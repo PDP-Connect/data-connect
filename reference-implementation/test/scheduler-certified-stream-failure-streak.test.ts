@@ -34,7 +34,6 @@ import {
 } from "../runtime/scheduler-backoff.ts";
 import type { RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import { getLatestCertifiedProgressRunAt, getLatestConnectorRunSummary } from "../server/connector-run-evidence.ts";
 import { startServer } from "../server/index.ts";
 import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
 import type { SchedulerRunHistoryRecord } from "../server/stores/scheduler-store.ts";
@@ -42,6 +41,7 @@ import type { SchedulerRunHistoryRecord } from "../server/stores/scheduler-store
 const BASE_INTERVAL_MS = 60_000;
 const CONNECTOR_ID = "scheduler-certified-stream-failure-streak";
 const NOW_MS = Date.parse("2026-05-16T00:00:00.000Z");
+const SEVEN_GENUINE = BLOCKED_PROMOTION_THRESHOLD;
 
 type CommitStatus = "committed" | "disabled" | "not_committed" | "partially_committed";
 
@@ -184,6 +184,14 @@ test("a certified-with-siblings run is not a success: it does not pose as one fo
 
 const REFERENCE_IMPL_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+function persistedRunAt(base: RunRecord, atMs: number): SchedulerRunHistoryRecord {
+  return persistedRun(0, {
+    ...base,
+    completedAt: new Date(atMs + 500).toISOString(),
+    startedAt: new Date(atMs).toISOString(),
+  });
+}
+
 function persistedRun(index: number, base: RunRecord): SchedulerRunHistoryRecord {
   return {
     attempt: base.attempt,
@@ -191,6 +199,7 @@ function persistedRun(index: number, base: RunRecord): SchedulerRunHistoryRecord
     completedAt: base.completedAt,
     connectorError: (base.connectorError as Record<string, unknown> | null) ?? null,
     connectorId: base.connectorId,
+    ...(base.error === undefined ? {} : { error: base.error }),
     failureReason: null,
     knownGaps: [],
     recordsEmitted: 0,
@@ -243,63 +252,9 @@ async function issueOwnerToken(asUrl: string, subjectId: string): Promise<string
   return token.access_token;
 }
 
-/**
- * A run that the scheduler's own history never holds, as a manual
- * `controller.runNow` leaves it: only the spine has it. `offsetMs` is relative
- * to the instant the first scheduled record of the test history completed.
- */
-interface ManualRunSpec {
-  readonly commitStatus: CommitStatus | null;
-  readonly errorCode: string | null;
-  readonly offsetMs: number;
-  readonly status: "failed" | "succeeded";
-}
-
-let manualRunSequence = 0;
-
-async function emitManualRun(spec: ManualRunSpec, baseMs: number): Promise<void> {
-  manualRunSequence += 1;
-  const runId = `run_manual_${manualRunSequence}`;
-  const at = new Date(baseMs + spec.offsetMs).toISOString();
-  const common = {
-    actor_id: CONNECTOR_ID,
-    actor_type: "runtime",
-    object_id: runId,
-    object_type: "run",
-    occurred_at: at,
-    run_id: runId,
-    scenario_id: "scenario-manual",
-    trace_id: `trace-${runId}`,
-  };
-  await emitSpineEvent({
-    ...common,
-    data: {
-      boot_epoch: "00000000-0000-4000-8000-000000000001",
-      connector_id: CONNECTOR_ID,
-      connector_instance_id: CONNECTOR_ID,
-      seq: manualRunSequence,
-      source: { id: CONNECTOR_ID, kind: "connector" },
-    },
-    event_type: "run.started",
-    status: "started",
-  });
-  await emitSpineEvent({
-    ...common,
-    data: {
-      ...(spec.commitStatus === null ? {} : { checkpoint_commit_status: spec.commitStatus }),
-      ...(spec.errorCode === null ? {} : { connector_error_code: spec.errorCode }),
-      reason: spec.status === "failed" ? "connector_reported_failed" : null,
-      source: { id: CONNECTOR_ID, kind: "connector" },
-    },
-    event_type: spec.status === "failed" ? "run.failed" : "run.completed",
-    status: spec.status,
-  });
-}
-
 async function dispatchGateOutcome(
-  records: readonly RunRecord[],
-  manualRuns: readonly ManualRunSpec[] = []
-): Promise<{ gaveUp: boolean; reachedReadiness: boolean }> {
+  records: readonly RunRecord[]
+): Promise<{ gaveUp: boolean; gaveUpEmitted: boolean; reachedReadiness: boolean }> {
   const spotifyManifest = JSON.parse(
     readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8")
   );
@@ -318,10 +273,6 @@ async function dispatchGateOutcome(
     const ownerToken = await issueOwnerToken(asUrl, "certified_streak_user");
     // Anchor every record just before now so the back-off window is live.
     const shift = Date.now() - 60_000 - NOW_MS;
-    for (const manualRun of manualRuns) {
-      // biome-ignore lint/performance/noAwaitInLoops: spine events are appended in order
-      await emitManualRun(manualRun, NOW_MS + shift);
-    }
     const persisted = records.map((record, index) =>
       persistedRun(index, {
         ...record,
@@ -348,14 +299,6 @@ async function dispatchGateOutcome(
           ownerToken,
         },
       ],
-      // The same durable cross-path probes the reference server wires in.
-      getLastBackoffResetAt: (connectorId, connectorInstanceId) =>
-        getLatestCertifiedProgressRunAt(connectorId, connectorInstanceId),
-      getLastSuccessfulRunAt: async (connectorId, connectorInstanceId) => {
-        const summary = await getLatestConnectorRunSummary(connectorId, "succeeded", connectorInstanceId);
-        const at = summary?.last_at ? Date.parse(String(summary.last_at)) : Number.NaN;
-        return Number.isFinite(at) ? at : null;
-      },
       getState: async () => null,
       onInteraction: async () => ({ status: "cancelled", type: "INTERACTION_RESPONSE" }),
       onRunComplete: (record) => completedRuns.push(record),
@@ -386,7 +329,8 @@ async function dispatchGateOutcome(
     );
     scheduler.stop();
     const reachedReadiness = completedRuns.some((record) => record.error?.includes("simulated unattended gate"));
-    return { gaveUp, reachedReadiness };
+    const gaveUpEmitted = completedRuns.some((record) => record.error?.startsWith("schedule.gave_up:"));
+    return { gaveUp, gaveUpEmitted, reachedReadiness };
   } finally {
     server.asServer.closeAllConnections();
     server.rsServer.closeAllConnections();
@@ -413,138 +357,120 @@ test("scheduler still gives up after the same number of certified failures that 
   assert.equal(outcome.gaveUp, true);
 });
 
-// ─── Manual runs: cross-path recovery evidence ──────────────────────────────
+// ─── Streak identity: counter, dispatch dedup and persisted markers ─────────
 //
-// A manual `controller.runNow` never enters the scheduler's own history, and a
-// manual run that commits sibling streams ends `failed`, so the success probe
-// never sees it either. The durable spine holds it; the certified-progress probe
-// reads it from there.
+// The counter, the announce-once cells and the persisted `back_off.started` /
+// `gave_up` marker lookups must agree on where a streak ends. Otherwise a
+// certified reset clears the count while the old `gave_up` marker still
+// suppresses the next real blockage alert and its escalation.
 
-const SEVEN_GENUINE = BLOCKED_PROMOTION_THRESHOLD;
+function gaveUpMarker(index: number): RunRecord {
+  return {
+    ...runRecord({ index, status: "skipped" }),
+    error:
+      'schedule.gave_up: {"reason_class":"terminal:connector_reported_failed","final_consecutive_failures":7,"last_success_at":null}',
+    terminalReason: null,
+  };
+}
 
-test("a manual certified run with committed siblings clears a blocked streak for the next automatic tick", async () => {
-  const blocked = await dispatchGateOutcome(history(SEVEN_GENUINE, genuineFailure));
-  assert.equal(blocked.gaveUp, true, "precondition: seven genuine failures block the source");
-
-  const afterManualProgress = await dispatchGateOutcome(history(SEVEN_GENUINE, genuineFailure), [
-    { commitStatus: "partially_committed", errorCode: "stream_collection_failed", offsetMs: 30_000, status: "failed" },
-  ]);
-  assert.equal(afterManualProgress.gaveUp, false, "the owner's manual run made progress; automation resumes");
-  assert.equal(afterManualProgress.reachedReadiness, true);
+test("two blocked cycles with certified progress between them each announce gave_up, after a reload from history", async () => {
+  // First blocked cycle: seven genuine failures, then its announced marker.
+  // Then a certified run ends that streak. Then a second blocked cycle of seven.
+  const first = history(SEVEN_GENUINE, genuineFailure);
+  const second = history(SEVEN_GENUINE, (index) => genuineFailure(SEVEN_GENUINE + 2 + index));
+  const records = [...first, gaveUpMarker(SEVEN_GENUINE), certifiedWithSiblings(SEVEN_GENUINE + 1), ...second];
+  const outcome = await dispatchGateOutcome(records);
+  assert.equal(outcome.gaveUp, true, "the second cycle is blocked");
+  assert.equal(outcome.gaveUpEmitted, true, "the first cycle's marker must not suppress the second cycle's gave_up");
 });
 
-test("a manual certified run that committed nothing does not clear a blocked streak", async () => {
-  for (const commitStatus of ["not_committed", null] as const) {
-    // biome-ignore lint/performance/noAwaitInLoops: each case owns an in-memory server
-    const outcome = await dispatchGateOutcome(history(SEVEN_GENUINE, genuineFailure), [
-      { commitStatus, errorCode: "stream_collection_failed", offsetMs: 30_000, status: "failed" },
-    ]);
-    assert.equal(outcome.gaveUp, true, `commit status ${String(commitStatus)} is not progress`);
-  }
+test("without certified progress between them, one blocked streak announces gave_up once, after a reload", async () => {
+  const records = [
+    ...history(SEVEN_GENUINE, genuineFailure),
+    gaveUpMarker(SEVEN_GENUINE),
+    ...history(3, (index) => genuineFailure(SEVEN_GENUINE + 1 + index)),
+  ];
+  const outcome = await dispatchGateOutcome(records);
+  assert.equal(outcome.gaveUpEmitted, false, "the persisted marker already announced this streak");
 });
 
-test("a manual run with committed state but a different error code does not clear a blocked streak", async () => {
-  const outcome = await dispatchGateOutcome(history(SEVEN_GENUINE, genuineFailure), [
-    { commitStatus: "partially_committed", errorCode: "something_else", offsetMs: 30_000, status: "failed" },
-  ]);
-  assert.equal(outcome.gaveUp, true);
-});
-
-test("a manual certified run older than the failures does not clear them", async () => {
-  const outcome = await dispatchGateOutcome(history(SEVEN_GENUINE, genuineFailure), [
-    { commitStatus: "partially_committed", errorCode: "stream_collection_failed", offsetMs: -30_000, status: "failed" },
-  ]);
-  assert.equal(outcome.gaveUp, true, "recovery evidence must be newer than the streak it ends");
-});
-
-test("a genuine failure after a manual certified run starts a new streak at one", async () => {
-  const records = history(SEVEN_GENUINE + 1, genuineFailure);
-  // The manual run falls between the seventh and the eighth scheduled failure.
-  const manualAtMs = NOW_MS + (SEVEN_GENUINE - 1) * 1000 + 750;
-  const withAnchor = computeNextRunWithBackoff(records, BASE_INTERVAL_MS, NOW_MS + SEVEN_GENUINE * 1000, {
-    lastBackoffResetAtMs: manualAtMs,
-  });
-  assert.equal(withAnchor.consecutiveFailures, 1);
-  assert.equal(withAnchor.backoffApplied, false);
-  assert.equal(withAnchor.recommendedHealthState, null);
-
-  const withoutAnchor = computeNextRunWithBackoff(records, BASE_INTERVAL_MS, NOW_MS + SEVEN_GENUINE * 1000);
-  assert.equal(withoutAnchor.consecutiveFailures, SEVEN_GENUINE + 1, "control: the anchor is what ends the streak");
-
-  const gate = await dispatchGateOutcome(records, [
-    {
-      commitStatus: "committed",
-      errorCode: "stream_collection_failed",
-      offsetMs: (SEVEN_GENUINE - 1) * 1000 + 750,
+test("a certified run that ends an announced back-off streak emits back_off.cleared and resets the announce cells", async () => {
+  const completedRuns: RunRecord[] = [];
+  const base = Date.now() - 60_000;
+  const persisted = Array.from({ length: DEFAULT_BACKOFF_THRESHOLD }, (_, index) =>
+    persistedRunAt(genuineFailure(index), base + index * 1000)
+  );
+  const scheduler = createScheduler({
+    connectors: [
+      {
+        connectorId: CONNECTOR_ID,
+        connectorInstanceId: CONNECTOR_ID,
+        connectorPath: join(REFERENCE_IMPL_DIR, "connectors/seed/index.ts"),
+        intervalMs: 25,
+        manifest: { connector_id: CONNECTOR_ID, streams: [{ name: "items" }] },
+        maxRetries: 0,
+        ownerSubjectId: "owner",
+        ownerToken: "owner-token",
+      },
+    ],
+    onInteraction: async () => ({ status: "cancelled" }),
+    onRunComplete: (record) => completedRuns.push(record),
+    rsUrl: "http://localhost.invalid",
+    runManagedConnectorViaController: () => ({
+      checkpoint_summary: { commit_status: "partially_committed" },
+      connector_error: { code: "stream_collection_failed" },
+      run_id: MANAGED_RUN_ID,
       status: "failed",
+      terminal_reason: "connector_reported_failed",
+      trace_id: "trace-managed-certified-streak",
+    }),
+    schedulerStore: {
+      // biome-ignore lint/suspicious/noEmptyBlockStatements: test store callback is intentionally empty
+      appendRunHistory: async () => {},
+      // biome-ignore lint/suspicious/noEmptyBlockStatements: test store callback is intentionally empty
+      deleteActiveRun: async () => {},
+      listLastRunTimes: async () => [],
+      listRunHistory: async () => persisted,
+      upsertActiveRun: async () => true,
+      // biome-ignore lint/suspicious/noEmptyBlockStatements: test store callback is intentionally empty
+      upsertLastRunTime: async () => {},
     },
-  ]);
-  assert.equal(gate.gaveUp, false);
-});
-
-test("the reset anchor and the success anchor combine by the newer one", () => {
-  const records = history(5, genuineFailure);
-  const lastFailureMs = NOW_MS + 4 * 1000 + 500;
-  const older = lastFailureMs - 10_000;
-  const newer = lastFailureMs + 10_000;
-  for (const options of [
-    { lastBackoffResetAtMs: newer, lastSuccessAtMs: older },
-    { lastBackoffResetAtMs: older, lastSuccessAtMs: newer },
-    { lastBackoffResetAtMs: newer },
-    { lastSuccessAtMs: newer },
-  ]) {
-    assert.equal(computeNextRunWithBackoff(records, BASE_INTERVAL_MS, NOW_MS, options).consecutiveFailures, 0);
-  }
-  const stale = computeNextRunWithBackoff(records, BASE_INTERVAL_MS, NOW_MS, {
-    lastBackoffResetAtMs: older,
-    lastSuccessAtMs: older - 1,
   });
-  assert.equal(stale.consecutiveFailures, 5, "an anchor older than the newest failure only drops older failures");
+  try {
+    scheduler.start();
+    assert.equal(
+      await waitFor(() => completedRuns.some((record) => record.error?.startsWith("schedule.back_off.cleared:")), 5000),
+      true,
+      "the announced back-off streak ended, so the cleared marker is emitted"
+    );
+  } finally {
+    scheduler.stop();
+  }
+  const announced = completedRuns.findIndex((record) => record.error?.startsWith("schedule.back_off.started:"));
+  const certified = completedRuns.findIndex((record) => record.status === "failed");
+  const cleared = completedRuns.findIndex((record) => record.error?.startsWith("schedule.back_off.cleared:"));
+  assert.ok(
+    announced >= 0 && announced < certified && certified < cleared,
+    "started, then certified run, then cleared"
+  );
 });
 
-test("the certified-progress probe reads the durable spine, so it survives a restart", async (t) => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), "pdpp-certified-progress-probe-")), "pdpp.sqlite");
-  closeDb();
-  initDb(dbPath);
-  t.after(() => closeDb());
-  const baseMs = Date.parse("2026-05-16T00:00:00.000Z");
+// ─── Known limitation: manual runs are not in scheduler history ─────────────
 
-  assert.equal(await getLatestCertifiedProgressRunAt(CONNECTOR_ID, CONNECTOR_ID), null, "no runs yet");
-
-  await emitManualRun(
-    { commitStatus: "not_committed", errorCode: "stream_collection_failed", offsetMs: 1000, status: "failed" },
-    baseMs
-  );
-  await emitManualRun(
-    { commitStatus: "partially_committed", errorCode: "stream_collection_failed", offsetMs: 2000, status: "failed" },
-    baseMs
-  );
-  await emitManualRun(
-    { commitStatus: "not_committed", errorCode: "other", offsetMs: 3000, status: "failed" },
-    baseMs
-  );
-  await emitManualRun(
-    { commitStatus: "committed", errorCode: null, offsetMs: 4000, status: "succeeded" },
-    baseMs
-  );
-  const expected = baseMs + 2000;
-
-  assert.equal(await getLatestCertifiedProgressRunAt(CONNECTOR_ID, CONNECTOR_ID), expected);
-  assert.equal(
-    await getLatestCertifiedProgressRunAt(CONNECTOR_ID, "another-instance"),
-    null,
-    "scoped to the connection"
-  );
-
-  closeDb();
-  initDb(dbPath);
-  assert.equal(
-    await getLatestCertifiedProgressRunAt(CONNECTOR_ID, CONNECTOR_ID),
-    expected,
-    "the anchor is derived from the durable spine, so a restart loses nothing"
-  );
-  const success = await getLatestConnectorRunSummary(CONNECTOR_ID, "succeeded", CONNECTOR_ID);
-  assert.equal(Date.parse(String(success?.last_at)), baseMs + 4000, "the success anchor is a separate fact");
+test("known limitation: a manual certified run cannot clear a blocked streak; a manual genuine success still can", () => {
+  // A manual `controller.runNow` never enters the scheduler's own history, so
+  // the walk sees only the seven scheduled failures whatever the owner did
+  // since. There is no certified-progress anchor on purpose (a durable,
+  // connection-scoped recovery projection is the follow-up). A manual genuine
+  // success is visible through `lastSuccessAtMs`, as it always was.
+  const records = history(SEVEN_GENUINE, genuineFailure);
+  const lastFailureMs = NOW_MS + (SEVEN_GENUINE - 1) * 1000 + 500;
+  assert.equal(decide(records).recommendedHealthState, "blocked");
+  const afterManualSuccess = computeNextRunWithBackoff(records, BASE_INTERVAL_MS, lastFailureMs, {
+    lastSuccessAtMs: lastFailureMs + 1000,
+  });
+  assert.equal(afterManualSuccess.recommendedHealthState, null);
+  assert.equal(afterManualSuccess.consecutiveFailures, 0);
 });
 
 // ─── Managed (browser-surface) runs ─────────────────────────────────────────

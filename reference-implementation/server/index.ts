@@ -103,7 +103,6 @@ import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
-import { getLatestCertifiedProgressRunAt } from "./connector-run-evidence.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
@@ -10565,25 +10564,6 @@ function createReferenceSchedulerManager({
           logger.error(
             { err: err instanceof Error ? err.message : String(err) },
             `[scheduler] last-success spine probe failed for ${connectorId}`
-          );
-          return null;
-        }
-      },
-      // Durable cross-path "latest certified partial progress at" probe. A run
-      // that ended failed with `stream_collection_failed` while sibling streams
-      // committed is not a success, so the probe above never sees it, but it
-      // ends a failure streak the same way. Read from the spine so a manual
-      // `controller.runNow` run (invisible to `listRunHistory`) counts, and so
-      // it survives a restart. Back-off recovery evidence only: it never feeds
-      // `last_successful_at` or `CollectionSucceeded`. Returns null on no such
-      // run or probe error (never fabricates a reset).
-      getLastBackoffResetAt: async (connectorId, connectorInstanceId) => {
-        try {
-          return await getLatestCertifiedProgressRunAt(connectorId, connectorInstanceId);
-        } catch (err) {
-          logger.error(
-            { err: err instanceof Error ? err.message : String(err) },
-            `[scheduler] certified-progress spine probe failed for ${connectorId}`
           );
           return null;
         }

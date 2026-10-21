@@ -56,7 +56,6 @@ import type {
 export type {
   ConnectorError,
   ConnectorSchedule,
-  GetLastBackoffResetAtHandler,
   GetLastSuccessfulRunAtHandler,
   GetNonPressureRecoverableCountHandler,
   GetSourcePressureGapsHandler,
@@ -397,7 +396,6 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     getSourcePressureGaps = () => [],
     getNonPressureRecoverableCount = async () => 0,
     getForwardEvidenceDebt = async () => false,
-    getLastBackoffResetAt = async () => null,
     getLastSuccessfulRunAt = async () => null,
     isManagedConnector = () => false,
     logger: baseLogger = NOOP_RUN_BASE_LOGGER,
@@ -603,7 +601,6 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
   const dispatchGovernor = createDispatchGovernor({
     getForwardEvidenceDebt,
-    getLastBackoffResetAt,
     getLastSuccessfulRunAt,
     getNonPressureRecoverableCount,
     getSourcePressureGaps,

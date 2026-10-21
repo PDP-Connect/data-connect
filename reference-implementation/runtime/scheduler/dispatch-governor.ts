@@ -19,11 +19,10 @@
  */
 
 import { filterFreshPressureRows, resolveRecoveryFirstMode } from "../recovery-decision.ts";
-import { type BackoffDecision, computeNextRunWithBackoff } from "../scheduler-backoff.ts";
+import { type BackoffDecision, computeNextRunWithBackoff, endsFailureStreak } from "../scheduler-backoff.ts";
 import type {
   ConnectorSchedule,
   GetForwardEvidenceDebtHandler,
-  GetLastBackoffResetAtHandler,
   GetLastSuccessfulRunAtHandler,
   GetNonPressureRecoverableCountHandler,
   GetSourcePressureGapsHandler,
@@ -56,7 +55,6 @@ export interface DispatchGovernorRuntimeState {
 
 export interface DispatchGovernorDeps {
   getForwardEvidenceDebt: GetForwardEvidenceDebtHandler;
-  getLastBackoffResetAt?: GetLastBackoffResetAtHandler;
   getLastSuccessfulRunAt: GetLastSuccessfulRunAtHandler;
   getNonPressureRecoverableCount: GetNonPressureRecoverableCountHandler;
   getSourcePressureGaps: GetSourcePressureGapsHandler;
@@ -159,19 +157,8 @@ function resolveLastRunEpochMs(lastRunTimeMs: number | undefined, history: reado
   return newestHistoryEpochMs(history);
 }
 
-function resolveScheduleAnchor(
-  lastRun: number,
-  lastSuccessAtMs: number | null,
-  now: number,
-  lastBackoffResetAtMs: number | null = null
-): number {
-  let anchor = lastRun;
-  for (const observed of [lastSuccessAtMs, lastBackoffResetAtMs]) {
-    if (observed !== null && observed <= now) {
-      anchor = Math.max(anchor, observed);
-    }
-  }
-  return anchor;
+function resolveScheduleAnchor(lastRun: number, lastSuccessAtMs: number | null, now: number): number {
+  return lastSuccessAtMs !== null && lastSuccessAtMs <= now ? Math.max(lastRun, lastSuccessAtMs) : lastRun;
 }
 
 function nowIso(): string {
@@ -321,9 +308,11 @@ function readSchedulerEventReasonClass(record: RunRecord, prefix: string): strin
 }
 
 function currentStreakHasSchedulerEvent(history: readonly RunRecord[], prefix: string, reasonClass: string): boolean {
-  const lastSuccessIndex = history.findLastIndex((record) => record.status === "succeeded");
+  // The current streak starts after the newest record that ends one: a success
+  // or certified partial progress (the same boundary the counter walk uses).
+  const lastBoundaryIndex = history.findLastIndex(endsFailureStreak);
   return history
-    .slice(lastSuccessIndex + 1)
+    .slice(lastBoundaryIndex + 1)
     .some((record) => readSchedulerEventReasonClass(record, prefix) === reasonClass);
 }
 
@@ -509,7 +498,6 @@ export interface DispatchGovernor {
 export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGovernor {
   const {
     getForwardEvidenceDebt,
-    getLastBackoffResetAt = async () => null,
     getLastSuccessfulRunAt,
     hasLegacySchedulerEventMarker = async () => false,
     getNonPressureRecoverableCount,
@@ -532,23 +520,6 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[scheduler] last-success probe failed for ${connectorId}: ${message}`);
-      return null;
-    }
-  }
-
-  // Read the durable cross-path "latest certified partial progress at"
-  // projection: a run (any trigger, including manual `controller.runNow`) that
-  // ended failed with `stream_collection_failed` while sibling streams
-  // committed. It is not a success, so the success probe above never sees it,
-  // yet it ends a failure streak the same way. Same fail-open stance: a probe
-  // failure is "no evidence" and never fabricates a reset.
-  async function probeLastBackoffResetAt(connectorId: string, connectorInstanceId: string): Promise<number | null> {
-    try {
-      const observed = await getLastBackoffResetAt(connectorId, connectorInstanceId);
-      return typeof observed === "number" && Number.isFinite(observed) ? observed : null;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[scheduler] backoff-reset probe failed for ${connectorId}: ${message}`);
       return null;
     }
   }
@@ -738,12 +709,8 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
     // Threading it into the back-off math lets a genuine recent success clear an
     // otherwise-immortal failure streak so automation resumes — the live wedge.
     const lastSuccessAtMs = await probeLastSuccessfulRunAt(connectorId, key);
-    const lastBackoffResetAtMs = await probeLastBackoffResetAt(connectorId, key);
-    const decision = computeNextRunWithBackoff(history, scheduleIntervalMs, lastRun, {
-      lastBackoffResetAtMs,
-      lastSuccessAtMs,
-    });
-    const scheduleAnchor = resolveScheduleAnchor(lastRun, lastSuccessAtMs, now, lastBackoffResetAtMs);
+    const decision = computeNextRunWithBackoff(history, scheduleIntervalMs, lastRun, { lastSuccessAtMs });
+    const scheduleAnchor = resolveScheduleAnchor(lastRun, lastSuccessAtMs, now);
 
     // Cross-run source-pressure cooldown. Independent of failure back-off: a
     // connection that *succeeded* but deferred work under upstream pressure

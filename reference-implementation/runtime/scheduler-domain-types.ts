@@ -289,19 +289,6 @@ export type GetLastSuccessfulRunAtHandler = (
   connectorInstanceId?: string
 ) => Promise<number | null> | number | null;
 
-/**
- * Durable cross-path "latest runtime-certified partial progress at" probe: the
- * newest run, on any trigger path (including a manual `controller.runNow`), that
- * ended failed with `stream_collection_failed` while sibling streams committed.
- * Such a run is not a success, so `GetLastSuccessfulRunAtHandler` never sees it,
- * but it ends a failure streak the same way. `null` when none is known; a probe
- * failure is "no evidence" and must never fabricate one.
- */
-export type GetLastBackoffResetAtHandler = (
-  connectorId: string,
-  connectorInstanceId?: string
-) => Promise<number | null> | number | null;
-
 export type HasLegacySchedulerEventMarkerHandler = (
   connectorId: string,
   connectorInstanceId: string,
@@ -444,7 +431,6 @@ export interface SchedulerOptions {
    * in-history-only streak walk).
    */
   getForwardEvidenceDebt?: GetForwardEvidenceDebtHandler;
-  getLastBackoffResetAt?: GetLastBackoffResetAtHandler;
   getLastSuccessfulRunAt?: GetLastSuccessfulRunAtHandler;
   getNonPressureRecoverableCount?: GetNonPressureRecoverableCountHandler;
   getSourcePressureGaps?: GetSourcePressureGapsHandler;

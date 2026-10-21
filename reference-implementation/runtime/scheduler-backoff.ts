@@ -78,17 +78,6 @@ export interface ComputeBackoffOptions {
    * behaviour: trust the in-history walk alone).
    */
   readonly lastSuccessAtMs?: number | null;
-  /**
-   * Epoch ms of the most recent run, on ANY trigger path, that ended in
-   * runtime-certified partial progress (`isCertifiedStreamFailureWithCommittedSiblings`)
-   * and therefore ends a failure streak without being a success. Same
-   * durable cross-path source and the same chronology as `lastSuccessAtMs`;
-   * the two anchors combine by `max`. Needed because a manual
-   * `controller.runNow` is invisible to `history`, and a manual run that
-   * commits sibling streams ends `failed`, so `lastSuccessAtMs` never sees it.
-   * It does not change any success timestamp or health condition.
-   */
-  readonly lastBackoffResetAtMs?: number | null;
   /** Owner-triggered run: bypass back-off entirely. */
   readonly manual?: boolean;
   /** Max exponent applied to the base interval. */
@@ -181,8 +170,9 @@ function readConnectorReason(error: RunRecord["connectorError"]): string | null 
  */
 const STREAM_COLLECTION_FAILED_CODE = "stream_collection_failed";
 
-/** The run facts the predicate reads; a `RunRecord` or a projection of a terminal run event. */
-export type CertifiedStreamFailureEvidence = Pick<RunRecord, "checkpointSummary" | "connectorError" | "status">;
+/** The run facts the predicate reads; a `RunRecord`, or any projection that keeps these fields. */
+export type CertifiedStreamFailureEvidence = Pick<RunRecord, "status"> &
+  Partial<Pick<RunRecord, "checkpointSummary" | "connectorError">>;
 
 /**
  * True for a failed run that certified its failure as stream-scoped AND whose
@@ -197,9 +187,9 @@ export type CertifiedStreamFailureEvidence = Pick<RunRecord, "checkpointSummary"
  * `committed` or `partially_committed` on a failed run is runtime evidence. The
  * code alone is only a connector-authored claim and is not enough: without the
  * commit status the run keeps counting as a failure. Callers must pass facts
- * taken from the runtime's run record or terminal event, never from connector
- * output. `commit_status` is a durability fact (state was written); it does not
- * prove the source was fully collected or that any cursor moved.
+ * taken from the runtime's run record, never from connector output.
+ * `commit_status` is a durability fact (state was written); it does not prove
+ * the source was fully collected or that any cursor moved.
  *
  * Such a run is partial progress, not a repeat of a whole-run failure: the
  * connector ran, reached the source and committed data; only the named
@@ -209,11 +199,22 @@ export type CertifiedStreamFailureEvidence = Pick<RunRecord, "checkpointSummary"
  * `BLOCKED_PROMOTION_THRESHOLD`, stop automatic dispatch of the whole source
  * while its siblings commit on every run.
  *
- * Visibility does not depend on this streak. Every such run stays `failed`
- * and reports the failed stream's SKIP_RESULT gap. When the failed stream had
- * staged a cursor, the runtime also reports `checkpoint_stalled` after
- * `CHECKPOINT_STALL_RUNS` withheld runs. A failed stream that never staged a
- * cursor has nothing to withhold, so it gets no stall gap.
+ * Known limits of this policy (deliberate, kept small):
+ * - It reads the scheduler's own run history. A MANUAL run (`controller.runNow`)
+ *   is not in that history, so a manual certified run cannot clear an already
+ *   blocked streak. A manual genuine success still does, through the existing
+ *   `lastSuccessAtMs` anchor. A durable, connection-scoped recovery projection
+ *   shared by the counter, the dispatch governor and the transition dedup is
+ *   the follow-up.
+ * - Visibility does not depend on this streak. Every such run stays `failed`
+ *   and reports the failed stream's SKIP_RESULT gap. `checkpoint_stalled`
+ *   (after `CHECKPOINT_STALL_RUNS` withheld runs) fires only when the failed
+ *   stream had staged a cursor that was then withheld. A failed stream that
+ *   never stages a STATE has nothing to withhold, so no stall warning fires
+ *   for it: the owner-visible signal is the failed run plus the per-run
+ *   skip_result gap. A persistent warning for that shape belongs to a
+ *   per-stream collection-health projection, not to the commit gate or to
+ *   this back-off.
  */
 export function isCertifiedStreamFailureWithCommittedSiblings(record: CertifiedStreamFailureEvidence): boolean {
   if (record.status !== "failed") {
@@ -224,6 +225,18 @@ export function isCertifiedStreamFailureWithCommittedSiblings(record: CertifiedS
   }
   const commitStatus = record.checkpointSummary?.commit_status;
   return commitStatus === "committed" || commitStatus === "partially_committed";
+}
+
+/**
+ * True for a record that ends a failure streak: a genuine success, or a failed
+ * run the runtime certified as partial progress. The back-off counter, the
+ * announce-once dedup cells and the persisted transition-marker lookups must
+ * all use this one boundary, so the notion of "the current streak" is the same
+ * everywhere. Neither kind of record is a failure that counts toward a streak;
+ * only the first is a success (`isCounterResetStatus`).
+ */
+export function endsFailureStreak(record: CertifiedStreamFailureEvidence): boolean {
+  return record.status === "succeeded" || isCertifiedStreamFailureWithCommittedSiblings(record);
 }
 
 // ─── Core helper ────────────────────────────────────────────────────────────
@@ -268,14 +281,7 @@ export function computeNextRunWithBackoff(
     };
   }
 
-  // Cross-path recovery anchor: the newer of the last genuine success and the
-  // last runtime-certified partial-progress run (see `lastBackoffResetAtMs`).
-  const externalSuccessAtMs = maxOptionalEpochMs(options.lastSuccessAtMs, options.lastBackoffResetAtMs);
-
-  const { consecutiveFailures, reasonClass, newestFailureAtMs } = countConsecutiveSameClassFailures(
-    history,
-    externalSuccessAtMs
-  );
+  const { consecutiveFailures, reasonClass, newestFailureAtMs } = countConsecutiveSameClassFailures(history);
 
   // Cross-path success recovery: a genuine success recorded on a path the
   // `history` argument cannot see (manual/owner `controller.runNow`) breaks the
@@ -284,6 +290,7 @@ export function computeNextRunWithBackoff(
   // walk above already honours), extended to successes the scheduler did not
   // itself dispatch. Without it, a connection whose only successes are manual
   // stays wedged on an inflated back-off curve forever.
+  const externalSuccessAtMs = normalizeOptionalEpochMs(options.lastSuccessAtMs);
   const externalSuccessBreaksStreak =
     externalSuccessAtMs !== null && (newestFailureAtMs === null || externalSuccessAtMs >= newestFailureAtMs);
   if (externalSuccessBreaksStreak) {
@@ -359,10 +366,7 @@ function toIsoTimestamp(epochMs: number): string {
   return new Date(safeEpochMs).toISOString();
 }
 
-function countConsecutiveSameClassFailures(
-  history: readonly RunRecord[],
-  recoveryAnchorMs: number | null
-): {
+function countConsecutiveSameClassFailures(history: readonly RunRecord[]): {
   consecutiveFailures: number;
   reasonClass: string | null;
   /**
@@ -384,17 +388,6 @@ function countConsecutiveSameClassFailures(
     if (!record) {
       continue;
     }
-    if (recoveryAnchorMs !== null) {
-      // A cross-path recovery (a success or certified partial progress the
-      // scheduler's own history cannot see) happened at `recoveryAnchorMs`.
-      // Failures at or before it belong to the streak it ended; only failures
-      // after it start a new one. This is what lets one later genuine failure
-      // count as 1, not as 1 plus the older streak.
-      const recordMs = recordTimestampMs(record);
-      if (recordMs !== null && recordMs <= recoveryAnchorMs) {
-        break;
-      }
-    }
     if (record.status === "succeeded") {
       // Success resets the counter, full stop.
       break;
@@ -410,12 +403,12 @@ function countConsecutiveSameClassFailures(
       // source and committed sibling streams. That is progress, and progress
       // warrants resetting a connection-wide streak: with a transparent record
       // the stale streak stays live for as long as the failed stream keeps
-      // failing, and `blocked` could never clear because no scheduler success
-      // follows. It does not prove that every older root cause is gone; a
+      // failing. It does not prove that every older root cause is gone; a
       // genuine failure after it starts a new streak at 1.
       // This is a streak reset only. It is NOT a success: `status` stays
       // `failed`, `last_success_at` and health `CollectionSucceeded` are
-      // untouched, and `isCounterResetStatus` is unchanged.
+      // untouched, and `isCounterResetStatus` is unchanged. The dedup of
+      // `back_off.started` / `gave_up` uses the same boundary (`endsFailureStreak`).
       break;
     }
     const candidate = reasonClassOf(record);
@@ -461,17 +454,6 @@ function recordTimestampMs(record: RunRecord): number | null {
  * `null`. Mirrors the defensive timing normalization used elsewhere in this
  * module so a malformed projection can never throw or invert the comparison.
  */
-function maxOptionalEpochMs(...values: readonly (number | null | undefined)[]): number | null {
-  let max: number | null = null;
-  for (const value of values) {
-    const normalized = normalizeOptionalEpochMs(value);
-    if (normalized !== null && (max === null || normalized > max)) {
-      max = normalized;
-    }
-  }
-  return max;
-}
-
 function normalizeOptionalEpochMs(value: number | null | undefined): number | null {
   if (value === null || value === undefined || !Number.isFinite(value) || value < 0) {
     return null;
