@@ -126,7 +126,7 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, mkdirSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 
-function prepareFixture(t, overrides = {}) {
+function prepareFixture(t, overrides = {}, command = ["prepare"]) {
   const dir = mkdtempSync(join(tmpdir(), "desktop-prepare-"))
   t.after(() => rmSync(dir, { recursive: true }))
   const bin = join(dir, "bin")
@@ -155,14 +155,21 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.CALL_LOG, JSON.stringify([tool, ...args]) + '\\n');
 let result;
 if (tool === 'git') {
-  if (args[0] === 'rev-parse') result = args[1] === 'HEAD' ? f.sha : f.refs[args[1]];
+  if (args[0] === 'rev-parse') result = ['HEAD', 'origin/main^{commit}'].includes(args[1]) ? f.sha : f.refs[args[1]];
   if (args[0] === 'tag') result = f.tags.join('\\n');
   if (args[0] === 'log') result = f.messages.join('\\0');
+  if (args[0] === 'ls-remote') result = (f.remoteTags || f.tags).map(tag => (f.refs[tag + '^{commit}'] || f.sha) + '\\trefs/tags/' + tag).join('\\n');
 } else if (tool === 'gh') {
   if (args.includes('--method')) { if (f.apiFailure) process.exit(1); result = ''; }
   else if (args[0] === 'release') result = '';
   else if (args[1].includes('/git/ref/heads/main')) result = JSON.stringify({object:{sha:f.main}});
-  else if (args.includes('--slurp')) result = JSON.stringify([f.releases]);
+  else if (args.includes('--slurp')) {
+    if (args.includes('--jq') || args.includes('--template')) {
+      console.error('the --slurp option is not supported with --jq or --template');
+      process.exit(1);
+    }
+    result = JSON.stringify(f.releasePages || [f.releases]);
+  }
 }
 if (result === undefined) { console.error('Unexpected command', tool, args); process.exit(1); }
 process.stdout.write(result);
@@ -173,7 +180,7 @@ process.stdout.write(result);
   }
   const result = spawnSync(
     process.execPath,
-    [fileURLToPath(new URL("desktop-release.mjs", import.meta.url)), "prepare"],
+    [fileURLToPath(new URL("desktop-release.mjs", import.meta.url)), ...command],
     {
       encoding: "utf8",
       env: {
@@ -311,4 +318,68 @@ test("late stale or failed CI events cannot replace the current release's pendin
     5
   )
   assert.equal(workflow.concurrency["cancel-in-progress"], true)
+})
+
+test("baseline accepts the published aarch64 installer name", () => {
+  assert.equal(
+    desktopBase([release("v0.7.54", {
+      assets: assets.map(a => ({ name: a.name.replace("_arm64.dmg", "_aarch64.dmg") })),
+    })], ["v0.7.54"]),
+    "v0.7.54"
+  )
+})
+
+test("plan reads all release pages, pins origin/main and never writes", t => {
+  const r = prepareFixture(t, {
+    main: "b".repeat(40),
+    messages: ["docs: help", "feat!: replace API"],
+    releasePages: [[release("v9.0.0", { assets: [] })], [release("v0.7.63")]],
+  }, ["plan"])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /Target: origin\/main/)
+  assert.match(r.stdout, /Desktop baseline: v0.7.63/)
+  assert.match(r.stdout, /Commits since baseline: 2/)
+  assert.match(r.stdout, /Next desktop version: v1.0.0/)
+  assert.equal(r.output, "")
+  assert.deepEqual(r.calls.filter(c => c[0] === "gh"), [[
+    "gh", "api", "--paginate", "--slurp",
+    "repos/PDP-Connect/data-connect/releases?per_page=100",
+  ]])
+  assert.ok(r.calls.some(c => c[1] === "log" && c.at(-1) === `v0.7.63..${"a".repeat(40)}`))
+  assert.ok(r.calls.filter(c => c[0] === "git").every(c => ["rev-parse", "tag", "log", "ls-remote"].includes(c[1])))
+})
+
+test("plan applies occupied-tag rules and reports no-release batches", t => {
+  const occupied = prepareFixture(t, {
+    tags: ["v0.7.63", "v0.7.64"],
+    refs: { "v0.7.64^{commit}": "b".repeat(40) },
+  }, ["plan"])
+  assert.equal(occupied.status, 0, occupied.stderr)
+  assert.match(occupied.stdout, /Next desktop version: v0.7.65/)
+  const ignored = prepareFixture(t, { messages: ["docs: help"] }, ["plan"])
+  assert.equal(ignored.status, 0, ignored.stderr)
+  assert.match(ignored.stdout, /Next desktop version: none/)
+  assert.match(ignored.stdout, /No releasable changes since v0.7.63/)
+  const empty = prepareFixture(t, { messages: [] }, ["plan"])
+  assert.equal(empty.status, 0, empty.stderr)
+  assert.match(empty.stdout, /Commits since baseline: 0/)
+})
+
+test("plan ignores tags belonging only to other local repositories", t => {
+  const r = prepareFixture(t, {
+    tags: ["v0.7.63", "v0.7.64"],
+    remoteTags: ["v0.7.63"],
+    refs: { "v0.7.64^{commit}": "b".repeat(40) },
+  }, ["plan"])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /Next desktop version: v0.7.64/)
+})
+
+test("plan handles real-sized historical commit logs above 1 MiB", t => {
+  const r = prepareFixture(t, {
+    messages: ["docs: history\n\n" + "x".repeat(1100000), "fix: launch"],
+  }, ["plan"])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /Commits since baseline: 2/)
+  assert.match(r.stdout, /Next desktop version: v0.7.64/)
 })

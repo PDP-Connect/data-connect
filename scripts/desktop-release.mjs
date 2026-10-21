@@ -46,7 +46,7 @@ export function desktopBase(releases, reachableTags) {
       /^v\d+\.\d+\.\d+$/.test(r.tag_name) &&
       reachableTags.includes(r.tag_name) &&
       [
-        /_arm64\.dmg$/,
+        /_(?:arm64|aarch64)\.dmg$/,
         /_x86_64\.dmg$/,
         /\.deb$/,
         /\.AppImage$/,
@@ -71,8 +71,63 @@ export function setBuildVersion(tag, path = "src-tauri/tauri.conf.json") {
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`)
 }
 
-const git = args => execFileSync("git", args, { encoding: "utf8" }).trim()
-const gh = args => execFileSync("gh", args, { encoding: "utf8" }).trim()
+const git = args =>
+  execFileSync("git", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).trim()
+const gh = args =>
+  execFileSync("gh", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).trim()
+
+// Both modes use the same history and occupied-tag rules. Only prepare writes.
+function releasePlan(repo, ref, sha) {
+  const releases = JSON.parse(
+    gh([
+      "api",
+      "--paginate",
+      "--slurp",
+      `repos/${repo}/releases?per_page=100`,
+    ])
+  ).flat()
+  const reachable = git(["tag", "--merged", ref]).split("\n")
+  const base = desktopBase(releases, reachable)
+  const messages = git(["log", "--format=%B%x00", `${base}..${ref}`])
+    .split("\0")
+    .map(s => s.trim())
+    .filter(Boolean)
+  let version = nextVersion(base.slice(1), messages)
+  const summary = { base, commitCount: messages.length }
+  if (!version) return { ...summary, reason: `No releasable changes since ${base}` }
+  // A shared local checkout can contain tags from other repositories. Reserve
+  // only names present on origin; prefer peeled SHAs for annotated tags.
+  const remoteTags = new Map()
+  for (const line of git(["ls-remote", "--tags", "origin"]).split("\n")) {
+    const [tagSha, refName] = line.split(/\s+/)
+    if (!refName) continue
+    const tag = refName.replace(/^refs\/tags\//, "").replace(/\^\{\}$/, "")
+    if (!remoteTags.has(tag) || refName.endsWith("^{}")) remoteTags.set(tag, tagSha)
+  }
+  const tags = new Set(remoteTags.keys())
+  // Legacy npm tags and abandoned drafts must never be moved or overwritten.
+  while (tags.has(`v${version}`)) {
+    const tagSha = remoteTags.get(`v${version}`)
+    const existing = releases.find(r => r.tag_name === `v${version}`)
+    if (tagSha === sha && (!existing || existing.draft)) break // recover tag-only reservations too
+    if (tagSha === sha && existing && !existing.draft) {
+      return { ...summary, reason: "This commit is already released" }
+    }
+    version = nextVersion(version, ["fix: reserve the next unused version"])
+  }
+  return { ...summary, version, releases, tags }
+}
+
+function plan(ref = "origin/main") {
+  const repo = process.env.GITHUB_REPOSITORY || "PDP-Connect/data-connect"
+  const sha = git(["rev-parse", `${ref}^{commit}`])
+  const result = releasePlan(repo, sha, sha)
+  console.log(`Target: ${ref} (${sha})`)
+  console.log(`Desktop baseline: ${result.base}`)
+  console.log(`Commits since baseline: ${result.commitCount}`)
+  console.log(`Next desktop version: ${result.version ? `v${result.version}` : "none"}`)
+  if (result.reason) console.log(result.reason)
+}
 
 function prepare() {
   const repo = process.env.GITHUB_REPOSITORY
@@ -84,37 +139,10 @@ function prepare() {
     console.log("Superseded by a newer main commit; skipping")
     return
   }
-  const releases = JSON.parse(
-    gh([
-      "api",
-      "--paginate",
-      "--slurp",
-      `repos/${repo}/releases?per_page=100`,
-      "--jq",
-      "[.[][] | {tag_name, draft, prerelease, assets: [.assets[] | {name}]}]",
-    ])
-  ).flat()
-  const reachable = git(["tag", "--merged", "HEAD"]).split("\n")
-  const base = desktopBase(releases, reachable)
-  const messages = git(["log", "--format=%B%x00", `${base}..HEAD`])
-    .split("\0")
-    .map(s => s.trim())
-  let version = nextVersion(base.slice(1), messages)
-  if (!version) {
-    console.log(`No releasable changes since ${base}`)
+  const { base, version, releases, tags, reason } = releasePlan(repo, "HEAD", sha)
+  if (reason) {
+    console.log(reason)
     return
-  }
-  const tags = new Set(git(["tag", "--list"]).split("\n"))
-  // Legacy npm tags and abandoned drafts must never be moved or overwritten.
-  while (tags.has(`v${version}`)) {
-    const tagSha = git(["rev-parse", `v${version}^{commit}`])
-    const existing = releases.find(r => r.tag_name === `v${version}`)
-    if (tagSha === sha && (!existing || existing.draft)) break // recover tag-only reservations too
-    if (tagSha === sha && existing && !existing.draft) {
-      console.log("This commit is already released")
-      return
-    }
-    version = nextVersion(version, ["fix: reserve the next unused version"])
   }
   const tag = `v${version}`
   if (!tags.has(tag)) {
@@ -155,6 +183,7 @@ if (
 ) {
   if (process.argv[2] === "set-version") setBuildVersion(process.argv[3])
   else if (process.argv[2] === "prepare") prepare()
+  else if (process.argv[2] === "plan") plan(process.argv[3])
   else
-    throw new Error("Usage: desktop-release.mjs prepare | set-version vX.Y.Z")
+    throw new Error("Usage: desktop-release.mjs plan [ref] | prepare | set-version vX.Y.Z")
 }

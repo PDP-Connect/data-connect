@@ -15,13 +15,27 @@ The version script reads all commit messages since the highest reachable, stable
 
 The highest bump in the range wins. Merge commits are ignored unless their messages follow the convention; ordinary merge histories still include the component commits. With squash merges, the squash commit's title/body must preserve the release intent. An explicit breaking marker overrides an otherwise ignored type.
 
-The coordinator reserves `vX.Y.Z` at the tested commit through the GitHub API and creates a draft release. It never changes an existing tag. If a historical npm tag or abandoned draft already occupies the computed version, it advances the patch until it finds an unused version. A retry at the same SHA reuses its draft. Failed/cancelled drafts remain visible to maintainers; a later merge computes from the last published desktop release, so it includes changes from unfinished releases too.
+The coordinator reserves `vX.Y.Z` at the tested commit through the GitHub API and creates a draft release. It never changes an existing tag. Tag reservations are read from origin, so unrelated tags in a shared local checkout do not affect version selection. If a historical npm tag or abandoned draft already occupies the computed version, it advances the patch until it finds an unused version. A retry at the same SHA reuses its draft. Failed/cancelled drafts remain visible to maintainers; a later merge computes from the last published desktop release, so it includes changes from unfinished releases too.
 
 The coordinator calls `release.yml` as a reusable workflow. That workflow still owns the four desktop build legs, five installer uploads, DMG attestations, Core multi-platform build, secret scans and digest-preserving publication. Automatic builds set `src-tauri/tauri.conf.json` to the selected tag version in each checkout before verifying the tag/commit/version identity. This is a build-time change: `main` receives no bot commit. `Cargo.toml`'s `0.1.0` is the crate version and root `package.json` is a private workspace; neither is the desktop product version. Tauri reads the product version from `tauri.conf.json`.
 
 After desktop upload and Core publication/promotion succeed, the coordinator publishes the draft as a normal release with `--latest`. The Core image is `ghcr.io/pdp-connect/data-connect/core:<version>` for linux/amd64 and linux/arm64. Its existing serialized promoter moves `core:latest` only forward by SemVer. GitHub Latest and `core:latest` are separate pointers.
 
 The `desktop-release-main` concurrency group cancels older builds when a newer successful current-head run arrives. A late old CI completion does not cancel the current build. GitHub retains at most one pending run; queued intermediate merges can be replaced. Every eventual release includes qualifying commits since the last complete desktop release.
+
+## Read-only version plan
+
+```bash
+node scripts/desktop-release.mjs plan
+# Inspect another locally available commit/ref:
+node scripts/desktop-release.mjs plan <ref>
+```
+
+The default target is local `origin/main`. The command pins that ref to a SHA, prints the desktop baseline, commit count and selected version (or skip reason), and uses the same version and remote-tag collision rules as the coordinator. It reads Git history, origin's tags and the GitHub releases API. It does not fetch, write files, create tags/releases or trigger workflows. Use a checkout with current main history and release tags; check the printed SHA against GitHub before relying on the result. `GITHUB_REPOSITORY` defaults to `PDP-Connect/data-connect` for this command. The plan predicts version selection, not whether the CI gate has passed.
+
+At the 2026-10-21 inspection, main `79ac35bfb1e4757b8e5ee4baaea1d8fe884ea66c` had baseline `v0.7.54`, 827 commits since it, and selected `v1.0.1`. Newer complete desktop releases through `v0.7.63` are prereleases and remain excluded. Published Apple Silicon installer names use `_aarch64.dmg`; the script accepts that and `_arm64.dmg`. Historical breaking commits select `1.0.0`, and the existing remote `v1.0.0` tag advances the selection to `1.0.1`.
+
+Before enabling automation, the owner should decide whether that major version is intended. To start at a chosen version instead, add a reviewed bootstrap record with the exact history cutoff SHA and first version (for example `0.7.64`, after checking availability). Both plan and prepare should consume that record until the first complete automated release is published, then use the ordinary release baseline. This is a proposed follow-up; no version override or historical-baseline change is enabled here.
 
 ## npm publishing
 
