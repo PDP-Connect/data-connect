@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverTestFiles } from "./run-tests-discovery.ts";
 import { assertCompleteShardReceipts, parseTestShard, type ShardReceipt } from "./test-shard.ts";
@@ -16,8 +17,8 @@ const receipts: ShardReceipt[] = await Promise.all(
     JSON.parse(await readFile(`${directory}/shard-${index + 1}.json`, "utf8"))
   )
 );
-const repoRoot = fileURLToPath(new URL("../", import.meta.url));
-const allFiles = await discoverTestFiles(repoRoot, `${repoRoot}/test`);
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const allFiles = await discoverTestFiles(repoRoot, join(repoRoot, "test"));
 assertCompleteShardReceipts(receipts, allFiles, shard.total, profile);
 console.log(
   `Verified ${shard.total} shards: ${allFiles.length} files exactly once; named skip mappings fully consumed.`

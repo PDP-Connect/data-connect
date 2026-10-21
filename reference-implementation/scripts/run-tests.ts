@@ -193,6 +193,10 @@ const testHarnessEnv: NodeJS.ProcessEnv = {
   ...process.env,
 };
 const scrubbedBaseEnv = storageProfileEnvironment(selectedProfile, buildScrubbedTestEnv(testHarnessEnv));
+// Shard selection belongs to this outer runner. Nested runner invocations in
+// test files must be free to exercise --files-from and accounting authorities.
+delete scrubbedBaseEnv.PDPP_TEST_SHARD;
+delete scrubbedBaseEnv.PDPP_TEST_SHARD_RECEIPT;
 const configuredPostgresTestUrl = scrubbedBaseEnv.PDPP_TEST_POSTGRES_URL;
 const configuredPostgresRestoreUrl = scrubbedBaseEnv.PDPP_TEST_POSTGRES_RESTORE_URL;
 const dedicatedBasePostgresTestUrl: string | null = configuredPostgresTestUrl
