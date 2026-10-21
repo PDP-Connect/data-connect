@@ -1135,6 +1135,7 @@ test("a paused historical-archive connection is resumed and its first sync start
 async function captureOnPausedArchiveWithBothHooks(
   options: {
     autoResumeResult?: { confirming_run: unknown; status: "active_run_exists" | "started" };
+    omitArchiveResumeHook?: boolean;
     runNowError?: string;
   } = {}
 ) {
@@ -1215,11 +1216,13 @@ async function captureOnPausedArchiveWithBothHooks(
     resolveOwnerConnectorNamespace: async () => ({ connectorId, connectorInstanceId: connectionId }),
     resolveRegisteredConnectorManifest: async () => syntheticNoProbeStaticSecretManifest(),
     // Same shape as server/index.ts: resume the row, then `controller.runNow`.
-    resumeHistoricalArchiveConnectionAndRunFirstSync: async () => {
-      instance.status = "active";
-      const started = await runNow();
-      return { kind: "resumed_and_synced", runId: started.run_id };
-    },
+    resumeHistoricalArchiveConnectionAndRunFirstSync: options.omitArchiveResumeHook
+      ? undefined
+      : async () => {
+          instance.status = "active";
+          const started = await runNow();
+          return { kind: "resumed_and_synced", runId: started.run_id };
+        },
     setReferenceTraceId: () => undefined,
   } as unknown as Parameters<typeof mountRefStaticSecretCredentialCapture>[1]);
   assert.ok(handler, "the capture route must be mounted");
@@ -1284,6 +1287,16 @@ test("archive reconnect starts a run when auto-resume returns no usable run id",
       assert.equal(response.status, 201);
       assert.deepEqual(response.body?.archive_reconnect, { run_id: "run_fake_1", status: "resumed" });
     }
+  });
+});
+
+test("archive reconnect stays skipped when its resume hook is unavailable", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    const { response, startedRunIds } = await captureOnPausedArchiveWithBothHooks({ omitArchiveResumeHook: true });
+
+    assert.deepEqual(startedRunIds, ["run_fake_1"]);
+    assert.equal(response.status, 201);
+    assert.equal(response.body?.archive_reconnect, null);
   });
 });
 
