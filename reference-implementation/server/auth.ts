@@ -39,6 +39,7 @@ import {
   verifyPrivateKeyJwtClientAssertion,
 } from "./oauth-client-auth.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
+import { CLIENT_RANGE_FILTERS_PROFILE_URI } from "./client-range-filters.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
 import {
   invalidConnectorManifest,
@@ -51,9 +52,11 @@ import {
   projectResolvedCoreGrantStreams as coreProjectResolvedGrantStreams,
   coreSchemaRequiredFields,
   createRetainedCoreConsentSnapshot,
+  freezeClientRangeFilters,
   materializeCoreResolvedGrant,
   readRetainedCoreConsentSnapshot,
   resolveCoreEligibleInstanceIds,
+  splitGrantExtensions,
   validateCoreSelectionRequest,
 } from "./core-source-authorization.ts";
 import { getDb, runWithSqliteBusyRetry } from "./db.ts";
@@ -130,6 +133,12 @@ interface InitiateGrantOptions {
   acceptedRevisionStore?: AcceptedSourceDeclarationRevisionStore;
   baseUrl?: string;
   cimdFetchDependencies?: CimdFetchDependencies;
+  /**
+   * Accept the experimental `pdpp_range_filters` request member
+   * (spec-client-range-filters.md Section 3). Without it the member is an
+   * unknown member and Core rejects it.
+   */
+  clientRangeFilters?: boolean;
   issuerBase?: string;
   /** Explicit local/test operator provisioning. This is not verified provider-native discovery. */
   nativeManifest?: DbRow | null;
@@ -165,6 +174,7 @@ interface RawStreamSelection {
   instance_ids?: unknown[] | undefined;
   name: unknown;
   necessity?: unknown | undefined;
+  pdpp_range_filters?: true | undefined;
   resources?: unknown[] | undefined;
   time_range?: unknown | undefined;
   view?: unknown | undefined;
@@ -950,6 +960,7 @@ const SUPPORTED_STREAM_SELECTION_FIELDS = new Set([
   "instance_ids",
   "name",
   "necessity",
+  "pdpp_range_filters",
   "resources",
   "time_range",
   "view",
@@ -1611,6 +1622,8 @@ function normalizeStreamSelection(stream: RawStreamSelection): RawStreamSelectio
     instance_ids: Array.isArray(stream.instance_ids) ? stream.instance_ids : undefined,
     name: stream.name,
     necessity: stream.necessity || undefined,
+    // Only the affirmative request is kept; false and absence mean the same.
+    pdpp_range_filters: stream.pdpp_range_filters === true ? true : undefined,
     resources: Array.isArray(stream.resources) ? stream.resources : undefined,
     time_range: stream.time_range || undefined,
     view: stream.view || undefined,
@@ -1679,8 +1692,12 @@ interface AuthorizationDetailInput extends Record<string, unknown> {
   streams?: RawStreamSelection[];
 }
 
-function requireAuthorizationDetailInput(detail: unknown, _index: number): AuthorizationDetailInput {
-  const validated = validateCoreSelectionRequest(detail);
+function requireAuthorizationDetailInput(
+  detail: unknown,
+  _index: number,
+  opts: InitiateGrantOptions = {}
+): AuthorizationDetailInput {
+  const validated = validateCoreSelectionRequest(detail, { clientRangeFilters: opts.clientRangeFilters === true });
   const hasPreset = isNonEmptyString(validated.selection_preset);
   return {
     ...validated,
@@ -1827,7 +1844,7 @@ async function normalizeAuthorizationDetail(
   index: number,
   opts: InitiateGrantOptions = {}
 ): Promise<{ selection: GrantSelection; source_binding: SourceBinding; storage_binding: StorageBinding }> {
-  const detail = requireAuthorizationDetailInput(rawDetail, index);
+  const detail = requireAuthorizationDetailInput(rawDetail, index, opts);
   const { sourceBinding, storageBinding } = await resolveAuthorizationDetailBindings(detail, index, opts);
 
   return {
@@ -2425,11 +2442,19 @@ function isUnsupportedLegacyGrantShape(grant: DbRow): boolean {
 }
 
 function requireClosedResolvedGrant(grant: unknown, code: "grant_invalid" | "invalid_request"): DbRow {
-  const candidate = cloneJson(grant);
+  // Profile `extensions` members are preserved but are not part of the closed
+  // Core grant schema; the Core members are validated without them.
+  let split: ReturnType<typeof splitGrantExtensions>;
+  try {
+    split = splitGrantExtensions(cloneJson(grant));
+  } catch (cause: unknown) {
+    throw bindingError(code, cause instanceof Error ? cause.message : "Resolved grant extensions are invalid");
+  }
+  const candidate = split.rest;
   if (!validateResolvedGrantContract(candidate)) {
     throw bindingError(code, `Resolved grant is invalid: ${contractValidationMessage(validateResolvedGrantContract)}`);
   }
-  const resolved = candidate as DbRow;
+  const resolved = (split.extensions ? { ...(candidate as DbRow), extensions: split.extensions } : candidate) as DbRow;
   if (resolved.version !== "0.1.0") {
     throw bindingError(code, "Resolved grant version is unsupported; fresh consent is required");
   }
@@ -3855,6 +3880,27 @@ function normalizeApprovalReviewClientClaims(raw: unknown): { commitments: strin
     ? raw.commitments.filter((value): value is string => typeof value === "string" && value.trim() !== "")
     : [];
   return commitments.length > 0 ? { commitments } : null;
+}
+
+// The grant `extensions` object for a client-requested frozen range filter set.
+// It comes from the retained consent declaration and the final resolved
+// streams, never from the current declaration, so a later declaration change
+// cannot alter an issued grant. The review artifact does not carry it: the
+// set is a pure function of the stored request (fixed at initiation), the
+// retained snapshot and the reviewed resolved streams, all of which the review
+// digest already binds, and the profile lets the approval surface omit it.
+function clientRangeFilterExtensions(
+  selection: GrantSelection,
+  resolvedStreams: ResolvedGrantStream[] | StreamSelection[],
+  snapshot: SourceDeclarationSnapshot
+): Record<string, unknown> | undefined {
+  const member = freezeClientRangeFilters({
+    declaration: snapshot.declaration as unknown as Parameters<typeof freezeClientRangeFilters>[0]["declaration"],
+    requestedStreams: (selection.streams ?? []) as Array<{ name: string; pdpp_range_filters?: unknown }>,
+    resolvedStreams: resolvedStreams as import("./core-source-authorization.ts").CoreStreamSelection[],
+    selectionPreset: selection.selection_preset,
+  });
+  return member ? { [CLIENT_RANGE_FILTERS_PROFILE_URI]: member } : undefined;
 }
 
 function buildApprovalReviewArtifact(input: {
@@ -7108,10 +7154,13 @@ async function persistApprovedBatchGrantAtomically({
     const grantId = generateId("grt");
     const issuedAt = createdAt;
     const expiresAt = resolved.entry.selection.access_mode === "single_use" ? (reviewPayload.expires_at ?? null) : null;
+    const childSnapshot = readRetainedSourceDeclarationSnapshot(resolved.slice);
+    const extensions = clientRangeFilterExtensions(resolved.entry.selection, resolved.resolvedStreams, childSnapshot);
     const grant = materializeCoreResolvedGrant({
       accessMode: resolved.entry.selection.access_mode,
       clientId: registeredClient.client_id,
       expiresAt,
+      ...(extensions ? { extensions } : {}),
       grantId,
       issuedAt,
       purposeCode: resolved.entry.selection.purpose_code,
@@ -7775,10 +7824,16 @@ export async function approveGrant(
     throw bindingError("invalid_request", "Pending consent review is stale");
   }
 
+  const grantExtensions = clientRangeFilterExtensions(
+    selection,
+    resolvedStreams,
+    readRetainedSourceDeclarationSnapshot(request)
+  );
   const grant = materializeCoreResolvedGrant({
     accessMode: selection.access_mode,
     clientId: registeredClient.client_id,
     expiresAt,
+    ...(grantExtensions ? { extensions: grantExtensions } : {}),
     grantId,
     issuedAt,
     purposeCode: selection.purpose_code,
@@ -10458,6 +10513,8 @@ export async function exchangeOAuthAuthorizationCode({
   const tokenInfo = await requireOAuthAuthorizationCodeTokenInfo(row, normalized.clientId);
   if (row.grant_id) {
     response.authorization_details = [buildGrantedAuthorizationDetail(tokenInfo.grant)];
+  } else if (row.package_id) {
+    Object.assign(response, await packageGrantExtensions(row.package_id));
   }
   const refresh =
     clientSupportsOAuthRefreshToken(registeredClient) && (await authorizationCodeBindingSupportsRefresh(row, tokenInfo))
@@ -11046,10 +11103,44 @@ export async function exchangeOAuthRefreshToken({
   return {
     access_token: outcome.accessToken,
     access_token_expires_at: outcome.accessTokenExpiresAt,
+    ...(await refreshedGrantExtensions(outcome.accessToken, outcome.row.package_id)),
     refresh_token: successorToken,
     token_type: "Bearer",
     ...(outcome.row.package_id ? { grant_package_id: outcome.row.package_id } : { grant_id: outcome.row.grant_id }),
   };
+}
+
+// Profile members of the grant travel with every delivery of it, the refresh
+// response included (spec-client-range-filters.md Section 4.3). A refresh
+// response otherwise names the grant only by id, so this adds the granted
+// authorization detail only when the grant carries a profile member.
+async function refreshedGrantExtensions(
+  accessToken: string,
+  packageId?: string | null
+): Promise<Record<string, unknown>> {
+  if (packageId) {
+    return await packageGrantExtensions(packageId);
+  }
+  const tokenInfo = await introspect(accessToken);
+  const grant = tokenInfo.active ? tokenInfo.grant : null;
+  if (!(isRecord(grant) && isRecord(grant.extensions))) {
+    return {};
+  }
+  return { authorization_details: [buildGrantedAuthorizationDetail(grant)] };
+}
+
+// A package token covers several grants. When any child carries a profile
+// member, return every active child as its own element, never merged, so each
+// child's frozen set reaches the client unchanged.
+async function packageGrantExtensions(packageId: string): Promise<Record<string, unknown>> {
+  const access = await getGrantPackageAccess(packageId);
+  const grants = ((access?.members as Array<{ grant?: unknown }> | undefined) ?? [])
+    .map((member) => member.grant)
+    .filter(isRecord);
+  if (!grants.some((grant) => isRecord(grant.extensions))) {
+    return {};
+  }
+  return { authorization_details: grants.map((grant) => buildGrantedAuthorizationDetail(grant)) };
 }
 
 const CONSENT_EXCHANGE_CODE_TTL_MS = 5 * 60 * 1000;
