@@ -170,3 +170,110 @@ test("PostgreSQL authorization-code delivery is CAS-bound and recoverable", {
     }
   );
 });
+
+async function readAuthorizationCodeRow(backend: Backend, deviceCode: string): Promise<Record<string, unknown>> {
+  if (backend === "postgres") {
+    const result = await postgresQuery<Record<string, unknown>>(
+      "SELECT * FROM oauth_authorization_codes WHERE device_code = $1",
+      [deviceCode]
+    );
+    assert.ok(result.rows[0]);
+    return result.rows[0];
+  }
+  const row = getDb()
+    .prepare("SELECT * FROM oauth_authorization_codes WHERE device_code = ?")
+    .get(deviceCode) as Record<string, unknown> | undefined;
+  assert.ok(row);
+  return { ...row };
+}
+
+type RestageStatus = "pending" | "expired" | "issued" | "consumed";
+
+async function exerciseRestaging(backend: Backend, status: RestageStatus): Promise<void> {
+  const deviceCode = `device_restage_${backend}_${randomBytes(6).toString("hex")}`;
+  const request = {
+    clientId: `client_restage_${backend}`,
+    codeChallenge: createHash("sha256").update(randomBytes(32)).digest("base64url"),
+    codeChallengeMethod: "S256",
+    deviceCode,
+    redirectUri: `https://${backend}.client.example/callback`,
+    state: "original-state",
+  };
+  await stageOAuthAuthorizationCodeRequest(request);
+  if (status === "issued" || status === "consumed") {
+    const delivery = await issueOAuthAuthorizationCodeForDeviceCode(deviceCode, {
+      grantId: `grt_restage_${backend}`,
+      token: `tok_restage_${backend}`,
+    });
+    assert.equal(typeof delivery?.code, "string");
+    if (status === "consumed") {
+      await markCodeConsumed(backend, String(delivery?.code));
+    }
+  } else if (status === "expired") {
+    if (backend === "postgres") {
+      await postgresQuery("UPDATE oauth_authorization_codes SET status = 'expired' WHERE device_code = $1", [
+        deviceCode,
+      ]);
+    } else {
+      getDb().prepare("UPDATE oauth_authorization_codes SET status = 'expired' WHERE device_code = ?").run(deviceCode);
+    }
+  }
+
+  const before = await readAuthorizationCodeRow(backend, deviceCode);
+  assert.equal(before.status, status);
+  const restage = () => stageOAuthAuthorizationCodeRequest({ ...request, state: "replacement-state" });
+  if (status === "issued" || status === "consumed") {
+    assert.ok(before.code);
+    assert.ok(before.issued_at);
+    if (status === "consumed") {
+      assert.ok(before.consumed_at);
+    }
+    await assert.rejects(restage, /already issued or consumed.*cannot be restaged/);
+    assert.deepEqual(
+      await readAuthorizationCodeRow(backend, deviceCode),
+      before,
+      "terminal restaging must preserve the complete row, including code, bindings and timestamps"
+    );
+    assert.equal(await countIssuedRows(backend, deviceCode), 1);
+  } else {
+    const staged = await restage();
+    const after = await readAuthorizationCodeRow(backend, deviceCode);
+    assert.equal(staged.status, "pending");
+    assert.equal(after.status, "pending");
+    assert.equal(after.state, "replacement-state");
+    assert.equal(after.id, before.id);
+    assert.equal(after.code, null);
+    assert.equal(await countIssuedRows(backend, deviceCode), 1);
+  }
+}
+
+// DCR-29: terminal OAuth requests are immutable; nonterminal restaging remains supported.
+for (const status of ["issued", "consumed", "pending", "expired"] as const) {
+  test(`SQLite OAuth request restaging: ${status}`, async () => {
+    initDb(":memory:");
+    try {
+      await exerciseRestaging("sqlite", status);
+    } finally {
+      closeDb();
+    }
+  });
+
+  test(
+    `PostgreSQL OAuth request restaging: ${status}${POSTGRES_URL ? "" : " (skipped: PDPP_TEST_POSTGRES_URL unset)"}`,
+    { skip: !POSTGRES_URL },
+    async () => {
+      assert.ok(POSTGRES_URL);
+      await withTemporaryPostgresDatabase(
+        {
+          closeConnections: closePostgresStorage,
+          connectionString: POSTGRES_URL,
+          databaseName: "pdpp_test_oauth_code_restage",
+        },
+        async (databaseUrl) => {
+          await initPostgresStorage({ backend: "postgres", databaseUrl });
+          await exerciseRestaging("postgres", status);
+        }
+      );
+    }
+  );
+}
