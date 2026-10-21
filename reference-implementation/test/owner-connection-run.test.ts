@@ -45,6 +45,7 @@ import { startServer as startServerUntyped } from "../server/index.ts";
 import { parseReachabilityContract, type ReachabilityContract } from "../server/reachability-contract.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { closeTestServer, type TestServer } from "./helpers/close-test-server.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
 
 const REGEXP_1 = /owner-agent/i;
@@ -54,17 +55,9 @@ const REGEXP_1 = /owner-agent/i;
 // each field this suite actually uses off an indexed `Record<string,
 // unknown>` view of the awaited result rather than casting the whole
 // (deeply, incompletely inferred) object at once.
-interface CloseableHandle {
-  close: (cb: (err?: Error) => void) => unknown;
-  closeAllConnections: () => void;
-}
-
-interface ClosableServer {
+interface ClosableServer extends TestServer {
   asPort: number;
-  asServer: CloseableHandle;
   rsPort: number;
-  rsServer: CloseableHandle;
-  schedulerManager?: { stop?: () => void };
 }
 
 interface StartServerOptions {
@@ -84,16 +77,7 @@ async function startServer(opts: StartServerOptions): Promise<ClosableServer> {
     connectionScopedRunEnvResolver: resolveCredentialFreeFixtureRunEnv,
     ...opts,
   });
-  const result: ClosableServer = {
-    asPort: raw.asPort as number,
-    asServer: raw.asServer as CloseableHandle,
-    rsPort: raw.rsPort as number,
-    rsServer: raw.rsServer as CloseableHandle,
-  };
-  if (raw.schedulerManager !== undefined) {
-    result.schedulerManager = raw.schedulerManager as { stop?: () => void };
-  }
-  return result;
+  return raw as unknown as ClosableServer;
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -102,16 +86,6 @@ const OWNER_SUBJECT_ID = "owner_local";
 const OTHER_SUBJECT_ID = "owner_other";
 const OWNER_CLIENT_ID = "cli_longview";
 const NOW = "2026-05-31T00:00:00.000Z";
-
-async function closeServer(server: ClosableServer): Promise<void> {
-  server.schedulerManager?.stop?.();
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  await Promise.allSettled([
-    new Promise((resolve) => server.asServer.close(() => resolve(undefined))),
-    new Promise((resolve) => server.rsServer.close(() => resolve(undefined))),
-  ]);
-}
 
 // Response body shape across every route this suite exercises.
 interface RunResponseBody {
@@ -208,8 +182,11 @@ async function withServer(
   try {
     await fn({ asUrl, rsUrl, startPath: connectorFixture.startPath });
   } finally {
-    await closeServer(server);
-    rmSync(tmpDir, { force: true, recursive: true });
+    try {
+      await closeTestServer(server);
+    } finally {
+      rmSync(tmpDir, { force: true, recursive: true });
+    }
   }
 }
 

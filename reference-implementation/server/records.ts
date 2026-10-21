@@ -2375,6 +2375,10 @@ async function ingestSqliteRecord(
       connectorId,
       connectorInstanceId,
       stream,
+      connectorInstanceId,
+      stream,
+      connectorInstanceId,
+      stream,
     ]);
     const nextVersion = allocated.max_version;
 
@@ -6431,6 +6435,10 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
 
     const allocated = execReturningOne<VersionAllocationRow>(referenceQueries.recordsIngestAllocateNextVersion, [
       connectorId,
+      connectorInstanceId,
+      stream,
+      connectorInstanceId,
+      stream,
       connectorInstanceId,
       stream,
     ]);

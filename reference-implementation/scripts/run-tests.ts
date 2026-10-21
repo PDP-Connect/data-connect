@@ -3,7 +3,7 @@
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,7 @@ import {
 } from "./postgres-test-template.ts";
 import { needsOuterPostgresDatabase, needsPostgresRestoreDatabase } from "./run-tests-db-requirements.ts";
 import { discoverSelectedTestFiles } from "./run-tests-discovery.ts";
+import { selectTestShard, withoutShardEnvironment } from "./run-tests-shard.ts";
 import { RUN_AUTHORITY_SCHEMA } from "./test-accounting/inventory.ts";
 import { type StructuredSummary, StructuredSummaryError } from "./test-accounting/receipt.ts";
 import {
@@ -395,7 +396,7 @@ async function runNodeTest(filePath: string, extraArgs: string[]): Promise<NodeT
     throw error;
   }
 
-  const childEnvBase: ProcessEnvLike = { ...baseEnv };
+  const childEnvBase: ProcessEnvLike = withoutShardEnvironment(baseEnv);
   if (allocation) {
     childEnvBase.PDPP_TEST_POSTGRES_URL = allocation.url;
   }
@@ -485,12 +486,27 @@ if (filesFromIndex !== -1) {
   const requested = (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean);
   testFiles = await validateFilesFrom(requested, await discoverTestFiles(repoRoot, testDir));
 }
+const shardIndex = process.env.PDPP_TEST_SHARD_INDEX;
+const shardCount = process.env.PDPP_TEST_SHARD_COUNT;
+const shardReceiptPath = process.env.PDPP_TEST_SHARD_RECEIPT;
+if (shardIndex !== undefined || shardCount !== undefined) {
+  if (shardIndex === undefined || shardCount === undefined || !shardReceiptPath || accountingAuthority) {
+    throw new Error("sharded runs require index, count, receipt path, and no accounting authority");
+  }
+  testFiles = selectTestShard(testFiles, Number(shardIndex), Number(shardCount));
+} else if (shardReceiptPath !== undefined) {
+  throw new Error("PDPP_TEST_SHARD_RECEIPT requires a test shard");
+}
+const availableCpus = availableParallelism?.() ?? null;
 const fileConcurrency = resolveFileConcurrency({
-  availableCpus: availableParallelism?.() ?? null,
+  availableCpus,
   profile: selectedProfile,
   requestedConcurrency,
   selectedFileCount: testFiles.length,
 });
+process.stdout.write(
+  `PDPP_TEST_FILE_WORKERS ${JSON.stringify({ availableCpus, workers: fileConcurrency, selectedFiles: testFiles.length })}\n`
+);
 
 const queue = [...testFiles];
 const results: NodeTestResult[] = [];
@@ -624,14 +640,9 @@ const counts = {
   skip_reasons: skipReasons,
   skipped: summaries.reduce((sum, summary) => sum + summary.skipped, 0),
 };
-// Complete-suite finalization for property 3 (exact named-mapping join): once
-// every planned file has run, require the named-mapping rows CONFIGURED for
-// this suite to exactly equal the identities the run CONSUMED. This is the one
-// new fail-closed path; it does not touch execution order, concurrency,
-// timeouts, output counts/schema, or the ordinary exit path. It is skipped
-// when the suite did not run to completion (a failing file already dominates
-// the exit) or a signal arrived, so it can never mask an unrelated failure or
-// fire on a partial run. A --files-from selection is partial by construction.
+// A full run checks the exact named-skip set here. Shards write their consumed
+// identities for the aggregate job to check against that same configured set.
+// Partial --files-from runs keep their prior behavior and skip this check.
 if (
   filesFromIndex === -1 &&
   !failed &&
@@ -641,13 +652,26 @@ if (
   results.length === testFiles.length
 ) {
   const consumedMappingIdentities = summaries.flatMap((summary) => summary.consumed_mapping_identities);
-  try {
-    assertNamedSkipMappingsFullyConsumed(
-      consumedMappingIdentities,
-      riConfiguredNamedSkipMappingIdentities(selectedProfile)
+  if (shardIndex !== undefined && shardReceiptPath) {
+    await writeFile(
+      shardReceiptPath,
+      JSON.stringify({
+        index: Number(shardIndex),
+        count: Number(shardCount),
+        files: selectedFiles,
+        consumedMappingIdentities,
+      }),
+      { flag: "wx", mode: 0o600 }
     );
-  } catch (error) {
-    runnerErrors.push(error);
+  } else {
+    try {
+      assertNamedSkipMappingsFullyConsumed(
+        consumedMappingIdentities,
+        riConfiguredNamedSkipMappingIdentities(selectedProfile)
+      );
+    } catch (error) {
+      runnerErrors.push(error);
+    }
   }
 }
 // The error's message can carry test-controlled text (a test name), so the
