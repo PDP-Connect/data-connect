@@ -53,7 +53,7 @@ export function assertCompleteShardReceipts(
   for (let index = 1; index <= total; index += 1) {
     const matches = receipts.filter((row) => row.shard.index === index);
     const [receipt] = matches;
-    if (matches.length !== 1 || receipt.shard.total !== total || receipt.profile !== profile) {
+    if (matches.length !== 1 || !receipt || receipt.shard.total !== total || receipt.profile !== profile) {
       throw new Error(`missing, duplicate, or incompatible receipt for shard ${index}/${total}`);
     }
     const expected = selectShardFiles(allFiles, { index, total });

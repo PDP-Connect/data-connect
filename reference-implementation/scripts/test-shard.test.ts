@@ -70,25 +70,25 @@ test("complete-suite accounting joins mappings across shards and rejects missing
   for (const mutate of [
     (rows: ShardReceipt[]) => rows.pop(),
     (rows: ShardReceipt[]) => {
-      rows[1] = rows[0];
+      rows[1] = rows[0] as ShardReceipt;
     },
     (rows: ShardReceipt[]) => {
-      rows[1].files = ["a"];
+      (rows[1] as ShardReceipt).files = ["a"];
     },
     (rows: ShardReceipt[]) => {
-      rows[1].files = [];
+      (rows[1] as ShardReceipt).files = [];
     },
     (rows: ShardReceipt[]) => {
-      rows[1].profile = "postgres";
+      (rows[1] as ShardReceipt).profile = "postgres";
     },
     (rows: ShardReceipt[]) => {
-      rows[1].shard.total = 4;
+      (rows[1] as ShardReceipt).shard.total = 4;
     },
     (rows: ShardReceipt[]) => {
-      rows[0].consumedMappingIdentities = [];
+      (rows[0] as ShardReceipt).consumedMappingIdentities = [];
     },
     (rows: ShardReceipt[]) => {
-      rows[1].consumedMappingIdentities = ["unconfigured mapping"];
+      (rows[1] as ShardReceipt).consumedMappingIdentities = ["unconfigured mapping"];
     },
   ]) {
     const rows = receipts();
