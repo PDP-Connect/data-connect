@@ -14,10 +14,10 @@ export const COLLECTION_PROFILE_PINS: readonly CollectionProfilePin[] = Object.f
   {
     "connectorId": "claude_code",
     "connectorKey": "claude-code",
-    "version": "0.3.23",
-    "digest": "sha256:30a1fb96c235ed230697aaf2ba37dbfe085f0e2af7c0d58628e6751779516440",
-    "profileSha256": "sha256:fe6cab49e033d383024a7d214b722e6f274df2f4bcf027acdd6e120033f75f26",
-    "entrypointSha256": "sha256:ae7b66daa0b1bbeeed1c7541ccc8989bd905ddba2fafc9e83fdd2cf63fee3d20"
+    "version": "0.3.24",
+    "digest": "sha256:543fed4139399accba142cc924ff206f2c2795891e3b7f78770fbdf0929b1253",
+    "profileSha256": "sha256:b943ac8428442c3d0efc568ed2d7140c9cc1b5916e31c7ce564fd89503988884",
+    "entrypointSha256": "sha256:ceba77668a6086877c13bc67f7dce08bd022793ddd3d7682a5294aab95a8e6fd"
   },
   {
     "connectorId": "codex",
@@ -30,25 +30,25 @@ export const COLLECTION_PROFILE_PINS: readonly CollectionProfilePin[] = Object.f
   {
     "connectorId": "google_takeout",
     "connectorKey": "google-takeout",
-    "version": "0.1.21",
-    "digest": "sha256:1130173e6328340ddc9e682c70f7a98f740c1e04e8d17ba2f1600837e46ba8ff",
-    "profileSha256": "sha256:85709d3abe622b2e8fa462d04d58f5836f80ac54d6576d3c5c44846ed7a32b1e",
-    "entrypointSha256": "sha256:f313e034142164e41cd55d2dbbe8218d29561cf11c23b49ec1023ea0ab010a7b"
+    "version": "0.1.22",
+    "digest": "sha256:e023b918a155b469969c262f130496bcab43f16b5ac885959f7cc61094417c23",
+    "profileSha256": "sha256:8225a01d3c074eecfe18c05991bdcc27aa6ad21f26935025bc391a66150ce275",
+    "entrypointSha256": "sha256:9bd42b0a86f26acff869e96a966b06a584191349017c2f64ab50bc796ddb1f19"
   },
   {
     "connectorId": "imessage",
     "connectorKey": "imessage",
-    "version": "0.1.20",
-    "digest": "sha256:f51ade76da993bab3eed2fb761092bb1dbf3e93f769c5e6886e93dbb4733d821",
-    "profileSha256": "sha256:82d80ef4e41aa39ec5df5f333e8a3a72f45a8132bfedb950180b6a0466f3c407",
-    "entrypointSha256": "sha256:3696e7fc7137b0bc4d2cf07e8289c542a0b505dfc76cae1d9666ee4857a8cc36"
+    "version": "0.1.21",
+    "digest": "sha256:5e012bda95f6fc921878da8964cb1ffc30941af3ef3e6f1c641acc0f0570fa9e",
+    "profileSha256": "sha256:91be3bf41b5203c87b2cb58af82b831a6cb94180905f05649882441bcdaad733",
+    "entrypointSha256": "sha256:b126181ed4ca4b7de6693646be305d662a912a4b1c6e72a7f0b258e58a41bde8"
   },
   {
     "connectorId": "apple_photos",
     "connectorKey": "apple-photos",
-    "version": "0.1.21",
-    "digest": "sha256:3bd47bd1b7d4ba8f7dd6a182801e9e72d12a9e6555f086a042f6fe7e57552bc1",
-    "profileSha256": "sha256:3096fb37a87226c9cb6601c12a1de52a3bed78c5971af574534a608dffbe34b7",
-    "entrypointSha256": "sha256:269788dae2745111df882e0b4278b515bdbad64e961028134303771aeaa406c8"
+    "version": "0.1.22",
+    "digest": "sha256:bea3370c4a97078c6af499e1712d100a739f81ac5b027352697c4bf8aa22ce93",
+    "profileSha256": "sha256:863c066c759496544b70d74e20f7dd46b98b329f1dd6d7b3366820c48dae165b",
+    "entrypointSha256": "sha256:a78a90a9040bfcc5b3518c486d8729f2a4b524192a630ea53d45a5ff1a101656"
   },
 ]);

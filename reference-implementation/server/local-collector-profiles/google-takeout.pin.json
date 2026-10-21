@@ -1,6 +1,6 @@
 {
   "connector_key": "google-takeout",
-  "version": "0.1.21",
-  "digest": "sha256:1130173e6328340ddc9e682c70f7a98f740c1e04e8d17ba2f1600837e46ba8ff",
-  "profile_sha256": "sha256:85709d3abe622b2e8fa462d04d58f5836f80ac54d6576d3c5c44846ed7a32b1e"
+  "version": "0.1.22",
+  "digest": "sha256:e023b918a155b469969c262f130496bcab43f16b5ac885959f7cc61094417c23",
+  "profile_sha256": "sha256:8225a01d3c074eecfe18c05991bdcc27aa6ad21f26935025bc391a66150ce275"
 }

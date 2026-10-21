@@ -957,7 +957,7 @@ async function prepareGoogleTakeoutFixture(): Promise<string> {
         header: "Search",
         title: "Searched for pack-install-run fixture",
         titleUrl: "https://www.google.com/search?q=pack-install-run+fixture",
-        time: "2026-01-01T00:00:00.000Z",
+        time: new Date(Date.now() - 3_600_000).toISOString(),
         products: ["Search"],
       },
     ])

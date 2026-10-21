@@ -1,6 +1,6 @@
 {
   "connector_key": "claude-code",
-  "version": "0.3.23",
-  "digest": "sha256:30a1fb96c235ed230697aaf2ba37dbfe085f0e2af7c0d58628e6751779516440",
-  "profile_sha256": "sha256:fe6cab49e033d383024a7d214b722e6f274df2f4bcf027acdd6e120033f75f26"
+  "version": "0.3.24",
+  "digest": "sha256:543fed4139399accba142cc924ff206f2c2795891e3b7f78770fbdf0929b1253",
+  "profile_sha256": "sha256:b943ac8428442c3d0efc568ed2d7140c9cc1b5916e31c7ce564fd89503988884"
 }

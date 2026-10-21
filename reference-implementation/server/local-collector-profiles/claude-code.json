@@ -9,7 +9,7 @@
 	},
 	"connector_key": "claude-code",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/claude-code",
-	"version": "0.3.23",
+	"version": "0.3.24",
 	"display_name": "Claude Code",
 	"brand": {
 		"icon": "icon.svg",

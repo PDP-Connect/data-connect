@@ -919,10 +919,10 @@ test("stale evidence scope withdraws coverage_unfillable_accounted along with th
   const entries = buildCollectionReport({
     attentionOpen: false,
     collectionFacts: {
+      collection_scope: "unscoped",
       streams: [fact({ checkpoint: "not_staged", collected: 100, considered: null, stream: "attachments" })],
     },
     declaredCollectionScope: "narrowed_v2",
-    evidenceCollectionScope: "unscoped",
     freshness: "fresh",
     manifestStreams: [{ name: "attachments" }],
     refresh: null,
