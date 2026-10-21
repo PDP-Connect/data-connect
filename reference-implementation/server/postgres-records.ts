@@ -2701,8 +2701,16 @@ export async function postgresOpenFanInChangesWindow(
 
 // PostgreSQL text that equals JavaScript's String(value) for a JSON scalar,
 // which is how cursor_value and primary_key_text are derived at ingest.
+// JavaScript prints a number in plain decimal from 1e-6 up to (not including)
+// 1e21 and as `1e-7` / `1e+21` outside that range. float8::text switches to
+// exponent form earlier (`1e-05`, `1e+15`) and pads the exponent, so it is
+// used only outside the plain range, with the exponent padding removed. Both
+// formats print the shortest digits that round-trip (extra_float_digits >= 1,
+// the default).
 function postgresJsonScalarText(expr: string): string {
-  return `CASE jsonb_typeof(${expr}) WHEN 'number' THEN ((${expr}) #>> '{}')::float8::text WHEN 'null' THEN NULL ELSE (${expr}) #>> '{}' END`;
+  const number = `((${expr}) #>> '{}')::numeric`;
+  const exponentForm = `regexp_replace(${number}::float8::text, 'e([+-])0*([0-9])', 'e\\1\\2')`;
+  return `CASE jsonb_typeof(${expr}) WHEN 'number' THEN CASE WHEN ${number} <> 0 AND (abs(${number}) < 0.000001 OR abs(${number}) >= 1e21) THEN ${exponentForm} ELSE ${number}::text END WHEN 'null' THEN NULL ELSE (${expr}) #>> '{}' END`;
 }
 
 /**
