@@ -1132,7 +1132,12 @@ test("a paused historical-archive connection is resumed and its first sync start
 // This mounts the route directly with a fake controller that, like the real
 // one, refuses a second run while one is active, and whose auto-resume turns a
 // `runNow` error into `blocked`.
-async function captureOnPausedArchiveWithBothHooks(options: { runNowError?: string } = {}) {
+async function captureOnPausedArchiveWithBothHooks(
+  options: {
+    autoResumeResult?: { confirming_run: unknown; status: "active_run_exists" | "started" };
+    runNowError?: string;
+  } = {}
+) {
   const connectorId = "ynab";
   const connectionId = "cin_paused_archive_both_hooks";
   const instance: { sourceBinding: Record<string, unknown>; status: string } = {
@@ -1163,6 +1168,9 @@ async function captureOnPausedArchiveWithBothHooks(options: { runNowError?: stri
   };
   mountRefStaticSecretCredentialCapture(app, {
     autoResumeSatisfiedActions: async () => {
+      if (options.autoResumeResult) {
+        return options.autoResumeResult;
+      }
       try {
         const started = await runNow();
         return { confirming_run: started, object: "connection_self_heal", satisfied_actions: [], status: "started" };
@@ -1250,6 +1258,32 @@ test("archive reconnect with auto-resume wired starts exactly one run and report
     const autoResume = response.body?.auto_resume as { confirming_run?: { run_id?: string } } | null;
     assert.equal(autoResume?.confirming_run?.run_id, "run_fake_1", "the console reads the same run from auto_resume");
     assert.equal(instance.status, "active");
+  });
+});
+
+test("archive reconnect adopts an existing active run without starting another", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    const { response, startedRunIds } = await captureOnPausedArchiveWithBothHooks({
+      autoResumeResult: { confirming_run: { run_id: "run_existing" }, status: "active_run_exists" },
+    });
+
+    assert.deepEqual(startedRunIds, []);
+    assert.equal(response.status, 201);
+    assert.deepEqual(response.body?.archive_reconnect, { run_id: "run_existing", status: "resumed" });
+  });
+});
+
+test("archive reconnect starts a run when auto-resume returns no usable run id", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    for (const confirmingRun of [null, { run_id: "" }, { run_id: 42 }]) {
+      const { response, startedRunIds } = await captureOnPausedArchiveWithBothHooks({
+        autoResumeResult: { confirming_run: confirmingRun, status: "started" },
+      });
+
+      assert.deepEqual(startedRunIds, ["run_fake_1"], `confirming_run=${JSON.stringify(confirmingRun)}`);
+      assert.equal(response.status, 201);
+      assert.deepEqual(response.body?.archive_reconnect, { run_id: "run_fake_1", status: "resumed" });
+    }
   });
 });
 
