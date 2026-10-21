@@ -103,6 +103,7 @@ import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
+import { getLatestCertifiedProgressRunAt } from "./connector-run-evidence.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
@@ -10452,6 +10453,9 @@ function createReferenceSchedulerManager({
             terminalData.connector_error_retryable !== undefined
           ) {
             connectorError = {};
+            if (typeof terminalData.connector_error_code === "string" && terminalData.connector_error_code.length > 0) {
+              connectorError.code = terminalData.connector_error_code;
+            }
             if (typeof terminalData.connector_error_message === "string") {
               connectorError.message = terminalData.connector_error_message;
             }
@@ -10459,7 +10463,14 @@ function createReferenceSchedulerManager({
               connectorError.retryable = terminalData.connector_error_retryable;
             }
           }
+          // The runtime reports the checkpoint outcome as the flat
+          // `checkpoint_commit_status`; scheduler records read `commit_status`.
+          const checkpointSummary =
+            typeof terminalData.checkpoint_commit_status === "string"
+              ? { commit_status: terminalData.checkpoint_commit_status }
+              : null;
           return {
+            checkpoint_summary: checkpointSummary,
             connector_error: connectorError,
             failure_reason: terminalData.reason || null,
             known_gaps: Array.isArray(terminalData.known_gaps) ? terminalData.known_gaps : [],
@@ -10554,6 +10565,25 @@ function createReferenceSchedulerManager({
           logger.error(
             { err: err instanceof Error ? err.message : String(err) },
             `[scheduler] last-success spine probe failed for ${connectorId}`
+          );
+          return null;
+        }
+      },
+      // Durable cross-path "latest certified partial progress at" probe. A run
+      // that ended failed with `stream_collection_failed` while sibling streams
+      // committed is not a success, so the probe above never sees it, but it
+      // ends a failure streak the same way. Read from the spine so a manual
+      // `controller.runNow` run (invisible to `listRunHistory`) counts, and so
+      // it survives a restart. Back-off recovery evidence only: it never feeds
+      // `last_successful_at` or `CollectionSucceeded`. Returns null on no such
+      // run or probe error (never fabricates a reset).
+      getLastBackoffResetAt: async (connectorId, connectorInstanceId) => {
+        try {
+          return await getLatestCertifiedProgressRunAt(connectorId, connectorInstanceId);
+        } catch (err) {
+          logger.error(
+            { err: err instanceof Error ? err.message : String(err) },
+            `[scheduler] certified-progress spine probe failed for ${connectorId}`
           );
           return null;
         }

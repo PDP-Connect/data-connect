@@ -14,6 +14,7 @@
 
 import { getRunTerminalEvent } from "../lib/spine.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
+import { getLatestCertifiedProgressRunAt } from "./connector-run-evidence.ts";
 import type { ConnectorEnvironmentPolicy } from "../runtime/connector-child-environment.ts";
 import { getScheduleIneligibilityReason, resolveDefaultConnectorPath } from "../runtime/controller.ts";
 import { hasForwardEvidenceDebt, isRecoverableDetailGapRow } from "../runtime/recovery-decision.ts";
@@ -717,6 +718,25 @@ export function createReferenceSchedulerManager({
           logger.error(
             { err: err instanceof Error ? err.message : String(err) },
             `[scheduler] last-success spine probe failed for ${connectorId}`
+          );
+          return null;
+        }
+      },
+      // Durable cross-path "latest certified partial progress at" probe. A run
+      // that ended failed with `stream_collection_failed` while sibling streams
+      // committed is not a success, so the probe above never sees it, but it
+      // ends a failure streak the same way. Read from the spine so a manual
+      // `controller.runNow` run (invisible to `listRunHistory`) counts, and so
+      // it survives a restart. Back-off recovery evidence only: it never feeds
+      // `last_successful_at` or `CollectionSucceeded`. Returns null on no such
+      // run or probe error (never fabricates a reset).
+      getLastBackoffResetAt: async (connectorId, connectorInstanceId) => {
+        try {
+          return await getLatestCertifiedProgressRunAt(connectorId, connectorInstanceId);
+        } catch (err) {
+          logger.error(
+            { err: err instanceof Error ? err.message : String(err) },
+            `[scheduler] certified-progress spine probe failed for ${connectorId}`
           );
           return null;
         }
