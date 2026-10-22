@@ -6,9 +6,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
 import { getConnectorSummaryForRoute, listConnectorSummaries } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
@@ -120,15 +120,15 @@ async function seedTerminalCoverage(
       .manifest
   );
   const bindings = {
+    artifact_digest: `sha256:${"a".repeat(64)}`,
     binding_generation: 0,
     manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
-    artifact_digest: `sha256:${"a".repeat(64)}`,
     runtime_accounting: {
-      durable_admission: true,
-      detail_complete: true,
-      stream_evidence_consistent: true,
-      outstanding_debt: 0,
       checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
       ...accountingOverrides,
     },
   };
@@ -145,12 +145,12 @@ async function seedTerminalCoverage(
         checkpoint: "committed",
         collected: 0,
         considered: null,
-        covered: null,
         coverage_statuses: ["collected"],
+        covered: null,
         pending_detail_gaps: 0,
         scoped: true,
         skipped: null,
-        stores: [{ store: malformed ? "unknown_store" : "projects", status: "collected" }],
+        stores: [{ status: "collected", store: malformed ? "unknown_store" : "projects" }],
         stream: "sessions",
       },
       {
@@ -158,12 +158,12 @@ async function seedTerminalCoverage(
         checkpoint: "committed",
         collected: 0,
         considered: null,
-        covered: null,
         coverage_statuses: [status],
+        covered: null,
         pending_detail_gaps: status === "collected" ? 0 : 1,
         scoped: true,
         skipped: null,
-        stores: [{ store: "derived_messages", status }],
+        stores: [{ status, store: "derived_messages" }],
         stream: "messages",
       },
     ],
@@ -298,11 +298,11 @@ test("persisted terminal coverage cannot cross a source binding generation", asy
 });
 
 for (const [field, value] of Object.entries({
-  durable_admission: false,
-  detail_complete: false,
-  stream_evidence_consistent: false,
-  outstanding_debt: 1,
   checkpoint_eligible: false,
+  detail_complete: false,
+  durable_admission: false,
+  outstanding_debt: 1,
+  stream_evidence_consistent: false,
 })) {
   test(`runtime ${field} contradiction prevents both owner projections claiming complete`, async () => {
     await withLocalConnection(async () => {

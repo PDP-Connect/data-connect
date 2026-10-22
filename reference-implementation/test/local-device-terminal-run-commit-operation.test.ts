@@ -4,16 +4,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { canonicalTerminalRunCommitEnvelope, hashCanonicalJson } from "@pdpp/collector-runtime/local-device-envelope";
+import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import {
   handleLocalDeviceTerminalRunCommit,
   normalizeTerminalCoverageFacts,
 } from "../operations/local-device-terminal-collection.ts";
-import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
-import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { deriveStreamCoverageCondition } from "../server/connector-coverage-policy.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import {
   commitTerminalRun as commitTerminalRunToStore,
@@ -63,12 +63,12 @@ test("version 2 terminal coverage validates named stores against the manifest", 
     state_delta: {},
     terminal_facts: [
       {
-        stream: "messages",
         scoped: true,
         stores: [
-          { store: "messages", status: "collected" },
-          { store: "history", status: "partial" },
+          { status: "collected", store: "messages" },
+          { status: "partial", store: "history" },
         ],
+        stream: "messages",
       },
     ],
     version: 2,
@@ -76,10 +76,6 @@ test("version 2 terminal coverage validates named stores against the manifest", 
   await handleLocalDeviceTerminalRunCommit({
     ctx: {
       canonicalConnectorKey: () => "codex",
-      getConnectorManifest: () =>
-        Promise.resolve({
-          streams: [{ name: "messages", coverage_stores: ["messages", "history"] }],
-        }),
       commitTerminalRun: (input) => {
         committed = input;
         return Promise.resolve({
@@ -94,6 +90,10 @@ test("version 2 terminal coverage validates named stores against the manifest", 
         });
       },
       emitSpineEvent: () => Promise.resolve(),
+      getConnectorManifest: () =>
+        Promise.resolve({
+          streams: [{ coverage_stores: ["messages", "history"], name: "messages" }],
+        }),
       handleError: (_res, error) => {
         throw error;
       },
@@ -128,23 +128,23 @@ test("version 2 terminal coverage validates named stores against the manifest", 
 });
 
 test("typed terminal coverage is green only for complete scoped store evidence", () => {
-  const manifest = { streams: [{ name: "messages", coverage_stores: ["messages", "history"] }] };
+  const manifest = { streams: [{ coverage_stores: ["messages", "history"], name: "messages" }] };
   const fact = (statuses: readonly [string, string], scoped = true) => ({
-    stream: "messages",
-    scoped,
-    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
     artifact_digest: `sha256:${"a".repeat(64)}`,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
     runtime_accounting: {
-      durable_admission: true,
-      detail_complete: true,
-      stream_evidence_consistent: true,
-      outstanding_debt: 0,
       checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
     },
+    scoped,
     stores: [
-      { store: "messages", status: statuses[0] },
-      { store: "history", status: statuses[1] },
+      { status: statuses[0], store: "messages" },
+      { status: statuses[1], store: "history" },
     ],
+    stream: "messages",
   });
   const axis = (raw: unknown) => {
     const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped");
@@ -162,7 +162,7 @@ test("typed terminal coverage is green only for complete scoped store evidence",
   assert.equal(normalizeTerminalCoverageFacts([fact(["collected", "bogus"])], manifest, "unscoped"), null);
   assert.equal(
     normalizeTerminalCoverageFacts(
-      [{ ...fact(["collected", "collected"]), stores: [{ store: "messages", status: "collected" }] }],
+      [{ ...fact(["collected", "collected"]), stores: [{ status: "collected", store: "messages" }] }],
       manifest,
       "unscoped"
     ),
@@ -174,11 +174,11 @@ test("typed terminal coverage is green only for complete scoped store evidence",
 test("a selected-stream terminal commit is accepted without proving omitted manifest streams", () => {
   const manifest = {
     streams: [
-      { name: "messages", coverage_stores: ["messages"] },
-      { name: "photos", coverage_stores: ["photos"] },
+      { coverage_stores: ["messages"], name: "messages" },
+      { coverage_stores: ["photos"], name: "photos" },
     ],
   };
-  const selected = [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }];
+  const selected = [{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }];
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped"), null);
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped", { allowSubset: true })?.length, 1);
 });
@@ -613,27 +613,27 @@ test("SQLite route operation composes authorization with 201, exact response-los
 });
 
 test("selected instrumented stream is accepted beside an uninstrumented stream", () => {
-  const manifest = { streams: [{ name: "messages", coverage_stores: ["messages"] }, { name: "photos" }] };
-  const selected = [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }];
+  const manifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }, { name: "photos" }] };
+  const selected = [{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }];
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped", { allowSubset: true })?.length, 1);
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped"), null);
 });
 
 test("connector collected assertions cannot override runtime accounting or absent admission", () => {
-  const manifest = { version: "1", streams: [{ name: "messages", coverage_stores: ["messages"] }] };
+  const manifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }], version: "1" };
   const raw = {
-    stream: "messages",
-    scoped: true,
-    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
     artifact_digest: `sha256:${"a".repeat(64)}`,
-    stores: [{ store: "messages", status: "collected" }],
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
     runtime_accounting: {
-      durable_admission: true,
-      detail_complete: true,
-      stream_evidence_consistent: true,
-      outstanding_debt: 0,
       checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
     },
+    scoped: true,
+    stores: [{ status: "collected", store: "messages" }],
+    stream: "messages",
   };
   for (const override of [
     { durable_admission: false },
@@ -671,21 +671,21 @@ test("connector collected assertions cannot override runtime accounting or absen
 test("proven empty content is complete while metadata inventory stays inventory only", () => {
   for (const coveragePolicy of ["collect", "inventory_only"]) {
     const manifest = {
-      streams: [{ name: "messages", coverage_policy: coveragePolicy, coverage_stores: ["messages"] }],
+      streams: [{ coverage_policy: coveragePolicy, coverage_stores: ["messages"], name: "messages" }],
     };
     const raw = {
-      stream: "messages",
-      scoped: true,
-      manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
       artifact_digest: `sha256:${"a".repeat(64)}`,
+      manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
       runtime_accounting: {
-        durable_admission: true,
-        detail_complete: true,
-        stream_evidence_consistent: true,
-        outstanding_debt: 0,
         checkpoint_eligible: true,
+        detail_complete: true,
+        durable_admission: true,
+        outstanding_debt: 0,
+        stream_evidence_consistent: true,
       },
-      stores: [{ store: "messages", status: "collected" }],
+      scoped: true,
+      stores: [{ status: "collected", store: "messages" }],
+      stream: "messages",
     };
     const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped");
     assert.ok(normalized);
@@ -701,7 +701,6 @@ for (const eligible of [false, true]) {
     await handleLocalDeviceTerminalRunCommit({
       ctx: {
         canonicalConnectorKey: () => "codex",
-        getConnectorManifest: () => ({ streams: [{ name: "messages", coverage_stores: ["messages"] }] }),
         commitTerminalRun: (input) => {
           committed = true;
           return Promise.resolve({
@@ -716,6 +715,7 @@ for (const eligible of [false, true]) {
           });
         },
         emitSpineEvent: () => Promise.resolve(),
+        getConnectorManifest: () => ({ streams: [{ coverage_stores: ["messages"], name: "messages" }] }),
         handleError: (_res, error) => {
           throw error;
         },
@@ -725,22 +725,22 @@ for (const eligible of [false, true]) {
       },
       req: {
         body: validBody({
-          version: 2,
           state_delta: { messages: { cursor: "new" } },
           terminal_facts: [
             {
-              stream: "messages",
-              scoped: true,
-              stores: [{ store: "messages", status: "partial" }],
               runtime_accounting: {
-                durable_admission: true,
-                detail_complete: false,
-                stream_evidence_consistent: true,
-                outstanding_debt: 1,
                 checkpoint_eligible: eligible,
+                detail_complete: false,
+                durable_admission: true,
+                outstanding_debt: 1,
+                stream_evidence_consistent: true,
               },
+              scoped: true,
+              stores: [{ status: "partial", store: "messages" }],
+              stream: "messages",
             },
           ],
+          version: 2,
         }),
         deviceExporter: { deviceId: "dev-1" },
         params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
@@ -759,23 +759,23 @@ for (const eligible of [false, true]) {
 
 test("v2 envelope identity binds accounting and executed release provenance", () => {
   const fact = {
-    stream: "messages",
-    scoped: true,
-    manifest_fingerprint: "manifest-a",
     artifact_digest: `sha256:${"a".repeat(64)}`,
+    manifest_fingerprint: "manifest-a",
     runtime_accounting: {
-      durable_admission: true,
-      detail_complete: true,
-      stream_evidence_consistent: true,
-      outstanding_debt: 0,
       checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
     },
-    stores: [{ store: "messages", status: "collected" }],
+    scoped: true,
+    stores: [{ status: "collected", store: "messages" }],
+    stream: "messages",
   };
   const hash = (value: Record<string, unknown>) =>
     hashCanonicalJson(
       canonicalTerminalRunCommitEnvelope(
-        validBody({ version: 2, terminal_facts: [value] }) as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]
+        validBody({ terminal_facts: [value], version: 2 }) as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]
       )
     );
   const original = hash(fact);

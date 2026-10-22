@@ -5020,7 +5020,8 @@ function deriveLocalTerminalCoverageAxis(
     }
     let storeIndex = 0;
     for (const assertion of rawFact.stores as readonly { store: string; status: string }[]) {
-      const status = (rawFact.coverage_statuses as string[])[storeIndex++] ?? "unknown";
+      const status = (rawFact.coverage_statuses as string[])[storeIndex] ?? "unknown";
+      storeIndex += 1;
       const rawStore = { ...assertion, status };
       rows.push({ collection_scope: terminal.collectionScope, status: rawStore.status, store: rawStore.store, stream });
       if (rawStore.status !== "collected") {

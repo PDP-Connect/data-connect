@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
-import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
+import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
@@ -172,10 +172,10 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       deviceId,
       envelopeHash,
       normalizedFacts: validatedFacts,
-      version,
       runId,
       sourceInstanceId,
       stateDelta,
+      version,
     });
     res.status(result.replayed ? 200 : 201).json(result.response);
   } catch (error) {
@@ -423,7 +423,7 @@ export function normalizeTerminalCoverageFacts(
         return null;
       }
       seenStores.add(name);
-      stores.push({ store: name, status });
+      stores.push({ status, store: name });
     }
     // Keep assertions separate from the verdict derived from host accounting.
     // Missing provenance remains unknown; a known contradiction is partial.
@@ -459,12 +459,12 @@ export function normalizeTerminalCoverageFacts(
     });
     const pendingDetailGaps = accountingKnown ? Number(accounting.outstanding_debt) : 0;
     facts.push({
+      artifact_digest: entry.artifact_digest,
       checkpoint: accountingKnown && accounting.checkpoint_eligible === true ? "committed" : "withheld",
       collected: 0,
       considered: null,
       covered: null,
       manifest_fingerprint: entry.manifest_fingerprint,
-      artifact_digest: entry.artifact_digest,
       ...(Number.isSafeInteger(options.bindingGeneration)
         ? {
             binding_generation: options.validateBindingGeneration
@@ -494,11 +494,11 @@ function readCoverageStatuses(value: unknown): readonly string[] | null {
 }
 
 interface TerminalRuntimeAccounting {
-  durable_admission: boolean;
-  detail_complete: boolean;
-  stream_evidence_consistent: boolean;
-  outstanding_debt: number;
   checkpoint_eligible: boolean;
+  detail_complete: boolean;
+  durable_admission: boolean;
+  outstanding_debt: number;
+  stream_evidence_consistent: boolean;
 }
 
 function readTerminalRuntimeAccounting(value: unknown): TerminalRuntimeAccounting | null {
@@ -516,10 +516,10 @@ function readTerminalRuntimeAccounting(value: unknown): TerminalRuntimeAccountin
     return null;
   }
   return {
-    durable_admission: accounting.durable_admission,
-    detail_complete: accounting.detail_complete,
-    stream_evidence_consistent: accounting.stream_evidence_consistent,
-    outstanding_debt: accounting.outstanding_debt,
     checkpoint_eligible: accounting.checkpoint_eligible,
+    detail_complete: accounting.detail_complete,
+    durable_admission: accounting.durable_admission,
+    outstanding_debt: accounting.outstanding_debt,
+    stream_evidence_consistent: accounting.stream_evidence_consistent,
   };
 }

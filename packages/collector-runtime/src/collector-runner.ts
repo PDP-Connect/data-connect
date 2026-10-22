@@ -1070,15 +1070,15 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
               artifact_digest: config.connector.artifactDigest as string,
               manifest_fingerprint: config.connector.manifestFingerprint as string,
               runtime_accounting: {
+                checkpoint_eligible: true,
+                detail_complete: true,
                 durable_admission:
                   recordDrain.failed === 0 &&
                   afterRecordsSummary.ready === 0 &&
                   afterRecordsSummary.leased === 0 &&
                   afterRecordsSummary.deadLetter === 0,
-                detail_complete: true,
-                stream_evidence_consistent: true,
                 outstanding_debt: 0,
-                checkpoint_eligible: true,
+                stream_evidence_consistent: true,
               },
               scoped: stream.scoped,
               stores: stream.stores,

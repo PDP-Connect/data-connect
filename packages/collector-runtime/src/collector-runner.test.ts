@@ -398,9 +398,9 @@ for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
           baseUrl: harness.url,
           connector: {
             args: [fixture],
+            artifactDigest: `sha256:${"b".repeat(64)}`,
             command: "node",
             connector_id: "fixture-detail-no-admission",
-            artifactDigest: `sha256:${"b".repeat(64)}`,
             manifestFingerprint: "a".repeat(64),
             protocol_capabilities: [],
             runCoverageVersion: 1,
@@ -439,9 +439,9 @@ test("runCollectorConnector refuses a collected assertion with mismatched emitte
         baseUrl: harness.url,
         connector: {
           args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
           command: "node",
           connector_id: "fixture-count-mismatch",
-          artifactDigest: `sha256:${"b".repeat(64)}`,
           manifestFingerprint: "a".repeat(64),
           protocol_capabilities: [],
           runCoverageVersion: 1,
