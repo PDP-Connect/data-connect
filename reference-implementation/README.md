@@ -481,7 +481,7 @@ reference stack. The quickest self-hosted path uses the public GHCR images:
 
 ```bash
 cp .env.docker.example .env.docker
-bash scripts/generate-secrets.sh --write  # fills PDPP_OWNER_PASSWORD and VAPID keys
+# Set PDPP_OWNER_PASSWORD and PDPP_CREDENTIAL_ENCRYPTION_KEY in .env.docker
 # set PDPP_REFERENCE_ORIGIN in .env.docker to your deployment URL
 docker compose --env-file .env.docker pull
 pnpm docker:reference:quick

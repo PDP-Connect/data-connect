@@ -20,6 +20,7 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { getDb } from "../server/db.ts";
 import { activateDraftConnection, startServer } from "../server/index.ts";
+import { mountRefStaticSecretCredentialCapture } from "../server/routes/ref-static-secret-credentials.ts";
 import { createSqliteConnectorInstanceCredentialStore } from "../server/stores/connector-instance-credential-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
@@ -1120,6 +1121,194 @@ test("a paused historical-archive connection is resumed and its first sync start
       assert.equal(archiveReconnect?.status, "resumed");
       assert.match(archiveReconnect?.run_id ?? "", RUN_ID_PATTERN);
     }, FIRST_SYNC_SERVER_OPTIONS);
+  });
+});
+
+// Production wires BOTH capture hooks to one controller (server/index.ts): the
+// auto-resume hook starts a confirming run once the saved credential satisfies
+// the repair action, and the archive-reconnect hook resumes the row and calls
+// `controller.runNow`. The full-server tests above run with
+// `staticSecretAutoResume: false`, so they never see the two hooks together.
+// This mounts the route directly with a fake controller that, like the real
+// one, refuses a second run while one is active, and whose auto-resume turns a
+// `runNow` error into `blocked`.
+async function captureOnPausedArchiveWithBothHooks(
+  options: {
+    autoResumeResult?: { confirming_run: unknown; status: "active_run_exists" | "started" };
+    omitArchiveResumeHook?: boolean;
+    runNowError?: string;
+  } = {}
+) {
+  const connectorId = "ynab";
+  const connectionId = "cin_paused_archive_both_hooks";
+  const instance: { sourceBinding: Record<string, unknown>; status: string } = {
+    sourceBinding: { kind: "historical_archive", original_connector_instance_id: connectionId },
+    status: "paused",
+  };
+  const startedRunIds: string[] = [];
+  let activeRunId: string | null = null;
+  // biome-ignore lint/suspicious/useAwait: Mirrors the async controller contract.
+  const runNow = async (): Promise<{ run_id: string }> => {
+    if (options.runNowError) {
+      throw new Error(options.runNowError);
+    }
+    if (activeRunId) {
+      throw new Error(`Connector already has an active run: ${activeRunId}`);
+    }
+    activeRunId = `run_fake_${startedRunIds.length + 1}`;
+    startedRunIds.push(activeRunId);
+    return { run_id: activeRunId };
+  };
+  let stored: Record<string, unknown> | null = null;
+  let handler: ((req: unknown, res: unknown) => Promise<unknown>) | null = null;
+  const app = {
+    post(_path: string, ...args: unknown[]) {
+      handler = args.at(-1) as typeof handler;
+      return app;
+    },
+  };
+  mountRefStaticSecretCredentialCapture(app, {
+    autoResumeSatisfiedActions: async () => {
+      if (options.autoResumeResult) {
+        return options.autoResumeResult;
+      }
+      try {
+        const started = await runNow();
+        return { confirming_run: started, object: "connection_self_heal", satisfied_actions: [], status: "started" };
+      } catch (err) {
+        return {
+          confirming_run: null,
+          error_message: (err as Error).message,
+          object: "connection_self_heal",
+          satisfied_actions: [],
+          status: "blocked",
+        };
+      }
+    },
+    createRequestConnectorInstanceCredentialStore: () => ({
+      capture: (input: { credentialKind: string; now: string }) => {
+        stored = { capturedAt: input.now, credentialKind: input.credentialKind, present: true, status: "active" };
+        return stored;
+      },
+      fingerprintCandidate: () => "fp",
+      getMetadata: () => stored,
+    }),
+    createRequestConnectorInstanceStore: () => ({
+      get: () => ({ connectorId, connectorInstanceId: connectionId, ...instance }),
+      updateStatus: (_id: string, update: { status: string }) => {
+        instance.status = update.status;
+        return { ...instance };
+      },
+    }),
+    createTraceContext: () => ({ scenario_id: null, trace_id: "trace_fake" }),
+    emitSpineEvent: async () => undefined,
+    ensureRequestId: () => "req_fake",
+    getOwnerSubjectId: () => OWNER_SUBJECT_ID,
+    handleError: (_res: unknown, err: unknown) => {
+      throw err;
+    },
+    pdppError: (
+      errorRes: { status: (code: number) => { json: (body: unknown) => unknown } },
+      status: number,
+      code: string
+    ) => errorRes.status(status).json({ error: { code } }),
+    requireOwnerSession: () => undefined,
+    resolveOwnerConnectorNamespace: async () => ({ connectorId, connectorInstanceId: connectionId }),
+    resolveRegisteredConnectorManifest: async () => syntheticNoProbeStaticSecretManifest(),
+    // Same shape as server/index.ts: resume the row, then `controller.runNow`.
+    resumeHistoricalArchiveConnectionAndRunFirstSync: options.omitArchiveResumeHook
+      ? undefined
+      : async () => {
+          instance.status = "active";
+          const started = await runNow();
+          return { kind: "resumed_and_synced", runId: started.run_id };
+        },
+    setReferenceTraceId: () => undefined,
+  } as unknown as Parameters<typeof mountRefStaticSecretCredentialCapture>[1]);
+  assert.ok(handler, "the capture route must be mounted");
+
+  const response: { body: Record<string, unknown> | null; status: number | null } = { body: null, status: null };
+  const res = {
+    getHeader: () => undefined,
+    json(body: Record<string, unknown>) {
+      response.body = body;
+      return res;
+    },
+    setHeader: () => undefined,
+    status(code: number) {
+      response.status = code;
+      return res;
+    },
+  };
+  await (handler as unknown as (req: unknown, res: unknown) => Promise<unknown>)(
+    {
+      body: { credential_kind: "personal_access_token", secret: GOOD_SECRET },
+      ownerSession: { sub: OWNER_SUBJECT_ID },
+      params: { connectorInstanceId: connectionId },
+    },
+    res
+  );
+  return { instance, response, startedRunIds };
+}
+
+test("archive reconnect with auto-resume wired starts exactly one run and reports its id", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    const { instance, response, startedRunIds } = await captureOnPausedArchiveWithBothHooks();
+
+    assert.deepEqual(startedRunIds, ["run_fake_1"], "the archive-reconnect journey must start exactly one run");
+    assert.equal(response.status, 201, `expected success, got ${JSON.stringify(response.body)}`);
+    assert.deepEqual(response.body?.archive_reconnect, { run_id: "run_fake_1", status: "resumed" });
+    const autoResume = response.body?.auto_resume as { confirming_run?: { run_id?: string } } | null;
+    assert.equal(autoResume?.confirming_run?.run_id, "run_fake_1", "the console reads the same run from auto_resume");
+    assert.equal(instance.status, "active");
+  });
+});
+
+test("archive reconnect adopts an existing active run without starting another", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    const { response, startedRunIds } = await captureOnPausedArchiveWithBothHooks({
+      autoResumeResult: { confirming_run: { run_id: "run_existing" }, status: "active_run_exists" },
+    });
+
+    assert.deepEqual(startedRunIds, []);
+    assert.equal(response.status, 201);
+    assert.deepEqual(response.body?.archive_reconnect, { run_id: "run_existing", status: "resumed" });
+  });
+});
+
+test("archive reconnect starts a run when auto-resume returns no usable run id", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    for (const confirmingRun of [null, { run_id: "" }, { run_id: 42 }]) {
+      const { response, startedRunIds } = await captureOnPausedArchiveWithBothHooks({
+        autoResumeResult: { confirming_run: confirmingRun, status: "started" },
+      });
+
+      assert.deepEqual(startedRunIds, ["run_fake_1"], `confirming_run=${JSON.stringify(confirmingRun)}`);
+      assert.equal(response.status, 201);
+      assert.deepEqual(response.body?.archive_reconnect, { run_id: "run_fake_1", status: "resumed" });
+    }
+  });
+});
+
+test("archive reconnect stays skipped when its resume hook is unavailable", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    const { response, startedRunIds } = await captureOnPausedArchiveWithBothHooks({ omitArchiveResumeHook: true });
+
+    assert.deepEqual(startedRunIds, ["run_fake_1"]);
+    assert.equal(response.status, 201);
+    assert.equal(response.body?.archive_reconnect, null);
+  });
+});
+
+test("archive reconnect still fails with 502 when neither hook gets a run handle", async () => {
+  await withCredentialKey(TEST_KEY, async () => {
+    const { response, startedRunIds } = await captureOnPausedArchiveWithBothHooks({
+      runNowError: "provider outage",
+    });
+
+    assert.deepEqual(startedRunIds, []);
+    assert.equal(response.status, 502);
+    assert.deepEqual(response.body?.error, { code: "archive_reconnect_resume_failed" });
   });
 });
 

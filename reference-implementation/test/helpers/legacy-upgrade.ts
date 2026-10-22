@@ -32,6 +32,7 @@ import {
   createPostgresConnectorInstanceStore,
   createSqliteConnectorInstanceStore,
 } from "../../server/stores/connector-instance-store.ts";
+import { closeTestServer } from "./close-test-server.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const NOW = "2026-05-18T12:00:00.000Z";
@@ -112,16 +113,6 @@ export const postgresBackend: LegacyBackend = {
   },
 };
 
-export async function closeServer(server: TestServer): Promise<void> {
-  server.schedulerManager?.stop?.();
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  await Promise.allSettled([
-    new Promise<void>((resolve) => server.asServer.close(() => resolve())),
-    new Promise<void>((resolve) => server.rsServer.close(() => resolve())),
-  ]);
-}
-
 // biome-ignore lint/suspicious/noExplicitAny: response bodies are asserted field by field in the tests.
 export async function fetchJson(url: string, init: RequestInit = {}): Promise<{ body: any; status: number }> {
   const response = await fetch(url, init);
@@ -192,7 +183,7 @@ export async function withLegacyServer(
     const asUrl = `http://localhost:${server.asPort}`;
     await body({ asUrl, ownerToken: await issueOwnerToken(asUrl), rsUrl: `http://localhost:${server.rsPort}` });
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 }
 

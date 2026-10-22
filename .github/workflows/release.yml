@@ -33,6 +33,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # onnxruntime-node's install script downloads the CUDA 12 provider binaries
+  # from nuget.org on linux/x64 even on CPU-only runners; that download is the
+  # ETIMEDOUT flake that fails `npm ci`. No job here requests the CUDA execution
+  # provider and the CPU binding ships in the package tarball, so skip it.
+  # scripts/ci-onnxruntime-install.test.ts guards this setting.
+  ONNXRUNTIME_NODE_INSTALL: "skip"
 
 jobs:
   build:

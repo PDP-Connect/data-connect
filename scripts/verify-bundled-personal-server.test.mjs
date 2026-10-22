@@ -26,7 +26,9 @@ import {
   assertPackagedNode,
   assertPackagedReferenceStacks,
   assertPackagedRuntime,
+  attachDmg,
   collectRelevantWindowsInstallerEntries,
+  detachDmg,
   listDebEntries,
   parseArgs,
   readMacBundleExecutable,
@@ -725,6 +727,102 @@ describe("assertMacFrameworkLayout", () => {
       )
     } finally {
       rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("hdiutil mount retries", () => {
+  const mountRoot = "/mnt/dataconnect-dmg"
+  const dmg = "DataConnect.dmg"
+  const attachArgs = [
+    "attach",
+    "-readonly",
+    "-nobrowse",
+    "-mountpoint",
+    mountRoot,
+    dmg,
+  ]
+  const detachArgs = ["detach", mountRoot]
+  const forceDetachArgs = ["detach", "-force", mountRoot]
+
+  // Fails the first `failures` calls with `message(attempt)`, worded like the
+  // verifier's own `run` errors, then succeeds. Records each call and pause.
+  function fakeHdiutil(failures, message) {
+    const calls = []
+    const pauses = []
+    const runCommand = (command, args) => {
+      calls.push([command, args])
+      if (calls.length > failures) return ""
+      throw new Error(
+        `${command} ${args.join(" ")} failed: ${message(calls.length)}`
+      )
+    }
+    return { calls, pauses, runCommand, pause: ms => pauses.push(ms) }
+  }
+
+  function errorFrom(action) {
+    try {
+      action()
+    } catch (error) {
+      return error
+    }
+    throw new Error("expected the action to throw")
+  }
+
+  it("attaches once two transient failures clear", () => {
+    const fake = fakeHdiutil(2, attempt => `attach stderr ${attempt}`)
+
+    expect(() =>
+      attachDmg(dmg, mountRoot, fake.runCommand, fake.pause)
+    ).not.toThrow()
+    expect(fake.calls).toEqual([
+      ["hdiutil", attachArgs],
+      ["hdiutil", attachArgs],
+      ["hdiutil", attachArgs],
+    ])
+  })
+
+  it("names hdiutil and lists every attempt when attach never succeeds", () => {
+    const fake = fakeHdiutil(Infinity, attempt => `attach stderr ${attempt}`)
+
+    const error = errorFrom(() =>
+      attachDmg(dmg, mountRoot, fake.runCommand, fake.pause)
+    )
+    expect(error.message).toContain("hdiutil attach")
+    for (const attempt of [1, 2, 3]) {
+      expect(error.message).toContain(`attach stderr ${attempt}`)
+    }
+    expect(fake.calls).toHaveLength(3)
+    expect(fake.pauses).toHaveLength(2)
+    expect(fake.pauses[1]).toBeGreaterThan(fake.pauses[0])
+  })
+
+  it("detaches once two Resource busy failures clear", () => {
+    const fake = fakeHdiutil(2, () => `couldn't eject "disk9" - Resource busy`)
+
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause)
+    ).not.toThrow()
+    expect(fake.calls.map(([, args]) => args)).toEqual([
+      detachArgs,
+      detachArgs,
+      forceDetachArgs,
+    ])
+  })
+
+  it("tries detach -force last and lists every attempt if the volume stays busy", () => {
+    const fake = fakeHdiutil(Infinity, attempt => `detach stderr ${attempt}`)
+
+    const error = errorFrom(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause)
+    )
+    expect(fake.calls.map(([, args]) => args)).toEqual([
+      detachArgs,
+      detachArgs,
+      forceDetachArgs,
+    ])
+    for (const attempt of [1, 2, 3]) {
+      expect(error.message).toContain(`detach stderr ${attempt}`)
     }
   })
 })
