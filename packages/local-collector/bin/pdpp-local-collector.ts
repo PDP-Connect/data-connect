@@ -52,8 +52,8 @@ import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pin
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
 import {
   COLLECTION_PROFILE_MANIFEST,
-  collectionProfileMismatch,
   type CollectionProfilePin,
+  collectionProfileMismatch,
   ensureCollectionProfileInstalled,
   installedCollectionProfile,
 } from "../src/managed/collection-profiles.ts";
@@ -3275,15 +3275,15 @@ export async function prepareConnectorSpec(
   return spec;
 }
 
-/** Request the optional terminal assertion only for a verified, fully instrumented selected set. */
+/** Request store evidence only for a verified 0.3.0 profile with complete selected inventories. */
 export function bindOptionalRunCoverageToRelease(
   spec: CollectorConnectorSpec,
   pin: Pick<CollectionProfilePin, "digest">,
   rawProfile: unknown
 ): CollectorConnectorSpec {
   if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) return spec;
-  const profile = rawProfile as { run_coverage?: { version?: unknown }; streams?: unknown };
-  if (profile.run_coverage?.version !== 1 || !Array.isArray(profile.streams)) return spec;
+  const profile = rawProfile as { protocol_version?: unknown; streams?: unknown };
+  if (profile.protocol_version !== "0.3.0" || !Array.isArray(profile.streams)) return spec;
   const inventory = new Map<string, readonly string[]>();
   for (const value of profile.streams) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return spec;

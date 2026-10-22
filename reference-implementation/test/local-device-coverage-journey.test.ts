@@ -14,11 +14,11 @@
 // Three substitutions, all about the release the lane runs. None changes what
 // the lane does with it:
 //
-//   - The checked-in claude-code pin declares no run_coverage, so no real
-//     release can emit a v2 proof yet. The test registers a fixture release
-//     that declares it: on the server through __setLocalCollectorReleaseForTest,
-//     and on the device through bindOptionalRunCoverageToRelease, as
-//     prepareConnectorSpec binds a pinned release.
+//   - The checked-in claude-code pin is not the proof-producing release in
+//     this journey. The test registers a 0.3.0 fixture release with inventories
+//     on the server through __setLocalCollectorReleaseForTest and on the device
+//     through bindOptionalRunCoverageToRelease, as prepareConnectorSpec binds
+//     a pinned release.
 //   - Enrolment registers the eleven-stream claude-code catalog manifest. The
 //     journey narrows that entry to the release's two streams.
 //   - The owner routes read a summary read model that the server refreshes in
@@ -89,11 +89,11 @@ const STREAMS = ["sessions", "messages"];
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
 const CSRF_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 
-// The fixture release: a claude-code profile that declares run coverage for
-// both streams. The server registers it, and the device binds to it.
+// The fixture release: a claude-code 0.3.0 profile that inventories both
+// streams. The server registers it, and the device binds to it.
 const PROFILE = {
   connector_id: CONNECTOR_ID,
-  run_coverage: { version: 1 },
+  protocol_version: "0.3.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },

@@ -115,12 +115,7 @@ export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS" as
 /** Capability required by a connector that emits OBSERVATION (Collection Profile 0.2.0, Section 5.10). */
 export const OBSERVATION_CAPABILITY = "OBSERVATION" as const;
 
-/**
- * Store collection evidence (Collection Profile Section 3.4). A connector that
- * cannot run without it declares this capability. It is required: a runtime
- * that cannot request the evidence (`START.run_coverage_version`) must not
- * start the connector.
- */
+/** Store collection evidence that a connector may require for a run. */
 export const RUN_COVERAGE_V1_CAPABILITY = "RUN_COVERAGE_V1" as const;
 
 /** Protocol capabilities that can be advertised by a connector or runtime. */
@@ -197,7 +192,7 @@ export function unsupportedRequiredProtocolCapabilities(
  * independent of {@link CONNECTOR_PROTOCOL_VERSION} and of the Core
  * SourceDeclaration `protocol_version`, which Core fixes at 0.1.0.
  */
-export const COLLECTION_PROFILE_VERSIONS = ["0.1.0", "0.2.0"] as const;
+export const COLLECTION_PROFILE_VERSIONS = ["0.1.0", "0.2.0", "0.3.0"] as const;
 
 /** Capabilities that Collection Profile 0.2.0 adds (Section 8). */
 const PROFILE_0_2_0_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
@@ -205,13 +200,16 @@ const PROFILE_0_2_0_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
   OBSERVATION_CAPABILITY,
 ];
 
+/** Capabilities that Collection Profile 0.3.0 adds. */
+const PROFILE_0_3_0_CAPABILITIES: readonly ConnectorProtocolCapability[] = [RUN_COVERAGE_V1_CAPABILITY];
+
 /**
  * Why a manifest's `protocol_version` and `protocol_capabilities` are not a
  * valid Collection Profile declaration, or null when they are. An absent
  * (`undefined`) capability list declares none. The version must be one of
  * {@link COLLECTION_PROFILE_VERSIONS}, every capability name must be known,
- * and a manifest that declares a capability added in 0.2.0 must declare
- * 0.2.0 (Section 3.1).
+ * and a manifest that declares a capability added in 0.2.0 or 0.3.0 must use
+ * that profile version or later (Section 3.1).
  */
 export function collectionProfileDeclarationError(
   protocolVersion: unknown,
@@ -227,6 +225,10 @@ export function collectionProfileDeclarationError(
   const profile020Only = declared.filter((capability) => PROFILE_0_2_0_CAPABILITIES.includes(capability));
   if (protocolVersion === "0.1.0" && profile020Only.length > 0) {
     return `protocol_capabilities ${profile020Only.join(", ")} require protocol_version 0.2.0`;
+  }
+  const profile030Only = declared.filter((capability) => PROFILE_0_3_0_CAPABILITIES.includes(capability));
+  if (protocolVersion !== "0.3.0" && profile030Only.length > 0) {
+    return `protocol_capabilities ${profile030Only.join(", ")} require protocol_version 0.3.0`;
   }
   return null;
 }

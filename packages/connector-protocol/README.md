@@ -66,12 +66,13 @@ runtime advertises `protocolVersion` and `protocolCapabilities`, and rejects
 unknown names and missing required capabilities before spawning a connector
 (`unsupportedRequiredProtocolCapabilities`). `DETAIL_COVERAGE_KEY_SETS` is
 advisory: a runtime that does not advertise it still starts the connector.
-`RUN_COVERAGE_V1` is required: a connector that cannot run without store
-collection evidence declares it, and a runtime that cannot request that
-evidence for the run does not start the connector.
-A manifest `protocol_version` is the Collection Profile version, `0.1.0` or
-`0.2.0`; a manifest that declares `DETAIL_COVERAGE_KEY_SETS` or `OBSERVATION`
-declares `0.2.0` (`collectionProfileDeclarationError`). `SKIP_RESULT.boundary_claim` is optional, does not require a
+`RUN_COVERAGE_V1` is a required capability when a connector declares it. A
+manifest `protocol_version` is the Collection Profile version, `0.1.0`,
+`0.2.0`, or `0.3.0`; a manifest that declares `DETAIL_COVERAGE_KEY_SETS` or
+`OBSERVATION` declares `0.2.0`, and one that declares `RUN_COVERAGE_V1`
+declares `0.3.0` (`collectionProfileDeclarationError`). The collector requests
+`START.run_coverage_version` only for a pinned `0.3.0` profile when every
+requested stream declares a non-empty `coverage_stores` inventory. `SKIP_RESULT.boundary_claim` is optional, does not require a
 protocol capability, and is disclosure-only: it never affects, reduces, or
 excludes anything from the servable denominator, coverage calculation, or
 connection/system health rollup, even when an independently recorded

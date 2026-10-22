@@ -77,11 +77,11 @@ const STREAMS = ["sessions", "messages"];
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
 const CSRF_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 
-// The fixture release declares run coverage for both streams. A negotiated run
-// binds to it; an unnegotiated run leaves the spec unbound.
+// The fixture release inventories both streams. A negotiated run binds to it;
+// an unnegotiated run leaves the spec unbound.
 const PROFILE = {
   connector_id: CONNECTOR_ID,
-  run_coverage: { version: 1 },
+  protocol_version: "0.3.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },

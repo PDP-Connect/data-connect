@@ -61,6 +61,8 @@ No wall clock takes part in either.
 
 Sequence issuance. The runtime already contacts the server before it scans: a "starting" heartbeat, the pre-scan drain, and the state read, which names the connection. None of these can carry the issuance. The heartbeat is a best-effort liveness signal that names no run, and the state read is a GET, which must stay free of side effects. The runtime therefore makes one new idempotent call at the same point, after the state read and before the scan: `POST .../source-instances/{source}/run-starts` with the run id. The server resolves the authenticated device, source and connection the same way as the terminal route. In one transaction that holds the connection row lock, it increments `connector_instances.run_sequence_issued` and stores `(connector_instance_id, run_id) -> (run_sequence, storage_epoch, device_id, source_instance_id)` in `collection_run_sequences`. An exact replay of the same run id from the same device and source returns the stored sequence (200). The same run id from another device or source is `409 run_start_conflict`. The runtime keeps the run id it registered and uses it for the run's terminal record. A server without the route (404), or a failed call, leaves the run without a sequence. The run still collects and commits its terminal record, but that record can never be an eligible positive proof.
 
+Run-start registration alone is not a coverage observation and does not retire the current proof. If a registered run crashes before a terminal record or ingested batch reaches the server, the earlier positive remains current with its original as-of. This is an accepted limit.
+
 Multiple collectors. The sequence is connection-scoped and fenced by construction: the connection row lock serializes issuance, so two devices or runtimes that collect one connection get distinct sequences in start order. Several collectors per connection are therefore allowed. The proof of the most recently started run that the server has heard from is the only one that can be current.
 
 Observed maximum. Every observation that takes a commit revision (see the table below) also updates a run-order marker on `connector_instances`, in the same transaction, after the revision `UPDATE` has locked the row: `run_order_sequence`, `run_order_event`, `run_order_run_id`, `run_order_revision`. An observation that names a run with a sequence in the current storage epoch has that sequence. An observation that names no such run is attributed to the newest issued sequence (`run_sequence_issued`) with no run id. Record batches, refused batches and state commits name no run, so they are always attributed this way; a failure report or terminal record of an unknown run is too. Attribution can retire a proof but never establish one. If the observation's sequence is greater than or equal to `run_order_sequence`, the marker moves to it: sequence, event, attributed run id (or NULL) and revision. A lower sequence leaves the marker unchanged. The observation still takes its commit revision and is stored as history.
@@ -203,8 +205,9 @@ were not in this note before, and they are added here.
 - "A runtime MAY request a separate run containing only instrumented streams."
   It is a permission. The rule that matters, that a connection-wide verdict
   does not cover uninstrumented streams, is kept.
-- "A manifest MAY advertise support ... with `run_coverage: { "version": 1 }`."
-  No failure depends on it, because START negotiation is what matters.
+- The former manifest-level `run_coverage` advertisement is removed. The runtime
+  derives START negotiation from the pinned profile version and requested
+  streams' store inventories.
 - "Checkpoint eligibility MUST remain governed by Sections 5.6 and 5.8." It
   restates the downgrade rule.
 - "Connector package patch versions alone MUST NOT establish wire
@@ -234,7 +237,7 @@ were not in this note before, and they are added here.
 | 3.2 | The manifest MUST state each store's obligation, content or metadata only. | Metadata-only inventory reads as completeness of content. | OP: "proven empty content is complete while metadata inventory stays inventory only" |
 | 3.2 | A runtime MUST NOT derive store coverage for a stream with no `coverage_stores`. | An undeclared store reads as covered. | OP: "the terminal endpoint rejects a store outside the registered inventory" |
 | 3.2 | A change to a store's obligation MUST change the manifest revision. | A proof for the old obligation survives the change. | PROJ: "catalog obligation changes invalidate proof when the binding generation advances" |
-| 3.4 | A connector that cannot run without the evidence MUST declare `RUN_COVERAGE_V1`. | The runtime runs the connector and silently drops evidence it needs. | none, by nature: a runtime cannot observe whether a connector can run without the evidence; the refusal in the next row is the testable half |
+| 3.4 | A runtime MUST request evidence only for a pinned `0.3.0` profile when every requested stream declares `coverage_stores`. | Evidence is requested under an older profile or for a stream without a complete store inventory. | LC: "a 0.3.0 manifest with inventories for requested streams requests store evidence"; LC: "a 0.2.0 manifest does not request store evidence even with inventories"; LC: "a 0.3.0 manifest does not request store evidence when a requested stream lacks inventory"; PROTO: "collectionProfileDeclarationError accepts profile versions and gates capabilities by version" |
 | 3.4 | A runtime that does not support the capability MUST refuse the connector before spawn. | Same as above, without the declaration. | RUNNER: "runCollectorConnector refuses a RUN_COVERAGE_V1 connector before spawn when its run requests no evidence" and "runCollectorConnector runs a RUN_COVERAGE_V1 connector when its START requests evidence"; CAP: "a declared RUN_COVERAGE_V1 places on the collector runtime and is missing on the provider runtime"; SEV: "the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones"; PROTO: "RUN_COVERAGE_V1 is a known, required capability" |
 | 3.4 | When START omits `run_coverage_version`, a connector MUST omit `DONE.coverage`. | Coverage that was not requested is trusted. | JOUR: "A: without START coverage negotiation, a successful run supplies no positive coverage"; RUNNER: "a connector that does not request coverage cannot submit a positive DONE verdict" |
 | 3.4 | If version 1 was requested and a successful DONE omits `coverage` (including from producers that predate the field), the runtime MUST treat the stores as unknown and MUST NOT keep an earlier positive. | An omission is read as "not supported", and the older proof stays current. | RUNNER: "successful DONE without coverage retires earlier proof with STATE" and "... without STATE"; PROJ: "legacy terminal commit without v2 proof stays unknown" |
@@ -267,14 +270,14 @@ were not in this note before, and they are added here.
 | 5.8.2 | A rejected in-scope effect, unresolved debt, missing accounting, or withheld checkpoint MUST prevent positive coverage for that obligation. | Positive coverage over a rejected record. | RUNNER: "runCollectorConnector withholds collected coverage after an HTTP receipt rejects a record"; JOUR: "J3: a run that fails before its scan leaves the lane not covered; the server keeps run A's coverage until a later run recovers" |
 | 5.8.2 | A positive's artifact digest and manifest fingerprint MUST match a release pair that the runtime or server has verified. | An unverified or mismatched release certifies code. | OP: "a v2 claim cannot pair a registered digest with another manifest fingerprint"; OP: "terminal coverage requires the release registered for the authorized connector instance" |
 | 5.8.2 | An unregistered digest, or a digest with a different fingerprint, MUST NOT establish positive coverage. | Same as above. | OP: "the terminal endpoint keeps an unregistered digest unknown"; OP: "unregistered well-formed artifact digests remain unknown" |
-| 5.8.2 | A different release MUST invalidate a positive unless a compatibility rule preserves its obligations. | A proof certifies a later release. | PROJ: "unchanged manifest with a different artifact digest projects unknown on list and detail" |
 | 5.8.2 | After a negotiated success, an omitted `DONE.coverage` is a new terminal result: the runtime MUST retire earlier positives for the connection and release, and MUST record the stores as unknown, with or without STATE. | A silent omission keeps the old proof current. | PROJ: "successful empty v2 terminal replacement retires earlier proof with state" and "... without state"; STALE: "journey: a later unnegotiated run with no STATE commits a terminal record that retires the proof"; JOUR: "U: after a covered run, an unnegotiated success with STATE retires the proof on server and device" and "... without STATE ..." |
-| 5.8.2 | A negative store result MUST NOT be erased by a later positive without independently valid recovery evidence. | A partial store flips to complete on an unsupported claim. | RUNNER: "runCollectorConnector keeps a negative store status when a later coverage record in the run says collected" (within one run; across runs, see "Gaps") |
+| 5.8.2 | A negative store result MUST NOT be erased by a later positive within the same run. Across runs, a validated `collected` proof replaces an earlier `partial` only for the same `collection_scope`. | An unsupported in-run claim erases a negative, or a proof is reused across scopes. | RUNNER: "runCollectorConnector keeps a negative store status when a later coverage record in the run says collected"; ATOM: "coverage: a later collected proof replaces an earlier partial for the same scope"; PROJ: "v2 terminal proof for an old collection scope cannot cover the current scope" |
 | 5.8.2 | A connection-wide verdict MUST NOT imply coverage for omitted or uninstrumented streams. | A connection-level "complete" hides an uninstrumented stream. | OP: "selected instrumented stream is accepted beside an uninstrumented stream"; PROJ: "selected-stream v2 proof cannot cover omitted manifest streams" |
 | 5.8.3 | The runtime MUST commit an orderable terminal run record for every successful run, negotiated or not, with or without STATE, and the record MUST name its run and run sequence. | A run without a record leaves an earlier proof current. | RUNNER: "successful DONE without coverage retires earlier proof without STATE"; STALE: "journey: a later unnegotiated run with no STATE commits a terminal record that retires the proof"; ATOM: "run start: the route issues a connection-scoped sequence and an exact replay returns it" |
 | 5.8.3 | A positive MUST be published only after a successful DONE, exit 0, durable admission of the run's relevant effects, and completion of its checkpoint commits. | A positive is published for data that is not yet durable. | RUNNER: "runCollectorConnector rejects a valid concrete ${effectType} before terminal coverage" (admission side; the checkpoint side is covered only by the OP checkpoint test above) |
 | 5.8.3 | The component MUST assign each run a sequence when the run starts, and the runtime MUST obtain it before it admits any effect. | Effects are admitted with no sequence, so no order exists. | ATOM: "run order: a second collector on one connection is ordered by run start, not by commit"; ATOM: "run start: the route issues a connection-scoped sequence and an exact replay returns it" |
-| 5.8.3 | A run without an assigned sequence MUST NOT produce positive coverage. | An unordered run becomes eligible. | ATOM: "run order: a run with no issued sequence never produces an eligible proof" |
+| 5.8.3 | Run-start registration alone MUST NOT retire current positive coverage. | Registering a run with no effect hides the earlier proof or changes its as-of. | ATOM: "run start alone leaves earlier coverage and its as-of standing" |
+| 5.8.3 | A run without an assigned sequence MUST NOT produce positive coverage. An observed terminal record or ingested batch without a sequence still retires earlier positive coverage. | An unordered run becomes eligible, or its observed effects leave an earlier proof current. | ATOM: "run order: an unregistered attempt retires prior coverage and cannot establish a proof" |
 | 5.8.3 | An observed event of the same or a later run MUST retire the positive to unknown. | An attempt does not retire the proof. | JOUR: "J2: a batch the server receives and rejects after a covered run retires the proof on server and device"; JOUR: "J4: a failure report the server receives after a covered run retires the proof"; JOUR: "J6: a runner killed after its records are admitted, before its terminal record, leaves the earlier positive unknown"; ATOM: "crash after ingest: a later run's durable records retire an earlier positive without its terminal" |
 | 5.8.3 | A terminal record of an earlier run that arrives later MUST NOT become current. | A late, older proof becomes current. | ATOM: "run order: an older run's proof that arrives after a newer run's terminal record stays history"; JOUR: "J5: an older run's proof delivered after a newer run's terminal record stays history" |
 | 5.8.3 | If a sequence or revision cannot be read, is missing, or is ambiguous, the result MUST be unknown. | An ambiguous order picks a proof. | STALE: "revision: an unreadable or mismatched revision, run sequence or storage epoch fails closed"; ATOM: "upgrade: rows from before the collection revision fail closed, and the next proof is current" |
@@ -295,28 +298,20 @@ were not in this note before, and they are added here.
 | 5.8.4 | Metadata-only inventory coverage MUST NOT be displayed as completeness of the underlying content. | Inventory reads as complete content. | OP: "proven empty content is complete while metadata inventory stays inventory only" |
 | 5.8.4 | A DETAIL_COVERAGE or STREAM_EVIDENCE projection SHOULD carry the same facts. | (SHOULD, so not a conformance requirement.) | none, by nature: a SHOULD, and the profile leaves those projections runtime-specific |
 | 6.2 (14) | Runtime conformance: the rows above, as one checklist. | (Aggregate.) | the rows above |
-| 8 | `coverage.version` versions this payload only; it does not replace `protocol_version`. | A runtime reads it as the profile version. | none, by nature: no code reads one version as the other; `validateRunCoverageVerdict` checks `coverage.version` and never `protocol_version`, and `collectionProfileDeclarationError` checks `protocol_version` and never `coverage.version`; a wrong payload version is the shape row in 5.8.2 |
-| 8 | Implementations MUST NOT assume that an older runtime, or a runtime with a closed manifest validator, ignores unknown manifest or wire fields. | A new field breaks the exchange or the manifest. | none, by nature: it limits an implementer's reasoning, not observable behavior; its consequences are the 3.4 negotiation and pre-spawn rows |
+Section 8 guidance (non-normative): `coverage.version` versions this payload only; it does not replace `protocol_version`. Implementations should not assume that older runtimes or closed manifest validators ignore unknown fields.
 
 ### Gaps
 
 Rows marked "none, by nature" have no test, for the reason in the cell:
 
-- 3.4: whether a connector can run without the evidence is internal to the
-  connector. The runtime refusal in the next row is tested.
 - 5.1: no code path reads the echoed string except the equality check, so
   there is no authorization path to test.
 - 5.8.3: the disclosure of undetected restore paths is a documentation duty.
 - 5.8.4: the DETAIL_COVERAGE and STREAM_EVIDENCE sentence is a SHOULD.
-- 8: no code reads `coverage.version` as `protocol_version`, or the reverse.
-- 8: "MUST NOT assume" limits how an implementer reasons. Its effects are the
-  3.4 negotiation and pre-spawn rows.
 
-The 3.4, 5.1, 5.8.4 and both section 8 sentences could become non-normative
-guidance without losing a testable failure. The 3.4 sentence can become the
-definition of the capability: `RUN_COVERAGE_V1` declares that the connector
-cannot run without the evidence. The 5.8.3 disclosure can stay normative,
-because a reviewer can check it against this note. The spec gate decides.
+The two Section 8 statements are non-normative guidance and do not add
+conformance requirements. The 5.8.3 restore disclosure remains normative,
+because a reviewer can check it against this note.
 
 Rows marked "none (gap)" or "none direct (gap)" are connector obligations
 that data-connectors PR #539 owns: the 3.2 identifier rule, the 5.8.2
@@ -325,28 +320,24 @@ rule, and the 5.8.2 `scoped` rule. The DC tests check only the profile's
 wording. This repository tests the runtime and server halves of the
 inventory rule: the collector requests no evidence when a selected stream
 has no inventory (`packages/local-collector/test/collection-profiles.test.ts`:
-"store evidence negotiation binds the exact selected release and leaves
-partial instrumentation unknown"), and the server rejects a claim for such a
+"a 0.3.0 manifest does not request store evidence when a requested stream
+lacks inventory"), and the server rejects a claim for such a
 stream (OP: "the terminal endpoint rejects a claim for a stream with no
 declared inventory"). No code in this repository derives a Section 3.3.9
 binding or effective-authority record from `scoped`. It only qualifies
 coverage.
 
-Open for the spec gate:
+### Spec gate decisions
 
-- Negative results across runs. The 5.8.2 negative-result row is tested
-  within one run. A later run's `collected` can follow an earlier run's
-  `partial`, for example an incremental run that does not revisit the
-  skipped item. Whether that later claim is "independently valid recovery
-  evidence" is not decided, and no cross-run rule is implemented.
-- What the scope string binds. `collectorScopeFingerprint` binds `since` and
-  the source roots, not per-stream `resources` or the requested stream set.
-  A START that names resources therefore requests no evidence. To bind
-  resources, three copies must change together: `collectorScopeFingerprint`,
-  `collectionScopeFingerprint` in `@pdpp/reference-contract`, and
-  `enumerationScopeFingerprint` in polyfill-connectors.
-- How evidence is negotiated. The profile uses `protocol_capabilities`
-  (`RUN_COVERAGE_V1`). The collector requests evidence when the pinned
-  manifest carries `run_coverage: { "version": 1 }`, a key whose profile text
-  was dropped. The code knows profile versions 0.1.0 and 0.2.0 only, so it
-  accepts `RUN_COVERAGE_V1` under both.
+- Cross-run negatives: a positive applies only to its bound `collection_scope`.
+  A later fully validated `collected` proof replaces an earlier `partial` for
+  that same scope. It does not establish coverage for another scope.
+- Effective scope: the current fingerprint binds `since` and source roots, not
+  per-stream `resources` or the requested stream set. When a runtime cannot
+  bind the effective scope, it requests no evidence; this is conformant. The
+  current runtime suppresses evidence when a START names resources.
+- Negotiation: a pinned manifest must declare `protocol_version: "0.3.0"`,
+  and every requested stream must have a non-empty `coverage_stores` inventory.
+  Otherwise the runtime omits `START.run_coverage_version`. `RUN_COVERAGE_V1`
+  is not accepted under 0.1.0 or 0.2.0, and the former `run_coverage` manifest
+  key is not read.

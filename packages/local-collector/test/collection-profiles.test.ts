@@ -298,12 +298,15 @@ test("prepareConnectorSpec installs the pinned profile before a pinned connector
   );
 });
 
-test("store evidence negotiation binds the exact selected release and leaves partial instrumentation unknown", () => {
-  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages"]));
+test("a 0.3.0 manifest with inventories for requested streams requests store evidence", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages,sessions"]));
   const pin = { digest: `sha256:${"a".repeat(64)}` };
   const profile = {
-    run_coverage: { version: 1 },
-    streams: [{ name: "messages", coverage_stores: ["messages"], obligation: "content" }, { name: "sessions" }],
+    protocol_version: "0.3.0",
+    streams: [
+      { name: "messages", coverage_stores: ["messages"], obligation: "content" },
+      { name: "sessions", coverage_stores: ["sessions"], obligation: "content" },
+    ],
   };
   const selected = bindOptionalRunCoverageToRelease(spec, pin, profile);
   assert.equal(selected.runCoverageVersion, 1);
@@ -311,8 +314,26 @@ test("store evidence negotiation binds the exact selected release and leaves par
   assert.equal(selected.manifestFingerprint?.length, 64);
   assert.notEqual(selected.manifestFingerprint,
     bindOptionalRunCoverageToRelease(spec, pin, { ...profile, streams: [{ ...profile.streams[0], obligation: "metadata" }, profile.streams[1]] }).manifestFingerprint);
-  assert.equal(bindOptionalRunCoverageToRelease({ ...spec, streams: ["messages", "sessions"] }, pin, profile).runCoverageVersion, undefined);
-  assert.equal(bindOptionalRunCoverageToRelease(spec, pin, { ...profile, run_coverage: undefined }).runCoverageVersion, undefined);
+});
+
+test("a 0.2.0 manifest does not request store evidence even with inventories", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages"]));
+  const pin = { digest: `sha256:${"a".repeat(64)}` };
+  const profile = {
+    protocol_version: "0.2.0",
+    streams: [{ name: "messages", coverage_stores: ["messages"], obligation: "content" }],
+  };
+  assert.equal(bindOptionalRunCoverageToRelease(spec, pin, profile).runCoverageVersion, undefined);
+});
+
+test("a 0.3.0 manifest does not request store evidence when a requested stream lacks inventory", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages,sessions"]));
+  const pin = { digest: `sha256:${"a".repeat(64)}` };
+  const profile = {
+    protocol_version: "0.3.0",
+    streams: [{ name: "messages", coverage_stores: ["messages"], obligation: "content" }, { name: "sessions" }],
+  };
+  assert.equal(bindOptionalRunCoverageToRelease(spec, pin, profile).runCoverageVersion, undefined);
 });
 
 test("prepareConnectorSpec installs nothing for a custom --command", async () => {

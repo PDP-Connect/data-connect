@@ -59,7 +59,7 @@ const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSI
 const CSRF_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 const PROFILE = {
   connector_id: CONNECTOR_ID,
-  run_coverage: { version: 1 },
+  protocol_version: "0.3.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },
@@ -1311,12 +1311,62 @@ laneTest(
   }
 );
 
-laneTest("run order: a run with no issued sequence never produces an eligible proof", async (lane) => {
+laneTest("run order: an unregistered attempt retires prior coverage and cannot establish a proof", async (lane) => {
+  await commitProof(lane, "run-covered");
+  await assertCovered(lane, "run-covered", "the registered run's proof is current");
+
+  const batch = await postBatch(lane, batchBody(lane, "unregistered-run-batch", sessionRecords("unregistered-record")));
+  assert.equal(batch.status, 201, JSON.stringify(batch.body));
+  assert.equal((await highWater(lane)).event, "batch_accepted");
+  await assertRetired(lane, "an admitted effect from an unregistered attempt retires the prior proof");
+
+  await commitProof(lane, "run-covered-before-unregistered-terminal");
+  await assertCovered(lane, "run-covered-before-unregistered-terminal", "coverage is standing before the unregistered terminal");
+
   await commitIssuedProof(lane, "run-unregistered");
-  await assertRetired(lane, "a proof from a run the server issued no sequence is not current");
   assert.equal((await storedRunOrder(lane, "run-unregistered")).run_sequence, null);
+  await assertRetired(lane, "an unregistered terminal retires prior coverage and cannot establish a proof");
+
   await commitProof(lane, "run-registered");
   await assertCovered(lane, "run-registered", "a registered run's proof is current");
+});
+
+laneTest("run start alone leaves earlier coverage and its as-of standing", async (lane) => {
+  await commitProof(lane, "run-covered");
+  const before = await projection(lane);
+  assert.equal(before.axis, "complete");
+  const beforeOrder = await highWater(lane);
+
+  const registered = await postRunStart(lane, "run-with-no-effect");
+  assert.equal(registered.status, 201, JSON.stringify(registered.body));
+
+  const after = await projection(lane);
+  assert.equal(after.axis, "complete", "registering a run is not an observed coverage effect");
+  assert.deepEqual(after.asOf, before.asOf, "the earlier proof keeps its original as-of");
+  assert.deepEqual(await highWater(lane), beforeOrder, "registration takes no collection revision");
+});
+
+laneTest("coverage: a later collected proof replaces an earlier partial for the same scope", async (lane) => {
+  const partialRunId = "run-partial";
+  await issueRun(lane, partialRunId);
+  const partial = await buildProof(lane, partialRunId);
+  const partialFacts = partial.normalizedFacts.map((fact) => {
+    const stores = Array.isArray(fact.stores) ? fact.stores : [];
+    return {
+      ...fact,
+      coverage_statuses: ["partial"],
+      pending_detail_gaps: 1,
+      stores: stores.map((store) => ({ ...(store as Record<string, unknown>), status: "partial" })),
+    };
+  });
+  const partialResult = await commitTerminalRun({ ...partial, normalizedFacts: partialFacts });
+  assert.equal(partialResult.replayed, false);
+  assert.notEqual((await projection(lane)).axis, "complete", "the earlier partial is not positive coverage");
+
+  await commitProof(lane, "run-collected");
+  const collected = await projection(lane);
+  assert.equal(collected.axis, "complete", "a validated proof for the same scope replaces the partial");
+  assert.equal(collected.asOf?.run_id, "run-collected");
 });
 
 laneTest("run order: a second collector on one connection is ordered by run start, not by commit", async (lane) => {

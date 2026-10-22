@@ -635,7 +635,7 @@ interface CollectorConnectorSpecExtra {
   readonly manifestFingerprint?: string;
   /** Optional stream resources for scoped connector runs. */
   readonly resources?: Readonly<Record<string, readonly string[]>>;
-  /** Set only when the installed manifest advertises optional store evidence. */
+  /** Set only when the pinned 0.3.0 manifest inventories every requested stream. */
   readonly runCoverageVersion?: 1;
   /**
    * The owner-declared collection boundary this run must stay inside, as

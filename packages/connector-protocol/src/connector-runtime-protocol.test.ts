@@ -346,9 +346,8 @@ test("the capability vocabulary knows DETAIL_COVERAGE_KEY_SETS and OBSERVATION",
   ]);
 });
 
-// Collection Profile Section 3.4: a connector that cannot run without store
-// collection evidence declares RUN_COVERAGE_V1. The capability is required: a
-// runtime that does not advertise it must not start the connector.
+// RUN_COVERAGE_V1 remains a known required capability when a connector
+// declares it; profile 0.3.0 does not require every connector to declare it.
 test("RUN_COVERAGE_V1 is a known, required capability", () => {
   assert.equal(isConnectorProtocolCapabilityArray(["RUN_COVERAGE_V1"]), true);
   assert.deepEqual(unsupportedRequiredProtocolCapabilities(["RUN_COVERAGE_V1"], []), ["RUN_COVERAGE_V1"]);
@@ -372,20 +371,22 @@ test("an advisory capability is never unsupported; a required one is unsupported
   assert.deepEqual(unsupportedRequiredProtocolCapabilities([], []), []);
 });
 
-// Section 3.1: protocol_version is "0.1.0" or "0.2.0", and "0.2.0" when the
-// manifest declares a capability Section 8 adds in 0.2.0. It is the profile
-// version, not CONNECTOR_PROTOCOL_VERSION.
-test("collectionProfileDeclarationError accepts 0.1.0 and 0.2.0 and binds 0.2.0 capabilities to 0.2.0", () => {
-  assert.deepEqual([...COLLECTION_PROFILE_VERSIONS], ["0.1.0", "0.2.0"]);
+// Section 3.1: protocol_version is the Collection Profile version, not
+// CONNECTOR_PROTOCOL_VERSION. RUN_COVERAGE_V1 is only valid in 0.3.0.
+test("collectionProfileDeclarationError accepts profile versions and gates capabilities by version", () => {
+  assert.deepEqual([...COLLECTION_PROFILE_VERSIONS], ["0.1.0", "0.2.0", "0.3.0"]);
   assert.equal(collectionProfileDeclarationError("0.1.0", undefined), null);
   assert.equal(collectionProfileDeclarationError("0.1.0", []), null);
   assert.equal(collectionProfileDeclarationError("0.1.0", ["STREAM_EVIDENCE", "BLOB"]), null);
   assert.equal(collectionProfileDeclarationError("0.2.0", undefined), null);
   assert.equal(collectionProfileDeclarationError("0.2.0", ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION"]), null);
   assert.equal(collectionProfileDeclarationError("0.2.0", ["STREAM_EVIDENCE"]), null);
+  assert.equal(collectionProfileDeclarationError("0.3.0", ["RUN_COVERAGE_V1"]), null);
+  assert.equal(collectionProfileDeclarationError("0.3.0", []), null);
   assert.match(String(collectionProfileDeclarationError("0.1.0", ["DETAIL_COVERAGE_KEY_SETS"])), /0\.2\.0/);
   assert.match(String(collectionProfileDeclarationError("0.1.0", ["OBSERVATION"])), /OBSERVATION/);
-  assert.match(String(collectionProfileDeclarationError("0.3.0", [])), /protocol_version/);
+  assert.match(String(collectionProfileDeclarationError("0.1.0", ["RUN_COVERAGE_V1"])), /0\.3\.0/);
+  assert.match(String(collectionProfileDeclarationError("0.2.0", ["RUN_COVERAGE_V1"])), /0\.3\.0/);
   assert.match(String(collectionProfileDeclarationError(undefined, [])), /protocol_version/);
   assert.match(String(collectionProfileDeclarationError("0.2.0", ["FORGED"])), /protocol_capabilities/);
   assert.match(String(collectionProfileDeclarationError("0.2.0", null)), /protocol_capabilities/);
