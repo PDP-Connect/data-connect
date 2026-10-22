@@ -4729,68 +4729,6 @@ function getSnapshotAtVersion(
 }
 
 /**
- * The newest state-commit instant for one connection: the max `updated_at`
- * over its connector-state rows, skipping the server's own `$`-prefixed rows
- * (declared and measured scope). A state write stamps this column, and a
- * terminal commit stamps its state and its run completion with one instant, so
- * the projection can tell a later commit from a proof's own transaction. There
- * is no durable sequence on state writes; this is the only ordering they carry.
- */
-export async function readLatestStateCommitAt(connectorInstanceId: string): Promise<string | null> {
-  if (isPostgresStorageBackend()) {
-    const result = await postgresQuery<{ latest: string | null }>(
-      "SELECT MAX(updated_at) AS latest FROM connector_state WHERE connector_instance_id = $1 AND substr(stream, 1, 1) <> '$'",
-      [connectorInstanceId]
-    );
-    return result.rows[0]?.latest ?? null;
-  }
-  const row = getDb()
-    .prepare(
-      "SELECT MAX(updated_at) AS latest FROM connector_state WHERE connector_instance_id = ? AND substr(stream, 1, 1) <> '$'"
-    )
-    .get<{ latest: string | null }>(connectorInstanceId);
-  return row?.latest ?? null;
-}
-
-/** Batched {@link readLatestStateCommitAt} for one page of connection ids, keyed by connector instance. */
-export async function readLatestStateCommitAtByConnectionIds(ids: readonly string[]): Promise<Map<string, string>> {
-  const latest = new Map<string, string>();
-  interface Row {
-    connector_instance_id: string;
-    latest: string | null;
-  }
-  const rows: Row[] = [];
-  if (isPostgresStorageBackend()) {
-    const query = await postgresQuery<Row>(
-      `SELECT connector_instance_id, MAX(updated_at) AS latest FROM connector_state
-        WHERE connector_instance_id = ANY($1::text[]) AND substr(stream, 1, 1) <> '$'
-        GROUP BY connector_instance_id`,
-      [ids]
-    );
-    rows.push(...query.rows);
-  } else {
-    for (let start = 0; start < ids.length; start += 900) {
-      const chunk = ids.slice(start, start + 900);
-      rows.push(
-        ...(getDb()
-          .prepare(
-            `SELECT connector_instance_id, MAX(updated_at) AS latest FROM connector_state
-              WHERE connector_instance_id IN (${chunk.map(() => "?").join(", ")}) AND substr(stream, 1, 1) <> '$'
-              GROUP BY connector_instance_id`
-          )
-          .all(...chunk) as Row[])
-      );
-    }
-  }
-  for (const row of rows) {
-    if (row.latest) {
-      latest.set(row.connector_instance_id, row.latest);
-    }
-  }
-  return latest;
-}
-
-/**
  * Persist explicit provenance for a rejected internal write against the
  * current manifest generation. It never writes a record: retained history is
  * diagnostic/dormant unless this independent signal says otherwise.

@@ -171,7 +171,6 @@ import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-c
 import { readLocalCollectorRelease } from "./local-collector-profiles.ts";
 import { mapPendingPressureGaps } from "./pending-pressure-gap-map.ts";
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
-import { readLatestStateCommitAt, readLatestStateCommitAtByConnectionIds } from "./records.ts";
 import {
   chooseDisplayTimestamp,
   compareTimestampValues,
@@ -203,6 +202,11 @@ import {
   createSqliteAcquisitionBatchStore,
 } from "./stores/acquisition-batch-store.ts";
 import { getDefaultBrowserSurfaceLeaseStore } from "./stores/browser-surface-lease-store.ts";
+import {
+  type LocalCoverageRevisionFence,
+  readCollectionRevision,
+  readLocalCoverageRevisionFences,
+} from "./stores/collection-revision-store.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import { getDefaultConnectorCoverageHorizonStore } from "./stores/connector-coverage-horizon-store.ts";
 import { getDefaultConnectorDetailGapStore } from "./stores/connector-detail-gap-store.ts";
@@ -595,6 +599,8 @@ export interface ConnectorRunSummary {
    * `collection_report`; never final coverage truth.
    */
   readonly collection_facts: RuntimeCollectionFacts | null;
+  /** The per-connection collection revision this run was committed at; `null` when the run carries none. */
+  readonly collection_revision?: number | null;
   /** Authenticated v2 device terminal evidence; checked against current manifest and scope on read. */
   readonly local_terminal_coverage?: {
     readonly eligibleLocalRun: boolean;
@@ -924,6 +930,12 @@ export interface ConnectorSummary {
    * here means "not read," never "confirmed absent."
    */
   readonly coverage_horizons: readonly ConnectionCoverageHorizon[];
+  /**
+   * What the local coverage on this row is a fact about: the run, its release
+   * digest, and the collection revision and time it was committed at. `null`
+   * when no current local proof backs the coverage shown.
+   */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   readonly display_name: string;
   readonly freshness: Freshness;
   readonly last_run: ConnectorRunSummary | null;
@@ -1162,6 +1174,8 @@ export interface ConnectorDetail {
    */
   readonly connection_health: ConnectionHealthSnapshot | null;
   readonly connection_id: string;
+  /** See {@link ConnectorSummary.coverage_as_of}; `null` when no single connection resolved. */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   /**
    * How this connector-keyed detail resolved to an owner connection
    * (design.md "Central consumer and cache boundary"): `resolved` when
@@ -1596,6 +1610,7 @@ function productRunHistoryToConnectorRunSummary(
       : null;
   return {
     collection_facts: readCollectionFactsFromTerminalData(facts),
+    collection_revision: readCollectionRevision(facts?.collection_revision),
     local_terminal_coverage: readLocalTerminalCoverage(facts, history),
     connector_error: projectConnectorRunError(history.connectorError),
     event_count: 0,
@@ -1618,7 +1633,12 @@ function productRunHistoryToConnectorRunSummary(
 
 function readLocalTerminalCoverage(
   facts: Record<string, unknown> | null,
-  history: ProductRunHistoryRecord
+  history: {
+    readonly connectorInstanceId?: string | null;
+    readonly runId?: string | null;
+    readonly schedulerManaged?: boolean | null;
+    readonly status: string;
+  }
 ): NonNullable<ConnectorRunSummary["local_terminal_coverage"]> | null {
   const block = facts?.collection_facts;
   if (!block || typeof block !== "object" || Array.isArray(block)) {
@@ -4457,7 +4477,7 @@ function pendingDetailGapCountsByStream(
 
 /** Project only a complete, current, authenticated v2 terminal inventory. */
 function terminalCoverageByStream(
-  run: ConnectorRunSummary | null,
+  run: Pick<ConnectorRunSummary, "local_terminal_coverage"> | null,
   manifest: ConnectorManifest,
   declaredScope: string | null,
   bindingGeneration: number | null,
@@ -4522,26 +4542,116 @@ function terminalCoverageCondition(
 }
 
 /**
- * Retire a typed terminal proof that a later state commit has superseded.
- *
- * A terminal commit writes its state rows and its run completion with one
- * instant, so the proof's instant is its settled run's `last_at`. A state commit
- * strictly after that instant came from a later run or checkpoint that carried
- * no terminal replacement, so the proof no longer describes the source's latest
- * collection. A commit at the same instant is the proof's own transaction, and
- * an earlier one predates it: neither retires the proof. An unparseable instant
- * keeps the proof, because it cannot establish that a later commit exists.
+ * What a shown local coverage proof is a fact about. A proof is shown only while
+ * the connection's revision fence admits it, so the run, its release digest, and
+ * the revision and time it was committed at travel with the coverage they qualify.
  */
-function retireTerminalCoverageSupersededByLaterCommit(
-  terminalCoverage: ReturnType<typeof terminalCoverageByStream>,
-  settledRun: ConnectorRunSummary | null,
-  stateCommittedAt: string | null
-): ReturnType<typeof terminalCoverageByStream> {
-  const proofAt = settledRun?.last_at ?? null;
-  if (terminalCoverage === null || !proofAt || !stateCommittedAt) {
-    return terminalCoverage;
+export interface LocalCoverageAsOf {
+  readonly artifact_digest: string | null;
+  readonly collection_revision: number;
+  readonly committed_at: string | null;
+  readonly evidence: "terminal_run";
+  readonly run_id: string;
+}
+
+/**
+ * The terminal run the connection's collection-revision high-water mark names,
+ * shaped for {@link terminalCoverageByStream}. The fence reads the run by id, so
+ * a skewed `completed_at` cannot hide a newer proof behind an older one.
+ */
+function localProofRun(
+  fence: LocalCoverageRevisionFence | null | undefined,
+  connectorInstanceId: string
+): {
+  readonly artifactDigest: string | null;
+  readonly collectionRevision: number | null;
+  readonly run: Pick<ConnectorRunSummary, "last_at" | "local_terminal_coverage">;
+  readonly runId: string;
+} | null {
+  const proofRun = fence?.proofRun;
+  // A terminal run record always has a completion time; one without it is not a proof.
+  if (!proofRun?.completedAt) {
+    return null;
   }
-  return Date.parse(stateCommittedAt) > Date.parse(proofAt) ? null : terminalCoverage;
+  const terminal = readLocalTerminalCoverage(proofRun.facts, {
+    connectorInstanceId,
+    runId: proofRun.runId,
+    schedulerManaged: proofRun.schedulerManaged,
+    status: proofRun.status,
+  });
+  if (!terminal) {
+    return null;
+  }
+  const digests = new Set(
+    (Array.isArray(terminal.streams) ? terminal.streams : []).map((fact) => {
+      const digest = (fact as { artifact_digest?: unknown } | null)?.artifact_digest;
+      return typeof digest === "string" ? digest : null;
+    })
+  );
+  const [digest] = digests;
+  return {
+    artifactDigest: digests.size === 1 && typeof digest === "string" ? digest : null,
+    collectionRevision: readCollectionRevision(proofRun.facts?.collection_revision),
+    run: { last_at: proofRun.completedAt, local_terminal_coverage: terminal },
+    runId: proofRun.runId,
+  };
+}
+
+/**
+ * Keep a local terminal proof only while it is the connection's newest observed
+ * collection event.
+ *
+ * The server assigns each event that can establish or retire proof a monotonic
+ * per-connection revision at commit: state commits, terminal runs, admitted and
+ * refused batches, and delivered failure reports. A terminal proof is current
+ * only while the newest event is the terminal run it names, at the revision that
+ * run was committed at. Any later event retires it to unknown. No wall clock is
+ * compared, so an equal or skewed timestamp cannot order two commits.
+ *
+ * Fails closed: a missing fence or revision, a mismatch, or a newest settled
+ * device run that is not the proof and carries no revision (its order against
+ * the proof is ambiguous) leaves the connection without current coverage.
+ */
+function fenceTerminalCoverageProof(
+  coverage: ReturnType<typeof terminalCoverageByStream>,
+  proof: ReturnType<typeof localProofRun>,
+  fence: LocalCoverageRevisionFence | null | undefined,
+  latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null
+): { asOf: LocalCoverageAsOf | null; coverage: ReturnType<typeof terminalCoverageByStream> } {
+  const highWater = fence?.highWater ?? null;
+  // A scheduler-managed run is not a device collection attempt. Any other
+  // settled run with no revision cannot be ordered against the proof.
+  const unorderedLaterRun =
+    proof !== null &&
+    latestSettledRun !== null &&
+    latestSettledRun.scheduler_managed !== true &&
+    latestSettledRun.run_id !== proof.runId &&
+    (latestSettledRun.collection_revision === null || latestSettledRun.collection_revision === undefined);
+  if (
+    coverage === null ||
+    proof === null ||
+    highWater === null ||
+    proof.collectionRevision === null ||
+    unorderedLaterRun ||
+    highWater.event !== "terminal_run" ||
+    highWater.runId !== proof.runId ||
+    highWater.revision !== proof.collectionRevision
+  ) {
+    return { asOf: null, coverage: null };
+  }
+  return {
+    asOf:
+      coverage.bindingReason === null
+        ? {
+            artifact_digest: proof.artifactDigest,
+            collection_revision: highWater.revision,
+            committed_at: proof.run.last_at ?? null,
+            evidence: "terminal_run",
+            run_id: proof.runId,
+          }
+        : null,
+    coverage,
+  };
 }
 
 function stateStreamParent(stream: ManifestStream | undefined): string | null {
@@ -4631,7 +4741,7 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
     heartbeats,
     unfillableAccounted,
     coverageHorizons,
-    stateCommits,
+    revisionFences,
   ] = await Promise.all([
     listRetainedSizeConnectionsByInstanceIds(ids),
     listRetainedSizeStreamsByInstanceIds(ids),
@@ -4662,7 +4772,7 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
     getDefaultConnectorCoverageHorizonStore()
       .getCurrentCoverageHorizonsByInstanceIds(ids)
       .catch(() => null),
-    readLatestStateCommitAtByConnectionIds(ids).catch(() => null),
+    readLocalCoverageRevisionFences(ids).catch(() => null),
   ]);
   const connectionsByInstanceId = new Map<string, RetainedSizeConnectionProjectionRow>();
   for (const [id, row] of connections) {
@@ -4723,7 +4833,7 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
       credentialMetadataByInstanceId: credentials as ReadonlyMap<string, CredentialStoreMetadata> | null,
       detailGapsByInstanceId,
       outboxByInstanceId,
-      stateCommittedAtByInstanceId: stateCommits,
+      localRevisionFenceByInstanceId: revisionFences,
     },
     retainedSizeSnapshot: {
       connectionsByInstanceId,
@@ -6163,8 +6273,8 @@ interface PageProductEvidence {
       readonly unreliable: boolean;
     }
   > | null;
-  /** Newest state-commit instant per connection, or null when the batch read failed. */
-  readonly stateCommittedAtByInstanceId: ReadonlyMap<string, string> | null;
+  /** Collection-revision fence per connection, or null when the batch read failed. */
+  readonly localRevisionFenceByInstanceId: ReadonlyMap<string, LocalCoverageRevisionFence> | null;
 }
 
 // A revoked row whose binding is still a setup-shell kind: setup was started
@@ -6408,8 +6518,8 @@ interface ConnectorSummarySynthesisInput {
   readonly connectorInstanceId: string;
   /** Current owner boundary; null if the state read failed. */
   readonly declaredLocalCollectionScope: string | null;
-  /** The connection's newest state-commit instant; null off the local device path or when that read failed. */
-  readonly localStateCommittedAt: string | null;
+  /** The connection's collection-revision fence; null off the local device path or when that read failed. */
+  readonly localRevisionFence: LocalCoverageRevisionFence | null;
   /**
    * Provider coverage-horizon/provenance disclosures for this connection,
    * pre-fetched by the caller via `ConnectorCoverageHorizonStore` (kept out
@@ -6526,22 +6636,27 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const localCollectorRelease = localDeviceBacked ? readLocalCollectorRelease(connectorId) : null;
-  // Retired here, once, so every reader of `terminalCoverage` below (the
-  // collection report, the artifact binding) sees the same retirement.
-  const terminalCoverage = localDeviceBacked
-    ? retireTerminalCoverageSupersededByLaterCommit(
+  // The proof is the terminal run the revision high-water mark names. Fenced
+  // here, once, so every reader of `terminalCoverage` below (the collection
+  // report, the artifact binding) and the as-of sees the same decision.
+  const proofRun = localDeviceBacked ? localProofRun(input.localRevisionFence, connectorInstanceId) : null;
+  const fencedTerminal = localDeviceBacked
+    ? fenceTerminalCoverageProof(
         terminalCoverageByStream(
-          fallbackSettledRun,
+          proofRun?.run ?? null,
           manifest,
           input.declaredLocalCollectionScope,
           evidence?.manifest_generation ?? null,
           localCollectorRelease?.artifactDigest ?? null,
           localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
         ),
-        fallbackSettledRun,
-        input.localStateCommittedAt
+        proofRun,
+        input.localRevisionFence,
+        fallbackSettledRun
       )
     : null;
+  const terminalCoverage = fencedTerminal?.coverage ?? null;
+  const coverageAsOf = fencedTerminal?.asOf ?? null;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =
     instance.status === "draft" && authoritativeLastRun
@@ -6898,6 +7013,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     // passed straight through — empty only when no horizon has ever been
     // confirmed for this connection. See `ConnectorSummary.coverage_horizons`'s
     // doc comment.
+    coverage_as_of: coverageAsOf,
     coverage_horizons: input.coverageHorizons,
     // B8: a source's label must identify WHICH source it is — the device for a
     // device-backed source, the account for an account-backed one. Derived,
@@ -7675,13 +7791,15 @@ async function projectConnectorSummaryForInstance(
   const connectorImplementation = localDeviceBacked
     ? null
     : connectorImplementationForSummary(deps.connectorImplementationStates, connectorId);
-  // A later state commit retires a typed proof. Page callers batch the instant;
-  // a singleton read fails open, as the batch read does.
-  const localStateCommittedAt = localDeviceBacked
-    ? pageProductEvidence
-      ? (pageProductEvidence.stateCommittedAtByInstanceId?.get(connectorInstanceId) ?? null)
-      : await readLatestStateCommitAt(connectorInstanceId).catch(() => null)
-    : null;
+  // The revision fence retires a terminal proof that a later observed event has
+  // superseded. Page callers batch it; a singleton read fails open, as the batch does.
+  let localRevisionFence: LocalCoverageRevisionFence | null = null;
+  if (localDeviceBacked) {
+    const fences = pageProductEvidence
+      ? pageProductEvidence.localRevisionFenceByInstanceId
+      : await readLocalCoverageRevisionFences([connectorInstanceId]).catch(() => null);
+    localRevisionFence = fences?.get(connectorInstanceId) ?? null;
+  }
   return synthesizeConnectorSummary({
     acquisitionCoverage,
     activeRun,
@@ -7691,7 +7809,7 @@ async function projectConnectorSummaryForInstance(
     connectorImplementation,
     connectorInstanceId,
     declaredLocalCollectionScope,
-    localStateCommittedAt,
+    localRevisionFence,
     coverageHorizons,
     credential,
     detailGaps,
@@ -9034,6 +9152,7 @@ function buildUnresolvedConnectorDetail(
     connection_id: connectorId,
     connection_resolution: resolution,
     connector_id: connectorId,
+    coverage_as_of: null,
     display_name: manifest.display_name || connectorId,
     freshness: { status: "unknown" },
     last_run: null,
@@ -9103,6 +9222,7 @@ export async function getConnectorDetail(
     connection_id: summary.connector_instance_id,
     connection_resolution: "resolved",
     connector_id: summary.connector_id,
+    coverage_as_of: summary.coverage_as_of,
     display_name: summary.display_name,
     freshness: summary.freshness,
     last_run: summary.last_run,

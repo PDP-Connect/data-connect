@@ -829,18 +829,6 @@ export class CollectorStateReadError extends Error {
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: ordered durable-run lifecycle; splitting it would hide checkpoint and heartbeat ordering.
 export async function runCollectorConnector(config: CollectorRunConfig): Promise<CollectorRunResult> {
-  if (
-    config.connector.runCoverageVersion === 1 &&
-    !(
-      MANIFEST_FINGERPRINT_RE.test(config.connector.manifestFingerprint ?? "") &&
-      ARTIFACT_DIGEST_RE.test(config.connector.artifactDigest ?? "")
-    )
-  ) {
-    throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
-  }
-  throwIfAborted(config.abortSignal);
-  const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
-
   const policy: CollectorOutboxPolicy = {
     ...DEFAULT_COLLECTOR_OUTBOX_POLICY,
     ...(config.outboxPolicy ?? {}),
@@ -866,6 +854,20 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
   // Never replace it with a generic corrective status in the outer catch.
   let definitiveBlockedHeartbeatSent = false;
   try {
+    // Preflight refusals are attempts for this lane too. They run inside the try
+    // so the catch below opens the failure barrier for each of them.
+    if (
+      config.connector.runCoverageVersion === 1 &&
+      !(
+        MANIFEST_FINGERPRINT_RE.test(config.connector.manifestFingerprint ?? "") &&
+        ARTIFACT_DIGEST_RE.test(config.connector.artifactDigest ?? "")
+      )
+    ) {
+      throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
+    }
+    throwIfAborted(config.abortSignal);
+    const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
+
     const initialSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
     });
@@ -989,18 +991,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       streamResult,
     });
     const hasTypedTerminalEvidence = typedTerminalFacts !== null;
-    // A successful run without typed coverage must replace any retained
-    // positive receipt. Version 1 carries an explicit unaccounted result so
-    // the server records the newer run and the local outbox clears v2 proof.
-    const unprovenTerminalFacts =
-      done?.status === "succeeded" &&
-      !streamResult.scanBudgetExceeded &&
-      !typedTerminalFacts &&
-      outbox.latestTerminalCoverageReceipt({ sourceInstanceId: config.sourceInstanceId })
-        ? (config.connector.streams.length > 0 ? config.connector.streams : ["$run"]).map(
-            (stream): TerminalCollectionFact => ({ coverage_statuses: ["unaccounted"], stream })
-          )
-        : null;
     // A typed terminal commit carries both evidence and state. Keep state out
     // of that commit when an effect was not durably admitted; a coverage
     // downgrade alone does not change the normal checkpoint policy.
@@ -1008,8 +998,20 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     let terminalEvidence: TerminalEvidence | null = null;
     if (typedTerminalFacts) {
       terminalEvidence = { facts: typedTerminalFacts, version: 2 };
-    } else if (unprovenTerminalFacts) {
-      terminalEvidence = { facts: unprovenTerminalFacts, version: 1 };
+    } else if (
+      done?.status === "succeeded" &&
+      priorStateProjection.connectorInstanceId &&
+      !hasTerminalRecordForRun(outbox, config)
+    ) {
+      // This profile version commits an orderable terminal run record for every
+      // successful run, whether or not coverage was negotiated and whether or
+      // not STATE changed. Without evidence the record carries no facts: the
+      // server stores unknown coverage for the run and retires any earlier
+      // proof, and the device clears its receipt. A server that names no
+      // connection on its state read cannot bind a terminal record, and a run
+      // id that already has one is a continuation of that run; both keep the
+      // plain state checkpoint.
+      terminalEvidence = { facts: [], version: 2 };
     }
     const checkpointResult = await maybeCommitCheckpoint({
       afterRecordsSummary,
@@ -1024,12 +1026,15 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       terminalRunConnectorInstanceId: priorStateProjection.connectorInstanceId,
     });
 
+    // A local failure barrier is recovered only by a complete successful run
+    // whose typed coverage committed. A scoped success, a corrective heartbeat,
+    // and a run that negotiated no coverage are deliberately insufficient.
+    const coverageCheckpointCommitted = checkpointResult.flushedState !== null && typedTerminalFacts !== null;
     await recoverResolvedLocalCollectorGaps({
       client,
       config,
-      // Recover the failure barrier only after a successful checkpoint.
       deferRecoveredGapCleanup:
-        streamResult.scanBudgetExceeded || done?.status !== "succeeded" || checkpointResult.flushedState === null,
+        streamResult.scanBudgetExceeded || done?.status !== "succeeded" || !coverageCheckpointCommitted,
       outbox,
     });
 
@@ -1094,10 +1099,11 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       streamingBufferHighWaterMark: streamResult.bufferHighWaterMark,
     };
   } catch (error) {
-    // Every failed run leaves an open connector_child_failure gap, whether it
-    // failed before its scan (state read, starting heartbeat, pre-scan drain) or
-    // during it. The device verdict reads open outbox rows as unadmitted, so the
-    // lane stops reading covered until a later complete run recovers the gap.
+    // Every failed run leaves an open connector_child_failure gap, whether it was
+    // refused before any work (provenance, abort, placement), failed before its
+    // scan (state read, starting heartbeat, pre-scan drain), or failed during it.
+    // The device verdict reads open outbox rows as unadmitted, so the lane stops
+    // reading covered until a later complete run recovers the gap.
     ensureOpenFailureGapRow({
       clock: () => new Date(),
       connectorId: config.connector.connector_id,
@@ -1937,6 +1943,20 @@ function recordConnectorChildFailureGap(input: {
 type TerminalEvidence =
   | { facts: readonly TerminalCollectionFact[]; version: 1 }
   | { facts: readonly TerminalCoverageFact[]; version: 2 };
+
+/**
+ * The server binds one terminal record to one run identity. A caller that
+ * reuses a run id across passes already has that record in the outbox, so a
+ * later pass of the same run must not send a second, different one.
+ */
+function hasTerminalRecordForRun(outbox: LocalDeviceOutbox, config: CollectorRunConfig): boolean {
+  if (!config.runId) {
+    return false;
+  }
+  return outbox
+    .listByKind({ kind: "terminal_run_commit", sourceInstanceId: config.sourceInstanceId })
+    .some((item) => isRecord(item.payload) && item.payload.run_id === config.runId);
+}
 
 async function maybeCommitCheckpoint(input: {
   afterRecordsSummary: LocalDeviceOutboxSummary;

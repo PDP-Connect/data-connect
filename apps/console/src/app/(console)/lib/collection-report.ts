@@ -30,9 +30,9 @@
 import type { AxisChip, EvidenceTone } from "@pdpp/display";
 import { formatCoverageAxis } from "@pdpp/display";
 import type { ForwardDispositionSummary } from "./connection-evidence.ts";
-import { formatForwardDisposition } from "./connection-evidence.ts";
+import { formatForwardDisposition, withCoverageAsOf } from "./connection-evidence.ts";
 import { dispositionForInstallState } from "./connector-implementation.ts";
-import type { RefCollectionReportEntry } from "./ref-client.ts";
+import type { RefCollectionReportEntry, RefCoverageAsOf } from "./ref-client.ts";
 
 export interface StreamCollectionFacts {
   /**
@@ -292,9 +292,15 @@ export function formatStreamCollectionFacts(
      * happen, so the reference's disposition is replaced by the install blocker.
      */
     readonly connectorNotInstalled?: boolean;
+    /** The run the connection's local coverage describes (`coverage_as_of`). */
+    readonly coverageAsOf?: RefCoverageAsOf | null;
   } = {}
 ): StreamCollectionFacts {
-  const coverage = formatCoverageAxis(entry.coverage_condition);
+  const coverage = withCoverageAsOf(
+    formatCoverageAxis(entry.coverage_condition),
+    entry.coverage_condition,
+    options.coverageAsOf
+  );
   const disposition = dispositionForInstallState(
     formatForwardDisposition(entry.forward_disposition),
     options.connectorNotInstalled === true

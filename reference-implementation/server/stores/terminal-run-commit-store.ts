@@ -8,6 +8,10 @@ import { appendSqliteSpineEventInTransaction, type SpineDatabase, type SpineEven
 import { getDb } from "../db.ts";
 import { isPostgresStorageBackend, withPostgresTransaction } from "../postgres-storage.ts";
 import {
+  advancePostgresCollectionRevisionInTransaction,
+  advanceSqliteCollectionRevisionInTransaction,
+} from "./collection-revision-store.ts";
+import {
   putPostgresConnectorStateDeltaInTransaction,
   putSqliteConnectorStateDeltaInTransaction,
 } from "./connector-state-store.ts";
@@ -87,12 +91,16 @@ function eventInputFor(
   input: ResolvedTerminalRunCommit,
   eventId: string,
   response: TerminalRunCommitResponse,
-  occurredAt: string
+  occurredAt: string,
+  collectionRevision: number | null
 ): SpineEventInput & PostgresSpineEventInput {
   return {
     actor_id: input.deviceId,
     actor_type: "local_device",
     data: {
+      // The connection revision this run, and the state it wrote, were
+      // committed at. A proof is current only while it is the high-water mark.
+      collection_revision: collectionRevision,
       collection_facts: {
         collection_scope: input.collectionBoundary,
         reference_only: true,
@@ -188,15 +196,24 @@ function commitSqlite(input: ResolvedTerminalRunCommit): TerminalRunCommitResult
 
     const occurredAt = new Date().toISOString();
     const response = responseFor(input, eventId);
+    const collectionRevision =
+      advanceSqliteCollectionRevisionInTransaction(db, input.connectorInstanceId, {
+        at: occurredAt,
+        event: "terminal_run",
+        runId: input.runId,
+      })?.revision ?? null;
     putSqliteConnectorStateDeltaInTransaction(
       db,
       { connectorId: input.connectorId, connectorInstanceId: input.connectorInstanceId },
       input.stateDelta,
       occurredAt,
-      { afterStateWrite: (stream) => maybeFault(`after_state_write:${stream}`) }
+      {
+        afterStateWrite: (stream) => maybeFault(`after_state_write:${stream}`),
+        collectionRevision,
+      }
     );
     appendSqliteSpineEventInTransaction(
-      eventInputFor(input, eventId, response, occurredAt),
+      eventInputFor(input, eventId, response, occurredAt, collectionRevision),
       db as unknown as SpineDatabase,
       {
         afterEventInsert: () => maybeFault("after_event_insert"),
@@ -254,14 +271,26 @@ async function commitPostgres(input: ResolvedTerminalRunCommit): Promise<Termina
 
       const occurredAt = new Date().toISOString();
       const response = responseFor(input, eventId);
+      const collectionRevision =
+        (
+          await advancePostgresCollectionRevisionInTransaction(client, input.connectorInstanceId, {
+            at: occurredAt,
+            event: "terminal_run",
+            runId: input.runId,
+          })
+        )?.revision ?? null;
       await putPostgresConnectorStateDeltaInTransaction(
         client,
         { connectorId: input.connectorId, connectorInstanceId: input.connectorInstanceId },
         input.stateDelta,
         occurredAt,
-        { afterStateWrite: (stream) => maybeFault(`after_state_write:${stream}`) }
+        {
+          afterStateWrite: (stream) => maybeFault(`after_state_write:${stream}`),
+          collectionRevision,
+        }
       );
-      await appendPostgresSpineEventInTransaction(client, eventInputFor(input, eventId, response, occurredAt), {
+      const event = eventInputFor(input, eventId, response, occurredAt, collectionRevision);
+      await appendPostgresSpineEventInTransaction(client, event, {
         afterEventInsert: () => maybeFault("after_event_insert"),
         afterRunHistoryWrite: () => maybeFault("after_run_history_write"),
       });

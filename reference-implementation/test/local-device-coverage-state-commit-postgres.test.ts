@@ -2,27 +2,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Real-PostgreSQL proof for the newest state-commit instant the stale-proof
- * projection compares against a terminal proof (`stateCommittedAt`). The SQL
- * runs in both the singleton and the page-batched readers, and the batched one
- * is the list path, which swallows its own failures. So this test reads it
- * back directly rather than trusting a projection that would silently degrade.
+ * Real-PostgreSQL proof for the collection-revision fence the local coverage
+ * projection reads (`localRevisionFence`). State commits, terminal runs and
+ * observed attempts each take the next per-connection revision at commit, and
+ * the server's own `$` scope rows take none. The fence SQL is the page-batched
+ * reader the projection uses, and that path swallows its own failures. So this
+ * test reads it back directly rather than trusting a projection that would
+ * silently degrade.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
-import { readLatestStateCommitAt, readLatestStateCommitAtByConnectionIds } from "../server/records.ts";
+import {
+  readLocalCoverageRevisionFences,
+  recordCollectionRevisionEvent,
+} from "../server/stores/collection-revision-store.ts";
+import { createPostgresConnectorStateStore } from "../server/stores/connector-state-store.ts";
+import { commitTerminalRun } from "../server/stores/terminal-run-commit-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 const CONNECTOR_ID = "claude-code";
-const WITH_STATE = "cin_stale_proof_state_commit_pg";
-const SCOPE_ONLY = "cin_stale_proof_scope_only_pg";
-const EARLIER = "2026-10-22T10:00:00.000Z";
-const LATER = "2026-10-22T10:05:00.000Z";
-const SCOPE_WRITE = "2026-10-22T11:00:00.000Z";
+const WITH_STATE = "cin_revision_fence_pg";
+const SCOPE_ONLY = "cin_revision_fence_scope_only_pg";
+const PROOF_RUN = "run_revision_fence_pg";
 const NOW = "2026-10-22T09:00:00.000Z";
 
 function postgresStorageConfig(): { backend: "postgres"; databaseUrl: string } {
@@ -31,12 +36,11 @@ function postgresStorageConfig(): { backend: "postgres"; databaseUrl: string } {
 }
 
 async function cleanup(): Promise<void> {
-  await postgresQuery("DELETE FROM connector_state WHERE connector_instance_id = ANY($1::text[])", [
-    [WITH_STATE, SCOPE_ONLY],
-  ]);
-  await postgresQuery("DELETE FROM connector_instances WHERE connector_instance_id = ANY($1::text[])", [
-    [WITH_STATE, SCOPE_ONLY],
-  ]);
+  const ids = [WITH_STATE, SCOPE_ONLY];
+  await postgresQuery("DELETE FROM run_history WHERE connector_instance_id = ANY($1::text[])", [ids]);
+  await postgresQuery("DELETE FROM spine_events WHERE run_id = $1", [PROOF_RUN]);
+  await postgresQuery("DELETE FROM connector_state WHERE connector_instance_id = ANY($1::text[])", [ids]);
+  await postgresQuery("DELETE FROM connector_instances WHERE connector_instance_id = ANY($1::text[])", [ids]);
   await postgresQuery("DELETE FROM connectors WHERE connector_id = $1", [CONNECTOR_ID]);
 }
 
@@ -56,47 +60,107 @@ async function seed(): Promise<void> {
       [instance, CONNECTOR_ID, NOW]
     );
   }
-  // WITH_STATE: two stream commits, the newer of which decides the instant. Its
-  // `$`-prefixed scope row is written last, and must not count as a state commit.
-  const rows: Array<[string, string, string, string]> = [
-    [WITH_STATE, "messages", LATER, '{"cursor":"later"}'],
-    [WITH_STATE, "sessions", EARLIER, '{"cursor":"earlier"}'],
-    [WITH_STATE, "$collection_scope", SCOPE_WRITE, '"unscoped"'],
-    [SCOPE_ONLY, "$collection_scope", SCOPE_WRITE, '"unscoped"'],
-  ];
-  for (const [instance, stream, updatedAt, stateJson] of rows) {
-    await postgresQuery(
-      `INSERT INTO connector_state(
-         connector_id, connector_instance_id, stream, state_json, updated_at, manifest_generation
-       ) VALUES ($1, $2, $3, $4::jsonb, $5, 0)`,
-      [CONNECTOR_ID, instance, stream, stateJson, updatedAt]
-    );
-  }
 }
 
-test("real PostgreSQL: the newest non-scope state commit, from the singleton and batched readers (skipped: PDPP_TEST_POSTGRES_URL unset)", {
+async function stateRowRevisions(connectorInstanceId: string): Promise<Record<string, string | null>> {
+  const result = await postgresQuery<{
+    collection_revision: string | null;
+    stream: string;
+  }>(
+    "SELECT stream, collection_revision::text AS collection_revision FROM connector_state WHERE connector_instance_id = $1",
+    [connectorInstanceId]
+  );
+  return Object.fromEntries(result.rows.map((row) => [row.stream, row.collection_revision]));
+}
+
+async function fences() {
+  const fenced = await readLocalCoverageRevisionFences([WITH_STATE, SCOPE_ONLY]);
+  return {
+    scopeOnly: fenced.get(SCOPE_ONLY),
+    withState: fenced.get(WITH_STATE),
+  };
+}
+
+test("real PostgreSQL: the collection revision orders commits and observed events, and the fence reads the run it names (skipped: PDPP_TEST_POSTGRES_URL unset)", {
   skip: !POSTGRES_URL,
 }, async () => {
   await initPostgresStorage(postgresStorageConfig());
   try {
     await cleanup();
     await seed();
+    const store = createPostgresConnectorStateStore();
+    const scope = {
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: WITH_STATE,
+    };
 
-    const batch = await readLatestStateCommitAtByConnectionIds([WITH_STATE, SCOPE_ONLY]);
-    assert.equal(
-      batch.get(WITH_STATE),
-      LATER,
-      "the newest stream commit wins, and the later scope row is not a state commit"
-    );
-    assert.equal(
-      batch.has(SCOPE_ONLY),
-      false,
-      "a connection with only server scope state has no state commit"
-    );
+    // A state commit takes revision 1 and stamps every row it writes.
+    await store.putState(scope, {
+      messages: { cursor: "m-1" },
+      sessions: { cursor: "s-1" },
+    });
+    // The server's own scope row is not a collection event.
+    await store.putState(scope, { $collection_scope: "unscoped" });
+    assert.deepEqual(await stateRowRevisions(WITH_STATE), {
+      $collection_scope: null,
+      messages: "1",
+      sessions: "1",
+    });
 
-    const single = await readLatestStateCommitAt(WITH_STATE);
-    assert.equal(single, LATER, "the singleton reader agrees with the batched one");
-    assert.equal(await readLatestStateCommitAt(SCOPE_ONLY), null, "the singleton reader reports no state commit");
+    // A terminal run takes revision 2; its own state rows and its run record carry it.
+    await commitTerminalRun({
+      collectionBoundary: "unscoped",
+      commitId: `commit_${PROOF_RUN}`,
+      connectorId: CONNECTOR_ID,
+      connectorInstanceId: WITH_STATE,
+      deviceId: "dev_revision_fence_pg",
+      envelopeHash: `envelope_${PROOF_RUN}`,
+      normalizedFacts: [],
+      runId: PROOF_RUN,
+      sourceInstanceId: "src_revision_fence_pg",
+      stateDelta: { messages: { cursor: "m-2" } },
+      version: 2,
+    });
+    assert.deepEqual(await stateRowRevisions(WITH_STATE), {
+      $collection_scope: null,
+      messages: "2",
+      sessions: "1",
+    });
+    const afterRun = await fences();
+    assert.deepEqual(
+      afterRun.withState?.highWater && {
+        ...afterRun.withState.highWater,
+        at: null,
+      },
+      {
+        at: null,
+        event: "terminal_run",
+        revision: 2,
+        runId: PROOF_RUN,
+      }
+    );
+    assert.equal(afterRun.withState?.proofRun?.runId, PROOF_RUN, "the fence reads the run the high-water mark names");
+    assert.equal(afterRun.withState?.proofRun?.facts?.collection_revision, 2, "the run record carries its revision");
+    assert.deepEqual(afterRun.scopeOnly?.highWater, {
+      at: null,
+      event: null,
+      revision: 0,
+      runId: null,
+    });
+    assert.equal(afterRun.scopeOnly?.proofRun, null);
+
+    // A later observed attempt takes revision 3. The high-water mark no longer names a terminal run.
+    assert.equal(
+      await recordCollectionRevisionEvent(WITH_STATE, {
+        at: NOW,
+        event: "batch_rejected",
+      }),
+      3
+    );
+    const afterRejection = await fences();
+    assert.equal(afterRejection.withState?.highWater?.revision, 3);
+    assert.equal(afterRejection.withState?.highWater?.event, "batch_rejected");
+    assert.equal(afterRejection.withState?.proofRun, null);
   } finally {
     await cleanup();
     await closePostgresStorage();

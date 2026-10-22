@@ -98,6 +98,18 @@ process.stdin.on("end", () => {
     emit({ records_emitted: 0, status: "succeeded", type: "DONE" });
     return;
   }
+  if (mode === "crash") {
+    // The child dies mid-scan, before STATE or DONE.
+    record("sessions", "s-crash");
+    process.exit(3);
+  }
+  if (mode === "state") {
+    // A successful run that commits STATE and makes no coverage claim.
+    record("sessions", "s-1");
+    emit({ cursor: { cursor: tag + "-sessions" }, stream: "sessions", type: "STATE" });
+    emit({ records_emitted: 1, status: "succeeded", type: "DONE" });
+    return;
+  }
   if (mode === "reject") {
     // A stream the connector manifest does not declare: the server refuses the batch.
     record("sessions", "s-1");
