@@ -37,6 +37,8 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { expectedLocalCoverageStoreDescriptors } from "@pdpp/polyfill-connectors/local-source-inventory";
+
 import { bindOptionalRunCoverageToRelease } from "../../packages/local-collector/bin/pdpp-local-collector.ts";
 import {
   type CollectorConnectorSpec,
@@ -573,6 +575,35 @@ test("store: a state commit before the proof does not retire it", async (t) => {
     t.mock.timers.setTime(Date.parse(PROOF_AT));
     await seedV2Proof("run_boundary_after_earlier_state");
     assert.equal((await boundaryProjection()).axis, "complete");
+  });
+});
+
+// Legacy path: no v2 run exists, so the projection reads the committed
+// `coverage_diagnostics` snapshot. Its `updated_at` is the proof's instant.
+const LEGACY_DIAGNOSTICS_STREAM = "coverage_diagnostics";
+
+test("store: a legacy diagnostics proof is retired by a later state commit, not by one at its own instant", async (t) => {
+  await withBoundaryConnection(async () => {
+    const stores = expectedLocalCoverageStoreDescriptors(connectorId);
+    assert.ok(stores, "the claude-code inventory declares its coverage stores");
+    const snapshot = {
+      fetched_at: PROOF_AT,
+      stores: stores.map(({ store, stream }) => ({ status: "collected", store, stream })),
+    };
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
+    await putSyncState(BOUNDARY_TARGET, { [LEGACY_DIAGNOSTICS_STREAM]: snapshot });
+    assert.equal((await boundaryProjection()).axis, "complete", "the legacy snapshot is a reliable complete proof");
+
+    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "same-instant" } });
+    assert.equal((await boundaryProjection()).axis, "complete", "a same-instant state write is not later");
+
+    t.mock.timers.setTime(Date.parse(PROOF_AT) + 1);
+    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "later" } });
+    assert.equal(
+      (await boundaryProjection()).axis,
+      "unknown",
+      "a later unaccounted state write retires the legacy proof"
+    );
   });
 });
 
