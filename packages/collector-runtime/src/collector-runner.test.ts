@@ -158,6 +158,30 @@ test("buildCollectorStartMessage populates START.state only when prior state is 
   assert.equal(withState.type, "START");
 });
 
+// Collection Profile Section 5.1: a runtime that requests version 1 evidence
+// supplies a non-empty collection_scope. A request without one would bind the
+// proof to no boundary, so the builder refuses it instead of sending it.
+test("buildCollectorStartMessage refuses a version 1 request without a collection scope", () => {
+  for (const collectionScope of [undefined, "", "  "]) {
+    assert.throws(
+      () => buildCollectorStartMessage(["messages"], [], null, {}, {}, [], collectionScope, 1),
+      /collection_scope/,
+      JSON.stringify(collectionScope)
+    );
+  }
+  assert.deepEqual(buildCollectorStartMessage(["messages"], [], null, {}, {}, [], "unscoped", 1), {
+    collection_scope: "unscoped",
+    run_coverage_version: 1,
+    scope: { streams: [{ name: "messages" }] },
+    type: "START",
+  });
+  assert.deepEqual(
+    buildCollectorStartMessage(["messages"], [], null, {}, {}, []),
+    { scope: { streams: [{ name: "messages" }] }, type: "START" },
+    "a START that requests no evidence needs no scope"
+  );
+});
+
 test("transformRecordsToCollectorEnvelopes uses the given connector id", () => {
   const envelopes = transformRecordsToCollectorEnvelopes({
     batchId: "batch-1",

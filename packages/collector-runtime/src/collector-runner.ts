@@ -1756,6 +1756,20 @@ async function streamConnectorIntoOutbox(
 ): Promise<StreamConnectorIntoOutboxResult> {
   throwIfAborted(input.abortSignal);
 
+  // START is built before spawn: a START the builder refuses starts no child.
+  const startMessage = buildCollectorStartMessage(
+    input.config.connector.streams,
+    input.config.connector.streamsToBackfill,
+    input.priorState,
+    input.config.connector.resources,
+    resolveScopedStreamTimeRanges(input.config.connector.scope, input.config.connector.timeScopableStreams),
+    // Roots only reach the connector when it declared it enforces them, so
+    // an unsupported connector cannot silently receive a boundary it will
+    // ignore while the run still looks bounded.
+    input.config.connector.enforcesSourceRoots === true ? resolveScopedSourceRoots(input.config.connector.scope) : [],
+    collectorScopeFingerprint(input.config.connector.scope),
+    input.config.connector.runCoverageVersion
+  );
   const child = spawnConnector(
     input.config.connector,
     {
@@ -1989,25 +2003,7 @@ async function streamConnectorIntoOutbox(
     // actionable diagnostic; do not mask it with EPIPE.
   });
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  child.stdin.end(
-    `${JSON.stringify(
-      buildCollectorStartMessage(
-        input.config.connector.streams,
-        input.config.connector.streamsToBackfill,
-        input.priorState,
-        input.config.connector.resources,
-        resolveScopedStreamTimeRanges(input.config.connector.scope, input.config.connector.timeScopableStreams),
-        // Roots only reach the connector when it declared it enforces them, so
-        // an unsupported connector cannot silently receive a boundary it will
-        // ignore while the run still looks bounded.
-        input.config.connector.enforcesSourceRoots === true
-          ? resolveScopedSourceRoots(input.config.connector.scope)
-          : [],
-        collectorScopeFingerprint(input.config.connector.scope),
-        input.config.connector.runCoverageVersion
-      )
-    )}\n`
-  );
+  child.stdin.end(`${JSON.stringify(startMessage)}\n`);
 
   let exitCode: number | null;
   try {
@@ -2511,6 +2507,11 @@ export function buildCollectorStartMessage(
   collectionScope?: string,
   runCoverageVersion?: 1
 ): StartMessage {
+  // A version 1 request binds its evidence to this string (Collection Profile
+  // Section 5.1). Without one the proof would bind to no boundary.
+  if (runCoverageVersion === 1 && !collectionScope?.trim()) {
+    throw new Error("a version 1 store evidence request requires a non-empty collection_scope");
+  }
   const start: StartMessage = {
     ...(runCoverageVersion === 1 && collectionScope ? { collection_scope: collectionScope } : {}),
     ...(runCoverageVersion === 1 ? { run_coverage_version: 1 } : {}),
