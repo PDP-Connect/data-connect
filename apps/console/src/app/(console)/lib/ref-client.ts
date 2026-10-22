@@ -639,6 +639,8 @@ export interface RefCoverageAsOf {
   readonly committed_at: string | null;
   readonly evidence: "terminal_run";
   readonly run_id: string;
+  /** The sequence the server issued to the run at its start; it decides which proof can be current. */
+  readonly run_sequence: number;
 }
 
 export interface RefConnectorSummary {

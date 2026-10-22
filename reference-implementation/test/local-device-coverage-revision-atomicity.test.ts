@@ -22,6 +22,8 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { referenceManifests, validateResponse } from "@pdpp/reference-contract";
+
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -36,7 +38,10 @@ import { getConnectorDetail, getOwnerConnectionDiagnostics, listConnectorSummari
 import { __setDeviceIngestPhaseFaultHookForTest } from "../server/routes/ref-device-exporters.ts";
 import {
   __setLocalCoverageFenceReadHookForTest,
+  beginStorageEpochAfterRestore,
   isCollectionRevisionUnavailable,
+  issueCollectionRunSequence,
+  RunStartConflictError,
 } from "../server/stores/collection-revision-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
 import { commitTerminalRun } from "../server/stores/terminal-run-commit-store.ts";
@@ -349,12 +354,52 @@ function postFailureReport(lane: Lane, runId: string): Promise<JsonResponse> {
   );
 }
 
-/** A v2 terminal proof for both streams, bound to the server's release. Returns the commit so a test can replay it. */
+/** Register a run at its start, as the runtime does before its scan. Returns the issued sequence. */
+async function issueRun(
+  lane: Lane,
+  runId: string,
+  identity: { readonly deviceId?: string; readonly sourceInstanceId?: string } = {}
+): Promise<number> {
+  const { issued } = await issueCollectionRunSequence({
+    connectorInstanceId: lane.enrolled.connector_instance_id,
+    deviceId: identity.deviceId ?? lane.enrolled.device_id,
+    runId,
+    sourceInstanceId: identity.sourceInstanceId ?? lane.enrolled.source_instance_id,
+  });
+  return issued.runSequence;
+}
+
+/** A v2 terminal proof for both streams, bound to the server's release, for a run registered at its start. Returns the commit so a test can replay it. */
 async function commitProof(lane: Lane, runId: string): Promise<TerminalCommit> {
-  const commit = await buildProof(lane, runId);
+  await issueRun(lane, runId);
+  return await commitIssuedProof(lane, runId);
+}
+
+/** `commitProof` for a run that is already registered, or deliberately is not. */
+async function commitIssuedProof(
+  lane: Lane,
+  runId: string,
+  identity: Partial<TerminalCommit> = {}
+): Promise<TerminalCommit> {
+  const commit = { ...(await buildProof(lane, runId)), ...identity };
   const result = await commitTerminalRun(commit);
   assert.equal(result.replayed, false, `run ${runId} commits a new terminal proof`);
   return commit;
+}
+
+/** The device's last heartbeat: a drained outbox, as after a complete run. */
+async function markDrained(lane: Lane): Promise<void> {
+  await getDefaultDeviceExporterStore().markSourceInstanceHeartbeat(
+    lane.enrolled.device_id,
+    lane.enrolled.source_instance_id,
+    {
+      lastError: null,
+      outboxDiagnostics: { dead_letter: 0, pending: 0, stale_leases: 0, succeeded: 1, total: 1 },
+      receivedAt: new Date().toISOString(),
+      recordsPending: 0,
+      status: "healthy",
+    }
+  );
 }
 
 /** The v2 terminal commit `commitProof` sends, not yet committed. */
@@ -365,13 +410,7 @@ async function buildProof(
 ): Promise<TerminalCommit> {
   const { connector_instance_id: connectorInstanceId, device_id: deviceId } = lane.enrolled;
   const sourceInstanceId = lane.enrolled.source_instance_id;
-  await getDefaultDeviceExporterStore().markSourceInstanceHeartbeat(deviceId, sourceInstanceId, {
-    lastError: null,
-    outboxDiagnostics: { dead_letter: 0, pending: 0, stale_leases: 0, succeeded: 1, total: 1 },
-    receivedAt: new Date().toISOString(),
-    recordsPending: 0,
-    status: "healthy",
-  });
+  await markDrained(lane);
   const [instance] = await sql(
     lane,
     "SELECT manifest_generation FROM connector_instances WHERE connector_instance_id = ?",
@@ -1135,6 +1174,379 @@ laneTest("a state commit whose revision write fails writes no state and keeps th
   assert.equal(await sessionsCursor(lane), "recorded");
   assert.equal((await highWater(lane)).event, "state_commit");
   await assertRetired(lane, "the state commit retires run A's proof");
+});
+
+// ---------------------------------------------------------------------------
+// Round 4: run order decides eligibility; commit revision orders observations.
+// ---------------------------------------------------------------------------
+
+interface RunOrderRow {
+  readonly event: string | null;
+  readonly issued: number;
+  readonly revision: number | null;
+  readonly runId: string | null;
+  readonly sequence: number;
+  readonly storageEpoch: number;
+}
+
+async function runOrder(lane: Lane): Promise<RunOrderRow> {
+  const [row] = await sql(
+    lane,
+    `SELECT run_order_sequence AS sequence, run_order_event AS event, run_order_run_id AS run_id,
+            run_order_revision AS revision, run_sequence_issued AS issued, storage_epoch
+       FROM connector_instances WHERE connector_instance_id = ?`,
+    `SELECT run_order_sequence::text AS sequence, run_order_event AS event, run_order_run_id AS run_id,
+            run_order_revision::text AS revision, run_sequence_issued::text AS issued,
+            storage_epoch::text AS storage_epoch
+       FROM connector_instances WHERE connector_instance_id = $1`,
+    [lane.enrolled.connector_instance_id]
+  );
+  assert.ok(row, "the connection has a run-order row");
+  return {
+    event: (row.event as string | null) ?? null,
+    issued: Number(row.issued),
+    revision: row.revision === null ? null : Number(row.revision),
+    runId: (row.run_id as string | null) ?? null,
+    sequence: Number(row.sequence),
+    storageEpoch: Number(row.storage_epoch),
+  };
+}
+
+/** The run-order facts the server stored with one run record. */
+async function storedRunOrder(
+  lane: Lane,
+  runId: string
+): Promise<{ readonly collection_revision: unknown; readonly run_sequence: unknown; readonly storage_epoch: unknown }> {
+  const [run] = await sql(
+    lane,
+    "SELECT facts_json FROM run_history WHERE run_id = ?",
+    "SELECT facts_json::text AS facts_json FROM run_history WHERE run_id = $1",
+    [runId]
+  );
+  assert.ok(run, `the server stored run ${runId}`);
+  const facts = JSON.parse(String(run.facts_json)) as Record<string, unknown>;
+  return {
+    collection_revision: facts.collection_revision,
+    run_sequence: facts.run_sequence,
+    storage_epoch: facts.storage_epoch,
+  };
+}
+
+function postRunStart(lane: Lane, runId: string): Promise<JsonResponse> {
+  return postJson(sourceUrl(lane, "/run-starts"), { connector_id: CONNECTOR_ID, run_id: runId }, authHeaders(lane));
+}
+
+/** A v2 terminal record as the device sends it on the wire, bound to the server's release. */
+async function terminalWireBody(
+  lane: Lane,
+  runId: string,
+  stateDelta: Record<string, unknown> = {}
+): Promise<Record<string, unknown>> {
+  const diagnostics = await readCommittedLocalCoverageDiagnostics({
+    connector_id: CONNECTOR_ID,
+    connector_instance_id: lane.enrolled.connector_instance_id,
+  });
+  assert.ok("declaredCollectionScope" in diagnostics, "the connection declares its collection boundary");
+  const fact = (stream: string, store: string) => ({
+    artifact_digest: ARTIFACT_DIGEST,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(PROFILE),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: true,
+    stores: [{ status: "collected", store }],
+    stream,
+  });
+  return {
+    collection_boundary: diagnostics.declaredCollectionScope,
+    commit_id: `wire_commit_${runId}`,
+    connector_id: CONNECTOR_ID,
+    connector_instance_id: lane.enrolled.connector_instance_id,
+    device_id: lane.enrolled.device_id,
+    run_id: runId,
+    source_instance_id: lane.enrolled.source_instance_id,
+    state_delta: stateDelta,
+    terminal_facts: [fact("messages", "derived_messages"), fact("sessions", "projects")],
+    version: 2,
+  };
+}
+
+function postTerminal(lane: Lane, body: Record<string, unknown>): Promise<JsonResponse> {
+  return postJson(sourceUrl(lane, "/terminal-run-commits"), body, authHeaders(lane));
+}
+
+laneTest(
+  "run order: an older run's proof that arrives after a newer run's terminal record stays history",
+  async (lane) => {
+    assert.equal(await issueRun(lane, "run-a"), 1, "run A starts first");
+    assert.equal(await issueRun(lane, "run-b"), 2, "run B starts second");
+    await commitIssuedProof(lane, "run-b");
+    await assertCovered(lane, "run-b", "run B's proof is current");
+    const bOrder = await runOrder(lane);
+
+    // Run A's proof was queued on its device and reaches the server after run B's terminal record.
+    await commitIssuedProof(lane, "run-a");
+    const aStored = await storedRunOrder(lane, "run-a");
+    const bStored = await storedRunOrder(lane, "run-b");
+    assert.ok(
+      Number(aStored.collection_revision) > Number(bStored.collection_revision),
+      "run A's record is the newer observation in commit order"
+    );
+    assert.equal((await highWater(lane)).runId, "run-a", "commit order names run A's record as the newest observation");
+    assert.deepEqual(
+      aStored,
+      { collection_revision: aStored.collection_revision, run_sequence: 1, storage_epoch: 1 },
+      "run A's record keeps its own as-of: its revision, run sequence and epoch"
+    );
+    assert.deepEqual(await runOrder(lane), bOrder, "an older run's terminal record does not move the run-order marker");
+    const projected = await projection(lane);
+    assert.equal(projected.axis, "complete", "run B's proof stays current");
+    assert.equal(projected.asOf?.run_id, "run-b");
+    assert.equal(projected.asOf?.run_sequence, 2, "the as-of names run B's sequence");
+    assert.equal(projected.asOf?.collection_revision, bStored.collection_revision, "and run B's own revision");
+  }
+);
+
+laneTest("run order: a run with no issued sequence never produces an eligible proof", async (lane) => {
+  await commitIssuedProof(lane, "run-unregistered");
+  await assertRetired(lane, "a proof from a run the server issued no sequence is not current");
+  assert.equal((await storedRunOrder(lane, "run-unregistered")).run_sequence, null);
+  await commitProof(lane, "run-registered");
+  await assertCovered(lane, "run-registered", "a registered run's proof is current");
+});
+
+laneTest("run order: a second collector on one connection is ordered by run start, not by commit", async (lane) => {
+  const second = { deviceId: "device-second-collector", sourceInstanceId: "src-second-collector" };
+  assert.equal(await issueRun(lane, "run-first-device"), 1);
+  assert.equal(await issueRun(lane, "run-second-device", second), 2, "issuance is connection-scoped");
+  await commitIssuedProof(lane, "run-second-device", second);
+  await assertCovered(lane, "run-second-device", "the later-started run's proof is current");
+  await commitIssuedProof(lane, "run-first-device");
+  await assertCovered(lane, "run-second-device", "the earlier-started run's later commit stays history");
+
+  // A run id belongs to the device and source that registered it.
+  const before = await runOrder(lane);
+  await assert.rejects(issueRun(lane, "run-second-device"), RunStartConflictError);
+  const conflict = await postRunStart(lane, "run-second-device");
+  assert.equal(conflict.status, 409, JSON.stringify(conflict.body));
+  assert.equal((conflict.body?.error as Record<string, unknown> | undefined)?.code, "run_start_conflict");
+  assert.deepEqual(await runOrder(lane), before, "a conflicting run start issues nothing");
+});
+
+laneTest("run start: the route issues a connection-scoped sequence and an exact replay returns it", async (lane) => {
+  const first = await postRunStart(lane, "run-route");
+  assert.equal(first.status, 201, JSON.stringify(first.body));
+  assert.deepEqual(first.body, {
+    connector_instance_id: lane.enrolled.connector_instance_id,
+    object: "device_run_start",
+    run_id: "run-route",
+    run_sequence: 1,
+    storage_epoch: 1,
+  });
+  const replay = await postRunStart(lane, "run-route");
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.deepEqual(replay.body, first.body, "a replay returns the stored sequence");
+  assert.equal((await runOrder(lane)).issued, 1, "a replay issues nothing");
+});
+
+laneTest(
+  "replay: an exact terminal replay after an inventory change gets its receipt; a conflicting duplicate fails atomically",
+  async (lane) => {
+    assert.equal((await postRunStart(lane, "run-a")).status, 201);
+    await markDrained(lane);
+    const body = await terminalWireBody(lane, "run-a", { sessions: { cursor: "a" } });
+    const committed = await postTerminal(lane, body);
+    assert.equal(committed.status, 201, JSON.stringify(committed.body));
+    await assertCovered(lane, "run-a", "run A's proof is current");
+    const snapshot = async () => ({
+      cursor: await sessionsCursor(lane),
+      highWater: await highWater(lane),
+      order: await runOrder(lane),
+      rows: await runRows(lane, "run-a"),
+    });
+    const before = await snapshot();
+
+    // The release now declares another store, so run A's facts no longer match the current inventory.
+    const changed = {
+      ...PROFILE,
+      streams: PROFILE.streams.map((stream) =>
+        stream.name === "sessions" ? { ...stream, coverage_stores: ["projects", "archived_projects"] } : stream
+      ),
+    };
+    __setLocalCollectorReleaseForTest(CONNECTOR_ID, { artifactDigest: ARTIFACT_DIGEST, manifest: changed });
+    try {
+      const replay = await postTerminal(lane, body);
+      assert.equal(
+        replay.status,
+        200,
+        `an exact authorized replay gets its stored receipt: ${JSON.stringify(replay.body)}`
+      );
+      assert.deepEqual(replay.body, committed.body, "the replay returns the stored receipt");
+      assert.deepEqual(await snapshot(), before, "a replay moves neither the run sequence nor the revision");
+
+      const conflicting = await postTerminal(lane, { ...body, state_delta: { sessions: { cursor: "other" } } });
+      assert.equal(conflicting.status, 409, JSON.stringify(conflicting.body));
+      assert.equal(
+        (conflicting.body?.error as Record<string, unknown> | undefined)?.code,
+        "terminal_run_commit_conflict"
+      );
+      assert.deepEqual(await snapshot(), before, "a conflicting duplicate writes nothing");
+    } finally {
+      __setLocalCollectorReleaseForTest(CONNECTOR_ID, SERVER_RELEASE);
+    }
+    await assertCovered(lane, "run-a", "neither request changed run A's proof");
+  }
+);
+
+laneTest("restore: the restore step makes a restored proof unknown until a new eligible terminal", async (lane) => {
+  await commitProof(lane, "run-a");
+  await assertCovered(lane, "run-a", "run A's proof is current");
+  const backup = await runOrder(lane);
+  const backupHighWater = await highWater(lane);
+
+  await commitProof(lane, "run-b");
+  await assertCovered(lane, "run-b", "run B's proof replaces run A's");
+
+  // Restore a backup taken after run A: run B's records and the connection's order columns roll back.
+  const id = lane.enrolled.connector_instance_id;
+  await sql(
+    lane,
+    `UPDATE connector_instances
+        SET run_order_sequence = ?, run_order_event = ?, run_order_run_id = ?, run_order_revision = ?,
+            run_sequence_issued = ?, collection_revision = ?, collection_revision_event = ?,
+            collection_revision_run_id = ?
+      WHERE connector_instance_id = ?`,
+    `UPDATE connector_instances
+        SET run_order_sequence = $1, run_order_event = $2, run_order_run_id = $3, run_order_revision = $4,
+            run_sequence_issued = $5, collection_revision = $6, collection_revision_event = $7,
+            collection_revision_run_id = $8
+      WHERE connector_instance_id = $9`,
+    [
+      backup.sequence,
+      backup.event,
+      backup.runId,
+      backup.revision,
+      backup.issued,
+      backupHighWater.revision,
+      backupHighWater.event,
+      backupHighWater.runId,
+      id,
+    ]
+  );
+  for (const table of ["run_history", "spine_events", "collection_run_sequences"]) {
+    // biome-ignore lint/performance/noAwaitInLoops: the restore rewrites one table after another on one connection.
+    await sql(lane, `DELETE FROM ${table} WHERE run_id = ?`, `DELETE FROM ${table} WHERE run_id = $1`, ["run-b"]);
+  }
+  // The restored snapshot is internally consistent, so without the restore step its proof reads as current.
+  await assertCovered(lane, "run-a", "an undetected restore revives run A's proof (the disclosed limitation)");
+
+  const { connections } = await beginStorageEpochAfterRestore();
+  assert.ok(connections >= 1, "the restore step reaches the connection");
+  await assertRetired(lane, "after the restore step, the pre-restore proof is unknown");
+  assert.equal((await runOrder(lane)).storageEpoch, 2);
+
+  // A replay of the pre-restore record is still only a replay.
+  const replay = await commitTerminalRun(await buildProof(lane, "run-a"));
+  assert.equal(replay.replayed, true);
+  await assertRetired(lane, "a replay does not revive the pre-restore proof");
+
+  // Run C, issued after the restore step, re-uses a sequence number the lost history had issued,
+  // but in the new epoch, and its proof is current.
+  assert.equal(await issueRun(lane, "run-c"), 2, "issuance continues from the restored counter");
+  await commitIssuedProof(lane, "run-c");
+  await assertCovered(lane, "run-c", "a run issued after the restore step proves coverage again");
+  assert.equal((await storedRunOrder(lane, "run-c")).storage_epoch, 2);
+});
+
+laneTest(
+  "crash after ingest: a later run's durable records retire an earlier positive without its terminal",
+  async (lane) => {
+    await commitProof(lane, "run-a");
+    await assertCovered(lane, "run-a", "run A's proof is current");
+    const bSequence = await issueRun(lane, "run-b");
+    const accepted = await postBatch(lane, batchBody(lane, "batch-run-b", sessionRecords("b-1")));
+    assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
+    // Run B dies here, before its terminal record.
+    await assertRetired(lane, "run B's admitted records retire run A's proof");
+    const order = await runOrder(lane);
+    assert.equal(order.sequence, bSequence, "the records are attributed to the newest issued run");
+    assert.equal(order.runId, null, "an attributed observation names no run, so it can never be a proof");
+
+    // A late delivery of run A's own terminal record is only a replay; run A cannot become current again.
+    const replay = await commitTerminalRun(await buildProof(lane, "run-a"));
+    assert.equal(replay.replayed, true);
+    await assertRetired(lane, "run A stays retired");
+    await commitIssuedProof(lane, "run-b");
+    await assertCovered(lane, "run-b", "run B's eventual terminal record is current");
+  }
+);
+
+// The vendored @pdpp/reference-contract (built from PDP-Connect/pdpp
+// packages/reference-contract) does not list the as-of yet, and its
+// diagnostics schemas reject unknown members. These are the members this
+// change adds that the contract still lacks. The source schema must add them
+// and this repository must re-vendor the tarball; when the vendored schema
+// lists one, this test fails until it is removed here.
+const CONTRACT_PENDING_DIAGNOSTICS_MEMBERS = [["coverage_as_of"], ["health", "coverage_as_of"]] as const;
+const STREAM_NAME_PATH = /^\/streams\/\d+$/;
+
+/** The response schema the vendored contract declares for one operation and status. */
+function contractResponseSchema(operationId: string, status: number): Record<string, unknown> {
+  const manifest = (
+    referenceManifests as readonly { id: string; responses?: Record<string, { schema?: unknown }> }[]
+  ).find((entry) => entry.id === operationId);
+  const schema = manifest?.responses?.[String(status)]?.schema;
+  assert.ok(schema && typeof schema === "object", `the contract declares ${operationId} ${status}`);
+  return schema as Record<string, unknown>;
+}
+
+function schemaAt(schema: Record<string, unknown>, path: readonly string[]): Record<string, unknown> | null {
+  let current: Record<string, unknown> | null = schema;
+  for (const key of path) {
+    const properties = current?.properties as Record<string, Record<string, unknown>> | undefined;
+    current = properties?.[key] ?? null;
+  }
+  return current;
+}
+
+laneTest("contract: owner diagnostics and connector detail validate against @pdpp/reference-contract", async (lane) => {
+  await commitProof(lane, "run-a");
+  await reconcileDirtyConnectorSummaryEvidence(null);
+
+  const diagnostics = JSON.parse(
+    JSON.stringify(await getOwnerConnectionDiagnostics(lane.enrolled.connector_instance_id))
+  ) as Record<string, unknown>;
+  const schema = contractResponseSchema("ownerInspectConnectionDiagnostics", 200);
+  for (const path of CONTRACT_PENDING_DIAGNOSTICS_MEMBERS) {
+    const parent = path
+      .slice(0, -1)
+      .reduce<Record<string, unknown>>((object, key) => object[key] as Record<string, unknown>, diagnostics);
+    const member = path.at(-1) as string;
+    assert.ok(parent[member], `the diagnostics response carries ${path.join(".")}`);
+    assert.equal(
+      schemaAt(schema, path),
+      null,
+      `the vendored contract now lists ${path.join(".")}: drop it from CONTRACT_PENDING_DIAGNOSTICS_MEMBERS`
+    );
+    delete parent[member];
+  }
+  const diagnosticsResult = validateResponse("ownerInspectConnectionDiagnostics", { body: diagnostics, status: 200 });
+  assert.deepEqual(diagnosticsResult, { ok: true, skipped: false }, "diagnostics match the contract");
+
+  // The connector summary schema admits additional members, so the as-of is valid there. The
+  // vendored schema still types `streams` as names while the detail returns stream objects; that
+  // mismatch predates this change and is the only one allowed here.
+  const detail = JSON.parse(JSON.stringify(await getConnectorDetail(CONNECTOR_ID))) as Record<string, unknown>;
+  assert.ok(detail.coverage_as_of, "the detail carries its as-of");
+  const detailResult = validateResponse("refGetConnector", { body: detail, status: 200 });
+  const detailErrors = detailResult.ok
+    ? []
+    : (detailResult.errors as { instancePath: string }[]).filter((error) => !STREAM_NAME_PATH.test(error.instancePath));
+  assert.deepEqual(detailErrors, [], "the connector detail matches the contract outside the known streams mismatch");
 });
 
 // Bounded by the test timeout: a hang fails the test, and PostgreSQL reports a

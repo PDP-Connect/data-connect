@@ -28,6 +28,7 @@
 import { createHash } from "node:crypto";
 import type { CollectionScope } from "@pdpp/reference-contract/evidence";
 import {
+  handleLocalDeviceRunStart,
   handleLocalDeviceTerminalCollection,
   handleLocalDeviceTerminalRunCommit,
   type RegisteredCollectionProfileRelease,
@@ -43,9 +44,10 @@ import type { LocalCoverageAsOf } from "../ref-control.ts";
 import {
   type CollectionRevisionEventInput,
   isCollectionRevisionUnavailable,
+  issueCollectionRunSequence,
   recordCollectionRevisionEvent,
 } from "../stores/collection-revision-store.ts";
-import { commitTerminalRun } from "../stores/terminal-run-commit-store.ts";
+import { commitTerminalRun, findTerminalRunReceipt } from "../stores/terminal-run-commit-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
   type EnrolledSourceKind,
@@ -3136,6 +3138,7 @@ export function mountRefDeviceExporterSourceInstanceStatePut(app: AppLike, ctx: 
   );
   mountRefDeviceExporterTerminalCollection(app, ctx);
   mountRefDeviceExporterTerminalRunCommit(app, ctx);
+  mountRefDeviceExporterRunStart(app, ctx);
 }
 
 // POST /_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/terminal-collection
@@ -3169,7 +3172,24 @@ export function mountRefDeviceExporterTerminalRunCommit(app: AppLike, ctx: Mount
         ctx: {
           ...ctx,
           commitTerminalRun: ctx.commitTerminalRun ?? commitTerminalRun,
+          findTerminalRunReceipt,
         },
+        req,
+        res,
+        resolveAuthorizedSource: async (deviceId, sourceInstanceId) =>
+          await resolveAuthorizedDeviceSource(ctx, req, res, deviceId, sourceInstanceId, { notFoundStatus: 404 }),
+      })
+  );
+}
+
+// POST /_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/run-starts
+export function mountRefDeviceExporterRunStart(app: AppLike, ctx: MountRefDeviceExportersContext): void {
+  app.post(
+    "/_ref/device-exporters/:deviceId/source-instances/:sourceInstanceId/run-starts",
+    ctx.requireDeviceExporterCredential,
+    async (req: RouteRequest, res: RouteResponse) =>
+      await handleLocalDeviceRunStart({
+        ctx: { ...ctx, issueRunSequence: issueCollectionRunSequence },
         req,
         res,
         resolveAuthorizedSource: async (deviceId, sourceInstanceId) =>

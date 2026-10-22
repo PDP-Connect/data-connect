@@ -2359,6 +2359,7 @@ const COVERAGE_AS_OF = {
   committed_at: "2026-10-22T10:00:00.000Z",
   evidence: "terminal_run",
   run_id: "run-a",
+  run_sequence: 3,
 } as const;
 
 test("coverage chip reads 'complete as of <time>' when the reference names the run it describes", () => {

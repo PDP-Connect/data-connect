@@ -1852,6 +1852,30 @@ async function bootstrapPostgresSchemaOnce({
         ADD COLUMN IF NOT EXISTS collection_revision_run_id TEXT;
       ALTER TABLE connector_instances
         ADD COLUMN IF NOT EXISTS collection_revision_at TEXT;
+      -- Run order: see ensureCollectionRevisionColumns in db.ts.
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_sequence_issued BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS storage_epoch BIGINT NOT NULL DEFAULT 1;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_sequence BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_event TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_run_id TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS run_order_revision BIGINT;
+      CREATE TABLE IF NOT EXISTS collection_run_sequences (
+        connector_instance_id TEXT NOT NULL
+          REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        run_sequence BIGINT NOT NULL,
+        storage_epoch BIGINT NOT NULL,
+        device_id TEXT NOT NULL,
+        source_instance_id TEXT NOT NULL,
+        issued_at TEXT NOT NULL,
+        PRIMARY KEY (connector_instance_id, run_id)
+      );
 
       -- Existing Postgres deployments may have been bootstrapped before the
       -- static-secret draft lifecycle existed. Widen the status CHECK in place

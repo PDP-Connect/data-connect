@@ -3010,6 +3010,29 @@ function ensureCollectionRevisionColumns(raw: SqliteDatabase): void {
   addColumnIfMissing(raw, "connector_instances", "collection_revision_run_id", "TEXT");
   addColumnIfMissing(raw, "connector_instances", "collection_revision_at", "TEXT");
   addColumnIfMissing(raw, "connector_state", "collection_revision", "INTEGER");
+  // Run order (collection-revision-store.ts): the last issued run sequence, the
+  // storage epoch a restore step increments, and the newest observation of the
+  // highest observed run sequence. A positive proof is eligible only while it
+  // is that observation, in the current storage epoch.
+  addColumnIfMissing(raw, "connector_instances", "run_sequence_issued", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "connector_instances", "storage_epoch", "INTEGER NOT NULL DEFAULT 1");
+  addColumnIfMissing(raw, "connector_instances", "run_order_sequence", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "connector_instances", "run_order_event", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "run_order_run_id", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "run_order_revision", "INTEGER");
+  raw.exec(`
+    CREATE TABLE IF NOT EXISTS collection_run_sequences (
+      connector_instance_id TEXT NOT NULL
+        REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+      run_id TEXT NOT NULL,
+      run_sequence INTEGER NOT NULL,
+      storage_epoch INTEGER NOT NULL,
+      device_id TEXT NOT NULL,
+      source_instance_id TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      PRIMARY KEY (connector_instance_id, run_id)
+    )
+  `);
 }
 
 function ensureConnectorSummaryEvidenceColumns(raw: SqliteDatabase): void {

@@ -4852,6 +4852,8 @@ export interface LocalCoverageAsOf {
   readonly committed_at: string | null;
   readonly evidence: "terminal_run";
   readonly run_id: string;
+  /** The sequence the server issued to the run at its start. */
+  readonly run_sequence: number;
 }
 
 const LOCAL_COVERAGE_ACCOUNTED_STATUSES = new Set([
@@ -5179,6 +5181,8 @@ function localProofRunCoverage(
   readonly collectionRevision: number | null;
   readonly run: Pick<ConnectorRunSummary, "last_at" | "local_terminal_coverage">;
   readonly runId: string;
+  readonly runSequence: number | null;
+  readonly storageEpoch: number | null;
 } | null {
   const proofRun = fence?.proofRun;
   // A terminal run record always has a completion time; one without it is not a proof.
@@ -5203,27 +5207,33 @@ function localProofRunCoverage(
     collectionRevision: readCollectionRevision(proofRun.facts?.collection_revision),
     run: { last_at: proofRun.completedAt, local_terminal_coverage: terminal },
     runId: proofRun.runId,
+    runSequence: readCollectionRevision(proofRun.facts?.run_sequence),
+    storageEpoch: readCollectionRevision(proofRun.facts?.storage_epoch),
   };
 }
 
 /**
- * Keep a local coverage proof only while it is the connection's newest
- * observed collection event.
+ * Keep a local coverage proof only while it is the run-order marker: the
+ * newest observation of the highest observed run sequence, in the current
+ * storage epoch.
  *
- * The server assigns each event that can establish or retire proof a
- * monotonic per-connection revision at commit (state commits, terminal runs,
- * admitted and refused batches, delivered failure reports). A proof binds to
- * the revision it was committed at. It is current only when that revision is
- * the high-water mark; any later event retires it to unknown. No wall clock is
- * compared. The proof must also be the terminal run the high-water mark names,
- * and it must name its release digest.
+ * Run order decides eligibility. The server issues each run a sequence at its
+ * start, and every observation that takes a commit revision (state commits,
+ * terminal runs, admitted and refused batches, delivered failure reports) also
+ * moves the marker when its run sequence is at least the highest observed one.
+ * A proof is current only when the marker is its terminal record: the same
+ * run, sequence and commit revision, in the connection's current storage
+ * epoch. An older run's proof that arrives after a newer run's terminal record
+ * stays history. The commit revision orders observations and dates the as-of.
+ * No wall clock is compared. The proof must also name its release digest.
  *
  * Only a v2 terminal run record is a positive proof. A legacy
  * `coverage_diagnostics` state row names no run and no release, so it never
  * shows positive coverage: the projection is unknown.
  *
- * Fails closed: a missing fence, an unreadable or NULL revision, any
- * mismatch, a proof without a single release digest, or a newest settled
+ * Fails closed: a missing fence, an unreadable or NULL revision, sequence or
+ * epoch, a run without an issued sequence, any mismatch, a proof without a
+ * single release digest, or a newest settled
  * device run that is not the proof and carries no revision, whose order is
  * ambiguous, is unknown coverage.
  */
@@ -5236,7 +5246,7 @@ function fenceLocalCoverageProof(
   if (axis === null || axis.axis === "unknown") {
     return axis;
   }
-  const highWater = fence?.highWater ?? null;
+  const runOrder = fence?.runOrder ?? null;
   // A settled device run record with no revision cannot be ordered against a
   // terminal proof (a pre-revision row, or a writer that assigns none). If it
   // is the newest settled run and not the proof itself, the order is
@@ -5251,16 +5261,21 @@ function fenceLocalCoverageProof(
     terminal &&
     !unorderedLaterRun &&
     terminal.artifactDigest !== null &&
-    highWater?.event === "terminal_run" &&
-    highWater.runId === terminal.runId &&
+    runOrder?.event === "terminal_run" &&
+    runOrder.runId === terminal.runId &&
     terminal.collectionRevision !== null &&
-    terminal.collectionRevision === highWater.revision
+    terminal.collectionRevision === runOrder.revision &&
+    terminal.runSequence !== null &&
+    terminal.runSequence === runOrder.sequence &&
+    terminal.storageEpoch !== null &&
+    terminal.storageEpoch === fence?.storageEpoch
       ? {
           artifact_digest: terminal.artifactDigest,
-          collection_revision: highWater.revision,
+          collection_revision: terminal.collectionRevision,
           committed_at: terminal.run.last_at ?? null,
           evidence: "terminal_run",
           run_id: terminal.runId,
+          run_sequence: terminal.runSequence,
         }
       : null;
   if (!asOf) {

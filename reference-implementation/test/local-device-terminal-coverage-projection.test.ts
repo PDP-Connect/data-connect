@@ -13,9 +13,21 @@ import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attemp
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
 import { readLocalCollectorArtifactDigest, readLocalCollectorRelease } from "../server/local-collector-profiles.ts";
 import { getConnectorSummaryForRoute, listConnectorSummaries } from "../server/ref-control.ts";
+import { issueCollectionRunSequence } from "../server/stores/collection-revision-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
 import { commitTerminalRun } from "../server/stores/terminal-run-commit-store.ts";
+
+/** Commit a terminal record for a run registered at its start, as the runtime does before its scan. */
+async function commitRegisteredTerminalRun(input: Parameters<typeof commitTerminalRun>[0]) {
+  await issueCollectionRunSequence({
+    connectorInstanceId: input.connectorInstanceId,
+    deviceId: input.deviceId,
+    runId: input.runId,
+    sourceInstanceId: input.sourceInstanceId,
+  });
+  return await commitTerminalRun(input);
+}
 
 const connectorId = "claude-code";
 const connectorInstanceId = "cin_terminal_coverage";
@@ -148,7 +160,7 @@ async function seedTerminalCoverage(
     },
     server_artifact_digest: readLocalCollectorArtifactDigest(sourceConnectorId),
   };
-  await commitTerminalRun({
+  await commitRegisteredTerminalRun({
     collectionBoundary: "unscoped",
     commitId: "commit_terminal_coverage",
     connectorId: sourceConnectorId,
@@ -360,7 +372,7 @@ for (const includeState of [false, true]) {
         validateServerArtifactDigest: true,
       });
       assert.ok(unknownFacts, "the empty successful result must expand to explicit unknown inventory");
-      await commitTerminalRun({
+      await commitRegisteredTerminalRun({
         collectionBoundary: "unscoped",
         commitId: `commit_terminal_coverage_omission_${includeState}`,
         connectorId,

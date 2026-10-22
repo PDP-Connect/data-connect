@@ -6,7 +6,12 @@ import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/loca
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
-import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
+import { type IssuedRunSequence, RunStartConflictError } from "../server/stores/collection-revision-store.ts";
+import type {
+  ResolvedTerminalRunCommit,
+  TerminalRunCommitResult,
+  TerminalRunReceiptLookup,
+} from "../server/stores/terminal-run-commit-store.ts";
 import {
   commitLegacyTerminalCollection,
   TerminalRunCommitConflictError,
@@ -42,6 +47,14 @@ interface TerminalContext {
 export interface TerminalRunCommitContext extends TerminalContext {
   canonicalConnectorKey: (value: string | null | undefined) => string | null;
   commitTerminalRun: (input: ResolvedTerminalRunCommit) => Promise<TerminalRunCommitResult>;
+  /**
+   * Resolve a stored receipt for this exact binding before the request is
+   * validated against the current manifest inventory. Optional: without it,
+   * the store still answers a replay, but only after validation.
+   */
+  findTerminalRunReceipt?: (
+    input: TerminalRunReceiptLookup
+  ) => Promise<TerminalRunCommitResult | null> | TerminalRunCommitResult | null;
   getConnectorManifest?: (connectorId: string) => Promise<unknown> | unknown;
   getExpectedArtifactDigest?: (connectorId: string) => string | null;
   getRegisteredCollectionProfileRelease?: (
@@ -123,6 +136,64 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       return;
     }
 
+    const canonicalEnvelope = {
+      collection_boundary: collectionBoundary,
+      commit_id: commitId,
+      // The hash MUST be recomputed over the connector id the device actually
+      // SENT, not the canonicalized one. The collector hashes the bytes it puts
+      // on the wire and compares that digest against the `envelope_hash` this
+      // route returns; substituting the canonical spelling here rehashes a
+      // different envelope, so the digests never match. The guard above is
+      // deliberately alias-tolerant, which means `claude_code` is accepted and
+      // then silently rewritten to `claude-code` — every legacy alias that is
+      // not identity (apple_photos, claude_code, google_messages,
+      // google_takeout) dead-lettered its terminal commit forever. Storage
+      // identity below stays canonical; only the hash input follows the wire.
+      connector_id: reportedConnectorId,
+      connector_instance_id: reportedConnectorInstanceId,
+      device_id: deviceId,
+      run_id: runId,
+      source_instance_id: sourceInstanceId,
+      state_delta: stateDelta,
+      terminal_facts: body.terminal_facts,
+      version,
+    } as const;
+    let canonicalJson: string;
+    try {
+      canonicalJson =
+        version === 2
+          ? JSON.stringify(
+              canonicalTerminalRunCommitEnvelope(
+                canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]
+              )
+            )
+          : canonicalTerminalRunCommitJson(canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitJson>[0]);
+    } catch {
+      ctx.pdppError(res, 400, "invalid_request", "terminal run commit body or binding is invalid");
+      return;
+    }
+    const envelopeHash = createHash("sha256").update(canonicalJson).digest("hex");
+
+    // An exact replay of a stored record gets its stored receipt, and a
+    // different request for the same run binding is a conflict, before the
+    // request is judged against the current manifest inventory. An inventory
+    // change after the commit must not turn a replay into a 400. The binding
+    // is already authorized above, and the store compares every binding field.
+    const receipt = await ctx.findTerminalRunReceipt?.({
+      commitId,
+      connectorId: canonicalConnectorId,
+      connectorInstanceId: authorized.connectorInstance.connectorInstanceId,
+      deviceId,
+      envelopeHash,
+      runId,
+      sourceInstanceId,
+      version,
+    });
+    if (receipt) {
+      res.status(200).json(receipt.response);
+      return;
+    }
+
     const registeredReleaseResolver = ctx.getRegisteredCollectionProfileRelease;
     const registeredRelease = registeredReleaseResolver
       ? await registeredReleaseResolver(canonicalConnectorId, authorized.connectorInstance.connectorInstanceId)
@@ -165,37 +236,6 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       return;
     }
 
-    const canonicalEnvelope = {
-      collection_boundary: collectionBoundary,
-      commit_id: commitId,
-      // The hash MUST be recomputed over the connector id the device actually
-      // SENT, not the canonicalized one. The collector hashes the bytes it puts
-      // on the wire and compares that digest against the `envelope_hash` this
-      // route returns; substituting the canonical spelling here rehashes a
-      // different envelope, so the digests never match. The guard above is
-      // deliberately alias-tolerant, which means `claude_code` is accepted and
-      // then silently rewritten to `claude-code` — every legacy alias that is
-      // not identity (apple_photos, claude_code, google_messages,
-      // google_takeout) dead-lettered its terminal commit forever. Storage
-      // identity below stays canonical; only the hash input follows the wire.
-      connector_id: reportedConnectorId,
-      connector_instance_id: reportedConnectorInstanceId,
-      device_id: deviceId,
-      run_id: runId,
-      source_instance_id: sourceInstanceId,
-      state_delta: stateDelta,
-      terminal_facts: body.terminal_facts,
-      version,
-    } as const;
-    const canonicalJson =
-      version === 2
-        ? JSON.stringify(
-            canonicalTerminalRunCommitEnvelope(
-              canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]
-            )
-          )
-        : canonicalTerminalRunCommitJson(canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitJson>[0]);
-    const envelopeHash = createHash("sha256").update(canonicalJson).digest("hex");
     const result = await ctx.commitTerminalRun({
       collectionBoundary,
       commitId,
@@ -218,6 +258,74 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
         "terminal_run_commit_conflict",
         "Terminal run commit identity conflicts with an existing commit."
       );
+      return;
+    }
+    ctx.handleError(res, error);
+  }
+}
+
+export interface RunStartContext extends TerminalContext {
+  canonicalConnectorKey: (value: string | null | undefined) => string | null;
+  issueRunSequence: (input: {
+    readonly connectorInstanceId: string;
+    readonly deviceId: string;
+    readonly runId: string;
+    readonly sourceInstanceId: string;
+  }) => Promise<{ readonly issued: IssuedRunSequence; readonly replayed: boolean }>;
+}
+
+/**
+ * Register a run at its start and answer its run sequence. The sequence is
+ * connection-scoped and issued under the connection row lock, so runs from
+ * several devices are ordered by start. Only a run with a sequence can
+ * produce an eligible positive coverage proof. An exact replay returns the
+ * stored sequence; a run id registered to another device or source is a 409.
+ */
+export async function handleLocalDeviceRunStart(input: {
+  ctx: RunStartContext;
+  req: TerminalRequest;
+  res: TerminalResponse;
+  resolveAuthorizedSource: (deviceId: string, sourceInstanceId: string) => Promise<AuthorizedSource | null>;
+}): Promise<void> {
+  const { ctx, req, res } = input;
+  try {
+    const deviceId = decodeURIComponent(req.params.deviceId as string);
+    const sourceInstanceId = decodeURIComponent(req.params.sourceInstanceId as string);
+    if (deviceId !== req.deviceExporter?.deviceId) {
+      ctx.pdppError(res, 403, "permission_error", "Device credential is not valid for this device");
+      return;
+    }
+    const authorized = await input.resolveAuthorizedSource(deviceId, sourceInstanceId);
+    if (!authorized) {
+      return;
+    }
+    const body = asObject(req.body);
+    const runId = body && readRequiredString(body.run_id);
+    const reportedConnectorId = body && readRequiredString(body.connector_id);
+    const canonicalConnectorId = ctx.canonicalConnectorKey(authorized.sourceInstance.connectorId);
+    const reportedConnectorKey = reportedConnectorId
+      ? (ctx.canonicalConnectorKey(reportedConnectorId) ?? reportedConnectorId)
+      : null;
+    if (!(runId && canonicalConnectorId) || reportedConnectorKey !== canonicalConnectorId) {
+      ctx.pdppError(res, 400, "invalid_request", "run start requires run_id and the source's connector_id");
+      return;
+    }
+    const { issued, replayed } = await ctx.issueRunSequence({
+      connectorInstanceId: authorized.connectorInstance.connectorInstanceId,
+      deviceId,
+      runId,
+      sourceInstanceId,
+    });
+    res.status(replayed ? 200 : 201).json({
+      connector_instance_id: issued.connectorInstanceId,
+      object: "device_run_start",
+      run_id: issued.runId,
+      run_sequence: issued.runSequence,
+      storage_epoch: issued.storageEpoch,
+    });
+  } catch (error) {
+    if (error instanceof RunStartConflictError) {
+      ctx.pdppError(res, 409, "run_start_conflict", "Run id is already registered to another device or source.");
       return;
     }
     ctx.handleError(res, error);

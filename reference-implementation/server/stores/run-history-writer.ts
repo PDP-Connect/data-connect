@@ -129,6 +129,11 @@ const FACTS_JSON_KEYS = [
   // (server/stores/collection-revision-store.ts). The coverage projection
   // binds the run's proof to it.
   "collection_revision",
+  // The run's place in run order: the sequence issued at its start and the
+  // storage epoch it was recorded in. A proof is eligible only while it is
+  // the connection's run-order marker in the current epoch.
+  "run_sequence",
+  "storage_epoch",
   "needs_input",
   // Preserve presence separately from the schema's records_emitted DEFAULT 0.
   // A missing runtime field is not evidence of zero yield.
