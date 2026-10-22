@@ -972,9 +972,24 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
             })
           )
         : null;
-    const terminalEvidence: TerminalEvidence | null = typedTerminalFacts
-      ? { facts: typedTerminalFacts, version: 2 }
-      : null;
+    // A successful run without typed coverage must replace any retained
+    // positive receipt. Version 1 carries an explicit unaccounted result so
+    // the server records the newer run and the local outbox clears v2 proof.
+    const unprovenTerminalFacts =
+      done?.status === "succeeded" &&
+      !streamResult.scanBudgetExceeded &&
+      !typedTerminalFacts &&
+      outbox.latestTerminalCoverageReceipt({ sourceInstanceId: config.sourceInstanceId })
+        ? (config.connector.streams.length > 0 ? config.connector.streams : ["$run"]).map(
+            (stream): TerminalCollectionFact => ({ coverage_statuses: ["unaccounted"], stream })
+          )
+        : null;
+    let terminalEvidence: TerminalEvidence | null = null;
+    if (typedTerminalFacts) {
+      terminalEvidence = { facts: typedTerminalFacts, version: 2 };
+    } else if (unprovenTerminalFacts) {
+      terminalEvidence = { facts: unprovenTerminalFacts, version: 1 };
+    }
     const checkpointResult = await maybeCommitCheckpoint({
       afterRecordsSummary,
       bufferedState,
@@ -1802,10 +1817,9 @@ function recordConnectorChildFailureGap(input: {
   });
 }
 
-interface TerminalEvidence {
-  facts: readonly TerminalCoverageFact[];
-  version: 2;
-}
+type TerminalEvidence =
+  | { facts: readonly TerminalCollectionFact[]; version: 1 }
+  | { facts: readonly TerminalCoverageFact[]; version: 2 };
 
 async function maybeCommitCheckpoint(input: {
   afterRecordsSummary: LocalDeviceOutboxSummary;
@@ -1839,8 +1853,9 @@ async function maybeCommitCheckpoint(input: {
         run_id: runId,
         source_instance_id: input.config.sourceInstanceId,
         state_delta: input.bufferedState,
-        terminal_facts: input.terminalEvidence.facts,
-        version: 2 as const,
+        ...(input.terminalEvidence.version === 1
+          ? { terminal_facts: input.terminalEvidence.facts, version: 1 as const }
+          : { terminal_facts: input.terminalEvidence.facts, version: 2 as const }),
       }
     : null;
   const commitId = terminalCommitIdentity ? `terminal-commit:${hashCanonicalJson(terminalCommitIdentity)}` : null;

@@ -89,28 +89,36 @@ async function projectedCoverage() {
   };
 }
 
-async function seedTerminalCoverage(status: "collected" | "partial" | "failed", malformed = false, version: 1 | 2 = 2): Promise<void> {
+async function seedTerminalCoverage(
+  status: "collected" | "partial" | "failed",
+  malformed = false,
+  version: 1 | 2 = 2,
+  runId = "run_terminal_coverage"
+): Promise<void> {
+  const normalizedFacts = version === 1
+    ? ["sessions", "messages"].map((stream) => ({ coverage_statuses: ["unaccounted"], stream }))
+    : [
+        {
+          checkpoint: "committed", collected: 0, considered: null, covered: null,
+          coverage_statuses: ["collected"], pending_detail_gaps: 0, scoped: true, skipped: null,
+          stores: [{ store: malformed ? "unknown_store" : "projects", status: "collected" }], stream: "sessions",
+        },
+        {
+          checkpoint: "committed", collected: 0, considered: null, covered: null,
+          coverage_statuses: [status], pending_detail_gaps: status === "collected" ? 0 : 1,
+          scoped: true, skipped: null,
+          stores: [{ store: "derived_messages", status }], stream: "messages",
+        },
+      ];
   await commitTerminalRun({
     collectionBoundary: "unscoped",
-    commitId: "commit_terminal_coverage",
+    commitId: `commit_${runId}`,
     connectorId,
     connectorInstanceId,
     deviceId,
     envelopeHash: "test-envelope-hash",
-    normalizedFacts: [
-      {
-        checkpoint: "committed", collected: 0, considered: null, covered: null,
-        coverage_statuses: ["collected"], pending_detail_gaps: 0, scoped: true, skipped: null,
-        stores: [{ store: malformed ? "unknown_store" : "projects", status: "collected" }], stream: "sessions",
-      },
-      {
-        checkpoint: "committed", collected: 0, considered: null, covered: null,
-        coverage_statuses: [status], pending_detail_gaps: status === "collected" ? 0 : 1,
-        scoped: true, skipped: null,
-        stores: [{ store: "derived_messages", status }], stream: "messages",
-      },
-    ],
-    runId: "run_terminal_coverage",
+    normalizedFacts,
+    runId,
     sourceInstanceId,
     stateDelta: {},
     version,
@@ -152,6 +160,18 @@ test("malformed persisted v2 store inventory never projects covered", async () =
 test("legacy terminal commit without v2 proof stays unknown", async () => {
   await withLocalConnection(async () => {
     await seedTerminalCoverage("collected", false, 1);
+    assert.equal((await projectedCoverage()).axis, "unknown");
+  });
+});
+
+test("a newer successful run without typed proof replaces an earlier covered verdict", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).axis, "complete");
+    const runId = "run_terminal_without_coverage";
+    await seedTerminalCoverage("collected", false, 1, runId);
+    const later = new Date(Date.now() + 60_000).toISOString();
+    getDb().prepare("UPDATE run_history SET completed_at = ? WHERE run_id = ?").run(later, runId);
     assert.equal((await projectedCoverage()).axis, "unknown");
   });
 });

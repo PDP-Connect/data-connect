@@ -233,6 +233,57 @@ test("runCollectorConnector commits a typed DONE coverage verdict without a diag
   }
 });
 
+test("a later successful DONE without coverage replaces an acknowledged typed verdict", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  const queuePath = await tempQueuePath();
+  const run = async (coverage: boolean) => {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({
+          type: "DONE", status: "succeeded", records_emitted: 0,
+          ${coverage ? 'coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] },' : ""}
+        }) + "\\n");
+      `,
+    });
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-coverage-replacement",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath,
+      sourceInstanceId: "src-coverage-replacement",
+    });
+  };
+  try {
+    await run(true);
+    await run(false);
+    assert.deepEqual(
+      harness.terminalCommits.map((commit) => commit.version),
+      [2, 1]
+    );
+    const outbox = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      assert.equal(outbox.latestTerminalCoverageReceipt({ sourceInstanceId: "src-coverage-replacement" }), null);
+    } finally {
+      outbox.close();
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
 test("runCollectorConnector.onMessage observes every protocol message in emission order without altering the result", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
