@@ -1084,6 +1084,20 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       terminalEvidence = { facts: typedTerminalFacts, version: 2 };
     } else if (legacyTerminalFacts) {
       terminalEvidence = { facts: legacyTerminalFacts, version: 1 };
+    } else if (
+      done?.status === "succeeded" &&
+      priorStateProjection.connectorInstanceId &&
+      !hasTerminalRecordForRun(outbox, config)
+    ) {
+      // This profile version commits an orderable terminal run record for every
+      // successful run, whether or not coverage was negotiated and whether or
+      // not STATE changed. Without evidence the record carries no facts: the
+      // server stores unknown coverage for the run and retires any earlier
+      // proof, and the device clears its receipt. A server that names no
+      // connection on its state read cannot bind a terminal record, and a run
+      // id that already has one is a continuation of that run; both keep the
+      // plain state checkpoint.
+      terminalEvidence = { facts: [], version: 2 };
     }
     const checkpointResult = await maybeCommitCheckpoint({
       afterRecordsSummary,
@@ -2170,6 +2184,20 @@ function recordConnectorChildFailureGap(input: {
 type TerminalEvidence =
   | { facts: readonly TerminalCollectionFact[]; version: 1 }
   | { facts: readonly TerminalCoverageFact[]; version: 2 };
+
+/**
+ * The server binds one terminal record to one run identity. A caller that
+ * reuses a run id across passes already has that record in the outbox, so a
+ * later pass of the same run must not send a second, different one.
+ */
+function hasTerminalRecordForRun(outbox: LocalDeviceOutbox, config: CollectorRunConfig): boolean {
+  if (!config.runId) {
+    return false;
+  }
+  return outbox
+    .listByKind({ kind: "terminal_run_commit", sourceInstanceId: config.sourceInstanceId })
+    .some((item) => isRecord(item.payload) && item.payload.run_id === config.runId);
+}
 
 async function maybeCommitCheckpoint(input: {
   afterRecordsSummary: LocalDeviceOutboxSummary;

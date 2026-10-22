@@ -11,7 +11,9 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { DEFAULT_COLLECTOR_OUTBOX_POLICY, drainCollectorOutbox } from "@pdpp/collector-runtime/collector-runner";
-import { LocalDeviceClient } from "@pdpp/collector-runtime/local-device-client";
+import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import { LocalDeviceClient, type TerminalRunCommitRequest } from "@pdpp/collector-runtime/local-device-client";
+import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
 import {
   // The concrete bundled-connector registry is assembled at the composition
   // root (the bin) from connector-owned definitions; the src runtime is
@@ -3086,7 +3088,7 @@ test("an unrecovered failure gap delivered by an independent drain leaves the la
   assert.notEqual(status.lifecycle_state, "covered");
 });
 
-test("a following successful pass without coverage evidence leaves a delivered failure gap unadmitted", async () => {
+test("a following successful pass without coverage evidence leaves a delivered failure gap unrecovered and the lane not covered", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   let gapId = "";
@@ -3108,8 +3110,8 @@ test("a following successful pass without coverage evidence leaves a delivered f
     await gapServer.close();
   }
 
-  // A pass that succeeds without negotiating coverage commits no terminal
-  // evidence, so it neither replaces the receipt nor recovers the gap.
+  // A pass that succeeds without negotiating coverage commits a terminal run
+  // record with no evidence. It clears the receipt but recovers no gap.
   const previous = process.env[ALLOW_CUSTOM_COMMAND_ENV];
   process.env[ALLOW_CUSTOM_COMMAND_ENV] = "1";
   const server = await startAcceptingDeviceServer();
@@ -3150,8 +3152,9 @@ test("a following successful pass without coverage evidence leaves a delivered f
   } finally {
     after.close();
   }
+  // The pass's own no-evidence terminal record replaced run A's covered receipt.
   const status = statusFor(path);
-  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
   assert.notEqual(status.lifecycle_state, "covered");
 });
 
@@ -4030,6 +4033,7 @@ async function startAcceptingDeviceServer(): Promise<{ close: () => Promise<void
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
           JSON.stringify({
+            connector_instance_id: "cin-1",
             device_id: "device-1",
             object: "device_source_instance_state",
             source_instance_id: "src-1",
@@ -4048,6 +4052,21 @@ async function startAcceptingDeviceServer(): Promise<{ close: () => Promise<void
             object: "device_ingest_batch_result",
             rejected_record_count: 0,
             status: "accepted",
+          })
+        );
+        return;
+      }
+      if (url.includes("/terminal-run-commits")) {
+        // Every successful pass commits a terminal run record; acknowledge it as the server does.
+        const request = JSON.parse(body || "{}") as TerminalRunCommitRequest;
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            commit_id: request.commit_id,
+            envelope_hash: hashCanonicalJson(canonicalTerminalRunCommitEnvelope(request)),
+            object: "device_terminal_run_commit",
+            run_id: request.run_id,
+            terminal_event_id: `evt-${request.run_id}`,
           })
         );
         return;
