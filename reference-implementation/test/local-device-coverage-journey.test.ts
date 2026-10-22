@@ -59,6 +59,7 @@ import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summ
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { __setLocalCollectorReleaseForTest } from "../server/local-collector-profiles.ts";
+import { closeTestServer } from "./helpers/close-test-server.ts";
 
 const CONNECTOR_ID = "claude-code";
 const LOCAL_BINDING_NAME = "journey-laptop";
@@ -271,19 +272,6 @@ function registerFixtureManifest(connectorInstanceId: string): void {
     .run(connectorInstanceId);
 }
 
-async function closeServer(server: Awaited<ReturnType<typeof startServer>>): Promise<void> {
-  const closeOne = (srv: { close: (callback: () => void) => void; closeAllConnections?: () => void }) =>
-    new Promise<void>((resolve) => {
-      srv.closeAllConnections?.();
-      const timer = setTimeout(resolve, 2000);
-      srv.close(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  await Promise.allSettled([closeOne(server.asServer), closeOne(server.rsServer)]);
-}
-
 async function withJourney(run: (journey: Journey) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "pdpp-local-coverage-journey-"));
   const childPath = join(dir, "fixture-connector.mjs");
@@ -304,7 +292,7 @@ async function withJourney(run: (journey: Journey) => Promise<void>): Promise<vo
     await run({ asUrl, childPath, cookie, dir, enrolled, queuePath: join(dir, "outbox.sqlite") });
   } finally {
     __setLocalCollectorReleaseForTest(CONNECTOR_ID, null);
-    await closeServer(server);
+    await closeTestServer(server);
     closeDb();
     await rm(dir, { force: true, recursive: true });
   }
