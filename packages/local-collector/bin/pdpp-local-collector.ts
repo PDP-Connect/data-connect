@@ -52,6 +52,7 @@ import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pin
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
 import {
   COLLECTION_PROFILE_MANIFEST,
+  collectionProfileMismatch,
   type CollectionProfilePin,
   ensureCollectionProfileInstalled,
   installedCollectionProfile,
@@ -1683,10 +1684,21 @@ export interface LocalOutboxStatusOutput {
     observed: boolean | null;
     record_batches: number;
   };
-  /** Latest server-acknowledged typed terminal verdict, retained after outbox pruning. */
+  /**
+   * Latest server-acknowledged typed terminal verdict, retained after outbox
+   * pruning.
+   *
+   * - `covered`: every requested store collected, bound to the release this
+   *   device selects.
+   * - `incomplete`: bound to the selected release, but a store fell short.
+   * - `not_current`: acknowledged for another release, or with no release
+   *   binding, or this device selects no release. Says nothing about
+   *   completeness, so it is never read as `incomplete`.
+   * - `no_evidence`: no acknowledged typed verdict.
+   */
   terminal_coverage: {
     collection_boundary: string | null;
-    verdict: "covered" | "incomplete" | "no_evidence";
+    verdict: "covered" | "incomplete" | "not_current" | "no_evidence";
   };
   db: {
     configured: boolean;
@@ -1703,10 +1715,16 @@ export interface LocalOutboxStatusOutput {
   deployment_posture: LocalCollectorDeploymentPosture;
   /**
    * The single lifecycle state for this lane. Open work takes priority;
-   * a drained scoped lane is covered only after a v2 terminal ACK, and
-   * otherwise reports incomplete or no evidence.
+   * a drained scoped lane is covered only after a v2 terminal ACK for the
+   * selected release, and otherwise reports incomplete, not current, or no
+   * evidence.
    */
-  lifecycle_state: LocalCollectorLifecycleState | "covered" | "coverage_incomplete" | "no_evidence";
+  lifecycle_state:
+    | LocalCollectorLifecycleState
+    | "covered"
+    | "coverage_incomplete"
+    | "coverage_not_current"
+    | "no_evidence";
   outbox: {
     counts: {
       dead_letter: number;
@@ -1837,6 +1855,12 @@ export interface InspectLocalOutboxStatusDeps {
    * deterministic regardless of where the test process itself resolves from.
    */
   deploymentPosture?: LocalCollectorDeploymentPosture;
+  /**
+   * The release this device selects for the lane's connector. Defaults to the
+   * pinned release installed on this device (see {@link selectedCollectionRelease}).
+   * `null` means the device selects none, so no receipt can be current.
+   */
+  selectedRelease?: SelectedCollectionRelease | null;
 }
 
 export function inspectLocalOutboxStatus(
@@ -1854,14 +1878,22 @@ export function inspectLocalOutboxStatus(
     recordBatchCount,
     summary,
   });
-  const terminalVerdict = terminalCoverageVerdict(inspection.terminalCoverage);
+  const selectedRelease =
+    inspection.terminalCoverage === null
+      ? null
+      : deps.selectedRelease !== undefined
+        ? deps.selectedRelease
+        : selectedCollectionRelease(options.connector);
+  const terminalVerdict = terminalCoverageVerdict(inspection.terminalCoverage, selectedRelease);
   const lifecycleState =
     options.sourceInstanceId && (outboxLifecycleState === "healthy_idle" || outboxLifecycleState === "coverage_missing")
       ? terminalVerdict === "covered"
         ? "covered"
         : terminalVerdict === "incomplete"
           ? "coverage_incomplete"
-          : "no_evidence"
+          : terminalVerdict === "not_current"
+            ? "coverage_not_current"
+            : "no_evidence"
       : outboxLifecycleState;
   const deploymentPosture = deps.deploymentPosture ?? classifyLocalCollectorDeploymentPosture();
   return {
@@ -2051,7 +2083,7 @@ export function buildLocalOutboxDoctor(
         ? "warn"
         : status.terminal_coverage.verdict === "covered"
         ? "ok"
-        : status.terminal_coverage.verdict === "incomplete"
+        : status.terminal_coverage.verdict === "incomplete" || status.terminal_coverage.verdict === "not_current"
           ? "warn"
           : "unknown",
     deployment_posture: postureDisqualifiesEvidence ? "warn" : "ok",
@@ -2090,7 +2122,9 @@ export function buildLocalOutboxDoctor(
     remediation.push(
       staleScope
         ? "The latest acknowledged terminal verdict belongs to an older collection boundary. Re-run against the active scope before treating this lane as covered."
-        : "The latest acknowledged terminal verdict is incomplete; inspect the connector run diagnostics and re-run after resolving the missing store coverage."
+        : status.terminal_coverage.verdict === "not_current"
+          ? "The latest acknowledged terminal verdict was produced for a connector release other than the one this device selects, or for none. Re-run the collector on the selected release before treating this lane as covered."
+          : "The latest acknowledged terminal verdict is incomplete; inspect the connector run diagnostics and re-run after resolving the missing store coverage."
     );
   }
   if (checks.deployment_posture === "warn") {
@@ -3639,7 +3673,19 @@ interface LocalOutboxInspection {
   coverageObserved: boolean | null;
   recordBatchCount: number;
   summary: LocalDeviceOutboxSummary;
-  terminalCoverage: { collectionBoundary: string; terminalFacts: readonly { scoped: boolean; stores: readonly { status: string }[] }[] } | null;
+  terminalCoverage: { collectionBoundary: string; terminalFacts: readonly StoredTerminalFact[] } | null;
+}
+
+/**
+ * One terminal fact as the outbox returns it. The release fields are absent on
+ * a receipt acknowledged before the release binding existed, which then can
+ * never be current.
+ */
+interface StoredTerminalFact {
+  artifact_digest?: string;
+  manifest_fingerprint?: string;
+  scoped: boolean;
+  stores: readonly { status: string }[];
 }
 
 function readOutboxInspection(path: string, sourceInstanceId: string | undefined): LocalOutboxInspection {
@@ -3660,11 +3706,68 @@ function readOutboxInspection(path: string, sourceInstanceId: string | undefined
   }
 }
 
+/**
+ * The release this device selects for a connector: the digest pinned into this
+ * package, and the manifest fingerprint of the profile installed under that
+ * pin. A receipt counts as current only when its facts name exactly these.
+ */
+export interface SelectedCollectionRelease {
+  readonly artifactDigest: string;
+  readonly manifestFingerprint: string;
+}
+
+/**
+ * The release {@link prepareConnectorSpec} would run for `connector`, read
+ * without installing or fetching anything. Null when the connector is unpinned,
+ * or the installed profile is not the pinned one: no release can then be named
+ * as selected.
+ */
+export function selectedCollectionRelease(
+  connector: string | null | undefined,
+  installRoot: string = COLLECTION_PROFILE_ROOT
+): SelectedCollectionRelease | null {
+  const pin = connector ? PINS_BY_CONNECTOR.get(normalizeConnectorId(connector)) : undefined;
+  return pin ? selectedReleaseForPin(pin, installRoot) : null;
+}
+
+/**
+ * The release a pin selects, when its installed profile still passes the same
+ * check a run makes before using it. Reads local files only.
+ */
+export function selectedReleaseForPin(
+  pin: CollectionProfilePin,
+  installRoot: string
+): SelectedCollectionRelease | null {
+  const { directory } = installedCollectionProfile(installRoot, pin);
+  try {
+    if (collectionProfileMismatch(directory, pin) !== null) {
+      return null;
+    }
+    const profile = JSON.parse(readFileSync(join(directory, COLLECTION_PROFILE_MANIFEST), "utf8")) as unknown;
+    return { artifactDigest: pin.digest, manifestFingerprint: hashCanonicalJson(profile) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Covered is a claim about one release, so the release is checked before the
+ * stores. A receipt for another digest or fingerprint, or on a device that
+ * selects no release, is `not_current` whatever its stores say.
+ */
 function terminalCoverageVerdict(
-  receipt: LocalOutboxInspection["terminalCoverage"]
+  receipt: LocalOutboxInspection["terminalCoverage"],
+  release: SelectedCollectionRelease | null
 ): LocalOutboxStatusOutput["terminal_coverage"]["verdict"] {
   if (!receipt || !receipt.collectionBoundary.trim()) {
     return "no_evidence";
+  }
+  const isSelectedRelease = (fact: StoredTerminalFact) =>
+    release !== null &&
+    fact.artifact_digest === release.artifactDigest &&
+    fact.manifest_fingerprint === release.manifestFingerprint;
+  if (!receipt.terminalFacts.every(isSelectedRelease)) {
+    return "not_current";
   }
   return receipt.terminalFacts.length > 0 &&
     receipt.terminalFacts.every(
