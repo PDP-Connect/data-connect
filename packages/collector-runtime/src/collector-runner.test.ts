@@ -910,7 +910,6 @@ for (const includeState of [false, true]) {
   });
 }
 
-
 for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
   test(`runCollectorConnector refuses ${effectType} without durable detail accounting`, async () => {
     const harness = await startCollectorHarness({ priorState: {} });
