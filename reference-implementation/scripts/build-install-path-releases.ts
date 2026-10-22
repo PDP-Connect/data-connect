@@ -16,6 +16,17 @@
  * layers differ, so their digests differ, while the manifest stays byte-identical.
  * Both are pushed under the same repository and version.
  *
+ * Two more files go into the --work directory, and the journey reads them:
+ *
+ *  - `pins.json`: a shipped-shape `CollectionProfilePin` for each release. Its two
+ *    sha256 values come from the built layers (the profile file, and the entrypoint
+ *    inside the code layer), not from the installer. The journey therefore checks
+ *    what the installer wrote against bytes this script produced.
+ *  - A signature stand-in per release. The installer core refuses an artifact with
+ *    no signature object before it calls the signature verifier, so each release
+ *    gets a cosign-bundle-shaped referrer under the `sha256-<hex>` tag. Nothing
+ *    signed it. The journey's verifier stub accepts it. It is not a Sigstore bundle.
+ *
  * Run from reference-implementation/:
  *
  *   node --import tsx scripts/build-install-path-releases.ts \
@@ -23,18 +34,23 @@
  *     --registry <host:port> --work <directory that does not exist> \
  *     --modules <directory whose node_modules/esbuild resolves> [--oras <path>]
  *
- * Prints {"repository", "a": {"digest"}, "b": {"digest"}} as JSON on stdout.
+ * Prints {"pins", "repository", "a": {"digest"}, "b": {"digest"}} as JSON on stdout.
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
+import type { CollectionProfilePin } from "../../packages/local-collector/src/managed/collection-profiles.ts";
 import {
   fixtureConnectorSource,
+  INSTALL_PATH_COLLECTOR_ID,
+  INSTALL_PATH_CONNECTOR_KEY,
   INSTALL_PATH_PROFILE,
   INSTALL_PATH_REPOSITORY,
+  INSTALL_PATH_VERSION,
 } from "../test/helpers/install-path-fixture.ts";
 
 /** The files the builder and its gates read from the producer, at the pinned revision. */
@@ -173,6 +189,96 @@ function push(out: string, spec: LayerSpec, tag: string): string {
   return digest;
 }
 
+const BUNDLE_MEDIA_TYPE = "application/vnd.dev.sigstore.bundle.v0.3+json";
+
+function sha256Digest(bytes: Buffer): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+/**
+ * The two sha256 values a pin records, read from one built release: the profile
+ * file, and the entrypoint inside the code tarball. The member is named as the
+ * artifact's config.entrypoint names it, relative to the code layer.
+ */
+function pinHashes(
+  out: string,
+): Pick<CollectionProfilePin, "entrypointSha256" | "profileSha256"> {
+  const profile = readFileSync(join(out, "collection-profile.json"));
+  const entrypoint = execFileSync(
+    "tar",
+    ["-xzOf", join(out, "code.tar.gz"), "collection-profile.mjs"],
+    {
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
+  return {
+    entrypointSha256: sha256Digest(entrypoint),
+    profileSha256: sha256Digest(profile),
+  };
+}
+
+/**
+ * The signature stand-in. Shaped as cosign v3 writes a bundle, with the one part
+ * the installer reads before it calls the verifier: the DSSE payload, an in-toto
+ * statement whose subject names the release digest. The signature and the
+ * verification material are empty. Nothing signed this.
+ */
+function fabricatedBundle(digest: string): string {
+  const statement = {
+    _type: "https://in-toto.io/Statement/v1",
+    predicate: {},
+    predicateType: "https://cosign.sigstore.dev/attestation/v1",
+    subject: [
+      {
+        digest: { sha256: digest.slice("sha256:".length) },
+        name: `ghcr.io/${INSTALL_PATH_REPOSITORY}`,
+      },
+    ],
+  };
+  return `${JSON.stringify(
+    {
+      dsseEnvelope: {
+        payload: Buffer.from(JSON.stringify(statement)).toString("base64"),
+        payloadType: "application/vnd.in-toto+json",
+        signatures: [{ keyid: "", sig: "" }],
+      },
+      mediaType: BUNDLE_MEDIA_TYPE,
+      verificationMaterial: {},
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+/** Attach the signature stand-in to a pushed release, by digest, under the referrers tag the installer reads. */
+function attachSignature(out: string, digest: string): void {
+  writeFileSync(join(out, "signature.bundle.json"), fabricatedBundle(digest));
+  execFileSync(
+    oras,
+    [
+      "attach",
+      "--plain-http",
+      "--distribution-spec",
+      "v1.1-referrers-tag",
+      "--artifact-type",
+      BUNDLE_MEDIA_TYPE,
+      `${registry}/${INSTALL_PATH_REPOSITORY}@${digest}`,
+      `signature.bundle.json:${BUNDLE_MEDIA_TYPE}`,
+    ],
+    { cwd: out, stdio: ["ignore", 2, 2] },
+  );
+}
+
+function pinFor(digest: string, out: string): CollectionProfilePin {
+  return {
+    connectorId: INSTALL_PATH_COLLECTOR_ID,
+    connectorKey: INSTALL_PATH_CONNECTOR_KEY,
+    digest,
+    version: INSTALL_PATH_VERSION,
+    ...pinHashes(out),
+  };
+}
+
 mkdirSync(work, { recursive: true });
 const fixtureRoot = join(work, "fixture");
 mkdirSync(fixtureRoot);
@@ -199,6 +305,14 @@ if (digestA === digestB) {
   );
 }
 
+attachSignature(outA, digestA);
+attachSignature(outB, digestB);
+const pinsPath = join(work, "pins.json");
+writeFileSync(
+  pinsPath,
+  `${JSON.stringify({ a: pinFor(digestA, outA), b: pinFor(digestB, outB) }, null, 2)}\n`,
+);
+
 process.stdout.write(
-  `${JSON.stringify({ a: { digest: digestA }, b: { digest: digestB }, repository: INSTALL_PATH_REPOSITORY }, null, 2)}\n`
+  `${JSON.stringify({ a: { digest: digestA }, b: { digest: digestB }, pins: pinsPath, repository: INSTALL_PATH_REPOSITORY }, null, 2)}\n`,
 );

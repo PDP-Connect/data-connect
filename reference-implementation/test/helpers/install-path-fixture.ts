@@ -5,13 +5,15 @@
  * The fixture connector and release profile for the install-path journey.
  *
  * One connector protocol serves two consumers: the local-device journeys run it
- * as a source file, and the managed-install journey packages it as an OCI
- * artifact with `scripts/build-install-path-releases.ts`. Both must behave the
- * same, so the protocol body lives here once.
+ * as a source file, and the install-path journey packages it as an OCI artifact
+ * with `scripts/build-install-path-releases.ts`. Both must behave the same, so
+ * the protocol body lives here once.
  */
 
 export const INSTALL_PATH_CONNECTOR_KEY = "claude-code";
-export const INSTALL_PATH_CONNECTOR_ID = `https://registry.pdpp.dev/connectors/${INSTALL_PATH_CONNECTOR_KEY}`;
+const INSTALL_PATH_CONNECTOR_ID = `https://registry.pdpp.dev/connectors/${INSTALL_PATH_CONNECTOR_KEY}`;
+/** The local collector's id for this connector. A collection-profile pin is keyed by this. */
+export const INSTALL_PATH_COLLECTOR_ID = "claude_code";
 export const INSTALL_PATH_REPOSITORY = `pdp-connect/connector/${INSTALL_PATH_CONNECTOR_KEY}`;
 export const INSTALL_PATH_VERSION = "0.1.0";
 
