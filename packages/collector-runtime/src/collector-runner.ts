@@ -2445,7 +2445,7 @@ export function buildCollectorStartMessage(
   runCoverageVersion?: 1
 ): StartMessage {
   const start: StartMessage = {
-    ...(collectionScope ? { collection_scope: collectionScope } : {}),
+    ...(runCoverageVersion === 1 && collectionScope ? { collection_scope: collectionScope } : {}),
     ...(runCoverageVersion === 1 ? { run_coverage_version: 1 } : {}),
     scope: {
       streams: streams.map((name): StreamScope => {

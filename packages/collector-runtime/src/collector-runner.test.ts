@@ -667,56 +667,68 @@ test("runCollectorConnector records withheld checkpoint accounting before a type
   }
 });
 
-test("runCollectorConnector sends coverage version and exact scope in the actual START", async () => {
-  const harness = await startCollectorHarness({ priorState: {} });
-  try {
-    const startPath = join(await createTempDir("pdpp-coverage-start-"), "start.json");
-    const fixture = await writeFixtureConnector({
-      script: `
-        const fs = await import("node:fs/promises");
-        let input = "";
-        await new Promise((resolve) => process.stdin.on("data", (chunk) => {
-          input += chunk;
-          if (input.includes("\\n")) resolve();
-        }));
-        const start = JSON.parse(input.split("\\n")[0]);
-        await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
-          coverage: { version: 1, collection_scope: start.collection_scope,
-            streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
-      `,
-    });
-    await runCollectorConnector({
-      baseUrl: harness.url,
-      connector: {
-        args: [fixture],
-        artifactDigest: `sha256:${"b".repeat(64)}`,
-        command: "node",
-        connector_id: "fixture-coverage-negotiation",
-        enforcesSourceRoots: true,
-        manifestFingerprint: "a".repeat(64),
-        protocol_capabilities: [],
-        runCoverageVersion: 1,
-        runtime_requirements: { bindings: {} },
-        scope: { since: "2026-10-01T00:00:00.000Z", source_roots: ["/notes"] },
-        sourceRootScopableStreams: ["messages"],
-        streams: ["messages"],
-        timeScopableStreams: ["messages"],
-      },
-      deviceId: "device-1",
-      deviceToken: "device-token",
-      executionRoot: TEST_EXECUTION_ROOT,
-      queuePath: await tempQueuePath(),
-      sourceInstanceId: "src-coverage-negotiation",
-    });
-    const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
-    assert.equal(start.run_coverage_version, 1);
-    assert.equal(typeof start.collection_scope, "string");
-    assert.equal(harness.terminalCommits[0]?.collection_boundary, start.collection_scope);
-  } finally {
-    await harness.close();
-  }
-});
+for (const [label, scope, expectedScope] of [
+  [
+    "bounded",
+    { since: "2026-10-01T00:00:00.000Z", source_roots: ["/notes"] },
+    "since=2026-10-01T00:00:00.000Z;roots=/notes",
+  ],
+  ["unscoped", undefined, "unscoped"],
+] as const) {
+  test(`runCollectorConnector sends version 1 and exact ${label} scope in the actual START`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const startPath = join(await createTempDir("pdpp-coverage-start-"), "start.json");
+      const fixture = await writeFixtureConnector({
+        script: `
+          const fs = await import("node:fs/promises");
+          let input = "";
+          await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+            input += chunk;
+            if (input.includes("\\n")) resolve();
+          }));
+          const start = JSON.parse(input.split("\\n")[0]);
+          await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+          const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+          if (start.run_coverage_version === 1) {
+            done.coverage = { version: 1, collection_scope: start.collection_scope,
+              streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+          }
+          process.stdout.write(JSON.stringify(done) + "\\n");
+        `,
+      });
+      await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-coverage-negotiation",
+          enforcesSourceRoots: true,
+          manifestFingerprint: "a".repeat(64),
+          protocol_capabilities: [],
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          ...(scope ? { scope } : {}),
+          sourceRootScopableStreams: ["messages"],
+          streams: ["messages"],
+          timeScopableStreams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: `src-coverage-negotiation-${label}`,
+      });
+      const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+      assert.equal(start.run_coverage_version, 1);
+      assert.equal(start.collection_scope, expectedScope);
+      assert.equal(harness.terminalCommits[0]?.collection_boundary, expectedScope);
+    } finally {
+      await harness.close();
+    }
+  });
+}
 
 test("a connector that does not request coverage cannot submit a positive DONE verdict", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
@@ -894,7 +906,12 @@ test("a negotiation-aware connector omits DONE coverage when START has no featur
         }));
         const start = JSON.parse(input.split("\\n")[0]);
         await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
-        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+        const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+        if (start.run_coverage_version === 1) {
+          done.coverage = { version: 1, collection_scope: start.collection_scope,
+            streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+        }
+        process.stdout.write(JSON.stringify(done) + "\\n");
       `,
     });
     const result = await runCollectorConnector({
@@ -915,6 +932,7 @@ test("a negotiation-aware connector omits DONE coverage when START has no featur
     });
     const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
     assert.equal("run_coverage_version" in start, false);
+    assert.equal("collection_scope" in start, false, "legacy START shape must not add an unnegotiated field");
     assert.equal(result.done?.status, "succeeded", "legacy collection remains usable");
     const facts = harness.terminalCommits[0]?.terminal_facts;
     assert.equal(Array.isArray(facts) && facts.length > 0, false, "omission cannot produce positive facts");
@@ -1076,8 +1094,11 @@ for (const debtOutcome of ["gapped", "unaccounted"] as const) {
   test(`runCollectorConnector fails closed for STREAM_EVIDENCE ${debtOutcome} counts`, async () => {
     const harness = await startCollectorHarness({ priorState: {} });
     try {
+      const markerPath = join(await createTempDir("pdpp-stream-evidence-blocked-"), "spawned");
       const fixture = await writeFixtureConnector({
         script: `
+          const fs = await import("node:fs/promises");
+          await fs.writeFile(${JSON.stringify(markerPath)}, "spawned");
           await new Promise((resolve) => {
             let input = "";
             process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
@@ -1090,7 +1111,6 @@ for (const debtOutcome of ["gapped", "unaccounted"] as const) {
               stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
         `,
       });
-      const markerPath = join(await createTempDir("pdpp-stream-evidence-blocked-"), "spawned");
       await assert.rejects(
         runCollectorConnector({
           baseUrl: harness.url,
@@ -1114,7 +1134,7 @@ for (const debtOutcome of ["gapped", "unaccounted"] as const) {
           return true;
         }
       );
-      await assert.rejects(() => readFile(markerPath));
+      await assert.rejects(() => readFile(markerPath), /ENOENT/);
       assert.equal(harness.terminalCommits.length, 0);
     } finally {
       await harness.close();

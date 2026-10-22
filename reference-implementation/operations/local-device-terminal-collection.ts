@@ -127,16 +127,19 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
     const expectedArtifactDigest = registeredReleaseResolver
       ? (registeredRelease?.artifactDigest ?? null)
       : (ctx.getExpectedArtifactDigest?.(canonicalConnectorId) ?? null);
-    const expectedManifestFingerprint = registeredReleaseResolver
-      ? (registeredRelease ? fingerprintDeviceAttemptManifest(registeredRelease.manifest) : null)
-      : undefined;
+    let expectedManifestFingerprint: string | null | undefined;
+    if (registeredReleaseResolver) {
+      expectedManifestFingerprint = registeredRelease
+        ? fingerprintDeviceAttemptManifest(registeredRelease.manifest)
+        : null;
+    }
     const validatedFacts =
       version === 2
         ? normalizeTerminalCoverageFacts(rawFacts, registeredManifest, collectionBoundary, {
             allowSubset: true,
             bindingGeneration: authorized.sourceInstance.manifestGeneration ?? null,
             expectedArtifactDigest,
-            ...(expectedManifestFingerprint !== undefined ? { expectedManifestFingerprint } : {}),
+            ...(expectedManifestFingerprint === undefined ? {} : { expectedManifestFingerprint }),
           })
         : normalizedFacts;
     if (!validatedFacts) {
@@ -385,7 +388,8 @@ export function normalizeTerminalCoverageFacts(
   if (!Array.isArray(manifestStreams) || manifestStreams.length === 0) {
     return null;
   }
-  const manifestFingerprint = fingerprintDeviceAttemptManifest(rawManifest);
+  const manifestFingerprint =
+    options.expectedManifestFingerprint ?? fingerprintDeviceAttemptManifest(rawManifest);
   const inventory = new Map<string, Set<string>>();
   const metadataOnlyStreams = new Set<string>();
   for (const rawStream of manifestStreams) {

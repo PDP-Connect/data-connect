@@ -11,7 +11,7 @@ import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summ
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
-import { readLocalCollectorArtifactDigest } from "../server/local-collector-profiles.ts";
+import { readLocalCollectorArtifactDigest, readLocalCollectorRelease } from "../server/local-collector-profiles.ts";
 import { getConnectorSummaryForRoute, listConnectorSummaries } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
@@ -119,7 +119,8 @@ async function seedTerminalCoverage(
   version: 1 | 2 = 2,
   accountingOverrides: Record<string, unknown> = {},
   artifactDigest = readLocalCollectorArtifactDigest(connectorId),
-  sourceConnectorId = connectorId
+  sourceConnectorId = connectorId,
+  claimedManifestFingerprint?: string
 ): Promise<void> {
   const manifest = JSON.parse(
     (
@@ -128,10 +129,15 @@ async function seedTerminalCoverage(
       }
     ).manifest
   );
+  const registeredRelease = readLocalCollectorRelease(sourceConnectorId);
   const bindings = {
     artifact_digest: artifactDigest,
     binding_generation: 0,
-    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    manifest_fingerprint:
+      claimedManifestFingerprint ??
+      (registeredRelease
+        ? fingerprintDeviceAttemptManifest(registeredRelease.manifest)
+        : fingerprintDeviceAttemptManifest(manifest)),
     runtime_accounting: {
       checkpoint_eligible: true,
       detail_complete: true,
@@ -183,6 +189,23 @@ async function seedTerminalCoverage(
     version,
   });
 }
+
+test("registered release fingerprint survives catalog connector-key normalization", async () => {
+  const release = readLocalCollectorRelease(connectorId);
+  assert.ok(release, "the reference server must have a verified local-collector release pin");
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage(
+      "collected",
+      false,
+      2,
+      {},
+      release.artifactDigest,
+      connectorId,
+      fingerprintDeviceAttemptManifest(release.manifest)
+    );
+    assert.equal((await projectedCoverage()).axis, "complete");
+  });
+});
 
 test("local-device v2 terminal coverage projects per-stream proof; absent proof stays unknown", async () => {
   await withLocalConnection(async () => {
@@ -358,7 +381,7 @@ for (const includeState of [false, true]) {
   });
 }
 
-test("changed release obligations with identical store names invalidate positive coverage", async () => {
+test("catalog obligation changes invalidate proof when the binding generation advances", async () => {
   await withLocalConnection(async () => {
     await seedTerminalCoverage("collected");
     assert.equal((await projectedCoverage()).axis, "complete");
@@ -371,6 +394,9 @@ test("changed release obligations with identical store names invalidate positive
     getDb()
       .prepare("UPDATE connectors SET manifest = ? WHERE connector_id = ?")
       .run(JSON.stringify(manifest), connectorId);
+    getDb()
+      .prepare("UPDATE connector_instances SET manifest_generation = manifest_generation + 1 WHERE connector_instance_id = ?")
+      .run(connectorInstanceId);
     assert.equal((await projectedCoverage()).axis, "unknown");
   });
 });
