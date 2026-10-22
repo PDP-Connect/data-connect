@@ -4803,6 +4803,12 @@ interface LocalCoverageDiagnosticAxis {
     | "duplicate_stores"
     | "missing_stores"
     | "unexpected_stores";
+  /**
+   * The newest state-commit instant for this connection (see
+   * `readLatestStateCommitAt` in `server/records.ts`). Carried so the projection
+   * can retire a proof that a later, unaccounted state commit has superseded.
+   */
+  readonly stateCommittedAt?: string | null;
 }
 
 const LOCAL_COVERAGE_ACCOUNTED_STATUSES = new Set([
@@ -4898,6 +4904,8 @@ export function deriveLocalCoverageAxis(input: {
    * that hold no boundary omit it and keep the honest `unscoped` default.
    */
   readonly declaredCollectionScope?: string | null;
+  /** The connection's newest state-commit instant (`readLatestStateCommitAt`); omitted by callers with no state read. */
+  readonly stateCommittedAt?: string | null;
 }): LocalCoverageDiagnosticAxis {
   const declaredScope = resolveDeclaredCoverageScope(input.declaredCollectionScope, input.state);
   const { rows } = input;
@@ -4915,7 +4923,11 @@ export function deriveLocalCoverageAxis(input: {
     rows.map((row) => readRowCollectionScope(row)).filter((value): value is string => value !== null)
   );
   const measuredScope: string | null = measuredScopes.size === 1 ? ([...measuredScopes][0] ?? null) : null;
-  const scopeField = { declaredCollectionScope: declaredScope, measuredCollectionScope: measuredScope };
+  const scopeField = {
+    declaredCollectionScope: declaredScope,
+    measuredCollectionScope: measuredScope,
+    stateCommittedAt: input.stateCommittedAt ?? null,
+  };
   const stateCursor =
     input.state && typeof input.state === "object" && !Array.isArray(input.state)
       ? (input.state as Record<string, unknown>).fetched_at
@@ -5074,6 +5086,44 @@ function deriveLocalTerminalCoverageAxis(
     rows,
     source: "terminal_verdict",
     unaccountedStores: unaccountedStores.sort((left, right) => left.localeCompare(right)),
+  };
+}
+
+/**
+ * Retire a local coverage proof that a later, unaccounted state commit has
+ * superseded.
+ *
+ * A terminal commit writes its state rows and its run completion with one
+ * instant, so `evidenceAsOf` is the proof's own instant: a v2 proof's run
+ * `completed_at`, or a legacy proof's diagnostics `updated_at`. A state commit
+ * strictly after that instant came from a later run or checkpoint. That commit
+ * carried no terminal replacement, so the proof no longer describes the source's
+ * latest collection, and coverage is unknown until a later run proves it again.
+ * A commit at the same instant is the proof's own transaction, and an earlier
+ * one predates it. Neither retires the proof.
+ *
+ * The server decides this from what it stored. It never reads the device outbox.
+ * An unparseable instant keeps the proof, because it cannot establish that a
+ * later commit exists.
+ */
+function retireLocalCoverageSupersededByLaterCommit(
+  axis: LocalCoverageDiagnosticAxis | null,
+  stateCommittedAt: string | null | undefined
+): LocalCoverageDiagnosticAxis | null {
+  if (axis === null || axis.axis === "unknown" || !axis.evidenceAsOf || !stateCommittedAt) {
+    return axis;
+  }
+  if (!(Date.parse(stateCommittedAt) > Date.parse(axis.evidenceAsOf))) {
+    return axis;
+  }
+  return {
+    ...axis,
+    axis: "unknown",
+    evidenceAsOf: null,
+    measuredCollectionScope: null,
+    reliable: false,
+    rows: [],
+    unaccountedStores: [],
   };
 }
 
@@ -7096,15 +7146,22 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const localCollectorRelease = localDeviceBacked ? readLocalCollectorRelease(connectorId) : null;
+  // Whichever proof this reads (the settled run's v2 verdict, else the legacy
+  // diagnostics), a later state commit it does not account for retires it. The
+  // downstream readers below all take `effectiveLocalCoverage`, so the
+  // retirement reaches every consumer, not only this branch.
   const effectiveLocalCoverage = localDeviceBacked
-    ? (deriveLocalTerminalCoverageAxis(
-        fallbackSettledRun,
-        manifest,
-        localCoverage,
-        evidence?.manifest_generation ?? null,
-        localCollectorRelease?.artifactDigest ?? null,
-        localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
-      ) ?? localCoverage)
+    ? retireLocalCoverageSupersededByLaterCommit(
+        deriveLocalTerminalCoverageAxis(
+          fallbackSettledRun,
+          manifest,
+          localCoverage,
+          evidence?.manifest_generation ?? null,
+          localCollectorRelease?.artifactDigest ?? null,
+          localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
+        ) ?? localCoverage,
+        localCoverage?.stateCommittedAt
+      )
     : localCoverage;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =
