@@ -37,6 +37,22 @@ export interface LocalCollectorRelease {
 const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
+const releaseOverrides = new Map<string, LocalCollectorRelease>();
+
+/**
+ * Test seam: serve `release` for `connectorKey` in place of its checked-in pin,
+ * or restore the pin when `release` is null. Production never calls it. The
+ * checked-in pins are the signed releases, so a test needs this to register a
+ * release that declares terminal coverage before any such pin exists.
+ */
+export function __setLocalCollectorReleaseForTest(connectorKey: string, release: LocalCollectorRelease | null): void {
+  if (release) {
+    releaseOverrides.set(connectorKey, release);
+  } else {
+    releaseOverrides.delete(connectorKey);
+  }
+}
+
 /**
  * The pinned profile for a canonical connector key, or `null` when the local
  * collector does not install that connector. Throws when the pinned file is
@@ -48,6 +64,10 @@ export function readLocalCollectorProfile(connectorKey: string): Record<string, 
 
 /** The server's current OCI artifact identity for a local-device connector. */
 export function readLocalCollectorArtifactDigest(connectorKey: string): string | null {
+  const override = releaseOverrides.get(connectorKey);
+  if (override) {
+    return override.artifactDigest;
+  }
   try {
     return readPinnedProfile(connectorKey)?.digest ?? null;
   } catch {
@@ -58,6 +78,10 @@ export function readLocalCollectorArtifactDigest(connectorKey: string): string |
 
 /** The installed execution release as one atomically read, pin-verified pair. */
 export function readLocalCollectorRelease(connectorKey: string): LocalCollectorRelease | null {
+  const override = releaseOverrides.get(connectorKey);
+  if (override) {
+    return override;
+  }
   try {
     const pinned = readPinnedProfile(connectorKey);
     return pinned ? { artifactDigest: pinned.digest, manifest: pinned.profile } : null;

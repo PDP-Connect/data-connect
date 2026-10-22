@@ -865,10 +865,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
   // A failed state read emits the definitive terminal heartbeat for this pass.
   // Never replace it with a generic corrective status in the outer catch.
   let definitiveBlockedHeartbeatSent = false;
-  // Distinguishes a failure while only draining/heartbeating old backlog from
-  // a failure after a new local scan began. Only the latter invalidates the
-  // scan's coverage proof with a new child-failure barrier.
-  let scanStarted = false;
   try {
     const initialSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
@@ -943,7 +939,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     });
     startingHeartbeatSent = true;
 
-    scanStarted = true;
     // The SERVER is the authority on the declared boundary: it is persisted with
     // the connection and delivered on the state read, so it cannot be widened by
     // a local flag or lost when the CLI process goes away. A caller-supplied
@@ -1099,6 +1094,20 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       streamingBufferHighWaterMark: streamResult.bufferHighWaterMark,
     };
   } catch (error) {
+    // Every failed run leaves an open connector_child_failure gap, whether it
+    // failed before its scan (state read, starting heartbeat, pre-scan drain) or
+    // during it. The device verdict reads open outbox rows as unadmitted, so the
+    // lane stops reading covered until a later complete run recovers the gap.
+    ensureOpenFailureGapRow({
+      clock: () => new Date(),
+      connectorId: config.connector.connector_id,
+      details: "collector run failed before a committed coverage checkpoint",
+      outbox,
+      reason: "connector_child_failure",
+      retryable: true,
+      ...(config.runId ? { runId: config.runId } : {}),
+      sourceInstanceId: config.sourceInstanceId,
+    });
     // A throw after the "starting" heartbeat (connector child failure, unclean
     // exit, abort, protocol-parse error, drain transition error, …) would
     // otherwise leave "starting" as the last status the server ever saw — even
@@ -1108,18 +1117,6 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     // was never sent, preserving the honest "blocked" the state-read block
     // emits on its own.
     if (startingHeartbeatSent && !definitiveBlockedHeartbeatSent) {
-      if (scanStarted) {
-        ensureCollectorGapRow({
-          clock: () => new Date(),
-          connectorId: config.connector.connector_id,
-          details: "collector run failed before a committed coverage checkpoint",
-          outbox,
-          reason: "connector_child_failure",
-          retryable: true,
-          ...(config.runId ? { runId: config.runId } : {}),
-          sourceInstanceId: config.sourceInstanceId,
-        });
-      }
       await emitCorrectiveHeartbeatFromOutbox({
         client,
         config,
@@ -1925,7 +1922,7 @@ function recordConnectorChildFailureGap(input: {
   enqueuedBatches: number;
   input: StreamConnectorIntoOutboxInput;
 }): void {
-  ensureCollectorGapRow({
+  ensureOpenFailureGapRow({
     clock: () => new Date(),
     connectorId: input.input.config.connector.connector_id,
     details: input.details,
@@ -2433,6 +2430,20 @@ function ensureCollectorGapRow(input: EnsureGapInput): LocalDeviceOutboxItem {
     payload,
     sourceInstanceId: input.sourceInstanceId,
   });
+}
+
+/**
+ * Make a `connector_child_failure` gap open for its lane. A gap the server already
+ * acknowledged is `succeeded` here, and {@link ensureCollectorGapRow} returns it
+ * unchanged. It stays open until a complete successful run recovers it, so reopen
+ * it. Left delivered, the device verdict would count no open work and read the
+ * lane covered while the server still holds the gap open.
+ */
+function ensureOpenFailureGapRow(input: EnsureGapInput): void {
+  const gap = ensureCollectorGapRow(input);
+  if (gap.status === "succeeded") {
+    input.outbox.reopenSucceeded(gap.id);
+  }
 }
 
 function sanitizeCollectorGapDetails(value: string): string {

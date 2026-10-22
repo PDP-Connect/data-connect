@@ -630,6 +630,31 @@ export class LocalDeviceOutbox {
   }
 
   /**
+   * Return one acknowledged row to `ready`, so the next drain delivers it again.
+   * Only `succeeded` rows reopen. A delivered gap stays open for its lane until a
+   * complete successful run recovers it, so a failure that re-observes the gap
+   * reopens the row instead of leaving it looking closed.
+   */
+  reopenSucceeded(id: string): boolean {
+    const now = this.#now();
+    const result = this.#db
+      .prepare(
+        `UPDATE local_device_outbox
+            SET status = 'ready',
+                attempt_count = 0,
+                next_attempt_at = ?,
+                acknowledged_at = NULL,
+                lease_holder = NULL,
+                lease_until = NULL,
+                last_error = NULL,
+                updated_at = ?
+          WHERE id = ? AND status = 'succeeded'`
+      )
+      .run(now, now, id);
+    return Number(result.changes) === 1;
+  }
+
+  /**
    * Record that an accepted replacement terminal commit supersedes older
    * rejected terminal evidence. The old row is intentionally retained; the
    * ledger is the only retirement marker used by active-work queries.
