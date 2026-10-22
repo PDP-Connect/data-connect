@@ -172,7 +172,7 @@ interface ProjectedStream {
 
 interface OwnerConnectionRow {
   readonly collection_report: readonly ProjectedStream[];
-  readonly connection_health: { readonly axes: { readonly coverage: string } };
+  readonly connection_health: { readonly axes: { readonly coverage: string; readonly outbox: string } };
 }
 
 async function requestJson(url: string, init: RequestInit = {}): Promise<JsonResponse> {
@@ -529,5 +529,37 @@ test("B2: a server-rejected record stays unadmitted, moves no cursor, and leaves
     assert.equal(status.terminal_coverage.verdict, "no_evidence");
     assert.notEqual(status.lifecycle_state, "covered");
     assert.deepEqual(deviceReceiptFacts(journey), []);
+  });
+});
+
+test("J2: a run the server rejects after a covered run leaves the lane not covered", async () => {
+  await withJourney(async (journey) => {
+    // Run A: a clean complete run. The device holds a covered receipt and the server projects complete.
+    const a = await runOnce(journey, "complete", "a-complete");
+    assert.equal(a.result.done?.status, "succeeded");
+    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
+    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+
+    // Run B: the server refuses its record batch (an undeclared stream), so nothing from B is admitted.
+    // The batch stays ready for retry and run B's terminal commit waits behind it, so the server never
+    // receives a terminal commit for run B.
+    const b = await runOnce(journey, "reject", "b-reject");
+    assert.equal(b.result.done?.status, "succeeded", "the child finished; the server refused its batch");
+    assert.equal(serverRunStreams("b-reject"), null, "the server acknowledged no terminal commit for run B");
+    assert.equal(serverRecordCount(journey, "sessions"), 2, "the rejected batch wrote no record; run A's remain");
+
+    // The device no longer stands behind run A's receipt for the lane: its latest run is unadmitted.
+    const status = deviceStatus(journey);
+    assert.equal(status.terminal_coverage.verdict, "unadmitted");
+    assert.equal(status.lifecycle_state, "draining");
+
+    // The server never learns of run B as a run: nothing from B was admitted and its terminal commit never
+    // arrived, so the server holds no run-level record for B. Its coverage still reflects run A's admitted
+    // terminal commit, and its outbox axis shows the lane has not drained. Only the device reports run B as
+    // unadmitted.
+    const owner = await ownerConnectionRow(journey);
+    assert.equal(owner.connection_health.axes.coverage, "complete");
+    assert.deepEqual(conditions(owner), { messages: "complete", sessions: "complete" });
+    assert.equal(owner.connection_health.axes.outbox, "active");
   });
 });

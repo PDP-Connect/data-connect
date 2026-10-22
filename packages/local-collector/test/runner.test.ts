@@ -2563,10 +2563,10 @@ function enqueueRecordBatch(outbox, { id, sourceInstanceId = "src-1", streams })
   });
 }
 
-/** Claim + acknowledge a row so it reaches status 'succeeded' (drained). */
+/** Claim + acknowledge the next ready row, which must be `id`, so it reaches status 'succeeded' (drained). */
 function drainRow(outbox, id, sourceInstanceId = "src-1") {
-  const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, sourceInstanceId });
-  assert.ok(claim, `expected to claim a ready row for ${id}`);
+  const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId });
+  assert.equal(claim?.id, id, `expected ${id} to be the next ready row`);
   outbox.acknowledge({ holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
 }
 
@@ -2586,9 +2586,27 @@ function releaseBinding(release) {
   return release ? { artifact_digest: release.artifactDigest, manifest_fingerprint: release.manifestFingerprint } : {};
 }
 
-function acknowledgeTerminalCoverage(
+/** The runtime accounting the collector attaches to a v2 fact for a run that ran clean. */
+const CLEAN_ACCOUNTING = Object.freeze({
+  checkpoint_eligible: true,
+  detail_complete: true,
+  durable_admission: true,
+  outstanding_debt: 0,
+  stream_evidence_consistent: true,
+});
+
+/** Enqueue a terminal run commit without draining it. `accounting: null` models a v2 fact with none. */
+function enqueueTerminalCoverage(
   outbox,
-  { id, sourceInstanceId = "src-1", stores, scoped = true, version = 2, release = SELECTED_RELEASE }
+  {
+    id,
+    sourceInstanceId = "src-1",
+    stores,
+    scoped = true,
+    version = 2,
+    release = SELECTED_RELEASE,
+    accounting = CLEAN_ACCOUNTING,
+  }
 ) {
   outbox.enqueue({
     id,
@@ -2603,13 +2621,25 @@ function acknowledgeTerminalCoverage(
       source_instance_id: sourceInstanceId,
       state_delta: {},
       terminal_facts: version === 2
-        ? [{ ...releaseBinding(release), scoped, stores, stream: "sessions" }]
+        ? [
+            {
+              ...releaseBinding(release),
+              ...(accounting ? { runtime_accounting: accounting } : {}),
+              scoped,
+              stores,
+              stream: "sessions",
+            },
+          ]
         : [{ coverage_statuses: ["collected"], stream: "sessions" }],
       version,
     },
     sourceInstanceId,
   });
-  drainRow(outbox, id, sourceInstanceId);
+}
+
+function acknowledgeTerminalCoverage(outbox, options) {
+  enqueueTerminalCoverage(outbox, options);
+  drainRow(outbox, options.id, options.sourceInstanceId ?? "src-1");
 }
 
 test("acknowledged v2 coverage stays covered after sent rows are pruned", async () => {
@@ -2689,6 +2719,128 @@ test("a later v1 terminal ACK clears prior v2 coverage proof", async () => {
   const status = statusFor(path);
   assert.equal(status.terminal_coverage.verdict, "no_evidence");
   assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+// The collector's own accounting can contradict a store that reads collected:
+// the server withholds collected for these facts, so the device must not read
+// the receipt as covered either.
+for (const [field, value] of [
+  ["durable_admission", false],
+  ["detail_complete", false],
+  ["stream_evidence_consistent", false],
+  ["checkpoint_eligible", false],
+  ["outstanding_debt", 1],
+]) {
+  test(`v2 receipt with runtime ${field} ${value} is incomplete, even when every store is collected`, async () => {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: `terminal-unclean-${field}`,
+        accounting: { ...CLEAN_ACCOUNTING, [field]: value },
+        stores: [{ store: "local_files", status: "collected" }],
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const status = statusFor(path);
+    assert.equal(status.terminal_coverage.verdict, "incomplete");
+    assert.equal(status.lifecycle_state, "coverage_incomplete");
+    assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+  });
+}
+
+test("v2 receipt without runtime accounting reads no_evidence, even when every store is collected", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-no-accounting",
+      accounting: null,
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+// A covered receipt is proof for the run that wrote it. A later run whose record
+// batch the server refuses is not admitted, and its terminal commit waits behind
+// that batch, so the device must not keep reporting the older run's proof.
+test("a later run whose record batch stays ready makes an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    enqueueTerminalCoverage(outbox, { id: "terminal-run-b", stores: [{ store: "local_files", status: "collected" }] });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.equal(status.lifecycle_state, "draining");
+  assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+});
+
+test("a later run whose record batch is dead-lettered makes an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    outbox.deadLetter({ error: "refused", holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.equal(status.lifecycle_state, "dead_letter");
+});
+
+test("open record work without an acknowledged receipt stays no_evidence", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    enqueueRecordBatch(outbox, { id: "rb-first-run", streams: ["sessions"] });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "draining");
+});
+
+test("a covered verdict returns once the later run's commit is acknowledged clean", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    enqueueTerminalCoverage(outbox, { id: "terminal-run-b", stores: [{ store: "local_files", status: "collected" }] });
+    drainRow(outbox, "rb-run-b");
+    drainRow(outbox, "terminal-run-b");
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "covered");
+  assert.equal(status.lifecycle_state, "covered");
 });
 
 // A receipt is current only for the release this device selects. Each case is
