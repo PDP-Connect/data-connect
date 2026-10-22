@@ -125,6 +125,10 @@ function toTerminalStatus(eventType: string, status: string): string {
 // `readRunTerminalEventData` spine read on GET (G1).
 const FACTS_JSON_KEYS = [
   "collection_facts",
+  // The per-connection collection revision a local terminal run committed at
+  // (server/stores/collection-revision-store.ts). The coverage projection
+  // binds the run's proof to it.
+  "collection_revision",
   "needs_input",
   // Preserve presence separately from the schema's records_emitted DEFAULT 0.
   // A missing runtime field is not evidence of zero yield.

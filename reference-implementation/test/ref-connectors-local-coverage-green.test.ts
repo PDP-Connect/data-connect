@@ -35,6 +35,7 @@ import {
   projectConnectorSummaryConnectionHealth,
 } from "../server/ref-control.ts";
 import { rebuildRetainedSize } from "../server/retained-size-read-model.ts";
+import { advanceSqliteCollectionRevisionInTransaction } from "../server/stores/collection-revision-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultConnectorStateStore } from "../server/stores/connector-state-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
@@ -252,10 +253,16 @@ function seedCoverage(rows: readonly TestCoverageRow[], { includeExpected = true
       stream: "coverage_diagnostics",
     });
   });
+  // A committed snapshot is a state commit: it takes the connection's next
+  // collection revision, which the projection binds the proof to.
+  const revision = advanceSqliteCollectionRevisionInTransaction(getDb(), CONNECTOR_INSTANCE_ID, {
+    at: "2026-06-03T11:58:31.000Z",
+    event: "state_commit",
+  })?.revision;
   getDb()
     .prepare(
-      `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at)
-       VALUES (?, ?, 'coverage_diagnostics', ?, ?)`
+      `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, collection_revision)
+       VALUES (?, ?, 'coverage_diagnostics', ?, ?, ?)`
     )
     .run(
       STATE_CONNECTOR_ID,
@@ -268,7 +275,8 @@ function seedCoverage(rows: readonly TestCoverageRow[], { includeExpected = true
           stream: stream ?? null,
         })),
       }),
-      "2026-06-03T11:58:31.000Z"
+      "2026-06-03T11:58:31.000Z",
+      revision ?? null
     );
 }
 

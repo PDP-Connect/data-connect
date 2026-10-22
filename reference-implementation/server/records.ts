@@ -142,6 +142,10 @@ import {
   resolveStorageConnectorInstanceId,
 } from "./storage-utils.ts";
 import {
+  type LocalCoverageRevisionFence,
+  readLocalCoverageRevisionFences,
+} from "./stores/collection-revision-store.ts";
+import {
   ConnectorInstanceResolutionError,
   makeDefaultAccountConnectorInstanceId,
 } from "./stores/connector-instance-store.ts";
@@ -4864,68 +4868,6 @@ export async function listLocalCoverageDiagnostics(storageTarget: RecordStorageT
 }
 
 /**
- * The newest state-commit instant for one connection: the max `updated_at`
- * over its connector-state rows, skipping the server's own `$`-prefixed rows
- * (declared and measured scope). A state write stamps this column, and a
- * terminal commit stamps its state and its run completion with one instant, so
- * the projection can tell a later commit from a proof's own transaction. There
- * is no durable sequence on state writes; this is the only ordering they carry.
- */
-async function readLatestStateCommitAt(connectorInstanceId: string): Promise<string | null> {
-  if (isPostgresStorageBackend()) {
-    const result = await postgresQuery<{ latest: string | null }>(
-      "SELECT MAX(updated_at) AS latest FROM connector_state WHERE connector_instance_id = $1 AND substr(stream, 1, 1) <> '$'",
-      [connectorInstanceId]
-    );
-    return result.rows[0]?.latest ?? null;
-  }
-  const row = getDb()
-    .prepare(
-      "SELECT MAX(updated_at) AS latest FROM connector_state WHERE connector_instance_id = ? AND substr(stream, 1, 1) <> '$'"
-    )
-    .get<{ latest: string | null }>(connectorInstanceId);
-  return row?.latest ?? null;
-}
-
-/** Batched {@link readLatestStateCommitAt} for one page of connection ids, keyed by connector instance. */
-async function readLatestStateCommitAtByConnectionIds(ids: readonly string[]): Promise<Map<string, string>> {
-  const latest = new Map<string, string>();
-  interface Row {
-    connector_instance_id: string;
-    latest: string | null;
-  }
-  const rows: Row[] = [];
-  if (isPostgresStorageBackend()) {
-    const query = await postgresQuery<Row>(
-      `SELECT connector_instance_id, MAX(updated_at) AS latest FROM connector_state
-        WHERE connector_instance_id = ANY($1::text[]) AND substr(stream, 1, 1) <> '$'
-        GROUP BY connector_instance_id`,
-      [ids]
-    );
-    rows.push(...query.rows);
-  } else {
-    for (let start = 0; start < ids.length; start += 900) {
-      const chunk = ids.slice(start, start + 900);
-      rows.push(
-        ...(getDb()
-          .prepare(
-            `SELECT connector_instance_id, MAX(updated_at) AS latest FROM connector_state
-              WHERE connector_instance_id IN (${chunk.map(() => "?").join(", ")}) AND substr(stream, 1, 1) <> '$'
-              GROUP BY connector_instance_id`
-          )
-          .all(...chunk) as Row[])
-      );
-    }
-  }
-  for (const row of rows) {
-    if (row.latest) {
-      latest.set(row.connector_instance_id, row.latest);
-    }
-  }
-  return latest;
-}
-
-/**
  * Read the local coverage proof without laundering malformed or duplicate
  * diagnostic rows into a healthy projection. This is intentionally separate
  * from the operator list above: that surface presents a concise inventory,
@@ -4941,9 +4883,9 @@ export async function readCommittedLocalCoverageDiagnostics(storageTarget: Recor
       hasCommittedSnapshot: false,
       malformed: false,
       missingStores: [],
+      revisionFence: null,
       rows: [],
       state: null,
-      stateCommittedAt: null,
       unexpectedStores: [],
       updatedAt: null,
     };
@@ -4990,8 +4932,11 @@ export async function readCommittedLocalCoverageDiagnostics(storageTarget: Recor
     ...parseCoverageDiagnosticsStateSnapshot(connectorId, state),
     declaredCollectionScope,
     manifestGeneration: currentGeneration === null ? null : Number(currentGeneration),
+    revisionFence:
+      (await readLocalCoverageRevisionFences([connectorInstanceId], LOCAL_COVERAGE_DIAGNOSTICS_STREAM)).get(
+        connectorInstanceId
+      ) ?? null,
     state,
-    stateCommittedAt: await readLatestStateCommitAt(connectorInstanceId),
     stateManifestGeneration: stateGeneration === null ? null : Number(stateGeneration),
     updatedAt: stateProjection.updated_at ?? null,
   };
@@ -5009,8 +4954,8 @@ export async function readCommittedLocalCoverageDiagnosticsByConnectionIds(conne
     ReturnType<typeof parseCoverageDiagnosticsStateSnapshot> & {
       declaredCollectionScope: string;
       manifestGeneration: number | null;
+      revisionFence: LocalCoverageRevisionFence | null;
       state: unknown;
-      stateCommittedAt: string | null;
       stateManifestGeneration: number | null;
       updatedAt: string | null;
     }
@@ -5057,7 +5002,7 @@ export async function readCommittedLocalCoverageDiagnosticsByConnectionIds(conne
       );
     }
   }
-  const latestStateCommitAt = await readLatestStateCommitAtByConnectionIds(ids);
+  const revisionFences = await readLocalCoverageRevisionFences(ids, LOCAL_COVERAGE_DIAGNOSTICS_STREAM);
   for (const row of rows) {
     // `row.state_json` is already the `coverage_diagnostics` stream's own
     // payload — the JOIN's `ON` clause already narrows `cs.stream =
@@ -5075,8 +5020,8 @@ export async function readCommittedLocalCoverageDiagnosticsByConnectionIds(conne
       ...parseCoverageDiagnosticsStateSnapshot(row.connector_id, parsedState),
       declaredCollectionScope: declaredCollectionScopeFingerprint(row.scope_state_json ?? null),
       manifestGeneration: row.current_generation === null ? null : Number(row.current_generation),
+      revisionFence: revisionFences.get(row.connector_instance_id) ?? null,
       state: parsedState,
-      stateCommittedAt: latestStateCommitAt.get(row.connector_instance_id) ?? null,
       stateManifestGeneration: row.state_generation === null ? null : Number(row.state_generation),
       updatedAt: row.updated_at ?? null,
     });

@@ -38,7 +38,7 @@ The collector stores the latest acknowledged v2 receipt in local outbox schema v
 
 The device verdict (`pdpp-local-collector status`, `terminal_coverage.verdict`) is `covered` only when the receipt names the selected release, every store is `collected`, and the run's runtime accounting is clean: durable admission, complete detail, consistent stream evidence, checkpoint eligibility, and zero outstanding debt. Clean accounting is the same test the server applies before it withholds `collected`. Missing or malformed accounting reads `no_evidence`; a measured gap reads `incomplete`. Open outbox work for the lane (queued, leased or dead-lettered) reads `unadmitted`, because the latest run has not reached a durable terminal commit and the receipt no longer stands for it.
 
-The server's owner coverage is "as of the last admitted run". A later run the server never admitted cannot change it. Every failed run, including one that fails before its scan, leaves an open `connector_child_failure` gap on the device, so the device shows that run as `unadmitted` until a later complete run is admitted and recovers the gap. Until then the owner projection keeps the last admitted coverage.
+The server's owner coverage is a fact about one admitted run, shown with its as-of. Any later attempt the server observes (a state commit, a terminal run record, an admitted or refused batch, a delivered failure report) retires it to unknown; see "Revision fencing" below. Only an attempt the server never hears about leaves the last admitted coverage in place. Every failed run, including one that fails before its scan, leaves an open `connector_child_failure` gap on the device, so the device shows that run as `unadmitted` until a later complete run is admitted and recovers the gap.
 
 ## Collection Profile amendment
 
@@ -47,3 +47,33 @@ The canonical Collection Profile is `data-connectors/docs/spec/collection-profil
 ## Acceptance and release
 
 Failing-first tests must show absent coverage unknown, a valid fully drained proof covered, partial/unavailable/failed not covered, malformed rejected or unknown, and old devices still working. Verify connector emitters, collector checkpointing, server validation, and both read models. Bump the five connector manifest patch versions and regenerate connector-implementation-index.json. PR #553 then repins the five signed releases and their verified hashes.
+
+## Revision fencing (replaces the wall-clock stale-proof rule)
+
+The spec gate replaced the server's wall-clock rule (MAX `connector_state.updated_at` compared with the proof instant) with a monotonic per-connection revision. Equal timestamps do not identify a transaction, and a skewed clock can order a later commit before an earlier one. The revision follows the Core restore-safety fencing principle: retire by revision comparison only.
+
+Events that get a revision. The server assigns the next revision inside the transaction of each event it can observe for an authorized connection:
+
+| Event | Kind | Where |
+| --- | --- | --- |
+| Owner-scoped state write that touches a non-`$` stream | `state_commit` | connector-state store, PUT state route |
+| Terminal run commit (v1 or v2), with its own state delta | `terminal_run` | terminal-run-commit store |
+| New ingest batch admitted (not a replay of an admitted batch) | `batch_accepted` | device ingest route |
+| Ingest batch received and refused (4xx after device authorization) | `batch_rejected` | device ingest route |
+| Failure report received (`connector_child_failure` or `policy_budget` gap) | `failure_report` | local-collector-gaps route |
+
+Server-owned `$` scope rows, heartbeats, gap recoveries, grant-scoped state, and the legacy split `terminal-collection` report get no revision. They neither establish nor retire proof. The legacy split report follows its own state commit, which already has a revision; its run record is labelled with the current revision so that the projection can order it.
+
+Storage. `connector_instances` holds the high-water mark: `collection_revision` (0 before any event), `collection_revision_event`, `collection_revision_run_id`, and `collection_revision_at` (wall-clock, display only). `connector_state.collection_revision` records the revision of the commit that last wrote each row. The terminal run event, and so `run_history.facts_json`, carries `collection_revision`. SQLite adds the columns with `addColumnIfMissing`; Postgres uses `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. Rows that predate the migration read NULL and fail closed.
+
+Proof binding. A v2 proof is the terminal run record at revision R; its own state rows carry R. A legacy `coverage_diagnostics` proof is that state row, at the revision of the commit that wrote it.
+
+Retirement. A proof is current only when its revision equals the connection's high-water revision. For a v2 proof, the high-water event must also be `terminal_run` with the same run id. The server reads the proof run by that run id, not by the newest `completed_at`. Any later observable event raises the high-water revision and retires the proof to unknown. No wall clock takes part.
+
+Fail closed. Coverage is unknown when the high-water row or the proof revision is missing, NULL, not a safe integer, or unequal; when the high-water run id differs from the proof run; or when the revision read fails. A v2 proof is also unknown when the newest settled device run is a different run that carries no revision (a pre-migration row or a writer that assigns none), because its order against the proof is ambiguous.
+
+Terminal record for every successful run. A runtime that implements this profile version commits a terminal run record for every run whose DONE succeeded, even when coverage was not negotiated and no STATE changed. Without coverage evidence it sends a version 2 commit with empty `terminal_facts`, carrying the run's STATE delta. The server stores unknown inventory for it, and the device clears its receipt (`no_evidence`). A server that names no connection on its state read cannot bind a terminal record, so against such a server the runtime keeps the plain state checkpoint.
+
+As-of. Every owner projection that shows local coverage carries `coverage_as_of`: run id, release digest, collection revision, and commit time. Owner UI copy reads "complete as of <time>". A legacy proof has no release digest, so its `artifact_digest` is null.
+
+Limits. The server cannot order an attempt it never hears about. Examples are a run refused before authorization, a device that goes offline before it delivers its failure barrier, and a runner that predates this version and sends neither state nor records. In those cases the projection keeps the last admitted proof, labelled with its as-of. The device keeps its stricter local verdict. There is no heartbeat or lease machinery.

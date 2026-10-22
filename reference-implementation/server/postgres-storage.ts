@@ -1842,6 +1842,16 @@ async function bootstrapPostgresSchemaOnce({
       -- capabilities.record_identity.generation at reconcile time).
       ALTER TABLE connector_instances
         ADD COLUMN IF NOT EXISTS record_identity_generation BIGINT NOT NULL DEFAULT 0;
+      -- Per-connection collection revision: see ensureCollectionRevisionColumns
+      -- in db.ts and server/stores/collection-revision-store.ts.
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision_event TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision_run_id TEXT;
+      ALTER TABLE connector_instances
+        ADD COLUMN IF NOT EXISTS collection_revision_at TEXT;
 
       -- Existing Postgres deployments may have been bootstrapped before the
       -- static-secret draft lifecycle existed. Widen the status CHECK in place
@@ -3706,6 +3716,8 @@ async function bootstrapPostgresSchemaOnce({
         ADD COLUMN IF NOT EXISTS lease_expires_at TEXT;
       ALTER TABLE connector_state
         ADD COLUMN IF NOT EXISTS manifest_generation BIGINT NOT NULL DEFAULT 0;
+      ALTER TABLE connector_state
+        ADD COLUMN IF NOT EXISTS collection_revision BIGINT;
       ALTER TABLE grant_connector_state
         ADD COLUMN IF NOT EXISTS manifest_generation BIGINT NOT NULL DEFAULT 0;
       -- Terminal-run events are the fold source for per-stream evidence; the

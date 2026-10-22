@@ -39,6 +39,7 @@ import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
+import { type CollectionRevisionEvent, recordCollectionRevisionEvent } from "../stores/collection-revision-store.ts";
 import { commitTerminalRun } from "../stores/terminal-run-commit-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
@@ -2529,6 +2530,9 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
     ctx.requireDeviceExporterCredential,
     // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: this boundary deliberately keeps credential, identity, hash, and response precedence visible together.
     async (req: RouteRequest, res: RouteResponse) => {
+      // Set once the device and source are authorized. Every later refusal is a
+      // batch the server received for this connection and did not admit.
+      let observedConnectorInstanceId: string | null = null;
       try {
         const deviceId = decodeURIComponent(req.params.deviceId as string);
         if (deviceId !== req.deviceExporter?.deviceId) {
@@ -2554,6 +2558,7 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           return;
         }
         const { sourceInstance, connectorInstance } = authorized;
+        observedConnectorInstanceId = connectorInstance.connectorInstanceId;
         const sourceConnectorMatches = sameConnectorType(ctx, sourceInstance.connectorId, requestConnectorId);
         // Reservation identity and attempt facts use the canonical connector
         // key, not the URL/legacy alias supplied by the collector. This keeps
@@ -2569,6 +2574,7 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
         if (!SHA256_HEX.test(bodyHash) || (bodyHash !== canonical.hash && bodyHash !== collectorEnvelopeHash)) {
+          await observeCollectionAttempt(connectorInstance.connectorInstanceId, "batch_rejected");
           ctx.pdppError(
             res,
             400,
@@ -2591,6 +2597,9 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
       } catch (err) {
+        if (observedConnectorInstanceId) {
+          await observeCollectionAttempt(observedConnectorInstanceId, "batch_rejected");
+        }
         if (err instanceof ctx.DeviceBatchConflictError) {
           ctx.pdppError(
             res,
@@ -2637,6 +2646,30 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
   );
 }
 
+/**
+ * Record an observed collection attempt for an authorized connection, so it
+ * retires any earlier local coverage proof (see collection-revision-store.ts).
+ * The caller awaits this before it answers the device, so the device cannot
+ * send a later terminal commit that the server orders before this event.
+ */
+async function observeCollectionAttempt(
+  connectorInstanceId: string,
+  event: CollectionRevisionEvent,
+  runId: string | null = null
+): Promise<void> {
+  try {
+    await recordCollectionRevisionEvent(connectorInstanceId, {
+      at: new Date().toISOString(),
+      event,
+      runId,
+    });
+  } catch (error) {
+    console.warn(
+      `[device-exporters] collection revision not recorded connector_instance_id=${connectorInstanceId} event=${event} code=${String((error as { code?: unknown } | null)?.code ?? "unknown")}`
+    );
+  }
+}
+
 async function processDeviceIngestBatch(
   ctx: MountRefDeviceExportersContext,
   res: RouteResponse,
@@ -2681,6 +2714,7 @@ async function processDeviceIngestBatch(
     const existing = await ctx.deviceExporterStore.getBatchOutcome(deviceId, batchId);
     if (existing) {
       if (!deviceBatchIdentityMatches(existing, identity)) {
+        await observeCollectionAttempt(connectorInstanceId, "batch_rejected");
         ctx.pdppError(
           res,
           409,
@@ -2698,6 +2732,7 @@ async function processDeviceIngestBatch(
     // New malformed candidates retain the historical 400, but an existing
     // device/batch reservation owns conflict precedence.
     if (!sourceConnectorMatches) {
+      await observeCollectionAttempt(connectorInstanceId, "batch_rejected");
       ctx.pdppError(res, 400, "invalid_request", "connector_id does not match source_instance_id", "connector_id");
       return;
     }
@@ -2872,6 +2907,13 @@ async function processDeviceIngestBatch(
         source_instance_id: sourceInstanceId,
         status: "accepted",
       };
+      // A newly admitted batch is an observed attempt. Record it before the
+      // acknowledgement: the device sends its terminal commit only after this
+      // response, so the commit always gets the later revision.
+      await recordCollectionRevisionEvent(connectorInstanceId, {
+        at: new Date().toISOString(),
+        event: "batch_accepted",
+      });
       maybeDeviceIngestStoreFault("before-complete-processing-batch");
       await ctx.deviceExporterStore.completeProcessingBatch({
         acceptedAt: new Date().toISOString(),
@@ -3217,6 +3259,13 @@ async function reportLocalCollectorGap(
     stream: syntheticStream,
     ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),
     ...(lastRunId ? { lastRunId } : {}),
+  });
+  // A delivered failure report is an observed attempt: it retires any earlier
+  // coverage proof for this connection.
+  await recordCollectionRevisionEvent(connectorInstanceId, {
+    at: new Date().toISOString(),
+    event: "failure_report",
+    runId: lastRunId,
   });
   res.status(201).json({
     attempt_count: gap.attempt_count,

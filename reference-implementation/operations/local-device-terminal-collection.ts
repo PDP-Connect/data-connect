@@ -6,6 +6,7 @@ import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/loca
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
+import { readCollectionRevisionHighWaters } from "../server/stores/collection-revision-store.ts";
 import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
 import { TerminalRunCommitConflictError } from "../server/stores/terminal-run-commit-store.ts";
 
@@ -24,7 +25,10 @@ interface TerminalResponse {
 
 interface AuthorizedSource {
   readonly connectorInstance: { readonly connectorInstanceId: string };
-  readonly sourceInstance: { readonly connectorId: string; readonly manifestGeneration?: number | null };
+  readonly sourceInstance: {
+    readonly connectorId: string;
+    readonly manifestGeneration?: number | null;
+  };
 }
 
 interface TerminalContext {
@@ -135,7 +139,7 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
     }
     const validatedFacts =
       version === 2
-        ? normalizeTerminalCoverageFacts(rawFacts, registeredManifest, collectionBoundary, {
+        ? normalizeTerminalRunRecordFacts(rawFacts, registeredManifest, collectionBoundary, {
             allowSubset: true,
             bindingGeneration: authorized.sourceInstance.manifestGeneration ?? null,
             expectedArtifactDigest,
@@ -272,10 +276,16 @@ export async function handleLocalDeviceTerminalCollection(input: {
       );
       return;
     }
+    // The split report follows its own state commit, which already took a
+    // collection revision. It takes none itself; it is labelled with the
+    // current revision so the projection can order it against a proof.
+    const { connectorInstanceId } = authorized.connectorInstance;
+    const highWater = (await readCollectionRevisionHighWaters([connectorInstanceId])).get(connectorInstanceId);
     await ctx.emitSpineEvent({
       actor_id: deviceId,
       actor_type: "local_device",
       data: {
+        collection_revision: highWater?.revision ?? null,
         collection_facts: {
           // The boundary this evidence was measured against travels WITH it, so
           // a later scope change is detectable by comparison and stale proof can
@@ -367,6 +377,22 @@ export function normalizeTerminalFacts(rawFacts: readonly unknown[]): readonly R
   return byStream.size > 0
     ? [...byStream.values()].sort((left, right) => String(left.stream).localeCompare(String(right.stream)))
     : null;
+}
+
+/**
+ * A version 2 record with no facts makes no coverage claim: it is the terminal
+ * run record every successful run commits. Without a registered manifest
+ * there is no inventory to expand to unknown, so it stays empty. Any other
+ * version 2 record is validated as a coverage claim.
+ */
+function normalizeTerminalRunRecordFacts(
+  ...args: Parameters<typeof normalizeTerminalCoverageFacts>
+): ReturnType<typeof normalizeTerminalCoverageFacts> {
+  const [rawFacts, rawManifest] = args;
+  if (rawFacts.length === 0 && !Array.isArray(asObject(rawManifest)?.streams)) {
+    return [];
+  }
+  return normalizeTerminalCoverageFacts(...args);
 }
 
 /** Validate a v2 claim against the registered manifest, without source-specific rules. */
@@ -467,7 +493,10 @@ export function normalizeTerminalCoverageFacts(
       return null;
     }
     seen.add(stream);
-    const stores: { store: string; status: "collected" | "partial" | "unavailable" | "failed" }[] = [];
+    const stores: {
+      store: string;
+      status: "collected" | "partial" | "unavailable" | "failed";
+    }[] = [];
     const seenStores = new Set<string>();
     for (const rawStore of rawStores) {
       const store = asObject(rawStore);

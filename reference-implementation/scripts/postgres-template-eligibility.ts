@@ -103,7 +103,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/lexical-index-skip-unchanged-postgres.test.ts",
   "test/live-shadow-comparison.test.ts",
   "test/local-coverage-state-parser-postgres.test.ts",
-  // Postgres is a fixture for the newest state-commit read, not the schema bootstrap under test.
+  // Postgres is a fixture for the collection-revision fence read, not the schema bootstrap under test.
   "test/local-device-coverage-state-commit-postgres.test.ts",
   "test/manual-upload-artifact-store-postgres.test.ts",
   "test/oauth-code-delivery-atomicity.test.ts",

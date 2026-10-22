@@ -1,27 +1,26 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Stale terminal proof. A negotiated run commits a v2 terminal proof for every
-// requested stream. A later successful run that did not negotiate run coverage
-// then reaches the server with no terminal evidence. The server must not keep
-// projecting the older proof as covered once a later state commit exists that
-// the proof does not account for.
+// Stale terminal proof, fenced by the per-connection collection revision. The
+// server assigns every event that can establish or retire a local coverage
+// proof a monotonic revision at commit. A proof is current only while its
+// revision is the connection's high-water mark. No wall clock takes part.
 //
 // Two layers:
 //
-//   - Store-level boundary tests with an injected clock. They pin the ordering
-//     rule: a state commit strictly after the proof retires it; one at the same
-//     instant (the proof's own transaction) or before it does not.
+//   - Store-level tests with an injected clock. They pin that ordering follows
+//     the revision, not the timestamp: a distinct commit at the proof's own
+//     instant retires it, a commit after a clock rollback retires it, a commit
+//     before the proof does not retire it even when the clock had run ahead,
+//     and a newer proof wins even when its clock reads earlier. They also pin
+//     the as-of the projection carries and the fail-closed cases.
 //   - End-to-end journey through the real collector runner, the reference
 //     server, and the HTTP owner list and detail routes, as in
 //     local-device-coverage-journey.test.ts. Run B is unnegotiated and runs on a
 //     fresh device outbox, so the device holds no local receipt for it. The
-//     server projection must not depend on that device state.
-//
-// The journey has one limit that the server cannot close on its own. An
-// unnegotiated run that commits no state and no terminal record leaves nothing
-// the server can order against the proof. That case is pinned below as a
-// known limit, not a fix.
+//     server projection must not depend on that device state. A runtime that
+//     implements this profile version commits a terminal run record for every
+//     successful run, so run B retires run A's proof with or without STATE.
 
 // The local-collector bin reaches the untyped installer core. This names the
 // local collector's own shim for it, which the reference-implementation program
@@ -163,7 +162,9 @@ interface ProjectedStream {
 
 interface OwnerConnectionRow {
   readonly collection_report: readonly ProjectedStream[];
-  readonly connection_health: { readonly axes: { readonly coverage: string; readonly outbox: string } };
+  readonly connection_health: {
+    readonly axes: { readonly coverage: string; readonly outbox: string };
+  };
 }
 
 async function requestJson(url: string, init: RequestInit = {}): Promise<JsonResponse> {
@@ -243,7 +244,9 @@ function registerFixtureManifest(connectorInstanceId: string): void {
     | { manifest: string }
     | undefined;
   assert.ok(row, "enrolment registers the claude-code catalog manifest");
-  const catalog = JSON.parse(row.manifest) as Record<string, unknown> & { streams: Record<string, unknown>[] };
+  const catalog = JSON.parse(row.manifest) as Record<string, unknown> & {
+    streams: Record<string, unknown>[];
+  };
   const streams = PROFILE.streams.map((release) => {
     const declared = catalog.streams.find((stream) => stream.name === release.name);
     assert.ok(declared, `the catalog declares ${release.name}`);
@@ -333,15 +336,34 @@ function serverRunStreams(runId: string): Record<string, unknown>[] | null {
   if (!row) {
     return null;
   }
-  const facts = JSON.parse(row.facts_json) as { collection_facts?: { streams?: Record<string, unknown>[] } };
+  const facts = JSON.parse(row.facts_json) as {
+    collection_facts?: { streams?: Record<string, unknown>[] };
+  };
   return facts.collection_facts?.streams ?? [];
+}
+
+/** A successful run without coverage evidence commits a terminal record whose every stream is unknown. */
+function assertNoEvidenceTerminalRecord(runId: string): void {
+  const streams = serverRunStreams(runId);
+  assert.ok(streams, `the server committed a terminal record for ${runId}`);
+  assert.deepEqual(
+    streams.map((stream) => [stream.stream, stream.coverage_statuses]),
+    [
+      ["messages", ["unknown"]],
+      ["sessions", ["unknown"]],
+    ],
+    "the record carries no coverage evidence"
+  );
 }
 
 /** Stream cursors only. The `$`-prefixed rows are the server's own collection-scope state, not connector cursors. */
 function serverCursors(journey: Journey): Record<string, unknown> {
   const rows = getDb()
     .prepare("SELECT stream, state_json FROM connector_state WHERE connector_instance_id = ? ORDER BY stream")
-    .all(journey.enrolled.connector_instance_id) as Array<{ state_json: string; stream: string }>;
+    .all(journey.enrolled.connector_instance_id) as Array<{
+    state_json: string;
+    stream: string;
+  }>;
   return Object.fromEntries(
     rows.filter((row) => !row.stream.startsWith("$")).map((row) => [row.stream, JSON.parse(row.state_json) as unknown])
   );
@@ -533,56 +555,153 @@ async function seedV2Proof(runId: string): Promise<void> {
   });
 }
 
-async function boundaryProjection(): Promise<{ axis: string; conditions: Record<string, string> }> {
+async function boundaryProjection(): Promise<{
+  asOf: Record<string, unknown> | null;
+  axis: string;
+  conditions: Record<string, string>;
+}> {
   await reconcileDirtyConnectorSummaryEvidence(null);
   const summary = (await listConnectorSummaries()).find((row) => row.connector_instance_id === connectorInstanceId);
   assert.ok(summary, "the boundary connection is projected");
   return {
+    asOf: (summary.coverage_as_of as Record<string, unknown> | null) ?? null,
     axis: summary.connection_health.axes.coverage,
     conditions: Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition])),
   };
 }
 
-const BOUNDARY_TARGET = { connector_id: connectorId, connector_instance_id: connectorInstanceId };
+/** The connection's collection revision high-water mark, as the server stored it. */
+function highWaterRevision(): number {
+  const row = getDb()
+    .prepare("SELECT collection_revision FROM connector_instances WHERE connector_instance_id = ?")
+    .get(connectorInstanceId) as { collection_revision: number } | undefined;
+  assert.ok(row, "the boundary connection has a revision row");
+  return Number(row.collection_revision);
+}
 
-test("store: a state commit at the proof's own instant does not retire it; a strictly later one does", async (t) => {
+const BOUNDARY_TARGET = {
+  connector_id: connectorId,
+  connector_instance_id: connectorInstanceId,
+};
+const COMPLETE = { messages: "complete", sessions: "complete" };
+const UNKNOWN = { messages: "unknown", sessions: "unknown" };
+
+test("revision: a distinct state commit at the proof's own instant retires it", async (t) => {
   await withBoundaryConnection(async () => {
     t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
     await seedV2Proof("run_boundary_proof");
-    assert.deepEqual(await boundaryProjection(), {
-      axis: "complete",
-      conditions: { messages: "complete", sessions: "complete" },
+    assert.deepEqual((await boundaryProjection()).conditions, COMPLETE);
+
+    // The same wall-clock instant, but a separate commit: the proof does not account for it.
+    await putSyncState(BOUNDARY_TARGET, {
+      messages: { cursor: "same-instant" },
     });
+    const projected = await boundaryProjection();
+    assert.equal(projected.axis, "unknown", "an equal timestamp is not the proof's own transaction");
+    assert.deepEqual(projected.conditions, UNKNOWN);
+    assert.equal(projected.asOf, null, "retired coverage carries no as-of");
+  });
+});
 
-    // The same instant as the proof: nothing is later than the proof's own commit.
-    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "same-instant" } });
-    assert.equal((await boundaryProjection()).axis, "complete", "a same-instant state commit is not later");
+test("revision: a later state commit retires the proof when the server clock has gone back", async (t) => {
+  await withBoundaryConnection(async () => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
+    await seedV2Proof("run_boundary_proof");
+    t.mock.timers.setTime(Date.parse(PROOF_AT) - 3_600_000);
+    await putSyncState(BOUNDARY_TARGET, {
+      messages: { cursor: "after-clock-rollback" },
+    });
+    assert.deepEqual((await boundaryProjection()).conditions, UNKNOWN);
+  });
+});
 
-    // One millisecond later: a state commit the proof does not account for.
-    t.mock.timers.setTime(Date.parse(PROOF_AT) + 1);
-    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "later" } });
-    assert.deepEqual(await boundaryProjection(), {
-      axis: "unknown",
-      conditions: { messages: "unknown", sessions: "unknown" },
+test("revision: a state commit before the proof does not retire it when the clock had run ahead", async (t) => {
+  await withBoundaryConnection(async () => {
+    t.mock.timers.enable({
+      apis: ["Date"],
+      now: Date.parse(PROOF_AT) + 3_600_000,
+    });
+    await putSyncState(BOUNDARY_TARGET, {
+      messages: { cursor: "before-proof-skewed-ahead" },
+    });
+    t.mock.timers.setTime(Date.parse(PROOF_AT));
+    await seedV2Proof("run_boundary_after_skewed_state");
+    const projected = await boundaryProjection();
+    assert.deepEqual(projected.conditions, COMPLETE);
+    assert.equal(projected.asOf?.run_id, "run_boundary_after_skewed_state");
+  });
+});
+
+test("revision: a newer proof committed with the clock set back is the current proof", async (t) => {
+  await withBoundaryConnection(async () => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
+    await seedV2Proof("run_a_before_rollback");
+    t.mock.timers.setTime(Date.parse(PROOF_AT) - 3_600_000);
+    await seedV2Proof("run_b_after_rollback");
+    const projected = await boundaryProjection();
+    assert.deepEqual(projected.conditions, COMPLETE);
+    assert.equal(projected.asOf?.run_id, "run_b_after_rollback", "the newest revision wins, not the newest clock");
+    assert.equal(projected.asOf?.committed_at, new Date(Date.parse(PROOF_AT) - 3_600_000).toISOString());
+  });
+});
+
+test("as-of: a shown proof carries its run id, release digest, revision and commit time", async (t) => {
+  await withBoundaryConnection(async () => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
+    await seedV2Proof("run_as_of");
+    const release = readLocalCollectorRelease(connectorId);
+    assert.ok(release);
+    const projected = await boundaryProjection();
+    assert.equal(projected.axis, "complete");
+    assert.equal(projected.asOf?.run_id, "run_as_of", "the shown coverage names its run");
+    assert.deepEqual(projected.asOf, {
+      artifact_digest: release.artifactDigest,
+      collection_revision: highWaterRevision(),
+      committed_at: PROOF_AT,
+      evidence: "terminal_run",
+      run_id: "run_as_of",
     });
   });
 });
 
-test("store: a state commit before the proof does not retire it", async (t) => {
-  await withBoundaryConnection(async () => {
-    t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-22T09:30:00.000Z") });
-    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "earlier" } });
-    t.mock.timers.setTime(Date.parse(PROOF_AT));
-    await seedV2Proof("run_boundary_after_earlier_state");
-    assert.equal((await boundaryProjection()).axis, "complete");
-  });
+test("revision: an unreadable or mismatched revision fails closed", async (t) => {
+  for (const tamper of ["drop proof revision", "high-water below proof", "high-water names another run"] as const) {
+    // biome-ignore lint/performance/noAwaitInLoops: each case needs its own fresh database, one after another.
+    await withBoundaryConnection(async () => {
+      t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
+      await seedV2Proof("run_fail_closed");
+      assert.equal((await boundaryProjection()).axis, "complete", tamper);
+      if (tamper === "drop proof revision") {
+        getDb()
+          .prepare(
+            "UPDATE run_history SET facts_json = json_remove(facts_json, '$.collection_revision') WHERE run_id = ?"
+          )
+          .run("run_fail_closed");
+      } else if (tamper === "high-water below proof") {
+        getDb()
+          .prepare(
+            "UPDATE connector_instances SET collection_revision = collection_revision - 1 WHERE connector_instance_id = ?"
+          )
+          .run(connectorInstanceId);
+      } else {
+        getDb()
+          .prepare("UPDATE connector_instances SET collection_revision_run_id = ? WHERE connector_instance_id = ?")
+          .run("run_other", connectorInstanceId);
+      }
+      const projected = await boundaryProjection();
+      assert.deepEqual(projected.conditions, UNKNOWN, tamper);
+      assert.equal(projected.asOf, null, tamper);
+      t.mock.timers.reset();
+    });
+  }
 });
 
 // Legacy path: no v2 run exists, so the projection reads the committed
-// `coverage_diagnostics` snapshot. Its `updated_at` is the proof's instant.
+// `coverage_diagnostics` snapshot. It binds to the revision of the state commit
+// that wrote it.
 const LEGACY_DIAGNOSTICS_STREAM = "coverage_diagnostics";
 
-test("store: a legacy diagnostics proof is retired by a later state commit, not by one at its own instant", async (t) => {
+test("revision: a legacy diagnostics proof stands while its commit is newest; any later commit retires it", async (t) => {
   await withBoundaryConnection(async () => {
     const stores = expectedLocalCoverageStoreDescriptors(connectorId);
     assert.ok(stores, "the claude-code inventory declares its coverage stores");
@@ -591,35 +710,44 @@ test("store: a legacy diagnostics proof is retired by a later state commit, not 
       stores: stores.map(({ store, stream }) => ({ status: "collected", store, stream })),
     };
     t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
-    await putSyncState(BOUNDARY_TARGET, { [LEGACY_DIAGNOSTICS_STREAM]: snapshot });
-    assert.equal((await boundaryProjection()).axis, "complete", "the legacy snapshot is a reliable complete proof");
+    // One commit carries the diagnostics and a cursor: both rows share its revision.
+    await putSyncState(BOUNDARY_TARGET, {
+      [LEGACY_DIAGNOSTICS_STREAM]: snapshot,
+      messages: { cursor: "own" },
+    });
+    const projected = await boundaryProjection();
+    assert.equal(projected.axis, "complete", "the legacy snapshot is a reliable complete proof");
+    assert.equal(projected.asOf?.evidence, "legacy_diagnostics", "the legacy proof carries its as-of");
+    assert.deepEqual(projected.asOf, {
+      artifact_digest: null,
+      collection_revision: highWaterRevision(),
+      committed_at: PROOF_AT,
+      evidence: "legacy_diagnostics",
+      run_id: null,
+    });
 
-    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "same-instant" } });
-    assert.equal((await boundaryProjection()).axis, "complete", "a same-instant state write is not later");
-
-    t.mock.timers.setTime(Date.parse(PROOF_AT) + 1);
-    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "later" } });
+    await putSyncState(BOUNDARY_TARGET, {
+      messages: { cursor: "same-instant" },
+    });
     assert.equal(
       (await boundaryProjection()).axis,
       "unknown",
-      "a later unaccounted state write retires the legacy proof"
+      "a separate commit at the same instant retires the legacy proof"
     );
   });
 });
 
-test("store: a later server-owned scope write is not a state commit and does not retire the proof", async (t) => {
+test("revision: a later server-owned scope write is not an event and does not retire the proof", async (t) => {
   await withBoundaryConnection(async () => {
     t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
     await seedV2Proof("run_boundary_scope_proof");
+    const revision = highWaterRevision();
     t.mock.timers.setTime(Date.parse(PROOF_AT) + 1);
     await putSyncState(BOUNDARY_TARGET, {
       [COLLECTION_SCOPE_STATE_KEY]: buildStoredCollectionScope(null, new Date().toISOString()),
     });
-    assert.equal(
-      (await boundaryProjection()).axis,
-      "complete",
-      "the `$`-prefixed scope row is server state, not a commit"
-    );
+    assert.equal(highWaterRevision(), revision, "the `$`-prefixed scope row gets no revision");
+    assert.equal((await boundaryProjection()).axis, "complete");
   });
 });
 
@@ -645,7 +773,7 @@ test("journey: a later unnegotiated run that commits state retires the earlier v
       [],
       "the fresh outbox holds no receipt"
     );
-    assert.equal(serverRunStreams("b-state"), null, "the server committed no terminal evidence for run B");
+    assertNoEvidenceTerminalRecord("b-state");
     assert.deepEqual(
       serverCursors(journey).messages,
       { cursor: "b-state-messages" },
@@ -688,11 +816,16 @@ test("journey: an unnegotiated state commit before a negotiated proof does not r
   });
 });
 
-test("journey, known limit: an unnegotiated run that commits no state leaves no server record, so the last proof stands", async () => {
+test("journey: a later unnegotiated run with no STATE commits a terminal record that retires the proof", async () => {
   await withJourney(async (journey) => {
-    await runOnce(journey, { mode: "complete", negotiated: true, tag: "a-complete" });
-    // Run B: unnegotiated, records only, no STATE, fresh outbox. The server gets
-    // records but no commit it can order against the proof.
+    await runOnce(journey, {
+      mode: "complete",
+      negotiated: true,
+      tag: "a-complete",
+    });
+    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    // Run B: unnegotiated, records only, no STATE, fresh outbox. A runtime that
+    // implements this profile version still commits its terminal run record.
     const freshQueue = join(journey.dir, "outbox-fresh.sqlite");
     const b = await runOnce(journey, {
       mode: "records-only",
@@ -701,9 +834,13 @@ test("journey, known limit: an unnegotiated run that commits no state leaves no 
       tag: "b-silent",
     });
     assert.equal(b.result.done?.status, "succeeded");
-    assert.equal(serverRunStreams("b-silent"), null, "the server committed no terminal evidence for run B");
+    assertNoEvidenceTerminalRecord("b-silent");
     assert.deepEqual(serverCursors(journey).messages, { cursor: "a-complete-messages" }, "no cursor moved");
-    // This pins what the server can observe today. Closing it needs a run boundary from the runtime.
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    const owner = await ownerConnectionRow(journey);
+    assert.equal(owner.connection_health.axes.coverage, "unknown");
+    assert.deepEqual(conditions(owner), {
+      messages: "unknown",
+      sessions: "unknown",
+    });
   });
 });

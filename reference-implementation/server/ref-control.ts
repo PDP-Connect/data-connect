@@ -206,6 +206,7 @@ import {
   createSqliteAcquisitionBatchStore,
 } from "./stores/acquisition-batch-store.ts";
 import { getDefaultBrowserSurfaceLeaseStore } from "./stores/browser-surface-lease-store.ts";
+import { type LocalCoverageRevisionFence, readCollectionRevision } from "./stores/collection-revision-store.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import { getDefaultConnectorCoverageHorizonStore } from "./stores/connector-coverage-horizon-store.ts";
 import { getDefaultConnectorDetailGapStore } from "./stores/connector-detail-gap-store.ts";
@@ -597,6 +598,8 @@ export interface ConnectorRunSummary {
    * `collection_report`; never final coverage truth.
    */
   readonly collection_facts: RuntimeCollectionFacts | null;
+  /** The per-connection collection revision this run was committed at; `null` when the run carries none. */
+  readonly collection_revision?: number | null;
   /** Authenticated v2 device terminal evidence, kept raw until manifest and current scope are checked on read. */
   readonly local_terminal_coverage?: {
     readonly eligibleLocalRun: boolean;
@@ -926,6 +929,12 @@ export interface ConnectorSummary {
    * here means "not read," never "confirmed absent."
    */
   readonly coverage_horizons: readonly ConnectionCoverageHorizon[];
+  /**
+   * What the local coverage on this row is a fact about: the run, its release
+   * digest, and the collection revision and time it was committed at. `null`
+   * when no current local proof backs the coverage shown.
+   */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   readonly display_name: string;
   readonly freshness: Freshness;
   readonly last_run: ConnectorRunSummary | null;
@@ -1164,6 +1173,8 @@ export interface ConnectorDetail {
    */
   readonly connection_health: ConnectionHealthSnapshot | null;
   readonly connection_id: string;
+  /** See {@link ConnectorSummary.coverage_as_of}; `null` when no single connection resolved. */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   /**
    * How this connector-keyed detail resolved to an owner connection
    * (design.md "Central consumer and cache boundary"): `resolved` when
@@ -1598,6 +1609,7 @@ function productRunHistoryToConnectorRunSummary(
       : null;
   return {
     collection_facts: readCollectionFactsFromTerminalData(facts),
+    collection_revision: readCollectionRevision(facts?.collection_revision),
     local_terminal_coverage: readLocalTerminalCoverage(facts, history),
     connector_error: projectConnectorRunError(history.connectorError),
     event_count: 0,
@@ -1624,7 +1636,12 @@ function recordOrNull(value: unknown): Record<string, unknown> | null {
 
 function readLocalTerminalCoverage(
   facts: Record<string, unknown> | null,
-  history: ProductRunHistoryRecord
+  history: {
+    readonly connectorInstanceId?: string | null;
+    readonly runId?: string | null;
+    readonly schedulerManaged?: boolean | null;
+    readonly status: string;
+  }
 ): NonNullable<ConnectorRunSummary["local_terminal_coverage"]> | null {
   const block = recordOrNull(facts?.collection_facts);
   if (block?.schema_version !== 2) {
@@ -4804,11 +4821,27 @@ interface LocalCoverageDiagnosticAxis {
     | "missing_stores"
     | "unexpected_stores";
   /**
-   * The newest state-commit instant for this connection (see
-   * `readLatestStateCommitAt` in `server/records.ts`). Carried so the projection
-   * can retire a proof that a later, unaccounted state commit has superseded.
+   * The connection's collection-revision fence (see
+   * `server/stores/collection-revision-store.ts`). Carried so the projection
+   * can retire a proof that any later observed event has superseded.
    */
-  readonly stateCommittedAt?: string | null;
+  readonly revisionFence?: LocalCoverageRevisionFence | null;
+  /** What the shown coverage is a fact about. Set only on a proof the revision fence admits. */
+  readonly asOf?: LocalCoverageAsOf | null;
+}
+
+/**
+ * The run a local coverage verdict describes. Coverage is a fact about one
+ * run, never a present-tense claim, so every projection that shows coverage
+ * carries this. A legacy diagnostics proof has no release binding, so its
+ * `artifact_digest` is null; its `run_id` is null when no run committed it.
+ */
+export interface LocalCoverageAsOf {
+  readonly artifact_digest: string | null;
+  readonly collection_revision: number;
+  readonly committed_at: string | null;
+  readonly evidence: "legacy_diagnostics" | "terminal_run";
+  readonly run_id: string | null;
 }
 
 const LOCAL_COVERAGE_ACCOUNTED_STATUSES = new Set([
@@ -4904,8 +4937,8 @@ export function deriveLocalCoverageAxis(input: {
    * that hold no boundary omit it and keep the honest `unscoped` default.
    */
   readonly declaredCollectionScope?: string | null;
-  /** The connection's newest state-commit instant (`readLatestStateCommitAt`); omitted by callers with no state read. */
-  readonly stateCommittedAt?: string | null;
+  /** The connection's collection-revision fence; omitted by callers with no revision read, which fail closed. */
+  readonly revisionFence?: LocalCoverageRevisionFence | null;
 }): LocalCoverageDiagnosticAxis {
   const declaredScope = resolveDeclaredCoverageScope(input.declaredCollectionScope, input.state);
   const { rows } = input;
@@ -4926,7 +4959,7 @@ export function deriveLocalCoverageAxis(input: {
   const scopeField = {
     declaredCollectionScope: declaredScope,
     measuredCollectionScope: measuredScope,
-    stateCommittedAt: input.stateCommittedAt ?? null,
+    revisionFence: input.revisionFence ?? null,
   };
   const stateCursor =
     input.state && typeof input.state === "object" && !Array.isArray(input.state)
@@ -5007,7 +5040,7 @@ export function deriveLocalCoverageAxis(input: {
 
 /** Recheck committed v2 facts against the currently pinned manifest and scope. */
 function deriveLocalTerminalCoverageAxis(
-  run: ConnectorRunSummary | null,
+  run: Pick<ConnectorRunSummary, "last_at" | "local_terminal_coverage"> | null,
   manifest: ConnectorManifest,
   legacyAxis: LocalCoverageDiagnosticAxis | null,
   bindingGeneration: number | null,
@@ -5060,7 +5093,10 @@ function deriveLocalTerminalCoverageAxis(
       return unknown;
     }
     let storeIndex = 0;
-    for (const assertion of rawFact.stores as readonly { store: string; status: string }[]) {
+    for (const assertion of rawFact.stores as readonly {
+      store: string;
+      status: string;
+    }[]) {
       const status = (rawFact.coverage_statuses as string[])[storeIndex] ?? "unknown";
       storeIndex += 1;
       const rawStore = { ...assertion, status };
@@ -5090,41 +5126,131 @@ function deriveLocalTerminalCoverageAxis(
 }
 
 /**
- * Retire a local coverage proof that a later, unaccounted state commit has
- * superseded.
- *
- * A terminal commit writes its state rows and its run completion with one
- * instant, so `evidenceAsOf` is the proof's own instant: a v2 proof's run
- * `completed_at`, or a legacy proof's diagnostics `updated_at`. A state commit
- * strictly after that instant came from a later run or checkpoint. That commit
- * carried no terminal replacement, so the proof no longer describes the source's
- * latest collection, and coverage is unknown until a later run proves it again.
- * A commit at the same instant is the proof's own transaction, and an earlier
- * one predates it. Neither retires the proof.
- *
- * The server decides this from what it stored. It never reads the device outbox.
- * An unparseable instant keeps the proof, because it cannot establish that a
- * later commit exists.
+ * The terminal run the revision fence names, shaped for
+ * `deriveLocalTerminalCoverageAxis`. The fence reads it by run id, so a
+ * skewed `completed_at` cannot hide a newer proof behind an older one.
  */
-function retireLocalCoverageSupersededByLaterCommit(
-  axis: LocalCoverageDiagnosticAxis | null,
-  stateCommittedAt: string | null | undefined
-): LocalCoverageDiagnosticAxis | null {
-  if (axis === null || axis.axis === "unknown" || !axis.evidenceAsOf || !stateCommittedAt) {
-    return axis;
+function localProofRunCoverage(
+  fence: LocalCoverageRevisionFence | null | undefined,
+  connectorInstanceId: string
+): {
+  readonly artifactDigest: string | null;
+  readonly collectionRevision: number | null;
+  readonly run: Pick<ConnectorRunSummary, "last_at" | "local_terminal_coverage">;
+  readonly runId: string;
+} | null {
+  const proofRun = fence?.proofRun;
+  // A terminal run record always has a completion time; one without it is not a proof.
+  if (!proofRun?.completedAt) {
+    return null;
   }
-  if (!(Date.parse(stateCommittedAt) > Date.parse(axis.evidenceAsOf))) {
-    return axis;
+  const terminal = readLocalTerminalCoverage(proofRun.facts, {
+    connectorInstanceId,
+    runId: proofRun.runId,
+    schedulerManaged: proofRun.schedulerManaged,
+    status: proofRun.status,
+  });
+  if (!terminal) {
+    return null;
   }
+  const digests = new Set(
+    (Array.isArray(terminal.streams) ? terminal.streams : []).map((fact) => recordOrNull(fact)?.artifact_digest)
+  );
+  const [digest] = digests;
   return {
-    ...axis,
-    axis: "unknown",
-    evidenceAsOf: null,
-    measuredCollectionScope: null,
-    reliable: false,
-    rows: [],
-    unaccountedStores: [],
+    artifactDigest: digests.size === 1 && typeof digest === "string" ? digest : null,
+    collectionRevision: readCollectionRevision(proofRun.facts?.collection_revision),
+    run: { last_at: proofRun.completedAt, local_terminal_coverage: terminal },
+    runId: proofRun.runId,
   };
+}
+
+/**
+ * Keep a local coverage proof only while it is the connection's newest
+ * observed collection event.
+ *
+ * The server assigns each event that can establish or retire proof a
+ * monotonic per-connection revision at commit (state commits, terminal runs,
+ * admitted and refused batches, delivered failure reports). A proof binds to
+ * the revision it was committed at. It is current only when that revision is
+ * the high-water mark; any later event retires it to unknown. No wall clock is
+ * compared. A v2 proof must also be the terminal run the high-water mark names.
+ * A legacy diagnostics proof is the `coverage_diagnostics` row, at the revision
+ * of the commit that wrote it.
+ *
+ * Fails closed: a missing fence, an unreadable or NULL revision, any
+ * mismatch, or (for a terminal proof) a newest settled device run that is not
+ * the proof and carries no revision, whose order is ambiguous, is unknown
+ * coverage.
+ */
+function fenceLocalCoverageProof(
+  axis: LocalCoverageDiagnosticAxis | null,
+  fence: LocalCoverageRevisionFence | null | undefined,
+  terminal: ReturnType<typeof localProofRunCoverage>,
+  latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null
+): LocalCoverageDiagnosticAxis | null {
+  if (axis === null || axis.axis === "unknown") {
+    return axis;
+  }
+  const highWater = fence?.highWater ?? null;
+  // A settled device run record with no revision cannot be ordered against a
+  // terminal proof (a pre-revision row, or a writer that assigns none). If it
+  // is the newest settled run and not the proof itself, the order is
+  // ambiguous. A scheduler-managed run is not a device collection attempt. A
+  // legacy diagnostics proof binds to a state row, not to a run record, so
+  // this check does not apply to it.
+  const unorderedLaterRun =
+    terminal !== null &&
+    latestSettledRun !== null &&
+    latestSettledRun.scheduler_managed !== true &&
+    latestSettledRun.run_id !== terminal?.runId &&
+    (latestSettledRun.collection_revision === null || latestSettledRun.collection_revision === undefined);
+  let asOf: LocalCoverageAsOf | null = null;
+  if (unorderedLaterRun) {
+    asOf = null;
+  } else if (terminal) {
+    if (
+      highWater?.event === "terminal_run" &&
+      highWater.runId === terminal.runId &&
+      terminal.collectionRevision !== null &&
+      terminal.collectionRevision === highWater.revision
+    ) {
+      asOf = {
+        artifact_digest: terminal.artifactDigest,
+        collection_revision: highWater.revision,
+        committed_at: terminal.run.last_at ?? null,
+        evidence: "terminal_run",
+        run_id: terminal.runId,
+      };
+    }
+  } else if (
+    highWater &&
+    (highWater.event === "state_commit" || highWater.event === "terminal_run") &&
+    fence?.legacyProofRevision !== null &&
+    fence?.legacyProofRevision !== undefined &&
+    fence.legacyProofRevision === highWater.revision
+  ) {
+    asOf = {
+      artifact_digest: null,
+      collection_revision: highWater.revision,
+      committed_at: highWater.at,
+      evidence: "legacy_diagnostics",
+      run_id: highWater.event === "terminal_run" ? highWater.runId : null,
+    };
+  }
+  if (!asOf) {
+    return {
+      ...axis,
+      asOf: null,
+      axis: "unknown",
+      evidenceAsOf: null,
+      measuredCollectionScope: null,
+      reliable: false,
+      rows: [],
+      unaccountedStores: [],
+    };
+  }
+  return { ...axis, asOf };
 }
 
 /**
@@ -7146,21 +7272,26 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const localCollectorRelease = localDeviceBacked ? readLocalCollectorRelease(connectorId) : null;
-  // Whichever proof this reads (the settled run's v2 verdict, else the legacy
-  // diagnostics), a later state commit it does not account for retires it. The
-  // downstream readers below all take `effectiveLocalCoverage`, so the
+  // The proof is the terminal run the connection's revision high-water mark
+  // names (else the legacy diagnostics row). Any later observed event retires
+  // it. The downstream readers below all take `effectiveLocalCoverage`, so the
   // retirement reaches every consumer, not only this branch.
+  const proofRunCoverage = localDeviceBacked
+    ? localProofRunCoverage(localCoverage?.revisionFence, connectorInstanceId)
+    : null;
   const effectiveLocalCoverage = localDeviceBacked
-    ? retireLocalCoverageSupersededByLaterCommit(
+    ? fenceLocalCoverageProof(
         deriveLocalTerminalCoverageAxis(
-          fallbackSettledRun,
+          proofRunCoverage?.run ?? null,
           manifest,
           localCoverage,
           evidence?.manifest_generation ?? null,
           localCollectorRelease?.artifactDigest ?? null,
           localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
         ) ?? localCoverage,
-        localCoverage?.stateCommittedAt
+        localCoverage?.revisionFence,
+        proofRunCoverage,
+        fallbackSettledRun
       )
     : localCoverage;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
@@ -7486,6 +7617,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     connection_health: connectionHealth,
     connection_id: connectorInstanceId,
     connector_display_name: connectorDisplayName,
+    coverage_as_of: effectiveLocalCoverage?.asOf ?? null,
     connector_id: connectorId,
     connector_implementation: input.connectorImplementation,
     connector_instance_id: connectorInstanceId,
@@ -9624,6 +9756,7 @@ function buildUnresolvedConnectorDetail(
     connection_health: null,
     connection_id: connectorId,
     connection_resolution: resolution,
+    coverage_as_of: null,
     connector_id: connectorId,
     display_name: manifest.display_name || connectorId,
     freshness: { status: "unknown" },
@@ -9694,6 +9827,7 @@ export async function getConnectorDetail(
     connection_id: summary.connector_instance_id,
     connection_resolution: "resolved",
     connector_id: summary.connector_id,
+    coverage_as_of: summary.coverage_as_of,
     display_name: summary.display_name,
     freshness: summary.freshness,
     last_run: summary.last_run,

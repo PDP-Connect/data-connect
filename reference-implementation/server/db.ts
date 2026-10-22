@@ -2998,6 +2998,20 @@ function ensureRecordIdentityGenerationColumn(raw: SqliteDatabase): void {
   addColumnIfMissing(raw, "connector_instances", "record_identity_generation", "INTEGER NOT NULL DEFAULT 0");
 }
 
+// Per-connection collection revision (server/stores/collection-revision-store.ts):
+// a monotonic counter the server assigns at commit to every observed event that
+// can establish or retire a local coverage proof. `connector_instances` holds
+// the high-water mark; `connector_state.collection_revision` is the revision of
+// the commit that last wrote the row. Rows that predate the columns read NULL,
+// and a NULL proof revision is unknown coverage.
+function ensureCollectionRevisionColumns(raw: SqliteDatabase): void {
+  addColumnIfMissing(raw, "connector_instances", "collection_revision", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(raw, "connector_instances", "collection_revision_event", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "collection_revision_run_id", "TEXT");
+  addColumnIfMissing(raw, "connector_instances", "collection_revision_at", "TEXT");
+  addColumnIfMissing(raw, "connector_state", "collection_revision", "INTEGER");
+}
+
 function ensureConnectorSummaryEvidenceColumns(raw: SqliteDatabase): void {
   addColumnIfMissing(raw, "connector_summary_evidence", "last_record_updated_at", "TEXT");
   addColumnIfMissing(raw, "connector_summary_evidence", "stream_records_json", "TEXT NOT NULL DEFAULT '[]'");
@@ -6554,6 +6568,7 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   );
   runWithSqliteBusyRetrySync(() => ensureRecordResetGenerationColumn(raw));
   runWithSqliteBusyRetrySync(() => ensureRecordIdentityGenerationColumn(raw));
+  runWithSqliteBusyRetrySync(() => ensureCollectionRevisionColumns(raw));
   // Incremental add-source linkage: a later same-client ceremony records the
   // prior package it extends via `parent_package_id`. Pre-existing reference
   // DBs predate the column; add it non-destructively (NULL = a root package

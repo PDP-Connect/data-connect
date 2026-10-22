@@ -31,6 +31,7 @@ import { COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts"
 import { putSyncState, readCommittedLocalCoverageDiagnostics } from "../server/records.ts";
 import { deriveLocalCoverageAxis, listConnectorSummaries } from "../server/ref-control.ts";
 import { rebuildRetainedSize } from "../server/retained-size-read-model.ts";
+import { recordCollectionRevisionEvent } from "../server/stores/collection-revision-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
 
@@ -160,10 +161,16 @@ async function seedLocalRun({
   });
 
   if (commitSnapshot) {
+    // A committed snapshot is a state commit: it takes the connection's next
+    // collection revision, which the projection binds the proof to.
+    const revision = await recordCollectionRevisionEvent(CONNECTOR_INSTANCE_ID, {
+      at: "2026-06-03T11:58:31.000Z",
+      event: "state_commit",
+    });
     getDb()
       .prepare(
-        `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at)
-         VALUES (?, ?, 'coverage_diagnostics', ?, ?)`
+        `INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at, collection_revision)
+         VALUES (?, ?, 'coverage_diagnostics', ?, ?, ?)`
       )
       .run(
         connectorId,
@@ -177,7 +184,8 @@ async function seedLocalRun({
             stream: descriptor.stream ?? null,
           })),
         }),
-        "2026-06-03T11:58:31.000Z"
+        "2026-06-03T11:58:31.000Z",
+        revision
       );
   }
 
