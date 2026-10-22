@@ -167,6 +167,7 @@ import { filterRunGapsProvenCompleteByReport } from "./continuation-proof.ts";
 import { getSqliteStoreCacheIdentity } from "./db.ts";
 import { deriveReferenceFreshness, type ReferenceFreshness } from "./freshness.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
+import { readLocalCollectorArtifactDigest } from "./local-collector-profiles.ts";
 import { mapPendingPressureGaps } from "./pending-pressure-gap-map.ts";
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
 import {
@@ -203,7 +204,6 @@ import { getDefaultBrowserSurfaceLeaseStore } from "./stores/browser-surface-lea
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import { getDefaultConnectorCoverageHorizonStore } from "./stores/connector-coverage-horizon-store.ts";
 import { getDefaultConnectorDetailGapStore } from "./stores/connector-detail-gap-store.ts";
-import { getDefaultConnectorStateStore } from "./stores/connector-state-store.ts";
 import {
   type CredentialStateChange,
   createPostgresConnectorInstanceCredentialStore,
@@ -215,6 +215,7 @@ import {
   isOwnerVisibleConnectorInstance,
   RETIRED_SETUP_SHELL_BINDING_KINDS,
 } from "./stores/connector-instance-store.ts";
+import { getDefaultConnectorStateStore } from "./stores/connector-state-store.ts";
 import {
   getDefaultDeviceExporterStore,
   listSourceInstanceHeartbeatsByConnectionIds,
@@ -4456,8 +4457,13 @@ function pendingDetailGapCountsByStream(
 function terminalCoverageByStream(
   run: ConnectorRunSummary | null,
   manifest: ConnectorManifest,
-  declaredScope: string | null
-): ReadonlyMap<string, CoverageAxis> | null {
+  declaredScope: string | null,
+  bindingGeneration: number | null,
+  expectedArtifactDigest: string | null
+): {
+  readonly conditions: ReadonlyMap<string, CoverageAxis>;
+  readonly bindingReason: "artifact_digest_mismatch" | "artifact_digest_unknown" | null;
+} | null {
   const terminal = run?.local_terminal_coverage;
   if (
     !terminal?.eligibleLocalRun ||
@@ -4467,26 +4473,48 @@ function terminalCoverageByStream(
   ) {
     return null;
   }
-  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, declaredScope);
+  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, declaredScope, {
+    allowSubset: true,
+    bindingGeneration,
+    expectedArtifactDigest,
+    validateBindingGeneration: true,
+    validateServerArtifactDigest: true,
+  });
   if (!normalized) {
     return null;
   }
+  const bindingReason = normalized.find((fact) => typeof fact.artifact_binding_reason === "string")
+    ?.artifact_binding_reason as "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined;
   const conditions = new Map<string, CoverageAxis>();
   for (const fact of normalized) {
     if (fact.scoped !== true || typeof fact.stream !== "string" || !Array.isArray(fact.stores)) {
       return null;
     }
-    const statuses = fact.stores.map((store: { status: string }) => store.status);
-    const condition: CoverageAxis = statuses.includes("failed")
-      ? "gaps"
-      : statuses.includes("partial")
-        ? "partial"
-        : statuses.includes("unavailable")
-          ? "unavailable"
-          : "complete";
-    conditions.set(fact.stream, condition);
+    conditions.set(fact.stream, terminalCoverageCondition(fact.coverage_statuses as string[], bindingReason));
   }
-  return conditions;
+  return { bindingReason: bindingReason ?? null, conditions };
+}
+
+function terminalCoverageCondition(
+  statuses: readonly string[],
+  bindingReason: "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined
+): CoverageAxis {
+  if (bindingReason || statuses.includes("unknown")) {
+    return "unknown";
+  }
+  if (statuses.includes("failed") || statuses.includes("unaccounted")) {
+    return "gaps";
+  }
+  if (statuses.includes("partial")) {
+    return "partial";
+  }
+  if (statuses.includes("unavailable")) {
+    return "unavailable";
+  }
+  if (statuses.includes("inventory_only")) {
+    return "inventory_only";
+  }
+  return "complete";
 }
 
 function stateStreamParent(stream: ManifestStream | undefined): string | null {
@@ -5410,6 +5438,7 @@ export function projectConnectorSummaryConnectionHealth(input: {
    * connections (device evidence never greens them).
    */
   readonly localDeviceBacked?: boolean;
+  readonly unknownArtifactBinding?: "artifact_digest_mismatch" | "artifact_digest_unknown" | null;
   /**
    * Manifest-declared streams. The projection reads each stream's
    * `required` flag and `coverage_policy` to roll up accepted-coverage
@@ -5545,13 +5574,13 @@ export function projectConnectorSummaryConnectionHealth(input: {
     lastErrorCode: scheduleEvidence.lastErrorCode,
     nowIso,
   });
-  const coverage = applyCoverageOverride(
-    {
+  const coverage = {
+    ...applyCoverageOverride({
       axis: mapCoverageAxis(coverageRunForHealth, pendingDetailGaps, input.manifestStreams ?? []),
       requiredButAccepted: pickRequiredAcceptedCoverage(input.manifestStreams ?? []) !== null,
-    },
-    input.coverageOverride
-  );
+    }, input.coverageOverride),
+    ...(input.unknownArtifactBinding ? { unknownArtifactBinding: input.unknownArtifactBinding } : {}),
+  };
   const outbox = input.outbox ?? { axis: "unknown" };
   const freshnessAxis = mapFreshnessAxis(input.freshness);
   // Cadence-relative lateness: "did the expected collection happen?", sized
@@ -6463,7 +6492,13 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const terminalCoverage = localDeviceBacked
-    ? terminalCoverageByStream(fallbackSettledRun, manifest, input.declaredLocalCollectionScope)
+    ? terminalCoverageByStream(
+        fallbackSettledRun,
+        manifest,
+        input.declaredLocalCollectionScope,
+        evidence?.manifest_generation ?? null,
+        readLocalCollectorArtifactDigest(connectorId)
+      )
     : null;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =
@@ -6556,6 +6591,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     refreshPolicy,
     remoteSurface: healthRemoteSurface.evidence,
     schedule: localDeviceBacked ? null : schedule,
+    unknownArtifactBinding: terminalCoverage?.bindingReason ?? null,
     unreliableSources: combineUnreliableSources(
       detailGaps.unreliable,
       outbox.unreliable,
@@ -6587,7 +6623,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   });
   const collectionReport = terminalCoverage
     ? baseCollectionReport.map((entry) => {
-        const condition = terminalCoverage.get(entry.stream);
+        const condition = terminalCoverage.conditions.get(entry.stream);
         if (!condition) {
           return entry;
         }

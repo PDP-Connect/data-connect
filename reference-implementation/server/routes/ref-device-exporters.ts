@@ -530,6 +530,7 @@ export interface MountRefDeviceExportersContext {
   // connector. Used to derive the enrolled source kind from the manifest
   // bindings. Async to match the host's `getConnectorManifest`.
   getConnectorManifest: (connectorId: string) => Promise<SourceKindManifestLike | null> | SourceKindManifestLike | null;
+  getExpectedArtifactDigest?: (connectorId: string) => string | null;
   getDefaultConnectorDetailGapStore: () => ConnectorDetailGapStore;
   getOwnerSubjectId: (req: unknown) => string;
   getSemanticCapabilityIdentity: () => string;

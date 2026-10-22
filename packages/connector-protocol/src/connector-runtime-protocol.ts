@@ -324,6 +324,8 @@ export interface StartMessage {
    * new source-touching work. Absent/false = an ordinary full run.
    */
   recovery_only?: boolean;
+  /** Optional negotiated store collection evidence, independent of protocol_version. */
+  run_coverage_version?: 1;
   scope: { streams: readonly StreamScope[] };
   state?: Record<string, unknown>;
   streamsToBackfill?: readonly string[];

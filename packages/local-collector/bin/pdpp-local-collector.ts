@@ -51,6 +51,7 @@ import { ALLOW_CUSTOM_COMMAND_ENV, CollectorCustomCommandRefusedError, Collector
 import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
 import {
+  COLLECTION_PROFILE_MANIFEST,
   type CollectionProfilePin,
   ensureCollectionProfileInstalled,
   installedCollectionProfile,
@@ -70,6 +71,7 @@ import {
   type EnrollmentExchangeResponse,
   enrollCollector,
   getBundledConnectorFrom,
+  hashCanonicalJson,
   isMainModule,
   type LocalCollectorLifecycleState,
   LocalDeviceClient,
@@ -3078,9 +3080,39 @@ export async function prepareConnectorSpec(
   const spec = buildConnectorSpec(options);
   const pin = options.entrypointCommand ? undefined : PINS_BY_CONNECTOR.get(spec.connector_id);
   if (pin) {
-    await install({ pin, installRoot: COLLECTION_PROFILE_ROOT, durableRoot: collectorStateDirectory() });
+    const release = await install({ pin, installRoot: COLLECTION_PROFILE_ROOT, durableRoot: collectorStateDirectory() });
+    const profile = JSON.parse(readFileSync(join(release.directory, COLLECTION_PROFILE_MANIFEST), "utf8")) as unknown;
+    return bindOptionalRunCoverageToRelease(spec, pin, profile);
   }
   return spec;
+}
+
+/** Request the optional terminal assertion only for a verified, fully instrumented selected set. */
+export function bindOptionalRunCoverageToRelease(
+  spec: CollectorConnectorSpec,
+  pin: Pick<CollectionProfilePin, "digest">,
+  rawProfile: unknown
+): CollectorConnectorSpec {
+  if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) return spec;
+  const profile = rawProfile as { run_coverage?: { version?: unknown }; streams?: unknown };
+  if (profile.run_coverage?.version !== 1 || !Array.isArray(profile.streams)) return spec;
+  const inventory = new Map<string, readonly string[]>();
+  for (const value of profile.streams) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return spec;
+    const stream = value as { name?: unknown; coverage_stores?: unknown };
+    if (typeof stream.name !== "string" || inventory.has(stream.name)) return spec;
+    if (Array.isArray(stream.coverage_stores) && stream.coverage_stores.length > 0 &&
+      stream.coverage_stores.every((store) => typeof store === "string" && store.trim())) {
+      inventory.set(stream.name, stream.coverage_stores as readonly string[]);
+    }
+  }
+  if (!spec.streams.every((stream) => inventory.has(stream))) return spec;
+  return {
+    ...spec,
+    artifactDigest: pin.digest,
+    manifestFingerprint: hashCanonicalJson(rawProfile),
+    runCoverageVersion: 1,
+  };
 }
 
 export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec {

@@ -175,6 +175,15 @@ export interface TerminalCollectionFact {
 
 /** Named stores are required for the server to check a signed inventory. */
 export interface TerminalCoverageFact {
+  artifact_digest: string;
+  manifest_fingerprint: string;
+  runtime_accounting: {
+    durable_admission: boolean;
+    detail_complete: boolean;
+    stream_evidence_consistent: boolean;
+    outstanding_debt: number;
+    checkpoint_eligible: boolean;
+  };
   scoped: boolean;
   stores: readonly { store: string; status: "collected" | "partial" | "unavailable" | "failed" }[];
   stream: string;
@@ -438,10 +447,22 @@ export class LocalDeviceClient {
   }
 
   ingestBatch(request: IngestBatchRequest): Promise<{ ok: true }> {
-    return this.#request(LOCAL_DEVICE_ENDPOINTS.ingestBatch(this.#requireDeviceId()), {
+    return this.#request<Record<string, unknown>>(LOCAL_DEVICE_ENDPOINTS.ingestBatch(this.#requireDeviceId()), {
       authenticate: true,
       body: request,
       method: "POST",
+    }).then((response) => {
+      if (
+        response?.object !== "device_ingest_batch_result" ||
+        response.status !== "accepted" ||
+        response.accepted_record_count !== request.records.length ||
+        response.rejected_record_count !== 0
+      ) {
+        throw new LocalDeviceReceiptValidationError(
+          "device ingest batch response rejected records or omitted durable admission counts"
+        );
+      }
+      return { ok: true };
     });
   }
 

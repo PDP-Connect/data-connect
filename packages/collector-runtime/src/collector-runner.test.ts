@@ -210,9 +210,12 @@ test("runCollectorConnector commits a typed DONE coverage verdict without a diag
       baseUrl: harness.url,
       connector: {
         args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
         command: "node",
         connector_id: "fixture-typed-coverage",
+        manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
+        runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -226,7 +229,20 @@ test("runCollectorConnector commits a typed DONE coverage verdict without a diag
     assert.equal(harness.terminalCommits.length, 1);
     assert.equal(harness.terminalCommits[0]?.version, 2);
     assert.deepEqual(harness.terminalCommits[0]?.terminal_facts, [
-      { scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" },
+      {
+        artifact_digest: `sha256:${"b".repeat(64)}`,
+        manifest_fingerprint: "a".repeat(64),
+        runtime_accounting: {
+          checkpoint_eligible: true,
+          detail_complete: true,
+          durable_admission: true,
+          outstanding_debt: 0,
+          stream_evidence_consistent: true,
+        },
+        scoped: true,
+        stores: [{ status: "collected", store: "messages" }],
+        stream: "messages",
+      },
     ]);
   } finally {
     await harness.close();
@@ -253,9 +269,12 @@ test("a later successful DONE without coverage replaces an acknowledged typed ve
       baseUrl: harness.url,
       connector: {
         args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
         command: "node",
         connector_id: "fixture-coverage-replacement",
+        manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
+        runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -279,6 +298,87 @@ test("a later successful DONE without coverage replaces an acknowledged typed ve
     } finally {
       outbox.close();
     }
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
+  test(`runCollectorConnector refuses ${effectType} without durable detail accounting`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const fixture = await writeFixtureConnector({
+        script: `
+          process.stdout.write(JSON.stringify({ type: ${JSON.stringify(effectType)}, stream: "messages" }) + "\\n");
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+            coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            artifactDigest: `sha256:${"b".repeat(64)}`,
+            command: "node",
+            connector_id: "fixture-detail-no-admission",
+            manifestFingerprint: "a".repeat(64),
+            protocol_capabilities: [],
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: "src-detail-no-admission",
+        }),
+        new RegExp(`unsupported ${effectType}`)
+      );
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+test("runCollectorConnector refuses a collected assertion with mismatched emitted count", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+      process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m1",
+        data: { id: "m1" }, emitted_at: new Date().toISOString() }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 2,
+        coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+          stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+    `,
+    });
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-count-mismatch",
+          manifestFingerprint: "a".repeat(64),
+          protocol_capabilities: [],
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-count-mismatch",
+      }),
+      /contradicted emitted record count/
+    );
+    assert.equal(harness.terminalCommits.length, 0);
   } finally {
     await harness.close();
   }

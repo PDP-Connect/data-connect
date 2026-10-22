@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { parseArgs, prepareConnectorSpec } from "../bin/pdpp-local-collector.ts";
+import { bindOptionalRunCoverageToRelease, buildConnectorSpec, parseArgs, prepareConnectorSpec } from "../bin/pdpp-local-collector.ts";
 import { ALLOW_CUSTOM_COMMAND_ENV } from "../src/errors.ts";
 import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
@@ -282,7 +282,10 @@ test("prepareConnectorSpec installs the pinned profile before a pinned connector
   const installed: CollectionProfilePin[] = [];
   const spec = await prepareConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex"]), async (options) => {
     installed.push(options.pin);
-    return installedCollectionProfile(options.installRoot, options.pin);
+    const directory = join(scratch, "prepared-codex");
+    mkdirSync(join(directory, "profile"), { recursive: true });
+    writeFileSync(join(directory, "profile", "collection-profile.json"), readFileSync(new URL("codex.json", REFERENCE_PROFILE_DIR)));
+    return { ...installedCollectionProfile(options.installRoot, options.pin), directory };
   });
   assert.deepEqual(
     installed.map((pin) => pin.connectorId),
@@ -293,6 +296,23 @@ test("prepareConnectorSpec installs the pinned profile before a pinned connector
     (spec.args[0] as string).endsWith(join("connectors", "codex", pin.digest.replace(":", "-"), "dist", "collection-profile.mjs")),
     String(spec.args[0])
   );
+});
+
+test("store evidence negotiation binds the exact selected release and leaves partial instrumentation unknown", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages"]));
+  const pin = { digest: `sha256:${"a".repeat(64)}` };
+  const profile = {
+    run_coverage: { version: 1 },
+    streams: [{ name: "messages", coverage_stores: ["messages"], obligation: "content" }, { name: "sessions" }],
+  };
+  const selected = bindOptionalRunCoverageToRelease(spec, pin, profile);
+  assert.equal(selected.runCoverageVersion, 1);
+  assert.equal(selected.artifactDigest, pin.digest);
+  assert.equal(selected.manifestFingerprint?.length, 64);
+  assert.notEqual(selected.manifestFingerprint,
+    bindOptionalRunCoverageToRelease(spec, pin, { ...profile, streams: [{ ...profile.streams[0], obligation: "metadata" }, profile.streams[1]] }).manifestFingerprint);
+  assert.equal(bindOptionalRunCoverageToRelease({ ...spec, streams: ["messages", "sessions"] }, pin, profile).runCoverageVersion, undefined);
+  assert.equal(bindOptionalRunCoverageToRelease(spec, pin, { ...profile, run_coverage: undefined }).runCoverageVersion, undefined);
 });
 
 test("prepareConnectorSpec installs nothing for a custom --command", async () => {

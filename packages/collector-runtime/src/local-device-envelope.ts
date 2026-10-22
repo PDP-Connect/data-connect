@@ -60,6 +60,9 @@ export interface CanonicalTerminalFactInput {
 }
 
 export interface CanonicalCoverageFactInput {
+  readonly artifact_digest?: string;
+  readonly manifest_fingerprint?: string;
+  readonly runtime_accounting?: Record<string, unknown>;
   readonly scoped: boolean;
   readonly stores: readonly {
     readonly store: string;
@@ -106,6 +109,9 @@ export function canonicalTerminalRunCommitEnvelope(input: TerminalRunCommitEnvel
       state_delta: input.state_delta,
       terminal_facts: input.terminal_facts
         .map((fact) => ({
+          ...(fact.artifact_digest ? { artifact_digest: fact.artifact_digest } : {}),
+          ...(fact.manifest_fingerprint ? { manifest_fingerprint: fact.manifest_fingerprint } : {}),
+          ...(fact.runtime_accounting ? { runtime_accounting: fact.runtime_accounting } : {}),
           scoped: fact.scoped,
           stores: [...fact.stores].sort((left, right) => left.store.localeCompare(right.store)),
           stream: fact.stream,

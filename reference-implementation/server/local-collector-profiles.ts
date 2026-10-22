@@ -30,6 +30,7 @@ interface LocalCollectorProfilePin {
 }
 
 const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
+const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 /**
  * The pinned profile for a canonical connector key, or `null` when the local
@@ -37,6 +38,20 @@ const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
  * missing or does not hash to its pin.
  */
 export function readLocalCollectorProfile(connectorKey: string): Record<string, unknown> | null {
+  return readPinnedProfile(connectorKey)?.profile ?? null;
+}
+
+/** The server's current OCI artifact identity for a local-device connector. */
+export function readLocalCollectorArtifactDigest(connectorKey: string): string | null {
+  try {
+    return readPinnedProfile(connectorKey)?.digest ?? null;
+  } catch {
+    // A missing or invalid pin cannot establish executable identity.
+    return null;
+  }
+}
+
+function readPinnedProfile(connectorKey: string): { digest: string; profile: Record<string, unknown> } | null {
   if (!CONNECTOR_KEY.test(connectorKey)) {
     return null;
   }
@@ -47,10 +62,10 @@ export function readLocalCollectorProfile(connectorKey: string): Record<string, 
   const pin = JSON.parse(readFileSync(pinUrl, "utf8")) as LocalCollectorProfilePin;
   const bytes = readFileSync(new URL(`./local-collector-profiles/${connectorKey}.json`, import.meta.url));
   const actual = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-  if (pin.connector_key !== connectorKey || actual !== pin.profile_sha256) {
+  if (pin.connector_key !== connectorKey || !ARTIFACT_DIGEST.test(pin.digest) || actual !== pin.profile_sha256) {
     throw new Error(
       `local collector profile ${connectorKey}.json hashes to ${actual}, but its pin (${pin.digest}) says ${pin.profile_sha256}`
     );
   }
-  return JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+  return { digest: pin.digest, profile: JSON.parse(bytes.toString("utf8")) as Record<string, unknown> };
 }

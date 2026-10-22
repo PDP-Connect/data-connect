@@ -8,7 +8,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
+import { readLocalCollectorArtifactDigest } from "../server/local-collector-profiles.ts";
 import { getConnectorSummaryForRoute, listConnectorSummaries } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
@@ -20,28 +22,40 @@ const deviceId = "dev_terminal_coverage";
 const sourceInstanceId = "src_terminal_coverage";
 const ownerSubjectId = "owner_local";
 
-async function withLocalConnection(run: () => Promise<void>): Promise<void> {
+async function withLocalConnection(run: () => Promise<void>, sourceConnectorId = connectorId): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "pdpp-terminal-coverage-projection-"));
   initDb(join(directory, "pdpp.sqlite"));
   try {
     const now = new Date().toISOString();
-    getDb().prepare("INSERT INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)").run(
-      connectorId,
-      JSON.stringify({
-        capabilities: { public_listing: { tier: "supported" } },
-        connector_id: connectorId,
-        display_name: "Terminal Coverage Fixture",
-        protocol_version: "0.1.0",
-        streams: [
-          { coverage_stores: ["projects"], coverage_strategy: "checkpoint_window", name: "sessions", primary_key: ["id"] },
-          { coverage_stores: ["derived_messages"], coverage_strategy: "checkpoint_window", name: "messages", primary_key: ["id"] },
-        ],
-        version: "1.0.0",
-      }),
-      now
-    );
+    getDb()
+      .prepare("INSERT INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
+      .run(
+        sourceConnectorId,
+        JSON.stringify({
+          capabilities: { public_listing: { tier: "supported" } },
+          connector_id: sourceConnectorId,
+          display_name: "Terminal Coverage Fixture",
+          protocol_version: "0.1.0",
+          streams: [
+            {
+              coverage_stores: ["projects"],
+              coverage_strategy: "checkpoint_window",
+              name: "sessions",
+              primary_key: ["id"],
+            },
+            {
+              coverage_stores: ["derived_messages"],
+              coverage_strategy: "checkpoint_window",
+              name: "messages",
+              primary_key: ["id"],
+            },
+          ],
+          version: "1.0.0",
+        }),
+        now
+      );
     await createSqliteConnectorInstanceStore().upsert({
-      connectorId,
+      connectorId: sourceConnectorId,
       connectorInstanceId,
       createdAt: now,
       displayName: "laptop",
@@ -53,9 +67,16 @@ async function withLocalConnection(run: () => Promise<void>): Promise<void> {
       updatedAt: now,
     });
     const store = getDefaultDeviceExporterStore();
-    await store.createDevice({ createdAt: now, deviceId, displayName: "laptop", ownerSubjectId, status: "active", updatedAt: now });
+    await store.createDevice({
+      createdAt: now,
+      deviceId,
+      displayName: "laptop",
+      ownerSubjectId,
+      status: "active",
+      updatedAt: now,
+    });
     await store.upsertSourceInstance({
-      connectorId,
+      connectorId: sourceConnectorId,
       connectorInstanceId,
       createdAt: now,
       deviceId,
@@ -86,6 +107,8 @@ async function projectedCoverage() {
   return {
     axis: summary.connection_health.axes.coverage,
     conditions: Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition])),
+    reason: summary.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")
+      ?.reason,
   };
 }
 
@@ -93,31 +116,67 @@ async function seedTerminalCoverage(
   status: "collected" | "partial" | "failed",
   malformed = false,
   version: 1 | 2 = 2,
+  accountingOverrides: Record<string, unknown> = {},
+  artifactDigest = readLocalCollectorArtifactDigest(connectorId),
+  sourceConnectorId = connectorId,
   runId = "run_terminal_coverage"
 ): Promise<void> {
-  const normalizedFacts = version === 1
-    ? ["sessions", "messages"].map((stream) => ({ coverage_statuses: ["unaccounted"], stream }))
-    : [
-        {
-          checkpoint: "committed", collected: 0, considered: null, covered: null,
-          coverage_statuses: ["collected"], pending_detail_gaps: 0, scoped: true, skipped: null,
-          stores: [{ store: malformed ? "unknown_store" : "projects", status: "collected" }], stream: "sessions",
-        },
-        {
-          checkpoint: "committed", collected: 0, considered: null, covered: null,
-          coverage_statuses: [status], pending_detail_gaps: status === "collected" ? 0 : 1,
-          scoped: true, skipped: null,
-          stores: [{ store: "derived_messages", status }], stream: "messages",
-        },
-      ];
+  const manifest = JSON.parse(
+    (
+      getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(sourceConnectorId) as {
+        manifest: string;
+      }
+    ).manifest
+  );
+  const bindings = {
+    artifact_digest: artifactDigest,
+    binding_generation: 0,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+      ...accountingOverrides,
+    },
+    server_artifact_digest: readLocalCollectorArtifactDigest(sourceConnectorId),
+  };
   await commitTerminalRun({
     collectionBoundary: "unscoped",
-    commitId: `commit_${runId}`,
-    connectorId,
+    commitId: runId === "run_terminal_coverage" ? "commit_terminal_coverage" : `commit_${runId}`,
+    connectorId: sourceConnectorId,
     connectorInstanceId,
     deviceId,
     envelopeHash: "test-envelope-hash",
-    normalizedFacts,
+    normalizedFacts: [
+      {
+        ...bindings,
+        checkpoint: "committed",
+        collected: 0,
+        considered: null,
+        coverage_statuses: ["collected"],
+        covered: null,
+        pending_detail_gaps: 0,
+        scoped: true,
+        skipped: null,
+        stores: [{ status: "collected", store: malformed ? "unknown_store" : "projects" }],
+        stream: "sessions",
+      },
+      {
+        ...bindings,
+        checkpoint: "committed",
+        collected: 0,
+        considered: null,
+        coverage_statuses: [status],
+        covered: null,
+        pending_detail_gaps: status === "collected" ? 0 : 1,
+        scoped: true,
+        skipped: null,
+        stores: [{ status, store: "derived_messages" }],
+        stream: "messages",
+      },
+    ],
     runId,
     sourceInstanceId,
     stateDelta: {},
@@ -137,6 +196,38 @@ test("local-device v2 terminal coverage projects per-stream proof; absent proof 
     assert.ok(detail && "connection_health" in detail);
     assert.equal(detail.connection_health.axes.coverage, "complete", "singleton reader agrees with page projection");
   });
+});
+
+test("unchanged manifest with a different artifact digest projects unknown on list and detail", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected", false, 2, {}, `sha256:${"b".repeat(64)}`);
+    const list = await projectedCoverage();
+    assert.equal(list.axis, "unknown");
+    assert.equal(list.reason, "coverage_unknown_artifact_mismatch");
+    const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+    assert.ok(detail && "connection_health" in detail);
+    assert.equal(detail.connection_health.axes.coverage, "unknown");
+    assert.equal(
+      detail.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")?.reason,
+      "coverage_unknown_artifact_mismatch"
+    );
+  });
+});
+
+test("a local source without a server pin projects unknown with an explicit reason", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected", false, 2, {}, `sha256:${"b".repeat(64)}`, "gmail");
+    const list = await projectedCoverage();
+    assert.equal(list.axis, "unknown");
+    assert.equal(list.reason, "coverage_unknown_artifact_unpinned");
+    const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+    assert.ok(detail && "connection_health" in detail);
+    assert.equal(detail.connection_health.axes.coverage, "unknown");
+    assert.equal(
+      detail.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")?.reason,
+      "coverage_unknown_artifact_unpinned"
+    );
+  }, "gmail");
 });
 
 for (const status of ["partial", "failed"] as const) {
@@ -169,7 +260,7 @@ test("a newer successful run without typed proof replaces an earlier covered ver
     await seedTerminalCoverage("collected");
     assert.equal((await projectedCoverage()).axis, "complete");
     const runId = "run_terminal_without_coverage";
-    await seedTerminalCoverage("collected", false, 1, runId);
+    await seedTerminalCoverage("collected", false, 1, {}, undefined, connectorId, runId);
     const later = new Date(Date.now() + 60_000).toISOString();
     getDb().prepare("UPDATE run_history SET completed_at = ? WHERE run_id = ?").run(later, runId);
     assert.equal((await projectedCoverage()).axis, "unknown");
@@ -179,12 +270,18 @@ test("a newer successful run without typed proof replaces an earlier covered ver
 test("selected-stream v2 proof cannot cover omitted manifest streams", async () => {
   await withLocalConnection(async () => {
     await seedTerminalCoverage("collected");
-    const row = getDb().prepare("SELECT facts_json FROM run_history WHERE run_id = ?").get("run_terminal_coverage") as { facts_json: string };
+    const row = getDb().prepare("SELECT facts_json FROM run_history WHERE run_id = ?").get("run_terminal_coverage") as {
+      facts_json: string;
+    };
     const facts = JSON.parse(row.facts_json) as { collection_facts: { streams: unknown[] } };
     facts.collection_facts.streams = facts.collection_facts.streams.slice(0, 1);
-    getDb().prepare("UPDATE run_history SET facts_json = ? WHERE run_id = ?")
+    getDb()
+      .prepare("UPDATE run_history SET facts_json = ? WHERE run_id = ?")
       .run(JSON.stringify(facts), "run_terminal_coverage");
-    assert.equal((await projectedCoverage()).axis, "unknown");
+    const selected = await projectedCoverage();
+    assert.equal(selected.axis, "unknown");
+    assert.equal(selected.conditions.sessions, "complete");
+    assert.equal(selected.conditions.messages, "unknown");
   });
 });
 
@@ -192,15 +289,17 @@ test("v2 terminal proof for an old collection scope cannot cover the current sco
   await withLocalConnection(async () => {
     await seedTerminalCoverage("collected");
     const now = new Date().toISOString();
-    getDb().prepare(
-      "INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(
-      connectorId,
-      connectorInstanceId,
-      COLLECTION_SCOPE_STATE_KEY,
-      JSON.stringify(buildStoredCollectionScope({ since: "2026-01-01T00:00:00.000Z" }, now)),
-      now
-    );
+    getDb()
+      .prepare(
+        "INSERT INTO connector_state(connector_id, connector_instance_id, stream, state_json, updated_at) VALUES (?, ?, ?, ?, ?)"
+      )
+      .run(
+        connectorId,
+        connectorInstanceId,
+        COLLECTION_SCOPE_STATE_KEY,
+        JSON.stringify(buildStoredCollectionScope({ since: "2026-01-01T00:00:00.000Z" }, now)),
+        now
+      );
     assert.equal((await projectedCoverage()).axis, "unknown");
   });
 });
@@ -210,12 +309,64 @@ test("a newer failed run cannot retain an earlier v2 covered verdict", async () 
     await seedTerminalCoverage("collected");
     assert.equal((await projectedCoverage()).axis, "complete");
     const later = new Date(Date.now() + 60_000).toISOString();
-    getDb().prepare(
-      `INSERT INTO run_history (
+    getDb()
+      .prepare(
+        `INSERT INTO run_history (
          connector_instance_id, connector_id, source_json, status, scheduler_managed,
          known_gaps_json, run_id, started_at, completed_at, attempt, facts_json
        ) VALUES (?, ?, '{}', 'failed', 0, '[]', ?, ?, ?, 1, '{}')`
-    ).run(connectorInstanceId, connectorId, "run_terminal_coverage_failed", later, later);
+      )
+      .run(connectorInstanceId, connectorId, "run_terminal_coverage_failed", later, later);
     assert.equal((await projectedCoverage()).axis, "unknown");
   });
 });
+
+test("changed release obligations with identical store names invalidate positive coverage", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).axis, "complete");
+    const row = getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(connectorId) as {
+      manifest: string;
+    };
+    const manifest = JSON.parse(row.manifest);
+    manifest.version = "2.0.0";
+    manifest.streams[0].description = "Now includes content and attachments";
+    getDb()
+      .prepare("UPDATE connectors SET manifest = ? WHERE connector_id = ?")
+      .run(JSON.stringify(manifest), connectorId);
+    assert.equal((await projectedCoverage()).axis, "unknown");
+  });
+});
+
+test("persisted terminal coverage cannot cross a source binding generation", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).axis, "complete");
+    getDb()
+      .prepare(
+        "UPDATE connector_instances SET manifest_generation = manifest_generation + 1 WHERE connector_instance_id = ?"
+      )
+      .run(connectorInstanceId);
+    assert.equal((await projectedCoverage()).axis, "unknown");
+  });
+});
+
+for (const [field, value] of Object.entries({
+  checkpoint_eligible: false,
+  detail_complete: false,
+  durable_admission: false,
+  outstanding_debt: 1,
+  stream_evidence_consistent: false,
+})) {
+  test(`runtime ${field} contradiction prevents both owner projections claiming complete`, async () => {
+    await withLocalConnection(async () => {
+      await seedTerminalCoverage("collected", false, 2, { [field]: value });
+      const result = await projectedCoverage();
+      assert.notEqual(result.axis, "complete");
+      assert.notEqual(result.conditions.messages, "complete");
+      const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+      assert.ok(detail && "connection_health" in detail);
+      assert.notEqual(detail.connection_health.axes.coverage, "complete");
+    });
+  });
+}

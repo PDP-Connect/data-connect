@@ -87,6 +87,8 @@ const COLLECTOR_AGENT_VERSION = buildAgentVersion();
 export const COLLECTOR_STDERR_MAX_BYTES = 256 * 1024;
 
 const COLLECTOR_GAP_DETAILS_MAX_CHARS = 300;
+const MANIFEST_FINGERPRINT_RE = /^[a-f0-9]{64}$/;
+const ARTIFACT_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const KEYED_SECRET_RE =
   /\b(authorization|bearer|token|password|passwd|cookie|secret|otp|api[_-]?key)\b\s*[:=]\s*["']?[^"',\s}]+/gi;
 const OTP_RE = /\b\d{6}\b/g;
@@ -607,6 +609,8 @@ export function readCollectionScopeFromState(
  */
 interface CollectorConnectorSpecExtra {
   readonly args: readonly string[];
+  /** Release identity of the executable used for this run. */
+  readonly artifactDigest?: string;
   /** Argv for the connector entrypoint (typically tsx + connector index.ts). */
   readonly command: string;
   /** Stable connector id used for ingest envelopes. */
@@ -620,8 +624,12 @@ interface CollectorConnectorSpecExtra {
   readonly enforcesSourceRoots?: boolean;
   /** Optional extra env passed to the connector child process. */
   readonly env?: NodeJS.ProcessEnv;
+  /** Fingerprint of the verified manifest used for this run. */
+  readonly manifestFingerprint?: string;
   /** Optional stream resources for scoped connector runs. */
   readonly resources?: Readonly<Record<string, readonly string[]>>;
+  /** Set only when the installed manifest advertises optional store evidence. */
+  readonly runCoverageVersion?: 1;
   /**
    * The owner-declared collection boundary this run must stay inside, as
    * resolved from the durable per-connection scope. `null`/absent is a full
@@ -820,6 +828,15 @@ export class CollectorStateReadError extends Error {
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: ordered durable-run lifecycle; splitting it would hide checkpoint and heartbeat ordering.
 export async function runCollectorConnector(config: CollectorRunConfig): Promise<CollectorRunResult> {
+  if (
+    config.connector.runCoverageVersion === 1 &&
+    !(
+      MANIFEST_FINGERPRINT_RE.test(config.connector.manifestFingerprint ?? "") &&
+      ARTIFACT_DIGEST_RE.test(config.connector.artifactDigest ?? "")
+    )
+  ) {
+    throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
+  }
   throwIfAborted(config.abortSignal);
   const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
 
@@ -966,6 +983,19 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       done?.status === "succeeded" && !streamResult.scanBudgetExceeded && done.coverage
         ? done.coverage.streams.map(
             (stream): TerminalCoverageFact => ({
+              artifact_digest: config.connector.artifactDigest as string,
+              manifest_fingerprint: config.connector.manifestFingerprint as string,
+              runtime_accounting: {
+                checkpoint_eligible: true,
+                detail_complete: true,
+                durable_admission:
+                  recordDrain.failed === 0 &&
+                  afterRecordsSummary.ready === 0 &&
+                  afterRecordsSummary.leased === 0 &&
+                  afterRecordsSummary.deadLetter === 0,
+                outstanding_debt: 0,
+                stream_evidence_consistent: true,
+              },
               scoped: stream.scoped,
               stores: stream.stores,
               stream: stream.stream,
@@ -1428,6 +1458,7 @@ async function streamConnectorIntoOutbox(
   let pendingRecords: Extract<EmittedMessage, { type: "RECORD" }>[] = [];
   let bufferHighWaterMark = 0;
   let recordsQueued = 0;
+  let recordsObserved = 0;
   let enqueuedBatches = 0;
   let done: Extract<EmittedMessage, { type: "DONE" }> | null = null;
   let scanBudgetExceeded = false;
@@ -1499,6 +1530,7 @@ async function streamConnectorIntoOutbox(
       throw new Error(`${input.config.connector.connector_id} emitted ${message.type} after terminal DONE`);
     }
     if (message.type === "RECORD") {
+      recordsObserved += 1;
       pendingRecords.push(message);
       if (pendingRecords.length > bufferHighWaterMark) {
         bufferHighWaterMark = pendingRecords.length;
@@ -1522,10 +1554,19 @@ async function streamConnectorIntoOutbox(
       assertValidStreamEvidence(message, input.config.connector);
       return;
     }
+    if (message.type === "DETAIL_GAP" || message.type === "DETAIL_COVERAGE") {
+      throw new Error(`${input.config.connector.connector_id} emitted unsupported ${message.type} to local collector`);
+    }
     if (message.type === "DONE") {
       if (message.coverage === undefined) {
         done = message;
         return;
+      }
+      if (input.config.connector.runCoverageVersion !== 1) {
+        throw new Error(`${input.config.connector.connector_id} emitted unrequested DONE coverage`);
+      }
+      if (message.records_emitted !== recordsObserved) {
+        throw new Error(`${input.config.connector.connector_id} DONE coverage contradicted emitted record count`);
       }
       if (message.status !== "succeeded") {
         throw new Error(`${input.config.connector.connector_id} emitted coverage on failed DONE`);
@@ -1610,7 +1651,8 @@ async function streamConnectorIntoOutbox(
         input.config.connector.enforcesSourceRoots === true
           ? resolveScopedSourceRoots(input.config.connector.scope)
           : [],
-        collectorScopeFingerprint(input.config.connector.scope)
+        collectorScopeFingerprint(input.config.connector.scope),
+        input.config.connector.runCoverageVersion
       )
     )}\n`
   );
@@ -2091,10 +2133,12 @@ export function buildCollectorStartMessage(
   resources: Readonly<Record<string, readonly string[]>> = {},
   timeRanges: CollectorStreamTimeRanges = {},
   sourceRoots: readonly string[] = [],
-  collectionScope?: string
+  collectionScope?: string,
+  runCoverageVersion?: 1
 ): StartMessage {
   const start: StartMessage = {
     ...(collectionScope ? { collection_scope: collectionScope } : {}),
+    ...(runCoverageVersion === 1 ? { run_coverage_version: 1 } : {}),
     scope: {
       streams: streams.map((name): StreamScope => {
         const streamResources = resources[name]?.filter((value) => typeof value === "string" && value.length > 0);

@@ -48,9 +48,9 @@ The collector validates the typed field before accepting it. It carries store ID
 
 The collector stores the latest acknowledged v2 receipt in local outbox schema v5, outside prunable outbox rows. If a later successful DONE omits coverage while that receipt exists, the collector sends a v1 terminal commit with unaccounted facts. Its acknowledgement removes the receipt and makes the server's latest run unknown. Offline status can describe the receipt's measured boundary; doctor compares it with the active owner boundary. The server read model must make the same boundary comparison before showing positive connection coverage.
 
-## Published PDPP spec impact
+## Collection Profile amendment
 
-This changes the Collection Profile wire contract. The PDPP owner tree remains read-only in this lane. Both /home/tnunamak/code/pdpp/spec-collection-profile.md and its published copy, apps/site/content/docs/spec-collection-profile.mdx, need updates: DONE (root line 514, published line 518) needs the optional field and its validation; START (root around line 198) needs collection_scope; manifest stream declarations (root lines 45-75) need coverage-store inventory. The state machine (root lines 120-155) already defines DONE as final. The restart-abandonment rule at root line 573 uses “DONE-time coverage verdict” for detail-coverage checkpoint eligibility; it does not define this per-store terminal payload. PDPP Core is unaffected. Protocol addition needs owner approval at merge.
+The canonical Collection Profile is `data-connectors/docs/spec/collection-profile.md`. [Data-connectors PR #541](https://github.com/PDP-Connect/data-connectors/pull/541), stacked on #516, specifies the optional START capability, stream store declarations, terminal store collection evidence, and its relationship to detail accounting and checkpoint eligibility. Data-connectors #539 and this PR implement the amendment. The owner approves it at merge.
 
 ## Acceptance and release
 
