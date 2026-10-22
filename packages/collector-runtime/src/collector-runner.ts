@@ -1802,7 +1802,10 @@ function recordConnectorChildFailureGap(input: {
   });
 }
 
-type TerminalEvidence = { facts: readonly TerminalCoverageFact[]; version: 2 };
+interface TerminalEvidence {
+  facts: readonly TerminalCoverageFact[];
+  version: 2;
+}
 
 async function maybeCommitCheckpoint(input: {
   afterRecordsSummary: LocalDeviceOutboxSummary;
