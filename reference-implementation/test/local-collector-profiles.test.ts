@@ -3,13 +3,16 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readLocalCollectorProfile } from "../server/local-collector-profiles.ts";
+import { readLocalCollectorArtifactDigest, readLocalCollectorProfile } from "../server/local-collector-profiles.ts";
+
+const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 test("a pinned local-collector connector resolves to its pinned Collection Profile", () => {
   const profile = readLocalCollectorProfile("claude-code");
   assert.ok(profile);
   assert.equal(profile.connector_key, "claude-code");
   assert.ok(Array.isArray(profile.streams) && profile.streams.length > 0);
+  assert.match(readLocalCollectorArtifactDigest("claude-code") ?? "", ARTIFACT_DIGEST);
 });
 
 test("a connector the local collector does not install has no local-collector profile", () => {
@@ -17,6 +20,7 @@ test("a connector the local collector does not install has no local-collector pr
   // Collection Profile, so the collector cannot run it.
   assert.equal(readLocalCollectorProfile("google-messages"), null);
   assert.equal(readLocalCollectorProfile("gmail"), null);
+  assert.equal(readLocalCollectorArtifactDigest("gmail"), null);
 });
 
 test("a key that is not a connector key never reaches the filesystem", () => {

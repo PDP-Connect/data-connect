@@ -207,7 +207,7 @@ import {
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import { deriveReferenceFreshness } from "./freshness.ts";
-import { readLocalCollectorProfile } from "./local-collector-profiles.ts";
+import { readLocalCollectorArtifactDigest, readLocalCollectorProfile } from "./local-collector-profiles.ts";
 import {
   encodeHostedMcpSelection,
   encodeHostedMcpStreamSelection,
@@ -7064,6 +7064,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     ensureReferenceConnectorCatalogEntry,
     generateReferenceSecret,
     generateSpineId,
+    getExpectedArtifactDigest: readLocalCollectorArtifactDigest,
     getConnectorManifest: (connectorId: string) => getConnectorManifest(connectorId),
     getDefaultConnectorDetailGapStore,
     getOwnerSubjectId,

@@ -37,6 +37,7 @@ export interface TerminalRunCommitContext extends TerminalContext {
   canonicalConnectorKey: (value: string | null | undefined) => string | null;
   commitTerminalRun: (input: ResolvedTerminalRunCommit) => Promise<TerminalRunCommitResult>;
   getConnectorManifest?: (connectorId: string) => Promise<unknown> | unknown;
+  getExpectedArtifactDigest?: (connectorId: string) => string | null;
 }
 
 /**
@@ -113,7 +114,11 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
             rawFacts,
             await ctx.getConnectorManifest?.(canonicalConnectorId),
             collectionBoundary,
-            { allowSubset: true, bindingGeneration: authorized.sourceInstance.manifestGeneration ?? null }
+            {
+              allowSubset: true,
+              bindingGeneration: authorized.sourceInstance.manifestGeneration ?? null,
+              expectedArtifactDigest: ctx.getExpectedArtifactDigest?.(canonicalConnectorId) ?? null,
+            }
           )
         : normalizedFacts;
     if (!validatedFacts) {
@@ -348,7 +353,13 @@ export function normalizeTerminalCoverageFacts(
   rawFacts: readonly unknown[],
   rawManifest: unknown,
   collectionBoundary: string,
-  options: { allowSubset?: boolean; bindingGeneration?: number | null; validateBindingGeneration?: boolean } = {}
+  options: {
+    allowSubset?: boolean;
+    bindingGeneration?: number | null;
+    expectedArtifactDigest?: string | null;
+    validateBindingGeneration?: boolean;
+    validateServerArtifactDigest?: boolean;
+  } = {}
 ): readonly Record<string, unknown>[] | null {
   const manifest = asObject(rawManifest);
   const manifestStreams = manifest?.streams;
@@ -433,11 +444,22 @@ export function normalizeTerminalCoverageFacts(
     const generationMatches =
       !options.validateBindingGeneration ||
       (Number.isSafeInteger(options.bindingGeneration) && entry.binding_generation === options.bindingGeneration);
+    let artifactBindingReason: "artifact_digest_mismatch" | "artifact_digest_unknown" | null = null;
+    if (
+      !ARTIFACT_DIGEST.test(options.expectedArtifactDigest ?? "") ||
+      (options.validateServerArtifactDigest && !ARTIFACT_DIGEST.test(String(entry.server_artifact_digest ?? "")))
+    ) {
+      artifactBindingReason = "artifact_digest_unknown";
+    } else if (
+      entry.artifact_digest !== options.expectedArtifactDigest ||
+      (options.validateServerArtifactDigest && entry.server_artifact_digest !== options.expectedArtifactDigest)
+    ) {
+      artifactBindingReason = "artifact_digest_mismatch";
+    }
     const bound =
       generationMatches &&
       entry.manifest_fingerprint === manifestFingerprint &&
-      typeof entry.artifact_digest === "string" &&
-      ARTIFACT_DIGEST.test(entry.artifact_digest);
+      artifactBindingReason === null;
     const complete =
       accountingKnown &&
       accounting.durable_admission === true &&
@@ -460,11 +482,15 @@ export function normalizeTerminalCoverageFacts(
     const pendingDetailGaps = accountingKnown ? Number(accounting.outstanding_debt) : 0;
     facts.push({
       artifact_digest: entry.artifact_digest,
+      ...(artifactBindingReason ? { artifact_binding_reason: artifactBindingReason } : {}),
       checkpoint: accountingKnown && accounting.checkpoint_eligible === true ? "committed" : "withheld",
       collected: 0,
       considered: null,
       covered: null,
       manifest_fingerprint: entry.manifest_fingerprint,
+      server_artifact_digest: options.validateServerArtifactDigest
+        ? entry.server_artifact_digest
+        : (options.expectedArtifactDigest ?? null),
       ...(Number.isSafeInteger(options.bindingGeneration)
         ? {
             binding_generation: options.validateBindingGeneration

@@ -167,6 +167,7 @@ import { filterRunGapsProvenCompleteByReport } from "./continuation-proof.ts";
 import { getSqliteStoreCacheIdentity } from "./db.ts";
 import { deriveReferenceFreshness, type ReferenceFreshness } from "./freshness.ts";
 import { readStoredCollectionScope } from "./local-collection-scope.ts";
+import { readLocalCollectorArtifactDigest } from "./local-collector-profiles.ts";
 import { mapPendingPressureGaps } from "./pending-pressure-gap-map.ts";
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
 import {
@@ -3178,6 +3179,7 @@ function buildCoverageEvidence(
 ): {
   axis: CoverageAxis;
   requiredButAccepted: boolean;
+  unknownArtifactBinding?: "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined;
   unknownStaleCollectorBuild: boolean;
 } {
   const requiredButAccepted = pickRequiredAcceptedCoverage(manifestStreams) !== null;
@@ -3199,7 +3201,13 @@ function buildCoverageEvidence(
   }
   const unknownStaleCollectorBuild =
     runAxis === "unknown" && localCoverage !== null && localCoverage.unreliableReason === "missing_stores";
-  return { axis: runAxis, requiredButAccepted, unknownStaleCollectorBuild };
+  const unknownArtifactBinding =
+    runAxis === "unknown" &&
+    (localCoverage?.unreliableReason === "artifact_digest_mismatch" ||
+      localCoverage?.unreliableReason === "artifact_digest_unknown")
+      ? localCoverage.unreliableReason
+      : undefined;
+  return { axis: runAxis, requiredButAccepted, unknownArtifactBinding, unknownStaleCollectorBuild };
 }
 
 const DEGRADING_REPORT_COVERAGE_ROLLUP_ORDER = ["terminal_gap", "retryable_gap", "gaps", "partial"] as const;
@@ -3529,6 +3537,7 @@ function applyCoverageOverride(
     axis: CoverageAxis;
     requiredButAccepted: boolean;
     unfillableAccounted?: boolean;
+    unknownArtifactBinding?: "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined;
     unknownStaleCollectorBuild: boolean;
   },
   coverageOverride:
@@ -3543,6 +3552,7 @@ function applyCoverageOverride(
   axis: CoverageAxis;
   requiredButAccepted: boolean;
   unfillableAccounted?: boolean;
+  unknownArtifactBinding?: "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined;
   unknownStaleCollectorBuild: boolean;
 } {
   if (!coverageOverride || coverageOverride.axis === undefined) {
@@ -3558,6 +3568,8 @@ function applyCoverageOverride(
     // PRE-override axis/report pairing. Absent/`false` on the override always
     // means `false` here.
     unfillableAccounted: coverageOverride.unfillableAccounted === true,
+    unknownArtifactBinding:
+      coverageOverride.axis === "unknown" ? undefined : resolvedCoverage.unknownArtifactBinding,
     // A collection-report override supplies its OWN, more specific axis
     // (`refineConnectionHealthWithCollectionReport`'s required-unknown
     // refusal) — it never re-derives `localCoverage.unreliableReason`, so it
@@ -4780,6 +4792,8 @@ interface LocalCoverageDiagnosticAxis {
    * Never widens what counts as reliable -- purely a label on the same gate.
    */
   readonly unreliableReason?:
+    | "artifact_digest_mismatch"
+    | "artifact_digest_unknown"
     | "invalid_cursor"
     | "generation_mismatch"
     | "malformed"
@@ -4983,7 +4997,8 @@ function deriveLocalTerminalCoverageAxis(
   run: ConnectorRunSummary | null,
   manifest: ConnectorManifest,
   legacyAxis: LocalCoverageDiagnosticAxis | null,
-  bindingGeneration: number | null
+  bindingGeneration: number | null,
+  expectedArtifactDigest: string | null
 ): LocalCoverageDiagnosticAxis | null {
   const terminal = run?.local_terminal_coverage;
   if (!terminal) {
@@ -5006,9 +5021,20 @@ function deriveLocalTerminalCoverageAxis(
     terminal.collectionScope !== declaredScope || !Array.isArray(terminal.streams)) {
     return unknown;
   }
-  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, terminal.collectionScope, { allowSubset: true, bindingGeneration, validateBindingGeneration: true });
+  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, terminal.collectionScope, {
+    allowSubset: true,
+    bindingGeneration,
+    expectedArtifactDigest,
+    validateBindingGeneration: true,
+    validateServerArtifactDigest: true,
+  });
   if (!normalized) {
     return unknown;
+  }
+  const artifactBindingReason = normalized.find((fact) => typeof fact.artifact_binding_reason === "string")
+    ?.artifact_binding_reason;
+  if (artifactBindingReason === "artifact_digest_unknown" || artifactBindingReason === "artifact_digest_mismatch") {
+    return { ...unknown, unreliableReason: artifactBindingReason };
   }
   const rows: LocalCoverageDiagnosticRow[] = [];
   const unaccountedStores: string[] = [];
@@ -7067,7 +7093,13 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const effectiveLocalCoverage = localDeviceBacked
-    ? (deriveLocalTerminalCoverageAxis(fallbackSettledRun, manifest, localCoverage, evidence?.manifest_generation ?? null) ?? localCoverage)
+    ? (deriveLocalTerminalCoverageAxis(
+        fallbackSettledRun,
+        manifest,
+        localCoverage,
+        evidence?.manifest_generation ?? null,
+        readLocalCollectorArtifactDigest(connectorId)
+      ) ?? localCoverage)
     : localCoverage;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =

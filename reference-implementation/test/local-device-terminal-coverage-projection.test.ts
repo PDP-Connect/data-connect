@@ -10,6 +10,7 @@ import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summ
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
+import { readLocalCollectorArtifactDigest } from "../server/local-collector-profiles.ts";
 import { getConnectorSummaryForRoute, listConnectorSummaries } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
@@ -21,7 +22,7 @@ const deviceId = "dev_terminal_coverage";
 const sourceInstanceId = "src_terminal_coverage";
 const ownerSubjectId = "owner_local";
 
-async function withLocalConnection(run: () => Promise<void>): Promise<void> {
+async function withLocalConnection(run: () => Promise<void>, sourceConnectorId = connectorId): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), "pdpp-terminal-coverage-projection-"));
   initDb(join(directory, "pdpp.sqlite"));
   try {
@@ -29,10 +30,10 @@ async function withLocalConnection(run: () => Promise<void>): Promise<void> {
     getDb()
       .prepare("INSERT INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
       .run(
-        connectorId,
+        sourceConnectorId,
         JSON.stringify({
           capabilities: { public_listing: { tier: "supported" } },
-          connector_id: connectorId,
+          connector_id: sourceConnectorId,
           display_name: "Terminal Coverage Fixture",
           protocol_version: "0.1.0",
           streams: [
@@ -54,7 +55,7 @@ async function withLocalConnection(run: () => Promise<void>): Promise<void> {
         now
       );
     await createSqliteConnectorInstanceStore().upsert({
-      connectorId,
+      connectorId: sourceConnectorId,
       connectorInstanceId,
       createdAt: now,
       displayName: "laptop",
@@ -75,7 +76,7 @@ async function withLocalConnection(run: () => Promise<void>): Promise<void> {
       updatedAt: now,
     });
     await store.upsertSourceInstance({
-      connectorId,
+      connectorId: sourceConnectorId,
       connectorInstanceId,
       createdAt: now,
       deviceId,
@@ -106,6 +107,8 @@ async function projectedCoverage() {
   return {
     axis: summary.connection_health.axes.coverage,
     conditions: Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition])),
+    reason: summary.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")
+      ?.reason,
   };
 }
 
@@ -113,14 +116,19 @@ async function seedTerminalCoverage(
   status: "collected" | "partial" | "failed",
   malformed = false,
   version: 1 | 2 = 2,
-  accountingOverrides: Record<string, unknown> = {}
+  accountingOverrides: Record<string, unknown> = {},
+  artifactDigest = readLocalCollectorArtifactDigest(connectorId),
+  sourceConnectorId = connectorId
 ): Promise<void> {
   const manifest = JSON.parse(
-    (getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(connectorId) as { manifest: string })
-      .manifest
+    (
+      getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(sourceConnectorId) as {
+        manifest: string;
+      }
+    ).manifest
   );
   const bindings = {
-    artifact_digest: `sha256:${"a".repeat(64)}`,
+    artifact_digest: artifactDigest,
     binding_generation: 0,
     manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
     runtime_accounting: {
@@ -131,11 +139,12 @@ async function seedTerminalCoverage(
       stream_evidence_consistent: true,
       ...accountingOverrides,
     },
+    server_artifact_digest: readLocalCollectorArtifactDigest(sourceConnectorId),
   };
   await commitTerminalRun({
     collectionBoundary: "unscoped",
     commitId: "commit_terminal_coverage",
-    connectorId,
+    connectorId: sourceConnectorId,
     connectorInstanceId,
     deviceId,
     envelopeHash: "test-envelope-hash",
@@ -186,6 +195,38 @@ test("local-device v2 terminal coverage projects per-stream proof; absent proof 
     assert.ok(detail && "connection_health" in detail);
     assert.equal(detail.connection_health.axes.coverage, "complete", "singleton reader agrees with page projection");
   });
+});
+
+test("unchanged manifest with a different artifact digest projects unknown on list and detail", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected", false, 2, {}, `sha256:${"b".repeat(64)}`);
+    const list = await projectedCoverage();
+    assert.equal(list.axis, "unknown");
+    assert.equal(list.reason, "coverage_unknown_artifact_mismatch");
+    const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+    assert.ok(detail && "connection_health" in detail);
+    assert.equal(detail.connection_health.axes.coverage, "unknown");
+    assert.equal(
+      detail.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")?.reason,
+      "coverage_unknown_artifact_mismatch"
+    );
+  });
+});
+
+test("a local source without a server pin projects unknown with an explicit reason", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected", false, 2, {}, `sha256:${"b".repeat(64)}`, "gmail");
+    const list = await projectedCoverage();
+    assert.equal(list.axis, "unknown");
+    assert.equal(list.reason, "coverage_unknown_artifact_unpinned");
+    const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+    assert.ok(detail && "connection_health" in detail);
+    assert.equal(detail.connection_health.axes.coverage, "unknown");
+    assert.equal(
+      detail.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")?.reason,
+      "coverage_unknown_artifact_unpinned"
+    );
+  }, "gmail");
 });
 
 for (const status of ["partial", "failed"] as const) {

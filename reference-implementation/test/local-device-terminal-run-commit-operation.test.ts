@@ -147,7 +147,9 @@ test("typed terminal coverage is green only for complete scoped store evidence",
     stream: "messages",
   });
   const axis = (raw: unknown) => {
-    const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped");
+    const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped", {
+      expectedArtifactDigest: `sha256:${"a".repeat(64)}`,
+    });
     assert.ok(normalized);
     const parsed = readRuntimeCollectionFact(normalized[0]);
     assert.ok(parsed);
@@ -668,6 +670,129 @@ test("connector collected assertions cannot override runtime accounting or absen
   );
 });
 
+test("terminal collection requires the server's active artifact digest even when the manifest is unchanged", () => {
+  const manifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+  const knownDigest = `sha256:${"a".repeat(64)}`;
+  const raw = {
+    artifact_digest: knownDigest,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: true,
+    stores: [{ status: "collected", store: "messages" }],
+    stream: "messages",
+  };
+  const normalize = (fact: typeof raw, expectedArtifactDigest: string | null) => {
+    const normalized = normalizeTerminalCoverageFacts([fact], manifest, "unscoped", { expectedArtifactDigest });
+    assert.ok(normalized);
+    return normalized[0];
+  };
+  assert.deepEqual(normalize(raw, knownDigest)?.coverage_statuses, ["collected"]);
+  const mismatched = normalize({ ...raw, artifact_digest: `sha256:${"b".repeat(64)}` }, knownDigest);
+  assert.deepEqual(mismatched?.coverage_statuses, ["unknown"]);
+  assert.equal(mismatched?.artifact_binding_reason, "artifact_digest_mismatch");
+  const unpinned = normalize(raw, null);
+  assert.deepEqual(unpinned?.coverage_statuses, ["unknown"]);
+  assert.equal(unpinned?.artifact_binding_reason, "artifact_digest_unknown");
+  assert.equal(unpinned?.server_artifact_digest, null);
+  const afterLaterPin = normalizeTerminalCoverageFacts([unpinned], manifest, "unscoped", {
+    expectedArtifactDigest: knownDigest,
+    validateServerArtifactDigest: true,
+  });
+  assert.deepEqual(afterLaterPin?.[0]?.coverage_statuses, ["unknown"], "a later pin cannot green an unbound run");
+  const matchingAtCommit = normalize(raw, knownDigest);
+  const matchingAtRead = normalizeTerminalCoverageFacts([matchingAtCommit], manifest, "unscoped", {
+    expectedArtifactDigest: knownDigest,
+    validateServerArtifactDigest: true,
+  });
+  assert.deepEqual(matchingAtRead?.[0]?.coverage_statuses, ["collected"]);
+  const afterReplacement = normalizeTerminalCoverageFacts([matchingAtCommit], manifest, "unscoped", {
+    expectedArtifactDigest: `sha256:${"b".repeat(64)}`,
+    validateServerArtifactDigest: true,
+  });
+  assert.deepEqual(afterReplacement?.[0]?.coverage_statuses, ["unknown"]);
+});
+
+test("terminal commit records the server pin at admission and refuses an unbound positive verdict", async () => {
+  const manifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+  const knownDigest = `sha256:${"a".repeat(64)}`;
+  await Promise.all(
+    [knownDigest, `sha256:${"b".repeat(64)}`, null].map(async (expectedDigest) => {
+      const capture = responseCapture();
+      let committed: ResolvedTerminalRunCommit | null = null;
+      await handleLocalDeviceTerminalRunCommit({
+        ctx: {
+          canonicalConnectorKey: () => "codex",
+          commitTerminalRun: (input) => {
+            committed = input;
+            return Promise.resolve({
+              replayed: false,
+              response: {
+                commit_id: input.commitId,
+                envelope_hash: input.envelopeHash,
+                object: "device_terminal_run_commit",
+                run_id: input.runId,
+                terminal_event_id: "evt-v2",
+              },
+            });
+          },
+          emitSpineEvent: () => Promise.resolve(),
+          getConnectorManifest: () => manifest,
+          getExpectedArtifactDigest: () => expectedDigest,
+          handleError: (_res, error) => {
+            throw error;
+          },
+          pdppError: (_res, status) => {
+            capture.response.status(status);
+          },
+        },
+        req: {
+          body: validBody({
+            state_delta: {},
+            terminal_facts: [
+              {
+                artifact_digest: knownDigest,
+                manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+                runtime_accounting: {
+                  checkpoint_eligible: true,
+                  detail_complete: true,
+                  durable_admission: true,
+                  outstanding_debt: 0,
+                  stream_evidence_consistent: true,
+                },
+                scoped: true,
+                stores: [{ status: "collected", store: "messages" }],
+                stream: "messages",
+              },
+            ],
+            version: 2,
+          }),
+          deviceExporter: { deviceId: "dev-1" },
+          params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
+        },
+        res: capture.response,
+        resolveAuthorizedSource: () =>
+          Promise.resolve({
+            connectorInstance: { connectorInstanceId: "cin-1" },
+            sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
+          }),
+      });
+      assert.equal(capture.snapshot().status, 201);
+      assert.ok(committed);
+      const { normalizedFacts } = committed as ResolvedTerminalRunCommit;
+      assert.equal(normalizedFacts[0]?.server_artifact_digest, expectedDigest);
+      assert.deepEqual(normalizedFacts[0]?.coverage_statuses, [
+        expectedDigest === knownDigest ? "collected" : "unknown",
+      ]);
+    })
+  );
+});
+
 test("proven empty content is complete while metadata inventory stays inventory only", () => {
   for (const coveragePolicy of ["collect", "inventory_only"]) {
     const manifest = {
@@ -687,7 +812,9 @@ test("proven empty content is complete while metadata inventory stays inventory 
       stores: [{ status: "collected", store: "messages" }],
       stream: "messages",
     };
-    const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped");
+    const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped", {
+      expectedArtifactDigest: `sha256:${"a".repeat(64)}`,
+    });
     assert.ok(normalized);
     assert.equal(normalized[0]?.collected, 0, "no records admitted for proven empty enumeration");
     assert.deepEqual(normalized[0]?.coverage_statuses, [coveragePolicy === "collect" ? "collected" : "inventory_only"]);
