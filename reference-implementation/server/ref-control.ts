@@ -4547,7 +4547,7 @@ function terminalCoverageCondition(
  * the revision and time it was committed at travel with the coverage they qualify.
  */
 export interface LocalCoverageAsOf {
-  readonly artifact_digest: string | null;
+  readonly artifact_digest: string;
   readonly collection_revision: number;
   readonly committed_at: string | null;
   readonly evidence: "terminal_run";
@@ -4602,15 +4602,22 @@ function localProofRun(
  * collection event.
  *
  * The server assigns each event that can establish or retire proof a monotonic
- * per-connection revision at commit: state commits, terminal runs, admitted and
- * refused batches, and delivered failure reports. A terminal proof is current
- * only while the newest event is the terminal run it names, at the revision that
- * run was committed at. Any later event retires it to unknown. No wall clock is
- * compared, so an equal or skewed timestamp cannot order two commits.
+ * per-connection revision at commit (state commits, terminal runs, device batch
+ * records, admitted and refused batches, delivered failure reports, legacy split
+ * terminal reports). A proof binds to the revision it was committed at. It is
+ * current only while that revision is the high-water mark; any later event
+ * retires it to unknown. No wall clock is compared, so an equal or skewed
+ * timestamp cannot order two commits. The proof must also be the terminal run
+ * the high-water mark names, and it must name exactly one release digest.
  *
- * Fails closed: a missing fence or revision, a mismatch, or a newest settled
- * device run that is not the proof and carries no revision (its order against
- * the proof is ambiguous) leaves the connection without current coverage.
+ * Only a v2 terminal run record is a positive proof. A legacy
+ * `coverage_diagnostics` state row names no run and no release, so it never
+ * shows positive coverage: the projection is unknown.
+ *
+ * Fails closed: a missing fence, an unreadable or NULL revision, any mismatch, a
+ * proof without a single release digest, or a newest settled device run that is
+ * not the proof and carries no revision, whose order is ambiguous, leaves the
+ * connection without current coverage.
  */
 function fenceTerminalCoverageProof(
   coverage: ReturnType<typeof terminalCoverageByStream>,
@@ -4619,8 +4626,10 @@ function fenceTerminalCoverageProof(
   latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null
 ): { asOf: LocalCoverageAsOf | null; coverage: ReturnType<typeof terminalCoverageByStream> } {
   const highWater = fence?.highWater ?? null;
-  // A scheduler-managed run is not a device collection attempt. Any other
-  // settled run with no revision cannot be ordered against the proof.
+  // A settled device run record with no revision cannot be ordered against a
+  // terminal proof (a pre-revision row, or a writer that assigns none). If it
+  // is the newest settled run and not the proof itself, the order is
+  // ambiguous. A scheduler-managed run is not a device collection attempt.
   const unorderedLaterRun =
     proof !== null &&
     latestSettledRun !== null &&
@@ -4630,6 +4639,7 @@ function fenceTerminalCoverageProof(
   if (
     coverage === null ||
     proof === null ||
+    proof.artifactDigest === null ||
     highWater === null ||
     proof.collectionRevision === null ||
     unorderedLaterRun ||
@@ -9314,6 +9324,11 @@ export interface OwnerConnectionDiagnostics {
   readonly connection_id: string;
   readonly connector_id: string;
   readonly connector_key: string;
+  /**
+   * What the coverage in `health.axes` and `rendered_verdict` is a fact
+   * about. See {@link ConnectorSummary.coverage_as_of}.
+   */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   readonly display_name: string | null;
   readonly freshness: Freshness;
   readonly health: OwnerConnectionDiagnosticsHealth;
@@ -9448,6 +9463,7 @@ export async function getOwnerConnectionDiagnostics(
     connection_id: summary.connection_id,
     connector_id: summary.connector_id,
     connector_key: summary.connector_id,
+    coverage_as_of: summary.coverage_as_of,
     display_name: summary.display_name,
     freshness: summary.freshness,
     health: {

@@ -9,14 +9,21 @@
 //
 // The high-water mark lives on `connector_instances`. A connection with no row
 // gets no revision (`null`), and the reader treats that as unknown.
+//
+// A caller allocates the revision inside the transaction of the durable event
+// it orders (a record write, a batch acceptance, a stored failure report, a
+// terminal run), so the event and its revision commit or roll back together.
+// A refusal has no other durable effect: its revision is its only write.
 
 import { getDb } from "../db.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
 
 export type CollectionRevisionEvent =
   | "batch_accepted"
+  | "batch_record"
   | "batch_rejected"
   | "failure_report"
+  | "legacy_terminal"
   | "state_commit"
   | "terminal_run";
 
@@ -40,6 +47,25 @@ interface SqliteHandle {
 
 interface PostgresHandle {
   query: (sql: string, params: readonly unknown[]) => Promise<{ readonly rows: readonly unknown[] }>;
+}
+
+/**
+ * The revision for an observed event could not be recorded, so the event
+ * itself must not commit or be acknowledged. Device routes answer it with
+ * their retryable 503, so the device retries instead of trusting an answer
+ * the server cannot order.
+ */
+export class CollectionRevisionUnavailableError extends Error {
+  readonly code = "collection_revision_unavailable";
+
+  constructor(connectorInstanceId: string, event: CollectionRevisionEvent) {
+    super(`collection revision not recorded connector_instance_id=${connectorInstanceId} event=${event}`);
+    this.name = "CollectionRevisionUnavailableError";
+  }
+}
+
+export function isCollectionRevisionUnavailable(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "collection_revision_unavailable";
 }
 
 const ADVANCE_SET = `collection_revision = collection_revision + 1,
@@ -106,70 +132,48 @@ export async function advancePostgresCollectionRevisionInTransaction(
   return row && revision !== null ? { manifestGeneration: Number(row.manifest_generation ?? 0), revision } : null;
 }
 
-/** Record one observed event in its own transaction. */
+/** Advance on an open SQLite transaction, or throw so the caller's event rolls back with it. */
+export function requireSqliteCollectionRevisionInTransaction(
+  db: SqliteHandle,
+  connectorInstanceId: string,
+  input: CollectionRevisionEventInput
+): number {
+  const advanced = advanceSqliteCollectionRevisionInTransaction(db, connectorInstanceId, input);
+  if (!advanced) {
+    throw new CollectionRevisionUnavailableError(connectorInstanceId, input.event);
+  }
+  return advanced.revision;
+}
+
+/** Advance on an open Postgres transaction, or throw so the caller's event rolls back with it. */
+export async function requirePostgresCollectionRevisionInTransaction(
+  client: PostgresHandle,
+  connectorInstanceId: string,
+  input: CollectionRevisionEventInput
+): Promise<number> {
+  const advanced = await advancePostgresCollectionRevisionInTransaction(client, connectorInstanceId, input);
+  if (!advanced) {
+    throw new CollectionRevisionUnavailableError(connectorInstanceId, input.event);
+  }
+  return advanced.revision;
+}
+
+/**
+ * Record an observed event that has no other durable effect (a refused
+ * batch). Throws when the revision is not recorded; the caller must then not
+ * answer the event as if the server had observed it.
+ */
 export async function recordCollectionRevisionEvent(
   connectorInstanceId: string,
   input: CollectionRevisionEventInput
-): Promise<number | null> {
+): Promise<number> {
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(
       async (client) =>
-        (await advancePostgresCollectionRevisionInTransaction(client as PostgresHandle, connectorInstanceId, input))
-          ?.revision ?? null
+        await requirePostgresCollectionRevisionInTransaction(client as PostgresHandle, connectorInstanceId, input)
     );
   }
-  return advanceSqliteCollectionRevisionInTransaction(getDb(), connectorInstanceId, input)?.revision ?? null;
-}
-
-/** Batched high-water read, keyed by connector instance. Missing connections are absent from the map. */
-export async function readCollectionRevisionHighWaters(
-  connectorInstanceIds: readonly string[]
-): Promise<Map<string, CollectionRevisionHighWater>> {
-  interface Row {
-    collection_revision: unknown;
-    collection_revision_at: string | null;
-    collection_revision_event: string | null;
-    collection_revision_run_id: string | null;
-    connector_instance_id: string;
-  }
-  const rows: Row[] = [];
-  const ids = [...new Set(connectorInstanceIds)];
-  if (isPostgresStorageBackend()) {
-    const result = await postgresQuery<Row>(
-      `SELECT connector_instance_id, collection_revision::text AS collection_revision, collection_revision_event,
-              collection_revision_run_id, collection_revision_at
-         FROM connector_instances WHERE connector_instance_id = ANY($1::text[])`,
-      [ids]
-    );
-    rows.push(...result.rows);
-  } else {
-    for (let start = 0; start < ids.length; start += 900) {
-      const chunk = ids.slice(start, start + 900);
-      rows.push(
-        ...(getDb()
-          .prepare(
-            `SELECT connector_instance_id, collection_revision, collection_revision_event,
-                    collection_revision_run_id, collection_revision_at
-               FROM connector_instances WHERE connector_instance_id IN (${chunk.map(() => "?").join(", ")})`
-          )
-          .all(...chunk) as Row[])
-      );
-    }
-  }
-  const byId = new Map<string, CollectionRevisionHighWater>();
-  for (const row of rows) {
-    const revision = readCollectionRevision(row.collection_revision);
-    if (revision === null) {
-      continue;
-    }
-    byId.set(row.connector_instance_id, {
-      at: row.collection_revision_at ?? null,
-      event: row.collection_revision_event ?? null,
-      revision,
-      runId: row.collection_revision_run_id ?? null,
-    });
-  }
-  return byId;
+  return requireSqliteCollectionRevisionInTransaction(getDb(), connectorInstanceId, input);
 }
 
 /** The terminal run record the high-water mark names, read by run id rather than by completion time. */

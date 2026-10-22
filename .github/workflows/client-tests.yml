@@ -26,6 +26,14 @@ name: client-tests
 # own change, not smuggled into CI wiring. Promote this workflow to a required check once
 # that test passes on main; until then it reports honestly and does not block merges.
 
+env:
+  # onnxruntime-node's install script downloads the CUDA 12 provider binaries
+  # from nuget.org on linux/x64 even on CPU-only runners; that download is the
+  # ETIMEDOUT flake that fails `npm ci`. No job here requests the CUDA execution
+  # provider and the CPU binding ships in the package tarball, so skip it.
+  # scripts/ci-onnxruntime-install.test.ts guards this setting.
+  ONNXRUNTIME_NODE_INSTALL: "skip"
+
 on:
   pull_request:
     # PRs into the test-engineering integration branch are gated by a local

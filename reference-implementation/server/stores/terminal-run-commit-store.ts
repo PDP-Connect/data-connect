@@ -10,6 +10,8 @@ import { isPostgresStorageBackend, withPostgresTransaction } from "../postgres-s
 import {
   advancePostgresCollectionRevisionInTransaction,
   advanceSqliteCollectionRevisionInTransaction,
+  requirePostgresCollectionRevisionInTransaction,
+  requireSqliteCollectionRevisionInTransaction,
 } from "./collection-revision-store.ts";
 import {
   putPostgresConnectorStateDeltaInTransaction,
@@ -310,4 +312,47 @@ async function commitPostgres(input: ResolvedTerminalRunCommit): Promise<Termina
 
 export async function commitTerminalRun(input: ResolvedTerminalRunCommit): Promise<TerminalRunCommitResult> {
   return isPostgresStorageBackend() ? await commitPostgres(input) : commitSqlite(input);
+}
+
+/**
+ * Commit a legacy split `terminal-collection` report. It is an observed
+ * collection event of its own (`legacy_terminal`): its run record takes the
+ * next revision in the same transaction, so a report that arrives after a
+ * newer proof retires that proof instead of copying its revision. The event
+ * is built from the allocated revision. It is never a v2 proof.
+ */
+export async function commitLegacyTerminalCollection(input: {
+  readonly buildEvent: (collectionRevision: number) => SpineEventInput & PostgresSpineEventInput;
+  readonly connectorInstanceId: string;
+  readonly runId: string;
+}): Promise<void> {
+  const revisionEvent = {
+    at: new Date().toISOString(),
+    event: "legacy_terminal",
+    runId: input.runId,
+  } as const;
+  if (isPostgresStorageBackend()) {
+    await withPostgresTransaction(
+      async (client) => {
+        const revision = await requirePostgresCollectionRevisionInTransaction(
+          client,
+          input.connectorInstanceId,
+          revisionEvent
+        );
+        await appendPostgresSpineEventInTransaction(client, input.buildEvent(revision));
+      },
+      { lockConnectorInstanceId: input.connectorInstanceId }
+    );
+    return;
+  }
+  const db = getDb();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const revision = requireSqliteCollectionRevisionInTransaction(db, input.connectorInstanceId, revisionEvent);
+    appendSqliteSpineEventInTransaction(input.buildEvent(revision), db as unknown as SpineDatabase);
+    db.exec("COMMIT");
+  } catch (error) {
+    rollbackSqlite(db);
+    throw error;
+  }
 }

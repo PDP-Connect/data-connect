@@ -154,12 +154,10 @@ export function withCoverageAsOf(
   if (!(asOf && committedAt) || axis === "unknown" || axis === null || axis === undefined) {
     return chip;
   }
-  const release = asOf.artifact_digest ? `release ${asOf.artifact_digest}` : "an unrecorded release";
-  const run = asOf.run_id ? `run ${asOf.run_id}` : "a state commit";
   return {
     ...chip,
     label: `${chip.label} as of ${committedAt}`,
-    title: `${chip.title} This is a fact about ${run} (${release}), committed at ${committedAt} as collection revision ${asOf.collection_revision}. A later run the reference has not heard about is not reflected.`,
+    title: `${chip.title} This is a fact about run ${asOf.run_id} (release ${asOf.artifact_digest}), committed at ${committedAt} as collection revision ${asOf.collection_revision}. A later run the reference has not heard about is not reflected.`,
     value: `${chip.value} as of ${committedAt}`,
   };
 }

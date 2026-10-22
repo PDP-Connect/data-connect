@@ -219,6 +219,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/device-ingest-reservation-migration.test.ts",
   // Fences issuance writers while the cutover migration snapshots source tables.
   "test/issuance-cutover.test.ts",
+  // Drops the collection-revision columns and re-runs the bootstrap migration.
+  "test/local-device-coverage-revision-atomicity.test.ts",
   // Reopens old identity schemas and exercises migration rollback and recovery.
   "test/pairwise-grant-generation.test.ts",
   // Builds a prototype-shaped identity ledger before the real schema bootstrap.

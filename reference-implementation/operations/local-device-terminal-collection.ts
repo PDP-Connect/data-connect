@@ -6,9 +6,11 @@ import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/loca
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
-import { readCollectionRevisionHighWaters } from "../server/stores/collection-revision-store.ts";
 import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
-import { TerminalRunCommitConflictError } from "../server/stores/terminal-run-commit-store.ts";
+import {
+  commitLegacyTerminalCollection,
+  TerminalRunCommitConflictError,
+} from "../server/stores/terminal-run-commit-store.ts";
 
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
@@ -276,16 +278,15 @@ export async function handleLocalDeviceTerminalCollection(input: {
       );
       return;
     }
-    // The split report follows its own state commit, which already took a
-    // collection revision. It takes none itself; it is labelled with the
-    // current revision so the projection can order it against a proof.
+    // The split report is an observed collection event of its own. Its run
+    // record takes the next collection revision in the same transaction, so a
+    // report delayed past a newer proof retires that proof.
     const { connectorInstanceId } = authorized.connectorInstance;
-    const highWater = (await readCollectionRevisionHighWaters([connectorInstanceId])).get(connectorInstanceId);
-    await ctx.emitSpineEvent({
+    const event = (collectionRevision: number) => ({
       actor_id: deviceId,
       actor_type: "local_device",
       data: {
-        collection_revision: highWater?.revision ?? null,
+        collection_revision: collectionRevision,
         collection_facts: {
           // The boundary this evidence was measured against travels WITH it, so
           // a later scope change is detectable by comparison and stale proof can
@@ -314,6 +315,7 @@ export async function handleLocalDeviceTerminalCollection(input: {
       source_kind: "connector",
       status: "succeeded",
     });
+    await commitLegacyTerminalCollection({ buildEvent: event, connectorInstanceId, runId });
     res.status(201).json({ ok: true });
   } catch (error) {
     ctx.handleError(res, error);

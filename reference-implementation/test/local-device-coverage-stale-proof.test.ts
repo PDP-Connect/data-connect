@@ -721,6 +721,36 @@ test("store: a legacy diagnostics snapshot grants no coverage credit, before or 
   });
 });
 
+test("revision: a legacy diagnostics snapshot never shows positive coverage, even as the newest commit", async (t) => {
+  await withBoundaryConnection(async () => {
+    const stores = expectedLocalCoverageStoreDescriptors(connectorId);
+    assert.ok(stores, "the claude-code inventory declares its coverage stores");
+    const snapshot = {
+      fetched_at: PROOF_AT,
+      stores: stores.map(({ store, stream }) => ({ status: "collected", store, stream })),
+    };
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
+    // One commit carries the diagnostics and a cursor: both rows share its revision.
+    await putSyncState(BOUNDARY_TARGET, {
+      [LEGACY_DIAGNOSTICS_STREAM]: snapshot,
+      messages: { cursor: "own" },
+    });
+    const revision = highWaterRevision();
+    assert.ok(revision > 0, "the commit took a revision");
+    const projected = await boundaryProjection();
+    // Without a run id and release digest there is nothing for the owner's "complete as of" to name.
+    assert.equal(projected.axis, "unknown", "a fully collected legacy snapshot without run provenance is unknown");
+    assert.deepEqual(projected.conditions, UNKNOWN);
+    assert.equal(projected.asOf, null, "unknown coverage carries no as-of");
+
+    // A v2 proof after the snapshot is the current proof, and it names its run.
+    await seedV2Proof("run_after_legacy_snapshot");
+    const proof = await boundaryProjection();
+    assert.equal(proof.axis, "complete");
+    assert.equal(proof.asOf?.run_id, "run_after_legacy_snapshot");
+  });
+});
+
 test("revision: a later server-owned scope write is not an event and does not retire the proof", async (t) => {
   await withBoundaryConnection(async () => {
     t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
