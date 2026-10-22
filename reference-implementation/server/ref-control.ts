@@ -171,6 +171,7 @@ import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-c
 import { readLocalCollectorRelease } from "./local-collector-profiles.ts";
 import { mapPendingPressureGaps } from "./pending-pressure-gap-map.ts";
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
+import { readLatestStateCommitAt, readLatestStateCommitAtByConnectionIds } from "./records.ts";
 import {
   chooseDisplayTimestamp,
   compareTimestampValues,
@@ -4520,6 +4521,29 @@ function terminalCoverageCondition(
   return "complete";
 }
 
+/**
+ * Retire a typed terminal proof that a later state commit has superseded.
+ *
+ * A terminal commit writes its state rows and its run completion with one
+ * instant, so the proof's instant is its settled run's `last_at`. A state commit
+ * strictly after that instant came from a later run or checkpoint that carried
+ * no terminal replacement, so the proof no longer describes the source's latest
+ * collection. A commit at the same instant is the proof's own transaction, and
+ * an earlier one predates it: neither retires the proof. An unparseable instant
+ * keeps the proof, because it cannot establish that a later commit exists.
+ */
+function retireTerminalCoverageSupersededByLaterCommit(
+  terminalCoverage: ReturnType<typeof terminalCoverageByStream>,
+  settledRun: ConnectorRunSummary | null,
+  stateCommittedAt: string | null
+): ReturnType<typeof terminalCoverageByStream> {
+  const proofAt = settledRun?.last_at ?? null;
+  if (terminalCoverage === null || !proofAt || !stateCommittedAt) {
+    return terminalCoverage;
+  }
+  return Date.parse(stateCommittedAt) > Date.parse(proofAt) ? null : terminalCoverage;
+}
+
 function stateStreamParent(stream: ManifestStream | undefined): string | null {
   if (!stream || typeof stream !== "object") {
     return null;
@@ -4607,6 +4631,7 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
     heartbeats,
     unfillableAccounted,
     coverageHorizons,
+    stateCommits,
   ] = await Promise.all([
     listRetainedSizeConnectionsByInstanceIds(ids),
     listRetainedSizeStreamsByInstanceIds(ids),
@@ -4637,6 +4662,7 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
     getDefaultConnectorCoverageHorizonStore()
       .getCurrentCoverageHorizonsByInstanceIds(ids)
       .catch(() => null),
+    readLatestStateCommitAtByConnectionIds(ids).catch(() => null),
   ]);
   const connectionsByInstanceId = new Map<string, RetainedSizeConnectionProjectionRow>();
   for (const [id, row] of connections) {
@@ -4697,6 +4723,7 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
       credentialMetadataByInstanceId: credentials as ReadonlyMap<string, CredentialStoreMetadata> | null,
       detailGapsByInstanceId,
       outboxByInstanceId,
+      stateCommittedAtByInstanceId: stateCommits,
     },
     retainedSizeSnapshot: {
       connectionsByInstanceId,
@@ -6136,6 +6163,8 @@ interface PageProductEvidence {
       readonly unreliable: boolean;
     }
   > | null;
+  /** Newest state-commit instant per connection, or null when the batch read failed. */
+  readonly stateCommittedAtByInstanceId: ReadonlyMap<string, string> | null;
 }
 
 // A revoked row whose binding is still a setup-shell kind: setup was started
@@ -6379,6 +6408,8 @@ interface ConnectorSummarySynthesisInput {
   readonly connectorInstanceId: string;
   /** Current owner boundary; null if the state read failed. */
   readonly declaredLocalCollectionScope: string | null;
+  /** The connection's newest state-commit instant; null off the local device path or when that read failed. */
+  readonly localStateCommittedAt: string | null;
   /**
    * Provider coverage-horizon/provenance disclosures for this connection,
    * pre-fetched by the caller via `ConnectorCoverageHorizonStore` (kept out
@@ -6495,14 +6526,20 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const localCollectorRelease = localDeviceBacked ? readLocalCollectorRelease(connectorId) : null;
+  // Retired here, once, so every reader of `terminalCoverage` below (the
+  // collection report, the artifact binding) sees the same retirement.
   const terminalCoverage = localDeviceBacked
-    ? terminalCoverageByStream(
+    ? retireTerminalCoverageSupersededByLaterCommit(
+        terminalCoverageByStream(
+          fallbackSettledRun,
+          manifest,
+          input.declaredLocalCollectionScope,
+          evidence?.manifest_generation ?? null,
+          localCollectorRelease?.artifactDigest ?? null,
+          localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
+        ),
         fallbackSettledRun,
-        manifest,
-        input.declaredLocalCollectionScope,
-        evidence?.manifest_generation ?? null,
-        localCollectorRelease?.artifactDigest ?? null,
-        localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
+        input.localStateCommittedAt
       )
     : null;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
@@ -7638,6 +7675,13 @@ async function projectConnectorSummaryForInstance(
   const connectorImplementation = localDeviceBacked
     ? null
     : connectorImplementationForSummary(deps.connectorImplementationStates, connectorId);
+  // A later state commit retires a typed proof. Page callers batch the instant;
+  // a singleton read fails open, as the batch read does.
+  const localStateCommittedAt = localDeviceBacked
+    ? pageProductEvidence
+      ? (pageProductEvidence.stateCommittedAtByInstanceId?.get(connectorInstanceId) ?? null)
+      : await readLatestStateCommitAt(connectorInstanceId).catch(() => null)
+    : null;
   return synthesizeConnectorSummary({
     acquisitionCoverage,
     activeRun,
@@ -7647,6 +7691,7 @@ async function projectConnectorSummaryForInstance(
     connectorImplementation,
     connectorInstanceId,
     declaredLocalCollectionScope,
+    localStateCommittedAt,
     coverageHorizons,
     credential,
     detailGaps,
