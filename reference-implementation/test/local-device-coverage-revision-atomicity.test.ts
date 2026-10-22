@@ -27,11 +27,17 @@ import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summ
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { startServer } from "../server/index.ts";
+import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
 import { __setLocalCollectorReleaseForTest } from "../server/local-collector-profiles.ts";
+import { __setPostgresAdmissionLockedPhaseHookForTest } from "../server/postgres-records.ts";
 import { bootstrapPostgresSchema, closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
-import { readCommittedLocalCoverageDiagnostics } from "../server/records.ts";
+import { putSyncState, readCommittedLocalCoverageDiagnostics } from "../server/records.ts";
 import { getConnectorDetail, getOwnerConnectionDiagnostics, listConnectorSummaries } from "../server/ref-control.ts";
 import { __setDeviceIngestPhaseFaultHookForTest } from "../server/routes/ref-device-exporters.ts";
+import {
+  __setLocalCoverageFenceReadHookForTest,
+  isCollectionRevisionUnavailable,
+} from "../server/stores/collection-revision-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
 import { commitTerminalRun } from "../server/stores/terminal-run-commit-store.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
@@ -345,6 +351,18 @@ function postFailureReport(lane: Lane, runId: string): Promise<JsonResponse> {
 
 /** A v2 terminal proof for both streams, bound to the server's release. Returns the commit so a test can replay it. */
 async function commitProof(lane: Lane, runId: string): Promise<TerminalCommit> {
+  const commit = await buildProof(lane, runId);
+  const result = await commitTerminalRun(commit);
+  assert.equal(result.replayed, false, `run ${runId} commits a new terminal proof`);
+  return commit;
+}
+
+/** The v2 terminal commit `commitProof` sends, not yet committed. */
+async function buildProof(
+  lane: Lane,
+  runId: string,
+  stateDelta: TerminalCommit["stateDelta"] = {}
+): Promise<TerminalCommit> {
   const { connector_instance_id: connectorInstanceId, device_id: deviceId } = lane.enrolled;
   const sourceInstanceId = lane.enrolled.source_instance_id;
   await getDefaultDeviceExporterStore().markSourceInstanceHeartbeat(deviceId, sourceInstanceId, {
@@ -402,11 +420,9 @@ async function commitProof(lane: Lane, runId: string): Promise<TerminalCommit> {
     normalizedFacts: [stream("sessions", "projects"), stream("messages", "derived_messages")],
     runId,
     sourceInstanceId,
-    stateDelta: {},
+    stateDelta,
     version: 2,
   };
-  const result = await commitTerminalRun(commit);
-  assert.equal(result.replayed, false, `run ${runId} commits a new terminal proof`);
   return commit;
 }
 
@@ -472,14 +488,20 @@ async function openGapCount(lane: Lane): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
-/** Make every write that advances a collection revision fail, as a storage fault would. */
-async function failRevisionWrites(lane: Lane): Promise<() => Promise<void>> {
+/**
+ * Make every write that advances a collection revision fail, as a storage
+ * fault would. With `event`, only the advance for that event kind fails, so
+ * a test can fail one step of a multi-step request after earlier steps
+ * committed.
+ */
+async function failRevisionWrites(lane: Lane, event?: string): Promise<() => Promise<void>> {
+  const only = (column: string) => (event ? ` AND ${column} = '${event}'` : "");
   if (lane.backend === "postgres") {
     await postgresQuery(`CREATE FUNCTION pdpp_test_fail_collection_revision() RETURNS trigger
       LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected collection revision failure'; END $$`);
     await postgresQuery(`CREATE TRIGGER pdpp_test_fail_collection_revision
       BEFORE UPDATE OF collection_revision ON connector_instances FOR EACH ROW
-      WHEN (NEW.collection_revision IS DISTINCT FROM OLD.collection_revision)
+      WHEN (NEW.collection_revision IS DISTINCT FROM OLD.collection_revision${only("NEW.collection_revision_event")})
       EXECUTE FUNCTION pdpp_test_fail_collection_revision()`);
     return async () => {
       await postgresQuery("DROP TRIGGER pdpp_test_fail_collection_revision ON connector_instances");
@@ -488,7 +510,7 @@ async function failRevisionWrites(lane: Lane): Promise<() => Promise<void>> {
   }
   getDb().exec(`CREATE TRIGGER pdpp_test_fail_collection_revision
     BEFORE UPDATE OF collection_revision ON connector_instances
-    WHEN NEW.collection_revision IS NOT OLD.collection_revision
+    WHEN NEW.collection_revision IS NOT OLD.collection_revision${only("NEW.collection_revision_event")}
     BEGIN SELECT RAISE(ABORT, 'injected collection revision failure'); END`);
   return () => {
     getDb().exec("DROP TRIGGER pdpp_test_fail_collection_revision");
@@ -756,6 +778,424 @@ laneTest("every projection that shows complete coverage carries its as-of", asyn
   assert.ok(diagnostics, "diagnostics resolve the connection");
   assert.equal(diagnostics.health.axes.coverage, "complete", "diagnostics health");
   assert.deepEqual(pick((diagnostics as unknown as Record<string, unknown>).coverage_as_of), expected, "diagnostics");
+
+  // A health object read on its own still names what its coverage is a fact about.
+  const detailHealth = detailRecord.connection_health as Record<string, unknown>;
+  const healthAsOf = (health: unknown) => (health as Record<string, unknown> | undefined)?.coverage_as_of;
+  assert.deepEqual(
+    {
+      detailHealth: healthAsOf(detailHealth),
+      diagnosticsHealth: healthAsOf(diagnostics.health),
+      summaryHealth: healthAsOf(summary?.connection_health),
+    },
+    {
+      detailHealth: detailRecord.coverage_as_of,
+      diagnosticsHealth: diagnostics.coverage_as_of,
+      summaryHealth: summary?.coverage_as_of,
+    },
+    "every embedded health carries its projection's as-of"
+  );
+  assert.deepEqual(diagnostics.health.coverage_as_of, summary?.coverage_as_of, "one as-of across the projections");
+});
+
+// ---------------------------------------------------------------------------
+// Round 3: required terminal allocation, guarded advance, legacy replay,
+// device diagnostics, boundary snapshot, selective failures and lock order.
+// ---------------------------------------------------------------------------
+
+async function rawRevision(lane: Lane): Promise<string> {
+  const [row] = await sql(
+    lane,
+    "SELECT CAST(collection_revision AS TEXT) AS revision FROM connector_instances WHERE connector_instance_id = ?",
+    "SELECT collection_revision::text AS revision FROM connector_instances WHERE connector_instance_id = $1",
+    [lane.enrolled.connector_instance_id]
+  );
+  return String(row?.revision);
+}
+
+/** Store a revision value as a storage fault or a hand edit could leave it. */
+async function storeRevision(lane: Lane, value: unknown): Promise<void> {
+  await sql(
+    lane,
+    "UPDATE connector_instances SET collection_revision = ? WHERE connector_instance_id = ?",
+    "UPDATE connector_instances SET collection_revision = $1::bigint WHERE connector_instance_id = $2",
+    [value, lane.enrolled.connector_instance_id]
+  );
+}
+
+async function runRows(lane: Lane, runId: string): Promise<{ readonly events: number; readonly runs: number }> {
+  const [runs] = await sql(
+    lane,
+    "SELECT COUNT(*) AS n FROM run_history WHERE run_id = ?",
+    "SELECT COUNT(*)::integer AS n FROM run_history WHERE run_id = $1",
+    [runId]
+  );
+  const [events] = await sql(
+    lane,
+    "SELECT COUNT(*) AS n FROM spine_events WHERE run_id = ?",
+    "SELECT COUNT(*)::integer AS n FROM spine_events WHERE run_id = $1",
+    [runId]
+  );
+  return { events: Number(events?.n ?? 0), runs: Number(runs?.n ?? 0) };
+}
+
+/** The stored `sessions` cursor, or null when no state row exists. */
+async function sessionsCursor(lane: Lane): Promise<unknown> {
+  const [row] = await sql(
+    lane,
+    "SELECT state_json FROM connector_state WHERE connector_instance_id = ? AND stream = 'sessions'",
+    "SELECT state_json::text AS state_json FROM connector_state WHERE connector_instance_id = $1 AND stream = 'sessions'",
+    [lane.enrolled.connector_instance_id]
+  );
+  return row ? (JSON.parse(String(row.state_json)) as { cursor?: unknown }).cursor : null;
+}
+
+function putDeviceState(lane: Lane, cursor: string): Promise<JsonResponse> {
+  return requestJson(sourceUrl(lane, "/state"), {
+    body: JSON.stringify({ state: { sessions: { cursor } } }),
+    headers: { "Content-Type": "application/json", ...authHeaders(lane) },
+    method: "PUT",
+  });
+}
+
+async function terminalOutcome(commit: TerminalCommit): Promise<string> {
+  try {
+    await commitTerminalRun(commit);
+    return "committed";
+  } catch (error) {
+    return isCollectionRevisionUnavailable(error) ? "revision_unavailable" : String(error);
+  }
+}
+
+laneTest("no event commits against a stored revision that is unreadable or cannot advance", async (lane) => {
+  await commitProof(lane, "run-a");
+  // Both schemas accept a negative revision; SQLite's INTEGER affinity also keeps text and reals.
+  const stored: ReadonlyArray<readonly [string, unknown]> = [
+    ["negative", -1],
+    ...(lane.backend === "sqlite"
+      ? ([
+          ["text", "abc"],
+          ["real", 1.5],
+        ] as const)
+      : []),
+    ["exhausted", Number.MAX_SAFE_INTEGER],
+  ];
+  const outcomes: Record<string, unknown>[] = [];
+  for (const [label, value] of stored) {
+    await storeRevision(lane, value);
+    const before = await rawRevision(lane);
+    const runId = `run-${label}`;
+    const terminal = await terminalOutcome(await buildProof(lane, runId, { sessions: { cursor: label } }));
+    const state = await putDeviceState(lane, `state-${label}`);
+    outcomes.push({
+      label,
+      revisionUnchanged: (await rawRevision(lane)) === before,
+      run: await runRows(lane, runId),
+      sessionsCursor: await sessionsCursor(lane),
+      state: state.status >= 500 ? "refused" : state.status,
+      terminal,
+    });
+  }
+  assert.deepEqual(
+    outcomes,
+    stored.map(([label]) => ({
+      label,
+      revisionUnchanged: true,
+      run: { events: 0, runs: 0 },
+      sessionsCursor: null,
+      state: "refused",
+      terminal: "revision_unavailable",
+    }))
+  );
+});
+
+laneTest("a terminal commit whose revision write fails rolls back whole and keeps the prior proof", async (lane) => {
+  await commitProof(lane, "run-a");
+  const before = await highWater(lane);
+  const restore = await failRevisionWrites(lane, "terminal_run");
+  try {
+    const outcome = await commitTerminalRun(await buildProof(lane, "run-b", { sessions: { cursor: "b" } })).then(
+      () => "committed",
+      (error: unknown) => String((error as Error).message)
+    );
+    assert.match(outcome, /injected collection revision failure/);
+    // The trigger fails only the terminal advance: a state commit still records its own revision.
+  } finally {
+    await restore();
+  }
+  assert.deepEqual(await highWater(lane), before, "no revision was allocated");
+  assert.deepEqual(await runRows(lane, "run-b"), { events: 0, runs: 0 }, "no run event or run record");
+  assert.equal(await sessionsCursor(lane), null, "no state row from the rolled-back commit");
+  await assertCovered(lane, "run-a", "run A's proof is still the newest event");
+});
+
+laneTest(
+  "a retried legacy split terminal report neither advances the revision nor retires a newer proof",
+  async (lane) => {
+    const report = (statuses: string[]) =>
+      postJson(
+        sourceUrl(lane, "/terminal-collection"),
+        {
+          connector_id: CONNECTOR_ID,
+          run_id: "run-a",
+          source_instance_id: lane.enrolled.source_instance_id,
+          streams: [
+            { coverage_statuses: statuses, stream: "sessions" },
+            { coverage_statuses: ["collected"], stream: "messages" },
+          ],
+        },
+        authHeaders(lane)
+      );
+    const first = await report(["collected"]);
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    await commitProof(lane, "run-b");
+    await assertCovered(lane, "run-b", "run B's proof follows run A's report");
+    const proof = await highWater(lane);
+
+    const retried = await report(["collected"]);
+    const afterRetry = { highWater: await highWater(lane), run: await runRows(lane, "run-a") };
+    const conflicting = await report(["partial"]);
+    const afterConflict = { highWater: await highWater(lane), run: await runRows(lane, "run-a") };
+    assert.deepEqual(afterRetry, { highWater: proof, run: { events: 1, runs: 1 } }, "the retry is not a new event");
+    assert.deepEqual(afterConflict, afterRetry, "a conflicting report for the run writes nothing");
+    await assertCovered(lane, "run-b", "run B's proof is still current");
+    assert.deepEqual(
+      [
+        [retried.status, retried.body],
+        [conflicting.status, (conflicting.body?.error as Record<string, unknown> | undefined)?.code],
+      ],
+      [
+        [200, { ok: true }],
+        [409, "terminal_collection_conflict"],
+      ],
+      "an identical retry is acknowledged; a different report for the run is a conflict"
+    );
+  }
+);
+
+/** Raw `coverage_diagnostics` records, as an old collector left them: no run, release or revision behind them. */
+async function seedRawCoverageRows(lane: Lane): Promise<void> {
+  for (const [store, stream] of [
+    ["projects", "sessions"],
+    ["derived_messages", "messages"],
+  ] as const) {
+    const json = JSON.stringify({ id: `coverage:${store}`, status: "collected", store, stream });
+    await sql(
+      lane,
+      `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted)
+       VALUES (?, ?, 'coverage_diagnostics', ?, ?, ?, 1, 0)`,
+      `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted,
+                           primary_key_text)
+       VALUES ($1, $2, 'coverage_diagnostics', $3, $4::jsonb, $5, 1, FALSE, $3)`,
+      [CONNECTOR_ID, lane.enrolled.connector_instance_id, `coverage:${store}`, json, EMITTED_AT]
+    );
+  }
+}
+
+async function deviceCoverage(lane: Lane, cookie: string): Promise<Record<string, unknown>> {
+  const diagnostics = await requestJson(`${lane.asUrl}/_ref/device-exporters/diagnostics`, {
+    headers: { Cookie: cookie },
+  });
+  assert.equal(diagnostics.status, 200, JSON.stringify(diagnostics.body));
+  const devices = (diagnostics.body?.data ?? []) as Array<{ source_instances: Array<Record<string, unknown>> }>;
+  const source = devices
+    .flatMap((device) => device.source_instances)
+    .find((row) => row.source_instance_id === lane.enrolled.source_instance_id);
+  assert.ok(source, "the lane's source instance is listed");
+  return source.local_collector_coverage as Record<string, unknown>;
+}
+
+laneTest("device diagnostics show no coverage positive the owner projection has retired", async (lane) => {
+  const cookie = await ownerSessionCookie(lane.asUrl);
+  await seedRawCoverageRows(lane);
+  await commitProof(lane, "run-a");
+  await assertCovered(lane, "run-a", "run A's proof is current");
+  const current = await deviceCoverage(lane, cookie);
+
+  const refused = await postBatch(lane, {
+    ...batchBody(lane, "batch-refused", sessionRecords("s-1")),
+    body_hash: "0".repeat(64),
+  });
+  assert.equal(refused.status, 400, JSON.stringify(refused.body));
+  await assertRetired(lane, "the refused batch retires run A's proof");
+  const retired = await deviceCoverage(lane, cookie);
+
+  const view = (coverage: Record<string, unknown>) => ({
+    asOfRun: (coverage.coverage_as_of as Record<string, unknown> | null | undefined)?.run_id ?? null,
+    fullyAccounted: coverage.fully_accounted,
+    inventory: coverage.by_store,
+  });
+  const inventory = { derived_messages: "collected", projects: "collected" };
+  assert.deepEqual(
+    [view(current), view(retired)],
+    [
+      { asOfRun: "run-a", fullyAccounted: true, inventory },
+      { asOfRun: null, fullyAccounted: false, inventory },
+    ],
+    "the positive follows the owner projection; the raw inventory stays as history"
+  );
+});
+
+/**
+ * Change the boundary between the projection's own boundary reads and its
+ * fence read: a proof commits against the boundary the projection already
+ * read, then the boundary changes. Runs once.
+ */
+function changeBoundaryMidProjection(lane: Lane, change: () => Promise<void>): { readonly fired: () => boolean } {
+  let fired = false;
+  __setLocalCoverageFenceReadHookForTest(async (ids) => {
+    if (fired || !ids.includes(lane.enrolled.connector_instance_id)) {
+      return;
+    }
+    fired = true;
+    __setLocalCoverageFenceReadHookForTest(null);
+    await commitProof(lane, "run-b");
+    await change();
+  });
+  return { fired: () => fired };
+}
+
+laneTest("a scope change between the projection's reads composes no positive from two moments", async (lane) => {
+  await commitProof(lane, "run-a");
+  await assertCovered(lane, "run-a", "run A's proof is current");
+  const hook = changeBoundaryMidProjection(lane, async () => {
+    await putSyncState(
+      { connector_id: CONNECTOR_ID, connector_instance_id: lane.enrolled.connector_instance_id },
+      { [COLLECTION_SCOPE_STATE_KEY]: buildStoredCollectionScope(null, new Date().toISOString()) }
+    );
+  });
+  try {
+    const during = await projection(lane);
+    assert.ok(hook.fired(), "the boundary changed mid-projection");
+    assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof measured the scope that was replaced");
+  } finally {
+    __setLocalCoverageFenceReadHookForTest(null);
+  }
+  await assertRetired(lane, "run B's proof does not measure the current scope");
+});
+
+laneTest("a manifest change between the projection's reads composes no positive from two moments", async (lane) => {
+  await commitProof(lane, "run-a");
+  await assertCovered(lane, "run-a", "run A's proof is current");
+  const hook = changeBoundaryMidProjection(lane, () => registerFixtureManifest(lane));
+  try {
+    const during = await projection(lane);
+    assert.ok(hook.fired(), "the manifest generation changed mid-projection");
+    assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof is bound to the replaced generation");
+  } finally {
+    __setLocalCoverageFenceReadHookForTest(null);
+  }
+  await assertRetired(lane, "run B's proof is bound to the replaced generation");
+});
+
+laneTest("a batch whose acceptance cannot be recorded keeps its records and retries to acceptance", async (lane) => {
+  await commitProof(lane, "run-a");
+  const batch = batchBody(lane, "batch-acceptance-fails", sessionRecords("s-1", "s-2"));
+  const restore = await failRevisionWrites(lane, "batch_accepted");
+  let failed: JsonResponse;
+  try {
+    failed = await postBatch(lane, batch);
+  } finally {
+    await restore();
+  }
+  assert.equal(failed.status, 503, JSON.stringify(failed.body));
+  assert.equal(await sessionRecordCount(lane), 2, "each record committed with its own revision");
+  // The acceptance and its revision rolled back together. The retryable 503
+  // for an attempt the server received is itself an observed refusal.
+  assert.equal((await highWater(lane)).event, "batch_rejected", "no batch_accepted revision committed");
+  await assertRetired(lane, "the durable records retire run A's proof");
+
+  const retried = await postBatch(lane, batch);
+  assert.equal(retried.status, 201, JSON.stringify(retried.body));
+  assert.equal(await sessionRecordCount(lane), 2);
+  assert.equal((await highWater(lane)).event, "batch_accepted");
+  await assertRetired(lane, "the accepted batch is still later than run A's proof");
+});
+
+laneTest("a state commit whose revision write fails writes no state and keeps the prior proof", async (lane) => {
+  await commitProof(lane, "run-a");
+  const before = await highWater(lane);
+  const restore = await failRevisionWrites(lane, "state_commit");
+  let failed: JsonResponse;
+  try {
+    failed = await putDeviceState(lane, "unrecorded");
+  } finally {
+    await restore();
+  }
+  assert.ok(
+    failed.status >= 500,
+    `the state commit is not acknowledged: ${failed.status} ${JSON.stringify(failed.body)}`
+  );
+  assert.equal(await sessionsCursor(lane), null, "no state without its revision");
+  assert.deepEqual(await highWater(lane), before);
+  await assertCovered(lane, "run-a", "nothing was recorded after run A");
+
+  const committed = await putDeviceState(lane, "recorded");
+  assert.equal(committed.status, 200, JSON.stringify(committed.body));
+  assert.equal(await sessionsCursor(lane), "recorded");
+  assert.equal((await highWater(lane)).event, "state_commit");
+  await assertRetired(lane, "the state commit retires run A's proof");
+});
+
+// Bounded by the test timeout: a hang fails the test, and PostgreSQL reports a
+// deadlock between the two transactions as an error (40P01) to one of them.
+test("a record transaction and a terminal commit for one connection serialize without deadlock [real PostgreSQL]", {
+  skip: POSTGRES_SKIP,
+  timeout: 30_000,
+}, async () => {
+  await withLane("postgres", async (lane) => {
+    await commitProof(lane, "run-a");
+    const before = await highWater(lane);
+    const held = gate();
+    const release = gate();
+    let paused = false;
+    __setPostgresAdmissionLockedPhaseHookForTest(async (point: string, context: Record<string, unknown>) => {
+      if (paused || point !== "after-connector-instance-admission-lock") {
+        return;
+      }
+      if (context.connectorInstanceId !== lane.enrolled.connector_instance_id) {
+        return;
+      }
+      paused = true;
+      held.open();
+      await release.wait;
+    });
+    try {
+      const batch = postBatch(lane, batchBody(lane, "batch-holds-lock", sessionRecords("s-1")));
+      await held.wait;
+      const proof = await buildProof(lane, "run-b");
+      const terminal = commitTerminalRun(proof);
+      // The terminal commit must wait for the record transaction, not slip past it.
+      let waiting = 0;
+      for (let attempt = 0; attempt < 100 && waiting === 0; attempt += 1) {
+        const [row] = await sql(
+          lane,
+          "",
+          "SELECT COUNT(*)::integer AS n FROM pg_locks WHERE NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+        );
+        waiting = Number(row?.n ?? 0);
+        if (waiting === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      assert.ok(waiting > 0, "the terminal commit blocks on the lock the record transaction holds");
+      release.open();
+      const [accepted, committed] = await Promise.all([batch, terminal]);
+      assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
+      assert.equal(committed.replayed, false);
+    } finally {
+      release.open();
+      __setPostgresAdmissionLockedPhaseHookForTest(null);
+    }
+    const [run] = await sql(lane, "", "SELECT facts_json::text AS facts_json FROM run_history WHERE run_id = $1", [
+      "run-b",
+    ]);
+    const proofRevision = (JSON.parse(String(run?.facts_json)) as { collection_revision: number }).collection_revision;
+    assert.ok(
+      proofRevision > before.revision + 1,
+      `run B's revision ${proofRevision} follows the record's revision ${before.revision + 1}`
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

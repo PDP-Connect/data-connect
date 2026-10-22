@@ -1331,6 +1331,12 @@ export interface RefConnectionHealthSnapshot {
   collection_rate?: RefCollectionRateSnapshot | null;
   conditions?: readonly RefConnectionHealthCondition[];
   /**
+   * What `axes.coverage` is a fact about: the same value as the summary's
+   * top-level `coverage_as_of`. Optional on the mirror because a reference
+   * predating the field omits it.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
+  /**
    * Additive, nullable source-pressure detail-gap backlog rollup
    * ({@link RefDetailGapBacklog}). `null` when no backlog evidence was supplied
    * or the durable gap store was unreadable; a readable-but-drained backlog is a

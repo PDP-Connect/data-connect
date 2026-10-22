@@ -7089,6 +7089,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     prepareDeviceFinalRecords,
     putSyncState,
     readCollectorProtocolHeader,
+    // The same fenced verdict the connector summary shows, so device
+    // diagnostics never claim coverage the owner projection has retired.
+    readCurrentLocalCoverage: async (connectorInstanceId: string) => {
+      const summary = await getConnectorSummaryForRoute(connectorInstanceId, controller);
+      if (!(summary && "coverage_as_of" in summary && summary.connection_health)) {
+        return null;
+      }
+      return { asOf: summary.coverage_as_of, axis: summary.connection_health.axes.coverage };
+    },
     readReferenceLocalConnectorCatalogManifest,
     requireDeviceExporterCredential,
     requireOwnerSession: ownerAuth.requireOwnerSession,

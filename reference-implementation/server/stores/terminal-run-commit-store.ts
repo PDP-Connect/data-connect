@@ -8,8 +8,6 @@ import { appendSqliteSpineEventInTransaction, type SpineDatabase, type SpineEven
 import { getDb } from "../db.ts";
 import { isPostgresStorageBackend, withPostgresTransaction } from "../postgres-storage.ts";
 import {
-  advancePostgresCollectionRevisionInTransaction,
-  advanceSqliteCollectionRevisionInTransaction,
   requirePostgresCollectionRevisionInTransaction,
   requireSqliteCollectionRevisionInTransaction,
 } from "./collection-revision-store.ts";
@@ -94,7 +92,7 @@ function eventInputFor(
   eventId: string,
   response: TerminalRunCommitResponse,
   occurredAt: string,
-  collectionRevision: number | null
+  collectionRevision: number
 ): SpineEventInput & PostgresSpineEventInput {
   return {
     actor_id: input.deviceId,
@@ -198,12 +196,12 @@ function commitSqlite(input: ResolvedTerminalRunCommit): TerminalRunCommitResult
 
     const occurredAt = new Date().toISOString();
     const response = responseFor(input, eventId);
-    const collectionRevision =
-      advanceSqliteCollectionRevisionInTransaction(db, input.connectorInstanceId, {
-        at: occurredAt,
-        event: "terminal_run",
-        runId: input.runId,
-      })?.revision ?? null;
+    // Required: a terminal run without its revision rolls back whole.
+    const collectionRevision = requireSqliteCollectionRevisionInTransaction(db, input.connectorInstanceId, {
+      at: occurredAt,
+      event: "terminal_run",
+      runId: input.runId,
+    });
     putSqliteConnectorStateDeltaInTransaction(
       db,
       { connectorId: input.connectorId, connectorInstanceId: input.connectorInstanceId },
@@ -273,14 +271,12 @@ async function commitPostgres(input: ResolvedTerminalRunCommit): Promise<Termina
 
       const occurredAt = new Date().toISOString();
       const response = responseFor(input, eventId);
-      const collectionRevision =
-        (
-          await advancePostgresCollectionRevisionInTransaction(client, input.connectorInstanceId, {
-            at: occurredAt,
-            event: "terminal_run",
-            runId: input.runId,
-          })
-        )?.revision ?? null;
+      // Required: a terminal run without its revision rolls back whole.
+      const collectionRevision = await requirePostgresCollectionRevisionInTransaction(
+        client,
+        input.connectorInstanceId,
+        { at: occurredAt, event: "terminal_run", runId: input.runId }
+      );
       await putPostgresConnectorStateDeltaInTransaction(
         client,
         { connectorId: input.connectorId, connectorInstanceId: input.connectorInstanceId },
@@ -314,43 +310,115 @@ export async function commitTerminalRun(input: ResolvedTerminalRunCommit): Promi
   return isPostgresStorageBackend() ? await commitPostgres(input) : commitSqlite(input);
 }
 
+/** JSON with sorted keys and without undefined members, as stored JSON reads back. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, member: unknown) =>
+    member && typeof member === "object" && !Array.isArray(member)
+      ? Object.fromEntries(
+          Object.keys(member)
+            .sort()
+            .map((key) => [key, (member as Record<string, unknown>)[key]])
+        )
+      : member
+  );
+}
+
+/**
+ * What identifies a legacy report: the connection and the facts it reported.
+ * The spine adds its own fields to stored data (`source`), so a retry is
+ * compared on these alone.
+ */
+function legacyReportIdentity(data: unknown): string | null {
+  let parsed: unknown = data;
+  if (typeof data === "string") {
+    try {
+      parsed = JSON.parse(data) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  const record = asRecord(parsed);
+  return record
+    ? canonicalJson({
+        collection_facts: record.collection_facts,
+        connector_instance_id: record.connector_instance_id,
+      })
+    : null;
+}
+
 /**
  * Commit a legacy split `terminal-collection` report. It is an observed
  * collection event of its own (`legacy_terminal`): its run record takes the
  * next revision in the same transaction, so a report that arrives after a
- * newer proof retires that proof instead of copying its revision. The event
- * is built from the allocated revision. It is never a v2 proof.
+ * newer proof retires that proof instead of copying its revision. It is never
+ * a v2 proof.
+ *
+ * The event id is the run's, so a retried report finds the stored one under
+ * the same lock, before any revision is allocated. An identical retry is a
+ * replay: it allocates no revision and so retires nothing. A different report
+ * for the same run is a conflict. Neither writes anything.
  */
 export async function commitLegacyTerminalCollection(input: {
-  readonly buildEvent: (collectionRevision: number) => SpineEventInput & PostgresSpineEventInput;
   readonly connectorInstanceId: string;
+  /** The run event, without `data.collection_revision`; the store adds the allocated revision. */
+  readonly event: SpineEventInput &
+    PostgresSpineEventInput & { readonly data: Readonly<Record<string, unknown>>; readonly event_id: string };
   readonly runId: string;
-}): Promise<void> {
+}): Promise<{ readonly replayed: boolean }> {
   const revisionEvent = {
     at: new Date().toISOString(),
     event: "legacy_terminal",
     runId: input.runId,
   } as const;
+  const report = legacyReportIdentity(input.event.data);
+  const withRevision = (collectionRevision: number) => ({
+    ...input.event,
+    data: { ...input.event.data, collection_revision: collectionRevision },
+  });
+  const replayed = (existing: { data_json: unknown } | undefined): boolean => {
+    if (!existing) {
+      return false;
+    }
+    if (report === null || legacyReportIdentity(existing.data_json) !== report) {
+      throw new TerminalRunCommitConflictError();
+    }
+    return true;
+  };
   if (isPostgresStorageBackend()) {
-    await withPostgresTransaction(
+    return await withPostgresTransaction(
       async (client) => {
+        const existing = await client.query<{ data_json: unknown }>(
+          "SELECT data_json FROM spine_events WHERE event_id = $1",
+          [input.event.event_id]
+        );
+        if (replayed(existing.rows[0])) {
+          return { replayed: true };
+        }
         const revision = await requirePostgresCollectionRevisionInTransaction(
           client,
           input.connectorInstanceId,
           revisionEvent
         );
-        await appendPostgresSpineEventInTransaction(client, input.buildEvent(revision));
+        await appendPostgresSpineEventInTransaction(client, withRevision(revision));
+        return { replayed: false };
       },
       { lockConnectorInstanceId: input.connectorInstanceId }
     );
-    return;
   }
   const db = getDb();
   db.exec("BEGIN IMMEDIATE");
   try {
+    const existing = db.prepare("SELECT data_json FROM spine_events WHERE event_id = ?").get(input.event.event_id) as
+      | { data_json: unknown }
+      | undefined;
+    if (replayed(existing)) {
+      db.exec("COMMIT");
+      return { replayed: true };
+    }
     const revision = requireSqliteCollectionRevisionInTransaction(db, input.connectorInstanceId, revisionEvent);
-    appendSqliteSpineEventInTransaction(input.buildEvent(revision), db as unknown as SpineDatabase);
+    appendSqliteSpineEventInTransaction(withRevision(revision), db as unknown as SpineDatabase);
     db.exec("COMMIT");
+    return { replayed: false };
   } catch (error) {
     rollbackSqlite(db);
     throw error;

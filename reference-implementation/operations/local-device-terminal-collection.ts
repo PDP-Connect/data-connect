@@ -282,11 +282,10 @@ export async function handleLocalDeviceTerminalCollection(input: {
     // record takes the next collection revision in the same transaction, so a
     // report delayed past a newer proof retires that proof.
     const { connectorInstanceId } = authorized.connectorInstance;
-    const event = (collectionRevision: number) => ({
+    const event = {
       actor_id: deviceId,
       actor_type: "local_device",
       data: {
-        collection_revision: collectionRevision,
         collection_facts: {
           // The boundary this evidence was measured against travels WITH it, so
           // a later scope change is detectable by comparison and stale proof can
@@ -314,10 +313,20 @@ export async function handleLocalDeviceTerminalCollection(input: {
       source_id: authorized.sourceInstance.connectorId,
       source_kind: "connector",
       status: "succeeded",
-    });
-    await commitLegacyTerminalCollection({ buildEvent: event, connectorInstanceId, runId });
-    res.status(201).json({ ok: true });
+    };
+    // An identical retry of a stored report is acknowledged without a new revision.
+    const { replayed } = await commitLegacyTerminalCollection({ connectorInstanceId, event, runId });
+    res.status(replayed ? 200 : 201).json({ ok: true });
   } catch (error) {
+    if (error instanceof TerminalRunCommitConflictError) {
+      ctx.pdppError(
+        res,
+        409,
+        "terminal_collection_conflict",
+        "A different terminal collection report is already stored for this run."
+      );
+      return;
+    }
     ctx.handleError(res, error);
   }
 }

@@ -902,7 +902,7 @@ export interface ConnectorSummary {
    * `complete`. Empty when no in-scope stream universe exists.
    */
   readonly collection_report: readonly CollectionReportEntry[];
-  readonly connection_health: ConnectionHealthSnapshot;
+  readonly connection_health: ConnectorConnectionHealth;
   readonly connection_id: string;
   readonly connector_display_name: string;
   readonly connector_id: string;
@@ -1171,7 +1171,7 @@ export interface ConnectorDetail {
    * wide or zeroed snapshot. A consumer must treat `null` here as "no single
    * connection's health is resolvable," not as an absence of any problem.
    */
-  readonly connection_health: ConnectionHealthSnapshot | null;
+  readonly connection_health: ConnectorConnectionHealth | null;
   readonly connection_id: string;
   /** See {@link ConnectorSummary.coverage_as_of}; `null` when no single connection resolved. */
   readonly coverage_as_of: LocalCoverageAsOf | null;
@@ -4831,6 +4831,15 @@ interface LocalCoverageDiagnosticAxis {
 }
 
 /**
+ * A connection's health as the owner projections embed it. It carries the
+ * coverage as-of itself, so a health object read on its own still names what
+ * its coverage axis is a fact about.
+ */
+export type ConnectorConnectionHealth = ConnectionHealthSnapshot & {
+  readonly coverage_as_of: LocalCoverageAsOf | null;
+};
+
+/**
  * The run a local coverage verdict describes. Coverage is a fact about one
  * run, never a present-tense claim, so every projection that shows coverage
  * carries this: the run, the release digest it ran, and the collection
@@ -5124,6 +5133,37 @@ function deriveLocalTerminalCoverageAxis(
     source: "terminal_verdict",
     unaccountedStores: unaccountedStores.sort((left, right) => left.localeCompare(right)),
   };
+}
+
+/**
+ * Whether the boundary read with the proof and its fence (one statement) is
+ * the boundary the rest of this projection was built from: the declared scope
+ * of the coverage read, the manifest generation of the summary evidence, and
+ * the manifest itself. A difference means a scope or manifest change landed
+ * between those reads. The projection then composes no positive from the two
+ * moments; the coverage is unknown.
+ */
+function proofBoundaryIsCoherent(
+  fence: LocalCoverageRevisionFence | null | undefined,
+  declaredCollectionScope: string | undefined,
+  manifestGeneration: number | null,
+  manifest: ConnectorManifest
+): boolean {
+  const boundary = fence?.boundary;
+  if (!boundary?.manifestJson || boundary.manifestGeneration === null) {
+    return false;
+  }
+  let proofManifest: unknown;
+  try {
+    proofManifest = JSON.parse(boundary.manifestJson) as unknown;
+  } catch {
+    return false;
+  }
+  return (
+    boundary.declaredCollectionScope === declaredCollectionScope &&
+    boundary.manifestGeneration === manifestGeneration &&
+    JSON.stringify(proofManifest) === JSON.stringify(manifest)
+  );
 }
 
 /**
@@ -7261,16 +7301,23 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   // names; a legacy diagnostics row is never one. Any later observed event
   // retires it. The downstream readers below all take `effectiveLocalCoverage`, so the
   // retirement reaches every consumer, not only this branch.
-  const proofRunCoverage = localDeviceBacked
-    ? localProofRunCoverage(localCoverage?.revisionFence, connectorInstanceId)
-    : null;
+  const proofRunCoverage =
+    localDeviceBacked &&
+    proofBoundaryIsCoherent(
+      localCoverage?.revisionFence,
+      localCoverage?.declaredCollectionScope,
+      evidence?.manifest_generation ?? null,
+      manifest
+    )
+      ? localProofRunCoverage(localCoverage?.revisionFence, connectorInstanceId)
+      : null;
   const effectiveLocalCoverage = localDeviceBacked
     ? fenceLocalCoverageProof(
         deriveLocalTerminalCoverageAxis(
           proofRunCoverage?.run ?? null,
           manifest,
           localCoverage,
-          evidence?.manifest_generation ?? null,
+          localCoverage?.revisionFence?.boundary.manifestGeneration ?? null,
           localCollectorRelease?.artifactDigest ?? null,
           localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
         ) ?? localCoverage,
@@ -7411,6 +7458,8 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     initialConnectionHealth,
     collectionReport
   );
+  // One as-of for every projection of this coverage: the summary, its embedded health, and what reads them.
+  const coverageAsOf = effectiveLocalCoverage?.asOf ?? null;
   const recoveredCount = detailGaps.recovered;
   // A non-current `record_snapshot` means the stored counts predate a failure,
   // so they must never read as an authoritative exact count. Resolved here
@@ -7599,10 +7648,10 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     acquisition_coverage: acquisitionCoverage,
     auto_enroll_skip_reason: recordedAutoEnrollSkipReason(instance),
     collection_report: collectionReport,
-    connection_health: connectionHealth,
+    connection_health: { ...connectionHealth, coverage_as_of: coverageAsOf },
     connection_id: connectorInstanceId,
     connector_display_name: connectorDisplayName,
-    coverage_as_of: effectiveLocalCoverage?.asOf ?? null,
+    coverage_as_of: coverageAsOf,
     connector_id: connectorId,
     connector_implementation: input.connectorImplementation,
     connector_instance_id: connectorInstanceId,
@@ -9882,6 +9931,8 @@ export interface OwnerConnectionDiagnosticsRun {
 export interface OwnerConnectionDiagnosticsHealth {
   readonly axes: ConnectionHealthSnapshot["axes"];
   readonly badges: ConnectionHealthSnapshot["badges"];
+  /** What `axes.coverage` is a fact about; the same value as the top-level `coverage_as_of`. */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   readonly last_success_at: string | null;
   readonly next_attempt_at: string | null;
   readonly reason_code: string | null;
@@ -10049,6 +10100,7 @@ export async function getOwnerConnectionDiagnostics(
     health: {
       axes: health.axes,
       badges: health.badges,
+      coverage_as_of: health.coverage_as_of,
       last_success_at: health.last_success_at,
       next_attempt_at: health.next_attempt_at,
       reason_code: health.reason_code,

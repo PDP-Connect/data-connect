@@ -39,6 +39,7 @@ import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
+import type { LocalCoverageAsOf } from "../ref-control.ts";
 import {
   type CollectionRevisionEventInput,
   isCollectionRevisionUnavailable,
@@ -559,6 +560,10 @@ export interface MountRefDeviceExportersContext {
   // `{ store, stream, status }` triple per store — never paths, payloads,
   // the coverage `reason` text, or secrets.
   listLocalCoverageDiagnostics: (storageTarget: StorageTarget) => Promise<LocalCoverageRow[]>;
+  // The owner projection's fenced local coverage verdict for one connection
+  // (the connector summary's coverage axis and `coverage_as_of`), or `null`
+  // when the connection does not resolve.
+  readCurrentLocalCoverage: (connectorInstanceId: string) => Promise<CurrentLocalCoverage | null>;
   maintainRecordIndexes: (
     storageTarget: StorageTarget,
     record: unknown,
@@ -1534,16 +1539,31 @@ export interface LocalCoverageRow {
  * Per-source-instance local-completeness projection surfaced in the
  * device-exporter diagnostics (Section 5.3). Carries only safe coverage
  * statuses and counts; never raw paths, payloads, reasons, or secrets.
- * `observed` is false when the instance has no coverage records yet (no run
- * has requested `coverage_diagnostics`), so absence reads as absence.
+ *
+ * `by_store`, `counts_by_status`, `store_count` and `unaccounted_stores` are
+ * historical inventory: the latest live `coverage_diagnostics` records, with
+ * no run, release, generation, revision or scope behind them. They never
+ * claim current completeness. `observed` is false when the instance has no
+ * such records, so absence reads as absence.
+ *
+ * `fully_accounted` and `coverage_as_of` are the owner projection's fenced
+ * verdict for the connection: true only while a v2 terminal proof is current
+ * and the coverage axis is `complete`, with the as-of that proof carries.
  */
 interface LocalCoverageProjection {
   by_store: Record<string, string>;
   counts_by_status: Record<string, number>;
+  coverage_as_of: LocalCoverageAsOf | null;
   fully_accounted: boolean;
   observed: boolean;
   store_count: number;
   unaccounted_stores: string[];
+}
+
+/** The owner projection's coverage verdict for one connection. */
+export interface CurrentLocalCoverage {
+  readonly asOf: LocalCoverageAsOf | null;
+  readonly axis: string;
 }
 
 const COVERAGE_STATUSES = [
@@ -1556,7 +1576,11 @@ const COVERAGE_STATUSES = [
   "unaccounted",
 ] as const;
 
-function summarizeLocalCoverage(rows: readonly LocalCoverageRow[]): LocalCoverageProjection {
+function summarizeLocalCoverage(
+  rows: readonly LocalCoverageRow[],
+  current: CurrentLocalCoverage | null
+): LocalCoverageProjection {
+  const fullyAccounted = current?.axis === "complete" && current.asOf !== null;
   const countsByStatus: Record<string, number> = {};
   for (const status of COVERAGE_STATUSES) {
     countsByStatus[status] = 0;
@@ -1574,9 +1598,10 @@ function summarizeLocalCoverage(rows: readonly LocalCoverageRow[]): LocalCoverag
   return {
     by_store: byStore,
     counts_by_status: countsByStatus,
-    // `fully_accounted` requires actually observing coverage. An empty
-    // coverage set is "nothing seen", not "everything accounted for".
-    fully_accounted: rows.length > 0 && unaccountedStores.length === 0,
+    coverage_as_of: fullyAccounted ? (current?.asOf ?? null) : null,
+    // Never derived from the inventory above: those rows can outlive the
+    // owner coverage a later refused or failed run retired.
+    fully_accounted: fullyAccounted,
     observed: rows.length > 0,
     store_count: rows.length,
     // biome-ignore lint/suspicious/useArraySortCompare: Input ordering is intentionally the runtime’s established default string order.
@@ -1707,7 +1732,9 @@ async function aggregateLocalCoverage(
       const rows = await ctx.listLocalCoverageDiagnostics(
         referenceLocalDeviceStorageTarget(ctx, connectorId, connectorInstanceId)
       );
-      coverage.set(connectorInstanceId, summarizeLocalCoverage(rows));
+      // A failed verdict read shows no positive; the inventory still shows.
+      const current = await ctx.readCurrentLocalCoverage(connectorInstanceId).catch(() => null);
+      coverage.set(connectorInstanceId, summarizeLocalCoverage(rows, current));
     } catch {
       // Leave unset → EMPTY_LOCAL_COVERAGE (observed=false) in projection.
     }
@@ -1822,6 +1849,7 @@ const EMPTY_LOCAL_COVERAGE: LocalCoverageProjection = Object.freeze({
     string,
     number
   >,
+  coverage_as_of: null,
   fully_accounted: false,
   observed: false,
   store_count: 0,

@@ -2847,7 +2847,10 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     assert.ok(firstSource.local_collector_coverage);
     assert.equal(firstSource.local_collector_coverage.observed, true);
     assert.equal(firstSource.local_collector_coverage.store_count, 3);
-    assert.equal(firstSource.local_collector_coverage.fully_accounted, true);
+    // Raw coverage records are historical inventory: with no v2 terminal
+    // proof behind them, the owner projection has no current positive.
+    assert.equal(firstSource.local_collector_coverage.fully_accounted, false);
+    assert.equal(firstSource.local_collector_coverage.coverage_as_of, null);
     assert.deepEqual(firstSource.local_collector_coverage.unaccounted_stores, []);
     assert.equal(firstSource.local_collector_coverage.counts_by_status.collected, 1);
     assert.equal(firstSource.local_collector_coverage.counts_by_status.excluded, 1);
@@ -3088,6 +3091,7 @@ interface DiagnosticsSourceInstance extends Row {
   last_ingest_at: string | null;
   local_binding_name: string;
   local_collector_coverage: {
+    coverage_as_of: Record<string, unknown> | null;
     observed: boolean;
     store_count: number;
     fully_accounted: boolean;
