@@ -1444,6 +1444,8 @@ interface StreamConnectorIntoOutboxResult {
    * wins per store so a re-emitted store keeps its final status.
    */
   coverageByStore: Map<string, { status: CollectorCoverageStatus; stream: string | null }> | null;
+  /** Whether this run's START requested version 1 store evidence. */
+  coverageRequested: boolean;
   done: Extract<EmittedMessage, { type: "DONE" }> | null;
   duplicateStreamEvidence: ReadonlySet<string>;
   enqueuedBatches: number;
@@ -1536,7 +1538,7 @@ function buildTypedTerminalCoverageFacts(input: {
     return null;
   }
   if (!input.done.coverage) {
-    return input.connector.runCoverageVersion === 1 ? [] : null;
+    return input.streamResult.coverageRequested ? [] : null;
   }
 
   const evidenceRequired = input.connector.protocol_capabilities.includes("STREAM_EVIDENCE");
@@ -1928,7 +1930,9 @@ async function streamConnectorIntoOutbox(
         done = message;
         return;
       }
-      if (input.config.connector.runCoverageVersion !== 1) {
+      // Only the scope string START actually sent can be echoed.
+      const requestedScope = startMessage.run_coverage_version === 1 ? startMessage.collection_scope : undefined;
+      if (requestedScope === undefined) {
         throw new Error(`${input.config.connector.connector_id} emitted unrequested DONE coverage`);
       }
       if (message.records_emitted !== recordsObserved) {
@@ -1939,11 +1943,7 @@ async function streamConnectorIntoOutbox(
       }
       done = {
         ...message,
-        coverage: validateRunCoverageVerdict(
-          message.coverage,
-          input.config.connector.streams,
-          collectorScopeFingerprint(input.config.connector.scope)
-        ),
+        coverage: validateRunCoverageVerdict(message.coverage, input.config.connector.streams, requestedScope),
       };
     }
   };
@@ -2073,6 +2073,7 @@ async function streamConnectorIntoOutbox(
     // checkpoint state, so it is reported even when the scan budget cut the
     // run short — an honest partial coverage beats none.
     coverageByStore,
+    coverageRequested: startMessage.run_coverage_version === 1,
     done: scanBudgetExceeded ? null : done,
     duplicateStreamEvidence,
     enqueuedBatches,
@@ -2497,6 +2498,28 @@ export function resolveScopedSourceRoots(scope: CollectionScope | null | undefin
   ].sort();
 }
 
+/** The resources START names for one stream: its non-empty strings, possibly none. */
+function startStreamResources(resources: Readonly<Record<string, readonly string[]>>, stream: string): string[] {
+  return resources[stream]?.filter((value) => typeof value === "string" && value.length > 0) ?? [];
+}
+
+/**
+ * Whether START requests version 1 store evidence.
+ *
+ * {@link collectorScopeFingerprint} binds the time bound and the source roots,
+ * not per-stream resources. A START that narrows a stream to named resources
+ * would carry a scope string, often `unscoped`, without that restriction, and
+ * Collection Profile Section 5.1 forbids that. Such a run requests no
+ * evidence, so its terminal record reads unknown coverage.
+ */
+function startRequestsRunCoverage(
+  streams: readonly string[],
+  resources: Readonly<Record<string, readonly string[]>>,
+  runCoverageVersion: 1 | undefined
+): boolean {
+  return runCoverageVersion === 1 && streams.every((stream) => startStreamResources(resources, stream).length === 0);
+}
+
 export function buildCollectorStartMessage(
   streams: readonly string[],
   streamsToBackfill: readonly string[] = [],
@@ -2507,21 +2530,22 @@ export function buildCollectorStartMessage(
   collectionScope?: string,
   runCoverageVersion?: 1
 ): StartMessage {
+  const requestsCoverage = startRequestsRunCoverage(streams, resources, runCoverageVersion);
   // A version 1 request binds its evidence to this string (Collection Profile
   // Section 5.1). Without one the proof would bind to no boundary.
-  if (runCoverageVersion === 1 && !collectionScope?.trim()) {
+  if (requestsCoverage && !collectionScope?.trim()) {
     throw new Error("a version 1 store evidence request requires a non-empty collection_scope");
   }
   const start: StartMessage = {
-    ...(runCoverageVersion === 1 && collectionScope ? { collection_scope: collectionScope } : {}),
-    ...(runCoverageVersion === 1 ? { run_coverage_version: 1 } : {}),
+    ...(requestsCoverage && collectionScope ? { collection_scope: collectionScope } : {}),
+    ...(requestsCoverage ? { run_coverage_version: 1 } : {}),
     scope: {
       streams: streams.map((name): StreamScope => {
-        const streamResources = resources[name]?.filter((value) => typeof value === "string" && value.length > 0);
+        const streamResources = startStreamResources(resources, name);
         const timeRange = timeRanges[name];
         return {
           name,
-          ...(streamResources && streamResources.length > 0 ? { resources: streamResources } : {}),
+          ...(streamResources.length > 0 ? { resources: streamResources } : {}),
           // Only streams the caller proved scopable carry a bound. A stream
           // absent from `timeRanges` is collected whole rather than silently
           // narrowed against a field it does not have.

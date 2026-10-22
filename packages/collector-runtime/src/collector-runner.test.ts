@@ -55,6 +55,7 @@ async function assertCoverageFixtureRejected(input: {
   coverage: unknown;
   expectedError?: RegExp;
   requestedStreams?: readonly string[];
+  resources?: CollectorConnectorSpec["resources"];
   scope?: CollectorConnectorSpec["scope"];
 }): Promise<void> {
   const harness = await startCollectorHarness({ priorState: {} });
@@ -80,6 +81,7 @@ async function assertCoverageFixtureRejected(input: {
           connector_id: "fixture-invalid-done-coverage",
           manifestFingerprint: "a".repeat(64),
           protocol_capabilities: [],
+          ...(input.resources ? { resources: input.resources } : {}),
           runCoverageVersion: 1,
           runtime_requirements: { bindings: {} },
           ...(input.scope ? { scope: input.scope, timeScopableStreams: requestedStreams } : {}),
@@ -963,6 +965,72 @@ test("a negotiation-aware connector omits DONE coverage when START has no featur
   } finally {
     await harness.close();
   }
+});
+
+// Collection Profile Section 5.1: `unscoped` must not remove a restriction in
+// START.scope. The scope string binds the time bound and the source roots, not
+// per-stream resources, so a START that narrows a stream to named resources
+// requests no store evidence.
+test("runCollectorConnector requests no coverage when START restricts a stream to named resources", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const startPath = join(await createTempDir("pdpp-coverage-resources-start-"), "start.json");
+    const fixture = await writeFixtureConnector({
+      script: `
+        const fs = await import("node:fs/promises");
+        let input = "";
+        await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+          input += chunk;
+          if (input.includes("\\n")) resolve();
+        }));
+        const start = JSON.parse(input.split("\\n")[0]);
+        await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+        const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+        if (start.run_coverage_version === 1) {
+          done.coverage = { version: 1, collection_scope: start.collection_scope,
+            streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+        }
+        process.stdout.write(JSON.stringify(done) + "\\n");
+      `,
+    });
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-resource-restricted-coverage",
+        manifestFingerprint: "a".repeat(64),
+        protocol_capabilities: [],
+        resources: { messages: ["C07JYF0U8BY"] },
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-resource-restricted-coverage",
+    });
+    const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+    assert.deepEqual(start.scope, { streams: [{ name: "messages", resources: ["C07JYF0U8BY"] }] });
+    assert.equal("run_coverage_version" in start, false, "a resource-restricted START requests no evidence");
+    assert.equal("collection_scope" in start, false);
+    assert.equal(result.done?.status, "succeeded", "the restricted run still collects");
+    assert.equal(harness.terminalCommits.length, 1, "the run still commits its terminal record");
+    assert.deepEqual(harness.terminalCommits[0]?.terminal_facts, [], "with no positive facts");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector rejects coverage sent for a START restricted to named resources", async () => {
+  await assertCoverageFixtureRejected({
+    coverage: { collection_scope: "unscoped", streams: [validCoverageStream], version: 1 },
+    expectedError: /emitted unrequested DONE coverage/,
+    resources: { messages: ["C07JYF0U8BY"] },
+  });
 });
 
 for (const includeState of [false, true]) {
