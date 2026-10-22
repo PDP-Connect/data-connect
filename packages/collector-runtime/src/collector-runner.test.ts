@@ -3684,6 +3684,128 @@ test("runCollectorConnector honors AbortSignal at the pre-spawn gate", async () 
   }
 });
 
+/**
+ * A refusal before any work is still an attempt for its lane. Each one must
+ * leave the lane's connector_child_failure barrier open, or an earlier covered
+ * receipt would keep standing for the lane.
+ */
+function assertPreflightRefusalOpensBarrier(queuePath: string, runId: string) {
+  const gaps = readGapRows(queuePath);
+  assert.deepEqual(
+    gaps.map((item) => item.status),
+    ["ready"],
+    "the refused attempt leaves one open failure gap"
+  );
+  assert.deepEqual(
+    gaps.map((item) => (item.payload as Record<string, unknown>).reason),
+    ["connector_child_failure"]
+  );
+  assert.deepEqual(
+    gaps.map((item) => (item.payload as Record<string, unknown>).firstSeenRunId),
+    [runId]
+  );
+}
+
+test("a run aborted before start leaves a failure gap for its lane", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const controller = new AbortController();
+    controller.abort(new Error("operator cancelled run"));
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          abortSignal: controller.signal,
+          baseUrl: harness.url,
+          connector: {
+            args: ["unused.ts"],
+            command: "node",
+            connector_id: "fixture-aborted-barrier",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          runId: "run-aborted-before-start",
+          sourceInstanceId: "src-1",
+        }),
+      /operator cancelled run/
+    );
+    assertPreflightRefusalOpensBarrier(queuePath, "run-aborted-before-start");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("a run with invalid provenance leaves a failure gap for its lane", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: ["unused.ts"],
+            command: "node",
+            connector_id: "fixture-provenance-barrier",
+            protocol_capabilities: [],
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          runId: "run-invalid-provenance",
+          sourceInstanceId: "src-1",
+        }),
+      /optional store evidence requires a bound manifest fingerprint and artifact digest/
+    );
+    assertPreflightRefusalOpensBarrier(queuePath, "run-invalid-provenance");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("a run refused at placement leaves a failure gap for its lane", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+
+    await assert.rejects(
+      () =>
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: ["unused.ts"],
+            command: "node",
+            connector_id: "fixture-placement-barrier",
+            protocol_capabilities: ["STREAM_EVIDENCE"],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath,
+          runId: "run-placement-refused",
+          sourceInstanceId: "src-1",
+        }),
+      RuntimeCapabilityMismatchError
+    );
+    assertPreflightRefusalOpensBarrier(queuePath, "run-placement-refused");
+  } finally {
+    await harness.close();
+  }
+});
+
 test("recoverAndSummarizeOutbox recovers expired leases and returns a fast summary", async () => {
   let now = new Date("2026-05-19T12:00:00.000Z");
   const dir = await createTempDir("pdpp-recover-summary-");

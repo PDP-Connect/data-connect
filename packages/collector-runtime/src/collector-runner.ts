@@ -898,18 +898,6 @@ export class CollectorStateReadError extends Error {
  */
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: ordered durable-run lifecycle; splitting it would hide checkpoint and heartbeat ordering.
 export async function runCollectorConnector(config: CollectorRunConfig): Promise<CollectorRunResult> {
-  if (
-    config.connector.runCoverageVersion === 1 &&
-    !(
-      MANIFEST_FINGERPRINT_RE.test(config.connector.manifestFingerprint ?? "") &&
-      ARTIFACT_DIGEST_RE.test(config.connector.artifactDigest ?? "")
-    )
-  ) {
-    throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
-  }
-  throwIfAborted(config.abortSignal);
-  const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
-
   const policy: CollectorOutboxPolicy = {
     ...DEFAULT_COLLECTOR_OUTBOX_POLICY,
     ...(config.outboxPolicy ?? {}),
@@ -935,6 +923,20 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
   // Never replace it with a generic corrective status in the outer catch.
   let definitiveBlockedHeartbeatSent = false;
   try {
+    // Preflight refusals are attempts for this lane too. They run inside the try
+    // so the catch below opens the failure barrier for each of them.
+    if (
+      config.connector.runCoverageVersion === 1 &&
+      !(
+        MANIFEST_FINGERPRINT_RE.test(config.connector.manifestFingerprint ?? "") &&
+        ARTIFACT_DIGEST_RE.test(config.connector.artifactDigest ?? "")
+      )
+    ) {
+      throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
+    }
+    throwIfAborted(config.abortSignal);
+    const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
+
     const initialSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
     });
@@ -1172,10 +1174,11 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       streamingBufferHighWaterMark: streamResult.bufferHighWaterMark,
     };
   } catch (error) {
-    // Every failed run leaves an open connector_child_failure gap, whether it
-    // failed before its scan (state read, starting heartbeat, pre-scan drain) or
-    // during it. The device verdict reads open outbox rows as unadmitted, so the
-    // lane stops reading covered until a later complete run recovers the gap.
+    // Every failed run leaves an open connector_child_failure gap, whether it was
+    // refused before any work (provenance, abort, placement), failed before its
+    // scan (state read, starting heartbeat, pre-scan drain), or failed during it.
+    // The device verdict reads open outbox rows as unadmitted, so the lane stops
+    // reading covered until a later complete run recovers the gap.
     ensureOpenFailureGapRow({
       clock: () => new Date(),
       connectorId: config.connector.connector_id,
