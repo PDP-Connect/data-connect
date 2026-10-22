@@ -52,6 +52,7 @@ import {
 import {
   type CollectorConnectorSpec,
   type CollectorRunResult,
+  LocalDeviceHttpError,
   runCollectorConnector,
 } from "../../packages/local-collector/src/runner.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
@@ -298,7 +299,12 @@ async function withJourney(run: (journey: Journey) => Promise<void>): Promise<vo
   }
 }
 
-async function runOnce(journey: Journey, mode: string, tag: string): Promise<RunOutcome> {
+async function runOnce(
+  journey: Journey,
+  mode: string,
+  tag: string,
+  options: { deviceToken?: string } = {}
+): Promise<RunOutcome> {
   const observePath = join(journey.dir, `start-${tag}.json`);
   const connector: CollectorConnectorSpec = bindOptionalRunCoverageToRelease(
     {
@@ -316,7 +322,7 @@ async function runOnce(journey: Journey, mode: string, tag: string): Promise<Run
     baseUrl: journey.asUrl,
     connector,
     deviceId: journey.enrolled.device_id,
-    deviceToken: journey.enrolled.device_token,
+    deviceToken: options.deviceToken ?? journey.enrolled.device_token,
     executionRoot: dirname(journey.childPath),
     outboxPolicy: { maxDrainIterations: 1, retryBackoffMs: 1 },
     queuePath: journey.queuePath,
@@ -549,5 +555,43 @@ test("J2: a run the server rejects after a covered run leaves the lane not cover
     assert.equal(owner.connection_health.axes.coverage, "complete");
     assert.deepEqual(conditions(owner), { messages: "complete", sessions: "complete" });
     assert.equal(owner.connection_health.axes.outbox, "active");
+  });
+});
+
+test("J3: a run that fails before its scan leaves the lane not covered; the server keeps run A's coverage until a later run recovers the gap", async () => {
+  await withJourney(async (journey) => {
+    // Run A: a clean complete run. The device holds a covered receipt and the server projects complete.
+    const a = await runOnce(journey, "complete", "a-complete");
+    assert.equal(a.result.done?.status, "succeeded");
+    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
+    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+
+    // Run B: the server refuses the run's first heartbeat, so the run fails before its state read and scan.
+    // The child never starts, and the server admits nothing from the run.
+    await assert.rejects(
+      runOnce(journey, "complete", "b-refused", { deviceToken: "refused-device-token" }),
+      (error: unknown) => error instanceof LocalDeviceHttpError && error.status === 401
+    );
+    await assert.rejects(readFile(join(journey.dir, "start-b-refused.json"), "utf8"), { code: "ENOENT" });
+    assert.equal(serverRunStreams("b-refused"), null, "the server acknowledged no terminal commit for run B");
+
+    // The device no longer stands behind run A's receipt: run B's failure gap is open.
+    const status = deviceStatus(journey);
+    assert.equal(status.terminal_coverage.verdict, "unadmitted");
+    assert.equal(status.lifecycle_state, "draining");
+
+    // The server never admitted run B, so its projection still reflects run A's admitted terminal commit.
+    // Its outbox axis shows run A's last healthy heartbeat, because the refusal left the server nothing to
+    // record. The owner projection and the device verdict disagree until a later run reaches the server.
+    const owner = await ownerConnectionRow(journey);
+    assert.equal(owner.connection_health.axes.coverage, "complete");
+    assert.equal(owner.connection_health.axes.outbox, "idle");
+    assert.deepEqual(conditions(owner), { messages: "complete", sessions: "complete" });
+
+    // Run C: a clean run. Its pre-scan drain delivers run B's gap, and its complete pass recovers it.
+    const c = await runOnce(journey, "complete", "c-complete");
+    assert.equal(c.result.done?.status, "succeeded");
+    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
+    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
   });
 });

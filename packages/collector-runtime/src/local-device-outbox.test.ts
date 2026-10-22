@@ -707,6 +707,45 @@ test("LocalDeviceOutbox requeues dead letters by redacted error class", () => {
   }
 });
 
+test("LocalDeviceOutbox reopens only a succeeded row, as ready, and leaves other rows alone", () => {
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
+  try {
+    outbox.enqueue({
+      id: "src-1:gap:first",
+      kind: "gap",
+      payload: { reason: "connector_child_failure" },
+      sourceInstanceId: "src-1",
+    });
+    outbox.enqueue({
+      id: "src-1:gap:second",
+      kind: "gap",
+      payload: { reason: "connector_child_failure" },
+      sourceInstanceId: "src-1",
+    });
+    const [claim] = outbox.claimReady({
+      holder: "worker-a",
+      leaseMs: 60_000,
+      limit: 1,
+      sourceInstanceId: "src-1",
+    });
+    assert.ok(claim);
+    outbox.acknowledge({
+      holder: "worker-a",
+      id: claim.id,
+      leaseEpoch: claim.lease_epoch,
+    });
+    const otherId = claim.id === "src-1:gap:first" ? "src-1:gap:second" : "src-1:gap:first";
+
+    assert.equal(outbox.reopenSucceeded(otherId), false, "a ready row is not reopened");
+    assert.equal(outbox.get(otherId)?.status, "ready");
+    assert.equal(outbox.reopenSucceeded(claim.id), true);
+    assert.equal(outbox.get(claim.id)?.status, "ready");
+    assert.equal(outbox.summary({ sourceInstanceId: "src-1" }).ready, 2);
+  } finally {
+    outbox.close();
+  }
+});
+
 test("LocalDeviceOutbox deletes only succeeded rows by id", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {

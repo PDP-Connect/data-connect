@@ -38,6 +38,8 @@ The collector stores the latest acknowledged v2 receipt in local outbox schema v
 
 The device verdict (`pdpp-local-collector status`, `terminal_coverage.verdict`) is `covered` only when the receipt names the selected release, every store is `collected`, and the run's runtime accounting is clean: durable admission, complete detail, consistent stream evidence, checkpoint eligibility, and zero outstanding debt. Clean accounting is the same test the server applies before it withholds `collected`. Missing or malformed accounting reads `no_evidence`; a measured gap reads `incomplete`. Open outbox work for the lane (queued, leased or dead-lettered) reads `unadmitted`, because the latest run has not reached a durable terminal commit and the receipt no longer stands for it.
 
+The server's owner coverage is "as of the last admitted run". A later run the server never admitted cannot change it. Every failed run, including one that fails before its scan, leaves an open `connector_child_failure` gap on the device, so the device shows that run as `unadmitted` until a later complete run is admitted and recovers the gap. Until then the owner projection keeps the last admitted coverage.
+
 ## Collection Profile amendment
 
 The canonical Collection Profile is `data-connectors/docs/spec/collection-profile.md`. [Data-connectors PR #541](https://github.com/PDP-Connect/data-connectors/pull/541), stacked on #516, specifies the optional START capability, stream store declarations, terminal store collection evidence, and its relationship to detail accounting and checkpoint eligibility. Data-connectors #539 and this PR implement the amendment. The owner approves it at merge.

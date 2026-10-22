@@ -2892,7 +2892,7 @@ test("runCollectorConnector: restored server cursor is not advanced by an older 
   }
 });
 
-test("runCollectorConnector validates the reference route before mutating durable outbox work", async () => {
+test("runCollectorConnector validates the reference route before draining or leasing pending outbox work", async () => {
   const harness = await startCollectorHarness({
     heartbeatStatus: 502,
     priorState: {},
@@ -2943,10 +2943,20 @@ test("runCollectorConnector validates the reference route before mutating durabl
     const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
       const summary = outbox.summary({ sourceInstanceId: "src-1" });
-      assert.equal(summary.ready, 1, "pending work must remain ready");
       assert.equal(summary.leased, 0, "pending work must not be leased");
       assert.equal(summary.retrying, 0, "pending work must not be marked retryable");
       assert.equal(summary.deadLetter, 0, "pending work must not be dead-lettered");
+      // The failed run adds one open failure gap. The seeded batch itself must stay ready.
+      assert.deepEqual(
+        outbox.listByKind({ kind: "record_batch", sourceInstanceId: "src-1" }).map((item) => item.status),
+        ["ready"],
+        "pending work must remain ready"
+      );
+      assert.deepEqual(
+        outbox.listByKind({ kind: "gap", sourceInstanceId: "src-1" }).map((item) => item.status),
+        ["ready"],
+        "the failed run leaves one open failure gap"
+      );
     } finally {
       outbox.close();
     }
@@ -3044,8 +3054,10 @@ test("runCollectorConnector fails backlog-skip pass when terminal heartbeat is r
         }),
       /local device request failed: 503/
     );
-    assert.equal(harness.heartbeats.at(-1)?.status, "retrying");
-    assert.equal(harness.heartbeats.at(-1)?.records_pending, 1);
+    // The refused pass leaves its open failure gap, so the corrective heartbeat reports blocked, and the
+    // gap counts beside the pending batch in records_pending.
+    assert.equal(harness.heartbeats.at(-1)?.status, "blocked");
+    assert.equal(harness.heartbeats.at(-1)?.records_pending, 2);
   } finally {
     await harness.close();
   }
@@ -4484,6 +4496,368 @@ test("runCollectorConnector leaves a failure gap when prior backlog drains but t
   } finally {
     await harness.close();
   }
+});
+
+/** Durable gap rows for one source instance, read back from the outbox file. */
+function readGapRows(queuePath: string, sourceInstanceId = "src-1") {
+  const outbox = new LocalDeviceOutbox({ path: queuePath });
+  try {
+    return outbox.listByKind({ kind: "gap", sourceInstanceId });
+  } finally {
+    outbox.close();
+  }
+}
+
+/** One pass of source `src-1`. The fixture is spawned only if the pass reaches its scan. */
+function failureGapPassConfig(input: {
+  baseUrl: string;
+  connectorId: string;
+  fixture: string;
+  queuePath: string;
+  runId: string;
+}) {
+  return {
+    baseUrl: input.baseUrl,
+    connector: {
+      args: [input.fixture],
+      command: "node",
+      connector_id: input.connectorId,
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: {} },
+      streams: ["sessions", "coverage_diagnostics"],
+    },
+    deviceId: "device-1",
+    deviceToken: "device-token",
+    executionRoot: TEST_EXECUTION_ROOT,
+    queuePath: input.queuePath,
+    runId: input.runId,
+    sourceInstanceId: "src-1",
+  };
+}
+
+// Reads START, then exits without a record or DONE: the child fails mid-scan.
+const CHILD_FAILS_MID_SCAN_SCRIPT = `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        process.exit(7);
+      `;
+
+// A complete successful pass. It commits its coverage checkpoint, which is what recovers a failure gap.
+const COMPLETE_PASS_SCRIPT = `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        process.stdout.write(JSON.stringify({
+          type: "STATE",
+          stream: "coverage_diagnostics",
+          cursor: { fetched_at: new Date().toISOString() },
+        }) + "\\n");
+        process.stdout.write(JSON.stringify({
+          type: "DONE",
+          status: "succeeded",
+          records_emitted: 0,
+        }) + "\\n");
+      `;
+
+test("runCollectorConnector leaves an open failure gap when the state read fails before the scan, and a complete pass recovers it", async () => {
+  // The state read is refused before the child spawns, so this pass fails before
+  // its scan starts. The device verdict counts only open outbox rows, so the
+  // failed pass must leave one, and the next complete pass must clear it.
+  const queuePath = await tempQueuePath();
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const failing = await startCollectorHarness({ priorState: {}, stateReadStatus: 500 });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: failing.url,
+            connectorId: "fixture-state-read-gap",
+            fixture: neverSpawned,
+            queuePath,
+            runId: "run-state-read-failed",
+          })
+        ),
+      /failed to read prior state/
+    );
+  } finally {
+    await failing.close();
+  }
+  const open = readGapRows(queuePath);
+  assert.deepEqual(
+    open.map((item) => item.status),
+    ["ready"],
+    "the failed pass leaves one open failure gap"
+  );
+  assert.deepEqual(
+    open.map((item) => (item.payload as Record<string, unknown>).reason),
+    ["connector_child_failure"]
+  );
+
+  const complete = await startCollectorHarness({ priorState: {} });
+  try {
+    const completeFixture = await writeFixtureConnector({ script: COMPLETE_PASS_SCRIPT });
+    const result = await runCollectorConnector(
+      failureGapPassConfig({
+        baseUrl: complete.url,
+        connectorId: "fixture-state-read-gap",
+        fixture: completeFixture,
+        queuePath,
+        runId: "run-complete",
+      })
+    );
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(complete.gapAcks.length, 1, "the pre-scan drain delivers the open gap");
+    assert.equal(complete.gapRecoveries.length, 1, "the complete pass recovers the gap");
+    assert.equal(complete.gapRecoveries[0]?.reason, "connector_child_failure");
+  } finally {
+    await complete.close();
+  }
+  assert.deepEqual(readGapRows(queuePath), [], "recovery removes the gap row");
+});
+
+test("runCollectorConnector leaves an open failure gap when the second starting heartbeat fails before the scan", async () => {
+  // The first heartbeat and the state read succeed, so the pass has drained but
+  // has not spawned the child when the second starting heartbeat is refused. The
+  // corrective heartbeat must not report the lane healthy while the gap is open.
+  const queuePath = await tempQueuePath();
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const harness = await startCollectorHarness({ heartbeatStatuses: [200, 500], priorState: {} });
+  try {
+    await assert.rejects(() =>
+      runCollectorConnector(
+        failureGapPassConfig({
+          baseUrl: harness.url,
+          connectorId: "fixture-second-heartbeat-gap",
+          fixture: neverSpawned,
+          queuePath,
+          runId: "run-second-heartbeat-failed",
+        })
+      )
+    );
+  } finally {
+    await harness.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"]
+  );
+  assert.equal(
+    harness.heartbeats.at(-1)?.status,
+    "blocked",
+    `the corrective heartbeat must be blocked; saw ${harness.heartbeats.map((h) => h.status).join(",")}`
+  );
+});
+
+test("runCollectorConnector leaves an open failure gap when the first heartbeat is refused", async () => {
+  // Nothing has been read or delivered yet. The gap is durable local evidence, so
+  // the failed pass records it even though no corrective heartbeat follows the
+  // refused one.
+  const queuePath = await tempQueuePath();
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const harness = await startCollectorHarness({ heartbeatStatuses: [500], priorState: {} });
+  try {
+    await assert.rejects(() =>
+      runCollectorConnector(
+        failureGapPassConfig({
+          baseUrl: harness.url,
+          connectorId: "fixture-first-heartbeat-gap",
+          fixture: neverSpawned,
+          queuePath,
+          runId: "run-first-heartbeat-failed",
+        })
+      )
+    );
+  } finally {
+    await harness.close();
+  }
+  assert.equal(harness.heartbeats.length, 1, "no corrective heartbeat follows a refused first heartbeat");
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"]
+  );
+});
+
+test("runCollectorConnector reopens a delivered failure gap when the state read fails after the pre-scan drain, and a complete pass recovers it", async () => {
+  // Pass 1's child fails mid-scan and leaves an undelivered failure gap. Pass 2's
+  // pre-scan drain delivers that gap, so the server admits it and the local row
+  // is delivered. Pass 2 then fails at the state read. The failure is still open
+  // for the lane, so the delivered row must become open again. Otherwise the
+  // device reads the lane covered while the server still holds the gap open.
+  const queuePath = await tempQueuePath();
+  const childFails = await writeFixtureConnector({ script: CHILD_FAILS_MID_SCAN_SCRIPT });
+  const first = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: first.url,
+            connectorId: "fixture-reopen-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed",
+          })
+        ),
+      /connector exited 7/
+    );
+  } finally {
+    await first.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"]
+  );
+
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const second = await startCollectorHarness({ priorState: {}, stateReadStatus: 500 });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: second.url,
+            connectorId: "fixture-reopen-gap",
+            fixture: neverSpawned,
+            queuePath,
+            runId: "run-state-read-failed",
+          })
+        ),
+      /failed to read prior state/
+    );
+    assert.equal(second.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await second.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"],
+    "the delivered gap is open again"
+  );
+
+  const complete = await startCollectorHarness({ priorState: {} });
+  try {
+    const completeFixture = await writeFixtureConnector({ script: COMPLETE_PASS_SCRIPT });
+    const result = await runCollectorConnector(
+      failureGapPassConfig({
+        baseUrl: complete.url,
+        connectorId: "fixture-reopen-gap",
+        fixture: completeFixture,
+        queuePath,
+        runId: "run-complete-after-reopen",
+      })
+    );
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(complete.gapRecoveries.length, 1, "the complete pass recovers the reopened gap");
+  } finally {
+    await complete.close();
+  }
+  assert.deepEqual(readGapRows(queuePath), [], "recovery removes the gap row");
+});
+
+test("runCollectorConnector reopens a delivered failure gap when the second starting heartbeat fails after the pre-scan drain", async () => {
+  // Same history as the state-read case above, but pass 2 fails at its second
+  // starting heartbeat, after its pre-scan drain delivered the earlier gap.
+  const queuePath = await tempQueuePath();
+  const childFails = await writeFixtureConnector({ script: CHILD_FAILS_MID_SCAN_SCRIPT });
+  const first = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: first.url,
+            connectorId: "fixture-reopen-heartbeat-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed",
+          })
+        ),
+      /connector exited 7/
+    );
+  } finally {
+    await first.close();
+  }
+
+  const neverSpawned = await writeFixtureConnector({ script: "process.exit(99);" });
+  const second = await startCollectorHarness({ heartbeatStatuses: [200, 500], priorState: {} });
+  try {
+    await assert.rejects(() =>
+      runCollectorConnector(
+        failureGapPassConfig({
+          baseUrl: second.url,
+          connectorId: "fixture-reopen-heartbeat-gap",
+          fixture: neverSpawned,
+          queuePath,
+          runId: "run-second-heartbeat-failed",
+        })
+      )
+    );
+    assert.equal(second.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await second.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"],
+    "the delivered gap is open again"
+  );
+  assert.equal(second.heartbeats.at(-1)?.status, "blocked");
+});
+
+test("runCollectorConnector reopens a delivered failure gap when the child fails again mid-scan", async () => {
+  // Pass 2's pre-scan drain delivers pass 1's gap, and then its child fails mid-scan
+  // again. The second failure is the same lane failing, so it must reopen the gap.
+  const queuePath = await tempQueuePath();
+  const childFails = await writeFixtureConnector({ script: CHILD_FAILS_MID_SCAN_SCRIPT });
+  const first = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: first.url,
+            connectorId: "fixture-reopen-scan-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed-once",
+          })
+        ),
+      /connector exited 7/
+    );
+  } finally {
+    await first.close();
+  }
+
+  const second = await startCollectorHarness({ priorState: {} });
+  try {
+    await assert.rejects(
+      () =>
+        runCollectorConnector(
+          failureGapPassConfig({
+            baseUrl: second.url,
+            connectorId: "fixture-reopen-scan-gap",
+            fixture: childFails,
+            queuePath,
+            runId: "run-child-failed-twice",
+          })
+        ),
+      /connector exited 7/
+    );
+    assert.equal(second.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await second.close();
+  }
+  assert.deepEqual(
+    readGapRows(queuePath).map((item) => item.status),
+    ["ready"],
+    "the second failure reopens the delivered gap"
+  );
 });
 
 test("runCollectorConnector flushes a partial trailing batch when the child fails mid-stream and still does not advance the checkpoint", async () => {

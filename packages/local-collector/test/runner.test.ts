@@ -66,6 +66,7 @@ import {
   COLLECTOR_RUNTIME_CAPABILITIES,
   LocalDeviceHttpError,
   LocalDeviceOutbox,
+  runCollectorConnector,
 } from "../src/runner.ts";
 
 /**
@@ -2808,6 +2809,162 @@ test("a later run whose record batch is dead-lettered makes an earlier covered r
   const status = statusFor(path);
   assert.equal(status.terminal_coverage.verdict, "unadmitted");
   assert.equal(status.lifecycle_state, "dead_letter");
+});
+
+/**
+ * A reference stand-in for a server that refuses one pass's state read. Heartbeats
+ * and gap acknowledgements succeed, so a failed pass can still deliver its gap.
+ * Records each gap acknowledgement it receives.
+ */
+async function startStateReadRefusingServer() {
+  const gapAcks = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url.endsWith("/state") && req.method === "GET") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "synthetic_state_read_failure" } }));
+        return;
+      }
+      if (url.includes("/heartbeat")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ object: "device_exporter_heartbeat", status: "accepted" }));
+        return;
+      }
+      if (url.includes("/local-collector-gaps")) {
+        gapAcks.push(JSON.parse(body));
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            attempt_count: 0,
+            connector_id: "claude_code",
+            connector_instance_id: "cin_fake",
+            device_id: "device-1",
+            first_seen_at: null,
+            first_seen_run_id: null,
+            gap_id: "gap_fake",
+            last_run_id: null,
+            object: "device_local_collector_gap",
+            reason: "connector_child_failure",
+            retryable: true,
+            source_instance_id: "src-1",
+            status: "pending",
+            stream: "local-collector/connector_child_failure",
+            updated_at: new Date().toISOString(),
+          })
+        );
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "not_found" } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+    gapAcks,
+    url: `http://127.0.0.1:${address.port}`,
+  };
+}
+
+/** One pass of `src-1` for `claude_code`. Its child is never spawned when the state read is refused. */
+function refusedStatePassConfig(baseUrl, queuePath, runId) {
+  return {
+    baseUrl,
+    connector: {
+      args: [],
+      command: process.execPath,
+      connector_id: "claude_code",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: {} },
+      streams: ["sessions"],
+    },
+    deviceId: "device-1",
+    deviceToken: "device-token",
+    executionRoot: dirname(queuePath),
+    queuePath,
+    runId,
+    sourceInstanceId: "src-1",
+  };
+}
+
+// A failed pass must not leave an earlier covered receipt standing for its lane. Both
+// tests fail the pass at the state read, which is before the scan starts.
+test("a pass that fails before its scan leaves an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+
+  const server = await startStateReadRefusingServer();
+  try {
+    await assert.rejects(
+      runCollectorConnector(refusedStatePassConfig(server.url, path, "run-state-read-failed")),
+      /failed to read prior state/
+    );
+  } finally {
+    await server.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
+test("a pass that fails after its pre-scan drain delivered an earlier gap leaves the lane unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    // An earlier pass's failure gap, not yet delivered. The id is the one the
+    // runner derives for this lane's connector_child_failure gap.
+    outbox.enqueue({
+      id: buildLocalDeviceOutboxId({
+        kind: "gap",
+        parts: ["claude_code", "src-1", "connector_child_failure", null, null],
+        sourceInstanceId: "src-1",
+      }),
+      kind: "gap",
+      payload: {
+        connectorId: "claude_code",
+        firstSeenAt: "2026-10-22T11:00:00.000Z",
+        nextAttemptBackoffMs: 60_000,
+        reason: "connector_child_failure",
+        retryable: true,
+        sourceInstanceId: "src-1",
+      },
+      sourceInstanceId: "src-1",
+    });
+  } finally {
+    outbox.close();
+  }
+
+  const server = await startStateReadRefusingServer();
+  try {
+    await assert.rejects(
+      runCollectorConnector(refusedStatePassConfig(server.url, path, "run-after-pre-scan-drain")),
+      /failed to read prior state/
+    );
+    assert.equal(server.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await server.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "unadmitted");
 });
 
 test("open record work without an acknowledged receipt stays no_evidence", async () => {
