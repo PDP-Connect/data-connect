@@ -632,6 +632,15 @@ export interface RefConnectorImplementation {
   state: "built_in" | "installed" | "local_source" | "not_installed" | "unknown";
 }
 
+/** See {@link RefConnectorSummary.coverage_as_of}. */
+export interface RefCoverageAsOf {
+  readonly artifact_digest: string | null;
+  readonly collection_revision: number;
+  readonly committed_at: string | null;
+  readonly evidence: string;
+  readonly run_id: string | null;
+}
+
 export interface RefConnectorSummary {
   /**
    * Owner/control-plane acquisition provenance for manual imports, device
@@ -669,6 +678,13 @@ export interface RefConnectorSummary {
    * renders no horizons rather than inventing a state. Pass-through from
    * `server/ref-control.ts#projectConnectorSummaryConnectionHealth`.
    */
+  /**
+   * What the local coverage on this row is a fact about (`LocalCoverageAsOf`
+   * in reference `server/ref-control.ts`): the run, its release digest, and the
+   * collection revision and time it was committed at. `null` or absent when no
+   * current local proof backs the coverage shown.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   coverage_horizons?: readonly RefCoverageHorizon[];
   display_name: string;
   freshness: Record<string, unknown>;
