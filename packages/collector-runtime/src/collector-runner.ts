@@ -1445,8 +1445,9 @@ interface StreamConnectorIntoOutboxResult {
   bufferHighWaterMark: number;
   /**
    * Per-store coverage status accumulated from `coverage_diagnostics`
-   * RECORDs seen this pass, or `null` when none were observed. Last write
-   * wins per store so a re-emitted store keeps its final status.
+   * RECORDs seen this pass, or `null` when none were observed. A later record
+   * replaces a store's status, except that `collected` never replaces a status
+   * other than `collected` reported earlier in the run.
    */
   coverageByStore: Map<string, { status: CollectorCoverageStatus; stream: string | null }> | null;
   /** Whether this run's START requested version 1 store evidence. */
@@ -1861,6 +1862,12 @@ async function streamConnectorIntoOutbox(
       return;
     }
     coverageByStore ??= new Map<string, { status: CollectorCoverageStatus; stream: string | null }>();
+    // A negative store result stands for the rest of the run: a later
+    // `collected` record does not erase it (Collection Profile Section 5.8.2).
+    const previous = coverageByStore.get(entry.store);
+    if (entry.status === "collected" && previous !== undefined && previous.status !== "collected") {
+      return;
+    }
     coverageByStore.set(entry.store, {
       status: entry.status,
       stream: entry.stream,

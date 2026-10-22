@@ -350,6 +350,69 @@ test("runCollectorConnector summarizes coverage completeness distinct from decla
   }
 });
 
+// Collection Profile Section 5.8.2: a negative store result is not erased by a
+// later positive assertion. Within one run, a store that reported a status
+// other than `collected` keeps it when a later coverage record claims
+// `collected` for the same store.
+test("runCollectorConnector keeps a negative store status when a later coverage record in the run says collected", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((r) => {
+          let buf = "";
+          process.stdin.on("data", (c) => { buf += c; if (buf.includes("\\n")) r(); });
+        });
+        const coverage = [
+          { store: "logs", stream: "logs", status: "unaccounted", reason: "scan incomplete" },
+          { store: "downloads", stream: "downloads", status: "missing", reason: "not present" },
+          { store: "sessions", stream: "sessions", status: "collected", reason: "declared stream" },
+          { store: "logs", stream: "logs", status: "collected", reason: "late claim" },
+          { store: "downloads", stream: "downloads", status: "collected", reason: "late claim" },
+        ];
+        for (const c of coverage) {
+          process.stdout.write(JSON.stringify({
+            type: "RECORD", stream: "coverage_diagnostics", key: "coverage:" + c.store,
+            data: { id: "coverage:" + c.store, ...c }, emitted_at: new Date().toISOString(),
+          }) + "\\n");
+        }
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "coverage_diagnostics", cursor: "c-1" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 5 }) + "\\n");
+      `,
+    });
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-sticky-negative-coverage",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["sessions", "logs", "downloads", "coverage_diagnostics"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-sticky-negative-coverage",
+    });
+    assert.deepEqual(result.completeness?.byStore, {
+      downloads: "missing",
+      logs: "unaccounted",
+      sessions: "collected",
+    });
+    assert.equal(result.completeness?.fullyAccounted, false);
+    assert.deepEqual(result.completeness?.unaccountedStores, ["logs"]);
+    assert.deepEqual(harness.terminalCommits[0]?.terminal_facts, [
+      { coverage_statuses: ["missing"], stream: "downloads" },
+      { coverage_statuses: ["unaccounted"], stream: "logs" },
+      { coverage_statuses: ["collected"], stream: "sessions" },
+    ]);
+  } finally {
+    await harness.close();
+  }
+});
+
 test("runCollectorConnector reports null completeness when no coverage diagnostic is observed", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
