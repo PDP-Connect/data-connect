@@ -187,6 +187,52 @@ test("runCollectorConnector gives changed emitted_at records a distinct local ba
   }
 });
 
+test("runCollectorConnector commits a typed DONE coverage verdict without a diagnostics stream", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({
+          type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: {
+            version: 1, collection_scope: "unscoped",
+            streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }],
+          },
+        }) + "\\n");
+      `,
+    });
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-typed-coverage",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-typed-coverage",
+    });
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(harness.terminalCommits.length, 1);
+    assert.equal(harness.terminalCommits[0]?.version, 2);
+    assert.deepEqual(harness.terminalCommits[0]?.terminal_facts, [
+      { scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" },
+    ]);
+  } finally {
+    await harness.close();
+  }
+});
+
 test("runCollectorConnector.onMessage observes every protocol message in emission order without altering the result", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {

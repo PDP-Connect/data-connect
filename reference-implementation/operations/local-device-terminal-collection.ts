@@ -3,6 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
+import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
 import { TerminalRunCommitConflictError } from "../server/stores/terminal-run-commit-store.ts";
@@ -32,6 +33,7 @@ interface TerminalContext {
 export interface TerminalRunCommitContext extends TerminalContext {
   canonicalConnectorKey: (value: string | null | undefined) => string | null;
   commitTerminalRun: (input: ResolvedTerminalRunCommit) => Promise<TerminalRunCommitResult>;
+  getConnectorManifest?: (connectorId: string) => Promise<unknown> | unknown;
 }
 
 /**
@@ -68,8 +70,9 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
     const runId = body && readRequiredString(body.run_id);
     const collectionBoundary = body && readRequiredString(body.collection_boundary);
     const stateDelta = body && asObject(body.state_delta);
-    const normalizedFacts =
-      body && Array.isArray(body.terminal_facts) ? normalizeTerminalFacts(body.terminal_facts) : null;
+    const version = body?.version;
+    const rawFacts = body && Array.isArray(body.terminal_facts) ? body.terminal_facts : null;
+    const normalizedFacts = version === 1 && rawFacts ? normalizeTerminalFacts(rawFacts) : null;
     const canonicalConnectorId = ctx.canonicalConnectorKey(authorized.sourceInstance.connectorId);
     // Canonicalize BOTH sides before comparing, exactly as `sameConnectorType`
     // in routes/ref-device-exporters.ts already does for the record-batch leg.
@@ -83,7 +86,7 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       ? (ctx.canonicalConnectorKey(reportedConnectorId) ?? reportedConnectorId)
       : null;
     if (
-      body?.version !== 1 ||
+      (version !== 1 && version !== 2) ||
       !commitId ||
       reportedDeviceId !== deviceId ||
       reportedSourceId !== sourceInstanceId ||
@@ -92,11 +95,20 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       !runId ||
       !collectionBoundary ||
       !stateDelta ||
-      !normalizedFacts ||
+      !rawFacts ||
+      (version === 1 && !normalizedFacts) ||
       !canonicalConnectorId ||
       reportedConnectorKey !== canonicalConnectorId
     ) {
       ctx.pdppError(res, 400, "invalid_request", "terminal run commit body or binding is invalid");
+      return;
+    }
+
+    const validatedFacts = version === 2
+      ? normalizeTerminalCoverageFacts(rawFacts, await ctx.getConnectorManifest?.(canonicalConnectorId), collectionBoundary, { allowSubset: true })
+      : normalizedFacts;
+    if (!validatedFacts) {
+      ctx.pdppError(res, 400, "invalid_request", "terminal coverage does not match the manifest inventory");
       return;
     }
 
@@ -119,14 +131,13 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       run_id: runId,
       source_instance_id: sourceInstanceId,
       state_delta: stateDelta,
-      terminal_facts: body.terminal_facts as Array<{
-        coverage_statuses: string[];
-        scoped?: boolean;
-        stream: string;
-      }>,
-      version: 1,
+      terminal_facts: body.terminal_facts,
+      version,
     } as const;
-    const envelopeHash = createHash("sha256").update(canonicalTerminalRunCommitJson(canonicalEnvelope)).digest("hex");
+    const canonicalJson = version === 2
+      ? JSON.stringify(canonicalTerminalRunCommitEnvelope(canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]))
+      : canonicalTerminalRunCommitJson(canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitJson>[0]);
+    const envelopeHash = createHash("sha256").update(canonicalJson).digest("hex");
     const result = await ctx.commitTerminalRun({
       collectionBoundary,
       commitId,
@@ -134,7 +145,8 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       connectorInstanceId: authorized.connectorInstance.connectorInstanceId,
       deviceId,
       envelopeHash,
-      normalizedFacts,
+      normalizedFacts: validatedFacts,
+      version,
       runId,
       sourceInstanceId,
       stateDelta,
@@ -303,6 +315,77 @@ export function normalizeTerminalFacts(rawFacts: readonly unknown[]): readonly R
   return byStream.size > 0
     ? [...byStream.values()].sort((left, right) => String(left.stream).localeCompare(String(right.stream)))
     : null;
+}
+
+/** Validate a v2 claim against the registered manifest, without source-specific rules. */
+export function normalizeTerminalCoverageFacts(
+  rawFacts: readonly unknown[],
+  rawManifest: unknown,
+  collectionBoundary: string,
+  options: { allowSubset?: boolean } = {}
+): readonly Record<string, unknown>[] | null {
+  const manifest = asObject(rawManifest);
+  const manifestStreams = manifest?.streams;
+  if (!Array.isArray(manifestStreams) || manifestStreams.length === 0) {
+    return null;
+  }
+  const inventory = new Map<string, Set<string>>();
+  for (const rawStream of manifestStreams) {
+    const stream = asObject(rawStream);
+    const name = stream && readRequiredString(stream.name);
+    const stores = stream?.coverage_stores;
+    if (!name || !Array.isArray(stores) || stores.length === 0 ||
+      stores.some((store) => typeof store !== "string" || !store.trim()) ||
+      new Set(stores).size !== stores.length || inventory.has(name)) {
+      return null;
+    }
+    inventory.set(name, new Set(stores));
+  }
+  if (rawFacts.length === 0 || rawFacts.length > inventory.size || (!options.allowSubset && rawFacts.length !== inventory.size)) {
+    return null;
+  }
+  const seen = new Set<string>();
+  const facts: Record<string, unknown>[] = [];
+  for (const raw of rawFacts) {
+    const entry = asObject(raw);
+    const stream = entry && readRequiredString(entry.stream);
+    const expected = stream ? inventory.get(stream) : null;
+    const rawStores = entry?.stores;
+    if (!stream || !expected || seen.has(stream) || typeof entry.scoped !== "boolean" ||
+      !Array.isArray(rawStores) || rawStores.length !== expected.size ||
+      (collectionBoundary !== "unscoped" && entry.scoped !== true)) {
+      return null;
+    }
+    seen.add(stream);
+    const stores: { store: string; status: "collected" | "partial" | "unavailable" | "failed" }[] = [];
+    const seenStores = new Set<string>();
+    for (const rawStore of rawStores) {
+      const store = asObject(rawStore);
+      const name = store && readRequiredString(store.store);
+      const status = store?.status;
+      if (!name || !expected.has(name) || seenStores.has(name) ||
+        (status !== "collected" && status !== "partial" && status !== "unavailable" && status !== "failed")) {
+        return null;
+      }
+      seenStores.add(name);
+      stores.push({ store: name, status });
+    }
+    const statuses = stores.map((store) => store.status);
+    const pendingDetailGaps = statuses.filter((status) => status !== "collected").length;
+    facts.push({
+      checkpoint: "committed",
+      collected: 0,
+      considered: null,
+      covered: null,
+      coverage_statuses: statuses,
+      pending_detail_gaps: pendingDetailGaps,
+      scoped: entry.scoped,
+      skipped: null,
+      stores: stores.sort((left, right) => left.store.localeCompare(right.store)),
+      stream,
+    });
+  }
+  return seen.size === rawFacts.length ? facts.sort((left, right) => String(left.stream).localeCompare(String(right.stream))) : null;
 }
 
 function readCoverageStatuses(value: unknown): readonly string[] | null {

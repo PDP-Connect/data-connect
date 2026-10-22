@@ -1,57 +1,57 @@
 # Local device terminal coverage contract
 
-Status: required follow-up in data-connectors. PR #553 does not restore positive coverage.
+Status: decision for linked data-connectors and data-connect PRs. PR #553 cannot restore positive coverage until new signed connector releases are pinned.
 
-## Evidence at the pinned releases
+## Regression
 
-The five pins are in `packages/local-collector/src/generated/collection-profile-pins.generated.ts`. Their exact OCI artifacts were installed through `ensureCollectionProfileInstalled` (`packages/local-collector/src/managed/collection-profiles.ts:125-205`), which verifies the signature and pinned profile/entrypoint hashes. Each pinned `dist/collection-profile.mjs` contains `PROGRESS`, `SKIP_RESULT`, and `DONE`, but contains no `RUN_COVERAGE`, `coverage_statuses`, or `coverage_diagnostics` literal. The matching versioned source manifests and emitters were inspected in the data-connectors checkout at `5f501848d` (the five connector files have no branch changes from that checkout's `origin/main`). The source paths below explain the behavior found in the pinned entrypoints.
+The five pinned local releases (Claude Code 0.3.24, Codex 0.3.15, Google Takeout 0.1.22, iMessage 0.1.21, Apple Photos 0.1.22) no longer emit coverage_diagnostics. Their PROGRESS lines and stderr run diagnostics are not terminal coverage evidence. In data-connect, retired diagnostic records from old devices are accepted for compatibility but grant no coverage credit. These releases provide no typed DONE verdict, so the server's local coverage axis remains unknown. Earlier evidence in PR #553 proposed RUN_COVERAGE; the DONE decision here supersedes that message choice.
 
-`coverage_diagnostics` is retired for these five pins. Other connectors can still declare that stream; a declared stream keeps its own manifest identity and indexing rules.
+The five pins live in `packages/local-collector/src/generated/collection-profile-pins.generated.ts`. Their signed profile artifacts were inspected alongside version-matched emitters in data-connectors at `5f501848d`. Each entrypoint emits `PROGRESS`, `SKIP_RESULT`, and `DONE`, but no typed exhaustive per-store verdict. Other connectors may still declare `coverage_diagnostics`; those records retain their manifest identity and ingestion behavior without granting terminal coverage credit.
 
-| Pin | End-of-run evidence in version-matched source |
+| Pin | End-of-run evidence |
 | --- | --- |
-| Claude Code 0.3.24 | `connectors/claude_code/index.ts` emits stream `STATE`, human `PROGRESS`, and `SKIP_RESULT` for specific failures; `runConnector` supplies `DONE`. There is no terminal per-stream coverage object. |
-| Codex 0.3.15 | `connectors/codex/index.ts:3230-3269` emits human `PROGRESS` for outstanding work, then `DONE {status:"succeeded",records_emitted}`. Other failures use `SKIP_RESULT`; no terminal per-stream coverage object is emitted. |
-| Google Takeout 0.1.22 | `connectors/google_takeout/index.ts:76-112` emits `PROGRESS {stream,message}` and writes a separate stderr `coverage` diagnostic with `stream,status,reason,items,unsupported_files`. Missing inputs also emit `SKIP_RESULT` (for example `index.ts:510-525`). `runConnector` supplies `DONE`. |
-| iMessage 0.1.21 | `connectors/imessage/index.ts:374-403,770-871` emits `PROGRESS {stream,message}`, per-stream `STATE`, and `SKIP_RESULT` for missing tables or unusable dates. `runConnector` supplies `DONE`; no coverage verdict is emitted. |
-| Apple Photos 0.1.22 | `connectors/apple_photos/index.ts:127-145,190-215` emits `PROGRESS {stream,message}` and writes a separate stderr `coverage` diagnostic with `stream,status,reason,files_scanned`. Missing exports also emit `SKIP_RESULT`. `runConnector` supplies `DONE`. |
+| Claude Code 0.3.24 | `STATE`, human `PROGRESS`, and failure-specific `SKIP_RESULT`; `runConnector` supplies `DONE`. |
+| Codex 0.3.15 | Human `PROGRESS` for outstanding work and `DONE` with status and record count; failures use `SKIP_RESULT`. |
+| Google Takeout 0.1.22 | `PROGRESS` and a separate bounded stderr coverage diagnostic; missing inputs can emit `SKIP_RESULT`. |
+| iMessage 0.1.21 | `PROGRESS`, per-stream `STATE`, and `SKIP_RESULT` for missing tables or unusable dates. |
+| Apple Photos 0.1.22 | `PROGRESS`, a separate bounded stderr coverage diagnostic, and `SKIP_RESULT` for missing exports. |
 
-`packages/connector-protocol/src/connector-runtime-protocol.ts:772-900` types `PROGRESS` as owner-facing text with optional counts, `SKIP_RESULT` as a failure/skip event, and `DONE` as run status and record count. `packages/polyfill-connectors/src/connector-runtime.ts:1773-1796` emits successful `DONE` after optional shape-check text. The data-connectors diagnostic helper (`packages/polyfill-connectors/src/connector-diagnostic.ts:4-77`) writes best-effort, bounded stderr lines; it explicitly does not provide a protocol event. A diagnostic may be omitted or truncated. Neither a successful `DONE`, a `STATE` checkpoint, a record count, a human `PROGRESS` line, nor the absence of `SKIP_RESULT` proves every requested stream and scope was covered.
+Stderr diagnostics may be omitted or truncated. A successful `DONE`, `STATE` checkpoint, record count, progress line, or absence of skips does not prove every requested stream and scope was covered.
 
-Data-connect's `packages/collector-runtime/src/collector-runner.ts:1409-1442` observes the typed child stream, retains `DONE`, and ignores `PROGRESS` and `SKIP_RESULT` for terminal coverage. At `:972` it passes `terminalFacts: null` into the durable commit path. Its stderr buffer is for failure reporting, not coverage. `deriveLocalCollectorLifecycleState` (`:3016-3067`) calls any drained outbox `healthy_idle`; this says nothing about source coverage. The reference server suppresses local-device scheduler run facts at `reference-implementation/server/ref-control.ts:4143-4162,5447-5455`. It must continue to show coverage `unknown` without a committed typed proof.
+## Step 1: message decision
 
-## Required v1 event
+Extend the existing DONE message with optional typed coverage. DONE is already the required final message. The collector retains one DONE in `packages/collector-runtime/src/collector-runner.ts`, rejects output after it, and decides whether to send a durable terminal commit. This binds the verdict to successful termination without an extra message or duplicate-event state machine. Existing DONE messages without coverage remain valid and yield unknown coverage.
 
-Add one `RUN_COVERAGE` JSONL message to the connector protocol, before terminal `DONE`:
+| Candidate | Type and validation | Persistence and terminal fit |
+| --- | --- | --- |
+| DONE | packages/connector-protocol/src/connector-runtime-protocol.ts:879-891 types status, count and error. collector-runner.ts:1829 parses JSONL with a cast, so the new field needs explicit runtime validation. | The collector retains it; the authenticated terminal commit endpoint validates and persists terminal facts in reference-implementation/operations/local-device-terminal-collection.ts:42-141. Its final-message semantics fit. |
+| PROGRESS | connector-runtime-protocol.ts:793-804 types owner-facing text and optional counts. connector-diagnostic.ts:4-77 writes best-effort bounded stderr, outside the protocol. | Neither is retained as terminal proof. A mid-run line can precede failure or truncation. |
+| STATE | connector-runtime-protocol.ts:791 types a stream cursor; collector-runner.ts:1650-1662 buffers only in-scope checkpoint state. | A cursor is a resume position, not enumeration status. Some streams have none. |
+| SKIP_RESULT | connector-runtime-protocol.ts:808-846 types a specific skip with reason, message, optional diagnostics and continuation. | One omission does not enumerate every store; absence of skips does not prove completeness. The collector does not retain it as terminal facts. |
+| STREAM_EVIDENCE | connector-runtime-protocol.ts:842-885 types measured state-stream detail counts. | It is reference-only, can arrive before completion, and does not enumerate local stores or assert a terminal scope. |
+| RUN_COVERAGE | No current protocol message. The earlier proposal adds a pre-DONE event and ordering rules. | The optional DONE field has the needed terminal semantics, so a new message is unnecessary. |
 
-```json
-{
-  "type": "RUN_COVERAGE",
-  "version": 1,
-  "collection_scope": "unscoped",
-  "streams": [
-    {
-      "stream": "messages",
-      "scoped": true,
-      "stores": [{ "store": "messages", "status": "collected" }]
-    }
-  ]
-}
-```
+The existing local-device run-coverage summaries and packages/polyfill-connectors/src/connector-diagnostic.ts stderr helper may supply inputs to a verdict, but they do not carry a typed protocol verdict and are not persisted as one. Old record-backed diagnostic status lists lack store IDs; the v2 path retains them in `DONE.coverage` without another event or ordering rule.
 
-Extend `START` with the collector's canonical `collection_scope` fingerprint and require the connector to echo it here; today `buildCollectorStartMessage` (`packages/collector-runtime/src/collector-runner.ts:1981-2024`) sends only per-stream ranges and roots. `unscoped` is a real value. The fingerprint algorithm is `collectorScopeFingerprint` (`:1908-1939`). `streams` contains exactly one entry for **every requested stream**, including a verified-empty stream, and no unrequested stream. Each entry contains exactly one status for every store in that stream's signed manifest coverage inventory. Store IDs are opaque to the app; the server compares sets against the signed manifest, without connector-specific branches. A stream with no declared inventory cannot gain positive coverage.
+## Typed field
 
-`status` is the closed v1 vocabulary `collected | verified_empty | missing | unaccounted`. `collected` means the store's requested region was enumerated and its supported records were handled. `verified_empty` means that region was enumerated and contained no supported records. `missing` means its source was absent or inaccessible. `unaccounted` means the scan or classification did not complete. An unsupported file, a skipped required item, a pending capture/upload, or a truncated scan cannot be `collected` or `verified_empty`. `scoped: true` asserts that the connector enforced the requested boundary on this stream; `false` prevents a positive claim for a bounded scope. The assertion must describe enumeration, not merely post-filtering emitted records.
+DONE.coverage has version 1, collection_scope, and streams. Each stream has stream, scoped, and stores. Each store has store and status. The closed status enum is collected, partial, unavailable, failed.
 
-The runtime accepts exactly one v1 event, validates its shape and requested-stream set, and rejects duplicates, unknown status/version, duplicate or missing stores, an absent/mismatched scope, and any message after `DONE`. It retains the event only until a successful `DONE`. It must drop the proof if the scan was budget-truncated, the outbox has a pending/dead-letter record or gap, or the terminal commit cannot durably checkpoint. On success it stamps the current boundary and connector instance and calls `maybeCommitCheckpoint` with the validated facts instead of `null`. An empty or absent event never produces a terminal commit.
+- collected: the requested region was fully enumerated and all supported records were handled; an honestly verified empty region counts.
+- partial: a supported item was skipped, deferred, unsupported, or remains pending.
+- unavailable: the source store was absent or inaccessible before enumeration.
+- failed: enumeration or classification began but did not complete.
 
-The terminal commit envelope needs version 2 so each `terminal_facts` entry preserves its store IDs and statuses; the current `TerminalCollectionFact` (`packages/collector-runtime/src/local-device-client.ts:164-174`) holds only a status list and cannot support the server's inventory check. Keep version 1 parsing and prior evidence behavior for old devices. The server validates version 2, source/device/connector identity, boundary, signed manifest inventory, statuses, and commit id before persisting it. Only a current, fully committed proof whose required streams are all `collected` or `verified_empty`, with `scoped: true` when bounded, can yield `complete`. Missing, partial, malformed, stale, or mixed-boundary proof yields `unknown` or the existing worse gap state; it never yields a false green. The generic terminal evidence must feed both the per-stream Collection Report and connection coverage axis. Scheduler run facts remain excluded for local-device sources unless they are tied to this validated terminal proof. The device must retain the last acknowledged proof outside the prunable outbox for status/doctor, invalidating it on a changed scope, failed run, or open gap.
+Only collected can support a positive coverage verdict. START.collection_scope carries the collector's canonical collectorScopeFingerprint; unscoped is an explicit value. DONE.coverage.collection_scope must echo it. The verdict lists exactly every requested stream and every store in each stream's signed manifest coverage inventory, with no duplicates or extras. The server admits a selected-stream subset when each reported stream matches its signed inventory; the read model requires the complete manifest inventory before showing whole-connection coverage. Store IDs are opaque to the app. A stream without inventory cannot prove coverage. scoped is true only if the connector enforced the requested boundary during enumeration.
 
-## Consumers and acceptance tests
+The collector validates the typed field before accepting it. It carries store IDs and statuses in a version 2 terminal commit only after successful DONE, complete scan, drained outbox, and durable checkpoint. The server validates the commit against authenticated device/source/connector identity, boundary, manifest inventory, status enum and commit ID. Existing version 1 commits remain accepted; an old device or missing field continues to work but does not gain coverage. Malformed, partial, unavailable, failed, missing, duplicate, stale or mixed-boundary evidence stays unknown or a worse gap state. The validated proof must feed both the Collection Report and connection coverage axis. A drained outbox alone is no evidence of coverage.
 
-1. Extend `START`, define and parse `RUN_COVERAGE` in `packages/connector-protocol/src/connector-runtime-protocol.ts`, and add each stream's coverage inventory to the signed manifest. Emit the event from new signed data-connectors releases. Keep `PROGRESS` as text and stderr diagnostics as diagnostics.
-2. Capture and validate it in `packages/collector-runtime/src/collector-runner.ts` at `handleMessage` and `streamConnectorIntoOutbox`; pass facts to `maybeCommitCheckpoint`, preserve the store identities in a v2 `TerminalRunCommitRequest` in `packages/collector-runtime/src/local-device-client.ts`, and retain the acknowledged local proof for status/doctor.
-3. Validate and fold the terminal commit generically in `reference-implementation/server/routes/ref-device-exporters.ts` and the terminal evidence store. Use that proof in `reference-implementation/server/ref-control.ts` for local-device coverage; expose the same result in local collector status/doctor without equating `healthy_idle` with coverage.
-4. Test before and after the change: successful `DONE` with no `RUN_COVERAGE` stays `unknown`; a complete, drained, correctly scoped proof becomes covered on device and server; missing/duplicate/malformed facts, mismatched scope, undeclared stores, missing required streams, incomplete drain, and replay remain unknown or worse. The positive test must fail against PR #553's current collector path.
+The collector stores the latest acknowledged v2 receipt in local outbox schema v5, outside prunable outbox rows. A later acknowledged v1 commit removes that receipt. Offline status can describe the receipt's measured boundary; doctor compares it with the active owner boundary. The server read model must make the same boundary comparison before showing positive connection coverage.
 
-Until the protocol and signed releases exist, PR #553's coverage blocker remains open.
+## Published PDPP spec impact
+
+This changes the Collection Profile wire contract. The PDPP owner tree remains read-only in this lane. Both /home/tnunamak/code/pdpp/spec-collection-profile.md and its published copy, apps/site/content/docs/spec-collection-profile.mdx, need updates: DONE (root line 514, published line 518) needs the optional field and its validation; START (root around line 198) needs collection_scope; manifest stream declarations (root lines 45-75) need coverage-store inventory. The state machine (root lines 120-155) already defines DONE as final. The restart-abandonment rule at root line 573 uses “DONE-time coverage verdict” for detail-coverage checkpoint eligibility; it does not define this per-store terminal payload. PDPP Core is unaffected. Protocol addition needs owner approval at merge.
+
+## Acceptance and release
+
+Tests must show absent coverage unknown, a valid fully drained proof covered, partial/unavailable/failed not covered, malformed rejected or unknown, and old devices still working. Verify connector emitters, collector checkpointing, server validation, and both read models. After data-connectors #539 releases its signed profiles, repin Claude Code 0.3.25, Codex 0.3.16, Google Takeout 0.1.23, iMessage 0.1.22, and Apple Photos 0.1.23. PR #553 keeps the current pins until that release.

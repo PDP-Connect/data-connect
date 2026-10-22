@@ -162,7 +162,7 @@ export interface CollectionProfile {
   readonly runtime_requirements?: {
     readonly bindings?: Readonly<Record<string, { readonly required: boolean }>>;
   };
-  readonly streams?: readonly { readonly name?: string; readonly id?: string }[];
+  readonly streams?: readonly { readonly name?: string; readonly id?: string; readonly coverage_stores?: readonly string[] }[];
 }
 
 /**

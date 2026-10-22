@@ -43,6 +43,44 @@ test("LocalDeviceOutbox persists ready work and reopens from disk", async (t) =>
   }
 });
 
+test("acknowledged v2 terminal coverage survives outbox pruning and reopen", async (t) => {
+  const path = await tempOutboxPath(t);
+  const payload = {
+    collection_boundary: "scope-1",
+    terminal_facts: [{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }],
+    version: 2,
+  };
+  const outbox = new LocalDeviceOutbox({ path });
+  outbox.enqueue({ id: "coverage-1", kind: "terminal_run_commit", payload, sourceInstanceId: "source-1" });
+  const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000 });
+  assert.ok(claimed);
+  outbox.acknowledge({ holder: "worker", id: claimed.id, leaseEpoch: claimed.lease_epoch });
+  outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "source-1" });
+  outbox.close();
+
+  const reopened = new LocalDeviceOutbox({ path });
+  try {
+    assert.equal(reopened.get("coverage-1"), null);
+    assert.deepEqual(reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" }), {
+      collectionBoundary: "scope-1",
+      terminalFacts: payload.terminal_facts,
+    });
+    assert.equal(reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-2" }), null);
+    reopened.enqueue({
+      id: "legacy-2",
+      kind: "terminal_run_commit",
+      payload: { collection_boundary: "scope-2", terminal_facts: [], version: 1 },
+      sourceInstanceId: "source-1",
+    });
+    const [legacy] = reopened.claimReady({ holder: "worker", leaseMs: 60_000 });
+    assert.ok(legacy);
+    reopened.acknowledge({ holder: "worker", id: legacy.id, leaseEpoch: legacy.lease_epoch });
+    assert.equal(reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" }), null);
+  } finally {
+    reopened.close();
+  }
+});
+
 test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
@@ -157,7 +195,7 @@ test("schema v3/v4 migration preserves pending v2 work and accepts terminal run 
     const version = migrated.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    assert.equal(version.user_version, 4);
+    assert.equal(version.user_version, 5);
   } finally {
     migrated.close();
   }
@@ -185,12 +223,12 @@ test("an old v2 binary uses the production version fence to refuse a v3 outbox",
   }
 });
 
-test("current binary refuses a future v5 outbox before applying schema", async (t) => {
+test("current binary refuses a future v6 outbox before applying schema", async (t) => {
   const path = await tempOutboxPath(t);
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA user_version = 5");
+  db.exec("PRAGMA user_version = 6");
   db.close();
-  assert.throws(() => new LocalDeviceOutbox({ path }), /newer than supported version 4/);
+  assert.throws(() => new LocalDeviceOutbox({ path }), /newer than supported version 5/);
 });
 
 test("schema v3 migration failure rolls back, closes, and reopens with v2 bytes and metadata intact", async (t) => {

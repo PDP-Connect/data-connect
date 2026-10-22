@@ -19,6 +19,7 @@ import type { RuntimeContinuationFact } from "@pdpp/connector-protocol/connector
 import { allowUnboundedReadAcknowledged, iterateDynamicSqlAcknowledged, referenceQueries } from "../lib/db.ts";
 import { isNullish } from "../lib/nullish.ts";
 import type { SpineSummary } from "../lib/spine.ts";
+import { normalizeTerminalCoverageFacts } from "../operations/local-device-terminal-collection.ts";
 import type { RefApprovalDetail } from "../operations/ref-approval-detail/index.ts";
 import {
   buildLiveConsentApprovalDetail,
@@ -165,6 +166,7 @@ import { listConnectorSummaryEvidence } from "./connector-summary-read-model.ts"
 import { filterRunGapsProvenCompleteByReport } from "./continuation-proof.ts";
 import { getSqliteStoreCacheIdentity } from "./db.ts";
 import { deriveReferenceFreshness, type ReferenceFreshness } from "./freshness.ts";
+import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
 import { mapPendingPressureGaps } from "./pending-pressure-gap-map.ts";
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
 import {
@@ -201,6 +203,7 @@ import { getDefaultBrowserSurfaceLeaseStore } from "./stores/browser-surface-lea
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import { getDefaultConnectorCoverageHorizonStore } from "./stores/connector-coverage-horizon-store.ts";
 import { getDefaultConnectorDetailGapStore } from "./stores/connector-detail-gap-store.ts";
+import { getDefaultConnectorStateStore } from "./stores/connector-state-store.ts";
 import {
   type CredentialStateChange,
   createPostgresConnectorInstanceCredentialStore,
@@ -589,6 +592,12 @@ export interface ConnectorRunSummary {
    * `collection_report`; never final coverage truth.
    */
   readonly collection_facts: RuntimeCollectionFacts | null;
+  /** Authenticated v2 device terminal evidence; checked against current manifest and scope on read. */
+  readonly local_terminal_coverage?: {
+    readonly eligibleLocalRun: boolean;
+    readonly collectionScope: unknown;
+    readonly streams: unknown;
+  } | null;
   readonly connector_error?: ConnectorRunErrorSummary | null;
   readonly event_count: number;
   readonly failure_reason: string | null;
@@ -1584,6 +1593,7 @@ function productRunHistoryToConnectorRunSummary(
       : null;
   return {
     collection_facts: readCollectionFactsFromTerminalData(facts),
+    local_terminal_coverage: readLocalTerminalCoverage(facts, history),
     connector_error: projectConnectorRunError(history.connectorError),
     event_count: 0,
     failure_reason: history.failureReason ?? history.error ?? browserSurfaceFailureReason,
@@ -1600,6 +1610,30 @@ function productRunHistoryToConnectorRunSummary(
     status,
     terminal_reason: history.terminalReason ?? null,
     yield_counts_present: yieldCounts.present,
+  };
+}
+
+function readLocalTerminalCoverage(
+  facts: Record<string, unknown> | null,
+  history: ProductRunHistoryRecord
+): NonNullable<ConnectorRunSummary["local_terminal_coverage"]> | null {
+  const block = facts?.collection_facts;
+  if (!block || typeof block !== "object" || Array.isArray(block)) {
+    return null;
+  }
+  const coverage = block as Record<string, unknown>;
+  if (coverage.schema_version !== 2) {
+    return null;
+  }
+  return {
+    eligibleLocalRun:
+      history.status === "succeeded" &&
+      history.schedulerManaged === false &&
+      typeof history.connectorInstanceId === "string" &&
+      typeof history.runId === "string" &&
+      coverage.reference_only === true,
+    collectionScope: coverage.collection_scope,
+    streams: coverage.streams,
   };
 }
 
@@ -4418,6 +4452,43 @@ function pendingDetailGapCountsByStream(
   return counts;
 }
 
+/** Project only a complete, current, authenticated v2 terminal inventory. */
+function terminalCoverageByStream(
+  run: ConnectorRunSummary | null,
+  manifest: ConnectorManifest,
+  declaredScope: string | null
+): ReadonlyMap<string, CoverageAxis> | null {
+  const terminal = run?.local_terminal_coverage;
+  if (
+    !terminal?.eligibleLocalRun ||
+    declaredScope === null ||
+    terminal.collectionScope !== declaredScope ||
+    !Array.isArray(terminal.streams)
+  ) {
+    return null;
+  }
+  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, declaredScope);
+  if (!normalized) {
+    return null;
+  }
+  const conditions = new Map<string, CoverageAxis>();
+  for (const fact of normalized) {
+    if (fact.scoped !== true || typeof fact.stream !== "string" || !Array.isArray(fact.stores)) {
+      return null;
+    }
+    const statuses = fact.stores.map((store: { status: string }) => store.status);
+    const condition: CoverageAxis = statuses.includes("failed")
+      ? "gaps"
+      : statuses.includes("partial")
+        ? "partial"
+        : statuses.includes("unavailable")
+          ? "unavailable"
+          : "complete";
+    conditions.set(fact.stream, condition);
+  }
+  return conditions;
+}
+
 function stateStreamParent(stream: ManifestStream | undefined): string | null {
   if (!stream || typeof stream !== "object") {
     return null;
@@ -4536,7 +4607,6 @@ async function loadPageProductEvidence(connectorInstanceIds: readonly string[]):
       .getCurrentCoverageHorizonsByInstanceIds(ids)
       .catch(() => null),
   ]);
-
   const connectionsByInstanceId = new Map<string, RetainedSizeConnectionProjectionRow>();
   for (const [id, row] of connections) {
     connectionsByInstanceId.set(id, row as RetainedSizeConnectionProjectionRow);
@@ -6275,6 +6345,8 @@ interface ConnectorSummarySynthesisInput {
   /** Pre-resolved by the caller; see `ConnectorSummary.connector_implementation`. */
   readonly connectorImplementation: ConnectorImplementationSummary | null;
   readonly connectorInstanceId: string;
+  /** Current owner boundary; null if the state read failed. */
+  readonly declaredLocalCollectionScope: string | null;
   /**
    * Provider coverage-horizon/provenance disclosures for this connection,
    * pre-fetched by the caller via `ConnectorCoverageHorizonStore` (kept out
@@ -6390,6 +6462,9 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const authoritativeLastSuccessfulRun = isOwnScopedRun(lastSuccessfulRun) ? lastSuccessfulRun : null;
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
+  const terminalCoverage = localDeviceBacked
+    ? terminalCoverageByStream(fallbackSettledRun, manifest, input.declaredLocalCollectionScope)
+    : null;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =
     instance.status === "draft" && authoritativeLastRun
@@ -6491,7 +6566,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   };
   const initialConnectionHealth = projectConnectorSummaryConnectionHealth(healthInput);
   const connectorDisplayName = manifest.display_name || connectorId;
-  const collectionReport = projectCollectionReport({
+  const baseCollectionReport = projectCollectionReport({
     connectionHealth: initialConnectionHealth,
     lastRun: authoritativeLastRun,
     lastSuccessfulRun: authoritativeLastSuccessfulRun,
@@ -6510,6 +6585,32 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     terminalDetailGapsByStream: detailGaps.terminalByStream,
     unfillableAccountedByStream: detailGaps.unfillableAccountedByStream,
   });
+  const collectionReport = terminalCoverage
+    ? baseCollectionReport.map((entry) => {
+        const condition = terminalCoverage.get(entry.stream);
+        if (!condition) {
+          return entry;
+        }
+        const coverageCondition = ["terminal_gap", "retryable_gap", "gaps", "partial"].includes(entry.coverage_condition)
+          ? entry.coverage_condition
+          : condition;
+        return {
+          ...entry,
+          checkpoint: "committed",
+          coverage_condition: coverageCondition,
+          evidence_as_of: fallbackSettledRun?.last_at ?? null,
+          forward_disposition: deriveForwardDisposition({
+            attentionOpen: initialConnectionHealth.axes.attention !== "none",
+            coverage: coverageCondition,
+            freshness: initialConnectionHealth.axes.freshness,
+            gapRetryable: false,
+            refresh: buildRefreshEvidence(refreshPolicy),
+            schedule: null,
+            unfillableAccounted: false,
+          }),
+        };
+      })
+    : baseCollectionReport;
   // `refineConnectionHealthWithCollectionReport` owns both report-derived
   // overrides: the required-unknown coverage refusal and the proof-age
   // freshness anchor (oldest required-stream proof). The owner-facing
@@ -7447,6 +7548,15 @@ async function projectConnectorSummaryForInstance(
           .getCurrentCoverageHorizons(connectorInstanceId)
           .catch(() => []),
   ]);
+  const declaredLocalCollectionScope = localDeviceBacked
+    ? await getDefaultConnectorStateStore()
+        .getState(
+          { connectorId, connectorInstanceId, grantId: null },
+          { allowedStreams: [COLLECTION_SCOPE_STATE_KEY] }
+        )
+        .then((projection) => readStoredCollectionScope(projection.state).fingerprint)
+        .catch(() => null)
+    : null;
   // Connections that are not static-secret-bound (browser-session connections,
   // or non-static-secret connectors): the ternary above resolved
   // `{ ok: true, metadata: null }` and `deriveCredentialEvidence` returns `null`
@@ -7495,6 +7605,7 @@ async function projectConnectorSummaryForInstance(
     connectorId,
     connectorImplementation,
     connectorInstanceId,
+    declaredLocalCollectionScope,
     coverageHorizons,
     credential,
     detailGaps,

@@ -434,10 +434,9 @@ test("local collector doctor flags missing db, expired leases, and dead letters"
       expired_leases: "warn",
       outbox_db: "ok",
       outbox_failures: "fail",
+      terminal_coverage: "unknown",
     });
-    // Dead letters dominate the lifecycle state even though no coverage
-    // diagnostic was observed: a lane that needs recovery is not first
-    // labeled "coverage missing".
+    // Dead letters dominate the lifecycle state even without a typed verdict.
     assert.equal(doctor.lifecycle_state, "dead_letter");
     assert.equal(doctor.outbox.counts.dead_letter, 1);
     assert.equal(doctor.outbox.counts.retrying, 1);
@@ -2457,12 +2456,166 @@ function drainRow(outbox, id, sourceInstanceId = "src-1") {
   outbox.acknowledge({ holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
 }
 
-test("lifecycle_state is healthy_idle on an empty outbox (nothing collected, no coverage to miss)", async () => {
+function acknowledgeTerminalCoverage(outbox, { id, sourceInstanceId = "src-1", stores, scoped = true, version = 2 }) {
+  outbox.enqueue({
+    id,
+    kind: "terminal_run_commit",
+    payload: {
+      collection_boundary: "unscoped",
+      commit_id: id,
+      connector_id: "claude_code",
+      connector_instance_id: "connector-1",
+      device_id: "device-1",
+      run_id: id,
+      source_instance_id: sourceInstanceId,
+      state_delta: {},
+      terminal_facts: version === 2
+        ? [{ scoped, stores, stream: "sessions" }]
+        : [{ coverage_statuses: ["collected"], stream: "sessions" }],
+      version,
+    },
+    sourceInstanceId,
+  });
+  drainRow(outbox, id, sourceInstanceId);
+}
+
+test("acknowledged v2 coverage stays covered after sent rows are pruned", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-covered",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.outbox.counts.total, 0);
+  assert.equal(status.terminal_coverage.verdict, "covered");
+  assert.equal(status.terminal_coverage.collection_boundary, "unscoped");
+  assert.equal(status.lifecycle_state, "covered");
+  assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "ok");
+  const matchingDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "unscoped",
+    status: "ok",
+  });
+  assert.equal(matchingDoctor.lifecycle_state, "covered");
+  assert.equal(matchingDoctor.scope.active, "unscoped");
+  const staleDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "new-owner-scope",
+    status: "ok",
+  });
+  assert.equal(staleDoctor.lifecycle_state, "no_evidence");
+  assert.equal(staleDoctor.terminal_coverage.verdict, "no_evidence");
+  assert.equal(staleDoctor.checks.terminal_coverage, "warn");
+  assert.equal(staleDoctor.status, "warning");
+});
+
+test("a later partial terminal receipt replaces a previously covered verdict", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-first",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-second",
+      stores: [{ store: "local_files", status: "partial" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "incomplete");
+  assert.equal(status.lifecycle_state, "coverage_incomplete");
+});
+
+test("a later v1 terminal ACK clears prior v2 coverage proof", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v2",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v1",
+      stores: [{ store: "local_files", status: "collected" }],
+      version: 1,
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+test("partial, failed, unscoped, and v1 terminal commits do not prove coverage", async () => {
+  for (const [statusValue, scoped, version, expected] of [
+    ["partial", true, 2, "incomplete"],
+    ["failed", true, 2, "incomplete"],
+    ["unavailable", true, 2, "incomplete"],
+    ["collected", false, 2, "incomplete"],
+    ["collected", true, 1, "no_evidence"],
+  ]) {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: `terminal-${statusValue}-${scoped}-${version}`,
+        stores: [{ store: "local_files", status: statusValue }],
+        scoped,
+        version,
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const observed = statusFor(path);
+    assert.equal(observed.terminal_coverage.verdict, expected);
+    assert.notEqual(observed.lifecycle_state, "covered");
+    assert.equal(buildLocalOutboxDoctor(observed).checks.terminal_coverage, expected === "no_evidence" ? "unknown" : "warn");
+  }
+});
+
+test("a malformed persisted terminal receipt stays unknown without crashing status", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-corrupt",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const db = new DatabaseSync(path);
+  try {
+    db.prepare("UPDATE local_device_terminal_coverage_receipts SET terminal_facts_json = ? WHERE source_instance_id = ?")
+      .run("{malformed", "src-1");
+  } finally {
+    db.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+test("lifecycle_state is no_evidence on an empty scoped outbox", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   outbox.close();
   const status = statusFor(path);
-  assert.equal(status.lifecycle_state, "healthy_idle");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
 });
 
 test("lifecycle_state is draining when claimable-now record work exists", async () => {

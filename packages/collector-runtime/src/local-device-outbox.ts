@@ -4,9 +4,10 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { TerminalCoverageFact } from "./local-device-client.ts";
 import { hashCanonicalJson } from "./local-device-envelope.ts";
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 type OutboxMigrationV3FaultPoint = "after_copy";
 let outboxMigrationV3FaultHook: ((point: OutboxMigrationV3FaultPoint) => void) | null = null;
 
@@ -447,9 +448,11 @@ export class LocalDeviceOutbox {
 
   acknowledge(input: LocalDeviceOutboxLeaseInput): void {
     const now = this.#now();
-    const result = this.#db
-      .prepare(
-        `UPDATE local_device_outbox
+    this.#db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.#db
+        .prepare(
+          `UPDATE local_device_outbox
            SET status = 'succeeded',
                acknowledged_at = ?,
                lease_holder = NULL,
@@ -460,9 +463,76 @@ export class LocalDeviceOutbox {
            AND lease_holder = ?
            AND lease_epoch = ?
            AND lease_until > ?`
+        )
+        .run(now, now, input.id, input.holder, input.leaseEpoch, now);
+      assertOneChange(Number(result.changes), `local outbox lease not current for acknowledge: ${input.id}`);
+      const row = this.#db
+        .prepare("SELECT source_instance_id, kind, payload_json FROM local_device_outbox WHERE id = ?")
+        .get(input.id);
+      if (isRecord(row) && row.kind === "terminal_run_commit" && typeof row.source_instance_id === "string") {
+        // The receipt tracks the latest ACK, including a legacy commit without
+        // coverage. Keep this in the ACK transaction so pruning cannot erase proof.
+        this.#db
+          .prepare("DELETE FROM local_device_terminal_coverage_receipts WHERE source_instance_id = ?")
+          .run(row.source_instance_id);
+        const payload = typeof row.payload_json === "string" ? JSON.parse(row.payload_json) : null;
+        if (
+          isRecord(payload) &&
+          payload.version === 2 &&
+          typeof payload.collection_boundary === "string" &&
+          payload.collection_boundary.length > 0 &&
+          Array.isArray(payload.terminal_facts) &&
+          payload.terminal_facts.length > 0 &&
+          payload.terminal_facts.every(isTerminalCoverageFact) &&
+          new Set(payload.terminal_facts.map((fact: TerminalCoverageFact) => fact.stream)).size ===
+            payload.terminal_facts.length &&
+          payload.terminal_facts.every(
+            (fact: TerminalCoverageFact) => new Set(fact.stores.map((store) => store.store)).size === fact.stores.length
+          )
+        ) {
+          this.#db
+            .prepare(`INSERT INTO local_device_terminal_coverage_receipts
+            (source_instance_id, collection_boundary, terminal_facts_json, acknowledged_at)
+            VALUES (?, ?, ?, ?)`)
+            .run(row.source_instance_id, payload.collection_boundary, JSON.stringify(payload.terminal_facts), now);
+        }
+      }
+      this.#db.exec("COMMIT");
+    } catch (error) {
+      this.#db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  latestTerminalCoverageReceipt(input: { sourceInstanceId: string }): {
+    collectionBoundary: string;
+    terminalFacts: readonly TerminalCoverageFact[];
+  } | null {
+    const row = this.#db
+      .prepare(`SELECT collection_boundary, terminal_facts_json
+      FROM local_device_terminal_coverage_receipts WHERE source_instance_id = ?`)
+      .get(input.sourceInstanceId);
+    if (!isRecord(row) || typeof row.collection_boundary !== "string" || typeof row.terminal_facts_json !== "string") {
+      return null;
+    }
+    let facts: unknown;
+    try {
+      facts = JSON.parse(row.terminal_facts_json);
+    } catch {
+      return null;
+    }
+    if (
+      !Array.isArray(facts) ||
+      facts.length === 0 ||
+      !facts.every(isTerminalCoverageFact) ||
+      new Set(facts.map((fact: TerminalCoverageFact) => fact.stream)).size !== facts.length ||
+      facts.some(
+        (fact: TerminalCoverageFact) => new Set(fact.stores.map((store) => store.store)).size !== fact.stores.length
       )
-      .run(now, now, input.id, input.holder, input.leaseEpoch, now);
-    assertOneChange(Number(result.changes), `local outbox lease not current for acknowledge: ${input.id}`);
+    ) {
+      return null;
+    }
+    return { collectionBoundary: row.collection_boundary, terminalFacts: facts };
   }
 
   failRetryable(input: LocalDeviceOutboxFailInput): void {
@@ -1239,6 +1309,7 @@ export class LocalDeviceOutbox {
       this.#applySchemaV3();
     }
     this.#applySchemaV4();
+    this.#applySchemaV5();
     if (version < CURRENT_SCHEMA_VERSION) {
       this.#db.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION}`);
     }
@@ -1372,6 +1443,18 @@ export class LocalDeviceOutbox {
     `);
   }
 
+  /** Schema v5 — latest acknowledged coverage survives outbox pruning. */
+  #applySchemaV5(): void {
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS local_device_terminal_coverage_receipts (
+        source_instance_id TEXT PRIMARY KEY,
+        collection_boundary TEXT NOT NULL,
+        terminal_facts_json TEXT NOT NULL,
+        acknowledged_at TEXT NOT NULL
+      );
+    `);
+  }
+
   #selectReady(
     sourceInstanceId: string | undefined,
     now: string,
@@ -1426,6 +1509,27 @@ export function buildLocalDeviceOutboxId(input: BuildLocalDeviceOutboxIdInput): 
     parts: input.parts,
     source_instance_id: input.sourceInstanceId,
   })}`;
+}
+
+function isTerminalCoverageFact(value: unknown): value is TerminalCoverageFact {
+  return (
+    isRecord(value) &&
+    typeof value.stream === "string" &&
+    value.stream.length > 0 &&
+    typeof value.scoped === "boolean" &&
+    Array.isArray(value.stores) &&
+    value.stores.length > 0 &&
+    value.stores.every(
+      (store: unknown) =>
+        isRecord(store) &&
+        typeof store.store === "string" &&
+        store.store.length > 0 &&
+        (store.status === "collected" ||
+          store.status === "partial" ||
+          store.status === "unavailable" ||
+          store.status === "failed")
+    )
+  );
 }
 
 /**

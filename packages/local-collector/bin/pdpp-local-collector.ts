@@ -1591,6 +1591,11 @@ export interface LocalOutboxStatusOutput {
     device_id_configured: boolean;
     device_token_configured: boolean;
   };
+  /** Latest server-acknowledged typed terminal verdict, retained after outbox pruning. */
+  terminal_coverage: {
+    collection_boundary: string | null;
+    verdict: "covered" | "incomplete" | "no_evidence";
+  };
   db: {
     configured: boolean;
     exists: boolean;
@@ -1605,11 +1610,11 @@ export interface LocalOutboxStatusOutput {
    */
   deployment_posture: LocalCollectorDeploymentPosture;
   /**
-   * The single mutually-exclusive lifecycle state for this lane, derived
-   * from the outbox counts. This is the active/drain signal an
-   * operator or agent reads instead of inferring from raw counts.
+   * The single lifecycle state for this lane. Open work takes priority;
+   * a drained scoped lane is covered only after a v2 terminal ACK, and
+   * otherwise reports incomplete or no evidence.
    */
-  lifecycle_state: LocalCollectorLifecycleState;
+  lifecycle_state: LocalCollectorLifecycleState | "covered" | "coverage_incomplete" | "no_evidence";
   outbox: {
     counts: {
       dead_letter: number;
@@ -1664,6 +1669,7 @@ export interface LocalCollectorReferenceRouteCheck {
 
 export interface LocalOutboxDoctorOutput extends LocalOutboxStatusOutput {
   checks: {
+    terminal_coverage: "ok" | "warn" | "unknown";
     /**
      * `warn` when the running collector is a `repo_dist_override` or reports the
      * `0.0.0` placeholder version — either disqualifies the output as published
@@ -1744,15 +1750,28 @@ export function inspectLocalOutboxStatus(
   const exists = existsSync(dbPath);
   const inspection = exists
     ? readOutboxInspection(dbPath, options.sourceInstanceId)
-    : { summary: emptyOutboxSummary() };
+    : { summary: emptyOutboxSummary(), terminalCoverage: null };
   const { summary } = inspection;
-  const lifecycleState = deriveLocalCollectorLifecycleState({ summary });
+  const outboxLifecycleState = deriveLocalCollectorLifecycleState({ summary });
+  const terminalVerdict = terminalCoverageVerdict(inspection.terminalCoverage);
+  const lifecycleState =
+    options.sourceInstanceId && outboxLifecycleState === "healthy_idle"
+      ? terminalVerdict === "covered"
+        ? "covered"
+        : terminalVerdict === "incomplete"
+          ? "coverage_incomplete"
+          : "no_evidence"
+      : outboxLifecycleState;
   const deploymentPosture = deps.deploymentPosture ?? classifyLocalCollectorDeploymentPosture();
   return {
     collector_protocol_version: COLLECTOR_PROTOCOL_VERSION,
     configured_device: {
       device_id_configured: Boolean(options.deviceId),
       device_token_configured: Boolean(options.deviceToken),
+    },
+    terminal_coverage: {
+      collection_boundary: inspection.terminalCoverage?.collectionBoundary ?? null,
+      verdict: terminalVerdict,
     },
     db: {
       configured: true,
@@ -1895,13 +1914,34 @@ function redactReferenceBaseUrl(raw: string): string {
 }
 
 export function buildLocalOutboxDoctor(
-  status: LocalOutboxStatusOutput,
+  statusInput: LocalOutboxStatusOutput,
   errorSummary?: LocalDeviceOutboxDeadLetterErrorSummary | null,
   referenceRoute?: LocalCollectorReferenceRouteCheck | null
 ): LocalOutboxDoctorOutput {
+  const activeScope = referenceRoute?.status === "ok" ? referenceRoute.scope : undefined;
+  const staleScope = Boolean(
+    activeScope &&
+      statusInput.terminal_coverage.collection_boundary &&
+      statusInput.terminal_coverage.collection_boundary !== activeScope
+  );
+  const status: LocalOutboxStatusOutput = staleScope
+    ? {
+        ...statusInput,
+        lifecycle_state: statusInput.lifecycle_state === "covered" ? "no_evidence" : statusInput.lifecycle_state,
+        terminal_coverage: { ...statusInput.terminal_coverage, verdict: "no_evidence" },
+      }
+    : statusInput;
   const posture = status.deployment_posture;
   const postureDisqualifiesEvidence = posture.kind === "repo_dist_override" || posture.is_placeholder_version;
   const checks: LocalOutboxDoctorOutput["checks"] = {
+    terminal_coverage:
+      staleScope
+        ? "warn"
+        : status.terminal_coverage.verdict === "covered"
+        ? "ok"
+        : status.terminal_coverage.verdict === "incomplete"
+          ? "warn"
+          : "unknown",
     deployment_posture: postureDisqualifiesEvidence ? "warn" : "ok",
     expired_leases: status.outbox.expired_leases > 0 ? "warn" : "ok",
     outbox_db: status.db.exists ? "ok" : "missing",
@@ -1927,6 +1967,13 @@ export function buildLocalOutboxDoctor(
         "no manual action is required."
     );
   }
+  if (checks.terminal_coverage === "warn") {
+    remediation.push(
+      staleScope
+        ? "The latest acknowledged terminal verdict belongs to an older collection boundary. Re-run against the active scope before treating this lane as covered."
+        : "The latest acknowledged terminal verdict is incomplete; inspect the connector run diagnostics and re-run after resolving the missing store coverage."
+    );
+  }
   if (checks.deployment_posture === "warn") {
     remediation.push(deploymentPostureRemediation(posture));
   }
@@ -1939,6 +1986,7 @@ export function buildLocalOutboxDoctor(
     checks,
     ...(includeSummary && errorSummary ? { dead_letter_error_summary: errorSummary } : {}),
     ...(referenceRoute ? { reference_route: referenceRoute } : {}),
+    ...(activeScope ? { scope: { active: activeScope, unknown: false } } : {}),
     ...(remediation.length > 0 ? { remediation } : {}),
     status: doctorSeverityForChecks(checks),
   };
@@ -2004,6 +2052,7 @@ function doctorSeverityForChecks(checks: LocalOutboxDoctorOutput["checks"]): "ok
   if (
     checks.expired_leases === "warn" ||
     checks.outbox_db === "missing" ||
+    checks.terminal_coverage === "warn" ||
     checks.deployment_posture === "warn"
   ) {
     return "warning";
@@ -3431,6 +3480,7 @@ function hasExplicitQueuePath(options: CliOptions): boolean {
 
 interface LocalOutboxInspection {
   summary: LocalDeviceOutboxSummary;
+  terminalCoverage: { collectionBoundary: string; terminalFacts: readonly { scoped: boolean; stores: readonly { status: string }[] }[] } | null;
 }
 
 function readOutboxInspection(path: string, sourceInstanceId: string | undefined): LocalOutboxInspection {
@@ -3438,14 +3488,29 @@ function readOutboxInspection(path: string, sourceInstanceId: string | undefined
   try {
     const summary = outbox.summary(sourceInstanceId ? { sourceInstanceId } : {});
     if (!sourceInstanceId) {
-      return { summary };
+      return { summary, terminalCoverage: null };
     }
     return {
       summary,
+      terminalCoverage: outbox.latestTerminalCoverageReceipt({ sourceInstanceId }),
     };
   } finally {
     outbox.close();
   }
+}
+
+function terminalCoverageVerdict(
+  receipt: LocalOutboxInspection["terminalCoverage"]
+): LocalOutboxStatusOutput["terminal_coverage"]["verdict"] {
+  if (!receipt || !receipt.collectionBoundary.trim()) {
+    return "no_evidence";
+  }
+  return receipt.terminalFacts.length > 0 &&
+    receipt.terminalFacts.every(
+      (fact) => fact.scoped && fact.stores.length > 0 && fact.stores.every((store) => store.status === "collected")
+    )
+    ? "covered"
+    : "incomplete";
 }
 
 function emptyOutboxSummary(): LocalDeviceOutboxSummary {
