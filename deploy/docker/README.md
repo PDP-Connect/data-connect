@@ -57,6 +57,11 @@ docker build --target core \
 
 ## Quickstart
 
+The commands below pin `core:0.7.62`, the newest published Core image.
+`core:latest` does not exist yet: so far only prerelease images are published,
+and `:latest` moves only on a stable release. After the first stable release
+this guide switches to `core:latest`.
+
 ```sh
 docker run -d --name pdpp --restart unless-stopped \
   --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
@@ -65,7 +70,7 @@ docker run -d --name pdpp --restart unless-stopped \
   -e PDPP_REFERENCE_ORIGIN=http://localhost:7662 \
   -e PDPP_TRUSTED_HOSTS=localhost,127.0.0.1 \
   -v pdpp_data:/var/lib/pdpp \
-  ghcr.io/pdp-connect/data-connect/core:latest && docker logs -f pdpp
+  ghcr.io/pdp-connect/data-connect/core:0.7.62 && docker logs -f pdpp
 ```
 
 The command keeps the container running in the background and follows its logs
@@ -112,7 +117,7 @@ docker run -d --name pdpp --restart unless-stopped \
   -e PDPP_REFERENCE_ORIGIN="https://${TUNNEL_HOST}" \
   -e PDPP_TRUSTED_HOSTS="localhost,127.0.0.1,${TUNNEL_HOST}" \
   -v pdpp_data:/var/lib/pdpp \
-  ghcr.io/pdp-connect/data-connect/core:latest
+  ghcr.io/pdp-connect/data-connect/core:0.7.62
 ```
 
 If the container already exists, recreate it with the same volume and updated
@@ -229,17 +234,20 @@ runtime diagnostics surface (`GET /_ref/deployment`).
   files and first-boot state live in `pdpp-data`, and secrets live in `.env`.
   Back up all three together.
 
-Upgrade by pulling and recreating; volumes persist:
+Upgrade by pulling a newer tag and recreating; volumes persist. Replace
+`<version>` with the newer release tag here and in your `docker run` command.
+For Compose, set `PDPP_CORE_IMAGE` in `.env` first:
 
 ```sh
-docker pull ghcr.io/pdp-connect/data-connect/core:latest && docker rm -f pdpp && <your docker run>
+docker pull ghcr.io/pdp-connect/data-connect/core:<version> && docker rm -f pdpp && <your docker run>
 # or, compose:
 docker compose pull && docker compose up -d
 ```
 
-`:latest` is the released channel: it moves only when a release succeeds, and
-it always resolves to the same image as that release's own version tag. Prefer
-it for a node you want to keep current.
+`:latest` is the released channel: it moves only when a stable release
+succeeds, and it always resolves to the same image as that release's own
+version tag. It does not exist until the first stable release; after that,
+prefer it for a node you want to keep current.
 
 For a reproducible deployment — pinning a known-good build, or reproducing a
 bug against one exact image — name an immutable tag instead. Both the release
