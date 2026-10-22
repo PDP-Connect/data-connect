@@ -35,6 +35,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -48,19 +49,29 @@ import {
   inspectLocalOutboxStatus,
   type LocalOutboxStatusOutput,
   parseArgs,
+  resolveExecutionRoot,
+  type SelectedCollectionRelease,
 } from "../../packages/local-collector/bin/pdpp-local-collector.ts";
+import { managedConnectorCommand, obtainManagedConnectors } from "../../packages/local-collector/src/managed/index.ts";
 import {
   type CollectorConnectorSpec,
   type CollectorRunResult,
   LocalDeviceHttpError,
   runCollectorConnector,
 } from "../../packages/local-collector/src/runner.ts";
+import { httpRegistryClient, stubVerifier } from "../../packages/local-collector/test/helpers/live-registry-client.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { __setLocalCollectorReleaseForTest } from "../server/local-collector-profiles.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
+import {
+  fixtureConnectorSource,
+  INSTALL_PATH_CONNECTOR_ID,
+  INSTALL_PATH_REPOSITORY,
+  INSTALL_PATH_VERSION,
+} from "./helpers/install-path-fixture.ts";
 
 const CONNECTOR_ID = "claude-code";
 const LOCAL_BINDING_NAME = "journey-laptop";
@@ -91,55 +102,10 @@ const PUBLISHED_POSTURE = Object.freeze({
   version: "0.1.0-beta.7",
 });
 
-// Offline fixture connector. It reads START, records what it was asked for, and
-// answers with protocol messages chosen by its mode. Written with no template
-// interpolation so it can sit inside this file as a plain string.
-const FIXTURE_CONNECTOR_SOURCE = `
-import { writeFileSync } from "node:fs";
-
-const [mode, observePath, tag] = process.argv.slice(2);
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  input += chunk;
-});
-process.stdin.on("end", () => {
-  const start = JSON.parse(input.split("\\n")[0]);
-  writeFileSync(observePath, JSON.stringify(start));
-  const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
-  const emittedAt = "2026-10-22T12:00:00.000Z";
-  const record = (stream, id) => emit({ data: { id }, emitted_at: emittedAt, key: id, stream, type: "RECORD" });
-  const coverage = {
-    collection_scope: start.collection_scope,
-    streams: [
-      { scoped: true, stores: [{ status: "collected", store: "projects" }], stream: "sessions" },
-      { scoped: true, stores: [{ status: "collected", store: "derived_messages" }], stream: "messages" },
-    ],
-    version: 1,
-  };
-  if (mode === "empty") {
-    emit({ records_emitted: 0, status: "succeeded", type: "DONE" });
-    return;
-  }
-  if (mode === "reject") {
-    // A stream the connector manifest does not declare: the server refuses the batch.
-    record("sessions", "s-1");
-    record("undeclared_stream", "u-1");
-    emit({ cursor: { cursor: tag + "-sessions" }, stream: "sessions", type: "STATE" });
-    emit({ coverage, records_emitted: 2, status: "succeeded", type: "DONE" });
-    return;
-  }
-  record("sessions", "s-1");
-  record("sessions", "s-2");
-  record("messages", "m-1");
-  emit({ cursor: { cursor: tag + "-sessions" }, stream: "sessions", type: "STATE" });
-  emit({ cursor: { cursor: tag + "-messages" }, stream: "messages", type: "STATE" });
-  if (mode === "skip") {
-    emit({ message: "one message could not be read", reason: "source_unreadable", stream: "messages", type: "SKIP_RESULT" });
-  }
-  emit({ coverage, records_emitted: 3, status: "succeeded", type: "DONE" });
-});
-`;
+// The offline fixture connector (see install-path-fixture.ts): it reads START,
+// records what it was asked for, and answers with protocol messages chosen by its
+// mode. The journey's child runs this source as a file, labelled "source".
+const FIXTURE_CONNECTOR_SOURCE = fixtureConnectorSource("source");
 
 interface JsonResponse {
   readonly body: Record<string, unknown> | null;
@@ -153,13 +119,24 @@ interface Enrolled {
   readonly source_instance_id: string;
 }
 
-interface Journey {
+/** A lane's server and device identity: what the owner reads and the device reports on. */
+interface Lane {
   readonly asUrl: string;
-  readonly childPath: string;
   readonly cookie: string;
   readonly dir: string;
   readonly enrolled: Enrolled;
   readonly queuePath: string;
+}
+
+/** J1's lane, which also names the fixture child it runs. */
+interface Journey extends Lane {
+  readonly childPath: string;
+}
+
+/** The fields of a collection profile the lane reads. */
+interface ReleaseProfile {
+  readonly streams: readonly { readonly coverage_stores: readonly string[]; readonly name: string }[];
+  readonly [key: string]: unknown;
 }
 
 interface RunOutcome {
@@ -252,13 +229,13 @@ async function enrollLaptop(asUrl: string, cookie: string): Promise<Enrolled> {
  * update does, the manifest generation advances, so no earlier binding carries
  * over.
  */
-function registerFixtureManifest(connectorInstanceId: string): void {
+function registerFixtureManifest(connectorInstanceId: string, profile: ReleaseProfile): void {
   const row = getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(CONNECTOR_ID) as
     | { manifest: string }
     | undefined;
   assert.ok(row, "enrolment registers the claude-code catalog manifest");
   const catalog = JSON.parse(row.manifest) as Record<string, unknown> & { streams: Record<string, unknown>[] };
-  const streams = PROFILE.streams.map((release) => {
+  const streams = profile.streams.map((release) => {
     const declared = catalog.streams.find((stream) => stream.name === release.name);
     assert.ok(declared, `the catalog declares ${release.name}`);
     return { ...declared, coverage_stores: release.coverage_stores };
@@ -289,7 +266,7 @@ async function withJourney(run: (journey: Journey) => Promise<void>): Promise<vo
   try {
     const cookie = await ownerSessionCookie(asUrl);
     const enrolled = await enrollLaptop(asUrl, cookie);
-    registerFixtureManifest(enrolled.connector_instance_id);
+    registerFixtureManifest(enrolled.connector_instance_id, PROFILE);
     await run({ asUrl, childPath, cookie, dir, enrolled, queuePath: join(dir, "outbox.sqlite") });
   } finally {
     __setLocalCollectorReleaseForTest(CONNECTOR_ID, null);
@@ -332,7 +309,10 @@ async function runOnce(
   return { observed: JSON.parse(await readFile(observePath, "utf8")) as Record<string, unknown>, result };
 }
 
-function deviceStatus(journey: Journey): LocalOutboxStatusOutput {
+function deviceStatus(
+  journey: Lane,
+  selectedRelease: SelectedCollectionRelease = DEVICE_RELEASE
+): LocalOutboxStatusOutput {
   return inspectLocalOutboxStatus(
     parseArgs([
       "status",
@@ -343,12 +323,12 @@ function deviceStatus(journey: Journey): LocalOutboxStatusOutput {
       "--connector",
       CONNECTOR_ID,
     ]),
-    { deploymentPosture: PUBLISHED_POSTURE, selectedRelease: DEVICE_RELEASE }
+    { deploymentPosture: PUBLISHED_POSTURE, selectedRelease }
   );
 }
 
 /** The terminal facts the device acknowledged and stored as its current receipt. */
-function deviceReceiptFacts(journey: Journey): Record<string, unknown>[] {
+function deviceReceiptFacts(journey: Lane): Record<string, unknown>[] {
   const db = new DatabaseSync(journey.queuePath);
   try {
     const row = db
@@ -373,7 +353,7 @@ function serverRunStreams(runId: string): Record<string, unknown>[] | null {
 }
 
 /** The source generation terminal commits bind to, as the server stores it for this lane. */
-function sourceGeneration(journey: Journey): number {
+function sourceGeneration(journey: Lane): number {
   const row = getDb()
     .prepare("SELECT manifest_generation FROM device_source_instances WHERE source_instance_id = ?")
     .get(journey.enrolled.source_instance_id) as { manifest_generation: number | null } | undefined;
@@ -381,7 +361,7 @@ function sourceGeneration(journey: Journey): number {
   return Number(row.manifest_generation);
 }
 
-function serverRecordCount(journey: Journey, stream: string): number {
+function serverRecordCount(journey: Lane, stream: string): number {
   const row = getDb()
     .prepare("SELECT COUNT(*) AS n FROM records WHERE connector_instance_id = ? AND stream = ?")
     .get(journey.enrolled.connector_instance_id, stream) as { n: number };
@@ -389,7 +369,7 @@ function serverRecordCount(journey: Journey, stream: string): number {
 }
 
 /** Stream cursors only. The `$`-prefixed rows are the server's own collection-scope state, not connector cursors. */
-function serverCursors(journey: Journey): Record<string, unknown> {
+function serverCursors(journey: Lane): Record<string, unknown> {
   const rows = getDb()
     .prepare("SELECT stream, state_json FROM connector_state WHERE connector_instance_id = ? ORDER BY stream")
     .all(journey.enrolled.connector_instance_id) as Array<{ state_json: string; stream: string }>;
@@ -398,7 +378,7 @@ function serverCursors(journey: Journey): Record<string, unknown> {
   );
 }
 
-async function ownerConnectionRow(journey: Journey): Promise<OwnerConnectionRow> {
+async function ownerConnectionRow(journey: Lane): Promise<OwnerConnectionRow> {
   // The owner routes read a summary read model that the server refreshes from
   // dirty evidence in the background. Refresh it here, as the projection oracle
   // does, so the read reflects the terminal commit just made.
@@ -594,4 +574,322 @@ test("J3: a run that fails before its scan leaves the lane not covered; the serv
     assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
     assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
   });
+});
+
+// ---- J2-install: the same lane, with its child installed through the managed path -----------
+//
+// The lane is J1's, but the child is the installed entrypoint of a release pulled from a real OCI
+// registry, verified, and installed by the managed consumer path. Release A and release B share a
+// repository, a version and a byte-identical manifest. Only their code layers differ, so only their
+// artifact digests differ. Nothing but the digest can tell them apart, and the second half of the
+// journey tests exactly that.
+//
+// The registry is the one the managed-connector OCI job starts. The signature verifier is the stub
+// that job uses, so signature verification is the one step this journey does not prove. To run it
+// locally, push the two releases with scripts/build-install-path-releases.ts and export the three
+// variables below.
+
+const INSTALL_REGISTRY = process.env.PDPP_TEST_OCI_REGISTRY;
+const INSTALL_DIGEST_A = process.env.PDPP_TEST_INSTALL_PATH_DIGEST_A;
+const INSTALL_DIGEST_B = process.env.PDPP_TEST_INSTALL_PATH_DIGEST_B;
+const INSTALL_SKIP =
+  INSTALL_REGISTRY === undefined || INSTALL_DIGEST_A === undefined || INSTALL_DIGEST_B === undefined
+    ? "set PDPP_TEST_OCI_REGISTRY, PDPP_TEST_INSTALL_PATH_DIGEST_A and PDPP_TEST_INSTALL_PATH_DIGEST_B (scripts/build-install-path-releases.ts pushes both releases)"
+    : false;
+
+/** A release as the managed consumer installed it, read back from the installed files. */
+interface InstalledRelease {
+  readonly digest: string;
+  /** The installed bundle the child runs. */
+  readonly entrypoint: string;
+  /** The manifest fingerprint a receipt must carry to count as this release's. */
+  readonly fingerprint: string;
+  readonly profile: ReleaseProfile;
+  readonly profileBytes: Buffer;
+  readonly releaseRoot: string;
+}
+
+/** Owner-visible coverage for one connection, as the list and the detail both report it. */
+interface CoverageView {
+  readonly axis: string;
+  readonly conditions: Record<string, string>;
+  readonly reason: string | null;
+}
+
+/**
+ * The SourceCoverageComplete reason a covered lane carries: the condition's reason mirrors its
+ * coverage axis, so a complete lane reads "complete". A mismatch has its own reason.
+ */
+const COVERED_REASON = "complete";
+
+/**
+ * Install one pinned release through the managed consumer path. `activate` moves the install
+ * store's pointer to it, as an update applied between runs would.
+ */
+async function installRelease(input: {
+  readonly activate: boolean;
+  readonly digest: string;
+  readonly durableRoot: string;
+  readonly installRoot: string;
+}): Promise<InstalledRelease> {
+  const registry = INSTALL_REGISTRY as string;
+  const [managed] = await obtainManagedConnectors({
+    activate: input.activate,
+    client: httpRegistryClient(`http://${registry}`, INSTALL_PATH_REPOSITORY),
+    durableRoot: input.durableRoot,
+    installRoot: input.installRoot,
+    lock: {
+      connectors: [
+        {
+          connectorId: INSTALL_PATH_CONNECTOR_ID,
+          connectorKey: CONNECTOR_ID,
+          digest: input.digest,
+          reference: `${registry}/${INSTALL_PATH_REPOSITORY}`,
+          version: INSTALL_PATH_VERSION,
+        },
+      ],
+      lockVersion: "2.0",
+    },
+    verifier: stubVerifier,
+  });
+  assert.ok(managed, "one connector should have been installed");
+  const releaseRoot = dirname(dirname(managed.entrypoint));
+  const profileBytes = await readFile(join(releaseRoot, "collection-profile.json"));
+  const profile = JSON.parse(profileBytes.toString("utf8")) as ReleaseProfile;
+  return {
+    digest: managed.digest,
+    entrypoint: managed.entrypoint,
+    fingerprint: hashCanonicalJson(profile),
+    profile,
+    profileBytes,
+    releaseRoot,
+  };
+}
+
+/** The device's selected release, derived from the installed bytes rather than from a constant. */
+function selectedFrom(release: InstalledRelease): SelectedCollectionRelease {
+  return { artifactDigest: release.digest, manifestFingerprint: release.fingerprint };
+}
+
+/** The digest the install store's pointer names for the connector. */
+async function activeDigest(installRoot: string): Promise<string> {
+  const pointer = JSON.parse(await readFile(join(installRoot, "connectors", CONNECTOR_ID, "current.json"), "utf8")) as {
+    digest: string;
+  };
+  return pointer.digest;
+}
+
+/**
+ * The lane J1 builds (a server, an owner session, an enrolled device, and the catalog entry
+ * narrowed to the release's streams), with the server pinned to `release`.
+ */
+async function withInstallLane(
+  dir: string,
+  release: InstalledRelease,
+  run: (lane: Lane) => Promise<void>
+): Promise<void> {
+  const server = await startServer({
+    asPort: 0,
+    dbPath: join(dir, "pdpp.sqlite"),
+    ownerAuthPassword: OWNER_PASSWORD,
+    quiet: true,
+    rsPort: 0,
+  });
+  const asUrl = `http://localhost:${server.asPort}`;
+  __setLocalCollectorReleaseForTest(CONNECTOR_ID, { artifactDigest: release.digest, manifest: release.profile });
+  try {
+    const cookie = await ownerSessionCookie(asUrl);
+    const enrolled = await enrollLaptop(asUrl, cookie);
+    registerFixtureManifest(enrolled.connector_instance_id, release.profile);
+    await run({ asUrl, cookie, dir, enrolled, queuePath: join(dir, "outbox.sqlite") });
+  } finally {
+    __setLocalCollectorReleaseForTest(CONNECTOR_ID, null);
+    await closeTestServer(server);
+    closeDb();
+  }
+}
+
+/** Run an installed entrypoint through the runner, with the same spec the lane's own binding produces. */
+async function runInstalled(lane: Lane, release: InstalledRelease, mode: string, tag: string): Promise<RunOutcome> {
+  const observePath = join(lane.dir, `start-${tag}.json`);
+  const connector = bindOptionalRunCoverageToRelease(
+    {
+      args: [release.entrypoint, mode, observePath, tag],
+      command: managedConnectorCommand(release.entrypoint),
+      connector_id: CONNECTOR_ID,
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: {} },
+      streams: STREAMS,
+    },
+    { digest: release.digest },
+    release.profile
+  );
+  const result = await runCollectorConnector({
+    baseUrl: lane.asUrl,
+    connector,
+    deviceId: lane.enrolled.device_id,
+    deviceToken: lane.enrolled.device_token,
+    executionRoot: resolveExecutionRoot({ args: [release.entrypoint] }),
+    outboxPolicy: { maxDrainIterations: 1, retryBackoffMs: 1 },
+    queuePath: lane.queuePath,
+    runId: tag,
+    sourceInstanceId: lane.enrolled.source_instance_id,
+  });
+  return { observed: JSON.parse(await readFile(observePath, "utf8")) as Record<string, unknown>, result };
+}
+
+function coverageView(body: Record<string, unknown>): CoverageView {
+  const health = body.connection_health as {
+    axes: { coverage: string };
+    conditions: { reason?: string | null; type: string }[];
+  };
+  const report = body.collection_report as ProjectedStream[];
+  return {
+    axis: health.axes.coverage,
+    conditions: Object.fromEntries(report.map((entry) => [entry.stream, entry.coverage_condition])),
+    reason: health.conditions.find((condition) => condition.type === "SourceCoverageComplete")?.reason ?? null,
+  };
+}
+
+/** The owner's view of the connection, read from the list and the detail. The two must agree. */
+async function ownerCoverage(lane: Lane): Promise<CoverageView> {
+  await reconcileDirtyConnectorSummaryEvidence(null);
+  const list = await requestJson(`${lane.asUrl}/_ref/connectors?limit=100`, { headers: { Cookie: lane.cookie } });
+  assert.equal(list.status, 200, JSON.stringify(list.body));
+  const row = ((list.body?.data ?? []) as Record<string, unknown>[]).find(
+    (candidate) => candidate.connection_id === lane.enrolled.connector_instance_id
+  );
+  assert.ok(row, "the owner list projects the enrolled connection");
+  const detail = await requestJson(`${lane.asUrl}/_ref/connectors/${CONNECTOR_ID}`, {
+    headers: { Cookie: lane.cookie },
+  });
+  assert.equal(detail.status, 200, JSON.stringify(detail.body));
+  const fromList = coverageView(row);
+  assert.deepEqual(coverageView(detail.body ?? {}), fromList, "list and detail agree on coverage and its reason");
+  return fromList;
+}
+
+/** The stream facts the server stored for one terminal commit. The commit must exist. */
+function requireRunStreams(runId: string): Record<string, unknown>[] {
+  const streams = serverRunStreams(runId);
+  assert.ok(streams, `the server committed run ${runId}`);
+  return streams;
+}
+
+test("J2-install: a release installed through the managed path is covered; a replaced digest stops counting until its own run proves it", {
+  skip: INSTALL_SKIP,
+}, async () => {
+  const base = await mkdtemp(join(tmpdir(), "pdpp-install-path-journey-"));
+  const installRoot = join(base, "connector-releases");
+  const durableRoot = join(base, "connector-artifacts");
+  const digestA = INSTALL_DIGEST_A as string;
+  const digestB = INSTALL_DIGEST_B as string;
+  try {
+    // Install release A and check what the consumer made of it before anything runs.
+    const releaseA = await installRelease({ activate: true, digest: digestA, durableRoot, installRoot });
+    assert.equal(releaseA.digest, digestA);
+    assert.equal(releaseA.profile.connector_id, INSTALL_PATH_CONNECTOR_ID);
+    assert.deepEqual(
+      releaseA.profile.streams.map((stream) => stream.name),
+      STREAMS,
+      "the installed profile declares the lane's two streams"
+    );
+    assert.equal(releaseA.entrypoint, join(releaseA.releaseRoot, "code", "collection-profile.mjs"));
+    assert.ok(releaseA.entrypoint.startsWith(installRoot), "the entrypoint lies inside the install store");
+
+    await withInstallLane(base, releaseA, async (lane) => {
+      // Phase 1: release A runs through its installed entrypoint, and the server and the device accept it.
+      const a = await runInstalled(lane, releaseA, "complete", "a-install");
+      assert.equal(a.observed.build, "release-a", "the installed release A's bytes ran");
+      assert.equal(a.observed.run_coverage_version, 1, "START asked the installed connector for run coverage");
+      assert.equal(a.result.done?.status, "succeeded");
+      assert.equal(serverRecordCount(lane, "sessions"), 2);
+      assert.equal(serverRecordCount(lane, "messages"), 1);
+      for (const stream of requireRunStreams("a-install")) {
+        assert.equal(stream.artifact_digest, digestA, "the server stores run A under digest A");
+        assert.equal(stream.manifest_fingerprint, releaseA.fingerprint);
+        assert.equal(stream.binding_generation, sourceGeneration(lane), "bound to the source generation");
+      }
+      assert.deepEqual(await ownerCoverage(lane), {
+        axis: "complete",
+        conditions: { messages: "complete", sessions: "complete" },
+        reason: COVERED_REASON,
+      });
+      const aDevice = deviceStatus(lane, selectedFrom(releaseA));
+      assert.equal(aDevice.terminal_coverage.verdict, "covered");
+      assert.equal(aDevice.lifecycle_state, "covered");
+      const aReceipts = deviceReceiptFacts(lane);
+      assert.equal(aReceipts.length, 2, "the device holds a receipt for both streams");
+      assert.ok(
+        aReceipts.every(
+          (fact) => fact.artifact_digest === digestA && fact.manifest_fingerprint === releaseA.fingerprint
+        ),
+        "the device receipt names release A"
+      );
+
+      // Phase 2: install release B for the same source and select it. B does not run yet.
+      const releaseB = await installRelease({ activate: true, digest: digestB, durableRoot, installRoot });
+      assert.equal(releaseB.digest, digestB);
+      assert.notEqual(releaseB.releaseRoot, releaseA.releaseRoot, "B installs beside A");
+      assert.deepEqual(
+        releaseB.profileBytes,
+        releaseA.profileBytes,
+        "the manifest is byte-identical, so the digest is the only difference"
+      );
+      assert.ok(existsSync(releaseA.entrypoint), "installing B left release A in place");
+      assert.equal(await activeDigest(installRoot), digestB, "the install store points at B");
+      __setLocalCollectorReleaseForTest(CONNECTOR_ID, { artifactDigest: releaseB.digest, manifest: releaseB.profile });
+
+      // Before any B run, neither side counts A's proof for B.
+      assert.deepEqual(await ownerCoverage(lane), {
+        axis: "unknown",
+        conditions: { messages: "unknown", sessions: "unknown" },
+        reason: "coverage_unknown_artifact_mismatch",
+      });
+      const bBefore = deviceStatus(lane, selectedFrom(releaseB));
+      assert.equal(bBefore.terminal_coverage.verdict, "not_current");
+      assert.equal(bBefore.lifecycle_state, "coverage_not_current");
+      // No A proof is relabelled as B: the device still holds only A's receipt, and the server still
+      // records run A as A.
+      assert.ok(
+        deviceReceiptFacts(lane).every((fact) => fact.artifact_digest === digestA),
+        "the device receipt still names release A"
+      );
+      assert.ok(
+        requireRunStreams("a-install").every((stream) => stream.artifact_digest === digestA),
+        "the server still records run A as release A"
+      );
+
+      // Phase 3: release B runs through its installed entrypoint, and proves itself.
+      const b = await runInstalled(lane, releaseB, "complete", "b-install");
+      assert.equal(b.observed.build, "release-b", "the installed release B's bytes ran");
+      assert.equal(b.result.done?.status, "succeeded");
+      assert.ok(
+        requireRunStreams("b-install").every((stream) => stream.artifact_digest === digestB),
+        "the server stores run B under digest B"
+      );
+      assert.deepEqual(await ownerCoverage(lane), {
+        axis: "complete",
+        conditions: { messages: "complete", sessions: "complete" },
+        reason: COVERED_REASON,
+      });
+      const bDevice = deviceStatus(lane, selectedFrom(releaseB));
+      assert.equal(bDevice.terminal_coverage.verdict, "covered");
+      assert.equal(bDevice.lifecycle_state, "covered");
+      const bReceipts = deviceReceiptFacts(lane);
+      assert.equal(bReceipts.length, 2, "the device holds a receipt for both streams");
+      assert.ok(
+        bReceipts.every(
+          (fact) => fact.artifact_digest === digestB && fact.manifest_fingerprint === releaseB.fingerprint
+        ),
+        "the device receipt names release B"
+      );
+      assert.ok(
+        requireRunStreams("a-install").every((stream) => stream.artifact_digest === digestA),
+        "run A is still recorded as release A after B is covered"
+      );
+    });
+  } finally {
+    await rm(base, { force: true, recursive: true });
+  }
 });
