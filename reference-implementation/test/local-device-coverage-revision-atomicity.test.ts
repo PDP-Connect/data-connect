@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { referenceManifests, validateResponse } from "@pdpp/reference-contract";
+import { validateResponse } from "@pdpp/reference-contract";
 
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
@@ -1535,33 +1535,7 @@ laneTest(
   }
 );
 
-// The vendored @pdpp/reference-contract (built from PDP-Connect/pdpp
-// packages/reference-contract) does not list the as-of yet, and its
-// diagnostics schemas reject unknown members. These are the members this
-// change adds that the contract still lacks. The source schema must add them
-// and this repository must re-vendor the tarball; when the vendored schema
-// lists one, this test fails until it is removed here.
-const CONTRACT_PENDING_DIAGNOSTICS_MEMBERS = [["coverage_as_of"], ["health", "coverage_as_of"]] as const;
 const STREAM_NAME_PATH = /^\/streams\/\d+$/;
-
-/** The response schema the vendored contract declares for one operation and status. */
-function contractResponseSchema(operationId: string, status: number): Record<string, unknown> {
-  const manifest = (
-    referenceManifests as readonly { id: string; responses?: Record<string, { schema?: unknown }> }[]
-  ).find((entry) => entry.id === operationId);
-  const schema = manifest?.responses?.[String(status)]?.schema;
-  assert.ok(schema && typeof schema === "object", `the contract declares ${operationId} ${status}`);
-  return schema as Record<string, unknown>;
-}
-
-function schemaAt(schema: Record<string, unknown>, path: readonly string[]): Record<string, unknown> | null {
-  let current: Record<string, unknown> | null = schema;
-  for (const key of path) {
-    const properties = current?.properties as Record<string, Record<string, unknown>> | undefined;
-    current = properties?.[key] ?? null;
-  }
-  return current;
-}
 
 laneTest("contract: owner diagnostics and connector detail validate against @pdpp/reference-contract", async (lane) => {
   await commitProof(lane, "run-a");
@@ -1570,20 +1544,6 @@ laneTest("contract: owner diagnostics and connector detail validate against @pdp
   const diagnostics = JSON.parse(
     JSON.stringify(await getOwnerConnectionDiagnostics(lane.enrolled.connector_instance_id))
   ) as Record<string, unknown>;
-  const schema = contractResponseSchema("ownerInspectConnectionDiagnostics", 200);
-  for (const path of CONTRACT_PENDING_DIAGNOSTICS_MEMBERS) {
-    const parent = path
-      .slice(0, -1)
-      .reduce<Record<string, unknown>>((object, key) => object[key] as Record<string, unknown>, diagnostics);
-    const member = path.at(-1) as string;
-    assert.ok(parent[member], `the diagnostics response carries ${path.join(".")}`);
-    assert.equal(
-      schemaAt(schema, path),
-      null,
-      `the vendored contract now lists ${path.join(".")}: drop it from CONTRACT_PENDING_DIAGNOSTICS_MEMBERS`
-    );
-    delete parent[member];
-  }
   const diagnosticsResult = validateResponse("ownerInspectConnectionDiagnostics", { body: diagnostics, status: 200 });
   assert.deepEqual(diagnosticsResult, { ok: true, skipped: false }, "diagnostics match the contract");
 

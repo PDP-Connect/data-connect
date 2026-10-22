@@ -10,8 +10,10 @@ already pins `@pdpp/collector-runtime` and `@pdpp/connector-protocol` from data-
 built with a plain `npm pack`, referenced via a `file:` dependency, with its digest
 recorded below.
 
-`pdpp-reference-contract-0.1.0.tgz` was originally built via `npm pack` from
-`packages/reference-contract` at `PDP-Connect/pdpp` commit
+`pdpp-reference-contract-0.1.0.tgz` was built via `npm pack` from `packages/reference-contract`
+at `PDP-Connect/pdpp` PR #454 head commit `473f97633458031425f85343cd822619ccae205b` (open,
+not merged; re-vendored 2026-10-22). Re-point this entry to the merge commit of
+PDP-Connect/pdpp#454 once it merges. It replaces the earlier build from
 `0d3deca19186a2185a6a15ab76c71352d10e627e` (`main`, 2026-09-02). SHA-256 is recorded in
 `SHA256SUMS` in this directory.
 
