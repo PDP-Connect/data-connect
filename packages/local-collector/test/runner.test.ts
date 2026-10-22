@@ -2532,7 +2532,7 @@ test("inspectLocalOutboxStatus reads connection-scoped counts from the scoped de
 
 // --- Lifecycle state axis: queue health and acknowledged terminal coverage. ---
 
-function statusFor(path, sourceInstanceId = "src-1") {
+function statusFor(path, sourceInstanceId = "src-1", selectedRelease = SELECTED_RELEASE) {
   return inspectLocalOutboxStatus(
     {
       baseUrl: "http://127.0.0.1:7662",
@@ -2540,7 +2540,7 @@ function statusFor(path, sourceInstanceId = "src-1") {
       queuePath: path,
       sourceInstanceId,
     },
-    { deploymentPosture: PUBLISHED_POSTURE }
+    { deploymentPosture: PUBLISHED_POSTURE, selectedRelease }
   );
 }
 
@@ -2570,7 +2570,26 @@ function drainRow(outbox, id, sourceInstanceId = "src-1") {
   outbox.acknowledge({ holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
 }
 
-function acknowledgeTerminalCoverage(outbox, { id, sourceInstanceId = "src-1", stores, scoped = true, version = 2 }) {
+// The release this device selects for the connector, and one it has since
+// replaced. A v2 receipt is current only when its facts name the selected one.
+const SELECTED_RELEASE = Object.freeze({
+  artifactDigest: `sha256:${"a".repeat(64)}`,
+  manifestFingerprint: "b".repeat(64),
+});
+const SUPERSEDED_RELEASE = Object.freeze({
+  artifactDigest: `sha256:${"c".repeat(64)}`,
+  manifestFingerprint: "d".repeat(64),
+});
+
+/** The release fields a v2 terminal fact carries; `null` models a receipt with no binding. */
+function releaseBinding(release) {
+  return release ? { artifact_digest: release.artifactDigest, manifest_fingerprint: release.manifestFingerprint } : {};
+}
+
+function acknowledgeTerminalCoverage(
+  outbox,
+  { id, sourceInstanceId = "src-1", stores, scoped = true, version = 2, release = SELECTED_RELEASE }
+) {
   outbox.enqueue({
     id,
     kind: "terminal_run_commit",
@@ -2584,7 +2603,7 @@ function acknowledgeTerminalCoverage(outbox, { id, sourceInstanceId = "src-1", s
       source_instance_id: sourceInstanceId,
       state_delta: {},
       terminal_facts: version === 2
-        ? [{ scoped, stores, stream: "sessions" }]
+        ? [{ ...releaseBinding(release), scoped, stores, stream: "sessions" }]
         : [{ coverage_statuses: ["collected"], stream: "sessions" }],
       version,
     },
@@ -2671,6 +2690,39 @@ test("a later v1 terminal ACK clears prior v2 coverage proof", async () => {
   assert.equal(status.terminal_coverage.verdict, "no_evidence");
   assert.equal(status.lifecycle_state, "no_evidence");
 });
+
+// A receipt is current only for the release this device selects. Each case is
+// a receipt acknowledged for another release, or for none, while every store
+// reads collected: it must not be reported as covered.
+for (const [label, receiptRelease, selectedRelease] of [
+  ["a superseded artifact digest", SUPERSEDED_RELEASE, SELECTED_RELEASE],
+  [
+    "a matching artifact digest and a different manifest fingerprint",
+    { artifactDigest: SELECTED_RELEASE.artifactDigest, manifestFingerprint: "e".repeat(64) },
+    SELECTED_RELEASE,
+  ],
+  ["no release binding on the receipt", null, SELECTED_RELEASE],
+  ["no selected release on this device", SELECTED_RELEASE, null],
+]) {
+  test(`v2 receipt with ${label} is not current, even when every store is collected`, async () => {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: "terminal-not-current",
+        release: receiptRelease,
+        stores: [{ store: "local_files", status: "collected" }],
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const status = statusFor(path, "src-1", selectedRelease);
+    assert.equal(status.terminal_coverage.verdict, "not_current");
+    assert.equal(status.lifecycle_state, "coverage_not_current");
+    assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+  });
+}
 
 test("partial, failed, unscoped, and v1 terminal commits do not prove coverage", async () => {
   for (const [statusValue, scoped, version, expected] of [
