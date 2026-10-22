@@ -68,7 +68,7 @@ on:
       # The install-path journey (J2-install) and the fixture it packages.
       - "reference-implementation/test/local-device-coverage-journey.test.ts"
       - "reference-implementation/test/helpers/install-path-fixture.ts"
-      - "reference-implementation/scripts/build-install-path-releases.ts"
+      - "reference-implementation/test/helpers/build-install-path-releases.ts"
       # The shipped selection and binding the journey calls (selectedReleaseForPin, bindOptionalRunCoverageToRelease).
       - "packages/local-collector/bin/pdpp-local-collector.ts"
       # This job's own control files: a PR that only edits the workflow or moves the producer pin
@@ -85,7 +85,7 @@ on:
       - "packages/local-collector/test/helpers/live-registry-client.ts"
       - "reference-implementation/test/local-device-coverage-journey.test.ts"
       - "reference-implementation/test/helpers/install-path-fixture.ts"
-      - "reference-implementation/scripts/build-install-path-releases.ts"
+      - "reference-implementation/test/helpers/build-install-path-releases.ts"
       - "packages/local-collector/bin/pdpp-local-collector.ts"
       - ".github/workflows/managed-connector-oci-e2e.yml"
       - ".github/managed-connector-e2e-pin.json"
@@ -496,7 +496,7 @@ jobs:
           RELEASES_JSON: ${{ runner.temp }}/install-path-releases.json
         run: |
           set -euo pipefail
-          node --import tsx scripts/build-install-path-releases.ts \
+          node --import tsx test/helpers/build-install-path-releases.ts \
             --producer-git "$PRODUCER_GIT" \
             --producer-sha "$PRODUCER_SHA" \
             --registry localhost:5000 \

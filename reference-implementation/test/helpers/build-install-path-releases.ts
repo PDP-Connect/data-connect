@@ -29,7 +29,7 @@
  *
  * Run from reference-implementation/:
  *
- *   node --import tsx scripts/build-install-path-releases.ts \
+ *   node --import tsx test/helpers/build-install-path-releases.ts \
  *     --producer-git <data-connectors checkout> --producer-sha <40-hex> \
  *     --registry <host:port> --work <directory that does not exist> \
  *     --modules <directory whose node_modules/esbuild resolves> [--oras <path>]
@@ -43,7 +43,7 @@ import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
-import type { CollectionProfilePin } from "../../packages/local-collector/src/managed/collection-profiles.ts";
+import type { CollectionProfilePin } from "../../../packages/local-collector/src/managed/collection-profiles.ts";
 import {
   fixtureConnectorSource,
   INSTALL_PATH_COLLECTOR_ID,
@@ -51,7 +51,7 @@ import {
   INSTALL_PATH_PROFILE,
   INSTALL_PATH_REPOSITORY,
   INSTALL_PATH_VERSION,
-} from "../test/helpers/install-path-fixture.ts";
+} from "./install-path-fixture.ts";
 
 /** The files the builder and its gates read from the producer, at the pinned revision. */
 const PRODUCER_FILES = [

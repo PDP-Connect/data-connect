@@ -6,7 +6,7 @@
  *
  * One connector protocol serves two consumers: the local-device journeys run it
  * as a source file, and the install-path journey packages it as an OCI artifact
- * with `scripts/build-install-path-releases.ts`. Both must behave the same, so
+ * with `test/helpers/build-install-path-releases.ts`. Both must behave the same, so
  * the protocol body lives here once.
  */
 

@@ -600,19 +600,19 @@ test("J3: a run that fails before its scan leaves the lane not covered; the serv
 // object. The installer refuses an artifact that has none before it reaches the check, so the
 // builder pushes a fabricated bundle per release. (3) The transport. The signed lock names ghcr.io,
 // and the job's registry answers for it over plain HTTP; any other host is refused. (4) The pins.
-// scripts/build-install-path-releases.ts computes them from the built bytes, not from the signed
+// test/helpers/build-install-path-releases.ts computes them from the built bytes, not from the signed
 // catalog. (5) The server's release, which each phase sets with __setLocalCollectorReleaseForTest,
 // as J1 does. (6) The CLI's main() and its checked-in pin map: the journey passes the fixture pins
 // to the same functions that map feeds.
 //
 // The registry is the one the managed-connector OCI job starts. To run it locally, push the two
-// releases with scripts/build-install-path-releases.ts and export the two variables below.
+// releases with test/helpers/build-install-path-releases.ts and export the two variables below.
 
 const INSTALL_REGISTRY = process.env.PDPP_TEST_OCI_REGISTRY;
 const INSTALL_PINS = process.env.PDPP_TEST_INSTALL_PATH_PINS;
 const INSTALL_SKIP =
   INSTALL_REGISTRY === undefined || INSTALL_PINS === undefined
-    ? "set PDPP_TEST_OCI_REGISTRY and PDPP_TEST_INSTALL_PATH_PINS (scripts/build-install-path-releases.ts writes the pins)"
+    ? "set PDPP_TEST_OCI_REGISTRY and PDPP_TEST_INSTALL_PATH_PINS (test/helpers/build-install-path-releases.ts writes the pins)"
     : false;
 
 /** Owner-visible coverage for one connection, as the list and the detail both report it. */
