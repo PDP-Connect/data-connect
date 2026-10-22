@@ -30,6 +30,7 @@ import type { CollectionScope } from "@pdpp/reference-contract/evidence";
 import {
   handleLocalDeviceTerminalCollection,
   handleLocalDeviceTerminalRunCommit,
+  type RegisteredCollectionProfileRelease,
 } from "../../operations/local-device-terminal-collection.ts";
 import { mapWithConcurrency } from "../concurrency.ts";
 import { type DeviceAttemptContext, fingerprintDeviceAttemptManifest } from "../device-ingest-attempt-context.ts";
@@ -531,6 +532,10 @@ export interface MountRefDeviceExportersContext {
   // bindings. Async to match the host's `getConnectorManifest`.
   getConnectorManifest: (connectorId: string) => Promise<SourceKindManifestLike | null> | SourceKindManifestLike | null;
   getExpectedArtifactDigest?: (connectorId: string) => string | null;
+  getRegisteredCollectionProfileRelease?: (
+    connectorId: string,
+    connectorInstanceId: string
+  ) => RegisteredCollectionProfileRelease | null;
   getDefaultConnectorDetailGapStore: () => ConnectorDetailGapStore;
   getOwnerSubjectId: (req: unknown) => string;
   getSemanticCapabilityIdentity: () => string;

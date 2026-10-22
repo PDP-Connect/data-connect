@@ -207,7 +207,11 @@ import {
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import { deriveReferenceFreshness } from "./freshness.ts";
-import { readLocalCollectorArtifactDigest, readLocalCollectorProfile } from "./local-collector-profiles.ts";
+import {
+  readLocalCollectorArtifactDigest,
+  readLocalCollectorProfile,
+  readLocalCollectorRelease,
+} from "./local-collector-profiles.ts";
 import {
   encodeHostedMcpSelection,
   encodeHostedMcpStreamSelection,
@@ -7065,6 +7069,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
     generateSpineId,
     getExpectedArtifactDigest: readLocalCollectorArtifactDigest,
     getConnectorManifest: (connectorId: string) => getConnectorManifest(connectorId),
+    // The local server executes the installed, signature-verified release.
+    // Resolve its profile and artifact digest together for the authorized
+    // connector instance so a catalog refresh cannot splice two releases.
+    getRegisteredCollectionProfileRelease: (connectorId: string) => readLocalCollectorRelease(connectorId),
     getDefaultConnectorDetailGapStore,
     getOwnerSubjectId,
     getSemanticCapabilityIdentity,

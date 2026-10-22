@@ -56,6 +56,76 @@ function validBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
+async function invokeBoundCoverageCommit(input: {
+  claimDigest: string;
+  claimManifest: Record<string, unknown>;
+  claimStores: readonly string[];
+  currentManifest: Record<string, unknown>;
+  registeredRelease: { artifactDigest: string; manifest: Record<string, unknown> } | null;
+}): Promise<{ committed: ResolvedTerminalRunCommit | null; status: number }> {
+  const capture = responseCapture();
+  let committed: ResolvedTerminalRunCommit | null = null;
+  await handleLocalDeviceTerminalRunCommit({
+    ctx: {
+      canonicalConnectorKey: () => "codex",
+      commitTerminalRun: (value) => {
+        committed = value;
+        return Promise.resolve({
+          replayed: false,
+          response: {
+            commit_id: value.commitId,
+            envelope_hash: value.envelopeHash,
+            object: "device_terminal_run_commit",
+            run_id: value.runId,
+            terminal_event_id: "evt-bound-coverage",
+          },
+        });
+      },
+      emitSpineEvent: () => Promise.resolve(),
+      getConnectorManifest: () => input.currentManifest,
+      getExpectedArtifactDigest: () => input.registeredRelease?.artifactDigest ?? null,
+      getRegisteredCollectionProfileRelease: () => input.registeredRelease,
+      handleError: (_res, error) => {
+        throw error;
+      },
+      pdppError: (_res, status) => {
+        capture.response.status(status);
+      },
+    },
+    req: {
+      body: validBody({
+        state_delta: {},
+        terminal_facts: [
+          {
+            artifact_digest: input.claimDigest,
+            manifest_fingerprint: fingerprintDeviceAttemptManifest(input.claimManifest),
+            runtime_accounting: {
+              checkpoint_eligible: true,
+              detail_complete: true,
+              durable_admission: true,
+              outstanding_debt: 0,
+              stream_evidence_consistent: true,
+            },
+            scoped: true,
+            stores: input.claimStores.map((store) => ({ status: "collected", store })),
+            stream: "messages",
+          },
+        ],
+        version: 2,
+      }),
+      deviceExporter: { deviceId: "dev-1" },
+      params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
+    },
+    res: capture.response,
+    resolveAuthorizedSource: () =>
+      Promise.resolve({
+        connectorInstance: { connectorInstanceId: "cin-1" },
+        sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
+      }),
+  });
+  return { committed, status: capture.snapshot().status };
+}
+
 test("version 2 terminal coverage validates named stores against the manifest", async () => {
   const capture = responseCapture();
   let committed: ResolvedTerminalRunCommit | null = null;
@@ -790,6 +860,404 @@ test("terminal commit records the server pin at admission and refuses an unbound
         expectedDigest === knownDigest ? "collected" : "unknown",
       ]);
     })
+  );
+});
+
+test("terminal coverage requires the release registered for the authorized connector instance", async () => {
+  const capture = responseCapture();
+  let committed: ResolvedTerminalRunCommit | null = null;
+  const registeredManifest = {
+    streams: [{ coverage_stores: ["messages"], name: "messages" }],
+    version: "1.0.0",
+  };
+  const currentManifest = {
+    streams: [{ coverage_stores: ["messages"], name: "messages" }],
+    version: "2.0.0",
+  };
+  const registeredDigest = `sha256:${"a".repeat(64)}`;
+  const currentDigest = `sha256:${"b".repeat(64)}`;
+  const body = validBody({
+    state_delta: {},
+    terminal_facts: [
+      {
+        artifact_digest: currentDigest,
+        manifest_fingerprint: fingerprintDeviceAttemptManifest(currentManifest),
+        runtime_accounting: {
+          checkpoint_eligible: true,
+          detail_complete: true,
+          durable_admission: true,
+          outstanding_debt: 0,
+          stream_evidence_consistent: true,
+        },
+        scoped: true,
+        stores: [{ status: "collected", store: "messages" }],
+        stream: "messages",
+      },
+    ],
+    version: 2,
+  });
+  const ctx = {
+    canonicalConnectorKey: () => "codex",
+    commitTerminalRun: (input: ResolvedTerminalRunCommit) => {
+      committed = input;
+      return Promise.resolve({
+        replayed: false,
+        response: {
+          commit_id: input.commitId,
+          envelope_hash: input.envelopeHash,
+          object: "device_terminal_run_commit" as const,
+          run_id: input.runId,
+          terminal_event_id: "evt-release-binding",
+        },
+      });
+    },
+    emitSpineEvent: () => Promise.resolve(),
+    getConnectorManifest: () => currentManifest,
+    getExpectedArtifactDigest: () => currentDigest,
+    getRegisteredCollectionProfileRelease: (connectorId: string, connectorInstanceId: string) => {
+      assert.equal(connectorId, "codex");
+      assert.equal(connectorInstanceId, "cin-1");
+      return { artifactDigest: registeredDigest, manifest: registeredManifest };
+    },
+    handleError: (_res: unknown, error: unknown) => {
+      throw error;
+    },
+    pdppError: (_res: unknown, status: number) => {
+      capture.response.status(status);
+    },
+  };
+  await handleLocalDeviceTerminalRunCommit({
+    ctx,
+    req: {
+      body,
+      deviceExporter: { deviceId: "dev-1" },
+      params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
+    },
+    res: capture.response,
+    resolveAuthorizedSource: () =>
+      Promise.resolve({
+        connectorInstance: { connectorInstanceId: "cin-1" },
+        sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
+      }),
+  });
+
+  assert.equal(capture.snapshot().status, 201);
+  assert.ok(committed);
+  const fact = (committed as ResolvedTerminalRunCommit).normalizedFacts[0];
+  assert.deepEqual(fact?.coverage_statuses, ["unknown"], "current release B cannot authorize an A-instance claim");
+  assert.equal(fact?.server_artifact_digest, registeredDigest);
+});
+
+test("a run bound to its registered release remains valid after the connector catalog advances", async () => {
+  const capture = responseCapture();
+  let committed: ResolvedTerminalRunCommit | null = null;
+  const registeredManifest = {
+    streams: [{ coverage_stores: ["messages"], name: "messages" }],
+    version: "1.0.0",
+  };
+  const currentManifest = {
+    streams: [{ coverage_stores: ["messages"], name: "messages" }],
+    version: "2.0.0",
+  };
+  const registeredDigest = `sha256:${"a".repeat(64)}`;
+  const currentDigest = `sha256:${"b".repeat(64)}`;
+  const body = validBody({
+    state_delta: {},
+    terminal_facts: [
+      {
+        artifact_digest: registeredDigest,
+        manifest_fingerprint: fingerprintDeviceAttemptManifest(registeredManifest),
+        runtime_accounting: {
+          checkpoint_eligible: true,
+          detail_complete: true,
+          durable_admission: true,
+          outstanding_debt: 0,
+          stream_evidence_consistent: true,
+        },
+        scoped: true,
+        stores: [{ status: "collected", store: "messages" }],
+        stream: "messages",
+      },
+    ],
+    version: 2,
+  });
+  const ctx = {
+    canonicalConnectorKey: () => "codex",
+    commitTerminalRun: (input: ResolvedTerminalRunCommit) => {
+      committed = input;
+      return Promise.resolve({
+        replayed: false,
+        response: {
+          commit_id: input.commitId,
+          envelope_hash: input.envelopeHash,
+          object: "device_terminal_run_commit" as const,
+          run_id: input.runId,
+          terminal_event_id: "evt-release-race",
+        },
+      });
+    },
+    emitSpineEvent: () => Promise.resolve(),
+    getConnectorManifest: () => currentManifest,
+    getExpectedArtifactDigest: () => currentDigest,
+    getRegisteredCollectionProfileRelease: () => ({ artifactDigest: registeredDigest, manifest: registeredManifest }),
+    handleError: (_res: unknown, error: unknown) => {
+      throw error;
+    },
+    pdppError: (_res: unknown, status: number) => {
+      capture.response.status(status);
+    },
+  };
+  await handleLocalDeviceTerminalRunCommit({
+    ctx,
+    req: {
+      body,
+      deviceExporter: { deviceId: "dev-1" },
+      params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
+    },
+    res: capture.response,
+    resolveAuthorizedSource: () =>
+      Promise.resolve({
+        connectorInstance: { connectorInstanceId: "cin-1" },
+        sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
+      }),
+  });
+
+  assert.equal(capture.snapshot().status, 201);
+  assert.ok(committed);
+  const fact = (committed as ResolvedTerminalRunCommit).normalizedFacts[0];
+  assert.deepEqual(fact?.coverage_statuses, ["collected"]);
+  assert.equal(fact?.server_artifact_digest, registeredDigest);
+});
+
+test("a v2 claim cannot pair a registered digest with another manifest fingerprint", () => {
+  const registeredManifest = {
+    streams: [{ coverage_stores: ["messages"], name: "messages" }],
+    version: "1.0.0",
+  };
+  const currentManifest = {
+    streams: [{ coverage_stores: ["messages"], name: "messages" }],
+    version: "2.0.0",
+  };
+  const registeredDigest = `sha256:${"a".repeat(64)}`;
+  const fact = {
+    artifact_digest: registeredDigest,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(currentManifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: true,
+    stores: [{ status: "collected", store: "messages" }],
+    stream: "messages",
+  };
+  const options = {
+    expectedArtifactDigest: registeredDigest,
+    expectedManifestFingerprint: fingerprintDeviceAttemptManifest(registeredManifest),
+  };
+  const normalized = normalizeTerminalCoverageFacts([fact], currentManifest, "unscoped", options);
+  assert.ok(normalized);
+  assert.deepEqual(normalized[0]?.coverage_statuses, ["unknown"]);
+});
+
+test("the terminal endpoint makes a registered digest mismatch unknown with the registered inventory", async () => {
+  const registeredManifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+  const registeredDigest = `sha256:${"a".repeat(64)}`;
+  const result = await invokeBoundCoverageCommit({
+    claimDigest: `sha256:${"b".repeat(64)}`,
+    claimManifest: registeredManifest,
+    claimStores: ["messages"],
+    currentManifest: registeredManifest,
+    registeredRelease: { artifactDigest: registeredDigest, manifest: registeredManifest },
+  });
+
+  assert.equal(result.status, 201);
+  assert.ok(result.committed);
+  assert.deepEqual(result.committed.normalizedFacts[0]?.coverage_statuses, ["unknown"]);
+  assert.equal(result.committed.normalizedFacts[0]?.artifact_binding_reason, "artifact_digest_mismatch");
+});
+
+test("the terminal endpoint keeps an unregistered digest unknown", async () => {
+  const manifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+  const result = await invokeBoundCoverageCommit({
+    claimDigest: `sha256:${"c".repeat(64)}`,
+    claimManifest: manifest,
+    claimStores: ["messages"],
+    currentManifest: manifest,
+    registeredRelease: null,
+  });
+
+  assert.equal(result.status, 201);
+  assert.ok(result.committed);
+  assert.deepEqual(result.committed.normalizedFacts[0]?.coverage_statuses, ["unknown"]);
+  assert.equal(result.committed.normalizedFacts[0]?.artifact_binding_reason, "artifact_digest_unknown");
+});
+
+test("the terminal endpoint rejects a store outside the registered inventory", async () => {
+  const registeredManifest = { streams: [{ coverage_stores: ["messages", "history"], name: "messages" }] };
+  const digest = `sha256:${"a".repeat(64)}`;
+  const result = await invokeBoundCoverageCommit({
+    claimDigest: digest,
+    claimManifest: registeredManifest,
+    claimStores: ["history", "messages", "unexpected"],
+    currentManifest: registeredManifest,
+    registeredRelease: { artifactDigest: digest, manifest: registeredManifest },
+  });
+
+  assert.equal(result.status, 400);
+  assert.equal(result.committed, null);
+});
+
+test("an instance registered to release A cannot claim a larger release B inventory", async () => {
+  const registeredManifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+  const currentManifest = {
+    streams: [{ coverage_stores: ["messages", "history"], name: "messages" }],
+  };
+  const registeredDigest = `sha256:${"a".repeat(64)}`;
+  const currentDigest = `sha256:${"b".repeat(64)}`;
+  const result = await invokeBoundCoverageCommit({
+    claimDigest: currentDigest,
+    claimManifest: currentManifest,
+    claimStores: ["history", "messages"],
+    currentManifest,
+    registeredRelease: { artifactDigest: registeredDigest, manifest: registeredManifest },
+  });
+
+  assert.equal(result.status, 400);
+  assert.equal(result.committed, null);
+});
+
+test("unregistered well-formed artifact digests remain unknown", () => {
+  const manifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+  const fact = {
+    artifact_digest: `sha256:${"a".repeat(64)}`,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: true,
+    stores: [{ status: "collected", store: "messages" }],
+    stream: "messages",
+  };
+  const normalized = normalizeTerminalCoverageFacts([fact], manifest, "unscoped", { expectedArtifactDigest: null });
+  assert.ok(normalized);
+  assert.deepEqual(normalized[0]?.coverage_statuses, ["unknown"]);
+  assert.equal(normalized[0]?.artifact_binding_reason, "artifact_digest_unknown");
+});
+
+test("v2 claims with an extra store outside the registered inventory are rejected", () => {
+  const manifest = { streams: [{ coverage_stores: ["messages", "history"], name: "messages" }] };
+  const fact = {
+    artifact_digest: `sha256:${"a".repeat(64)}`,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: true,
+    stores: [
+      { status: "collected", store: "history" },
+      { status: "collected", store: "messages" },
+      { status: "collected", store: "unexpected" },
+    ],
+    stream: "messages",
+  };
+  assert.equal(normalizeTerminalCoverageFacts([fact], manifest, "unscoped"), null);
+});
+
+test("v2 normalization rejects duplicate streams and duplicate stores", () => {
+  const manifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }] };
+  const fact = {
+    artifact_digest: `sha256:${"a".repeat(64)}`,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: true,
+    stores: [{ status: "collected", store: "messages" }],
+    stream: "messages",
+  };
+  assert.equal(normalizeTerminalCoverageFacts([fact, fact], manifest, "unscoped"), null);
+  assert.equal(
+    normalizeTerminalCoverageFacts(
+      [{ ...fact, stores: [fact.stores[0], fact.stores[0]] }],
+      manifest,
+      "unscoped"
+    ),
+    null
+  );
+});
+
+test("a successful empty v2 terminal commit replaces every store with unknown evidence", async () => {
+  const capture = responseCapture();
+  let committed: ResolvedTerminalRunCommit | null = null;
+  const manifest = {
+    streams: [
+      { coverage_stores: ["messages", "history"], name: "messages" },
+      { coverage_stores: ["sessions"], name: "sessions" },
+    ],
+  };
+  await handleLocalDeviceTerminalRunCommit({
+    ctx: {
+      canonicalConnectorKey: () => "codex",
+      commitTerminalRun: (input) => {
+        committed = input;
+        return Promise.resolve({
+          replayed: false,
+          response: {
+            commit_id: input.commitId,
+            envelope_hash: input.envelopeHash,
+            object: "device_terminal_run_commit",
+            run_id: input.runId,
+            terminal_event_id: "evt-unknown-replacement",
+          },
+        });
+      },
+      emitSpineEvent: () => Promise.resolve(),
+      getConnectorManifest: () => manifest,
+      getExpectedArtifactDigest: () => `sha256:${"a".repeat(64)}`,
+      handleError: (_res, error) => {
+        throw error;
+      },
+      pdppError: (_res, status) => {
+        capture.response.status(status);
+      },
+    },
+    req: {
+      body: validBody({ state_delta: {}, terminal_facts: [], version: 2 }),
+      deviceExporter: { deviceId: "dev-1" },
+      params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
+    },
+    res: capture.response,
+    resolveAuthorizedSource: () =>
+      Promise.resolve({
+        connectorInstance: { connectorInstanceId: "cin-1" },
+        sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
+      }),
+  });
+
+  assert.equal(capture.snapshot().status, 201);
+  assert.ok(committed);
+  const facts = (committed as ResolvedTerminalRunCommit).normalizedFacts;
+  assert.deepEqual(
+    facts.map((fact) => [fact.stream, fact.stores]),
+    [
+      ["messages", [{ store: "history", status: "unknown" }, { store: "messages", status: "unknown" }]],
+      ["sessions", [{ store: "sessions", status: "unknown" }]],
+    ]
   );
 });
 

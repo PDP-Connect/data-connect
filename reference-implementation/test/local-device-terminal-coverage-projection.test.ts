@@ -6,11 +6,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { normalizeTerminalCoverageFacts } from "../operations/local-device-terminal-collection.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
-import { readLocalCollectorArtifactDigest } from "../server/local-collector-profiles.ts";
+import { readLocalCollectorArtifactDigest, readLocalCollectorRelease } from "../server/local-collector-profiles.ts";
 import { getConnectorSummaryForRoute, listConnectorSummaries } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
@@ -113,13 +114,14 @@ async function projectedCoverage() {
 }
 
 async function seedTerminalCoverage(
-  status: "collected" | "partial" | "failed",
+  status: "collected" | "partial" | "failed" | "unavailable",
   malformed = false,
   version: 1 | 2 = 2,
   accountingOverrides: Record<string, unknown> = {},
   artifactDigest = readLocalCollectorArtifactDigest(connectorId),
   sourceConnectorId = connectorId,
-  runId = "run_terminal_coverage"
+  runId = "run_terminal_coverage",
+  claimedManifestFingerprint?: string
 ): Promise<void> {
   const manifest = JSON.parse(
     (
@@ -128,10 +130,15 @@ async function seedTerminalCoverage(
       }
     ).manifest
   );
+  const registeredRelease = readLocalCollectorRelease(sourceConnectorId);
   const bindings = {
     artifact_digest: artifactDigest,
     binding_generation: 0,
-    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    manifest_fingerprint:
+      claimedManifestFingerprint ??
+      (registeredRelease
+        ? fingerprintDeviceAttemptManifest(registeredRelease.manifest)
+        : fingerprintDeviceAttemptManifest(manifest)),
     runtime_accounting: {
       checkpoint_eligible: true,
       detail_complete: true,
@@ -184,6 +191,24 @@ async function seedTerminalCoverage(
   });
 }
 
+test("registered release fingerprint survives catalog connector-key normalization", async () => {
+  const release = readLocalCollectorRelease(connectorId);
+  assert.ok(release, "the reference server must have a verified local-collector release pin");
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage(
+      "collected",
+      false,
+      2,
+      {},
+      release.artifactDigest,
+      connectorId,
+      "run_terminal_coverage",
+      fingerprintDeviceAttemptManifest(release.manifest)
+    );
+    assert.equal((await projectedCoverage()).axis, "complete");
+  });
+});
+
 test("local-device v2 terminal coverage projects per-stream proof; absent proof stays unknown", async () => {
   await withLocalConnection(async () => {
     assert.equal((await projectedCoverage()).axis, "unknown");
@@ -228,6 +253,17 @@ test("a local source without a server pin projects unknown with an explicit reas
       "coverage_unknown_artifact_unpinned"
     );
   }, "gmail");
+});
+
+test("an unavailable store verdict never projects complete on list or detail", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("unavailable");
+    const list = await projectedCoverage();
+    assert.notEqual(list.axis, "complete");
+    const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+    assert.ok(detail && "connection_health" in detail);
+    assert.notEqual(detail.connection_health.axes.coverage, "complete");
+  });
 });
 
 for (const status of ["partial", "failed"] as const) {
@@ -321,7 +357,45 @@ test("a newer failed run cannot retain an earlier v2 covered verdict", async () 
   });
 });
 
-test("changed release obligations with identical store names invalidate positive coverage", async () => {
+for (const includeState of [false, true]) {
+  test(`successful empty v2 terminal replacement retires earlier proof ${includeState ? "with" : "without"} state`, async () => {
+    await withLocalConnection(async () => {
+      await seedTerminalCoverage("collected");
+      assert.equal((await projectedCoverage()).axis, "complete");
+      const manifestRow = getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(connectorId) as {
+        manifest: string;
+      };
+      const manifest = JSON.parse(manifestRow.manifest) as unknown;
+      const artifactDigest = readLocalCollectorArtifactDigest(connectorId);
+      const unknownFacts = normalizeTerminalCoverageFacts([], manifest, "unscoped", {
+        allowSubset: true,
+        bindingGeneration: 0,
+        expectedArtifactDigest: artifactDigest,
+        validateServerArtifactDigest: true,
+      });
+      assert.ok(unknownFacts, "the empty successful result must expand to explicit unknown inventory");
+      await commitTerminalRun({
+        collectionBoundary: "unscoped",
+        commitId: `commit_terminal_coverage_omission_${includeState}`,
+        connectorId,
+        connectorInstanceId,
+        deviceId,
+        envelopeHash: `empty-terminal-envelope-${includeState}`,
+        normalizedFacts: unknownFacts,
+        runId: `run_terminal_coverage_omission_${includeState}`,
+        sourceInstanceId,
+        stateDelta: includeState ? { sessions: { cursor: "later" } } : {},
+        version: 2,
+      });
+      assert.equal((await projectedCoverage()).axis, "unknown");
+      const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+      assert.ok(detail && "connection_health" in detail);
+      assert.equal(detail.connection_health.axes.coverage, "unknown");
+    });
+  });
+}
+
+test("catalog obligation changes invalidate proof when the binding generation advances", async () => {
   await withLocalConnection(async () => {
     await seedTerminalCoverage("collected");
     assert.equal((await projectedCoverage()).axis, "complete");
@@ -334,6 +408,9 @@ test("changed release obligations with identical store names invalidate positive
     getDb()
       .prepare("UPDATE connectors SET manifest = ? WHERE connector_id = ?")
       .run(JSON.stringify(manifest), connectorId);
+    getDb()
+      .prepare("UPDATE connector_instances SET manifest_generation = manifest_generation + 1 WHERE connector_instance_id = ?")
+      .run(connectorInstanceId);
     assert.equal((await projectedCoverage()).axis, "unknown");
   });
 });

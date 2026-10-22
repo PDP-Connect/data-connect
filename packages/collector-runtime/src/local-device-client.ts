@@ -145,6 +145,13 @@ export interface HeartbeatRequest {
 
 export type IngestBatchRequest = LocalDeviceIngestBatchRequest;
 
+export interface IngestBatchReceipt {
+  accepted_record_count: number;
+  object: "device_ingest_batch_result";
+  rejected_record_count: number;
+  status: "accepted";
+}
+
 /** Safe, terminal per-stream evidence. Deliberately excludes paths, payloads, and reasons. */
 export interface TerminalCollectionRequest {
   /**
@@ -446,7 +453,7 @@ export class LocalDeviceClient {
     });
   }
 
-  ingestBatch(request: IngestBatchRequest): Promise<{ ok: true }> {
+  ingestBatch(request: IngestBatchRequest): Promise<IngestBatchReceipt> {
     return this.#request<Record<string, unknown>>(LOCAL_DEVICE_ENDPOINTS.ingestBatch(this.#requireDeviceId()), {
       authenticate: true,
       body: request,
@@ -462,7 +469,12 @@ export class LocalDeviceClient {
           "device ingest batch response rejected records or omitted durable admission counts"
         );
       }
-      return { ok: true };
+      return {
+        accepted_record_count: response.accepted_record_count as number,
+        object: "device_ingest_batch_result",
+        rejected_record_count: response.rejected_record_count as number,
+        status: "accepted",
+      };
     });
   }
 

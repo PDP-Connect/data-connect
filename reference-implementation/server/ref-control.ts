@@ -165,9 +165,10 @@ import {
 import { listConnectorSummaryEvidence } from "./connector-summary-read-model.ts";
 import { filterRunGapsProvenCompleteByReport } from "./continuation-proof.ts";
 import { getSqliteStoreCacheIdentity } from "./db.ts";
+import { fingerprintDeviceAttemptManifest } from "./device-ingest-attempt-context.ts";
 import { deriveReferenceFreshness, type ReferenceFreshness } from "./freshness.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
-import { readLocalCollectorArtifactDigest } from "./local-collector-profiles.ts";
+import { readLocalCollectorRelease } from "./local-collector-profiles.ts";
 import { mapPendingPressureGaps } from "./pending-pressure-gap-map.ts";
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
 import {
@@ -4459,7 +4460,8 @@ function terminalCoverageByStream(
   manifest: ConnectorManifest,
   declaredScope: string | null,
   bindingGeneration: number | null,
-  expectedArtifactDigest: string | null
+  expectedArtifactDigest: string | null,
+  expectedManifestFingerprint: string | null
 ): {
   readonly conditions: ReadonlyMap<string, CoverageAxis>;
   readonly bindingReason: "artifact_digest_mismatch" | "artifact_digest_unknown" | null;
@@ -4477,6 +4479,7 @@ function terminalCoverageByStream(
     allowSubset: true,
     bindingGeneration,
     expectedArtifactDigest,
+    expectedManifestFingerprint,
     validateBindingGeneration: true,
     validateServerArtifactDigest: true,
   });
@@ -6491,13 +6494,15 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const authoritativeLastSuccessfulRun = isOwnScopedRun(lastSuccessfulRun) ? lastSuccessfulRun : null;
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
+  const localCollectorRelease = localDeviceBacked ? readLocalCollectorRelease(connectorId) : null;
   const terminalCoverage = localDeviceBacked
     ? terminalCoverageByStream(
         fallbackSettledRun,
         manifest,
         input.declaredLocalCollectionScope,
         evidence?.manifest_generation ?? null,
-        readLocalCollectorArtifactDigest(connectorId)
+        localCollectorRelease?.artifactDigest ?? null,
+        localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
       )
     : null;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;

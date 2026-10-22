@@ -50,6 +50,54 @@ import {
  */
 const TEST_EXECUTION_ROOT = join(import.meta.dirname, "..");
 
+async function assertCoverageFixtureRejected(input: {
+  coverage: unknown;
+  expectedError?: RegExp;
+  requestedStreams?: readonly string[];
+  scope?: CollectorConnectorSpec["scope"];
+}): Promise<void> {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: ${JSON.stringify(input.coverage)} }) + "\\n");
+      `,
+    });
+    const requestedStreams = input.requestedStreams ?? ["messages"];
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-invalid-done-coverage",
+          manifestFingerprint: "a".repeat(64),
+          protocol_capabilities: [],
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          ...(input.scope ? { scope: input.scope, timeScopableStreams: requestedStreams } : {}),
+          streams: requestedStreams,
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-invalid-done-coverage",
+      }),
+      input.expectedError ?? /DONE coverage/
+    );
+    assert.equal(harness.terminalCommits.length, 0, "invalid assertions must not reach terminal persistence");
+  } finally {
+    await harness.close();
+  }
+}
+
 test("buildCollectorStartMessage emits a stream-only START with no owner credentials", () => {
   const start = buildCollectorStartMessage(["sessions", "messages"]);
   assert.deepEqual(start, {
@@ -274,7 +322,9 @@ test("a later successful DONE without coverage replaces an acknowledged typed ve
         connector_id: "fixture-coverage-replacement",
         manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
-        runCoverageVersion: 1,
+        // A negotiated run that omits coverage is an empty typed verdict (v2).
+        // The unaccounted v1 replacement applies to a run that did not negotiate.
+        ...(coverage ? { runCoverageVersion: 1 } : {}),
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -302,6 +352,564 @@ test("a later successful DONE without coverage replaces an acknowledged typed ve
     await harness.close();
   }
 });
+
+test("runCollectorConnector lets SKIP_RESULT defeat a collected DONE assertion", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "SKIP_RESULT", stream: "messages", reason: "not_served",
+          message: "the source omitted one required item", boundary_claim: "provider_history_boundary" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "after-skip" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+      `,
+    });
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-skip-overrides-coverage",
+        manifestFingerprint: "a".repeat(64),
+        protocol_capabilities: [],
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-skip-overrides-coverage",
+    });
+    const fact = (harness.terminalCommits[0]?.terminal_facts as Record<string, unknown>[] | undefined)?.[0];
+    assert.ok(fact, "successful run must leave an inspectable terminal verdict");
+    assert.deepEqual(fact.stores, [{ status: "partial", store: "messages" }]);
+    const accounting = fact.runtime_accounting as Record<string, unknown>;
+    assert.equal(accounting.detail_complete, false);
+    assert.equal(
+      accounting.checkpoint_eligible,
+      true,
+      "a coverage downgrade alone does not make an eligible checkpoint ineligible"
+    );
+    assert.ok(Number(accounting.outstanding_debt) > 0);
+    assert.deepEqual(harness.terminalCommits[0]?.state_delta, { messages: "after-skip" });
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector keeps a resolved rejected ingest receipt unacknowledged", async () => {
+  const queuePath = await tempQueuePath();
+  const sourceInstanceId = "src-rejected-receipt";
+  const batchId = `${sourceInstanceId}:batch-1`;
+  const records = transformRecordsToCollectorEnvelopes({
+    batchId,
+    batchSeq: 1,
+    connectorId: "fixture-rejected-receipt",
+    deviceId: "device-1",
+    messages: [
+      {
+        data: { id: "m-1" },
+        emitted_at: "2026-10-21T12:00:00.000Z",
+        key: "m-1",
+        stream: "messages",
+        type: "RECORD",
+      },
+    ],
+    sourceInstanceId,
+  });
+  const outbox = new LocalDeviceOutbox({ path: queuePath });
+  try {
+    outbox.enqueue({
+      id: buildLocalDeviceOutboxId({ kind: "record_batch", parts: [batchId], sourceInstanceId }),
+      kind: "record_batch",
+      payload: {
+        batchId,
+        batchSeq: 1,
+        connectorId: "fixture-rejected-receipt",
+        deviceId: "device-1",
+        records,
+        sourceInstanceId,
+      },
+      sourceInstanceId,
+    });
+    const client = {
+      ackLocalCollectorGap: async () => ({ ok: true }),
+      ingestBatch: async () => ({
+        accepted_record_count: 0,
+        object: "device_ingest_batch_result",
+        rejected_record_count: 1,
+        status: "accepted",
+      }),
+      putSourceInstanceState: async () => ({ ok: true }),
+    } as unknown as LocalDeviceClient;
+    const result = await drainCollectorOutbox({
+      client,
+      connectorId: "fixture-rejected-receipt",
+      holderId: "receipt-test",
+      outbox,
+      policy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, maxDrainIterations: 1 },
+      sourceInstanceId,
+    });
+    assert.equal(result.sent, 0, "a resolved receipt with rejections is not durable admission");
+    assert.equal(outbox.summary({ sourceInstanceId }).succeeded, 0, "the rejected batch must not be acknowledged");
+    assert.ok(outbox.summary({ sourceInstanceId }).ready + outbox.summary({ sourceInstanceId }).deadLetter > 0);
+  } finally {
+    outbox.close();
+  }
+});
+
+test("runCollectorConnector withholds collected coverage after an HTTP receipt rejects a record", async () => {
+  const harness = await startCollectorHarness({ ingestFailureMode: "rejected-receipt", priorState: {} });
+  const queuePath = await tempQueuePath();
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1",
+          data: { id: "m-1" }, emitted_at: new Date().toISOString() }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "m-1" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+      `,
+    });
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-rejected-http-receipt",
+        manifestFingerprint: "a".repeat(64),
+        protocol_capabilities: [],
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, maxAttempts: 1, retryBackoffMs: 60_000 },
+      queuePath,
+      sourceInstanceId: "src-rejected-http-receipt",
+    });
+    const verify = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      const terminal = verify
+        .list({ sourceInstanceId: "src-rejected-http-receipt" })
+        .find((item) => item.kind === "terminal_run_commit");
+      assert.ok(terminal, "failed admission must retain an inspectable terminal result");
+      const payload = terminal.payload as TerminalRunCommitRequest;
+      const fact = payload.terminal_facts[0] as unknown as Record<string, unknown>;
+      const accounting = fact.runtime_accounting as Record<string, unknown>;
+      assert.equal(accounting.durable_admission, false);
+      assert.equal(accounting.checkpoint_eligible, false);
+      assert.ok(Number(accounting.outstanding_debt) > 0);
+      assert.deepEqual(payload.state_delta, {});
+      assert.equal(harness.terminalCommits.length, 0);
+      assert.equal(harness.stateOps.filter((operation) => operation.method === "PUT").length, 0);
+      assert.equal(harness.ingestedBatches.length, 0);
+      assert.equal(verify.summary({ sourceInstanceId: "src-rejected-http-receipt" }).succeeded, 0);
+    } finally {
+      verify.close();
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector records withheld checkpoint accounting before a typed terminal commit", async () => {
+  const harness = await startCollectorHarness({ ingestFailureMode: "always-503", priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1",
+          data: { id: "m-1" }, emitted_at: new Date().toISOString() }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "m-1" }) + "\\n");
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 1,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+      `,
+    });
+    const queuePath = await tempQueuePath();
+    await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        artifactDigest: `sha256:${"b".repeat(64)}`,
+        command: "node",
+        connector_id: "fixture-withheld-coverage-checkpoint",
+        manifestFingerprint: "a".repeat(64),
+        protocol_capabilities: [],
+        runCoverageVersion: 1,
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, maxDrainDurationMs: 100, retryBackoffMs: 60_000 },
+      queuePath,
+      sourceInstanceId: "src-withheld-coverage-checkpoint",
+    });
+    const verify = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      const terminal = verify
+        .list({ sourceInstanceId: "src-withheld-coverage-checkpoint" })
+        .find((item) => item.kind === "terminal_run_commit");
+      assert.ok(terminal, "the terminal evidence must remain durable while its predecessor retries");
+      const payload = terminal.payload as TerminalRunCommitRequest;
+      const fact = payload.terminal_facts[0] as unknown as Record<string, unknown>;
+      const accounting = fact.runtime_accounting as Record<string, unknown>;
+      assert.equal(accounting.checkpoint_eligible, false);
+      assert.equal(accounting.durable_admission, false);
+      assert.ok(Number(accounting.outstanding_debt) > 0);
+      assert.deepEqual(payload.state_delta, {}, "withheld stream state must not enter the terminal commit");
+      assert.equal(harness.terminalCommits.length, 0, "an unacknowledged commit is not published proof");
+      assert.equal(harness.stateOps.filter((operation) => operation.method === "PUT").length, 0);
+    } finally {
+      verify.close();
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const [label, scope, expectedScope] of [
+  [
+    "bounded",
+    { since: "2026-10-01T00:00:00.000Z", source_roots: ["/notes"] },
+    "since=2026-10-01T00:00:00.000Z;roots=/notes",
+  ],
+  ["unscoped", undefined, "unscoped"],
+] as const) {
+  test(`runCollectorConnector sends version 1 and exact ${label} scope in the actual START`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const startPath = join(await createTempDir("pdpp-coverage-start-"), "start.json");
+      const fixture = await writeFixtureConnector({
+        script: `
+          const fs = await import("node:fs/promises");
+          let input = "";
+          await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+            input += chunk;
+            if (input.includes("\\n")) resolve();
+          }));
+          const start = JSON.parse(input.split("\\n")[0]);
+          await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+          const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+          if (start.run_coverage_version === 1) {
+            done.coverage = { version: 1, collection_scope: start.collection_scope,
+              streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+          }
+          process.stdout.write(JSON.stringify(done) + "\\n");
+        `,
+      });
+      await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-coverage-negotiation",
+          enforcesSourceRoots: true,
+          manifestFingerprint: "a".repeat(64),
+          protocol_capabilities: [],
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          ...(scope ? { scope } : {}),
+          sourceRootScopableStreams: ["messages"],
+          streams: ["messages"],
+          timeScopableStreams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: `src-coverage-negotiation-${label}`,
+      });
+      const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+      assert.equal(start.run_coverage_version, 1);
+      assert.equal(start.collection_scope, expectedScope);
+      assert.equal(harness.terminalCommits[0]?.collection_boundary, expectedScope);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+test("a connector that does not request coverage cannot submit a positive DONE verdict", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const fixture = await writeFixtureConnector({
+      script: `
+        await new Promise((resolve) => {
+          let input = "";
+          process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+        });
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+          coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+      `,
+    });
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-unrequested-coverage",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-unrequested-coverage",
+      }),
+      /emitted unrequested DONE coverage/
+    );
+    assert.equal(harness.terminalCommits.length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const [versionLabel, coverageVersion] of [
+  ["numeric v2", 2],
+  ["future string", "future"],
+  ["missing", undefined],
+] as const) {
+  test(`runCollectorConnector rejects ${versionLabel} DONE coverage versions`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const fixture = await writeFixtureConnector({
+        script: `
+          await new Promise((resolve) => {
+            let input = "";
+            process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+          });
+          const coverage = { ${coverageVersion === undefined ? "" : `version: ${JSON.stringify(coverageVersion)},`}
+            collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] };
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0, coverage }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            artifactDigest: `sha256:${"b".repeat(64)}`,
+            command: "node",
+            connector_id: "fixture-unknown-coverage-version",
+            manifestFingerprint: "a".repeat(64),
+            protocol_capabilities: [],
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: "src-unknown-coverage-version",
+        }),
+        /DONE coverage version or collection scope is invalid/
+      );
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+const validCoverageStream = {
+  scoped: true,
+  stores: [{ status: "collected", store: "messages" }],
+  stream: "messages",
+};
+
+for (const [label, coverage] of [
+  ["null payload", null],
+  ["array payload", []],
+  ["non-array stream list", { collection_scope: "unscoped", streams: "messages", version: 1 }],
+  ["empty store list", { collection_scope: "unscoped", streams: [{ ...validCoverageStream, stores: [] }], version: 1 }],
+  [
+    "unknown store status",
+    {
+      collection_scope: "unscoped",
+      streams: [{ ...validCoverageStream, stores: [{ status: "unknown", store: "messages" }] }],
+      version: 1,
+    },
+  ],
+  [
+    "nonboolean scoped flag",
+    { collection_scope: "unscoped", streams: [{ ...validCoverageStream, scoped: "yes" }], version: 1 },
+  ],
+  [
+    "empty store identifier",
+    {
+      collection_scope: "unscoped",
+      streams: [{ ...validCoverageStream, stores: [{ status: "collected", store: " " }] }],
+      version: 1,
+    },
+  ],
+  [
+    "duplicate stream",
+    { collection_scope: "unscoped", streams: [validCoverageStream, validCoverageStream], version: 1 },
+  ],
+  [
+    "duplicate store",
+    {
+      collection_scope: "unscoped",
+      streams: [{ ...validCoverageStream, stores: [validCoverageStream.stores[0], validCoverageStream.stores[0]] }],
+      version: 1,
+    },
+  ],
+] as const) {
+  test(`runCollectorConnector rejects malformed DONE coverage: ${label}`, async () => {
+    await assertCoverageFixtureRejected({ coverage });
+  });
+}
+
+test("runCollectorConnector rejects a DONE coverage scope echo that differs from actual START scope", async () => {
+  await assertCoverageFixtureRejected({
+    coverage: { collection_scope: "not-the-start-scope", streams: [validCoverageStream], version: 1 },
+    scope: { since: "2026-10-01T00:00:00.000Z" },
+  });
+});
+
+test("runCollectorConnector rejects missing and extra DONE coverage streams", async () => {
+  await assertCoverageFixtureRejected({
+    coverage: { collection_scope: "unscoped", streams: [validCoverageStream], version: 1 },
+    requestedStreams: ["messages", "sessions"],
+  });
+  await assertCoverageFixtureRejected({
+    coverage: {
+      collection_scope: "unscoped",
+      streams: [
+        validCoverageStream,
+        { scoped: true, stores: [{ status: "collected", store: "extra" }], stream: "unexpected" },
+      ],
+      version: 1,
+    },
+    requestedStreams: ["messages"],
+  });
+});
+
+test("a negotiation-aware connector omits DONE coverage when START has no feature request", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const startPath = join(await createTempDir("pdpp-legacy-coverage-start-"), "start.json");
+    const fixture = await writeFixtureConnector({
+      script: `
+        const fs = await import("node:fs/promises");
+        let input = "";
+        await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+          input += chunk;
+          if (input.includes("\\n")) resolve();
+        }));
+        const start = JSON.parse(input.split("\\n")[0]);
+        await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
+        const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
+        if (start.run_coverage_version === 1) {
+          done.coverage = { version: 1, collection_scope: start.collection_scope,
+            streams: [{ stream: "messages", scoped: true, stores: [{ store: "messages", status: "collected" }] }] };
+        }
+        process.stdout.write(JSON.stringify(done) + "\\n");
+      `,
+    });
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-legacy-runtime-negotiation",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath: await tempQueuePath(),
+      sourceInstanceId: "src-legacy-runtime-negotiation",
+    });
+    const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+    assert.equal("run_coverage_version" in start, false);
+    assert.equal("collection_scope" in start, false, "legacy START shape must not add an unnegotiated field");
+    assert.equal(result.done?.status, "succeeded", "legacy collection remains usable");
+    const facts = harness.terminalCommits[0]?.terminal_facts;
+    assert.equal(Array.isArray(facts) && facts.length > 0, false, "omission cannot produce positive facts");
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const includeState of [false, true]) {
+  test(`successful DONE without coverage retires earlier proof ${includeState ? "with" : "without"} STATE`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const fixture = await writeFixtureConnector({
+        script: `
+          await new Promise((resolve) => {
+            let input = "";
+            process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+          });
+          ${includeState ? 'process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: "run-b" }) + "\\n");' : ""}
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+        `,
+      });
+      await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          artifactDigest: `sha256:${"b".repeat(64)}`,
+          command: "node",
+          connector_id: "fixture-coverage-retirement",
+          manifestFingerprint: "a".repeat(64),
+          protocol_capabilities: [],
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        runId: "run-b-no-coverage",
+        sourceInstanceId: "src-coverage-retirement",
+      });
+      assert.equal(harness.terminalCommits.length, 1, "successful omission must enqueue an explicit replacement");
+      const replacement = harness.terminalCommits[0] as unknown as TerminalRunCommitRequest;
+      assert.equal(replacement.version, 2);
+      assert.deepEqual(replacement.terminal_facts, []);
+      assert.deepEqual(replacement.state_delta, includeState ? { messages: "run-b" } : {});
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
 
 for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
   test(`runCollectorConnector refuses ${effectType} without durable detail accounting`, async () => {
@@ -337,6 +945,121 @@ for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
         }),
         new RegExp(`unsupported ${effectType}`)
       );
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
+  test(`runCollectorConnector rejects a valid concrete ${effectType} before terminal coverage`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const detailMessage =
+        effectType === "DETAIL_GAP"
+          ? {
+              detail_locator: { id: "m-1", kind: "message" },
+              reason: "rate_limited",
+              record_key: "m-1",
+              reference_only: true,
+              retryable: true,
+              status: "pending",
+              stream: "messages",
+              type: effectType,
+            }
+          : {
+              empty_keys: [],
+              gap_keys: ["b"],
+              hydrated_keys: ["a"],
+              reference_only: true,
+              required_keys: ["a", "b"],
+              state_stream: "messages",
+              stream: "message_details",
+              type: effectType,
+            };
+      const fixture = await writeFixtureConnector({
+        script: `
+          process.stdout.write(JSON.stringify(${JSON.stringify(detailMessage)}) + "\\n");
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+            coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            artifactDigest: `sha256:${"b".repeat(64)}`,
+            command: "node",
+            connector_id: `fixture-concrete-${effectType.toLowerCase()}`,
+            manifestFingerprint: "a".repeat(64),
+            protocol_capabilities: [],
+            runCoverageVersion: 1,
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: `src-concrete-${effectType.toLowerCase()}`,
+        }),
+        new RegExp(`unsupported ${effectType}`)
+      );
+      assert.equal(harness.terminalCommits.length, 0);
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+for (const debtOutcome of ["gapped", "unaccounted"] as const) {
+  test(`runCollectorConnector fails closed for STREAM_EVIDENCE ${debtOutcome} counts`, async () => {
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const markerPath = join(await createTempDir("pdpp-stream-evidence-blocked-"), "spawned");
+      const fixture = await writeFixtureConnector({
+        script: `
+          const fs = await import("node:fs/promises");
+          await fs.writeFile(${JSON.stringify(markerPath)}, "spawned");
+          await new Promise((resolve) => {
+            let input = "";
+            process.stdin.on("data", (chunk) => { input += chunk; if (input.includes("\\n")) resolve(); });
+          });
+          process.stdout.write(JSON.stringify({ type: "STREAM_EVIDENCE", stream: "messages", considered: 1,
+            outcomes: { emitted: 0, unchanged: 0, gapped: ${debtOutcome === "gapped" ? 1 : 0},
+              unaccounted: ${debtOutcome === "unaccounted" ? 1 : 0} }, reference_only: true }) + "\\n");
+          process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
+            coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+              stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
+        `,
+      });
+      await assert.rejects(
+        runCollectorConnector({
+          baseUrl: harness.url,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: `fixture-stream-evidence-${debtOutcome}`,
+            protocol_capabilities: ["STREAM_EVIDENCE"],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          queuePath: await tempQueuePath(),
+          sourceInstanceId: `src-stream-evidence-${debtOutcome}`,
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof RuntimeCapabilityMismatchError);
+          assert.deepEqual((error as RuntimeCapabilityMismatchError).missing, ["STREAM_EVIDENCE"]);
+          return true;
+        }
+      );
+      await assert.rejects(() => readFile(markerPath), /ENOENT/);
       assert.equal(harness.terminalCommits.length, 0);
     } finally {
       await harness.close();
@@ -883,13 +1606,18 @@ test("drainCollectorQueue marks sent and preserves retryable failures", async ()
 
   const sent: IngestBatchRequest[] = [];
   const client = {
-    async ingestBatch(request: IngestBatchRequest): Promise<{ ok: true }> {
+    async ingestBatch(request: IngestBatchRequest) {
       await Promise.resolve();
       sent.push(request);
       if (request.batch_id === "batch-2") {
         throw new Error("temporary 503");
       }
-      return { ok: true };
+      return {
+        accepted_record_count: request.records.length,
+        object: "device_ingest_batch_result" as const,
+        rejected_record_count: 0,
+        status: "accepted" as const,
+      };
     },
   };
 
@@ -2419,7 +3147,7 @@ interface CollectorHarnessOptions {
   heartbeatStatus?: number;
   /** Per-heartbeat status overrides. Entries are consumed in request order. */
   heartbeatStatuses?: number[];
-  ingestFailureMode?: "always-400" | "always-503";
+  ingestFailureMode?: "always-400" | "always-503" | "rejected-receipt";
   priorState?: Record<string, unknown> | null;
   /** When set, the GET state endpoint returns this status instead of 200. */
   stateReadStatus?: number;
@@ -2624,6 +3352,15 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
         // local-ingest-backpressure-0810).
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: "synthetic_bad_request" } }));
+        return;
+      }
+      if (options.ingestFailureMode === "rejected-receipt") {
+        sendJson(res, 200, {
+          accepted_record_count: 0,
+          object: "device_ingest_batch_result",
+          rejected_record_count: (parsed as { records?: unknown[] }).records?.length ?? 0,
+          status: "accepted",
+        });
         return;
       }
       ingestedBatches.push(parsed as { records?: Array<{ data?: Record<string, unknown> }> });
@@ -4198,9 +4935,14 @@ test("drainCollectorOutbox stops between iterations when the duration budget is 
       ackLocalCollectorGap() {
         return Promise.reject(new Error("duration drain test must not ack gaps"));
       },
-      async ingestBatch() {
+      async ingestBatch(request) {
         await new Promise((resolve) => setTimeout(resolve, 40));
-        return { ok: true };
+        return {
+          accepted_record_count: request.records.length,
+          object: "device_ingest_batch_result" as const,
+          rejected_record_count: 0,
+          status: "accepted" as const,
+        };
       },
       putSourceInstanceState() {
         return Promise.reject(new Error("duration drain test must not send checkpoints"));
@@ -4281,9 +5023,14 @@ test("drainCollectorOutbox does not crash when batch-claimed work expires before
       ackLocalCollectorGap() {
         return Promise.reject(new Error("lease test must not ack gaps"));
       },
-      ingestBatch() {
+      ingestBatch(request) {
         now = new Date(now.getTime() + 40);
-        return Promise.resolve({ ok: true });
+        return Promise.resolve({
+          accepted_record_count: request.records.length,
+          object: "device_ingest_batch_result" as const,
+          rejected_record_count: 0,
+          status: "accepted" as const,
+        });
       },
       putSourceInstanceState() {
         return Promise.reject(new Error("lease test must not send checkpoints"));
@@ -5284,7 +6031,12 @@ function createTestClient(): Pick<
       stream: request.stream ?? "unknown",
       updated_at: new Date().toISOString(),
     }),
-    ingestBatch: async (_request: IngestBatchRequest) => ({ ok: true }),
+    ingestBatch: async (request: IngestBatchRequest) => ({
+      accepted_record_count: request.records.length,
+      object: "device_ingest_batch_result" as const,
+      rejected_record_count: 0,
+      status: "accepted" as const,
+    }),
     putSourceInstanceState: async (request: PutSourceInstanceStateRequest): Promise<SourceInstanceStateResponse> => ({
       connector_instance_id: "test-instance",
       device_id: "test-device",
