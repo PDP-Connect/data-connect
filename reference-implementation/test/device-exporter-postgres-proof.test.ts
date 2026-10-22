@@ -662,6 +662,15 @@ if (DEDICATED_POSTGRES_URL) {
         connectorId,
         JSON.stringify(manifest),
       ]);
+      // The connection the batch belongs to: each durable record and the
+      // acceptance take its next collection revision.
+      await postgresQuery(
+        `INSERT INTO connector_instances(
+           connector_instance_id, owner_subject_id, connector_id, display_name, status,
+           source_kind, source_binding_key, source_binding_json, created_at, updated_at
+         ) VALUES($1, $2, $3, 'migration-proof', 'active', 'local_device', $1, '{}'::jsonb, $4, $4)`,
+        [identity.connectorInstanceId, `owner_${suffix}`, connectorId, "2026-07-16T00:00:00.000Z"]
+      );
       await postgresQuery(
         `INSERT INTO device_ingest_batch_outcomes(
            device_id, batch_id, body_hash, source_instance_id, connector_instance_id,

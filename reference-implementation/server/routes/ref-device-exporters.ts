@@ -39,7 +39,11 @@ import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
-import { type CollectionRevisionEvent, recordCollectionRevisionEvent } from "../stores/collection-revision-store.ts";
+import {
+  type CollectionRevisionEventInput,
+  isCollectionRevisionUnavailable,
+  recordCollectionRevisionEvent,
+} from "../stores/collection-revision-store.ts";
 import { commitTerminalRun } from "../stores/terminal-run-commit-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
@@ -479,18 +483,21 @@ interface ConnectorDetailGapStore {
   }) => Promise<GapRow[]>;
   listPendingGapsForConnector?: (connectorId: string, options: { limit: number }) => Promise<GapRow[]>;
   markGapStatus: (gapId: string, status: string, options: { runId?: string }) => Promise<GapRow>;
-  upsertPendingGap: (params: {
-    connectorId: string;
-    connectorInstanceId: string;
-    stream: string;
-    source: unknown;
-    detailLocator: unknown;
-    reason: string;
-    lastError: unknown;
-    discoveredRunId?: string;
-    lastRunId?: string;
-    retryable?: boolean;
-  }) => Promise<GapRow>;
+  upsertPendingGap: (
+    params: {
+      connectorId: string;
+      connectorInstanceId: string;
+      stream: string;
+      source: unknown;
+      detailLocator: unknown;
+      reason: string;
+      lastError: unknown;
+      discoveredRunId?: string;
+      lastRunId?: string;
+      retryable?: boolean;
+    },
+    options?: { readonly collectionRevision?: CollectionRevisionEventInput }
+  ) => Promise<GapRow>;
 }
 
 export interface MountRefDeviceExportersContext {
@@ -2574,7 +2581,7 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
         if (!SHA256_HEX.test(bodyHash) || (bodyHash !== canonical.hash && bodyHash !== collectorEnvelopeHash)) {
-          await observeCollectionAttempt(connectorInstance.connectorInstanceId, "batch_rejected");
+          await observeRefusedBatch(connectorInstance.connectorInstanceId);
           ctx.pdppError(
             res,
             400,
@@ -2597,8 +2604,22 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
           sourceInstanceId,
         });
       } catch (err) {
-        if (observedConnectorInstanceId) {
-          await observeCollectionAttempt(observedConnectorInstanceId, "batch_rejected");
+        // A batch refused after authorization is an observed attempt, and its
+        // revision is its only durable effect. When that revision cannot be
+        // recorded (or an earlier one in this request failed), the device gets
+        // the retryable 503, never a definitive refusal the server cannot order.
+        if (
+          observedConnectorInstanceId &&
+          (isCollectionRevisionUnavailable(err) || !(await recordedRefusal(observedConnectorInstanceId)))
+        ) {
+          res.setHeader("Retry-After", "1");
+          ctx.pdppError(
+            res,
+            503,
+            "device_ingest_retryable",
+            "Device ingest is temporarily unavailable; retry the same batch"
+          );
+          return;
         }
         if (err instanceof ctx.DeviceBatchConflictError) {
           ctx.pdppError(
@@ -2647,26 +2668,30 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
 }
 
 /**
- * Record an observed collection attempt for an authorized connection, so it
- * retires any earlier local coverage proof (see collection-revision-store.ts).
- * The caller awaits this before it answers the device, so the device cannot
- * send a later terminal commit that the server orders before this event.
+ * Record a refused batch for an authorized connection, so it retires any
+ * earlier local coverage proof (see collection-revision-store.ts). The caller
+ * awaits this before it answers the device, so the device cannot send a later
+ * terminal commit that the server orders before this event. Throws
+ * `CollectionRevisionUnavailableError` when the revision is not recorded; the
+ * route's catch then answers 503 instead of the refusal.
  */
-async function observeCollectionAttempt(
-  connectorInstanceId: string,
-  event: CollectionRevisionEvent,
-  runId: string | null = null
-): Promise<void> {
+async function observeRefusedBatch(connectorInstanceId: string): Promise<void> {
+  await recordCollectionRevisionEvent(connectorInstanceId, {
+    at: new Date().toISOString(),
+    event: "batch_rejected",
+  });
+}
+
+/** `observeRefusedBatch` for the route's catch: false (and a server log line) when the revision is not recorded. */
+async function recordedRefusal(connectorInstanceId: string): Promise<boolean> {
   try {
-    await recordCollectionRevisionEvent(connectorInstanceId, {
-      at: new Date().toISOString(),
-      event,
-      runId,
-    });
+    await observeRefusedBatch(connectorInstanceId);
+    return true;
   } catch (error) {
     console.warn(
-      `[device-exporters] collection revision not recorded connector_instance_id=${connectorInstanceId} event=${event} code=${String((error as { code?: unknown } | null)?.code ?? "unknown")}`
+      `[device-exporters] refused batch not recorded; answering 503 connector_instance_id=${connectorInstanceId} code=${String((error as { code?: unknown } | null)?.code ?? "unknown")}`
     );
+    return false;
   }
 }
 
@@ -2714,7 +2739,7 @@ async function processDeviceIngestBatch(
     const existing = await ctx.deviceExporterStore.getBatchOutcome(deviceId, batchId);
     if (existing) {
       if (!deviceBatchIdentityMatches(existing, identity)) {
-        await observeCollectionAttempt(connectorInstanceId, "batch_rejected");
+        await observeRefusedBatch(connectorInstanceId);
         ctx.pdppError(
           res,
           409,
@@ -2732,7 +2757,7 @@ async function processDeviceIngestBatch(
     // New malformed candidates retain the historical 400, but an existing
     // device/batch reservation owns conflict precedence.
     if (!sourceConnectorMatches) {
-      await observeCollectionAttempt(connectorInstanceId, "batch_rejected");
+      await observeRefusedBatch(connectorInstanceId);
       ctx.pdppError(res, 400, "invalid_request", "connector_id does not match source_instance_id", "connector_id");
       return;
     }
@@ -2907,13 +2932,11 @@ async function processDeviceIngestBatch(
         source_instance_id: sourceInstanceId,
         status: "accepted",
       };
-      // A newly admitted batch is an observed attempt. Record it before the
-      // acknowledgement: the device sends its terminal commit only after this
-      // response, so the commit always gets the later revision.
-      await recordCollectionRevisionEvent(connectorInstanceId, {
-        at: new Date().toISOString(),
-        event: "batch_accepted",
-      });
+      // The accepted transition takes the batch's `batch_accepted` collection
+      // revision in its own transaction, as each record write above took its
+      // `batch_record` revision. It commits before the acknowledgement, and
+      // the device sends its terminal commit only after this response, so the
+      // commit always gets the later revision.
       maybeDeviceIngestStoreFault("before-complete-processing-batch");
       await ctx.deviceExporterStore.completeProcessingBatch({
         acceptedAt: new Date().toISOString(),
@@ -3246,27 +3269,26 @@ async function reportLocalCollectorGap(
     ...(details ? { details } : {}),
   };
   const store = ctx.getDefaultConnectorDetailGapStore();
-  const gap = await store.upsertPendingGap({
-    connectorId,
-    connectorInstanceId,
-    detailLocator,
-    lastError,
-    reason,
-    // The route requires a boolean (validateGapReportFields); an explicit false is
-    // kept in storage, never converted to a recoverable legacy NULL.
-    ...(typeof body.retryable === "boolean" ? { retryable: body.retryable } : {}),
-    source,
-    stream: syntheticStream,
-    ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),
-    ...(lastRunId ? { lastRunId } : {}),
-  });
   // A delivered failure report is an observed attempt: it retires any earlier
-  // coverage proof for this connection.
-  await recordCollectionRevisionEvent(connectorInstanceId, {
-    at: new Date().toISOString(),
-    event: "failure_report",
-    runId: lastRunId,
-  });
+  // coverage proof for this connection. The gap and its revision commit in one
+  // transaction; if the revision cannot be recorded, no gap is stored.
+  const gap = await store.upsertPendingGap(
+    {
+      connectorId,
+      connectorInstanceId,
+      detailLocator,
+      lastError,
+      reason,
+      // The route requires a boolean (validateGapReportFields); an explicit false is
+      // kept in storage, never converted to a recoverable legacy NULL.
+      ...(typeof body.retryable === "boolean" ? { retryable: body.retryable } : {}),
+      source,
+      stream: syntheticStream,
+      ...(firstSeenRunId ? { discoveredRunId: firstSeenRunId } : {}),
+      ...(lastRunId ? { lastRunId } : {}),
+    },
+    { collectionRevision: { at: new Date().toISOString(), event: "failure_report", runId: lastRunId } }
+  );
   res.status(201).json({
     attempt_count: gap.attempt_count,
     connector_id: connectorId,
