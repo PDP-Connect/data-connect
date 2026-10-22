@@ -4567,6 +4567,8 @@ function pendingDetailGapCountsByStream(
 
 function localCoverageConditionForStatus(status: unknown): CoverageAxis | null {
   switch (status) {
+    case "unknown":
+      return "unknown";
     case "collected":
     case "excluded":
     case "missing":
@@ -4980,7 +4982,8 @@ export function deriveLocalCoverageAxis(input: {
 function deriveLocalTerminalCoverageAxis(
   run: ConnectorRunSummary | null,
   manifest: ConnectorManifest,
-  legacyAxis: LocalCoverageDiagnosticAxis | null
+  legacyAxis: LocalCoverageDiagnosticAxis | null,
+  bindingGeneration: number | null
 ): LocalCoverageDiagnosticAxis | null {
   const terminal = run?.local_terminal_coverage;
   if (!terminal) {
@@ -5003,19 +5006,22 @@ function deriveLocalTerminalCoverageAxis(
     terminal.collectionScope !== declaredScope || !Array.isArray(terminal.streams)) {
     return unknown;
   }
-  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, terminal.collectionScope);
+  const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, terminal.collectionScope, { allowSubset: true, bindingGeneration, validateBindingGeneration: true });
   if (!normalized) {
     return unknown;
   }
   const rows: LocalCoverageDiagnosticRow[] = [];
   const unaccountedStores: string[] = [];
-  let axis: CoverageAxis = "complete";
+  let axis: CoverageAxis = normalized.length === manifest.streams?.length ? "complete" : "unknown";
   for (const rawFact of normalized) {
     const stream = rawFact.stream as string;
     if (rawFact.scoped !== true) {
       return unknown;
     }
-    for (const rawStore of rawFact.stores as readonly { store: string; status: string }[]) {
+    let storeIndex = 0;
+    for (const assertion of rawFact.stores as readonly { store: string; status: string }[]) {
+      const status = (rawFact.coverage_statuses as string[])[storeIndex++] ?? "unknown";
+      const rawStore = { ...assertion, status };
       rows.push({ collection_scope: terminal.collectionScope, status: rawStore.status, store: rawStore.store, stream });
       if (rawStore.status !== "collected") {
         unaccountedStores.push(rawStore.store);
@@ -7060,7 +7066,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const effectiveLocalCoverage = localDeviceBacked
-    ? (deriveLocalTerminalCoverageAxis(fallbackSettledRun, manifest, localCoverage) ?? localCoverage)
+    ? (deriveLocalTerminalCoverageAxis(fallbackSettledRun, manifest, localCoverage, evidence?.manifest_generation ?? null) ?? localCoverage)
     : localCoverage;
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =

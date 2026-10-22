@@ -4,9 +4,12 @@
 import { createHash } from "node:crypto";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
 import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
+import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
 import { TerminalRunCommitConflictError } from "../server/stores/terminal-run-commit-store.ts";
+
+const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 interface TerminalRequest {
   readonly body?: unknown;
@@ -21,7 +24,7 @@ interface TerminalResponse {
 
 interface AuthorizedSource {
   readonly connectorInstance: { readonly connectorInstanceId: string };
-  readonly sourceInstance: { readonly connectorId: string };
+  readonly sourceInstance: { readonly connectorId: string; readonly manifestGeneration?: number | null };
 }
 
 interface TerminalContext {
@@ -104,11 +107,29 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       return;
     }
 
-    const validatedFacts = version === 2
-      ? normalizeTerminalCoverageFacts(rawFacts, await ctx.getConnectorManifest?.(canonicalConnectorId), collectionBoundary, { allowSubset: true })
-      : normalizedFacts;
+    const validatedFacts =
+      version === 2
+        ? normalizeTerminalCoverageFacts(
+            rawFacts,
+            await ctx.getConnectorManifest?.(canonicalConnectorId),
+            collectionBoundary,
+            { allowSubset: true, bindingGeneration: authorized.sourceInstance.manifestGeneration ?? null }
+          )
+        : normalizedFacts;
     if (!validatedFacts) {
       ctx.pdppError(res, 400, "invalid_request", "terminal coverage does not match the manifest inventory");
+      return;
+    }
+
+    if (
+      version === 2 &&
+      validatedFacts.some(
+        (fact) =>
+          Object.hasOwn(stateDelta, String(fact.stream)) &&
+          asObject(fact.runtime_accounting)?.checkpoint_eligible === false
+      )
+    ) {
+      ctx.pdppError(res, 400, "invalid_request", "withheld checkpoint cannot advance stream state");
       return;
     }
 
@@ -134,9 +155,14 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       terminal_facts: body.terminal_facts,
       version,
     } as const;
-    const canonicalJson = version === 2
-      ? JSON.stringify(canonicalTerminalRunCommitEnvelope(canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]))
-      : canonicalTerminalRunCommitJson(canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitJson>[0]);
+    const canonicalJson =
+      version === 2
+        ? JSON.stringify(
+            canonicalTerminalRunCommitEnvelope(
+              canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitEnvelope>[0]
+            )
+          )
+        : canonicalTerminalRunCommitJson(canonicalEnvelope as Parameters<typeof canonicalTerminalRunCommitJson>[0]);
     const envelopeHash = createHash("sha256").update(canonicalJson).digest("hex");
     const result = await ctx.commitTerminalRun({
       collectionBoundary,
@@ -322,26 +348,46 @@ export function normalizeTerminalCoverageFacts(
   rawFacts: readonly unknown[],
   rawManifest: unknown,
   collectionBoundary: string,
-  options: { allowSubset?: boolean } = {}
+  options: { allowSubset?: boolean; bindingGeneration?: number | null; validateBindingGeneration?: boolean } = {}
 ): readonly Record<string, unknown>[] | null {
   const manifest = asObject(rawManifest);
   const manifestStreams = manifest?.streams;
   if (!Array.isArray(manifestStreams) || manifestStreams.length === 0) {
     return null;
   }
+  const manifestFingerprint = fingerprintDeviceAttemptManifest(rawManifest);
   const inventory = new Map<string, Set<string>>();
+  const metadataOnlyStreams = new Set<string>();
   for (const rawStream of manifestStreams) {
     const stream = asObject(rawStream);
     const name = stream && readRequiredString(stream.name);
     const stores = stream?.coverage_stores;
-    if (!name || !Array.isArray(stores) || stores.length === 0 ||
+    if (!name || inventory.has(name)) {
+      return null;
+    }
+    if (stores === undefined && options.allowSubset) {
+      inventory.set(name, new Set());
+      continue;
+    }
+    if (
+      !Array.isArray(stores) ||
+      stores.length === 0 ||
       stores.some((store) => typeof store !== "string" || !store.trim()) ||
-      new Set(stores).size !== stores.length || inventory.has(name)) {
+      new Set(stores).size !== stores.length ||
+      inventory.has(name)
+    ) {
       return null;
     }
     inventory.set(name, new Set(stores));
+    if (stream?.coverage_policy === "inventory_only") {
+      metadataOnlyStreams.add(name);
+    }
   }
-  if (rawFacts.length === 0 || rawFacts.length > inventory.size || (!options.allowSubset && rawFacts.length !== inventory.size)) {
+  if (
+    rawFacts.length === 0 ||
+    rawFacts.length > inventory.size ||
+    (!options.allowSubset && rawFacts.length !== inventory.size)
+  ) {
     return null;
   }
   const seen = new Set<string>();
@@ -351,9 +397,15 @@ export function normalizeTerminalCoverageFacts(
     const stream = entry && readRequiredString(entry.stream);
     const expected = stream ? inventory.get(stream) : null;
     const rawStores = entry?.stores;
-    if (!stream || !expected || seen.has(stream) || typeof entry.scoped !== "boolean" ||
-      !Array.isArray(rawStores) || rawStores.length !== expected.size ||
-      (collectionBoundary !== "unscoped" && entry.scoped !== true)) {
+    if (
+      !(stream && expected) ||
+      expected.size === 0 ||
+      seen.has(stream) ||
+      typeof entry.scoped !== "boolean" ||
+      !Array.isArray(rawStores) ||
+      rawStores.length !== expected.size ||
+      (collectionBoundary !== "unscoped" && entry.scoped !== true)
+    ) {
       return null;
     }
     seen.add(stream);
@@ -363,29 +415,75 @@ export function normalizeTerminalCoverageFacts(
       const store = asObject(rawStore);
       const name = store && readRequiredString(store.store);
       const status = store?.status;
-      if (!name || !expected.has(name) || seenStores.has(name) ||
-        (status !== "collected" && status !== "partial" && status !== "unavailable" && status !== "failed")) {
+      if (
+        !(name && expected.has(name)) ||
+        seenStores.has(name) ||
+        (status !== "collected" && status !== "partial" && status !== "unavailable" && status !== "failed")
+      ) {
         return null;
       }
       seenStores.add(name);
       stores.push({ store: name, status });
     }
-    const statuses = stores.map((store) => store.status);
-    const pendingDetailGaps = statuses.filter((status) => status !== "collected").length;
+    // Keep assertions separate from the verdict derived from host accounting.
+    // Missing provenance remains unknown; a known contradiction is partial.
+    stores.sort((left, right) => left.store.localeCompare(right.store));
+    const accounting = readTerminalRuntimeAccounting(entry.runtime_accounting);
+    const accountingKnown = accounting !== null;
+    const generationMatches =
+      !options.validateBindingGeneration ||
+      (Number.isSafeInteger(options.bindingGeneration) && entry.binding_generation === options.bindingGeneration);
+    const bound =
+      generationMatches &&
+      entry.manifest_fingerprint === manifestFingerprint &&
+      typeof entry.artifact_digest === "string" &&
+      ARTIFACT_DIGEST.test(entry.artifact_digest);
+    const complete =
+      accountingKnown &&
+      accounting.durable_admission === true &&
+      accounting.detail_complete === true &&
+      accounting.stream_evidence_consistent === true &&
+      accounting.checkpoint_eligible === true &&
+      accounting.outstanding_debt === 0;
+    const statuses = stores.map((store) => {
+      if (store.status !== "collected") {
+        return store.status;
+      }
+      if (!(bound && accountingKnown)) {
+        return "unknown";
+      }
+      if (!complete) {
+        return "partial";
+      }
+      return metadataOnlyStreams.has(stream) ? "inventory_only" : "collected";
+    });
+    const pendingDetailGaps = accountingKnown ? Number(accounting.outstanding_debt) : 0;
     facts.push({
-      checkpoint: "committed",
+      checkpoint: accountingKnown && accounting.checkpoint_eligible === true ? "committed" : "withheld",
       collected: 0,
       considered: null,
       covered: null,
+      manifest_fingerprint: entry.manifest_fingerprint,
+      artifact_digest: entry.artifact_digest,
+      ...(Number.isSafeInteger(options.bindingGeneration)
+        ? {
+            binding_generation: options.validateBindingGeneration
+              ? entry.binding_generation
+              : options.bindingGeneration,
+          }
+        : {}),
+      ...(accountingKnown ? { runtime_accounting: accounting } : {}),
       coverage_statuses: statuses,
       pending_detail_gaps: pendingDetailGaps,
       scoped: entry.scoped,
       skipped: null,
-      stores: stores.sort((left, right) => left.store.localeCompare(right.store)),
+      stores,
       stream,
     });
   }
-  return seen.size === rawFacts.length ? facts.sort((left, right) => String(left.stream).localeCompare(String(right.stream))) : null;
+  return seen.size === rawFacts.length
+    ? facts.sort((left, right) => String(left.stream).localeCompare(String(right.stream)))
+    : null;
 }
 
 function readCoverageStatuses(value: unknown): readonly string[] | null {
@@ -393,4 +491,35 @@ function readCoverageStatuses(value: unknown): readonly string[] | null {
     return null;
   }
   return [...new Set(value)].sort();
+}
+
+interface TerminalRuntimeAccounting {
+  durable_admission: boolean;
+  detail_complete: boolean;
+  stream_evidence_consistent: boolean;
+  outstanding_debt: number;
+  checkpoint_eligible: boolean;
+}
+
+function readTerminalRuntimeAccounting(value: unknown): TerminalRuntimeAccounting | null {
+  const accounting = asObject(value);
+  if (
+    !accounting ||
+    typeof accounting.durable_admission !== "boolean" ||
+    typeof accounting.detail_complete !== "boolean" ||
+    typeof accounting.stream_evidence_consistent !== "boolean" ||
+    typeof accounting.checkpoint_eligible !== "boolean" ||
+    typeof accounting.outstanding_debt !== "number" ||
+    !Number.isSafeInteger(accounting.outstanding_debt) ||
+    accounting.outstanding_debt < 0
+  ) {
+    return null;
+  }
+  return {
+    durable_admission: accounting.durable_admission,
+    detail_complete: accounting.detail_complete,
+    stream_evidence_consistent: accounting.stream_evidence_consistent,
+    outstanding_debt: accounting.outstanding_debt,
+    checkpoint_eligible: accounting.checkpoint_eligible,
+  };
 }
