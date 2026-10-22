@@ -2008,6 +2008,47 @@ function seedSucceededRows(path: string, sourceInstanceId: string, count: number
   }
 }
 
+test("pruneSent keeps a delivered failure gap until recovery deletes it", async (t) => {
+  // Delivery marks a gap succeeded; only recovery removes it. Pruning the
+  // acknowledged tail must not close a barrier the server still holds open.
+  const path = await tempOutboxPath(t);
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    outbox.enqueue({
+      id: "gap-1",
+      kind: "gap",
+      payload: {
+        connectorId: "connector-1",
+        firstSeenAt: "2026-10-22T11:00:00.000Z",
+        nextAttemptBackoffMs: 60_000,
+        reason: "connector_child_failure",
+        retryable: true,
+        sourceInstanceId: "source-1",
+      },
+      sourceInstanceId: "source-1",
+    });
+    outbox.enqueue({
+      id: "batch-1",
+      kind: "record_batch",
+      payload: { batchSeq: 1, records: [{ key: "m-1" }] },
+      sourceInstanceId: "source-1",
+    });
+    for (let claims = 0; claims < 2; claims += 1) {
+      const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000, sourceInstanceId: "source-1" });
+      assert.ok(claimed);
+      outbox.acknowledge({ holder: "worker", id: claimed.id, leaseEpoch: claimed.lease_epoch });
+    }
+    assert.equal(outbox.get("gap-1")?.status, "succeeded");
+
+    const result = outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "source-1" });
+    assert.equal(result.pruned, 1, "only the acknowledged record batch is prunable");
+    assert.equal(outbox.get("gap-1")?.status, "succeeded", "a delivered gap survives pruning");
+    assert.equal(outbox.countOpenGaps({ sourceInstanceId: "source-1" }), 1);
+  } finally {
+    outbox.close();
+  }
+});
+
 test("pruneSent deletes a backlog larger than SQLite's per-statement variable limit", async (t) => {
   // The live incident shape: ~170k succeeded rows. A single
   // `DELETE ... WHERE id IN (...)` over that set throws "too many SQL

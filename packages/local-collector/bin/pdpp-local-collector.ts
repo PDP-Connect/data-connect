@@ -1693,8 +1693,9 @@ export interface LocalOutboxStatusOutput {
    * - `incomplete`: bound to the selected release, but a store fell short or
    *   the runtime accounting shows outstanding debt.
    * - `unadmitted`: the lane holds open outbox work (queued, leased or
-   *   dead-lettered), so the latest run has not reached a durable terminal
-   *   commit. The acknowledged verdict above does not stand for that run.
+   *   dead-lettered), or a failure gap no complete run has recovered, so the
+   *   latest run has not reached a durable terminal commit. The acknowledged
+   *   verdict above does not stand for that run.
    * - `not_current`: acknowledged for another release, or with no release
    *   binding, or this device selects no release. Says nothing about
    *   completeness, so it is never read as `incomplete`.
@@ -1876,7 +1877,13 @@ export function inspectLocalOutboxStatus(
   const exists = existsSync(dbPath);
   const inspection = exists
     ? readOutboxInspection(dbPath, options.sourceInstanceId)
-    : { coverageObserved: null, recordBatchCount: 0, summary: emptyOutboxSummary(), terminalCoverage: null };
+    : {
+        coverageObserved: null,
+        openGaps: 0,
+        recordBatchCount: 0,
+        summary: emptyOutboxSummary(),
+        terminalCoverage: null,
+      };
   const { coverageObserved, recordBatchCount, summary } = inspection;
   const outboxLifecycleState = deriveLocalCollectorLifecycleState({
     coverageObserved,
@@ -1889,17 +1896,19 @@ export function inspectLocalOutboxStatus(
       : deps.selectedRelease !== undefined
         ? deps.selectedRelease
         : selectedCollectionRelease(options.connector);
-  // Any open work for the lane (queued, leased or dead-lettered) is work the
-  // acknowledged receipt does not account for: the latest run has not reached
-  // a durable terminal commit. Open work also keeps the outbox lifecycle
-  // non-idle, so `unadmitted` never reaches the lifecycle mapping below.
-  const latestRunOpen = summary.ready + summary.leased + summary.deadLetter > 0;
+  // Open work for the lane (queued, leased or dead-lettered), and any gap still
+  // open for it, is work the acknowledged receipt does not account for: the
+  // latest run has not reached a durable terminal commit that recovered its
+  // failures. A delivered gap counts, because only a complete run's recovery
+  // closes it. Open work keeps the outbox lifecycle non-idle; on a drained lane,
+  // an unrecovered gap maps to `coverage_incomplete` below.
+  const latestRunOpen = summary.ready + summary.leased + summary.deadLetter > 0 || inspection.openGaps > 0;
   const terminalVerdict = terminalCoverageVerdict(inspection.terminalCoverage, selectedRelease, latestRunOpen);
   const lifecycleState =
     options.sourceInstanceId && (outboxLifecycleState === "healthy_idle" || outboxLifecycleState === "coverage_missing")
       ? terminalVerdict === "covered"
         ? "covered"
-        : terminalVerdict === "incomplete"
+        : terminalVerdict === "incomplete" || terminalVerdict === "unadmitted"
           ? "coverage_incomplete"
           : terminalVerdict === "not_current"
             ? "coverage_not_current"
@@ -2135,7 +2144,7 @@ export function buildLocalOutboxDoctor(
       staleScope
         ? "The latest acknowledged terminal verdict belongs to an older collection boundary. Re-run against the active scope before treating this lane as covered."
         : status.terminal_coverage.verdict === "unadmitted"
-          ? "The latest run has not reached the server: its queued, retrying or dead-lettered work is still open, so the last acknowledged verdict does not stand for it. Let the next run drain the queue, or resolve dead-letter rows with `pdpp-local-collector recover`."
+          ? "The latest run has not reached the server: its queued, retrying or dead-lettered work is still open, or a failure gap is not yet recovered, so the last acknowledged verdict does not stand for it. Let the next complete run drain the queue and recover the gap, or resolve dead-letter rows with `pdpp-local-collector recover`."
           : status.terminal_coverage.verdict === "not_current"
             ? "The latest acknowledged terminal verdict was produced for a connector release other than the one this device selects, or for none. Re-run the collector on the selected release before treating this lane as covered."
             : "The latest acknowledged terminal verdict is incomplete; inspect the connector run diagnostics and re-run after resolving the missing store coverage."
@@ -3685,6 +3694,12 @@ interface LocalOutboxInspection {
    * refuses an unbounded payload scan).
    */
   coverageObserved: boolean | null;
+  /**
+   * Gap rows still open for the lane: queued, leased, or delivered but not yet
+   * recovered. Delivery is not recovery, so a delivered gap keeps the lane
+   * unadmitted until a complete run recovers it.
+   */
+  openGaps: number;
   recordBatchCount: number;
   summary: LocalDeviceOutboxSummary;
   terminalCoverage: { collectionBoundary: string; terminalFacts: readonly StoredTerminalFact[] } | null;
@@ -3744,10 +3759,11 @@ function readOutboxInspection(path: string, sourceInstanceId: string | undefined
   try {
     const summary = outbox.summary(sourceInstanceId ? { sourceInstanceId } : {});
     if (!sourceInstanceId) {
-      return { coverageObserved: null, recordBatchCount: 0, summary, terminalCoverage: null };
+      return { coverageObserved: null, openGaps: 0, recordBatchCount: 0, summary, terminalCoverage: null };
     }
     return {
       coverageObserved: outbox.hasObservedStream({ sourceInstanceId, stream: COVERAGE_DIAGNOSTICS_STREAM }),
+      openGaps: outbox.countOpenGaps({ sourceInstanceId }),
       recordBatchCount: outbox.countRecordBatches({ sourceInstanceId }),
       summary,
       terminalCoverage: outbox.latestTerminalCoverageReceipt({ sourceInstanceId }),
@@ -3802,12 +3818,12 @@ export function selectedReleaseForPin(
 }
 
 /**
- * Covered is a claim about one run on one release. Open work for the lane means
- * the latest run is unadmitted, so the receipt cannot speak for the lane. A
- * receipt for another digest or fingerprint, or on a device that selects no
- * release, is `not_current` whatever its stores say. The run's own runtime
- * accounting must be present and clean: a store reads `collected` only as the
- * collector measured it.
+ * Covered is a claim about one run on one release. Open work, or an unrecovered
+ * gap, for the lane means the latest run is unadmitted, so the receipt cannot
+ * speak for the lane. A receipt for another digest or fingerprint, or on a device
+ * that selects no release, is `not_current` whatever its stores say. The run's own
+ * runtime accounting must be present and clean: a store reads `collected` only as
+ * the collector measured it.
  */
 function terminalCoverageVerdict(
   receipt: LocalOutboxInspection["terminalCoverage"],

@@ -838,7 +838,7 @@ export class LocalDeviceOutbox {
    * `retrying`, or `dead_letter` rows.
    *
    * Safety invariants:
-   * - Only rows with `status = 'succeeded'` are ever considered.
+   * - Only rows with `status = 'succeeded'` and a non-gap kind are ever considered.
    * - `olderThanIso` uses `COALESCE(acknowledged_at, updated_at)` so rows
    *   without an explicit acknowledged timestamp still age out correctly.
    * - `keepCount` uses a `NOT IN (SELECT id … ORDER BY rowid DESC LIMIT n)`
@@ -856,7 +856,10 @@ export class LocalDeviceOutbox {
       throw new Error("pruneSent keepCount must be a non-negative safe integer");
     }
 
-    const clauses: string[] = ["status = 'succeeded'"];
+    // A delivered gap is still open for its lane until recovery deletes it (see
+    // `deleteSucceeded`). Pruning it would close a failure barrier the server
+    // still holds open, so gap rows are never prune candidates.
+    const clauses: string[] = ["status = 'succeeded'", "kind != 'gap'"];
     const params: (string | number)[] = [];
 
     if (input.sourceInstanceId) {

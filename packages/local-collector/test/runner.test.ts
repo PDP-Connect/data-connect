@@ -10,6 +10,8 @@ import { dirname, join } from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome 2.5.5's built-in Node module registry does not yet recognize node:sqlite; Node's own resolver and tsc both resolve it (same pre-existing gap as packages/collector-runtime/src/local-device-outbox.ts and its sibling test files).
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
+import { DEFAULT_COLLECTOR_OUTBOX_POLICY, drainCollectorOutbox } from "@pdpp/collector-runtime/collector-runner";
+import { LocalDeviceClient } from "@pdpp/collector-runtime/local-device-client";
 import {
   // The concrete bundled-connector registry is assembled at the composition
   // root (the bin) from connector-owned definitions; the src runtime is
@@ -2967,6 +2969,192 @@ test("a pass that fails after its pre-scan drain delivered an earlier gap leaves
   assert.equal(statusFor(path).terminal_coverage.verdict, "unadmitted");
 });
 
+/**
+ * Enqueues the connector_child_failure gap a failed pass leaves for `src-1`,
+ * under the id the runner derives for it. Returns that id.
+ */
+function enqueueFailureGap(outbox: LocalDeviceOutbox, connectorId: string): string {
+  const id = buildLocalDeviceOutboxId({
+    kind: "gap",
+    parts: [connectorId, "src-1", "connector_child_failure", null, null],
+    sourceInstanceId: "src-1",
+  });
+  outbox.enqueue({
+    id,
+    kind: "gap",
+    payload: {
+      connectorId,
+      firstSeenAt: "2026-10-22T11:00:00.000Z",
+      nextAttemptBackoffMs: 60_000,
+      reason: "connector_child_failure",
+      retryable: true,
+      sourceInstanceId: "src-1",
+    },
+    sourceInstanceId: "src-1",
+  });
+  return id;
+}
+
+/** One independent drain of `src-1`'s ready rows, outside any collector run. */
+async function drainLaneOnce(path: string, baseUrl: string, connectorId: string): Promise<void> {
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    await drainCollectorOutbox({
+      client: new LocalDeviceClient({ baseUrl, deviceId: "device-1", deviceToken: "device-token" }),
+      connectorId,
+      holderId: "independent-drain",
+      outbox,
+      policy: DEFAULT_COLLECTOR_OUTBOX_POLICY,
+      sourceInstanceId: "src-1",
+    });
+  } finally {
+    outbox.close();
+  }
+}
+
+test("a run aborted before start leaves an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+
+  const controller = new AbortController();
+  controller.abort(new Error("operator cancelled run"));
+  await assert.rejects(
+    runCollectorConnector({
+      abortSignal: controller.signal,
+      baseUrl: "http://127.0.0.1:9",
+      connector: {
+        args: [],
+        command: process.execPath,
+        connector_id: "claude_code",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["sessions"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: dirname(path),
+      queuePath: path,
+      runId: "run-aborted-before-start",
+      sourceInstanceId: "src-1",
+    }),
+    /operator cancelled run/
+  );
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
+test("an unrecovered failure gap delivered by an independent drain leaves the lane unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+
+  // A failed pass leaves its gap open, then an independent drain delivers it.
+  // Delivery is not recovery: no complete run has resolved the barrier.
+  const seeded = new LocalDeviceOutbox({ path });
+  try {
+    enqueueFailureGap(seeded, "claude_code");
+  } finally {
+    seeded.close();
+  }
+  const server = await startStateReadRefusingServer();
+  try {
+    await drainLaneOnce(path, server.url, "claude_code");
+    assert.equal(server.gapAcks.length, 1, "the independent drain delivered the gap");
+  } finally {
+    await server.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
+test("a following successful pass without coverage evidence leaves a delivered failure gap unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  let gapId = "";
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    gapId = enqueueFailureGap(outbox, "custom");
+  } finally {
+    outbox.close();
+  }
+
+  const gapServer = await startStateReadRefusingServer();
+  try {
+    await drainLaneOnce(path, gapServer.url, "custom");
+    assert.equal(gapServer.gapAcks.length, 1, "the independent drain delivered the gap");
+  } finally {
+    await gapServer.close();
+  }
+
+  // A pass that succeeds without negotiating coverage commits no terminal
+  // evidence, so it neither replaces the receipt nor recovers the gap.
+  const previous = process.env[ALLOW_CUSTOM_COMMAND_ENV];
+  process.env[ALLOW_CUSTOM_COMMAND_ENV] = "1";
+  const server = await startAcceptingDeviceServer();
+  try {
+    const fixture = await writeCountingFixtureConnector(1);
+    const result = await runCollectorOnce({
+      args: [fixture],
+      baseUrl: server.url,
+      command: "run",
+      connector: "custom",
+      deviceId: "device-1",
+      deviceToken: "token-1",
+      entrypointCommand: "node",
+      quiet: true,
+      queuePath: path,
+      sourceInstanceId: "src-1",
+      streams: ["messages"],
+    });
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(result.statePutFailed, false);
+    assert.equal(
+      result.outboxSummary.ready + result.outboxSummary.leased + result.outboxSummary.deadLetter,
+      0,
+      "the pass drained all of its own work, so any unadmitted verdict comes from the gap"
+    );
+  } finally {
+    await server.close();
+    if (previous === undefined) {
+      delete process.env[ALLOW_CUSTOM_COMMAND_ENV];
+    } else {
+      process.env[ALLOW_CUSTOM_COMMAND_ENV] = previous;
+    }
+  }
+
+  const after = new LocalDeviceOutbox({ path });
+  try {
+    assert.equal(after.get(gapId)?.status, "succeeded", "the successful pass left the delivered gap unrecovered");
+  } finally {
+    after.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
 test("open record work without an acknowledged receipt stays no_evidence", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
@@ -3824,6 +4012,59 @@ function tempDirSync(prefix = "pdpp-local-collector-test-"): string {
  * two routes a sample run actually hits. Not a general harness — keep it
  * this small; `collector-runner.test.ts` already owns the full route set.
  */
+/**
+ * A reference stand-in that accepts a whole pass: prior state, state writes, and
+ * ingest batches echoing the accepted count the client requires. Unlike
+ * {@link startSampleTestServer}, a batch it accepts is actually drained, so a
+ * pass that uses it leaves no open work of its own.
+ */
+async function startAcceptingDeviceServer(): Promise<{ close: () => Promise<void>; url: string }> {
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url.endsWith("/state")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            device_id: "device-1",
+            object: "device_source_instance_state",
+            source_instance_id: "src-1",
+            state: {},
+            updated_at: null,
+          })
+        );
+        return;
+      }
+      if (url.includes("/ingest-batches")) {
+        const records = (JSON.parse(body || "{}").records ?? []) as unknown[];
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            accepted_record_count: records.length,
+            object: "device_ingest_batch_result",
+            rejected_record_count: 0,
+            status: "accepted",
+          })
+        );
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    url: `http://127.0.0.1:${address.port}`,
+  };
+}
+
 async function startSampleTestServer(): Promise<{ close: () => Promise<void>; url: string }> {
   const server = createServer((req, res) => {
     if (req.url?.endsWith("/state")) {
