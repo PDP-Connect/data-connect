@@ -715,6 +715,63 @@ function verifyMacApp(
   }
 }
 
+// hdiutil fails transiently on GitHub's macOS runners: attach can exit with an
+// empty message, and detach can report "Resource busy" while the volume is
+// still in use. Each call gets three tries with a growing pause between them.
+// The last detach try adds -force, so a volume that stays busy is still
+// unmounted. When every try fails, the error carries each try's message.
+const HDIUTIL_ATTEMPTS = 3
+const HDIUTIL_RETRY_DELAY_MS = 1000
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
+}
+
+function runHdiutil(args, lastAttemptArgs, runCommand, pause) {
+  const failures = []
+  for (let attempt = 1; attempt <= HDIUTIL_ATTEMPTS; attempt += 1) {
+    const attemptArgs = attempt === HDIUTIL_ATTEMPTS ? lastAttemptArgs : args
+    try {
+      return runCommand("hdiutil", attemptArgs)
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error))
+      if (attempt < HDIUTIL_ATTEMPTS) pause(attempt * HDIUTIL_RETRY_DELAY_MS)
+    }
+  }
+  fail(
+    [
+      `hdiutil ${args[0]} failed after ${HDIUTIL_ATTEMPTS} attempts:`,
+      ...failures.map((message, index) => `  attempt ${index + 1}: ${message}`),
+    ].join("\n")
+  )
+}
+
+export function attachDmg(
+  dmgPath,
+  mountRoot,
+  runCommand = run,
+  pause = sleepSync
+) {
+  const args = [
+    "attach",
+    "-readonly",
+    "-nobrowse",
+    "-mountpoint",
+    mountRoot,
+    dmgPath,
+  ]
+  runHdiutil(args, args, runCommand, pause)
+}
+
+export function detachDmg(mountRoot, runCommand = run, pause = sleepSync) {
+  runHdiutil(
+    ["detach", mountRoot],
+    ["detach", "-force", mountRoot],
+    runCommand,
+    pause
+  )
+}
+
 function verifyMacArtifacts(
   bundleRoot,
   expectedArch,
@@ -741,14 +798,7 @@ function verifyMacArtifacts(
   )
   let attached = false
   try {
-    run("hdiutil", [
-      "attach",
-      "-readonly",
-      "-nobrowse",
-      "-mountpoint",
-      mountRoot,
-      dmgArtifacts[0],
-    ])
+    attachDmg(dmgArtifacts[0], mountRoot)
     attached = true
     const mountedApps = findAppBundles(mountRoot)
     if (mountedApps.length !== 1) {
@@ -762,7 +812,7 @@ function verifyMacArtifacts(
       verifyReferenceStacks
     )
   } finally {
-    if (attached) run("hdiutil", ["detach", mountRoot])
+    if (attached) detachDmg(mountRoot)
     rmSync(mountRoot, { recursive: true, force: true })
   }
 }
