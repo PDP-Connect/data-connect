@@ -29,7 +29,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EmittedMessage, RunCoverageVerdict, StartMessage, StreamScope } from "@pdpp/connector-protocol";
-import { validateHostBlobMessage, validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
+import {
+  RUN_COVERAGE_V1_CAPABILITY,
+  validateHostBlobMessage,
+  validateStreamEvidenceCounts,
+} from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
 import { type LocalDeviceBlobSpool, LocalDeviceBlobSpoolMissingError } from "./local-device-blob-spool.ts";
@@ -66,6 +70,7 @@ import {
   COLLECTOR_RUNTIME_CAPABILITIES,
   type ConnectorPlacementInput,
   type RuntimeBindingName,
+  type RuntimeCapabilityProfile,
 } from "./runtime-capabilities.ts";
 
 /**
@@ -936,7 +941,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
     }
     throwIfAborted(config.abortSignal);
-    const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
+    const satisfiedBindings = assertPlacementOrThrow(config.connector, runtimeCapabilitiesForRun(config.connector));
 
     const initialSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
@@ -2518,6 +2523,26 @@ function startRequestsRunCoverage(
   runCoverageVersion: 1 | undefined
 ): boolean {
   return runCoverageVersion === 1 && streams.every((stream) => startStreamResources(resources, stream).length === 0);
+}
+
+/**
+ * The profile a run is placed against. The collector supports RUN_COVERAGE_V1
+ * only for a run whose START requests store evidence; for any other run the
+ * capability is withdrawn, so a connector that cannot run without the
+ * evidence is refused before spawn (Collection Profile Section 3.4).
+ */
+function runtimeCapabilitiesForRun(connector: CollectorConnectorSpec): RuntimeCapabilityProfile {
+  if (startRequestsRunCoverage(connector.streams, connector.resources ?? {}, connector.runCoverageVersion)) {
+    return COLLECTOR_RUNTIME_CAPABILITIES;
+  }
+  return {
+    ...COLLECTOR_RUNTIME_CAPABILITIES,
+    protocolCapabilities: new Set(
+      [...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities].filter(
+        (capability) => capability !== RUN_COVERAGE_V1_CAPABILITY
+      )
+    ),
+  };
 }
 
 export function buildCollectorStartMessage(

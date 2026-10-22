@@ -1292,6 +1292,8 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
     [null, UNKNOWN_CAPABILITY_PATTERN, null],
     [["OBSERVATION"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
     [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
+    // This runtime requests no store collection evidence (Section 3.4).
+    [["RUN_COVERAGE_V1"], UNSUPPORTED_CAPABILITY_PATTERN, "RUN_COVERAGE_V1"],
     [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
   ];
   for (const [protocolCapabilities, rejection, unsupported] of cases) {

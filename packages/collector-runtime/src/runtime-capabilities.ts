@@ -5,6 +5,7 @@ import {
   CONNECTOR_PROTOCOL_VERSION,
   type ConnectorProtocolCapability,
   isConnectorProtocolCapabilityArray,
+  RUN_COVERAGE_V1_CAPABILITY,
   unsupportedRequiredProtocolCapabilities,
 } from "@pdpp/connector-protocol";
 
@@ -75,11 +76,16 @@ export const PROVIDER_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
  * deliberately deferred rather than half-built here.
  * Also does NOT advertise `BLOB`: this collector has no durable host blob
  * transport. The runner rejects any BLOB line before it can accept a RECORD.
+ *
+ * Advertises `RUN_COVERAGE_V1`: the runner requests store collection evidence
+ * in START and commits it in a version 2 terminal run record. A run whose
+ * START requests none is placed against this profile without the capability
+ * (`collector-runner.ts`), so it refuses a connector that declares it.
  */
 export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
   bindings: new Set<RuntimeBindingName>(["network", "browser", "filesystem", "local_device"]),
   id: "collector",
-  protocolCapabilities: new Set<ConnectorProtocolCapability>(),
+  protocolCapabilities: new Set<ConnectorProtocolCapability>([RUN_COVERAGE_V1_CAPABILITY]),
   protocolVersion: CONNECTOR_PROTOCOL_VERSION,
 };
 

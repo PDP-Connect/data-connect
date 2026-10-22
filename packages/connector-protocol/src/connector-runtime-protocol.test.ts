@@ -341,8 +341,18 @@ test("the capability vocabulary knows DETAIL_COVERAGE_KEY_SETS and OBSERVATION",
     "BLOB",
     "DETAIL_COVERAGE_KEY_SETS",
     "OBSERVATION",
+    "RUN_COVERAGE_V1",
     "STREAM_EVIDENCE",
   ]);
+});
+
+// Collection Profile Section 3.4: a connector that cannot run without store
+// collection evidence declares RUN_COVERAGE_V1. The capability is required: a
+// runtime that does not advertise it must not start the connector.
+test("RUN_COVERAGE_V1 is a known, required capability", () => {
+  assert.equal(isConnectorProtocolCapabilityArray(["RUN_COVERAGE_V1"]), true);
+  assert.deepEqual(unsupportedRequiredProtocolCapabilities(["RUN_COVERAGE_V1"], []), ["RUN_COVERAGE_V1"]);
+  assert.deepEqual(unsupportedRequiredProtocolCapabilities(["RUN_COVERAGE_V1"], ["RUN_COVERAGE_V1"]), []);
 });
 
 // Section 3.4: a runtime that does not advertise DETAIL_COVERAGE_KEY_SETS

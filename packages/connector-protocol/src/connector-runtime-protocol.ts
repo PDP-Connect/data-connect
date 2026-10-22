@@ -115,12 +115,21 @@ export const DETAIL_COVERAGE_KEY_SETS_CAPABILITY = "DETAIL_COVERAGE_KEY_SETS" as
 /** Capability required by a connector that emits OBSERVATION (Collection Profile 0.2.0, Section 5.10). */
 export const OBSERVATION_CAPABILITY = "OBSERVATION" as const;
 
+/**
+ * Store collection evidence (Collection Profile Section 3.4). A connector that
+ * cannot run without it declares this capability. It is required: a runtime
+ * that cannot request the evidence (`START.run_coverage_version`) must not
+ * start the connector.
+ */
+export const RUN_COVERAGE_V1_CAPABILITY = "RUN_COVERAGE_V1" as const;
+
 /** Protocol capabilities that can be advertised by a connector or runtime. */
 export type ConnectorProtocolCapability =
   | typeof STREAM_EVIDENCE_CAPABILITY
   | typeof HOST_BLOB_CAPABILITY
   | typeof DETAIL_COVERAGE_KEY_SETS_CAPABILITY
-  | typeof OBSERVATION_CAPABILITY;
+  | typeof OBSERVATION_CAPABILITY
+  | typeof RUN_COVERAGE_V1_CAPABILITY;
 
 /**
  * The closed, exhaustive list backing {@link ConnectorProtocolCapability} at
@@ -136,6 +145,7 @@ export const CONNECTOR_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapabili
   HOST_BLOB_CAPABILITY,
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   OBSERVATION_CAPABILITY,
+  RUN_COVERAGE_V1_CAPABILITY,
 ];
 
 /**

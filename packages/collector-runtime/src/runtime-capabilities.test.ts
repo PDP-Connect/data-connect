@@ -172,6 +172,25 @@ test("a declared OBSERVATION capability is a named missing capability, not a mal
   assert.equal(evaluatePlacement(observationConnector, observingRuntime).kind, "ok");
 });
 
+// Collection Profile Section 3.4: RUN_COVERAGE_V1 is required. The collector
+// runtime requests store collection evidence, so it advertises the capability.
+// The provider runtime does not, so it refuses a connector that declares it.
+test("a declared RUN_COVERAGE_V1 places on the collector runtime and is missing on the provider runtime", () => {
+  const evidenceConnector = {
+    connector_id: "evidence-connector",
+    protocol_capabilities: ["RUN_COVERAGE_V1" as const],
+  };
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("RUN_COVERAGE_V1"), true);
+  assert.equal(PROVIDER_RUNTIME_CAPABILITIES.protocolCapabilities.has("RUN_COVERAGE_V1"), false);
+  assert.deepEqual(evaluatePlacement(evidenceConnector, COLLECTOR_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
+  assert.deepEqual(evaluatePlacement(evidenceConnector, PROVIDER_RUNTIME_CAPABILITIES), {
+    connectorId: "evidence-connector",
+    kind: "missing_capability",
+    missing: ["RUN_COVERAGE_V1"],
+    runtime: "provider",
+  });
+});
+
 test("boundary_claim remains optional and does not require a protocol capability", () => {
   const skipResult = {
     boundary_claim: "provider_history_boundary",
