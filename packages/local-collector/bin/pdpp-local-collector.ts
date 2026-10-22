@@ -1699,10 +1699,22 @@ export interface LocalOutboxStatusOutput {
    * - `not_current`: acknowledged for another release, or with no release
    *   binding, or this device selects no release. Says nothing about
    *   completeness, so it is never read as `incomplete`.
-   * - `no_evidence`: no acknowledged typed verdict, or one whose runtime
-   *   accounting is missing or malformed.
+   * - `no_evidence`: no acknowledged typed verdict, one whose runtime
+   *   accounting is missing or malformed, or one that names no as-of (a
+   *   receipt from before run order, or a run the server issued no sequence).
+   *
+   * `as_of` is what the receipt is a fact about: the run, the run sequence and
+   * storage epoch the server issued, the commit revision it recorded the run
+   * at, and when this device received the acknowledgement.
    */
   terminal_coverage: {
+    as_of: {
+      acknowledged_at: string;
+      collection_revision: number;
+      run_id: string;
+      run_sequence: number;
+      storage_epoch: number;
+    } | null;
     collection_boundary: string | null;
     verdict: "covered" | "incomplete" | "unadmitted" | "not_current" | "no_evidence";
   };
@@ -1926,6 +1938,7 @@ export function inspectLocalOutboxStatus(
       record_batches: inspection.recordBatchCount,
     },
     terminal_coverage: {
+      as_of: receiptAsOf(inspection.terminalCoverage),
       collection_boundary: inspection.terminalCoverage?.collectionBoundary ?? null,
       verdict: terminalVerdict,
     },
@@ -3702,7 +3715,11 @@ interface LocalOutboxInspection {
   openGaps: number;
   recordBatchCount: number;
   summary: LocalDeviceOutboxSummary;
-  terminalCoverage: { collectionBoundary: string; terminalFacts: readonly StoredTerminalFact[] } | null;
+  terminalCoverage: {
+    asOf: NonNullable<ReturnType<LocalDeviceOutbox["latestTerminalCoverageReceipt"]>>["asOf"];
+    collectionBoundary: string;
+    terminalFacts: readonly StoredTerminalFact[];
+  } | null;
 }
 
 /**
@@ -3836,6 +3853,9 @@ function terminalCoverageVerdict(
   if (latestRunOpen) {
     return "unadmitted";
   }
+  if (!receipt.asOf) {
+    return "no_evidence";
+  }
   const isSelectedRelease = (fact: StoredTerminalFact) =>
     release !== null &&
     fact.artifact_digest === release.artifactDigest &&
@@ -3857,6 +3877,21 @@ function terminalCoverageVerdict(
     )
     ? "covered"
     : "incomplete";
+}
+
+function receiptAsOf(
+  receipt: LocalOutboxInspection["terminalCoverage"]
+): LocalOutboxStatusOutput["terminal_coverage"]["as_of"] {
+  const asOf = receipt?.asOf;
+  return asOf
+    ? {
+        acknowledged_at: asOf.acknowledgedAt,
+        collection_revision: asOf.collectionRevision,
+        run_id: asOf.runId,
+        run_sequence: asOf.runSequence,
+        storage_epoch: asOf.storageEpoch,
+      }
+    : null;
 }
 
 function emptyOutboxSummary(): LocalDeviceOutboxSummary {

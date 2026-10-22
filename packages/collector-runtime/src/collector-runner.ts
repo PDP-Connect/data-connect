@@ -57,6 +57,7 @@ import {
   LocalDeviceOutbox,
   type LocalDeviceOutboxItem,
   type LocalDeviceOutboxSummary,
+  type TerminalRunAck,
 } from "./local-device-outbox.ts";
 import type { LocalDeviceQueue, LocalDeviceQueueItem } from "./local-device-queue.ts";
 import { resolveConnectorCommand } from "./resolve-tsx-binary.ts";
@@ -997,6 +998,11 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       recordsPending: pendingOutboxWorkCount(postDrainSummary),
     });
     const priorState = priorStateProjection.state;
+    // The run id the server orders this run by, and the one its terminal
+    // record names. Registered before the scan, so every record the scan
+    // admits is ordered after any earlier run's proof.
+    const runId = config.runId ?? randomUUID();
+    await registerRunStart({ client, config, connectorInstanceId: priorStateProjection.connectorInstanceId, runId });
 
     await client.heartbeat({
       agent_version: COLLECTOR_AGENT_VERSION,
@@ -1107,6 +1113,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       holderId,
       outbox,
       policy,
+      runId,
       terminalEvidence,
       terminalRunBoundary: collectorScopeFingerprint(declaredScope),
       terminalRunConnectorInstanceId: priorStateProjection.connectorInstanceId,
@@ -1344,6 +1351,37 @@ async function maybeSkipScanForBacklog(input: MaybeSkipScanInput): Promise<Colle
     statePutFailed: false,
     streamingBufferHighWaterMark: 0,
   };
+}
+
+/**
+ * Register the run with the server at its start. The answered sequence is the
+ * run's place in run order: only a run with one can produce an eligible
+ * coverage proof. A server without the route, a connection the state read did
+ * not name, or a failed call leaves the run without a sequence. The run still
+ * collects and commits its terminal record, which then reads as unknown
+ * coverage.
+ */
+async function registerRunStart(input: {
+  client: Pick<LocalDeviceClient, "startRun">;
+  config: CollectorRunConfig;
+  connectorInstanceId: string;
+  runId: string;
+}): Promise<void> {
+  if (!input.connectorInstanceId) {
+    return;
+  }
+  throwIfAborted(input.config.abortSignal);
+  try {
+    await input.client.startRun({
+      connector_id: input.config.connector.connector_id,
+      run_id: input.runId,
+      source_instance_id: input.config.sourceInstanceId,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `${input.config.connector.connector_id} run start not registered; this run cannot prove coverage (${error instanceof Error ? error.message : String(error)})\n`
+    );
+  }
 }
 
 async function readPriorStateOrBlock(input: {
@@ -2210,6 +2248,7 @@ async function maybeCommitCheckpoint(input: {
   holderId: string;
   outbox: LocalDeviceOutbox;
   policy: CollectorOutboxPolicy;
+  runId: string;
   terminalEvidence: TerminalEvidence | null;
   terminalRunBoundary: string;
   terminalRunConnectorInstanceId: string;
@@ -2221,7 +2260,7 @@ async function maybeCommitCheckpoint(input: {
     return { flushedState: null, statePutFailed: false };
   }
 
-  const runId = input.config.runId ?? randomUUID();
+  const { runId } = input;
   const terminalCommitIdentity = input.terminalEvidence
     ? {
         collection_boundary: input.terminalRunBoundary,
@@ -3029,7 +3068,7 @@ async function drainClaimedOutboxItem(
       leaseEpoch: item.lease_epoch,
       leaseMs: input.policy.leaseMs,
     });
-    await sendOutboxItem(input.client, current, {
+    const terminalAck = await sendOutboxItem(input.client, current, {
       ...(input.blobUpload ? { blobUpload: input.blobUpload } : {}),
       ...(input.spool ? { spool: input.spool } : {}),
     });
@@ -3037,6 +3076,7 @@ async function drainClaimedOutboxItem(
       holder: input.holderId,
       id: current.id,
       leaseEpoch: current.lease_epoch,
+      ...(terminalAck ? { terminalAck } : {}),
     });
     result.sent += 1;
     sentByKind[current.kind] = (sentByKind[current.kind] ?? 0) + 1;
@@ -3134,12 +3174,26 @@ interface SendOutboxItemDeps {
   spool?: LocalDeviceBlobSpool;
 }
 
+/**
+ * What the server acknowledged for a terminal record: the run's place in run
+ * order and its commit revision. The receipt keeps them so the device can show
+ * the as-of and keep a newer run's receipt over an older run's late ACK.
+ */
+function terminalRunAck(response: Awaited<ReturnType<LocalDeviceClient["commitTerminalRun"]>>): TerminalRunAck {
+  return {
+    collectionRevision: response.collection_revision ?? null,
+    runId: response.run_id,
+    runSequence: response.run_sequence ?? null,
+    storageEpoch: response.storage_epoch ?? null,
+  };
+}
+
 async function sendOutboxItem(
   client: Pick<LocalDeviceClient, "ackLocalCollectorGap" | "ingestBatch" | "putSourceInstanceState"> &
     Partial<Pick<LocalDeviceClient, "commitTerminalRun">>,
   item: LocalDeviceOutboxItem,
   deps: SendOutboxItemDeps = {}
-): Promise<void> {
+): Promise<TerminalRunAck | undefined> {
   if (item.kind === "record_batch") {
     const payload = assertRecordBatchPayload(item.payload, item.id);
     if (payload.records.length === 0) {
@@ -3169,8 +3223,7 @@ async function sendOutboxItem(
     if (!client.commitTerminalRun) {
       throw new OutboxPayloadShapeError("collector client does not support terminal_run_commit; upgrade required");
     }
-    await client.commitTerminalRun(assertTerminalRunCommitPayload(item.payload, item.id));
-    return;
+    return terminalRunAck(await client.commitTerminalRun(assertTerminalRunCommitPayload(item.payload, item.id)));
   }
   if (item.kind === "gap") {
     // Validate first so a malformed gap dead-letters via OutboxPayloadShapeError
