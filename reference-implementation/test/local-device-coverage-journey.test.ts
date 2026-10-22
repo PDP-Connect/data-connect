@@ -286,21 +286,20 @@ async function runOnce(
   journey: Journey,
   mode: string,
   tag: string,
-  options: { deviceToken?: string } = {}
+  options: { deviceToken?: string; negotiateCoverage?: boolean } = {}
 ): Promise<RunOutcome> {
   const observePath = join(journey.dir, `start-${tag}.json`);
-  const connector: CollectorConnectorSpec = bindOptionalRunCoverageToRelease(
-    {
-      args: [journey.childPath, mode, observePath, tag],
-      command: process.execPath,
-      connector_id: CONNECTOR_ID,
-      protocol_capabilities: [],
-      runtime_requirements: { bindings: {} },
-      streams: STREAMS,
-    },
-    { digest: ARTIFACT_DIGEST },
-    PROFILE
-  );
+  const unbound: CollectorConnectorSpec = {
+    args: [journey.childPath, mode, observePath, tag],
+    command: process.execPath,
+    connector_id: CONNECTOR_ID,
+    protocol_capabilities: [],
+    runtime_requirements: { bindings: {} },
+    streams: STREAMS,
+  };
+  const connector = options.negotiateCoverage === false
+    ? unbound
+    : bindOptionalRunCoverageToRelease(unbound, { digest: ARTIFACT_DIGEST }, PROFILE);
   const result = await runCollectorConnector({
     baseUrl: journey.asUrl,
     connector,
@@ -400,6 +399,11 @@ async function ownerConnectionRow(journey: Lane): Promise<OwnerConnectionRow> {
   });
   assert.equal(detail.status, 200, JSON.stringify(detail.body));
   assert.deepEqual(detail.body?.collection_report, row.collection_report, "list and detail agree");
+  assert.equal(
+    (detail.body as unknown as OwnerConnectionRow).connection_health.axes.coverage,
+    (row as unknown as OwnerConnectionRow).connection_health.axes.coverage,
+    "list and detail agree on coverage"
+  );
   return row as unknown as OwnerConnectionRow;
 }
 
@@ -440,6 +444,7 @@ test("J1: a registered release's run coverage crosses child, runner, server and 
     assert.equal(aDevice.lifecycle_state, "covered");
     const aReceipt = deviceReceiptFacts(journey);
     assert.equal(aReceipt.length, 2, "the device holds a receipt for both streams");
+    assertJourneyStreams(aReceipt);
     assert.ok(
       aReceipt.every(
         (fact) =>
@@ -480,6 +485,7 @@ test("J1: a registered release's run coverage crosses child, runner, server and 
     assert.equal(c.result.done?.status, "succeeded");
     const cStreams = serverRunStreams("c-empty");
     assert.ok(cStreams, "the empty v2 report is acknowledged by the server");
+    assertJourneyStreams(cStreams);
     assert.ok(
       cStreams.every((stream) => JSON.stringify(stream.coverage_statuses) === '["unknown"]'),
       "the empty report commits unknown inventory, not collected stores"
@@ -490,6 +496,21 @@ test("J1: a registered release's run coverage crosses child, runner, server and 
     const cDevice = deviceStatus(journey);
     assert.equal(cDevice.terminal_coverage.verdict, "no_evidence");
     assert.equal(cDevice.lifecycle_state, "no_evidence");
+    assert.deepEqual(deviceReceiptFacts(journey), []);
+  });
+});
+
+test("A: without START coverage negotiation, a successful run supplies no positive coverage", async () => {
+  await withJourney(async (journey) => {
+    const outcome = await runOnce(journey, "empty", "unnegotiated", { negotiateCoverage: false });
+    assert.equal(outcome.observed.run_coverage_version, undefined, "START did not negotiate coverage");
+    assert.equal(outcome.result.done?.status, "succeeded");
+    const owner = await ownerConnectionRow(journey);
+    assert.equal(owner.connection_health.axes.coverage, "unknown");
+    assert.deepEqual(conditions(owner), { messages: "unknown", sessions: "unknown" });
+    const status = deviceStatus(journey);
+    assert.equal(status.terminal_coverage.verdict, "no_evidence");
+    assert.equal(status.lifecycle_state, "no_evidence");
     assert.deepEqual(deviceReceiptFacts(journey), []);
   });
 });
@@ -505,6 +526,9 @@ test("B2: a server-rejected record stays unadmitted, moves no cursor, and leaves
     assert.equal(serverRecordCount(journey, "sessions"), 0, "the rejected batch wrote no record");
     assert.deepEqual(serverCursors(journey), {}, "no cursor advanced");
     assert.equal(serverRunStreams("reject-1"), null, "no terminal commit was acknowledged");
+    const owner = await ownerConnectionRow(journey);
+    assert.equal(owner.connection_health.axes.coverage, "unknown");
+    assert.deepEqual(conditions(owner), { messages: "unknown", sessions: "unknown" });
     const status = deviceStatus(journey);
     assert.equal(status.terminal_coverage.verdict, "no_evidence");
     assert.notEqual(status.lifecycle_state, "covered");
@@ -893,10 +917,21 @@ async function ownerCoverage(lane: Lane): Promise<CoverageView> {
   return fromList;
 }
 
+/** Every journey fact set contains exactly one fact for each requested stream. */
+function assertJourneyStreams(streams: readonly Record<string, unknown>[]): void {
+  assert.equal(streams.length, 2, "facts exist for exactly two streams");
+  assert.deepEqual(
+    streams.map((stream) => stream.stream).sort(),
+    ["messages", "sessions"],
+    "facts name each requested stream exactly once"
+  );
+}
+
 /** The stream facts the server stored for one terminal commit. The commit must exist. */
 function requireRunStreams(runId: string): Record<string, unknown>[] {
   const streams = serverRunStreams(runId);
   assert.ok(streams, `the server committed run ${runId}`);
+  assertJourneyStreams(streams);
   return streams;
 }
 
@@ -988,6 +1023,7 @@ test("J2-install: a release installed through the shipped collection-profile pat
       assert.equal(aDevice.terminal_coverage.verdict, "covered");
       assert.equal(aDevice.lifecycle_state, "covered");
       const aReceipts = deviceReceiptFacts(lane);
+      assertJourneyStreams(aReceipts);
       assert.equal(
         aReceipts.length,
         2,
@@ -1056,8 +1092,10 @@ test("J2-install: a release installed through the shipped collection-profile pat
       assert.equal(bBefore.lifecycle_state, "coverage_not_current");
       // No A proof is relabelled as B: the device still holds only A's receipt, and the server still
       // records run A as A.
+      const unchangedReceipts = deviceReceiptFacts(lane);
+      assertJourneyStreams(unchangedReceipts);
       assert.ok(
-        deviceReceiptFacts(lane).every(
+        unchangedReceipts.every(
           (fact) => fact.artifact_digest === pinA.digest,
         ),
         "the device receipt still names release A",
@@ -1092,6 +1130,7 @@ test("J2-install: a release installed through the shipped collection-profile pat
       assert.equal(bDevice.terminal_coverage.verdict, "covered");
       assert.equal(bDevice.lifecycle_state, "covered");
       const bReceipts = deviceReceiptFacts(lane);
+      assertJourneyStreams(bReceipts);
       assert.equal(
         bReceipts.length,
         2,
