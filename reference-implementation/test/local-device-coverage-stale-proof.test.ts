@@ -696,12 +696,13 @@ test("revision: an unreadable or mismatched revision fails closed", async (t) =>
   }
 });
 
-// Legacy path: no v2 run exists, so the projection reads the committed
-// `coverage_diagnostics` snapshot. It binds to the revision of the state commit
-// that wrote it.
+// Legacy path: no v2 run exists, only a committed `coverage_diagnostics`
+// snapshot. That snapshot names no run and no release digest, so it is never a
+// positive proof: the projection is unknown even while its commit is the
+// newest event.
 const LEGACY_DIAGNOSTICS_STREAM = "coverage_diagnostics";
 
-test("revision: a legacy diagnostics proof stands while its commit is newest; any later commit retires it", async (t) => {
+test("revision: a legacy diagnostics snapshot never shows positive coverage, even as the newest commit", async (t) => {
   await withBoundaryConnection(async () => {
     const stores = expectedLocalCoverageStoreDescriptors(connectorId);
     assert.ok(stores, "the claude-code inventory declares its coverage stores");
@@ -715,25 +716,19 @@ test("revision: a legacy diagnostics proof stands while its commit is newest; an
       [LEGACY_DIAGNOSTICS_STREAM]: snapshot,
       messages: { cursor: "own" },
     });
+    const revision = highWaterRevision();
+    assert.ok(revision > 0, "the commit took a revision");
     const projected = await boundaryProjection();
-    assert.equal(projected.axis, "complete", "the legacy snapshot is a reliable complete proof");
-    assert.equal(projected.asOf?.evidence, "legacy_diagnostics", "the legacy proof carries its as-of");
-    assert.deepEqual(projected.asOf, {
-      artifact_digest: null,
-      collection_revision: highWaterRevision(),
-      committed_at: PROOF_AT,
-      evidence: "legacy_diagnostics",
-      run_id: null,
-    });
+    // Without a run id and release digest there is nothing for the owner's "complete as of" to name.
+    assert.equal(projected.axis, "unknown", "a fully collected legacy snapshot without run provenance is unknown");
+    assert.deepEqual(projected.conditions, UNKNOWN);
+    assert.equal(projected.asOf, null, "unknown coverage carries no as-of");
 
-    await putSyncState(BOUNDARY_TARGET, {
-      messages: { cursor: "same-instant" },
-    });
-    assert.equal(
-      (await boundaryProjection()).axis,
-      "unknown",
-      "a separate commit at the same instant retires the legacy proof"
-    );
+    // A v2 proof after the snapshot is the current proof, and it names its run.
+    await seedV2Proof("run_after_legacy_snapshot");
+    const proof = await boundaryProjection();
+    assert.equal(proof.axis, "complete");
+    assert.equal(proof.asOf?.run_id, "run_after_legacy_snapshot");
   });
 });
 

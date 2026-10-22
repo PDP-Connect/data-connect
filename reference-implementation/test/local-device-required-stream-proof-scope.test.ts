@@ -28,7 +28,11 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
-import { putSyncState, readCommittedLocalCoverageDiagnostics } from "../server/records.ts";
+import {
+  putSyncState,
+  readCommittedLocalCoverageDiagnostics,
+  readCommittedLocalCoverageDiagnosticsByConnectionIds,
+} from "../server/records.ts";
 import { deriveLocalCoverageAxis, listConnectorSummaries } from "../server/ref-control.ts";
 import { rebuildRetainedSize } from "../server/retained-size-read-model.ts";
 import { recordCollectionRevisionEvent } from "../server/stores/collection-revision-store.ts";
@@ -240,6 +244,38 @@ async function seedLocalRun({
   await rebuildRetainedSize();
 }
 
+/**
+ * The legacy snapshot's own classification against the declared boundary,
+ * before the owner projection decides whether it may show it. A legacy
+ * `coverage_diagnostics` snapshot names no run and no release digest, so the
+ * owner projection never shows it as positive coverage; these tests still pin
+ * that the boundary comparison classifies it correctly.
+ */
+async function legacySnapshotAxis() {
+  // The connection-keyed reader is the one the owner rollup uses.
+  const proof = (await readCommittedLocalCoverageDiagnosticsByConnectionIds([CONNECTOR_INSTANCE_ID])).get(
+    CONNECTOR_INSTANCE_ID
+  );
+  assert.ok(proof, "the connection has a committed coverage snapshot");
+  return deriveLocalCoverageAxis({ ...proof, nowIso: new Date().toISOString() });
+}
+
+/** A complete legacy snapshot is unknown to the owner: it carries no run id or release digest for its as-of. */
+function assertLegacyCompleteIsWithheld(
+  manifest: TestManifest,
+  report: Awaited<ReturnType<typeof projectReport>>,
+  why: string
+): void {
+  assert.equal(report.coverageAxis, "unknown", `${why}, but without run provenance it is not shown`);
+  for (const stream of requiredStreams(manifest)) {
+    assert.equal(
+      report.entryFor(stream)?.coverage_condition,
+      "unknown",
+      `${stream}: ${why}, but a legacy snapshot cannot back "complete as of" a run`
+    );
+  }
+}
+
 interface TestReportEntry {
   readonly coverage_condition?: unknown;
   readonly forward_disposition?: unknown;
@@ -320,15 +356,10 @@ for (const name of LOCAL_COLLECTORS) {
       const manifest = readManifest(name);
       await seedLocalRun({ declaredScope: SAMPLE_SCOPE, manifest, measuredScope: SAMPLE_FINGERPRINT });
 
-      const { coverageAxis, entryFor } = await projectReport();
-      assert.equal(coverageAxis, "complete");
-      for (const stream of requiredStreams(manifest)) {
-        assert.equal(
-          entryFor(stream)?.coverage_condition,
-          "complete",
-          `${stream}: a sample run that enforced the declared bound proves that region`
-        );
-      }
+      const snapshot = await legacySnapshotAxis();
+      assert.equal(snapshot.axis, "complete", "a sample run that enforced the declared bound classifies that region");
+      assert.equal(snapshot.measuredCollectionScope, SAMPLE_FINGERPRINT);
+      assertLegacyCompleteIsWithheld(manifest, await projectReport(), "the sample run measured the declared region");
     })
   );
 
@@ -342,13 +373,10 @@ for (const name of LOCAL_COLLECTORS) {
       const manifest = readManifest(name);
       await seedLocalRun({ manifest });
 
-      const { coverageAxis, entryFor } = await projectReport();
-      assert.equal(coverageAxis, "complete");
+      assert.equal((await legacySnapshotAxis()).axis, "complete", "every expected store was collected");
       const required = requiredStreams(manifest);
       assert.ok(required.length > 0, "the shipped manifest must declare required streams");
-      for (const stream of required) {
-        assert.equal(entryFor(stream)?.coverage_condition, "complete", `${stream} must prove complete`);
-      }
+      assertLegacyCompleteIsWithheld(manifest, await projectReport(), "the full pass collected every store");
     })
   );
 
@@ -362,15 +390,12 @@ for (const name of LOCAL_COLLECTORS) {
       const manifest = readManifest(name);
       await seedLocalRun({ emitRecords: false, manifest });
 
-      const { coverageAxis, entryFor } = await projectReport();
-      assert.equal(coverageAxis, "complete");
-      for (const stream of requiredStreams(manifest)) {
-        assert.equal(
-          entryFor(stream)?.coverage_condition,
-          "complete",
-          `${stream}: a measured empty pass is proven coverage, not a gap`
-        );
-      }
+      assert.equal(
+        (await legacySnapshotAxis()).axis,
+        "complete",
+        "a measured empty pass classifies as coverage, not a gap"
+      );
+      assertLegacyCompleteIsWithheld(manifest, await projectReport(), "the empty pass measured every store");
     })
   );
 

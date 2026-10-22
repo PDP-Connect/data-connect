@@ -4932,10 +4932,7 @@ export async function readCommittedLocalCoverageDiagnostics(storageTarget: Recor
     ...parseCoverageDiagnosticsStateSnapshot(connectorId, state),
     declaredCollectionScope,
     manifestGeneration: currentGeneration === null ? null : Number(currentGeneration),
-    revisionFence:
-      (await readLocalCoverageRevisionFences([connectorInstanceId], LOCAL_COVERAGE_DIAGNOSTICS_STREAM)).get(
-        connectorInstanceId
-      ) ?? null,
+    revisionFence: (await readLocalCoverageRevisionFences([connectorInstanceId])).get(connectorInstanceId) ?? null,
     state,
     stateManifestGeneration: stateGeneration === null ? null : Number(stateGeneration),
     updatedAt: stateProjection.updated_at ?? null,
@@ -5002,7 +4999,7 @@ export async function readCommittedLocalCoverageDiagnosticsByConnectionIds(conne
       );
     }
   }
-  const revisionFences = await readLocalCoverageRevisionFences(ids, LOCAL_COVERAGE_DIAGNOSTICS_STREAM);
+  const revisionFences = await readLocalCoverageRevisionFences(ids);
   for (const row of rows) {
     // `row.state_json` is already the `coverage_diagnostics` stream's own
     // payload — the JOIN's `ON` clause already narrows `cs.stream =

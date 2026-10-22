@@ -4833,15 +4833,16 @@ interface LocalCoverageDiagnosticAxis {
 /**
  * The run a local coverage verdict describes. Coverage is a fact about one
  * run, never a present-tense claim, so every projection that shows coverage
- * carries this. A legacy diagnostics proof has no release binding, so its
- * `artifact_digest` is null; its `run_id` is null when no run committed it.
+ * carries this: the run, the release digest it ran, and the collection
+ * revision and time it was committed at. Only a v2 terminal run record
+ * carries all of them, so it is the only positive proof.
  */
 export interface LocalCoverageAsOf {
-  readonly artifact_digest: string | null;
+  readonly artifact_digest: string;
   readonly collection_revision: number;
   readonly committed_at: string | null;
-  readonly evidence: "legacy_diagnostics" | "terminal_run";
-  readonly run_id: string | null;
+  readonly evidence: "terminal_run";
+  readonly run_id: string;
 }
 
 const LOCAL_COVERAGE_ACCOUNTED_STATUSES = new Set([
@@ -5174,14 +5175,17 @@ function localProofRunCoverage(
  * admitted and refused batches, delivered failure reports). A proof binds to
  * the revision it was committed at. It is current only when that revision is
  * the high-water mark; any later event retires it to unknown. No wall clock is
- * compared. A v2 proof must also be the terminal run the high-water mark names.
- * A legacy diagnostics proof is the `coverage_diagnostics` row, at the revision
- * of the commit that wrote it.
+ * compared. The proof must also be the terminal run the high-water mark names,
+ * and it must name its release digest.
+ *
+ * Only a v2 terminal run record is a positive proof. A legacy
+ * `coverage_diagnostics` state row names no run and no release, so it never
+ * shows positive coverage: the projection is unknown.
  *
  * Fails closed: a missing fence, an unreadable or NULL revision, any
- * mismatch, or (for a terminal proof) a newest settled device run that is not
- * the proof and carries no revision, whose order is ambiguous, is unknown
- * coverage.
+ * mismatch, a proof without a single release digest, or a newest settled
+ * device run that is not the proof and carries no revision, whose order is
+ * ambiguous, is unknown coverage.
  */
 function fenceLocalCoverageProof(
   axis: LocalCoverageDiagnosticAxis | null,
@@ -5196,48 +5200,29 @@ function fenceLocalCoverageProof(
   // A settled device run record with no revision cannot be ordered against a
   // terminal proof (a pre-revision row, or a writer that assigns none). If it
   // is the newest settled run and not the proof itself, the order is
-  // ambiguous. A scheduler-managed run is not a device collection attempt. A
-  // legacy diagnostics proof binds to a state row, not to a run record, so
-  // this check does not apply to it.
+  // ambiguous. A scheduler-managed run is not a device collection attempt.
   const unorderedLaterRun =
     terminal !== null &&
     latestSettledRun !== null &&
     latestSettledRun.scheduler_managed !== true &&
-    latestSettledRun.run_id !== terminal?.runId &&
+    latestSettledRun.run_id !== terminal.runId &&
     (latestSettledRun.collection_revision === null || latestSettledRun.collection_revision === undefined);
-  let asOf: LocalCoverageAsOf | null = null;
-  if (unorderedLaterRun) {
-    asOf = null;
-  } else if (terminal) {
-    if (
-      highWater?.event === "terminal_run" &&
-      highWater.runId === terminal.runId &&
-      terminal.collectionRevision !== null &&
-      terminal.collectionRevision === highWater.revision
-    ) {
-      asOf = {
-        artifact_digest: terminal.artifactDigest,
-        collection_revision: highWater.revision,
-        committed_at: terminal.run.last_at ?? null,
-        evidence: "terminal_run",
-        run_id: terminal.runId,
-      };
-    }
-  } else if (
-    highWater &&
-    (highWater.event === "state_commit" || highWater.event === "terminal_run") &&
-    fence?.legacyProofRevision !== null &&
-    fence?.legacyProofRevision !== undefined &&
-    fence.legacyProofRevision === highWater.revision
-  ) {
-    asOf = {
-      artifact_digest: null,
-      collection_revision: highWater.revision,
-      committed_at: highWater.at,
-      evidence: "legacy_diagnostics",
-      run_id: highWater.event === "terminal_run" ? highWater.runId : null,
-    };
-  }
+  const asOf: LocalCoverageAsOf | null =
+    terminal &&
+    !unorderedLaterRun &&
+    terminal.artifactDigest !== null &&
+    highWater?.event === "terminal_run" &&
+    highWater.runId === terminal.runId &&
+    terminal.collectionRevision !== null &&
+    terminal.collectionRevision === highWater.revision
+      ? {
+          artifact_digest: terminal.artifactDigest,
+          collection_revision: highWater.revision,
+          committed_at: terminal.run.last_at ?? null,
+          evidence: "terminal_run",
+          run_id: terminal.runId,
+        }
+      : null;
   if (!asOf) {
     return {
       ...axis,
@@ -7273,8 +7258,8 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const localCollectorRelease = localDeviceBacked ? readLocalCollectorRelease(connectorId) : null;
   // The proof is the terminal run the connection's revision high-water mark
-  // names (else the legacy diagnostics row). Any later observed event retires
-  // it. The downstream readers below all take `effectiveLocalCoverage`, so the
+  // names; a legacy diagnostics row is never one. Any later observed event
+  // retires it. The downstream readers below all take `effectiveLocalCoverage`, so the
   // retirement reaches every consumer, not only this branch.
   const proofRunCoverage = localDeviceBacked
     ? localProofRunCoverage(localCoverage?.revisionFence, connectorInstanceId)
@@ -9919,6 +9904,11 @@ export interface OwnerConnectionDiagnostics {
   readonly connection_id: string;
   readonly connector_id: string;
   readonly connector_key: string;
+  /**
+   * What the coverage in `health.axes` and `rendered_verdict` is a fact
+   * about. See {@link ConnectorSummary.coverage_as_of}.
+   */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   readonly display_name: string | null;
   readonly freshness: Freshness;
   readonly health: OwnerConnectionDiagnosticsHealth;
@@ -10053,6 +10043,7 @@ export async function getOwnerConnectionDiagnostics(
     connection_id: summary.connection_id,
     connector_id: summary.connector_id,
     connector_key: summary.connector_id,
+    coverage_as_of: summary.coverage_as_of,
     display_name: summary.display_name,
     freshness: summary.freshness,
     health: {

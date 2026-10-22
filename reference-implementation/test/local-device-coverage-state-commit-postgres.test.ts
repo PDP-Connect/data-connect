@@ -147,7 +147,6 @@ test("real PostgreSQL: the collection revision orders commits and observed event
     );
     assert.equal(afterRun.withState?.proofRun?.runId, PROOF_RUN, "the fence reads the run the high-water mark names");
     assert.equal(afterRun.withState?.proofRun?.facts?.collection_revision, 2, "the run record carries its revision");
-    assert.equal(afterRun.withState?.legacyProofRevision, null, "no diagnostics row exists");
     assert.deepEqual(afterRun.scopeOnly?.highWater, {
       at: null,
       event: null,

@@ -634,11 +634,11 @@ export interface RefConnectorImplementation {
 
 /** See {@link RefConnectorSummary.coverage_as_of}. */
 export interface RefCoverageAsOf {
-  readonly artifact_digest: string | null;
+  readonly artifact_digest: string;
   readonly collection_revision: number;
   readonly committed_at: string | null;
-  readonly evidence: string;
-  readonly run_id: string | null;
+  readonly evidence: "terminal_run";
+  readonly run_id: string;
 }
 
 export interface RefConnectorSummary {

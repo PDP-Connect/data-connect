@@ -183,13 +183,12 @@ export interface LocalCoverageProofRun {
 
 /**
  * Everything the projection needs to decide whether a local coverage proof is
- * current. `highWater` is null when the connection has no readable revision.
- * `legacyProofRevision` is the revision stamped on the `coverage_diagnostics`
- * state row. `proofRun` is present only when the newest event is a terminal run.
+ * current, read in one snapshot. `highWater` is null when the connection has
+ * no readable revision. `proofRun` is present only when the newest event is a
+ * terminal run.
  */
 export interface LocalCoverageRevisionFence {
   readonly highWater: CollectionRevisionHighWater | null;
-  readonly legacyProofRevision: number | null;
   readonly proofRun: LocalCoverageProofRun | null;
 }
 
@@ -207,8 +206,7 @@ function parseFacts(value: unknown): Record<string, unknown> | null {
 
 /** Batched fence read for one page of connections, keyed by connector instance. */
 export async function readLocalCoverageRevisionFences(
-  connectorInstanceIds: readonly string[],
-  legacyProofStream: string
+  connectorInstanceIds: readonly string[]
 ): Promise<Map<string, LocalCoverageRevisionFence>> {
   interface Row {
     collection_revision: unknown;
@@ -216,7 +214,6 @@ export async function readLocalCoverageRevisionFences(
     collection_revision_event: string | null;
     collection_revision_run_id: string | null;
     connector_instance_id: string;
-    legacy_proof_revision: unknown;
     proof_completed_at: string | null;
     proof_facts_json: unknown;
     proof_run_id: string | null;
@@ -228,24 +225,21 @@ export async function readLocalCoverageRevisionFences(
   if (ids.length === 0) {
     return new Map();
   }
-  const select = (revisionColumn: string, legacyColumn: string, stream: string, runTerminal: string) =>
+  const select = (revisionColumn: string, runTerminal: string) =>
     `SELECT ci.connector_instance_id, ${revisionColumn} AS collection_revision, ci.collection_revision_event,
             ci.collection_revision_run_id, ci.collection_revision_at,
-            ${legacyColumn} AS legacy_proof_revision,
             rh.run_id AS proof_run_id, rh.status AS proof_status, rh.scheduler_managed AS proof_scheduler_managed,
             rh.completed_at AS proof_completed_at, rh.facts_json AS proof_facts_json
        FROM connector_instances ci
-       LEFT JOIN connector_state cs
-         ON cs.connector_instance_id = ci.connector_instance_id AND cs.stream = ${stream}
        LEFT JOIN run_history rh
          ON rh.connector_instance_id = ci.connector_instance_id
         AND rh.run_id = ci.collection_revision_run_id
         AND ci.collection_revision_event = ${runTerminal}`;
   if (isPostgresStorageBackend()) {
     const result = await postgresQuery<Row>(
-      `${select("ci.collection_revision::text", "cs.collection_revision::text", "$2", "$3")}
+      `${select("ci.collection_revision::text", "$2")}
         WHERE ci.connector_instance_id = ANY($1::text[])`,
-      [ids, legacyProofStream, "terminal_run"]
+      [ids, "terminal_run"]
     );
     rows.push(...result.rows);
   } else {
@@ -254,10 +248,10 @@ export async function readLocalCoverageRevisionFences(
       rows.push(
         ...(getDb()
           .prepare(
-            `${select("ci.collection_revision", "cs.collection_revision", "?", "?")}
+            `${select("ci.collection_revision", "?")}
               WHERE ci.connector_instance_id IN (${chunk.map(() => "?").join(", ")})`
           )
-          .all(legacyProofStream, "terminal_run", ...chunk) as Row[])
+          .all("terminal_run", ...chunk) as Row[])
       );
     }
   }
@@ -274,8 +268,6 @@ export async function readLocalCoverageRevisionFences(
               revision,
               runId: row.collection_revision_run_id ?? null,
             },
-      legacyProofRevision:
-        row.legacy_proof_revision === null ? null : readCollectionRevision(row.legacy_proof_revision),
       proofRun:
         typeof row.proof_run_id === "string" && typeof row.proof_status === "string"
           ? {
