@@ -37,6 +37,7 @@ import {
   type EnrollmentExchangeResponse,
   type HeartbeatLastError,
   type HeartbeatOutboxDiagnostics,
+  type IngestBatchReceipt,
   LocalDeviceClient,
   LocalDeviceHttpError,
   LocalDeviceReceiptValidationError,
@@ -1063,29 +1064,24 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
             config.connector.sourceRootScopableStreams
           )
         : null;
-    const typedTerminalFacts =
-      done?.status === "succeeded" && !streamResult.scanBudgetExceeded && done.coverage
-        ? done.coverage.streams.map(
-            (stream): TerminalCoverageFact => ({
-              artifact_digest: config.connector.artifactDigest as string,
-              manifest_fingerprint: config.connector.manifestFingerprint as string,
-              runtime_accounting: {
-                checkpoint_eligible: true,
-                detail_complete: true,
-                durable_admission:
-                  recordDrain.failed === 0 &&
-                  afterRecordsSummary.ready === 0 &&
-                  afterRecordsSummary.leased === 0 &&
-                  afterRecordsSummary.deadLetter === 0,
-                outstanding_debt: 0,
-                stream_evidence_consistent: true,
-              },
-              scoped: stream.scoped,
-              stores: stream.stores,
-              stream: stream.stream,
-            })
-          )
-        : null;
+    const durableAdmission =
+      recordDrain.failed === 0 &&
+      afterRecordsSummary.ready === 0 &&
+      afterRecordsSummary.leased === 0 &&
+      afterRecordsSummary.deadLetter === 0;
+    const durableDebt = afterRecordsSummary.ready + afterRecordsSummary.leased + afterRecordsSummary.deadLetter;
+    const typedTerminalFacts = buildTypedTerminalCoverageFacts({
+      connector: config.connector,
+      done,
+      durableAdmission,
+      durableDebt,
+      streamResult,
+    });
+    const hasTypedTerminalEvidence = typedTerminalFacts !== null;
+    // A typed terminal commit carries both evidence and state. Keep state out
+    // of that commit when an effect was not durably admitted; a coverage
+    // downgrade alone does not change the normal checkpoint policy.
+    const checkpointState = Object.freeze(hasTypedTerminalEvidence && !durableAdmission ? {} : { ...bufferedState });
     let terminalEvidence: TerminalEvidence | null = null;
     if (typedTerminalFacts) {
       terminalEvidence = { facts: typedTerminalFacts, version: 2 };
@@ -1094,7 +1090,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
     }
     const checkpointResult = await maybeCommitCheckpoint({
       afterRecordsSummary,
-      bufferedState,
+      bufferedState: checkpointState,
       client,
       config,
       holderId,
@@ -1397,9 +1393,13 @@ interface StreamConnectorIntoOutboxResult {
    */
   coverageByStore: Map<string, { status: CollectorCoverageStatus; stream: string | null }> | null;
   done: Extract<EmittedMessage, { type: "DONE" }> | null;
+  duplicateStreamEvidence: ReadonlySet<string>;
   enqueuedBatches: number;
+  recordsObservedByStream: ReadonlyMap<string, number>;
   recordsQueued: number;
   scanBudgetExceeded: boolean;
+  skipCountByStream: ReadonlyMap<string, number>;
+  streamEvidenceByStream: ReadonlyMap<string, Extract<EmittedMessage, { type: "STREAM_EVIDENCE" }>>;
 }
 
 /**
@@ -1462,12 +1462,66 @@ function assertValidStreamEvidence(
   }
   try {
     validateStreamEvidenceCounts(message);
+    if (message.reference_only !== true) {
+      throw new Error("STREAM_EVIDENCE must be reference-only");
+    }
   } catch (error) {
     throw new Error(
       `${connector.connector_id} emitted STREAM_EVIDENCE with invalid outcome counts for stream '${message.stream}'`,
       { cause: error }
     );
   }
+}
+
+function buildTypedTerminalCoverageFacts(input: {
+  connector: CollectorRunConfig["connector"];
+  done: Extract<EmittedMessage, { type: "DONE" }> | null;
+  durableAdmission: boolean;
+  durableDebt: number;
+  streamResult: StreamConnectorIntoOutboxResult;
+}): readonly TerminalCoverageFact[] | null {
+  if (input.done?.status !== "succeeded" || input.streamResult.scanBudgetExceeded) {
+    return null;
+  }
+  if (!input.done.coverage) {
+    return input.connector.runCoverageVersion === 1 ? [] : null;
+  }
+
+  const evidenceRequired = input.connector.protocol_capabilities.includes("STREAM_EVIDENCE");
+  return input.done.coverage.streams.map((stream): TerminalCoverageFact => {
+    const evidence = input.streamResult.streamEvidenceByStream.get(stream.stream);
+    const skipCount = input.streamResult.skipCountByStream.get(stream.stream) ?? 0;
+    const recordCount = input.streamResult.recordsObservedByStream.get(stream.stream) ?? 0;
+    const evidenceConsistent =
+      !input.streamResult.duplicateStreamEvidence.has(stream.stream) &&
+      (evidence ? evidence.outcomes.emitted === recordCount : !evidenceRequired);
+    let evidenceDebt = 0;
+    if (evidence) {
+      evidenceDebt = evidence.outcomes.gapped + evidence.outcomes.unaccounted + (evidenceConsistent ? 0 : 1);
+    } else if (evidenceRequired) {
+      evidenceDebt = 1;
+    }
+    const detailComplete = skipCount === 0 && evidenceDebt === 0;
+    // Completeness and checkpoint eligibility are separate: this signal only
+    // reflects whether the runtime admitted this run's durable effects.
+    const checkpointEligible = input.durableAdmission;
+    return {
+      artifact_digest: input.connector.artifactDigest as string,
+      manifest_fingerprint: input.connector.manifestFingerprint as string,
+      runtime_accounting: {
+        checkpoint_eligible: checkpointEligible,
+        detail_complete: detailComplete,
+        durable_admission: input.durableAdmission,
+        outstanding_debt: Math.min(Number.MAX_SAFE_INTEGER, input.durableDebt + skipCount + evidenceDebt),
+        stream_evidence_consistent: evidenceConsistent,
+      },
+      scoped: stream.scoped,
+      stores: stream.stores.map((store) =>
+        skipCount > 0 && store.status === "collected" ? { ...store, status: "partial" as const } : store
+      ),
+      stream: stream.stream,
+    };
+  });
 }
 
 /** Parse the optional terminal claim before it can enter a durable outbox row. */
@@ -1664,6 +1718,10 @@ async function streamConnectorIntoOutbox(
   const bufferedState: Record<string, unknown> = {};
   let batchSeq = nextOutboxBatchSeq(input.outbox, input.config.sourceInstanceId);
   let pendingRecords: Extract<EmittedMessage, { type: "RECORD" }>[] = [];
+  const recordsObservedByStream = new Map<string, number>();
+  const skipCountByStream = new Map<string, number>();
+  const streamEvidenceByStream = new Map<string, Extract<EmittedMessage, { type: "STREAM_EVIDENCE" }>>();
+  const duplicateStreamEvidence = new Set<string>();
   let bufferHighWaterMark = 0;
   let recordsQueued = 0;
   let recordsObserved = 0;
@@ -1756,6 +1814,7 @@ async function streamConnectorIntoOutbox(
     }
     if (message.type === "RECORD") {
       recordsObserved += 1;
+      recordsObservedByStream.set(message.stream, (recordsObservedByStream.get(message.stream) ?? 0) + 1);
       recordCoverageIfPresent(message);
       pendingRecords.push(message);
       if (pendingRecords.length > bufferHighWaterMark) {
@@ -1778,6 +1837,21 @@ async function streamConnectorIntoOutbox(
     }
     if (message.type === "STREAM_EVIDENCE") {
       assertValidStreamEvidence(message, input.config.connector);
+      if (!inScopeStreams.has(message.stream)) {
+        throw new Error(`${input.config.connector.connector_id} emitted STREAM_EVIDENCE outside its requested streams`);
+      }
+      if (streamEvidenceByStream.has(message.stream)) {
+        duplicateStreamEvidence.add(message.stream);
+      } else {
+        streamEvidenceByStream.set(message.stream, message);
+      }
+      return;
+    }
+    if (message.type === "SKIP_RESULT") {
+      if (!inScopeStreams.has(message.stream)) {
+        throw new Error(`${input.config.connector.connector_id} emitted SKIP_RESULT outside its requested streams`);
+      }
+      skipCountByStream.set(message.stream, (skipCountByStream.get(message.stream) ?? 0) + 1);
       return;
     }
     if (message.type === "DETAIL_GAP" || message.type === "DETAIL_COVERAGE") {
@@ -1952,9 +2026,13 @@ async function streamConnectorIntoOutbox(
     // run short — an honest partial coverage beats none.
     coverageByStore,
     done: scanBudgetExceeded ? null : done,
+    duplicateStreamEvidence,
     enqueuedBatches,
+    recordsObservedByStream,
     recordsQueued,
     scanBudgetExceeded,
+    skipCountByStream,
+    streamEvidenceByStream,
   };
 }
 
@@ -3025,16 +3103,16 @@ async function sendOutboxItem(
     if (payload.records.length === 0) {
       throw new OutboxPayloadShapeError(`record_batch payload has no records: ${item.id}`);
     }
-    await client.ingestBatch(
-      buildLocalDeviceIngestBatchRequest({
-        batchId: payload.batchId,
-        batchSeq: payload.batchSeq,
-        connectorId: payload.connectorId,
-        deviceId: payload.deviceId,
-        records: payload.records,
-        sourceInstanceId: payload.sourceInstanceId,
-      })
-    );
+    const request = buildLocalDeviceIngestBatchRequest({
+      batchId: payload.batchId,
+      batchSeq: payload.batchSeq,
+      connectorId: payload.connectorId,
+      deviceId: payload.deviceId,
+      records: payload.records,
+      sourceInstanceId: payload.sourceInstanceId,
+    });
+    const receipt = await client.ingestBatch(request);
+    assertAcceptedIngestBatchReceipt(receipt, request.records.length);
     return;
   }
   if (item.kind === "checkpoint") {
@@ -3076,6 +3154,19 @@ async function sendOutboxItem(
     return;
   }
   throw new OutboxPayloadShapeError(`unsupported outbox kind ${item.kind} for id ${item.id}`);
+}
+
+function assertAcceptedIngestBatchReceipt(receipt: IngestBatchReceipt, submittedRecordCount: number): void {
+  if (
+    receipt?.object !== "device_ingest_batch_result" ||
+    receipt.status !== "accepted" ||
+    receipt.accepted_record_count !== submittedRecordCount ||
+    receipt.rejected_record_count !== 0
+  ) {
+    throw new LocalDeviceReceiptValidationError(
+      "device ingest batch response rejected records or omitted durable admission counts"
+    );
+  }
 }
 
 /**
@@ -3268,7 +3359,7 @@ function assertTerminalRunCommitPayload(payload: unknown, id: string): TerminalR
     typeof payload.collection_boundary !== "string" ||
     !isRecord(payload.state_delta) ||
     !Array.isArray(payload.terminal_facts) ||
-    payload.terminal_facts.length === 0 ||
+    (payload.version === 1 && payload.terminal_facts.length === 0) ||
     !payload.terminal_facts.every(payload.version === 1 ? isTerminalCollectionFact : isTerminalCoverageFact)
   ) {
     throw new OutboxPayloadShapeError(`terminal_run_commit payload missing or invalid fields: ${id}`);

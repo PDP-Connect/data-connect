@@ -38,6 +38,15 @@ export interface TerminalRunCommitContext extends TerminalContext {
   commitTerminalRun: (input: ResolvedTerminalRunCommit) => Promise<TerminalRunCommitResult>;
   getConnectorManifest?: (connectorId: string) => Promise<unknown> | unknown;
   getExpectedArtifactDigest?: (connectorId: string) => string | null;
+  getRegisteredCollectionProfileRelease?: (
+    connectorId: string,
+    connectorInstanceId: string
+  ) => Promise<RegisteredCollectionProfileRelease | null> | RegisteredCollectionProfileRelease | null;
+}
+
+export interface RegisteredCollectionProfileRelease {
+  artifactDigest: string;
+  manifest: unknown;
 }
 
 /**
@@ -108,18 +117,27 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       return;
     }
 
+    const registeredReleaseResolver = ctx.getRegisteredCollectionProfileRelease;
+    const registeredRelease = registeredReleaseResolver
+      ? await registeredReleaseResolver(canonicalConnectorId, authorized.connectorInstance.connectorInstanceId)
+      : null;
+    const registeredManifest = registeredReleaseResolver
+      ? (registeredRelease?.manifest ?? (await ctx.getConnectorManifest?.(canonicalConnectorId)))
+      : await ctx.getConnectorManifest?.(canonicalConnectorId);
+    const expectedArtifactDigest = registeredReleaseResolver
+      ? (registeredRelease?.artifactDigest ?? null)
+      : (ctx.getExpectedArtifactDigest?.(canonicalConnectorId) ?? null);
+    const expectedManifestFingerprint = registeredReleaseResolver
+      ? (registeredRelease ? fingerprintDeviceAttemptManifest(registeredRelease.manifest) : null)
+      : undefined;
     const validatedFacts =
       version === 2
-        ? normalizeTerminalCoverageFacts(
-            rawFacts,
-            await ctx.getConnectorManifest?.(canonicalConnectorId),
-            collectionBoundary,
-            {
-              allowSubset: true,
-              bindingGeneration: authorized.sourceInstance.manifestGeneration ?? null,
-              expectedArtifactDigest: ctx.getExpectedArtifactDigest?.(canonicalConnectorId) ?? null,
-            }
-          )
+        ? normalizeTerminalCoverageFacts(rawFacts, registeredManifest, collectionBoundary, {
+            allowSubset: true,
+            bindingGeneration: authorized.sourceInstance.manifestGeneration ?? null,
+            expectedArtifactDigest,
+            ...(expectedManifestFingerprint !== undefined ? { expectedManifestFingerprint } : {}),
+          })
         : normalizedFacts;
     if (!validatedFacts) {
       ctx.pdppError(res, 400, "invalid_request", "terminal coverage does not match the manifest inventory");
@@ -357,6 +375,7 @@ export function normalizeTerminalCoverageFacts(
     allowSubset?: boolean;
     bindingGeneration?: number | null;
     expectedArtifactDigest?: string | null;
+    expectedManifestFingerprint?: string | null;
     validateBindingGeneration?: boolean;
     validateServerArtifactDigest?: boolean;
   } = {}
@@ -395,11 +414,35 @@ export function normalizeTerminalCoverageFacts(
     }
   }
   if (
-    rawFacts.length === 0 ||
+    (rawFacts.length === 0 && !options.allowSubset) ||
     rawFacts.length > inventory.size ||
     (!options.allowSubset && rawFacts.length !== inventory.size)
   ) {
     return null;
+  }
+  if (rawFacts.length === 0) {
+    const expectedArtifactDigest = ARTIFACT_DIGEST.test(options.expectedArtifactDigest ?? "")
+      ? options.expectedArtifactDigest
+      : null;
+    return [...inventory.entries()]
+      .filter(([, stores]) => stores.size > 0)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([stream, stores]) => ({
+        ...(expectedArtifactDigest ? { artifact_digest: expectedArtifactDigest } : {}),
+        ...(!expectedArtifactDigest ? { artifact_binding_reason: "artifact_digest_unknown" } : {}),
+        checkpoint: "withheld",
+        collected: 0,
+        considered: null,
+        covered: null,
+        manifest_fingerprint: manifestFingerprint,
+        server_artifact_digest: expectedArtifactDigest,
+        ...(Number.isSafeInteger(options.bindingGeneration) ? { binding_generation: options.bindingGeneration } : {}),
+        coverage_statuses: ["unknown"],
+        pending_detail_gaps: 0,
+        scoped: false,
+        stores: [...stores].sort().map((store) => ({ status: "unknown", store })),
+        stream,
+      }));
   }
   const seen = new Set<string>();
   const facts: Record<string, unknown>[] = [];
@@ -459,6 +502,9 @@ export function normalizeTerminalCoverageFacts(
     const bound =
       generationMatches &&
       entry.manifest_fingerprint === manifestFingerprint &&
+      (options.expectedManifestFingerprint === undefined ||
+        (typeof options.expectedManifestFingerprint === "string" &&
+          entry.manifest_fingerprint === options.expectedManifestFingerprint)) &&
       artifactBindingReason === null;
     const complete =
       accountingKnown &&

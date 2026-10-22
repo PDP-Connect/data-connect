@@ -29,6 +29,11 @@ interface LocalCollectorProfilePin {
   readonly version: string;
 }
 
+export interface LocalCollectorRelease {
+  readonly artifactDigest: string;
+  readonly manifest: Record<string, unknown>;
+}
+
 const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
 const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
 
@@ -47,6 +52,17 @@ export function readLocalCollectorArtifactDigest(connectorKey: string): string |
     return readPinnedProfile(connectorKey)?.digest ?? null;
   } catch {
     // A missing or invalid pin cannot establish executable identity.
+    return null;
+  }
+}
+
+/** The installed execution release as one atomically read, pin-verified pair. */
+export function readLocalCollectorRelease(connectorKey: string): LocalCollectorRelease | null {
+  try {
+    const pinned = readPinnedProfile(connectorKey);
+    return pinned ? { artifactDigest: pinned.digest, manifest: pinned.profile } : null;
+  } catch {
+    // A missing or invalid pair cannot establish which release was executed.
     return null;
   }
 }

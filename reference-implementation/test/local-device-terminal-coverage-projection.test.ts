@@ -6,6 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { normalizeTerminalCoverageFacts } from "../operations/local-device-terminal-collection.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
@@ -113,7 +114,7 @@ async function projectedCoverage() {
 }
 
 async function seedTerminalCoverage(
-  status: "collected" | "partial" | "failed",
+  status: "collected" | "partial" | "failed" | "unavailable",
   malformed = false,
   version: 1 | 2 = 2,
   accountingOverrides: Record<string, unknown> = {},
@@ -229,6 +230,17 @@ test("a local source without a server pin projects unknown with an explicit reas
   }, "gmail");
 });
 
+test("an unavailable store verdict never projects complete on list or detail", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("unavailable");
+    const list = await projectedCoverage();
+    assert.notEqual(list.axis, "complete");
+    const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+    assert.ok(detail && "connection_health" in detail);
+    assert.notEqual(detail.connection_health.axes.coverage, "complete");
+  });
+});
+
 for (const status of ["partial", "failed"] as const) {
   test(`local-device v2 ${status} verdict never projects covered`, async () => {
     await withLocalConnection(async () => {
@@ -307,6 +319,44 @@ test("a newer failed run cannot retain an earlier v2 covered verdict", async () 
     assert.equal((await projectedCoverage()).axis, "unknown");
   });
 });
+
+for (const includeState of [false, true]) {
+  test(`successful empty v2 terminal replacement retires earlier proof ${includeState ? "with" : "without"} state`, async () => {
+    await withLocalConnection(async () => {
+      await seedTerminalCoverage("collected");
+      assert.equal((await projectedCoverage()).axis, "complete");
+      const manifestRow = getDb().prepare("SELECT manifest FROM connectors WHERE connector_id = ?").get(connectorId) as {
+        manifest: string;
+      };
+      const manifest = JSON.parse(manifestRow.manifest) as unknown;
+      const artifactDigest = readLocalCollectorArtifactDigest(connectorId);
+      const unknownFacts = normalizeTerminalCoverageFacts([], manifest, "unscoped", {
+        allowSubset: true,
+        bindingGeneration: 0,
+        expectedArtifactDigest: artifactDigest,
+        validateServerArtifactDigest: true,
+      });
+      assert.ok(unknownFacts, "the empty successful result must expand to explicit unknown inventory");
+      await commitTerminalRun({
+        collectionBoundary: "unscoped",
+        commitId: `commit_terminal_coverage_omission_${includeState}`,
+        connectorId,
+        connectorInstanceId,
+        deviceId,
+        envelopeHash: `empty-terminal-envelope-${includeState}`,
+        normalizedFacts: unknownFacts,
+        runId: `run_terminal_coverage_omission_${includeState}`,
+        sourceInstanceId,
+        stateDelta: includeState ? { sessions: { cursor: "later" } } : {},
+        version: 2,
+      });
+      assert.equal((await projectedCoverage()).axis, "unknown");
+      const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+      assert.ok(detail && "connection_health" in detail);
+      assert.equal(detail.connection_health.axes.coverage, "unknown");
+    });
+  });
+}
 
 test("changed release obligations with identical store names invalidate positive coverage", async () => {
   await withLocalConnection(async () => {
