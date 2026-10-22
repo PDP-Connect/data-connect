@@ -1,0 +1,95 @@
+name: Automatic desktop release
+
+on:
+  workflow_run:
+    # A release needs both test workflows green on the same commit. Whichever
+    # finishes second finds both successful and releases; the first one exits
+    # without releasing.
+    workflows: [client-tests, reference-implementation]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch: {}
+
+# A newer completed CI run replaces both running and pending older releases.
+concurrency:
+  # Stale/failed events must not replace the shared group's pending slot either.
+  group: desktop-release-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_sha == github.sha)) && 'main' || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: >-
+      github.repository == 'PDP-Connect/data-connect' &&
+      ((github.event_name == 'workflow_run' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_repository.full_name == github.repository) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      tag: ${{ steps.prepare.outputs.tag }}
+      sha: ${{ steps.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.21.0"
+      - name: Require successful main CI for this exact commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          ready=true
+          for workflow in client-tests.yml reference-implementation.yml; do
+            ok="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&head_sha=$sha&per_page=100" \
+              --jq '.workflow_runs | any(.conclusion == "success")')"
+            if [ "$ok" != true ]; then
+              echo "No successful $workflow push run for $sha yet; not releasing."
+              ready=false
+            fi
+          done
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+      - name: Compute version and reserve draft release
+        id: prepare
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/desktop-release.mjs prepare
+
+  build-and-publish:
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release.yml
+    with:
+      publish_tag: ${{ needs.prepare.outputs.tag }}
+      build_sha: ${{ needs.prepare.outputs.sha }}
+    secrets: inherit
+
+  publish-release:
+    needs: [prepare, build-and-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish complete desktop release as Latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest

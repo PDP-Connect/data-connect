@@ -1,13 +1,13 @@
 name: npm-release
 
-# Publishes @pdpp/connector-protocol and @pdpp/collector-runtime to npm via
+# Publishes the three @pdpp collector packages to npm via
 # semantic-release, using OIDC trusted publishing (id-token: write, no
 # NPM_TOKEN) — the same mechanism PDP-Connect/pdpp already runs for
 # @pdpp/cli, @pdpp/mcp-server, and @pdpp/read-core. See .releaserc.yaml for
 # which commits actually trigger a release: this workflow's `quality` and
 # `release` jobs only run at all when resolve-version's dry run found one.
 #
-# Scoped to just these two npm packages: this repo also ships a Tauri
+# Scoped to these npm packages: this repo also ships a Tauri
 # desktop app via .github/workflows/release.yml (a completely separate
 # artifact class — GitHub Release installers, not npm packages), which this
 # workflow does not touch.
@@ -104,6 +104,11 @@ jobs:
       # version supersedes it. There is no retry that completes the partial
       # one: its tag is already on the commit it ran at, so a run there
       # resolves zero commits and no version at all.
+      - name: Migrate legacy npm tag namespace once
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/npm-release-tags.mjs
+
       - name: Resolve release mode
         id: mode
         run: node --import tsx scripts/resolve-release-version.ts

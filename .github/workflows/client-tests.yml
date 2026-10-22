@@ -35,6 +35,8 @@ env:
   ONNXRUNTIME_NODE_INSTALL: "skip"
 
 on:
+  push:
+    branches: [main]
   pull_request:
     # PRs into the test-engineering integration branch are gated by a local
     # oracle and review; full CI runs once on the batch PR into main.
@@ -93,6 +95,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Test desktop release version rules
+        run: node --test scripts/desktop-release.test.mjs scripts/npm-release-tags.test.mjs
 
       - name: Typecheck console
         run: npm run types:check --workspace=apps/console

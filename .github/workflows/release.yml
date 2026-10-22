@@ -1,6 +1,14 @@
 name: Release manual-install artifacts
 
 on:
+  workflow_call:
+    inputs:
+      publish_tag:
+        required: true
+        type: string
+      build_sha:
+        required: true
+        type: string
   pull_request:
     # PRs into the test-engineering integration branch are gated by a local
     # oracle and review; full CI runs once on the batch PR into main.
@@ -35,7 +43,7 @@ env:
 jobs:
   build:
     # A dispatch with release_tag only runs clean-install against that release.
-    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
+    if: inputs.publish_tag != '' || github.event_name == 'pull_request' || (github.event_name == 'release' && startsWith(github.ref_name, 'v')) || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
     env:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
@@ -108,23 +116,28 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+          ref: ${{ inputs.build_sha || (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
           persist-credentials: false
 
       - name: Verify checked-out release identity
-        if: github.event_name == 'release'
+        if: inputs.publish_tag != '' || github.event_name == 'release'
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
+          EXPECTED_SHA: ${{ inputs.build_sha || github.sha }}
+          AUTOMATIC_TAG: ${{ inputs.publish_tag }}
         run: |
           set -euo pipefail
-          # The checkout resolves the tag name when it runs, but the
-          # attestation records GITHUB_SHA from the release event. Refuse if
-          # the tag moved in between, so the attested commit is the built one.
+          # Build only the selected commit. The ref verifier also checks that
+          # the release tag still points to it. Automatic builds materialize
+          # the version from that tag without a version-bump commit on main.
           head_sha="$(git rev-parse 'HEAD^{commit}')"
-          if [ "$head_sha" != "$GITHUB_SHA" ]; then
-            echo "::error::Checked-out commit $head_sha is not the release event commit $GITHUB_SHA."
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the selected release commit $EXPECTED_SHA."
             exit 1
+          fi
+          if [ -n "$AUTOMATIC_TAG" ]; then
+            node scripts/desktop-release.mjs set-version "$AUTOMATIC_TAG"
           fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
@@ -307,7 +320,7 @@ jobs:
           fi
 
       - name: Stage verified release artifacts
-        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
+        if: inputs.publish_tag != '' || github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: manual-install-${{ matrix.artifact_key }}
@@ -393,7 +406,7 @@ jobs:
           retention-days: 14
 
   publish:
-    if: github.event_name == 'release'
+    if: inputs.publish_tag != '' || github.event_name == 'release'
     needs: build
     runs-on: ubuntu-22.04
     permissions:
@@ -420,7 +433,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -447,7 +460,7 @@ jobs:
           gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "${{ github.repository }}"
 
   publish-core-image:
-    if: github.event_name == 'release'
+    if: inputs.publish_tag != '' || github.event_name == 'release'
     needs: [build, publish]
     runs-on: ubuntu-22.04
     outputs:
@@ -461,22 +474,27 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.ref_name }}
+          ref: ${{ inputs.build_sha || github.ref_name }}
           persist-credentials: false
 
       - name: Verify checked-out release identity
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
+          EXPECTED_SHA: ${{ inputs.build_sha || github.sha }}
+          AUTOMATIC_TAG: ${{ inputs.publish_tag }}
         run: |
           set -euo pipefail
-          # The checkout resolves the tag name when it runs, but the
-          # attestation records GITHUB_SHA from the release event. Refuse if
-          # the tag moved in between, so the attested commit is the built one.
+          # Build only the selected commit. The ref verifier also checks that
+          # the release tag still points to it. Automatic builds materialize
+          # the version from that tag without a version-bump commit on main.
           head_sha="$(git rev-parse 'HEAD^{commit}')"
-          if [ "$head_sha" != "$GITHUB_SHA" ]; then
-            echo "::error::Checked-out commit $head_sha is not the release event commit $GITHUB_SHA."
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the selected release commit $EXPECTED_SHA."
             exit 1
+          fi
+          if [ -n "$AUTOMATIC_TAG" ]; then
+            node scripts/desktop-release.mjs set-version "$AUTOMATIC_TAG"
           fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
@@ -524,7 +542,7 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},value=${{ inputs.publish_tag || github.ref_name }}
 
       # Build once into an OCI archive; nothing reaches GHCR until the scan
       # below has read every layer of every platform manifest in it.
@@ -539,7 +557,7 @@ jobs:
           context: .
           file: ./Dockerfile
           build-args: |
-            PDPP_REFERENCE_REVISION=${{ github.sha }}
+            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar,tar=true
           platforms: linux/amd64,linux/arm64
@@ -616,7 +634,7 @@ jobs:
   # above. GitHub keeps one pending run per group and cancels a replaced pending
   # run. Re-running a cancelled promoter is safe: it moves latest only forward.
   promote-core-latest:
-    if: github.event_name == 'release' && !github.event.release.prerelease
+    if: inputs.publish_tag != '' || (github.event_name == 'release' && !github.event.release.prerelease)
     needs: publish-core-image
     runs-on: ubuntu-22.04
     concurrency:

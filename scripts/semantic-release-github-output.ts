@@ -32,7 +32,7 @@ function appendOutputs(outputs: Record<string, string>): void {
   appendFileSync(outputPath, `${lines.join("\n")}\n`);
 }
 
-function releaseOutputs(version: string, gitTag = `v${version}`): Record<string, string> {
+function releaseOutputs(version: string, gitTag = `npm-v${version}`): Record<string, string> {
   const match = version.match(SEMVER_PATTERN);
   if (!match) {
     fail(`Invalid semantic-release version: ${version}`);
