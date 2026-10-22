@@ -60,6 +60,7 @@ async function invokeBoundCoverageCommit(input: {
   claimDigest: string;
   claimManifest: Record<string, unknown>;
   claimStores: readonly string[];
+  claimStream?: string;
   currentManifest: Record<string, unknown>;
   registeredRelease: { artifactDigest: string; manifest: Record<string, unknown> } | null;
 }): Promise<{ committed: ResolvedTerminalRunCommit | null; status: number }> {
@@ -108,7 +109,7 @@ async function invokeBoundCoverageCommit(input: {
             },
             scoped: true,
             stores: input.claimStores.map((store) => ({ status: "collected", store })),
-            stream: "messages",
+            stream: input.claimStream ?? "messages",
           },
         ],
         version: 2,
@@ -1108,6 +1109,26 @@ test("the terminal endpoint rejects a store outside the registered inventory", a
 
   assert.equal(result.status, 400);
   assert.equal(result.committed, null);
+});
+
+// Collection Profile Section 5.8.2: a stream with no declared inventory cannot
+// prove coverage. The endpoint rejects a claim that names one, with or without
+// stores, and commits nothing.
+test("the terminal endpoint rejects a claim for a stream with no declared inventory", async () => {
+  const registeredManifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }, { name: "photos" }] };
+  const digest = `sha256:${"a".repeat(64)}`;
+  for (const claimStores of [[], ["photos"]]) {
+    const result = await invokeBoundCoverageCommit({
+      claimDigest: digest,
+      claimManifest: registeredManifest,
+      claimStores,
+      claimStream: "photos",
+      currentManifest: registeredManifest,
+      registeredRelease: { artifactDigest: digest, manifest: registeredManifest },
+    });
+    assert.equal(result.status, 400, JSON.stringify(claimStores));
+    assert.equal(result.committed, null);
+  }
 });
 
 test("an instance registered to release A cannot claim a larger release B inventory", async () => {

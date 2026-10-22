@@ -118,6 +118,7 @@ async function projectedCoverage() {
   const summary = (await listConnectorSummaries()).find((row) => row.connector_instance_id === connectorInstanceId);
   assert.ok(summary);
   return {
+    asOf: summary.coverage_as_of,
     axis: summary.connection_health.axes.coverage,
     conditions: Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition])),
     reason: summary.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")
@@ -264,6 +265,44 @@ test("a local source without a server pin projects unknown with an explicit reas
     );
   }, "gmail");
 });
+
+// Collection Profile Section 5.8.4: a proof that has no recorded release shows
+// its digest as absent. Neither owner reader shows its coverage or an as-of,
+// and the reason says the server knows no digest, not that a different one ran.
+for (const [label, releaseFields] of [
+  ["the server recorded no release at admission", ["server_artifact_digest"]],
+  ["the proof names no release", ["artifact_digest", "server_artifact_digest"]],
+] as const) {
+  test(`a v2 proof with no recorded release shows its digest as absent: ${label}`, async () => {
+    await withLocalConnection(async () => {
+      await seedTerminalCoverage("collected");
+      const recorded = await projectedCoverage();
+      assert.equal(recorded.axis, "complete", "control: the proof with its release projects complete");
+      assert.equal(recorded.asOf?.artifact_digest, readLocalCollectorArtifactDigest(connectorId));
+      const row = getDb().prepare("SELECT facts_json FROM run_history WHERE run_id = ?").get("run_terminal_coverage") as {
+        facts_json: string;
+      };
+      const facts = JSON.parse(row.facts_json) as { collection_facts: { streams: Record<string, unknown>[] } };
+      for (const stream of facts.collection_facts.streams) {
+        for (const field of releaseFields) {
+          delete stream[field];
+        }
+      }
+      getDb()
+        .prepare("UPDATE run_history SET facts_json = ? WHERE run_id = ?")
+        .run(JSON.stringify(facts), "run_terminal_coverage");
+      const list = await projectedCoverage();
+      assert.equal(list.axis, "unknown");
+      assert.equal(list.asOf, null, "no as-of names a release");
+      assert.equal(list.reason, "coverage_unknown_artifact_unpinned");
+      const detail = await getConnectorSummaryForRoute(connectorInstanceId);
+      assert.ok(detail && "connection_health" in detail);
+      assert.equal(detail.connection_health.axes.coverage, "unknown");
+      assert.equal(detail.coverage_as_of, null);
+      assert.equal(detail.connection_health.coverage_as_of, null);
+    });
+  });
+}
 
 test("an unavailable store verdict never projects complete on list or detail", async () => {
   await withLocalConnection(async () => {
