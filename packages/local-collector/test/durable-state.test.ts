@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -43,6 +43,23 @@ function withTempRoot<T>(prefix: string, callback: (root: string) => T): T {
   try {
     return callback(root);
   } finally {
+    rmSync(root, { force: true, recursive: true });
+  }
+}
+
+/** Child migrators a test started and has not yet seen exit. */
+const pausedChildren = new Set<ChildProcess>();
+
+async function withTempRootAsync<T>(prefix: string, callback: (root: string) => Promise<T>): Promise<T> {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    return await callback(root);
+  } finally {
+    // A failed assertion must not leave a paused child waiting for a release.
+    for (const child of pausedChildren) {
+      child.kill("SIGKILL");
+    }
+    pausedChildren.clear();
     rmSync(root, { force: true, recursive: true });
   }
 }
@@ -1271,3 +1288,210 @@ test("an empty canonical queue does not block a legacy store holding only supers
     assert.equal(resolveCollectorQueuePath(resolveInput(root, installRoot)), canonicalPath);
   });
 });
+
+function sleepSync(milliseconds: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function waitUntil(predicate: () => boolean, milliseconds: number): boolean {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return true;
+    }
+    sleepSync(10);
+  }
+  return predicate();
+}
+
+/** The destinations recorded by retirement fences in a legacy store. */
+function fenceDestinations(legacyPath: string): string[] {
+  const db = new DatabaseSync(legacyPath, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT canonical_path FROM pdpp_legacy_retirements WHERE source_instance_id = ?")
+      .all(SOURCE_A)
+      .map((row) => String(row.canonical_path));
+  } finally {
+    db.close();
+  }
+}
+
+interface PausedMigration {
+  /** Let the paused migration publish, and wait for its process to exit. */
+  finish(): Promise<void>;
+}
+
+/**
+ * Start a real migrator in a child process that stops right after its retirement
+ * fence commits (holding its handoff lock) until released. Returns once the child
+ * is paused, so the parent can schedule work against a genuinely in-flight owner.
+ */
+function startPausedMigration(root: string, input: ReturnType<typeof resolveInput>, name: string): PausedMigration {
+  const readyPath = join(root, `${name}.ready`);
+  const goPath = join(root, `${name}.go`);
+  const scriptPath = join(root, `${name}.mts`);
+  writeFileSync(
+    scriptPath,
+    `import { existsSync, writeFileSync } from "node:fs";
+const [durableUrl, args] = process.argv.slice(2);
+const durable = await import(durableUrl);
+const input = JSON.parse(args);
+try {
+  durable.resolveCollectorQueuePath({
+    connectorId: input.connectorId,
+    moduleUrl: input.moduleUrl,
+    sourceInstanceId: input.sourceInstanceId,
+    stateRoot: input.stateRoot,
+    afterRetirementFence: () => {
+      writeFileSync(input.readyPath, "ready");
+      while (!existsSync(input.goPath)) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    },
+  });
+} catch (error) {
+  console.error(String(error));
+  process.exit(1);
+}
+`
+  );
+  const child = spawn(
+    process.execPath,
+    [
+      scriptPath,
+      new URL("../src/durable-state.ts", import.meta.url).href,
+      JSON.stringify({ ...input, goPath, readyPath }),
+    ],
+    { stdio: ["ignore", "ignore", "pipe"] }
+  );
+  pausedChildren.add(child);
+  let stderr = "";
+  child.stderr.on("data", (chunk) => {
+    stderr += String(chunk);
+  });
+  const exited = new Promise<number | null>((resolve) =>
+    child.on("exit", (code) => {
+      pausedChildren.delete(child);
+      resolve(code);
+    })
+  );
+  const paused = waitUntil(() => existsSync(readyPath) || child.exitCode !== null, 10_000) && existsSync(readyPath);
+  assert.equal(paused, true, `the child migrator never paused after its fence: ${stderr}`);
+  return {
+    async finish() {
+      writeFileSync(goPath, "go");
+      assert.equal(await exited, 0, stderr);
+    },
+  };
+}
+
+for (const destination of DIFFERENT_DESTINATIONS) {
+  test(`a migration cannot replace the fence of a migration with ${destination.name} that completed before it reconciled`, () => {
+    withTempRoot("pdpp-durable-state-race-completed-", (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+      const base = resolveInput(root, installRoot);
+      const other = { ...base, ...destination.change(root) };
+      const canonicalPath = canonicalCollectorQueuePath(base);
+      const otherPath = canonicalCollectorQueuePath(other);
+      seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+      // The other destination migrates the same legacy store after this attempt's
+      // snapshot but before it takes the legacy write lock.
+      let otherResolved: string | undefined;
+      assert.throws(
+        () =>
+          resolveCollectorQueuePath({
+            ...base,
+            beforeMigrationReconcile: () => {
+              otherResolved = resolveCollectorQueuePath(other);
+            },
+          }),
+        (error: unknown) =>
+          isConflict(error) &&
+          (error as Error).message.includes(canonicalPath) &&
+          (error as Error).message.includes(otherPath)
+      );
+
+      assert.equal(otherResolved, otherPath);
+      assert.equal(existsSync(canonicalPath), false, "the losing attempt published nothing");
+      assert.deepEqual(fenceDestinations(legacyPath), [otherPath]);
+      assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+      assert.deepEqual(outboxIds(otherPath, SOURCE_A), ["pending-A"]);
+    });
+  });
+
+  test(`a migration cannot replace the fence of an in-flight migration with ${destination.name} that began before it reconciled`, async () => {
+    await withTempRootAsync("pdpp-durable-state-race-in-flight-", async (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+      const base = resolveInput(root, installRoot);
+      const other = { ...base, ...destination.change(root) };
+      const canonicalPath = canonicalCollectorQueuePath(base);
+      const otherPath = canonicalCollectorQueuePath(other);
+      seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+      let paused: PausedMigration | undefined;
+      assert.throws(
+        () =>
+          resolveCollectorQueuePath({
+            ...base,
+            beforeMigrationReconcile: () => {
+              paused = startPausedMigration(root, other, "other");
+            },
+          }),
+        (error: unknown) =>
+          isConflict(error) &&
+          (error as Error).message.includes(canonicalPath) &&
+          (error as Error).message.includes(otherPath)
+      );
+      assert.ok(paused);
+      assert.deepEqual(fenceDestinations(legacyPath), [otherPath], "the in-flight owner's fence survives");
+
+      await paused.finish();
+      assert.equal(existsSync(canonicalPath), false);
+      assert.deepEqual(fenceDestinations(legacyPath), [otherPath]);
+      assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+      assert.deepEqual(outboxIds(otherPath, SOURCE_A), ["pending-A"]);
+    });
+  });
+
+  test(`recovery cannot lift a fence between observing no marker and no lock while a migration with ${destination.name} publishes`, async () => {
+    await withTempRootAsync("pdpp-durable-state-race-marker-lock-", async (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+      const owner = resolveInput(root, installRoot);
+      const requester = { ...owner, ...destination.change(root) };
+      const ownerPath = canonicalCollectorQueuePath(owner);
+      const requesterPath = canonicalCollectorQueuePath(requester);
+      seedOutbox(legacyPath, SOURCE_A, "pending-A");
+      const paused = startPausedMigration(root, owner, "owner");
+      new LocalDeviceOutbox({ path: requesterPath }).close();
+
+      // The owner is told to publish after the requester has looked for the
+      // owner's marker and before it looks at the owner's lock.
+      let betweenChecks = 0;
+      assert.throws(
+        () =>
+          resolveCollectorQueuePath({
+            ...requester,
+            betweenFenceMarkerAndLockChecks: () => {
+              betweenChecks += 1;
+              writeFileSync(join(root, "owner.go"), "go");
+              // Give the owner time to publish and release its handoff lock.
+              waitUntil(() => existsSync(ownerPath) && !existsSync(`${ownerPath}.handoff.lock`), 500);
+            },
+          }),
+        isConflict
+      );
+      assert.ok(betweenChecks > 0, "the interleaving point was reached");
+
+      await paused.finish();
+      assert.equal(existsSync(ownerPath), true);
+      assert.deepEqual(fenceDestinations(legacyPath), [ownerPath], "the published owner stays fenced");
+      assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+      assert.deepEqual(outboxIds(ownerPath, SOURCE_A), ["pending-A"]);
+    });
+  });
+}
