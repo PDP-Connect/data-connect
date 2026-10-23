@@ -14,6 +14,7 @@ import {
   readFileSync,
   readSync,
   rmSync,
+  statSync,
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -36,6 +37,11 @@ export interface CollectorStatePathInput {
   afterMigrationInstall?: (() => void) | undefined;
   /** Test hook that simulates a crash after the legacy retirement fence commits. */
   afterRetirementFence?: (() => void) | undefined;
+  /**
+   * Test hook run while publication holds the legacy write lock, after it has
+   * re-verified the fence and before it links the snapshot into place.
+   */
+  betweenPublishRecheckAndLink?: (() => void) | undefined;
   /** Test hook that simulates a legacy collector write after the first snapshot. */
   beforeMigrationReconcile?: (() => void) | undefined;
   /**
@@ -240,6 +246,7 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
     afterMigrationInstall: input.afterMigrationInstall,
     afterRetirementFence: input.afterRetirementFence,
     beforeMigrationReconcile: input.beforeMigrationReconcile,
+    betweenPublishRecheckAndLink: input.betweenPublishRecheckAndLink,
     linkFile: input.linkFile,
   });
 }
@@ -483,25 +490,60 @@ function retirementHasMigrationId(db: DatabaseSync): boolean {
 }
 
 /**
- * Whether the destination a fence was written for still binds the legacy store:
- * its database carries the fence's migration id (published), or the attempt that
- * wrote the fence still holds its handoff lock (in flight). Only meaningful while
- * the legacy write lock is held, because publication needs that lock too: no
- * attempt can publish between the two observations.
+ * Whether the destination a fence was written for still binds the legacy store.
+ *
+ * - `published`: the destination carries the fence's migration id. A fence with
+ *   no migration id was written by a release that did not record one; it only ever
+ *   installed the fence right before an atomic rename, so the destination existing
+ *   is the proof, and such a fence is never lifted.
+ * - `live`: the attempt that wrote the fence still holds its handoff lock.
+ * - `orphan`: a fence with no migration id and no destination. Nothing proves
+ *   whether that release finished, so it is neither trusted nor lifted.
+ * - `none`: an id-carrying fence nothing backs; its attempt died before publishing.
+ *
+ * Only meaningful while the legacy write lock is held, because publication needs
+ * that lock too: no attempt can publish between the two observations.
  */
+function fenceIsPublished(fence: FenceRecord, sourceInstanceId: string): boolean {
+  return fence.migrationId === null
+    ? existsSync(fence.recordedPath)
+    : readCanonicalMigrationId(fence.recordedPath, sourceInstanceId) === fence.migrationId;
+}
+
+type FenceBinding = { kind: "published" } | { kind: "live"; pid: number } | { kind: "orphan" } | { kind: "none" };
+
 function fenceBinding(
   fence: FenceRecord,
   sourceInstanceId: string,
   betweenChecks?: (() => void) | undefined
-): { kind: "published" } | { kind: "live"; pid: number } | { kind: "none" } {
-  const published =
-    fence.migrationId !== null && readCanonicalMigrationId(fence.recordedPath, sourceInstanceId) === fence.migrationId;
+): FenceBinding {
+  const published = fenceIsPublished(fence, sourceInstanceId);
   betweenChecks?.();
   if (published) {
     return { kind: "published" };
   }
   const pid = liveHandoffOwner(fence.recordedPath);
-  return pid === undefined ? { kind: "none" } : { kind: "live", pid };
+  if (pid !== undefined) {
+    return { kind: "live", pid };
+  }
+  return fence.migrationId === null ? { kind: "orphan" } : { kind: "none" };
+}
+
+/**
+ * The fence verdicts that need no lock: a published fence stays published, so
+ * observing the proof once, read-only, is final. Anything else (an attempt that
+ * may still publish, or a fence that might be lifted) needs `settleFence`.
+ */
+function settlePublishedFenceReadOnly(
+  fence: FenceRecord,
+  requestedPath: string,
+  sourceInstanceId: string
+): "foreign" | "proven" | undefined {
+  const published = fenceIsPublished(fence, sourceInstanceId);
+  if (!published) {
+    return undefined;
+  }
+  return fence.recordedPath === requestedPath ? "proven" : "foreign";
 }
 
 /**
@@ -541,7 +583,11 @@ function settleFence(
         );
       }
       const binding = fenceBinding(current, sourceInstanceId, betweenChecks);
-      if (binding.kind === "none") {
+      if (binding.kind === "orphan") {
+        db.exec("ROLLBACK");
+        throw orphanFence(legacyPath, current.recordedPath, sourceInstanceId);
+      }
+      if (binding.kind === "none" && current.migrationId !== null) {
         deleteFence(db, sourceInstanceId, current.migrationId);
         db.exec("COMMIT");
         return "lifted";
@@ -592,7 +638,9 @@ function accountForLegacyStores(
   for (const path of paths) {
     const status = inspectLegacyStore(path, sourceInstanceId);
     if (status.fence) {
-      const verdict = settleFence(path, canonicalPath, sourceInstanceId, status.fence, betweenFenceChecks);
+      const verdict =
+        settlePublishedFenceReadOnly(status.fence, canonicalPath, sourceInstanceId) ??
+        settleFence(path, canonicalPath, sourceInstanceId, status.fence, betweenFenceChecks);
       if (verdict === "proven") {
         continue;
       }
@@ -623,6 +671,17 @@ function foreignFenceConflict(
   );
 }
 
+function orphanFence(
+  legacyPath: string,
+  recordedPath: string,
+  sourceInstanceId: string
+): CollectorStateResolutionError {
+  return new CollectorStateResolutionError(
+    "legacy_state_conflict",
+    `the legacy store ${legacyPath} for source '${sourceInstanceId}' carries a retirement fence from an older release that points at ${recordedPath}, which does not exist. The fence was left in place and the legacy store stays retired; remove the fence deliberately only after confirming no queue was delivered from ${recordedPath}`
+  );
+}
+
 function handoffInProgress(canonicalPath: string, ownerPid: number): CollectorStateResolutionError {
   return new CollectorStateResolutionError(
     "legacy_state_conflict",
@@ -632,7 +691,11 @@ function handoffInProgress(canonicalPath: string, ownerPid: number): CollectorSt
 
 type MigrationHooks = Pick<
   CollectorStatePathInput,
-  "afterMigrationInstall" | "afterRetirementFence" | "beforeMigrationReconcile" | "linkFile"
+  | "afterMigrationInstall"
+  | "afterRetirementFence"
+  | "beforeMigrationReconcile"
+  | "betweenPublishRecheckAndLink"
+  | "linkFile"
 >;
 
 /**
@@ -687,7 +750,8 @@ function migrateLegacyStore(
       legacyPath,
       sourceInstanceId,
       migrationId,
-      hooks.linkFile ?? linkSync
+      hooks.linkFile ?? linkSync,
+      hooks.betweenPublishRecheckAndLink
     );
     published = true;
     settlePublishedSnapshot(canonicalPath);
@@ -710,6 +774,16 @@ function migrateLegacyStore(
     }
     if (error instanceof CollectorStateResolutionError) {
       throw error;
+    }
+    if (published) {
+      // The legacy store is fenced and the canonical queue holds its work, so the
+      // only valid queue is the canonical one.
+      // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
+      throw new CollectorStateResolutionError(
+        "legacy_state_migration_failed",
+        `the legacy local collector store for source '${sourceInstanceId}' was migrated to ${canonicalPath}, but finishing the handoff failed; the legacy store is retired, so do not select it with --queue. Rerun to use ${canonicalPath}`,
+        { cause: error }
+      );
     }
     // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
     throw new CollectorStateResolutionError(
@@ -792,13 +866,14 @@ function reconcileLegacyWrites(
     // Claim the source's retirement under the same write lock. A fence another
     // destination published, or is publishing, behind is never replaced; one
     // nothing backs belongs to a dead attempt and is taken over.
+    // A fence without a migration id (older release) is never taken over for
+    // another destination; for this destination, whose queue does not exist, it
+    // belongs to an interrupted handoff to the same path and is retried.
     const existing = readFenceRecord(source, sourceInstanceId);
-    if (
-      existing &&
-      existing.recordedPath !== canonicalPath &&
-      fenceBinding(existing, sourceInstanceId).kind !== "none"
-    ) {
-      throw foreignFenceConflict(legacyPath, existing.recordedPath, canonicalPath, sourceInstanceId);
+    if (existing && existing.recordedPath !== canonicalPath) {
+      if (existing.migrationId === null || fenceBinding(existing, sourceInstanceId).kind !== "none") {
+        throw foreignFenceConflict(legacyPath, existing.recordedPath, canonicalPath, sourceInstanceId);
+      }
     }
     installRetirementFence(source, sourceInstanceId, canonicalPath, migrationId);
     source.exec("COMMIT");
@@ -815,11 +890,14 @@ function reconcileLegacyWrites(
   }
 }
 
+/** An empty lock file this young may be an owner between creating and writing it. */
+const LOCK_WRITE_GRACE_MS = 2000;
+
 function acquireMigrationLock(path: string): void {
   try {
     const fd = openSync(path, "wx", 0o600);
     try {
-      writeSync(fd, `${process.pid}\n`, undefined, "utf8");
+      writeSync(fd, lockContents(), undefined, "utf8");
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -828,25 +906,131 @@ function acquireMigrationLock(path: string): void {
     if (!isAlreadyExistsError(error)) {
       throw error;
     }
-    let ownerPid: number | undefined;
+    let owner: LockOwner;
     try {
-      ownerPid = Number(readFileSync(path, { encoding: "utf8" }).trim());
+      owner = readLockOwner(path);
     } catch (lockReadError) {
-      throw new Error(`legacy state handoff is already in progress: ${path}`, { cause: lockReadError });
+      throw new Error(`legacy state handoff is already in progress: ${path}`, {
+        cause: lockReadError,
+      });
     }
-    if (Number.isInteger(ownerPid) && ownerPid > 0) {
-      try {
-        process.kill(ownerPid, 0);
-      } catch (probeError) {
-        if (isNodeError(probeError) && probeError.code === "ESRCH") {
-          rmSync(path, { force: true });
-          acquireMigrationLock(path);
-          return;
-        }
-      }
+    if (!owner.live) {
+      rmSync(path, { force: true });
+      acquireMigrationLock(path);
+      return;
     }
-    throw new Error(`legacy state handoff is already in progress: ${path}`, { cause: error });
+    throw new Error(`legacy state handoff is already in progress: ${path}`, {
+      cause: error,
+    });
   }
+}
+
+interface LockOwner {
+  live: boolean;
+  pid: number | undefined;
+}
+
+/**
+ * The handoff lock records the owner's pid plus the identity that distinguishes
+ * it from a later process that reuses the pid: its start time (Linux) and the boot
+ * id (Linux, when readable). Elsewhere only the pid is recorded.
+ */
+function lockContents(): string {
+  const lines = [String(process.pid)];
+  const startTime = processStartTime(process.pid);
+  if (startTime !== undefined) {
+    lines.push(`start=${startTime}`);
+  }
+  const bootId = currentBootId();
+  if (bootId !== undefined) {
+    lines.push(`boot=${bootId}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function currentBootId(): string | undefined {
+  try {
+    return (
+      readFileSync("/proc/sys/kernel/random/boot_id", {
+        encoding: "utf8",
+      }).trim() || undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/** Clock ticks since boot at which the process started, from /proc/<pid>/stat field 22. */
+function processStartTime(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, { encoding: "utf8" });
+    // The command name may contain spaces and parentheses; the fields that
+    // follow the last ")" are well formed. Field 22 is the 20th after it.
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return fields[19] || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Decide whether a lock file names a live owner. Only a positive integer pid can
+ * be an owner: an empty or garbled file is a dead owner's remains (an empty file
+ * is given a short grace for an owner still writing it). A pid whose start time
+ * or boot id differs from the recorded one is a reused pid, not the owner. EPERM
+ * means the process exists but is not ours to signal; it counts as live only when
+ * its identity could not be compared.
+ */
+function readLockOwner(lockPath: string): LockOwner {
+  let text: string;
+  try {
+    text = readFileSync(lockPath, { encoding: "utf8" });
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return { live: false, pid: undefined };
+    }
+    throw error;
+  }
+  const [pidLine = "", ...identityLines] = text.trim().split("\n");
+  if (text.trim() === "") {
+    let young = false;
+    try {
+      young = Date.now() - statSync(lockPath).mtimeMs < LOCK_WRITE_GRACE_MS;
+    } catch {
+      // The lock vanished; it has no owner.
+    }
+    return { live: young, pid: undefined };
+  }
+  const pid = /^\d+$/.test(pidLine.trim()) ? Number(pidLine.trim()) : Number.NaN;
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    return { live: false, pid: undefined };
+  }
+  const identity = new Map<string, string>();
+  for (const line of identityLines) {
+    const separator = line.indexOf("=");
+    if (separator > 0) {
+      identity.set(line.slice(0, separator), line.slice(separator + 1).trim());
+    }
+  }
+  const recordedBoot = identity.get("boot");
+  const bootId = currentBootId();
+  if (recordedBoot !== undefined && bootId !== undefined && recordedBoot !== bootId) {
+    return { live: false, pid };
+  }
+  try {
+    process.kill(pid, 0);
+  } catch (probeError) {
+    if (isNodeError(probeError) && probeError.code === "ESRCH") {
+      return { live: false, pid };
+    }
+    // EPERM or anything else: the process exists; fall through to identity.
+  }
+  const recordedStart = identity.get("start");
+  const startTime = recordedStart === undefined ? undefined : processStartTime(pid);
+  if (recordedStart !== undefined && startTime !== undefined && recordedStart !== startTime) {
+    return { live: false, pid };
+  }
+  return { live: true, pid };
 }
 
 function releaseMigrationLock(path: string): void {
@@ -873,7 +1057,8 @@ function publishSnapshot(
   legacyPath: string,
   sourceInstanceId: string,
   migrationId: string,
-  link: (existingPath: string, newPath: string) => void
+  link: (existingPath: string, newPath: string) => void,
+  betweenRecheckAndLink?: (() => void) | undefined
 ): void {
   let db: DatabaseSync | undefined;
   try {
@@ -888,6 +1073,7 @@ function publishSnapshot(
       );
     }
     try {
+      betweenRecheckAndLink?.();
       link(temporaryPath, canonicalPath);
     } catch (error) {
       if (isAlreadyExistsError(error)) {
@@ -934,18 +1120,16 @@ function settlePublishedSnapshot(canonicalPath: string): void {
 }
 
 /**
- * Delete a source's retirement fence, but only the one written by `migrationId`
- * (or an old fence that carries no id). Callers outside a publish or settle
- * decision use `liftOwnFence`.
+ * Delete a source's retirement fence, but only the one written by `migrationId`.
+ * Callers outside a publish or settle decision use `liftOwnFence`.
  */
-function deleteFence(db: DatabaseSync, sourceInstanceId: string, migrationId: string | null): void {
+function deleteFence(db: DatabaseSync, sourceInstanceId: string, migrationId: string): void {
+  // A store without the column holds only id-less fences, which are never deleted.
   if (retirementHasMigrationId(db)) {
-    db.prepare("DELETE FROM pdpp_legacy_retirements WHERE source_instance_id = ? AND migration_id IS ?").run(
+    db.prepare("DELETE FROM pdpp_legacy_retirements WHERE source_instance_id = ? AND migration_id = ?").run(
       sourceInstanceId,
       migrationId
     );
-  } else {
-    db.prepare("DELETE FROM pdpp_legacy_retirements WHERE source_instance_id = ?").run(sourceInstanceId);
   }
 }
 
@@ -971,24 +1155,8 @@ function liftOwnFence(legacyPath: string, sourceInstanceId: string, migrationId:
 
 /** The pid of a live process holding the handoff lock for a canonical path, if any. */
 function liveHandoffOwner(canonicalPath: string): number | undefined {
-  const lockPath = `${canonicalPath}.handoff.lock`;
-  let ownerPid: number;
-  try {
-    ownerPid = Number(readFileSync(lockPath, { encoding: "utf8" }).trim());
-  } catch (error) {
-    if (isNotFoundError(error)) {
-      return undefined;
-    }
-    throw error;
-  }
-  try {
-    process.kill(ownerPid, 0);
-  } catch (probeError) {
-    if (isNodeError(probeError) && probeError.code === "ESRCH") {
-      return undefined;
-    }
-  }
-  return ownerPid;
+  const owner = readLockOwner(`${canonicalPath}.handoff.lock`);
+  return owner.live ? (owner.pid ?? 0) : undefined;
 }
 
 /** Refuse to hand out a canonical path while a live process holds its handoff lock. */
