@@ -61,18 +61,12 @@ async function observeBootstrapWithinHarness(
 		clearTimeout(timer);
 	}
 	if (outcome.kind === "deadline") {
-		let settleTimer: ReturnType<typeof setTimeout> | undefined;
-		const settledAfterRelease = await Promise.race([
-			settled.then(() => true),
-			new Promise<boolean>((resolve) => {
-				settleTimer = setTimeout(() => resolve(false), 5_000);
-			}),
-		]);
-		if (settleTimer) {
-			clearTimeout(settleTimer);
-		}
+		// The blocker is released above, so bootstrap can now finish; wait for it
+		// (the runner's per-file timeout bounds this) so teardown never races a
+		// still-running migration, then fail with the harness verdict.
+		await settled;
 		assert.fail(
-			`${migration} exceeded the ${timeoutMs}ms test harness deadline; bootstrap ${settledAfterRelease ? "settled" : "remained pending"} after the test released its lock.`,
+			`${migration} exceeded the ${timeoutMs}ms test harness deadline and settled only after the test released its lock.`,
 		);
 	}
 	return outcome;
