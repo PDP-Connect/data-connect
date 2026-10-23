@@ -417,6 +417,12 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
   const runtime = buildRuntime();
   let hydrationStarted = false;
+  // Stop epoch: `stop()` aborts it and `start()` installs a fresh one. Every
+  // automatic dispatch captures the signal current at its tick, so a dispatch
+  // that was already past a gate (source-pressure probe, preflight, state,
+  // credentials) when the scheduler was stopped or replaced is dropped instead
+  // of launching a run against a schedule the owner may since have disabled.
+  let dispatchEpoch = new AbortController();
 
   function logRunHistoryPersistFailure(record: RunRecord, message: string): void {
     createRunLogger(baseLogger, {
@@ -522,12 +528,18 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     runtime,
     schedulerStore,
     setState,
+    ...(schedulerStore?.getSchedule
+      ? {
+          readScheduleEnabled: async (connectorInstanceId: string) =>
+            (await schedulerStore.getSchedule?.(connectorInstanceId))?.enabled === true,
+        }
+      : {}),
   });
 
   async function executeRun(
     schedule: ConnectorSchedule,
     isManual = false,
-    options: { recoveryOnly?: boolean } = {}
+    options: { dispatchSignal?: AbortSignal; recoveryOnly?: boolean } = {}
   ): Promise<RunRecord | null> {
     const { connectorId, connectorInstanceId, manifest, grantAccessMode = "continuous" } = schedule;
     if (!connectorInstanceId) {
@@ -558,6 +570,9 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
           preRunGate.runAutomaticPreflight(schedule, key, automationPolicy),
           schedulerDispatchLivenessCeilingMs
         );
+        if (options.dispatchSignal?.aborted) {
+          return null;
+        }
         if (preflight === DISPATCH_LIVENESS_TIMEOUT) {
           return recordAndNotify(dispatchWedgedRecord(connectorId, connectorInstanceId));
         }
@@ -571,7 +586,10 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       }
       // Not deadlined: `launchRun` owns its own much longer connector-attempt
       // watchdog (`maxRunWallClockMs`, hours-scale) once actually launched.
-      return await runExecutor.launchRun(schedule, isManual, automationPolicy, { recoveryOnly });
+      return await runExecutor.launchRun(schedule, isManual, automationPolicy, {
+        recoveryOnly,
+        ...(options.dispatchSignal ? { dispatchSignal: options.dispatchSignal } : {}),
+      });
     } finally {
       runtime.activeRuns.delete(key);
     }
@@ -582,6 +600,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       return;
     }
     runtime.running = true;
+    dispatchEpoch = new AbortController();
     Promise.resolve()
       .then(hydratePersistence)
       .then(() => {
@@ -636,12 +655,18 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       if (runtime.activeRuns.has(runtimeKey(schedule))) {
         return;
       }
+      const dispatchSignal = dispatchEpoch.signal;
       let dispatch: Awaited<ReturnType<typeof dispatchGovernor.evaluateBackoffDispatch>>;
       try {
         dispatch = await dispatchGovernor.evaluateBackoffDispatch(schedule, Date.now());
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[scheduler] failed to evaluate back-off for ${schedule.connectorId}: ${message}`);
+        return;
+      }
+      // The governor's source-pressure probe is async: the scheduler may have
+      // been stopped or replaced while it was pending. Drop the tick silently.
+      if (dispatchSignal.aborted) {
         return;
       }
       const { eligible, recoveryOnly, skipToEmit, eventsToEmit } = dispatch;
@@ -663,7 +688,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         return;
       }
       if (eligible) {
-        executeRun(schedule, false, { recoveryOnly }).catch(() => {
+        executeRun(schedule, false, { dispatchSignal, recoveryOnly }).catch(() => {
           // Errors are already surfaced into the run record via onRunComplete;
           // swallow here so the scheduler loop doesn't bubble an unhandled
           // rejection out of the interval callback.
@@ -708,6 +733,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       return;
     }
     runtime.running = false;
+    dispatchEpoch.abort();
     for (const timer of runtime.timers) {
       clearInterval(timer);
     }

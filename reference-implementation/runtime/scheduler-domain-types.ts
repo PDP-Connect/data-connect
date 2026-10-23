@@ -499,6 +499,10 @@ export interface SchedulerOptions {
     | "hasLegacySchedulerEventMarker"
     | "upsertActiveRun"
     | "upsertLastRunTime"
-  >;
+  > &
+    // Optional so fakes without a schedule table keep working. When present, a
+    // scheduled launch re-reads the schedule's CURRENT `enabled` flag from it at
+    // final admission, so a disable is honoured even by a stale dispatch.
+    Partial<Pick<SchedulerStore, "getSchedule">>;
   setState?: SetStateHandler;
 }
