@@ -5881,16 +5881,42 @@ const RESTORE_MISSING_VERSION_COUNTERS_SQL = `
    WHERE NOT EXISTS (SELECT 1 FROM version_counter vc
                       WHERE vc.connector_instance_id = p.connector_instance_id AND vc.stream = p.stream)`;
 
+// A counter row can lag the durable data: the allocator documents drift it has
+// seen live (postgres-records.ts, allocateNextVersion) and heals it on the next
+// write by allocating above the counter, the newest history row and the newest
+// current row. The gap rule below compares retained rows with the head, so it
+// must use that same head. Seeded at a lagging counter, the floor lands below a
+// gap that lies above the counter, and a stale token holding a deleted record
+// stays valid with its baseline gone. This raises each counter to its durable
+// maximum, never lowers it, and writes only the rows that lag.
+const RAISE_LAGGING_VERSION_COUNTERS_SQL = `
+  UPDATE version_counter vc
+     SET max_version = durable.max_version
+    FROM (
+      SELECT c.connector_instance_id, c.stream,
+             GREATEST(
+               COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                          WHERE rc.connector_instance_id = c.connector_instance_id AND rc.stream = c.stream), 0),
+               COALESCE((SELECT MAX(r.version) FROM records r
+                          WHERE r.connector_instance_id = c.connector_instance_id AND r.stream = c.stream), 0)) AS max_version
+        FROM version_counter c
+    ) durable
+   WHERE vc.connector_instance_id = durable.connector_instance_id
+     AND vc.stream = durable.stream
+     AND vc.max_version < durable.max_version`;
+
 // Oldest reconstructible changes_since watermark. The column and its seed
 // commit in one transaction: an interrupted seed must not leave a column that
 // makes the next startup skip it. Runs after the instance-namespace migration
 // so version_counter and record_changes both carry connector_instance_id.
-// Seed the floor at the head (existing cursors expire once; clients re-sync from
-// `beginning`) when retention is on, or when a stream's history has a gap: fewer
-// retained rows than versions means rows were pruned or compacted earlier, even
-// if retention is off now. Complete histories keep floor 0. A stream with
-// skipped version numbers also reads as a gap, which only costs one re-sync.
-// Streams that lost their counter row get one first, so the same rule covers them.
+// Seed the floor at the head (tokens strictly below it expire; clients re-sync
+// from `beginning`) when retention is on, or when a stream's history has a gap:
+// fewer retained rows than versions means rows were pruned or compacted
+// earlier, even if retention is off now. Complete histories keep floor 0. A
+// stream with skipped version numbers also reads as a gap, which only costs one
+// re-sync. The head is the stream's durable maximum, so streams that lost their
+// counter row get one first and lagging counters are raised first; the same
+// rule then covers them.
 async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
   if (await hasPostgresColumn(client, "version_counter", "changes_floor")) {
     return;
@@ -5904,17 +5930,14 @@ async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
     if (!(await hasPostgresColumn(client, "version_counter", "changes_floor"))) {
       await client.query("ALTER TABLE version_counter ADD COLUMN changes_floor BIGINT NOT NULL DEFAULT 0");
       await client.query(RESTORE_MISSING_VERSION_COUNTERS_SQL);
+      await client.query(RAISE_LAGGING_VERSION_COUNTERS_SQL);
       await client.query(
         `UPDATE version_counter SET changes_floor = max_version
           WHERE $1::boolean OR (
             SELECT COUNT(*) FROM record_changes rc
              WHERE rc.connector_instance_id = version_counter.connector_instance_id
                AND rc.stream = version_counter.stream
-          ) < GREATEST(max_version, COALESCE((
-            SELECT MAX(rc.version) FROM record_changes rc
-             WHERE rc.connector_instance_id = version_counter.connector_instance_id
-               AND rc.stream = version_counter.stream
-          ), 0))`,
+          ) < max_version`,
         [getChangeHistoryLimit() > 0]
       );
     }
@@ -5934,6 +5957,13 @@ async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
     throw err;
   }
 }
+
+/**
+ * Test-only entry to the one-time floor seed. The test-database guard refuses to
+ * re-admit a database whose `records` table holds rows, so a test that needs
+ * current rows beside the counters runs the seed on a client of its own.
+ */
+export const __ensurePostgresChangesFloorForTest = ensurePostgresChangesFloor;
 
 async function ensurePostgresRecordsBlobSearchInstanceIndexes(client: PoolClient): Promise<void> {
   await withPostgresAdvisoryLock(client, RECORDS_BLOB_SEARCH_INDEX_LOCK_ID, async () => {

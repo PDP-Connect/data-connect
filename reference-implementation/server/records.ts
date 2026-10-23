@@ -42,6 +42,7 @@ import {
   iterate,
   iterateDynamicSqlAcknowledged,
   referenceQueries,
+  transaction,
   writeTransaction,
 } from "../lib/db.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
@@ -1538,6 +1539,24 @@ export function __setAdmissionPreCheckPhaseHookForTest(hook: unknown): void {
 
 async function maybeAfterAdmissionPreCheckPhase(point: string, context: HookContext): Promise<void> {
   await admissionPreCheckPhaseHook?.(point, context);
+}
+
+let sqliteChangesSinceReadHook: FaultHook | null = null;
+
+/**
+ * Test-only seam between the statements of one SQLite changes-feed read, so a
+ * test can commit a write from a second connection at exactly that point.
+ * Fires with `{ connectorInstanceId, stream }` at point `"after-floor-read"`
+ * (epoch, counter, floor and minimum version read and checked) and at point
+ * `"after-change-groups"` (a batch of change groups listed, their predecessor
+ * and current snapshots not yet read). The hook is synchronous: the read is.
+ */
+export function __setSqliteChangesSinceReadHookForTest(hook: unknown): void {
+  sqliteChangesSinceReadHook = isFaultHook(hook) ? hook : null;
+}
+
+function maybeChangesSinceReadHook(point: string, context: HookContext): void {
+  sqliteChangesSinceReadHook?.(point, context);
 }
 
 async function maybeSqliteRecordSortBackfillPhaseForTest(point: string, context: HookContext): Promise<void> {
@@ -5218,6 +5237,7 @@ function validateChangesSinceVersions(
   if (belowFloor || sessionSnapshotPruned) {
     throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
   }
+  maybeChangesSinceReadHook("after-floor-read", { connectorInstanceId, stream });
 
   return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
 }
@@ -5267,6 +5287,7 @@ function collectVisibleChanges(
       effectiveSessionMaxVersion,
       batchSize
     );
+    maybeChangesSinceReadHook("after-change-groups", { connectorInstanceId, stream });
 
     if (!changeGroups.length) {
       break;
@@ -5369,7 +5390,25 @@ interface QueryRecordsChangesSinceArgs {
   stream: string;
 }
 
-function queryRecordsChangesSince({
+/**
+ * Answer one changes request from a single SQLite read snapshot.
+ *
+ * The request reads the reset epoch, the counter and floor, the change groups
+ * and, per group, a predecessor and a current snapshot, each as its own
+ * statement. Synchronous JavaScript keeps this connection's own writers out
+ * between them, but another connection or process can commit in between: a
+ * prune that raises `changes_floor` and removes a key's baseline would leave the
+ * reader a tombstone with no visible predecessor. It would drop the deletion yet
+ * return a token at the new floor, which stays valid, so the deletion is lost
+ * for good. A deferred transaction takes its WAL snapshot at the first read and
+ * holds it to the end, so every statement sees the state the floor check saw.
+ * Throwing (`cursor_expired`) rolls the read-only transaction back unchanged.
+ */
+function queryRecordsChangesSince(args: QueryRecordsChangesSinceArgs): ListResponse {
+  return transaction(() => readChangesSinceSnapshot(args));
+}
+
+function readChangesSinceSnapshot({
   changesSince,
   compiledFilters,
   connectorInstanceId,

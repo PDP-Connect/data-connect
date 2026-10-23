@@ -176,18 +176,34 @@ is below it, returns `410 cursor_expired`; the client restarts from `beginning`,
 which is always accepted. A bulk stream reset also expires earlier tokens: they
 carry the connection's `record_reset_generation`.
 
+A request reads the counter, the floor, the change groups and each key's
+snapshots from one database snapshot: a single read transaction on SQLite, one
+`REPEATABLE READ` transaction on PostgreSQL. A prune that another connection or
+process commits during the request cannot remove a baseline the request still
+has to read.
+
 Rules for the floor:
 
 - The column is created at startup, and the seed runs only then; later startups
-  keep the stored floor. A stream's floor starts at its current max version
-  (every outstanding token expires once, because earlier pruning did not keep
-  baselines) when `PDPP_CHANGE_HISTORY_LIMIT > 0` at that boot, or when its
-  history has a gap: fewer retained rows than versions means rows were pruned
-  or compacted earlier. A complete history starts at `0`.
+  keep the stored floor. The seed first sets each stream's `version_counter` row
+  to the stream's highest durable version, the larger of its newest
+  `record_changes` and newest `records` version. That is the head the allocator
+  continues from; a counter that lags is raised, never lowered. A stream's floor
+  then starts at that head when `PDPP_CHANGE_HISTORY_LIMIT > 0` at that boot, or
+  when its history has a gap: fewer retained rows than versions means rows were
+  pruned or compacted earlier. A complete history starts at `0`.
 - A stream that has history or current rows but no `version_counter` row (a
-  lost counter) first gets the row the allocator would create, at the stream's
-  highest version, and then the same rule applies. Otherwise its next write
-  would recreate the row with floor `0`.
+  lost counter) gets the row the allocator would create, at the same head, and
+  then the same rule applies. Otherwise its next write would recreate the row
+  with floor `0`.
+- Tokens that expire on the first start after the upgrade: a nonzero token
+  strictly below the seeded floor, so only on streams whose floor was seeded
+  above `0` (retention on at that boot, or a gapped history). A token equal to
+  the floor stays valid, and so do `beginning` and version-`0` tokens. The floor
+  expires nothing on a complete history with retention off. Separately, a token
+  issued before epochs existed has no epoch and reads as generation `0`: it
+  expires on every stream of a connection whose `record_reset_generation` is
+  already above `0`, whatever the floor.
 - On PostgreSQL the seed takes an `ACCESS EXCLUSIVE` lock on `version_counter`
   and waits for it at most 30 s (`PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS`).
   If a long-running transaction holds the table, startup fails with an error

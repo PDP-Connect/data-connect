@@ -6612,17 +6612,24 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
   // Pre-existing DBs predate the column. The column and its seed commit
   // together: an interrupted seed must not leave a column that makes the next
-  // startup skip it. Seed the floor at the head (existing cursors expire once;
-  // clients re-sync from `beginning`) when retention is on, or when a stream's
-  // history has a gap: fewer retained rows than versions means rows were pruned
-  // or compacted earlier, even if retention is off now. Complete histories
-  // keep floor 0. A stream with skipped version numbers also reads as a gap,
-  // which only costs one re-sync.
-  // A stream can hold history or current rows but no counter row (a lost
-  // counter). The allocator would create that row on the stream's next write
-  // with floor 0, so a gapped history would lose its floor then. The row is
-  // created first, at the head the allocator would continue from (it allocates
-  // above both maxima), so the seed treats it like every other counter row.
+  // startup skip it. Seed the floor at the head (tokens strictly below it
+  // expire; clients re-sync from `beginning`) when retention is on, or when a
+  // stream's history has a gap: fewer retained rows than versions means rows
+  // were pruned or compacted earlier, even if retention is off now. Complete
+  // histories keep floor 0. A stream with skipped version numbers also reads as
+  // a gap, which only costs one re-sync.
+  // The head is the stream's durable maximum, not the stored counter. A counter
+  // can lag the data (the allocator heals that on the next write by allocating
+  // above the counter, the newest history row and the newest current row). The
+  // gap rule compares retained rows with the head, so a lagging counter would
+  // seed the floor below a gap that lies above it, and a stale token holding a
+  // deleted record would stay valid with its baseline gone. So, in order:
+  //  1. A stream can hold history or current rows but no counter row (a lost
+  //     counter). The allocator would create that row on the stream's next write
+  //     with floor 0, so a gapped history would lose its floor then. The row is
+  //     created first, at the durable maximum.
+  //  2. Every other counter is raised to its durable maximum, never lowered.
+  //  3. The floor is seeded from those counters.
   runWithSqliteBusyRetrySync(() => {
     raw.exec("BEGIN IMMEDIATE");
     try {
@@ -6646,14 +6653,26 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
             WHERE NOT EXISTS (SELECT 1 FROM version_counter vc
                                WHERE vc.connector_instance_id = p.connector_instance_id AND vc.stream = p.stream)`
         );
+        raw.exec(
+          `UPDATE version_counter
+              SET max_version = durable.max_version
+             FROM (SELECT c.connector_instance_id AS connector_instance_id,
+                          c.stream AS stream,
+                          MAX(COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                                         WHERE rc.connector_instance_id = c.connector_instance_id AND rc.stream = c.stream), 0),
+                              COALESCE((SELECT MAX(r.version) FROM records r
+                                         WHERE r.connector_instance_id = c.connector_instance_id AND r.stream = c.stream), 0)) AS max_version
+                     FROM version_counter c) durable
+            WHERE durable.connector_instance_id = version_counter.connector_instance_id
+              AND durable.stream = version_counter.stream
+              AND durable.max_version > version_counter.max_version`
+        );
         raw.prepare(
           `UPDATE version_counter SET changes_floor = max_version
             WHERE ? = 1 OR (SELECT COUNT(*) FROM record_changes rc
                              WHERE rc.connector_instance_id = version_counter.connector_instance_id
                                AND rc.stream = version_counter.stream)
-                           < MAX(max_version, COALESCE((SELECT MAX(rc.version) FROM record_changes rc
-                                                         WHERE rc.connector_instance_id = version_counter.connector_instance_id
-                                                           AND rc.stream = version_counter.stream), 0))`
+                           < max_version`
         ).run(getChangeHistoryLimit() > 0 ? 1 : 0);
       }
       raw.exec("COMMIT");

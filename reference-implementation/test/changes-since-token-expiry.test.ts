@@ -23,6 +23,17 @@
  *
  * Both backends run the same scenarios. The page-cursor scenario is SQLite
  * only: the PostgreSQL changes feed returns one unpaged response.
+ *
+ * A request answers from one database snapshot. Another connection or process
+ * can commit between the statements of a read (a prune that raises the floor and
+ * removes a key's baseline), and a reader that straddled that commit would drop a
+ * tombstone yet return a token at the new floor. SQLite reads inside one
+ * transaction and PostgreSQL inside one REPEATABLE READ transaction; each has a
+ * test that commits a prune from a second connection mid-read.
+ *
+ * The upgrade seeds the floor from the reconciled counter, not the stored one: a
+ * counter can lag the durable history, and a gap above it must not be seeded
+ * below the gap.
  */
 
 import assert from "node:assert/strict";
@@ -34,13 +45,24 @@ import test from "node:test";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
 import { fileURLToPath } from "node:url";
+import { referenceQueries } from "../lib/db.ts";
 import { connectorInstanceAdvisoryLockKey } from "../server/connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { SqliteDriver } from "../server/sqlite-driver.ts";
-import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import {
+  __ensurePostgresChangesFloorForTest,
+  closePostgresStorage,
+  initPostgresStorage,
+  postgresQuery,
+} from "../server/postgres-storage.ts";
 import * as postgresRecordsModule from "../server/postgres-records.ts";
-import { deleteAllRecords, ingestRecord, queryRecords } from "../server/records.ts";
+import {
+  __setSqliteChangesSinceReadHookForTest,
+  deleteAllRecords,
+  ingestRecord,
+  queryRecords,
+} from "../server/records.ts";
 import { applyCompaction, type CompactionPolicy, planCompaction } from "../scripts/compact-record-history.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -116,8 +138,8 @@ function makeBackend(instanceId: string, kind: "sqlite" | "postgres", teardown: 
   };
 }
 
-async function sqliteBackend(instanceId: string): Promise<Backend> {
-  initDb();
+/** Register the connector and one connection on the open SQLite database. */
+function seedSqliteInstance(instanceId: string): void {
   getDb()
     .prepare("INSERT OR IGNORE INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
     .run(CONNECTOR_KEY, JSON.stringify(MANIFEST), NOW);
@@ -130,6 +152,11 @@ async function sqliteBackend(instanceId: string): Promise<Backend> {
        VALUES(?, ?, ?, 'Spotify source', 'active', 'account', ?, '{}', ?, ?, NULL)`
     )
     .run(instanceId, OWNER_SUBJECT_ID, CONNECTOR_KEY, instanceId, NOW, NOW);
+}
+
+async function sqliteBackend(instanceId: string): Promise<Backend> {
+  initDb();
+  seedSqliteInstance(instanceId);
   return makeBackend(instanceId, "sqlite", async () => closeDb());
 }
 
@@ -630,6 +657,157 @@ test("postgres: a prune landing mid-read cannot make the changes feed drop a tom
     await backend.teardown();
   }
 });
+
+// ─── One read snapshot per SQLite changes request ───────────────────────────
+
+type SqliteHandle = ReturnType<typeof getDb>;
+
+interface CounterRow {
+  changes_floor: number;
+  max_version: number;
+}
+
+function sqliteCounter(instanceId: string): CounterRow {
+  const row = getDb()
+    .prepare("SELECT max_version, changes_floor FROM version_counter WHERE connector_instance_id = ? AND stream = ?")
+    .get(instanceId, STREAM) as CounterRow;
+  return { changes_floor: row.changes_floor, max_version: row.max_version };
+}
+
+function sqliteHistory(instanceId: string): Array<[string, number]> {
+  const rows = getDb()
+    .prepare("SELECT record_key, version FROM record_changes WHERE connector_instance_id = ? AND stream = ? ORDER BY version")
+    .all(instanceId, STREAM) as Array<{ record_key: string; version: number }>;
+  return rows.map((row) => [row.record_key, row.version]);
+}
+
+/**
+ * One upsert as a second connection commits it: the production statements, in
+ * the production order, inside one BEGIN IMMEDIATE transaction. Allocate the
+ * version, write the current row and its history row, raise `changes_floor` to
+ * the retention horizon, prune with the same binds as pruneRecordChangeHistory.
+ */
+function commitUpsertOnOtherConnection(
+  other: SqliteHandle,
+  instanceId: string,
+  key: string,
+  popularity: number,
+  historyLimit: number
+): number {
+  return other
+    .transaction(() => {
+      const allocated = other
+        .prepare(referenceQueries.recordsIngestAllocateNextVersion.sql)
+        .get(CONNECTOR_KEY, instanceId, STREAM, instanceId, STREAM, instanceId, STREAM) as { max_version: number };
+      const version = allocated.max_version;
+      const json = JSON.stringify({ id: key, popularity });
+      other
+        .prepare(referenceQueries.recordsIngestUpsertRecord.sql)
+        .run(CONNECTOR_KEY, instanceId, STREAM, key, json, NOW, version, NOW);
+      other
+        .prepare(referenceQueries.recordsIngestInsertRecordChangeUpsert.sql)
+        .run(CONNECTOR_KEY, instanceId, STREAM, key, version, json, NOW);
+      const horizon = version - historyLimit;
+      other
+        .prepare(
+          "UPDATE version_counter SET changes_floor = MAX(changes_floor, ?) WHERE connector_instance_id = ? AND stream = ?"
+        )
+        .run(horizon, instanceId, STREAM);
+      other.prepare(referenceQueries.recordsIngestPruneRecordChanges.sql).run(instanceId, STREAM, horizon, horizon);
+      return version;
+    })
+    .immediate();
+}
+
+// The reviewer's schedule (history limit 2): cold=1, victim=2, hot=3..5, victim
+// deleted=6, token 4. The floor is 4 and victim's version-2 row is its baseline
+// at the token. Another connection then commits hot=7 and hot=8, which moves the
+// floor to 6 and prunes victim's version-2 row, between two statements of the
+// reader. Reading as separate autocommit statements, the reader found the
+// tombstone but no predecessor, dropped the deletion, and returned token 6,
+// which equals the new floor and so stays valid: the deletion was lost for good.
+// One read transaction answers from the state its floor check saw.
+for (const { point, between } of [
+  { between: "the floor check and the history reads", point: "after-floor-read" },
+  { between: "listing the change groups and reading their snapshots", point: "after-change-groups" },
+] as const) {
+  test(`sqlite: a prune committed on a second connection between ${between} cannot make the changes feed drop a tombstone`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cs-snapshot-race-"));
+    const path = join(dir, "ri.sqlite");
+    const instanceId = `cin_cs_epoch_sqlite_snapshot_${point.replace(/\W/g, "_")}`;
+    const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    let other: SqliteHandle | undefined;
+    try {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = "2";
+      initDb(path);
+      seedSqliteInstance(instanceId);
+      const backend = makeBackend(instanceId, "sqlite", async () => undefined);
+      await backend.put("cold");
+      await backend.put("victim");
+      await backend.put("hot", 1);
+      await backend.put("hot", 2);
+      const synced = await backend.list({ changes_since: "beginning" });
+      assert.ok(synced.next_changes_since, "the consumer holds a token at version 4");
+      await backend.put("hot", 3);
+      await backend.remove("victim");
+      assert.deepEqual(sqliteCounter(instanceId), { changes_floor: 4, max_version: 6 }, "fixture: floor 4, head 6");
+      assert.deepEqual(
+        sqliteHistory(instanceId),
+        [["cold", 1], ["victim", 2], ["hot", 4], ["hot", 5], ["victim", 6]],
+        "fixture: victim's version-2 row is its baseline at the token"
+      );
+
+      // A second connection to the same file, from the same driver package so
+      // that SQLite's in-process lock table is shared.
+      const writer = new SqliteDriver(path, { timeout: 2000 }) as unknown as SqliteHandle;
+      other = writer;
+      let fired = 0;
+      __setSqliteChangesSinceReadHookForTest((firedAt: string) => {
+        if (firedAt === point && fired === 0) {
+          fired += 1;
+          commitUpsertOnOtherConnection(writer, instanceId, "hot", 4, 2);
+          commitUpsertOnOtherConnection(writer, instanceId, "hot", 5, 2);
+        }
+      });
+      const delta = await backend.list({ changes_since: synced.next_changes_since });
+
+      assert.equal(fired, 1, "the hook must have interleaved the second connection's writes");
+      assert.deepEqual(
+        sqliteCounter(instanceId),
+        { changes_floor: 6, max_version: 8 },
+        "the writes moved the floor past the token"
+      );
+      assert.ok(
+        !sqliteHistory(instanceId).some(([key, version]) => key === "victim" && version === 2),
+        "the writes pruned victim's baseline"
+      );
+      assert.deepEqual(
+        delta.data.map((record) => [record.id, record.deleted === true]).sort(),
+        [
+          ["hot", false],
+          ["victim", true],
+        ],
+        "the deletion is delivered from the snapshot the floor check saw"
+      );
+
+      // The token the reader returned is its snapshot head. It is accepted and
+      // continues with exactly the writes the reader did not see.
+      assert.ok(delta.next_changes_since);
+      const next = await backend.list({ changes_since: delta.next_changes_since });
+      assert.deepEqual(ids(next), ["hot"]);
+    } finally {
+      __setSqliteChangesSinceReadHookForTest(null);
+      other?.close();
+      closeDb();
+      rmSync(dir, { force: true, recursive: true });
+      if (priorLimit === undefined) {
+        delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+      } else {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+      }
+    }
+  });
+}
 
 // Compaction deletes history rows outside the ingest prune. Retention is off
 // here so only compaction can account for them. The policy ignores
@@ -1265,27 +1443,55 @@ test("postgres: compaction refuses to remove history when the stream has no vers
 // A stream can hold history but no counter row (a lost counter). The seed only
 // updated existing rows, so the first write after the upgrade made the allocator
 // create the row with floor 0 and let stale tokens through. The seed now creates
-// the row the allocator would, then seeds every row by the same rule.
+// the row the allocator would, then seeds every row by the same rule. The
+// restored row belongs to the stream's own connection, and restoring it neither
+// resets nor advances that connection's reset generation (tokens carry it).
 const LOST_COUNTER_CASES = [
   { expectedFloor: 0, gap: false, limit: undefined, name: "complete history, retention off" },
   { expectedFloor: 3, gap: true, limit: undefined, name: "gapped history, retention off" },
   { expectedFloor: 3, gap: false, limit: "5", name: "complete history, retention on" },
 ] as const;
 
-for (const { expectedFloor, gap, limit, name } of LOST_COUNTER_CASES) {
+/** A connection that was reset twice before its counter was lost: its generation is not 0. */
+const PRIOR_RESET_GENERATION = "2";
+
+function setSqliteResetGeneration(instanceId: string, generation: string): void {
+  getDb()
+    .prepare("UPDATE connector_instances SET record_reset_generation = ? WHERE connector_instance_id = ?")
+    .run(Number(generation), instanceId);
+}
+
+function sqliteResetGeneration(instanceId: string): string | undefined {
+  const row = getDb()
+    .prepare("SELECT CAST(record_reset_generation AS TEXT) AS generation FROM connector_instances WHERE connector_instance_id = ?")
+    .get(instanceId) as { generation: string } | undefined;
+  return row?.generation;
+}
+
+function sqliteCounterRows(): object[] {
+  return getDb()
+    .prepare(
+      "SELECT connector_id, connector_instance_id, stream, max_version, changes_floor FROM version_counter ORDER BY connector_instance_id, stream"
+    )
+    .all()
+    .map((row: object) => ({ ...row }));
+}
+
+for (const [index, { expectedFloor, gap, limit, name }] of LOST_COUNTER_CASES.entries()) {
   test(`sqlite: the changes_floor seed restores the counter row of a stream that lost it (${name})`, async () => {
+    const instanceId = `cin_cs_epoch_sqlite_floor_lost_counter_${index}`;
+    const target = storageTarget(instanceId);
     const dir = mkdtempSync(join(tmpdir(), "cs-floor-lost-counter-"));
     const path = join(dir, "ri.sqlite");
     const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
     try {
       delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
       initDb(path);
-      getDb()
-        .prepare("INSERT OR IGNORE INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
-        .run(CONNECTOR_KEY, JSON.stringify(MANIFEST), NOW);
+      seedSqliteInstance(instanceId);
       for (const key of ["a", "b", "c"]) {
-        await ingestRecord(CONNECTOR_KEY, { data: { id: key }, emitted_at: NOW, key, stream: STREAM });
+        await ingestRecord(target, { data: { id: key }, emitted_at: NOW, key, stream: STREAM });
       }
+      setSqliteResetGeneration(instanceId, PRIOR_RESET_GENERATION);
       getDb().exec("DELETE FROM version_counter");
       if (gap) {
         getDb().exec("DELETE FROM record_changes WHERE version = 2");
@@ -1297,18 +1503,29 @@ for (const { expectedFloor, gap, limit, name } of LOST_COUNTER_CASES) {
         process.env.PDPP_CHANGE_HISTORY_LIMIT = limit;
       }
       initDb(path);
-      const rows = getDb()
-        .prepare("SELECT connector_id, stream, max_version, changes_floor FROM version_counter")
-        .all();
-      assert.deepEqual(
-        rows.map((row: object) => ({ ...row })),
-        [{ changes_floor: expectedFloor, connector_id: CONNECTOR_KEY, max_version: 3, stream: STREAM }]
-      );
+      assert.deepEqual(sqliteCounterRows(), [
+        {
+          changes_floor: expectedFloor,
+          connector_id: CONNECTOR_KEY,
+          connector_instance_id: instanceId,
+          max_version: 3,
+          stream: STREAM,
+        },
+      ]);
+      assert.equal(sqliteResetGeneration(instanceId), PRIOR_RESET_GENERATION, "the restore leaves the generation alone");
 
       // The allocator carries on from the restored row and keeps its floor.
-      await ingestRecord(CONNECTOR_KEY, { data: { id: "d" }, emitted_at: NOW, key: "d", stream: STREAM });
-      const after = getDb().prepare("SELECT max_version, changes_floor FROM version_counter").get();
-      assert.deepEqual({ ...after }, { changes_floor: expectedFloor, max_version: 4 });
+      await ingestRecord(target, { data: { id: "d" }, emitted_at: NOW, key: "d", stream: STREAM });
+      assert.deepEqual(sqliteCounterRows(), [
+        {
+          changes_floor: expectedFloor,
+          connector_id: CONNECTOR_KEY,
+          connector_instance_id: instanceId,
+          max_version: 4,
+          stream: STREAM,
+        },
+      ]);
+      assert.equal(sqliteResetGeneration(instanceId), PRIOR_RESET_GENERATION);
     } finally {
       closeDb();
       rmSync(dir, { force: true, recursive: true });
@@ -1324,26 +1541,34 @@ for (const { expectedFloor, gap, limit, name } of LOST_COUNTER_CASES) {
 // Current rows with no history and no counter: nothing proves the stream is
 // complete, so its floor starts at the head even with retention off.
 test("sqlite: the changes_floor seed restores a counter for current rows that have no history", async () => {
+  const instanceId = "cin_cs_epoch_sqlite_floor_no_history";
   const dir = mkdtempSync(join(tmpdir(), "cs-floor-no-history-"));
   const path = join(dir, "ri.sqlite");
   const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
   try {
     delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
     initDb(path);
-    getDb()
-      .prepare("INSERT OR IGNORE INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
-      .run(CONNECTOR_KEY, JSON.stringify(MANIFEST), NOW);
+    seedSqliteInstance(instanceId);
     for (const key of ["a", "b", "c"]) {
-      await ingestRecord(CONNECTOR_KEY, { data: { id: key }, emitted_at: NOW, key, stream: STREAM });
+      await ingestRecord(storageTarget(instanceId), { data: { id: key }, emitted_at: NOW, key, stream: STREAM });
     }
+    setSqliteResetGeneration(instanceId, PRIOR_RESET_GENERATION);
     getDb().exec("DELETE FROM version_counter");
     getDb().exec("DELETE FROM record_changes");
     getDb().exec("ALTER TABLE version_counter DROP COLUMN changes_floor");
     closeDb();
 
     initDb(path);
-    const row = getDb().prepare("SELECT max_version, changes_floor FROM version_counter").get();
-    assert.deepEqual({ ...row }, { changes_floor: 3, max_version: 3 });
+    assert.deepEqual(sqliteCounterRows(), [
+      {
+        changes_floor: 3,
+        connector_id: CONNECTOR_KEY,
+        connector_instance_id: instanceId,
+        max_version: 3,
+        stream: STREAM,
+      },
+    ]);
+    assert.equal(sqliteResetGeneration(instanceId), PRIOR_RESET_GENERATION, "the restore leaves the generation alone");
   } finally {
     closeDb();
     rmSync(dir, { force: true, recursive: true });
@@ -1354,6 +1579,30 @@ test("sqlite: the changes_floor seed restores a counter for current rows that ha
     }
   }
 });
+
+async function setPostgresResetGeneration(instanceId: string, generation: string): Promise<void> {
+  await postgresQuery("UPDATE connector_instances SET record_reset_generation = $1::bigint WHERE connector_instance_id = $2", [
+    generation,
+    instanceId,
+  ]);
+}
+
+async function postgresResetGeneration(instanceId: string): Promise<string | undefined> {
+  const { rows } = await postgresQuery<{ generation: string }>(
+    "SELECT record_reset_generation::text AS generation FROM connector_instances WHERE connector_instance_id = $1",
+    [instanceId]
+  );
+  return rows[0]?.generation;
+}
+
+async function postgresCounterRows(instanceId: string): Promise<object[]> {
+  const { rows } = await postgresQuery(
+    `SELECT connector_id, connector_instance_id, stream, max_version::int AS max_version, changes_floor::int AS changes_floor
+       FROM version_counter WHERE connector_instance_id = $1 ORDER BY stream`,
+    [instanceId]
+  );
+  return rows;
+}
 
 for (const [index, { expectedFloor, gap, limit, name }] of LOST_COUNTER_CASES.entries()) {
   test(`postgres: the changes_floor seed restores the counter row of a stream that lost it (${name})`, {
@@ -1367,6 +1616,7 @@ for (const [index, { expectedFloor, gap, limit, name }] of LOST_COUNTER_CASES.en
       for (const key of ["a", "b", "c"]) {
         await backend.put(key);
       }
+      await setPostgresResetGeneration(instanceId, PRIOR_RESET_GENERATION);
       await postgresQuery("DELETE FROM version_counter WHERE connector_instance_id = $1", [instanceId]);
       if (gap) {
         await postgresQuery(
@@ -1384,22 +1634,33 @@ for (const [index, { expectedFloor, gap, limit, name }] of LOST_COUNTER_CASES.en
         process.env.PDPP_CHANGE_HISTORY_LIMIT = limit;
       }
       await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL as string });
-      const counter = await postgresQuery(
-        `SELECT connector_id, stream, max_version::int AS max_version, changes_floor::int AS changes_floor
-           FROM version_counter WHERE connector_instance_id = $1`,
-        [instanceId]
-      );
-      assert.deepEqual(counter.rows, [
-        { changes_floor: expectedFloor, connector_id: CONNECTOR_KEY, max_version: 3, stream: STREAM },
+      assert.deepEqual(await postgresCounterRows(instanceId), [
+        {
+          changes_floor: expectedFloor,
+          connector_id: CONNECTOR_KEY,
+          connector_instance_id: instanceId,
+          max_version: 3,
+          stream: STREAM,
+        },
       ]);
+      assert.equal(
+        await postgresResetGeneration(instanceId),
+        PRIOR_RESET_GENERATION,
+        "the restore leaves the generation alone"
+      );
 
       // The allocator carries on from the restored row and keeps its floor.
       await backend.put("d");
-      const after = await postgresQuery(
-        "SELECT max_version::int AS max_version, changes_floor::int AS changes_floor FROM version_counter WHERE connector_instance_id = $1",
-        [instanceId]
-      );
-      assert.deepEqual(after.rows, [{ changes_floor: expectedFloor, max_version: 4 }]);
+      assert.deepEqual(await postgresCounterRows(instanceId), [
+        {
+          changes_floor: expectedFloor,
+          connector_id: CONNECTOR_KEY,
+          connector_instance_id: instanceId,
+          max_version: 4,
+          stream: STREAM,
+        },
+      ]);
+      assert.equal(await postgresResetGeneration(instanceId), PRIOR_RESET_GENERATION);
     } finally {
       if (priorLimit === undefined) {
         delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
@@ -1410,6 +1671,338 @@ for (const [index, { expectedFloor, gap, limit, name }] of LOST_COUNTER_CASES.en
     }
   });
 }
+
+// ─── Counters that lag the durable history ──────────────────────────────────
+
+// A counter can sit behind the durable data. The PostgreSQL allocator records
+// seeing it live (postgres-records.ts, allocateNextVersion), and both allocators
+// heal it by allocating above the counter, the newest history row and the newest
+// current row. The upgrade seed has to take the same head. Its gap rule compares
+// the retained rows with the stream's head; seeded at a lagging counter, the
+// floor lands below a gap that lies above the counter, and a stale token that
+// holds a deleted record stays valid with its baseline gone.
+
+/** cold=1, hot=2, victim=3, hot=4, victim deleted=5. A consumer at 4 holds victim. */
+async function putGapScenario(backend: Backend): Promise<void> {
+  await backend.put("cold");
+  await backend.put("hot", 1);
+  await backend.put("victim");
+  await backend.put("hot", 2);
+  await backend.remove("victim");
+}
+
+/** cold=1, a=2, b=3, a=4: four versions, every one in the history. */
+async function putCompleteHistory(backend: Backend): Promise<void> {
+  await backend.put("cold");
+  await backend.put("a");
+  await backend.put("b");
+  await backend.put("a", 1);
+}
+
+/** What a test reads back from the database under test. */
+interface CounterProbe {
+  counter(instanceId: string): Promise<CounterRow | undefined>;
+  generation(instanceId: string): Promise<string | undefined>;
+  rows(instanceId: string): Promise<object[]>;
+}
+
+async function postgresCounter(instanceId: string): Promise<CounterRow | undefined> {
+  const { rows } = await postgresQuery<CounterRow>(
+    "SELECT max_version::int AS max_version, changes_floor::int AS changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+    [instanceId, STREAM]
+  );
+  return rows[0];
+}
+
+const SQLITE_PROBE: CounterProbe = {
+  counter: async (instanceId) => sqliteCounter(instanceId),
+  generation: async (instanceId) => sqliteResetGeneration(instanceId),
+  rows: async () => sqliteCounterRows(),
+};
+
+const POSTGRES_PROBE: CounterProbe = {
+  counter: postgresCounter,
+  generation: postgresResetGeneration,
+  rows: postgresCounterRows,
+};
+
+interface UpgradeSteps {
+  /** Write through the real ingest path. */
+  arrange: (backend: Backend) => Promise<void>;
+  /** Run once the upgrade has happened. */
+  check: (backend: Backend, instanceId: string) => Promise<void>;
+  /** Edit the tables the way an earlier prune or a counter drift left them. */
+  damage: (instanceId: string) => Promise<void>;
+}
+
+/**
+ * A SQLite file written before `changes_floor` existed: `arrange`, `damage`, drop
+ * the column, and the next initDb is the upgrade under test. Retention is off, so
+ * only the gap rule can seed a floor.
+ */
+async function sqliteUpgrade(name: string, { arrange, check, damage }: UpgradeSteps): Promise<void> {
+  const instanceId = `cin_cs_epoch_sqlite_floor_${name}`;
+  const dir = mkdtempSync(join(tmpdir(), "cs-floor-lagging-"));
+  const path = join(dir, "ri.sqlite");
+  const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  try {
+    delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    initDb(path);
+    seedSqliteInstance(instanceId);
+    const backend = makeBackend(instanceId, "sqlite", async () => undefined);
+    await arrange(backend);
+    await damage(instanceId);
+    getDb().exec("ALTER TABLE version_counter DROP COLUMN changes_floor");
+    closeDb();
+    initDb(path);
+    await check(backend, instanceId);
+  } finally {
+    closeDb();
+    rmSync(dir, { force: true, recursive: true });
+    if (priorLimit === undefined) {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    } else {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+  }
+}
+
+/**
+ * The PostgreSQL counterpart of `sqliteUpgrade`. The test-database guard refuses
+ * to re-admit a database whose `records` hold rows, so they go before the
+ * upgrade; the history rows and the counters stay under test.
+ */
+async function postgresUpgrade(name: string, { arrange, check, damage }: UpgradeSteps): Promise<void> {
+  const instanceId = `cin_cs_epoch_postgres_floor_${name}`;
+  const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  const backend = await postgresBackend(instanceId);
+  try {
+    await arrange(backend);
+    await damage(instanceId);
+    await postgresQuery("DELETE FROM records WHERE connector_instance_id = $1", [instanceId]);
+    await postgresQuery("ALTER TABLE version_counter DROP COLUMN changes_floor");
+    await closePostgresStorage();
+    await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL as string });
+    await check(backend, instanceId);
+  } finally {
+    if (priorLimit === undefined) {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    } else {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+    await backend.teardown();
+  }
+}
+
+// Retained: cold=1, hot=4, victim deleted=5. Earlier pruning removed hot=2 and
+// victim=3, and the counter stopped at 4. Three rows against a head of 5 is a
+// gap, so the floor is the head, 5. Seeded at the counter (4), the next write
+// made the allocator continue at 6 and keep floor 4: token 4 was accepted, found
+// victim's tombstone without its version-3 predecessor, and dropped it.
+async function checkGapIsSeededAtTheHealedHead(
+  backend: Backend,
+  instanceId: string,
+  probe: CounterProbe
+): Promise<void> {
+  assert.deepEqual(await probe.rows(instanceId), [
+    {
+      changes_floor: 5,
+      connector_id: CONNECTOR_KEY,
+      connector_instance_id: instanceId,
+      max_version: 5,
+      stream: STREAM,
+    },
+  ]);
+  assert.equal(await probe.generation(instanceId), "0", "the heal leaves the generation alone");
+  // A token at the healed head holds everything, so nothing is new.
+  assert.deepEqual(ids(await backend.list({ changes_since: backend.legacyToken(5) })), []);
+}
+
+async function checkStaleTokenExpiresAfterTheNextWrite(
+  backend: Backend,
+  instanceId: string,
+  probe: CounterProbe
+): Promise<void> {
+  await backend.put("hot", 3);
+  await assert.rejects(backend.list({ changes_since: backend.legacyToken(4) }), {
+    code: "cursor_expired",
+    message: /pruned change history/,
+  });
+  // The write continued above the head and left the floor where the seed put it.
+  assert.deepEqual(await probe.counter(instanceId), { changes_floor: 5, max_version: 6 });
+  const fresh = await backend.list({ changes_since: "beginning" });
+  assert.deepEqual(ids(fresh), ["cold", "hot"], "a full re-sync sees the post-delete state");
+}
+
+const SQLITE_GAP_UNDER_LAGGING_COUNTER: Pick<UpgradeSteps, "arrange" | "damage"> = {
+  arrange: putGapScenario,
+  damage: async () => {
+    getDb().exec("DELETE FROM record_changes WHERE version IN (2, 3)");
+    getDb().exec("UPDATE version_counter SET max_version = 4");
+  },
+};
+
+const POSTGRES_GAP_UNDER_LAGGING_COUNTER: Pick<UpgradeSteps, "arrange" | "damage"> = {
+  arrange: putGapScenario,
+  damage: async (instanceId) => {
+    await postgresQuery(
+      "DELETE FROM record_changes WHERE connector_instance_id = $1 AND stream = $2 AND version IN (2, 3)",
+      [instanceId, STREAM]
+    );
+    await postgresQuery("UPDATE version_counter SET max_version = 4 WHERE connector_instance_id = $1 AND stream = $2", [
+      instanceId,
+      STREAM,
+    ]);
+  },
+};
+
+test("sqlite: the changes_floor seed heals a lagging counter first and seeds the gap at the healed head", async () => {
+  await sqliteUpgrade("lagging_gap_state", {
+    ...SQLITE_GAP_UNDER_LAGGING_COUNTER,
+    check: (backend, instanceId) => checkGapIsSeededAtTheHealedHead(backend, instanceId, SQLITE_PROBE),
+  });
+});
+
+test("sqlite: a stale token expires after a lagging counter's next write instead of dropping a tombstone", async () => {
+  await sqliteUpgrade("lagging_gap_token", {
+    ...SQLITE_GAP_UNDER_LAGGING_COUNTER,
+    check: (backend, instanceId) => checkStaleTokenExpiresAfterTheNextWrite(backend, instanceId, SQLITE_PROBE),
+  });
+});
+
+test("postgres: the changes_floor seed heals a lagging counter first and seeds the gap at the healed head", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await postgresUpgrade("lagging_gap_state", {
+    ...POSTGRES_GAP_UNDER_LAGGING_COUNTER,
+    check: (backend, instanceId) => checkGapIsSeededAtTheHealedHead(backend, instanceId, POSTGRES_PROBE),
+  });
+});
+
+test("postgres: a stale token expires after a lagging counter's next write instead of dropping a tombstone", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await postgresUpgrade("lagging_gap_token", {
+    ...POSTGRES_GAP_UNDER_LAGGING_COUNTER,
+    check: (backend, instanceId) => checkStaleTokenExpiresAfterTheNextWrite(backend, instanceId, POSTGRES_PROBE),
+  });
+});
+
+// A counter behind the history with no row missing: the heal raises it to the
+// head, but the stream is complete, so its floor stays 0 and a token below the
+// head still delivers exactly the newer change. Healing does not expire tokens.
+async function checkLaggingCounterWithCompleteHistory(
+  backend: Backend,
+  instanceId: string,
+  probe: CounterProbe
+): Promise<void> {
+  assert.deepEqual(await probe.rows(instanceId), [
+    {
+      changes_floor: 0,
+      connector_id: CONNECTOR_KEY,
+      connector_instance_id: instanceId,
+      max_version: 4,
+      stream: STREAM,
+    },
+  ]);
+  const delta = await backend.list({ changes_since: backend.legacyToken(3) });
+  assert.deepEqual(ids(delta), ["a"]);
+}
+
+test("sqlite: the changes_floor seed heals a lagging counter but keeps floor 0 for a complete history", async () => {
+  await sqliteUpgrade("lagging_complete", {
+    arrange: putCompleteHistory,
+    check: (backend, instanceId) => checkLaggingCounterWithCompleteHistory(backend, instanceId, SQLITE_PROBE),
+    damage: async () => {
+      getDb().exec("UPDATE version_counter SET max_version = 2");
+    },
+  });
+});
+
+test("postgres: the changes_floor seed heals a lagging counter but keeps floor 0 for a complete history", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await postgresUpgrade("lagging_complete", {
+    arrange: putCompleteHistory,
+    check: (backend, instanceId) => checkLaggingCounterWithCompleteHistory(backend, instanceId, POSTGRES_PROBE),
+    damage: async (instanceId) => {
+      await postgresQuery(
+        "UPDATE version_counter SET max_version = 2 WHERE connector_instance_id = $1 AND stream = $2",
+        [instanceId, STREAM]
+      );
+    },
+  });
+});
+
+// The shape one production counter has: it lags the current rows, not the
+// history. The newest current row, a=4, has no history row and the counter
+// stopped at 3. The head is 4 and three history rows are fewer than that, so the
+// floor is 4.
+async function checkLaggingCounterWithCurrentRowsAhead(
+  backend: Backend,
+  instanceId: string,
+  probe: CounterProbe
+): Promise<void> {
+  assert.deepEqual(await probe.rows(instanceId), [
+    {
+      changes_floor: 4,
+      connector_id: CONNECTOR_KEY,
+      connector_instance_id: instanceId,
+      max_version: 4,
+      stream: STREAM,
+    },
+  ]);
+  await backend.put("c");
+  assert.deepEqual(await probe.counter(instanceId), { changes_floor: 4, max_version: 5 });
+}
+
+test("sqlite: the changes_floor seed raises a counter that lags only the current rows", async () => {
+  await sqliteUpgrade("lagging_current", {
+    arrange: putCompleteHistory,
+    check: (backend, instanceId) => checkLaggingCounterWithCurrentRowsAhead(backend, instanceId, SQLITE_PROBE),
+    damage: async () => {
+      getDb().exec("DELETE FROM record_changes WHERE version = 4");
+      getDb().exec("UPDATE version_counter SET max_version = 3");
+    },
+  });
+});
+
+// The guard refuses a database whose `records` hold rows, and the current rows
+// are the point of this case, so the seed runs on a client of its own.
+test("postgres: the changes_floor seed raises a counter that lags only the current rows", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  const instanceId = "cin_cs_epoch_postgres_floor_lagging_current";
+  const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  const backend = await postgresBackend(instanceId);
+  const pool = new pg.Pool({ connectionString: POSTGRES_URL });
+  const client = await pool.connect();
+  try {
+    await putCompleteHistory(backend);
+    await postgresQuery("DELETE FROM record_changes WHERE connector_instance_id = $1 AND stream = $2 AND version = 4", [
+      instanceId,
+      STREAM,
+    ]);
+    await postgresQuery("UPDATE version_counter SET max_version = 3 WHERE connector_instance_id = $1 AND stream = $2", [
+      instanceId,
+      STREAM,
+    ]);
+    await postgresQuery("ALTER TABLE version_counter DROP COLUMN changes_floor");
+    await __ensurePostgresChangesFloorForTest(client);
+    await checkLaggingCounterWithCurrentRowsAhead(backend, instanceId, POSTGRES_PROBE);
+  } finally {
+    client.release();
+    await pool.end();
+    if (priorLimit === undefined) {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    } else {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+    await backend.teardown();
+  }
+});
 
 // ─── Seed lock ──────────────────────────────────────────────────────────────
 
