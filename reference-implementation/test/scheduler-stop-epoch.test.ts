@@ -16,10 +16,12 @@
 // honoured even when a stale scheduler instance is not stopped.
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunManagedConnectorViaController, RunRecord } from "../runtime/scheduler-domain-types.ts";
+import { closeDb, initDb } from "../server/db.ts";
+import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
 
 const CONNECTOR_ID = "chatgpt";
 const INSTANCE_ID = "cin_chatgpt_stop_epoch";
@@ -306,5 +308,116 @@ test("a stop then start dispatches on the new epoch but never on the stale one",
     assert.deepEqual(h.controllerCalls, [CONNECTOR_ID], "the post-restart tick dispatches");
   } finally {
     h.scheduler.stop();
+  }
+});
+
+type ManagedController = Parameters<typeof createRunManagedConnectorViaController>[0];
+
+// ── Production managed-run adapter ─────────────────────────────────────────
+//
+// The tests above inject a bare callback. The production route is
+// `createRunManagedConnectorViaController(controller)`, which ends in
+// `controller.runNow`; these drive that adapter with a stub controller so the
+// assertion is on `controller.runNow` itself.
+
+function managedControllerStub(onRunNow: (call: number) => void, awaitRun: () => Promise<string>): ManagedController {
+  let calls = 0;
+  return {
+    awaitRun,
+    browserSurfaceLeaseManager: { isManagedConnector: () => true },
+    runNow: async () => {
+      calls += 1;
+      onRunNow(calls);
+      return { run_id: `run_stop_epoch_managed_${calls}`, status: "started", trace_id: "trace-stop-epoch" };
+    },
+  } as unknown as ManagedController;
+}
+
+function buildManagedScheduler(controller: ManagedController, gate?: { entered: () => void; released: Promise<void> }) {
+  return createScheduler({
+    connectors: [
+      {
+        connectorId: CONNECTOR_ID,
+        connectorInstanceId: INSTANCE_ID,
+        connectorPath: "/nonexistent/connector.mjs",
+        intervalMs: 60_000,
+        manifest: BACKGROUND_SAFE_MANIFEST,
+        maxRetries: 2,
+        ownerSubjectId: OWNER,
+        ownerToken: "owner-token",
+      },
+    ],
+    getSourcePressureGaps: async () => {
+      gate?.entered();
+      await gate?.released;
+      return [];
+    },
+    onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+    readinessChecker: async () => ({ ready: true }),
+    rsUrl: "http://localhost.invalid",
+    runManagedConnectorViaController: createRunManagedConnectorViaController(controller) ?? null,
+    schedulerStore: buildStore(),
+  });
+}
+
+test("production managed adapter: stop() while the governor probe is pending never reaches controller.runNow", async () => {
+  const entered = deferred<void>();
+  const gate = deferred<void>();
+  const runNowCalls: number[] = [];
+  const scheduler = buildManagedScheduler(
+    managedControllerStub(
+      (call) => runNowCalls.push(call),
+      async () => "succeeded",
+    ),
+    { entered: () => entered.resolve(), released: gate.promise },
+  );
+  try {
+    scheduler.start();
+    await entered.promise;
+    assert.deepEqual(runNowCalls, [], "no run existed before stop");
+
+    scheduler.stop();
+    gate.resolve();
+    await drain();
+
+    assert.deepEqual(runNowCalls, [], "controller.runNow must not be called after stop");
+  } finally {
+    scheduler.stop();
+  }
+});
+
+test("production managed adapter: a retry after the scheduler is stopped never reaches controller.runNow", async (t) => {
+  initDb(":memory:");
+  t.after(() => closeDb());
+  // The retry back-off is a real 1 s timer; fake only setTimeout so the test
+  // advances it without waiting.
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+
+  const firstAttemptSettled = deferred<void>();
+  const runNowCalls: number[] = [];
+  // biome-ignore lint/style/useConst: assigned after the controller stub that closes over it
+  let scheduler!: ReturnType<typeof createScheduler>;
+  scheduler = buildManagedScheduler(
+    managedControllerStub(
+      (call) => runNowCalls.push(call),
+      async () => {
+        // The first attempt fails retryably while the owner disables the schedule.
+        scheduler.stop();
+        firstAttemptSettled.resolve();
+        return "failed";
+      },
+    ),
+  );
+  try {
+    scheduler.start();
+    await firstAttemptSettled.promise;
+    await drain();
+    mock.timers.tick(5000);
+    await drain();
+
+    assert.deepEqual(runNowCalls, [1], "the stopped scheduler must not start a retry run");
+  } finally {
+    scheduler.stop();
   }
 });

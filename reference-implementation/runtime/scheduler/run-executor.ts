@@ -1329,7 +1329,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     connectorInstanceId: string,
     ownerToken: string,
     ownerSubjectId: string,
-    options: { maxRetries?: number; recoveryOnly?: boolean } = {}
+    options: { dispatchSignal?: AbortSignal; maxRetries?: number; recoveryOnly?: boolean } = {}
   ): Promise<RunRecord | null> {
     const maxRetries =
       options.maxRetries !== undefined && Number.isFinite(options.maxRetries)
@@ -1386,8 +1386,16 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           terminal_reason: runNowResult.terminal_reason || null,
         })
       ) {
-        await sleep(backoffDelayMs(attempt));
-        continue;
+        // A stopped or replaced scheduler must not start another run for this
+        // schedule: record the attempt that already ran instead of retrying
+        // (the direct route does the same via `runtime.running` in
+        // `runWithRetries`).
+        if (!options.dispatchSignal?.aborted) {
+          await sleep(backoffDelayMs(attempt));
+          if (!options.dispatchSignal?.aborted) {
+            continue;
+          }
+        }
       }
 
       persistLastRunTime(connectorId, connectorInstanceId, Date.now());
@@ -1676,7 +1684,12 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     // from within the scheduler. Both guards stay intact.
     if (runManagedConnectorViaController && !isManual) {
       // Null return means connector is not managed — fall through to runWithRetries.
-      const managedRunOptions: { maxRetries?: number; recoveryOnly?: boolean } = { recoveryOnly };
+      const managedRunOptions: { dispatchSignal?: AbortSignal; maxRetries?: number; recoveryOnly?: boolean } = {
+        recoveryOnly,
+      };
+      if (dispatchSignal) {
+        managedRunOptions.dispatchSignal = dispatchSignal;
+      }
       if (schedule.maxRetries !== undefined) {
         managedRunOptions.maxRetries = schedule.maxRetries;
       }
