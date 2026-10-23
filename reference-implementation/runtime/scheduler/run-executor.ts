@@ -118,6 +118,12 @@ export interface RunExecutorDeps {
   rsUrl: string;
   runManagedConnectorViaController: RunManagedConnectorViaController | null;
   runtime: RunExecutorRuntimeState;
+  /**
+   * Deadline for one `readScheduleEnabled` read. A read that outlasts it (or the
+   * dispatch abort) invalidates the dispatch. Non-finite or non-positive means
+   * no deadline. The scheduler passes its pre-launch liveness ceiling.
+   */
+  scheduleReadDeadlineMs?: number;
   schedulerStore:
     | Pick<NonNullable<SchedulerOptions["schedulerStore"]>, "appendRunHistory" | "deleteActiveRun" | "upsertActiveRun">
     | null
@@ -790,8 +796,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     registerRunCancellation,
     resolveStaticSecretRunEnv,
     rsUrl,
-    runtime,
     runManagedConnectorViaController,
+    runtime,
+    scheduleReadDeadlineMs,
     schedulerStore,
     setState,
   } = deps;
@@ -1466,45 +1473,43 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
   // login credential exists; the connector can still reuse/repair the browser
   // session according to its automation policy.
   //
-  // Returns EITHER the resolved env OR a terminal RunRecord (`earlyReturn`) that
-  // launchRun must hand to recordAndNotify. Behavior-preserving extraction: the
-  // resolver call, persistLastRunTime, isManual/ownerRepairCode branching,
-  // markNeedsHuman, and both record builders are moved verbatim; recordAndNotify
-  // is still invoked exactly once by launchRun on the returned record.
+  // Returns EITHER the resolved env OR the resolver's failure. launchRun applies
+  // the failure (`recordCredentialFailure`) only after its final admission guard,
+  // and hands the resulting record to recordAndNotify exactly once.
   async function resolveLaunchCredentials(
     connectorId: string,
     connectorInstanceId: string,
-    ownerSubjectId: string,
-    isManual: boolean,
-    stillAdmitted: () => Promise<boolean>
-  ): Promise<{ env: Record<string, string> | null } | { earlyReturn: RunRecord } | { dropped: true }> {
+    ownerSubjectId: string
+  ): Promise<{ env: Record<string, string> | null } | { failure: unknown }> {
     if (!resolveStaticSecretRunEnv) {
       return { env: null };
     }
     try {
       return { env: await resolveStaticSecretRunEnv({ connectorId, connectorInstanceId, ownerSubjectId }) };
     } catch (err) {
-      // The lookup may have been abandoned by a stop or disable: its failure must
-      // not stamp the cadence or mark the connection needs-human.
-      if (!(await stillAdmitted())) {
-        return { dropped: true };
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      persistLastRunTime(connectorId, connectorInstanceId, Date.now());
-      const ownerRepairCode = ownerRepairCredentialCode(err);
-      if (!isManual && ownerRepairCode) {
-        markNeedsHuman(connectorId, connectorInstanceId);
-        return {
-          earlyReturn: buildCredentialResolutionOwnerActionSkip(
-            connectorId,
-            ownerRepairCode,
-            message,
-            connectorInstanceId
-          ),
-        };
-      }
-      return { earlyReturn: buildCredentialResolutionFailure(connectorId, message, connectorInstanceId) };
+      // Pure: the lookup may have been abandoned by a stop or disable, so the
+      // caller applies the failure's side effects only after its final guard.
+      return { failure: err };
     }
+  }
+
+  // Applies the side effects of a credential failure (cadence stamp, needs-human
+  // flag) and builds its record. Synchronous, so no guard can drop the dispatch
+  // between the effects.
+  function recordCredentialFailure(
+    connectorId: string,
+    connectorInstanceId: string,
+    isManual: boolean,
+    err: unknown
+  ): RunRecord {
+    const message = err instanceof Error ? err.message : String(err);
+    persistLastRunTime(connectorId, connectorInstanceId, Date.now());
+    const ownerRepairCode = ownerRepairCredentialCode(err);
+    if (!isManual && ownerRepairCode) {
+      markNeedsHuman(connectorId, connectorInstanceId);
+      return buildCredentialResolutionOwnerActionSkip(connectorId, ownerRepairCode, message, connectorInstanceId);
+    }
+    return buildCredentialResolutionFailure(connectorId, message, connectorInstanceId);
   }
 
   async function admitScheduledRunConnection(
@@ -1606,7 +1611,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     return automaticDispatchStillValid(
       signal,
       readScheduleEnabled,
-      schedule.connectorInstanceId ?? schedule.connectorId
+      schedule.connectorInstanceId ?? schedule.connectorId,
+      scheduleReadDeadlineMs
     );
   }
 
@@ -1645,21 +1651,12 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       return null;
     }
 
-    const credentials = await resolveLaunchCredentials(
-      connectorId,
-      connectorInstanceId,
-      ownerSubjectId,
-      isManual,
-      stillAdmitted
-    );
-    if ("dropped" in credentials) {
-      return null;
-    }
+    const credentials = await resolveLaunchCredentials(connectorId, connectorInstanceId, ownerSubjectId);
     if (!(await stillAdmitted())) {
       return null;
     }
-    if ("earlyReturn" in credentials) {
-      return recordAndNotify(credentials.earlyReturn);
+    if ("failure" in credentials) {
+      return recordAndNotify(recordCredentialFailure(connectorId, connectorInstanceId, isManual, credentials.failure));
     }
     const staticSecretEnv = credentials.env;
 

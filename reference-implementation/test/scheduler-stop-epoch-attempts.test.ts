@@ -26,6 +26,7 @@ import type {
   RunRecord,
 } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, initDb } from "../server/db.ts";
+import { createEscalationDelivery } from "../server/scheduler-manager-factory.ts";
 import {
   BACKGROUND_SAFE_MANIFEST,
   buildStore,
@@ -480,3 +481,232 @@ test("an escalation raised after stop() is never delivered", async () => {
     scheduler.stop();
   }
 });
+
+test("an escalation raised by a stopped epoch after a restart is bound to the old epoch and not delivered", async () => {
+  const preflightEntered = deferred<void>();
+  const preflightGate = deferred<void>();
+  const raised: Parameters<HumanRequiredStateEscalationHandler>[0][] = [];
+  const { scheduler } = directScheduler(
+    "/nonexistent/connector.mjs",
+    buildStore(() => ({ enabled: true })),
+    {
+      isNeedsHuman: () => true,
+      onHumanRequiredStateEscalation: (info) => {
+        raised.push(info);
+      },
+      readinessChecker: async () => {
+        preflightEntered.resolve();
+        await preflightGate.promise;
+        return { ready: true };
+      },
+    }
+  );
+  try {
+    scheduler.start();
+    await preflightEntered.promise;
+    scheduler.stop();
+    scheduler.start();
+    await drain();
+    preflightGate.resolve();
+    await drain();
+
+    for (const info of raised) {
+      assert.equal(await info.shouldDeliver?.(), false, "the old epoch's escalation must not adopt the new epoch");
+    }
+    assert.deepEqual(raised, [], "a stopped epoch must not raise an escalation, even after a restart");
+  } finally {
+    scheduler.stop();
+  }
+});
+
+// ── (f) post-lease guard liveness ──────────────────────────────────────────
+
+test("an abort during the post-lease schedule read releases the lease and a later start can dispatch", async (t) => {
+  initDb(":memory:");
+  t.after(() => closeDb());
+  const connector = writeConnector(t, "succeed");
+  const readEntered = deferred<void>();
+  const leaseCleared = deferred<void>();
+  let leased = false;
+  let hang = true;
+  const { scheduler } = directScheduler(
+    connector.connectorPath,
+    buildStore(undefined, {
+      deleteActiveRun: () => leaseCleared.resolve(),
+      getSchedule: async () => {
+        if (leased && hang) {
+          readEntered.resolve();
+          await new Promise<never>(() => undefined);
+        }
+        return { enabled: true };
+      },
+      upsertActiveRun: () => {
+        leased = true;
+        return true;
+      },
+    })
+  );
+  try {
+    scheduler.start();
+    await readEntered.promise;
+    scheduler.stop();
+    await leaseCleared.promise;
+    await drain();
+    assert.equal(connector.starts(), 0, "no connector starts for the aborted dispatch");
+
+    hang = false;
+    scheduler.start();
+    for (let i = 0; i < 250 && connector.starts() === 0; i += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: poll until the child process of the restarted dispatch starts
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(connector.starts(), 1, "the key is dispatchable again after the aborted dispatch released it");
+  } finally {
+    scheduler.stop();
+  }
+});
+
+// ── (g) credential failure: decide before any side effect ──────────────────
+
+test("a credential failure never applies its cadence and needs-human effects without its record", async () => {
+  const stamps: number[] = [];
+  const needsHuman: string[] = [];
+  let failed = false;
+  let readsAfterFailure = 0;
+  const { completed, scheduler } = directScheduler(
+    "/nonexistent/connector.mjs",
+    buildStore(undefined, {
+      getSchedule: () => {
+        if (failed) {
+          readsAfterFailure += 1;
+          if (readsAfterFailure > 1) {
+            throw new Error("store unavailable");
+          }
+        }
+        return { enabled: true };
+      },
+      upsertLastRunTime: () => stamps.push(1),
+    }),
+    {
+      markNeedsHuman: (id) => needsHuman.push(id),
+      resolveStaticSecretRunEnv: () => {
+        failed = true;
+        return Promise.reject(Object.assign(new Error("credential revoked"), { code: "credential_revoked" }));
+      },
+    }
+  );
+  try {
+    scheduler.start();
+    await drain();
+
+    assert.ok(readsAfterFailure >= 1, "the failure path consulted the schedule");
+    // The failure's effects and its record are applied together or not at all.
+    assert.equal(stamps.length, completed.length, "a cadence stamp needs the matching failure record");
+    assert.equal(needsHuman.length, completed.length, "a needs-human flag needs the matching failure record");
+  } finally {
+    scheduler.stop();
+  }
+});
+
+// ── (h) outer emissions follow the durable schedule ────────────────────────
+
+for (const enabledAtDeadline of [true, false]) {
+  test(`a wedged preflight ${enabledAtDeadline ? "records" : "does not record"} the wedge when the schedule is ${enabledAtDeadline ? "enabled" : "disabled"} at the deadline`, async () => {
+    const readinessEntered = deferred<void>();
+    const row: { enabled: boolean } = { enabled: true };
+    const { completed, scheduler } = directScheduler(
+      "/nonexistent/connector.mjs",
+      buildStore(() => row),
+      {
+        dispatchLivenessCeilingMs: 30,
+        readinessChecker: async () => {
+          readinessEntered.resolve();
+          await new Promise<never>(() => undefined);
+          return { ready: true };
+        },
+      }
+    );
+    try {
+      scheduler.start();
+      await readinessEntered.promise;
+      row.enabled = enabledAtDeadline;
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      await drain();
+
+      assert.equal(
+        completed.filter((record) => record.failureReason === "scheduler_dispatch_wedged").length,
+        enabledAtDeadline ? 1 : 0
+      );
+    } finally {
+      scheduler.stop();
+    }
+  });
+}
+
+// ── (i) escalation push through the real factory consumer ──────────────────
+
+for (const variant of ["stop", "disable", "none"] as const) {
+  test(`factory escalation consumer: ${variant} while the verdict projection is pending ${variant === "none" ? "delivers the push" : "sends no push"}`, async () => {
+    const projectionEntered = deferred<void>();
+    const projectionGate = deferred<void>();
+    const handled = deferred<Promise<void>>();
+    let listed = 0;
+    let row: ScheduleRow = { enabled: true };
+    const deliver = createEscalationDelivery({
+      controller: {} as Parameters<typeof createEscalationDelivery>[0]["controller"],
+      logger: { warn: () => undefined } as unknown as Parameters<typeof createEscalationDelivery>[0]["logger"],
+      ownerSubjectId: OWNER,
+      project: async () => {
+        projectionEntered.resolve();
+        await projectionGate.promise;
+        return {
+          connectionUrl: "/sources/x",
+          connectorDisplayName: "X",
+          renderedVerdict: {
+            channel: "attention",
+            required_actions: [{ audience: "owner", satisfied_when: { kind: "owner_action" } }],
+          },
+        };
+      },
+      webPushConfig: {
+        enabled: true,
+        privateKey: "k",
+        publicKey: "p",
+        subject: "mailto:test@example.invalid",
+        unavailableReason: null,
+      },
+      webPushSubscriptionStore: {
+        listActiveRaw: () => {
+          listed += 1;
+          return [];
+        },
+      } as unknown as Parameters<typeof createEscalationDelivery>[0]["webPushSubscriptionStore"],
+    });
+    const { scheduler } = directScheduler(
+      "/nonexistent/connector.mjs",
+      buildStore(() => row),
+      {
+        isNeedsHuman: () => true,
+        onHumanRequiredStateEscalation: (info) => {
+          handled.resolve(Promise.resolve(deliver(info)));
+        },
+      }
+    );
+    try {
+      scheduler.start();
+      await projectionEntered.promise;
+      if (variant === "stop") {
+        scheduler.stop();
+      } else if (variant === "disable") {
+        row = { enabled: false };
+      }
+      projectionGate.resolve();
+      const settled = await handled.promise;
+      await settled;
+
+      assert.equal(listed, variant === "none" ? 1 : 0);
+    } finally {
+      scheduler.stop();
+    }
+  });
+}
