@@ -7621,14 +7621,14 @@ function buildRsApp(opts: ServerOpts = {}) {
     ingestRecord: (
       target: unknown,
       record: unknown,
-      options?: Parameters<typeof ingestRecord>[2]
+      options?: { requireConnectionAdmission?: boolean; runId?: string | null }
     ) =>
       ingestRecord(target as Parameters<typeof ingestRecord>[0], record as Parameters<typeof ingestRecord>[1], options),
     ingestRecords: (
       target: unknown,
       records: readonly unknown[],
       afterRecord: ((record: unknown, outcome: unknown) => Promise<void>) | undefined,
-      options?: Parameters<typeof ingestRecords>[3]
+      options?: { requireConnectionAdmission?: boolean; runId?: string | null }
     ) =>
       ingestRecords(
         target as Parameters<typeof ingestRecords>[0],

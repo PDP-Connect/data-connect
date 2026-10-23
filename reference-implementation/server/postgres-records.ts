@@ -67,10 +67,6 @@ import {
   resolveStorageConnectorId,
   resolveStorageConnectorInstanceId,
 } from "./storage-utils.ts";
-import {
-  type CollectionRevisionEventInput,
-  requirePostgresCollectionObservationInTransaction,
-} from "./stores/collection-revision-store.ts";
 import { createPostgresConnectorInstanceStore } from "./stores/connector-instance-store.ts";
 import { advancePostgresDeviceIngestPrefix } from "./stores/device-exporter-store.ts";
 import { markSearchIndexDirtyPostgres } from "./stores/search-index-dirty-store.ts";
@@ -265,7 +261,6 @@ interface IngestRecord {
 
 interface IngestOptions {
   attemptContext?: DeviceAttemptContext | null;
-  collectionRevision?: CollectionRevisionEventInput;
   deviceReservation?: JsonObject & { inputIndex: number };
   /** See RecordIngestOptions.requireConnectionAdmission in server/records.ts. */
   requireConnectionAdmission?: boolean;
@@ -1916,20 +1911,6 @@ async function assertPostgresRunStillAdmitted(
   }
 }
 
-async function assertPostgresRecordIngestPreconditions(
-  client: PostgresTransactionClient,
-  connectorInstanceId: string,
-  options: Pick<IngestOptions, "collectionRevision" | "requireConnectionAdmission" | "runId">
-): Promise<void> {
-  if (options.requireConnectionAdmission) {
-    await assertPostgresConnectorInstanceWritable(client, connectorInstanceId);
-  }
-  await assertPostgresRunStillAdmitted(client, options.runId, connectorInstanceId);
-  if (options.collectionRevision) {
-    await requirePostgresCollectionObservationInTransaction(client, connectorInstanceId, options.collectionRevision);
-  }
-}
-
 /**
  * Opt-in re-check, inside the SAME locked transaction as the mutation it
  * guards, that the `connector_instances` row still exists AND is in a
@@ -2037,7 +2018,10 @@ export async function postgresIngestRecord(
   crashPoint("ingest:before-write-transaction");
   const outcome = await withPostgresTransaction<DurableIngestOutcome>(
     async (client) => {
-      await assertPostgresRecordIngestPreconditions(client, connectorInstanceId, options);
+      if (options.requireConnectionAdmission) {
+        await assertPostgresConnectorInstanceWritable(client, connectorInstanceId);
+      }
+      await assertPostgresRunStillAdmitted(client, options.runId, connectorInstanceId);
       const finishDurableOutcome = async (value: DurableIngestOutcome): Promise<DurableIngestOutcome> => {
         if (options.deviceReservation) {
           await advancePostgresDeviceIngestPrefix(

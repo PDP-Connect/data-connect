@@ -24,7 +24,6 @@ import test from "node:test";
 
 import { validateResponse } from "@pdpp/reference-contract";
 
-import { emitSpineEvent } from "../lib/spine.ts";
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -83,8 +82,6 @@ interface Lane {
   readonly asUrl: string;
   readonly backend: Backend;
   readonly enrolled: Enrolled;
-  readonly getRuntimeOwnerToken?: () => Promise<string>;
-  readonly rsUrl?: string;
 }
 
 interface JsonResponse {
@@ -250,16 +247,11 @@ async function withServerLane(
   }
   await server.startupBackfillDone?.catch(() => undefined);
   const asUrl = `http://localhost:${server.asPort}`;
-  const rsUrl = `http://localhost:${server.rsPort}`;
   __setLocalCollectorReleaseForTest(CONNECTOR_ID, SERVER_RELEASE);
   try {
     const cookie = await ownerSessionCookie(asUrl);
     const enrolled = await enroll(asUrl, cookie);
-    const getRuntimeOwnerToken = async () => {
-      assert.ok(server.controller, "the reference runtime controller is available");
-      return await server.controller.issueRuntimeOwnerToken();
-    };
-    const lane = { asUrl, backend, enrolled, rsUrl, getRuntimeOwnerToken };
+    const lane = { asUrl, backend, enrolled };
     await registerFixtureManifest(lane);
     await run(lane);
   } finally {
@@ -1360,79 +1352,6 @@ laneTest("run order: an unregistered attempt retires prior coverage and cannot e
 
   await commitProof(lane, "run-registered");
   await assertCovered(lane, "run-registered", "a registered run's proof is current");
-});
-
-laneTest("cross-runtime reference records and failures retire device coverage without run sequences", async (lane) => {
-  await commitProof(lane, "device-run-covered");
-  const pendingDeviceRunId = "device-run-pending-after-reference";
-  await issueRun(lane, pendingDeviceRunId);
-
-  const referenceRunId = "reference-run-record-batch";
-  // A reference runtime run normally creates this admission row at run.started;
-  // it deliberately has no collection_run_sequences entry.
-  await sql(
-    lane,
-    `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, known_gaps_json, started_at, attempt)
-     VALUES (?, ?, ?, '{}', 'running', '[]', ?, 1)`,
-    `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, known_gaps_json, started_at, attempt)
-     VALUES ($1, $2, $3, '{}'::jsonb, 'running', '[]'::jsonb, $4, 1)`,
-    [referenceRunId, lane.enrolled.connector_instance_id, CONNECTOR_ID, EMITTED_AT]
-  );
-  const { getRuntimeOwnerToken, rsUrl } = lane;
-  assert.ok(rsUrl, "the cross-runtime lane exposes the reference resource server");
-  assert.ok(getRuntimeOwnerToken, "the cross-runtime lane can mint a runtime owner token");
-  const ingestUrl = new URL("/v1/ingest/sessions", rsUrl);
-  ingestUrl.searchParams.set("connector_id", CONNECTOR_ID);
-  ingestUrl.searchParams.set("connector_instance_id", lane.enrolled.connector_instance_id);
-  ingestUrl.searchParams.set("run_id", referenceRunId);
-  const runtimeOwnerToken = await getRuntimeOwnerToken();
-  const ingested = await requestJson(ingestUrl.toString(), {
-    body: `${JSON.stringify({ data: { id: "reference-record" }, emitted_at: EMITTED_AT, key: "reference-record" })}\n`,
-    headers: {
-      Authorization: `Bearer ${runtimeOwnerToken}`,
-      "Content-Type": "application/x-ndjson",
-    },
-    method: "POST",
-  });
-  assert.equal(ingested.status, 200, JSON.stringify(ingested.body));
-  assert.equal(ingested.body?.records_accepted, 1, JSON.stringify(ingested.body));
-  assert.equal((await highWater(lane)).event, "batch_record");
-  const referenceObservation = await runOrder(lane);
-  assert.equal(referenceObservation.sequence, 2, "the unsequenced reference run counts at the latest issued sequence");
-  assert.equal(referenceObservation.runId, null, "the reference run has no device run sequence and cannot name one");
-  assert.equal(referenceObservation.event, "unsequenced_attempt");
-  await assertRetired(lane, "the reference runtime's accepted record retires the device positive");
-
-  await commitIssuedProof(lane, pendingDeviceRunId);
-  assert.equal(
-    (await runOrder(lane)).runId,
-    null,
-    "a same-sequence device terminal cannot replace the unsequenced observation"
-  );
-  await assertRetired(lane, "a device run already pending when the reference observation arrived is not eligible");
-
-  await commitProof(lane, "device-run-covered-again");
-  await assertCovered(lane, "device-run-covered-again", "a later device run gets a newer sequence and proves coverage");
-  const referenceFailureRunId = "reference-run-failed-without-sequence";
-  await emitSpineEvent({
-    actor_id: CONNECTOR_ID,
-    actor_type: "runtime",
-    data: {
-      connector_instance_id: lane.enrolled.connector_instance_id,
-      reason: "connector_reported_failed",
-      source: { id: CONNECTOR_ID, kind: "connector" },
-    },
-    event_type: "run.failed",
-    object_id: referenceFailureRunId,
-    object_type: "run",
-    run_id: referenceFailureRunId,
-    status: "failed",
-  });
-  assert.equal((await highWater(lane)).event, "terminal_run");
-  const failureObservation = await runOrder(lane);
-  assert.equal(failureObservation.runId, null, "the reference failure has no issued device sequence");
-  assert.equal(failureObservation.event, "unsequenced_attempt");
-  await assertRetired(lane, "a reference-runtime failure report retires the device positive");
 });
 
 laneTest("run start alone leaves earlier coverage and its as-of standing", async (lane) => {

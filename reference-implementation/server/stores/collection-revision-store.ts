@@ -115,10 +115,8 @@ interface AdvancedRevision {
 // Move the run-order marker for an observation that has just taken `revision`.
 // The observation's run sequence is its own run's issued sequence in the
 // current storage epoch, else the newest issued sequence (with no run id). The
-// marker moves when that sequence is at least the highest observed one. An
-// explicit run id with no issued sequence is marked `unsequenced_attempt` and
-// stays ineligible at that sequence, even if a run was already pending there.
-// The caller's revision UPDATE already holds the connection row lock.
+// marker moves when that sequence is at least the highest observed one. The
+// caller's revision UPDATE already holds the connection row lock.
 const RUN_ORDER_OBSERVATION = `SELECT COALESCE(rs.run_sequence, ci.run_sequence_issued) AS seq,
                 rs.run_id AS run_id, rs.run_sequence AS run_sequence, ci.storage_epoch AS storage_epoch
            FROM connector_instances ci
@@ -232,25 +230,11 @@ export function advanceSqliteCollectionRevisionInTransaction(
     connectorInstanceId,
     input.event
   );
-  const runOrderEvent =
-    input.runId !== null && input.runId !== undefined && observation.runSequence === null
-      ? "unsequenced_attempt"
-      : input.event;
   db.prepare(
     `UPDATE connector_instances
         SET run_order_sequence = ?, run_order_event = ?, run_order_run_id = ?, run_order_revision = ?
-      WHERE connector_instance_id = ? AND run_order_sequence <= ?
-        AND NOT (run_order_sequence = ? AND run_order_event = 'unsequenced_attempt' AND ? IS NOT NULL)`
-  ).run(
-    observation.seq,
-    runOrderEvent,
-    observation.runId,
-    advanced.revision,
-    connectorInstanceId,
-    observation.seq,
-    observation.seq,
-    observation.runSequence
-  );
+      WHERE connector_instance_id = ? AND run_order_sequence <= ?`
+  ).run(observation.seq, input.event, observation.runId, advanced.revision, connectorInstanceId, observation.seq);
   return { ...advanced, runSequence: observation.runSequence, storageEpoch: observation.storageEpoch };
 }
 
@@ -298,16 +282,11 @@ export async function advancePostgresCollectionRevisionInTransaction(
     connectorInstanceId,
     input.event
   );
-  const runOrderEvent =
-    input.runId !== null && input.runId !== undefined && observation.runSequence === null
-      ? "unsequenced_attempt"
-      : input.event;
   await client.query(
     `UPDATE connector_instances
         SET run_order_sequence = $1, run_order_event = $2, run_order_run_id = $3, run_order_revision = $4
-      WHERE connector_instance_id = $5 AND run_order_sequence <= $1
-        AND NOT (run_order_sequence = $1 AND run_order_event = 'unsequenced_attempt' AND $6 IS NOT NULL)`,
-    [observation.seq, runOrderEvent, observation.runId, advanced.revision, connectorInstanceId, observation.runSequence]
+      WHERE connector_instance_id = $5 AND run_order_sequence <= $1`,
+    [observation.seq, input.event, observation.runId, advanced.revision, connectorInstanceId]
   );
   return { ...advanced, runSequence: observation.runSequence, storageEpoch: observation.storageEpoch };
 }

@@ -4,10 +4,8 @@
 import { randomBytes } from "node:crypto";
 import { getDb } from "../server/db.ts";
 import { isPostgresStorageBackend } from "../server/postgres-storage.ts";
-import { advanceSqliteCollectionRevisionInTransaction } from "../server/stores/collection-revision-store.ts";
 import {
   isRunHistoryRelevantEventType,
-  isRunTerminalEventType,
   type RunHistorySpineEvent,
   writeSqliteRunHistoryForSpineEventOn,
 } from "../server/stores/run-history-writer.ts";
@@ -19,7 +17,6 @@ import {
   type Page,
   referenceQueries,
   decodeCursor as wrapperDecodeCursor,
-  writeTransaction,
 } from "./db.ts";
 import {
   deriveTokenAuditId,
@@ -504,13 +501,6 @@ export function appendSqliteSpineEventInTransaction(
   assertRunEventHasConnectorInstanceId(input);
   assertRunStartedIsStamped(input);
   const event = normalizeSpineEventInput(input);
-  if (isRunTerminalEventType(event.event_type) && event.connector_instance_id && !hasCollectionRevision(input.data)) {
-    advanceSqliteCollectionRevisionInTransaction(db, event.connector_instance_id, {
-      at: event.occurred_at,
-      event: "terminal_run",
-      runId: event.run_id,
-    });
-  }
   execNamedOn(db, referenceQueries.spineInsertEvent, event);
   hooks.afterEventInsert?.();
   if (isRunHistoryRelevantEventType(event.event_type)) {
@@ -543,19 +533,7 @@ function insertSqliteSpineEvent(input: SpineEventInput, dbHandle: SpineDatabase 
   if (!db) {
     return null;
   }
-  if (!dbHandle && isRunTerminalEventType(input.event_type)) {
-    return writeTransaction(() => appendSqliteSpineEventInTransaction(input, db));
-  }
   return appendSqliteSpineEventInTransaction(input, db);
-}
-
-function hasCollectionRevision(data: unknown): boolean {
-  return Boolean(
-    data &&
-      typeof data === "object" &&
-      !Array.isArray(data) &&
-      typeof (data as Record<string, unknown>).collection_revision === "number"
-  );
 }
 
 /**

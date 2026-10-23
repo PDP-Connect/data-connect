@@ -76,10 +76,6 @@ export function isRunHistoryRelevantEventType(eventType: string | null | undefin
   );
 }
 
-export function isRunTerminalEventType(eventType: string | null | undefined): boolean {
-  return RUN_TERMINAL_EVENT_TYPES.has(eventType ?? "");
-}
-
 export interface RunHistorySpineEvent {
   readonly connectorId: string | null;
   readonly connectorInstanceId: string | null;
