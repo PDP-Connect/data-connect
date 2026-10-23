@@ -1671,10 +1671,14 @@ test("a local_device connection's foreign (non-scheduler-managed) run does not p
 
 test("a local_device connection's device terminal run stays quarantined even when stamped scheduler_managed", () => {
   // A database whose column default was once `true` stamped device terminal
-  // commits `scheduler_managed = true`. A device terminal commit stamps the
-  // connection's collection revision; that, not the flag, says the run is
-  // not the connection's own scheduler history.
-  const failed = { ...ownScopedRunSummary({ scheduler_managed: true, status: "failed" }), failure_reason: "boom" };
+  // commits `scheduler_managed = true`. The run's recorded provenance
+  // (run_history.actor_type), not the flag, says the run is not the
+  // connection's own scheduler history.
+  const failed = {
+    ...ownScopedRunSummary({ scheduler_managed: true, status: "failed" }),
+    actor_type: "runtime",
+    failure_reason: "boom",
+  };
   const healthOf = (lastRun: ConnectorRunSummary) =>
     projectConnectorSummaryConnectionHealth({
       freshness: FRESH_FRESHNESS,
@@ -1690,7 +1694,7 @@ test("a local_device connection's device terminal run stays quarantined even whe
 
   assert.equal(healthOf(failed).reason_code, "boom", "control: the connection's own scheduler run is evidence");
   assert.equal(
-    healthOf({ ...failed, collection_revision: 7 }).reason_code,
+    healthOf({ ...failed, actor_type: "local_device" }).reason_code,
     null,
     "a device terminal run is quarantined whatever its flag says"
   );
