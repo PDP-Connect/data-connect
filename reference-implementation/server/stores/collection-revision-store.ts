@@ -536,7 +536,6 @@ export interface LocalCoverageProofRun {
   readonly completedAt: string | null;
   readonly facts: Record<string, unknown> | null;
   readonly runId: string;
-  readonly schedulerManaged: boolean;
   readonly status: string;
 }
 
@@ -640,11 +639,10 @@ export async function readLocalCoverageRevisionFences(
     collection_revision_run_id: string | null;
     connector_instance_id: string;
     manifest_generation: unknown;
-    proof_manifest: string | null;
     proof_completed_at: string | null;
     proof_facts_json: unknown;
+    proof_manifest: string | null;
     proof_run_id: string | null;
-    proof_scheduler_managed: unknown;
     proof_status: string | null;
     run_order_event: string | null;
     run_order_revision: unknown;
@@ -671,7 +669,7 @@ export async function readLocalCoverageRevisionFences(
             ci.storage_epoch${casts.revision} AS storage_epoch,
             ci.manifest_generation, scope.state_json${casts.json} AS scope_state_json,
             CASE WHEN ci.run_order_event = ${runTerminal} THEN c.manifest${casts.json} END AS proof_manifest,
-            rh.run_id AS proof_run_id, rh.status AS proof_status, rh.scheduler_managed AS proof_scheduler_managed,
+            rh.run_id AS proof_run_id, rh.status AS proof_status,
             rh.completed_at AS proof_completed_at, rh.facts_json AS proof_facts_json
        FROM connector_instances ci
        LEFT JOIN connectors c ON c.connector_id = ci.connector_id
@@ -727,7 +725,6 @@ export async function readLocalCoverageRevisionFences(
               completedAt: row.proof_completed_at ?? null,
               facts: parseFacts(row.proof_facts_json),
               runId: row.proof_run_id,
-              schedulerManaged: row.proof_scheduler_managed === true || Number(row.proof_scheduler_managed) === 1,
               status: row.proof_status,
             }
           : null,

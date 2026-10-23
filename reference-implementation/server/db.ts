@@ -30,6 +30,7 @@ import {
   makeConnectorInstanceSourceBindingKey as canonicalSourceBindingKey,
 } from "./connector-instance-utils.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
+import { RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID } from "./postgres-migration-ledger.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { SqliteDriver } from "./sqlite-driver.ts";
 import {
@@ -2492,16 +2493,15 @@ CREATE INDEX IF NOT EXISTS idx_connector_summary_evidence_connector
 -- module for the semantics of each column and why completion may never be
 -- inferred from the data.
 --
--- SQLite has no writer for it today, and that is deliberate rather than an
--- omission: this backend's local-device canonicalization
--- (migrateLocalDeviceConnectorInstances below) is a synchronous
--- single-file transaction whose cost profile is not the one the Postgres
--- ledger exists to bound -- there is no pre-listen multi-GB index scan and
--- no 503 window to protect. The table is created here so the two backends'
--- schemas stay at parity (backup-table-policy.ts's parity invariant, proven
--- by test/backup-table-inventory.test.ts) and so a SQLite deployment that
--- later needs the same receipt does not require a schema migration to get
--- one.
+-- SQLite's only writer is run_history's device-run provenance repair
+-- (migrateRunHistoryDeviceRunProvenance), a one-statement pass that needs a
+-- receipt but no resume cursor. The local-device canonicalization
+-- (migrateLocalDeviceConnectorInstances below) writes none, deliberately: it
+-- is a synchronous single-file transaction whose cost profile is not the one
+-- the Postgres ledger exists to bound -- there is no pre-listen multi-GB index
+-- scan and no 503 window to protect. The table keeps the two backends'
+-- schemas at parity (backup-table-policy.ts's parity invariant, proven by
+-- test/backup-table-inventory.test.ts).
 CREATE TABLE IF NOT EXISTS storage_migration_ledger (
   migration_id      TEXT PRIMARY KEY,
   status            TEXT NOT NULL CHECK(status IN ('pending', 'running', 'complete', 'blocked')),
@@ -6040,6 +6040,64 @@ function migrateSpineEventsConnectorInstanceIdBackfill(
 }
 
 /**
+ * Set `run_history.scheduler_managed = 0` on the rows a device wrote. The
+ * Postgres twin (`migratePostgresRunHistoryDeviceRunProvenance`) explains the
+ * rule and why server rows are left alone.
+ *
+ * A database that predates the column carries `DEFAULT 1` (see
+ * `migrateRunHistoryRename`), and SQLite cannot change a default in place. The
+ * two run-history writers that leave the column unset
+ * (`start-run-history.sql`, `insert-finalized-run-history.sql`) now set it to
+ * 0 themselves, so the stale default no longer decides a value. This pass
+ * repairs the rows already written. It is one statement in one transaction:
+ * SQLite is the single-file local backend, where the Postgres ledger's bounded
+ * pages answer a cost this table does not have. The COMPLETE receipt skips it
+ * on later boots.
+ */
+function migrateRunHistoryDeviceRunProvenance(raw: SqliteDatabase): void {
+  if (!(tableColumns(raw, "run_history").length && hasTableColumn(raw, "spine_events", "connector_instance_id"))) {
+    return;
+  }
+  const receipt = raw
+    .prepare("SELECT 1 FROM storage_migration_ledger WHERE migration_id = ? AND status = 'complete'")
+    .get(RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID);
+  if (receipt) {
+    return;
+  }
+  raw.transaction(() => {
+    const result = raw
+      .prepare(
+        `UPDATE run_history
+            SET scheduler_managed = 0
+          WHERE scheduler_managed <> 0
+            AND run_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM spine_events s
+               WHERE s.run_id = run_history.run_id
+                 AND s.actor_type = 'local_device'
+                 AND COALESCE(
+                   NULLIF(s.connector_instance_id, ''),
+                   NULLIF(json_extract(s.data_json, '$.connector_instance_id'), ''),
+                   NULLIF(json_extract(s.data_json, '$.connection_id'), '')
+                 ) = run_history.connector_instance_id
+            )`
+      )
+      .run();
+    const nowIso = new Date().toISOString();
+    raw
+      .prepare(
+        `INSERT INTO storage_migration_ledger(
+           migration_id, status, attempt_count, changed_rows, started_at, updated_at, completed_at
+         ) VALUES (?, 'complete', 1, ?, ?, ?, ?)
+         ON CONFLICT(migration_id) DO UPDATE SET
+           status = 'complete', changed_rows = excluded.changed_rows,
+           attempt_count = attempt_count + 1, updated_at = excluded.updated_at, completed_at = excluded.completed_at`
+      )
+      .run(RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, Number(result.changes), nowIso, nowIso, nowIso);
+  })();
+}
+
+/**
  * Migrate `blob_bindings` to include `json_path` in the primary key.
  *
  * Pre-migration shape: PRIMARY KEY (blob_id, connector_id, stream, record_key).
@@ -6804,6 +6862,7 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   // connector-summary-read-model.ts exactly: `data.connector_instance_id`
   // first, then `data.connection_id`.
   runWithSqliteBusyRetrySync(() => migrateSpineEventsConnectorInstanceIdBackfill(raw, opts));
+  runWithSqliteBusyRetrySync(() => migrateRunHistoryDeviceRunProvenance(raw));
   // Index gives us a fast lookup-by-approval-id and approximates the
   // UNIQUE constraint on the column (the inline CREATE TABLE form
   // declares it UNIQUE; SQLite's ALTER TABLE ADD COLUMN does not

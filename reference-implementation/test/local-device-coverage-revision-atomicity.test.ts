@@ -2060,6 +2060,75 @@ test("a record transaction and a terminal commit for one connection serialize wi
 });
 
 // ---------------------------------------------------------------------------
+// A database whose run_history.scheduler_managed column was added later.
+// ---------------------------------------------------------------------------
+
+/**
+ * Give `run_history.scheduler_managed` the default a database that predates
+ * the column carries (`DEFAULT true` / `DEFAULT 1`), then boot again as the
+ * server does. SQLite cannot change a default in place, so the table is
+ * rebuilt; it is empty at this point.
+ */
+async function restoreLegacySchedulerManagedDefault(lane: Lane): Promise<void> {
+  if (lane.backend === "postgres") {
+    await postgresQuery("ALTER TABLE run_history ALTER COLUMN scheduler_managed SET DEFAULT true");
+    await bootstrapPostgresSchema();
+    return;
+  }
+  const db = getDb();
+  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM run_history").get() as { n: number }).n, 0);
+  const definitions = db
+    .prepare("SELECT type, sql FROM sqlite_master WHERE tbl_name = 'run_history' AND sql IS NOT NULL")
+    .all() as { sql: string; type: string }[];
+  const table = definitions.find((row) => row.type === "table")?.sql ?? "";
+  assert.match(table, /scheduler_managed\s+INTEGER NOT NULL DEFAULT 0/);
+  db.exec("DROP TABLE run_history");
+  db.exec(table.replace(/(scheduler_managed\s+INTEGER NOT NULL DEFAULT )0/, "$11"));
+  for (const index of definitions.filter((row) => row.type === "index")) {
+    db.exec(index.sql);
+  }
+}
+
+async function schedulerManagedFlag(lane: Lane, runId: string): Promise<boolean> {
+  const [row] = await sql(
+    lane,
+    "SELECT scheduler_managed FROM run_history WHERE run_id = ?",
+    "SELECT scheduler_managed FROM run_history WHERE run_id = $1",
+    [runId]
+  );
+  assert.ok(row, `run ${runId} has a run_history row`);
+  return row.scheduler_managed === true || row.scheduler_managed === 1;
+}
+
+laneTest("legacy column default: a device proof stays covered when the flag defaulted to true", async (lane) => {
+  await restoreLegacySchedulerManagedDefault(lane);
+  await commitProof(lane, "run-legacy-default");
+  assert.equal(
+    await schedulerManagedFlag(lane, "run-legacy-default"),
+    false,
+    "the run-history writer records a device run as not scheduler-managed whatever the column default"
+  );
+  await assertCovered(lane, "run-legacy-default", "the device proof is eligible on a legacy-default table");
+});
+
+laneTest("legacy column default: a device run stamped scheduler-managed is not scheduler history", async (lane) => {
+  await commitProof(lane, "run-stamped");
+  await sql(
+    lane,
+    "UPDATE run_history SET scheduler_managed = 1 WHERE run_id = ?",
+    "UPDATE run_history SET scheduler_managed = true WHERE run_id = $1",
+    ["run-stamped"]
+  );
+  await assertCovered(lane, "run-stamped", "the proof does not depend on the flag");
+  await reconcileDirtyConnectorSummaryEvidence(null);
+  const summary = (await listConnectorSummaries()).find(
+    (row) => row.connector_instance_id === lane.enrolled.connector_instance_id
+  );
+  assert.ok(summary, "the lane's connection is projected");
+  assert.equal(summary.last_run, null, "a stamped device run is not the connection's own scheduler run");
+});
+
+// ---------------------------------------------------------------------------
 // Upgrade from a database that predates the collection revision.
 // ---------------------------------------------------------------------------
 

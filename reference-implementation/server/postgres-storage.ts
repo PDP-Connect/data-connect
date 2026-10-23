@@ -36,6 +36,7 @@ import {
   ensurePostgresMigrationLedger,
   LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID,
   readPostgresMigrationLedgerRow,
+  RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID,
 } from "./postgres-migration-ledger.ts";
 import {
   assertTestDatabase,
@@ -3955,6 +3956,7 @@ async function bootstrapPostgresSchemaOnce({
     await migratePostgresSchedulerInstanceColumns(client);
     await migratePostgresRunHistoryRename(client);
     await migratePostgresRunHistoryCompletedAtNullable(client);
+    await migratePostgresRunHistorySchedulerManagedDefault(client);
     await migratePostgresConnectorMaintenanceCursorNameCheck(client);
     await migratePostgresRecordsBlobSearchInstanceColumns(client);
     // Legacy blob tables gain connector_instance_id in the migration above.
@@ -3966,6 +3968,7 @@ async function bootstrapPostgresSchemaOnce({
     // own completion, which is the defect the ledger exists to remove.
     await ensurePostgresMigrationLedger(client);
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
+    await migratePostgresRunHistoryDeviceRunProvenance(client, { log });
     await migratePostgresLegacyConnectorInstancesToDefaultAccount(client);
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
     await migratePostgresConnectorSummaryEvidenceRepairChunkPageSize(client);
@@ -5636,6 +5639,131 @@ async function migratePostgresRunHistoryCompletedAtNullable(client: PoolClient):
     return;
   }
   await client.query("ALTER TABLE run_history ALTER COLUMN completed_at DROP NOT NULL");
+}
+
+// `run_history.scheduler_managed` is false for every row the spine-driven
+// writer inserts (fresh schemas default it to false). A database that
+// predates the column got it through ADD COLUMN ... DEFAULT true, and that
+// default outlived the backfill it was written for: the spine writer, which
+// leaves the column unset, then stamped true on every run it recorded. Set the
+// default to the fresh-schema value. Only the default changes; rows are
+// repaired by migratePostgresRunHistoryDeviceRunProvenance. The ALTER takes
+// an exclusive table lock, so it runs only when the default differs.
+async function migratePostgresRunHistorySchedulerManagedDefault(client: PoolClient): Promise<void> {
+  const result = await client.query<{ column_default: string | null }>(
+    `SELECT column_default FROM information_schema.columns
+       WHERE table_schema = current_schema() AND table_name = 'run_history' AND column_name = 'scheduler_managed'`
+  );
+  const columnDefault = result.rows[0]?.column_default;
+  if (columnDefault === undefined || columnDefault === "false") {
+    return;
+  }
+  await client.query("ALTER TABLE run_history ALTER COLUMN scheduler_managed SET DEFAULT false");
+}
+
+const PG_RUN_HISTORY_PROVENANCE_BATCH_ROWS = 2000;
+const PG_RUN_HISTORY_PROVENANCE_LEASE_MS = 15 * 60 * 1000;
+
+/**
+ * Correct `scheduler_managed` on the run_history rows a device wrote.
+ *
+ * A device terminal commit writes a spine event with `actor_type =
+ * 'local_device'`; the run-history writer turns it into the run_history row.
+ * While the column default was true (see the default migration above) every
+ * such row was stamped true, and the coverage projection read it as scheduler
+ * history. A row is set false when a `local_device` spine event names the same
+ * (run_id, connector_instance_id): run_id alone is not unique across
+ * connections.
+ *
+ * Server rows are not touched. A row for a server-side run was stamped true by
+ * the default whether or not the scheduler wrote it, and nothing stored
+ * separates a scheduler run from a manual one, so no correct value can be
+ * rebuilt for it.
+ *
+ * Pages run in id order, and each page is its own short transaction that also
+ * advances the ledger cursor, so a crash resumes at the last committed page.
+ * Each page probes the run_id/event_type terminal-event partial index once per
+ * still-true row; a COMPLETE receipt skips the whole pass on later boots.
+ */
+async function migratePostgresRunHistoryDeviceRunProvenance(
+  client: PoolClient,
+  { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
+): Promise<{ changedRows: number; skippedByReceipt: boolean }> {
+  const claim = await claimPostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+    leaseDurationMs: PG_RUN_HISTORY_PROVENANCE_LEASE_MS,
+    leaseOwner: `${process.pid}@${POSTGRES_MIGRATION_LEASE_OWNER_NONCE}`,
+    nowIso: new Date().toISOString(),
+  });
+  if (!claim) {
+    return { changedRows: 0, skippedByReceipt: true };
+  }
+  let cursor = claim.cursor ?? "0";
+  let changedRows = 0;
+  for (;;) {
+    // biome-ignore lint/performance/noAwaitInLoops: Pages are sequential by contract — each cursor is valid only after the previous page committed.
+    const page = await client.query<{ upper_id: string | null }>(
+      `SELECT MAX(id)::text AS upper_id
+         FROM (SELECT id FROM run_history WHERE id > $1::bigint ORDER BY id LIMIT $2) page`,
+      [cursor, PG_RUN_HISTORY_PROVENANCE_BATCH_ROWS]
+    );
+    const upperId = page.rows[0]?.upper_id;
+    if (!upperId) {
+      break;
+    }
+    await client.query("BEGIN");
+    try {
+      const updated = await client.query(
+        `UPDATE run_history rh
+            SET scheduler_managed = false
+          WHERE rh.id > $1::bigint AND rh.id <= $2::bigint
+            AND rh.scheduler_managed
+            AND rh.run_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM spine_events s
+               WHERE s.run_id = rh.run_id
+                 AND s.event_type IN ('run.completed', 'run.failed', 'run.cancelled', 'run.abandoned')
+                 AND s.actor_type = 'local_device'
+                 AND COALESCE(
+                   NULLIF(s.connector_instance_id, ''),
+                   NULLIF(s.data_json->>'connector_instance_id', ''),
+                   NULLIF(s.data_json->>'connection_id', '')
+                 ) = rh.connector_instance_id
+            )`,
+        [cursor, upperId]
+      );
+      const batchChangedRows = updated.rowCount ?? 0;
+      await advancePostgresMigrationCursor(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+        changedRows: batchChangedRows,
+        cursor: upperId,
+        nowIso: new Date().toISOString(),
+      });
+      await client.query("COMMIT");
+      cursor = upperId;
+      changedRows += batchChangedRows;
+    } catch (err) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        // Rollback failure must not hide the original migration error.
+      }
+      try {
+        await blockPostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+          error: err instanceof Error ? err.message : String(err),
+          nowIso: new Date().toISOString(),
+        });
+      } catch {
+        // A ledger write failure must not hide the original migration error.
+      }
+      throw err;
+    }
+  }
+  await completePostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+    nowIso: new Date().toISOString(),
+  });
+  if (changedRows > 0) {
+    log(`[PDPP] run_history device-run provenance: ${changedRows} device runs set scheduler_managed = false`);
+  }
+  return { changedRows, skippedByReceipt: false };
 }
 
 // Widens `connector_maintenance_cursor.name`'s CHECK to admit the

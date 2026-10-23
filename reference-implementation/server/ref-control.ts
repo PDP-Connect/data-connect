@@ -1641,7 +1641,6 @@ function readLocalTerminalCoverage(
   history: {
     readonly connectorInstanceId?: string | null;
     readonly runId?: string | null;
-    readonly schedulerManaged?: boolean | null;
     readonly status: string;
   }
 ): NonNullable<ConnectorRunSummary["local_terminal_coverage"]> | null {
@@ -1652,9 +1651,12 @@ function readLocalTerminalCoverage(
   return {
     coverageEligibilityReason:
       typeof block.coverage_eligibility_reason === "string" ? block.coverage_eligibility_reason : null,
+    // A device terminal commit stamps the connection's collection revision
+    // (see `isDeviceTerminalRun`); no server run does. The row's
+    // `scheduler_managed` flag is not provenance here.
     eligibleLocalRun:
       history.status === "succeeded" &&
-      history.schedulerManaged === false &&
+      readCollectionRevision(facts?.collection_revision) !== null &&
       typeof history.connectorInstanceId === "string" &&
       typeof history.runId === "string" &&
       block.reference_only === true,
@@ -2913,6 +2915,16 @@ function isDeviceTerminalRun(run: ConnectorRunSummary | null): boolean {
     typeof run.collection_revision === "number" ||
     run.local_terminal_coverage?.coverageEligibilityReason === NON_LOCAL_DEVICE_COVERAGE_REASON
   );
+}
+
+/**
+ * A run the connection's own scheduler recorded. `scheduler_managed` says so,
+ * but a device terminal commit is never scheduler history whatever the flag
+ * holds: a database whose column default was once `true` can still carry such
+ * a row stamped `true`.
+ */
+function isSchedulerOwnedRun(run: ConnectorRunSummary | null): boolean {
+  return run?.scheduler_managed === true && !isDeviceTerminalRun(run);
 }
 
 function selectCoverageClassifyingRun(
@@ -5234,7 +5246,6 @@ function localProofRunCoverage(
   const terminal = readLocalTerminalCoverage(proofRun.facts, {
     connectorInstanceId,
     runId: proofRun.runId,
-    schedulerManaged: proofRun.schedulerManaged,
     status: proofRun.status,
   });
   if (!terminal) {
@@ -6419,8 +6430,7 @@ export function projectConnectorSummaryConnectionHealth(input: {
   // placement admission began refusing new server runs for local-device
   // connections.
   const localDeviceBacked = input.localDeviceBacked === true;
-  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean =>
-    !localDeviceBacked || run?.scheduler_managed === true;
+  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean => !localDeviceBacked || isSchedulerOwnedRun(run);
   const authoritativeLastRun = isOwnScopedRun(input.lastRun) ? input.lastRun : null;
   const authoritativeLastSuccessfulRun = isOwnScopedRun(input.lastSuccessfulRun) ? input.lastSuccessfulRun : null;
   const fallbackSettledRun = input.latestSettledRun ?? fallbackLatestSettledRun(input.lastRun, input.lastSuccessfulRun);
@@ -7360,8 +7370,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   // local device's run evidence is quarantined as foreign/historical unless
   // the row proves it is this connection's own scheduler-managed run. This
   // keeps historical rows readable after placement admission blocks new ones.
-  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean =>
-    !localDeviceBacked || run?.scheduler_managed === true;
+  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean => !localDeviceBacked || isSchedulerOwnedRun(run);
   const authoritativeActiveRun = localDeviceBacked ? null : activeRun;
   const authoritativeCollectionRate = localDeviceBacked ? null : collectionRate;
   const authoritativeEphemeralBrowserRuntime = localDeviceBacked ? null : ephemeralBrowserRuntime;
