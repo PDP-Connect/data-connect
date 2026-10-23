@@ -529,6 +529,47 @@ for (const [label, hookName] of [
   });
 }
 
+test("a fence left by a crashed attempt is lifted when a canonical queue appears before reconcile", () => {
+  withTempRoot("pdpp-durable-state-stale-fence-", (root) => {
+    const stateRoot = join(root, "user-state");
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
+    const base = {
+      connectorId: "claude_code",
+      moduleUrl: modulePath(installRoot),
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    };
+    assert.throws(() =>
+      resolveCollectorQueuePath({
+        ...base,
+        afterRetirementFence: () => {
+          throw new Error("simulated crash after durable retirement");
+        },
+      })
+    );
+    assert.throws(() => assertLegacyStillWritable(legacyPath), /retired/);
+
+    const { result: resolved, stderr } = captureStderr(() =>
+      resolveCollectorQueuePath({
+        ...base,
+        beforeMigrationReconcile: () => seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process"),
+      })
+    );
+
+    assert.equal(resolved, canonicalPath);
+    assertLegacyStillWritable(legacyPath);
+    assert.equal(sourceSummary(legacyPath, SOURCE_A), 2);
+    assert.match(stderr, /left writable/);
+  });
+});
+
 test("a normal migration still migrates and fences the legacy source", () => {
   withTempRoot("pdpp-durable-state-normal-fence-", (root) => {
     const stateRoot = join(root, "user-state");

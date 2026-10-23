@@ -368,6 +368,8 @@ function migrateLegacyStore(
 
     beforeReconcile?.();
     if (reconcileLegacyWrites(legacyPath, temporaryPath, canonicalPath, sourceInstanceId) === "canonical_exists") {
+      // An earlier crashed attempt may have left this source fenced.
+      liftRetirementFence(legacyPath, sourceInstanceId);
       return abandonMigrationForExistingCanonical(legacyPath, canonicalPath, sourceInstanceId, temporaryPath, lockPath);
     }
 
@@ -597,6 +599,13 @@ function liftRetirementFence(legacyPath: string, sourceInstanceId: string): void
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec("BEGIN IMMEDIATE");
     try {
+      const fenced = db
+        .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'pdpp_legacy_retirements'")
+        .get();
+      if (!fenced) {
+        db.exec("COMMIT");
+        return;
+      }
       db.prepare("DELETE FROM pdpp_legacy_retirements WHERE source_instance_id = ?").run(sourceInstanceId);
       const remaining = db.prepare("SELECT 1 AS present FROM pdpp_legacy_retirements LIMIT 1").get();
       if (!remaining) {
