@@ -603,8 +603,9 @@ export interface ConnectorRunSummary {
    * `run_history.actor_type`: the actor_type of the run's terminal spine event
    * (`local_device` for a run a device terminal commit recorded). `null` =
    * provenance not known (still running, predates the column and not yet
-   * backfilled, or no terminal event). `undefined` = this summary was not read
-   * from `run_history`, so it carries no provenance to judge.
+   * backfilled, or spine events with no terminal one). `undefined` = this
+   * summary was not read from `run_history`, so it carries no provenance to
+   * judge.
    */
   readonly actor_type?: string | null;
   /** The per-connection collection revision this run was committed at; `null` when the run carries none. */
@@ -2919,13 +2920,16 @@ function coverageClassifyingRun(
  *
  * - `local_device`: a device run. Dropped.
  * - another actor_type: a server run. Kept.
- * - `null` (provenance unknown): dropped, because the run may be a device
- *   run and a non-device connection must not credit one. Two proofs of server
- *   origin keep it: a scheduler-managed run (the scheduler never runs a
- *   device's terminal commit) and a nonterminal run (a device run is
- *   recorded only at its terminal commit). Once the startup backfill
- *   (server/stores/run-history-actor-backfill.ts) has run, `null` remains only
- *   for a terminal run with no terminal spine event.
+ * - `null` on a settled run (provenance unknown): dropped, because the run may
+ *   be a device run and a non-device connection must not credit one. It means
+ *   the row has not been backfilled yet (server/stores/run-history-actor-backfill.ts
+ *   fills it at boot, so after a deploy such rows read as no evidence until
+ *   that pass finishes), or its run has spine events but no terminal one.
+ *   `scheduler_managed` is NOT evidence of a server run: the column defaults to
+ *   true, so device rows carry it too. A scheduler append stamps `runtime`
+ *   itself, so it never reaches this branch.
+ * - `null` on a nonterminal run: kept. A device run is recorded only at its
+ *   terminal commit, so a running row is not one.
  * - `undefined`: the summary did not come from `run_history`; not judged here.
  *
  * Source kind is applied before this point: a local-device connection
@@ -2939,7 +2943,7 @@ function isDeviceTerminalRun(run: ConnectorRunSummary | null): boolean {
     return false;
   }
   if (run.actor_type === null) {
-    return !(run.scheduler_managed === true || isActiveRunSummaryStatus(run.status));
+    return !isActiveRunSummaryStatus(run.status);
   }
   return run.actor_type === LOCAL_DEVICE_ACTOR_TYPE;
 }

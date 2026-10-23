@@ -1919,20 +1919,28 @@ laneTest(
   }
 );
 
-laneTest("provenance: a run of unknown provenance credits nothing to a browser_collector connection", async (lane) => {
-  await commitProof(lane, "run-unknown-provenance");
-  await assertCovered(lane, "run-unknown-provenance", "the device terminal covers its local_device connection");
-  // The row as it stood before the actor backfill reached it, from a server that kept no revision stamp.
-  await stripRevisionStamp(lane, "run-unknown-provenance");
-  await sql(
-    lane,
-    "UPDATE run_history SET actor_type = NULL WHERE run_id = ?",
-    "UPDATE run_history SET actor_type = NULL WHERE run_id = $1",
-    ["run-unknown-provenance"]
-  );
-  await changeSourceKind(lane, "browser_collector");
-  await assertNoDeviceCoverage(lane, "a device terminal whose run_history row has no provenance yet");
-});
+laneTest(
+  "provenance: a scheduler_managed device run of unknown provenance credits nothing to a browser_collector connection",
+  async (lane) => {
+    await commitProof(lane, "run-unknown-provenance");
+    await assertCovered(lane, "run-unknown-provenance", "the device terminal covers its local_device connection");
+    // The row as it stood before the actor backfill reached it, from a server that kept no revision stamp.
+    // scheduler_managed is TRUE, the column default in production: device rows carry it, so it is no proof
+    // of a server run.
+    await stripRevisionStamp(lane, "run-unknown-provenance");
+    await sql(
+      lane,
+      "UPDATE run_history SET actor_type = NULL, scheduler_managed = 1 WHERE run_id = ?",
+      "UPDATE run_history SET actor_type = NULL, scheduler_managed = true WHERE run_id = $1",
+      ["run-unknown-provenance"]
+    );
+    await changeSourceKind(lane, "browser_collector");
+    await assertNoDeviceCoverage(
+      lane,
+      "a scheduler_managed device terminal whose run_history row has no provenance yet"
+    );
+  }
+);
 
 laneTest(
   "source kind: a behind-version cache holding an unmarked device fact reads unknown before any repair runs",

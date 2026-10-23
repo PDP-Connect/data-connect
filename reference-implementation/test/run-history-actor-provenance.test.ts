@@ -14,7 +14,8 @@
 // Covers, on SQLite and real PostgreSQL where a dedicated test database is
 // available:
 //   - the migration adds the column to an existing run_history,
-//   - the live writer records the terminal event's actor_type,
+//   - the live writer records the terminal event's actor_type, and the
+//     scheduler's own append records `runtime`,
 //   - the startup backfill fills historical rows (idempotent, batched, bounded),
 //   - the coverage selector's rule for device, server, and unknown provenance.
 // The end-to-end half (a pre-revision device terminal on a browser_collector
@@ -42,6 +43,7 @@ import {
   SQLITE_FILL_ACTOR_SQL,
 } from "../server/stores/run-history-actor-backfill.ts";
 import { runRunHistoryBackfillRound } from "../server/stores/run-history-backfill-stage.ts";
+import { createSchedulerStore, type SchedulerRunHistoryRecord } from "../server/stores/scheduler-store.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
@@ -258,6 +260,38 @@ backendTest("row backfill: a run the stage inserts from spine carries its termin
   assert.equal(await actorTypeOf(backend, "run-lost-server", INSTANCE_A), "runtime");
 });
 
+backendTest("scheduler append: the scheduler's own run_history write records runtime provenance", async (backend) => {
+  const store = createSchedulerStore();
+  const record = (runId: string | null): SchedulerRunHistoryRecord => ({
+    attempt: 1,
+    checkpointSummary: null,
+    completedAt: "2026-10-01T00:01:00.000Z",
+    connectorId: CONNECTOR_ID,
+    connectorInstanceId: INSTANCE_A,
+    knownGaps: [],
+    recordsEmitted: 0,
+    runId,
+    source: { id: CONNECTOR_ID, kind: "connector" },
+    startedAt: "2026-10-01T00:00:00.000Z",
+    status: "skipped",
+  });
+  // A skipped run has no spine events: the append is its only writer.
+  await store.appendRunHistory(record("run-skipped"));
+  assert.equal(await actorTypeOf(backend, "run-skipped", INSTANCE_A), "runtime");
+
+  // A row the spine writer already finalized keeps the actor it recorded.
+  await emitSpineEvent(startedEvent("run-device-then-append", INSTANCE_A));
+  await emitSpineEvent(terminalEvent("run-device-then-append", INSTANCE_A, "local_device"));
+  await store.appendRunHistory(record("run-device-then-append"));
+  assert.equal(await actorTypeOf(backend, "run-device-then-append", INSTANCE_A), "local_device");
+
+  // A still-running row, which has no provenance yet, takes runtime when the scheduler settles it.
+  await emitSpineEvent(startedEvent("run-running-then-append", INSTANCE_A));
+  assert.equal(await actorTypeOf(backend, "run-running-then-append", INSTANCE_A), null);
+  await store.appendRunHistory(record("run-running-then-append"));
+  assert.equal(await actorTypeOf(backend, "run-running-then-append", INSTANCE_A), "runtime");
+});
+
 // ---------------------------------------------------------------------------
 // Backfill
 // ---------------------------------------------------------------------------
@@ -280,7 +314,9 @@ async function seedHistoricalRows(backend: Backend): Promise<void> {
   // Still running: not a candidate.
   await emitSpineEvent(startedEvent("run-running", INSTANCE_A));
   await clearProvenance(backend);
-  // A terminal row whose run has no terminal spine event: stays NULL.
+  // A terminal row whose run has no spine event at all: only the scheduler's own
+  // append writes such a row, a server run by construction. It reads scheduler_managed
+  // TRUE, the column default every row carries in production, device rows included.
   await sql(
     backend,
     `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, started_at, completed_at)
@@ -306,12 +342,11 @@ const EXPECTED_AFTER_BACKFILL: readonly (readonly [string, string, string | null
   ["run-two-terminals", INSTANCE_A, "local_device"],
   ["run-surface", INSTANCE_A, "runtime"],
   ["run-running", INSTANCE_A, null],
-  ["run-no-events", INSTANCE_A, null],
+  ["run-no-events", INSTANCE_A, "runtime"],
   ["run-already-set", INSTANCE_A, "kept"],
 ];
 // Candidates: terminal, NULL actor_type, run_id set. run-running and run-already-set are not.
-const FILLABLE = 5;
-const UNFILLABLE_TERMINAL = 1;
+const FILLABLE = 6;
 
 async function assertBackfilled(backend: Backend, message: string): Promise<void> {
   for (const [runId, instance, expected] of EXPECTED_AFTER_BACKFILL) {
@@ -320,21 +355,58 @@ async function assertBackfilled(backend: Backend, message: string): Promise<void
   }
 }
 
-backendTest("backfill: historical rows take their run's first terminal event actor, idempotently", async (backend) => {
-  await seedHistoricalRows(backend);
-  assert.equal(await actorTypeOf(backend, "run-shared", INSTANCE_A), null, "the fixture rows predate the column");
-  const first = await runStartupRunHistoryActorBackfillToCompletion();
-  assert.equal(first.complete, true);
-  assert.equal(first.filled, FILLABLE);
-  await assertBackfilled(backend, "after the first pass");
+backendTest(
+  "backfill: historical rows take their run's earliest terminal actor, or runtime with no spine event, idempotently",
+  async (backend) => {
+    await seedHistoricalRows(backend);
+    assert.equal(await actorTypeOf(backend, "run-shared", INSTANCE_A), null, "the fixture rows predate the column");
+    const first = await runStartupRunHistoryActorBackfillToCompletion();
+    assert.equal(first.complete, true);
+    assert.equal(first.filled, FILLABLE);
+    await assertBackfilled(backend, "after the first pass");
 
-  // A second pass changes nothing: only the row with no terminal event is re-examined.
-  const second = await runStartupRunHistoryActorBackfillToCompletion();
-  assert.equal(second.complete, true);
-  assert.equal(second.filled, 0);
-  assert.equal(second.examined, UNFILLABLE_TERMINAL);
-  await assertBackfilled(backend, "after the second pass");
+    // Every terminal row is filled, so a second pass reads and writes nothing.
+    const second = await runStartupRunHistoryActorBackfillToCompletion();
+    assert.equal(second.complete, true);
+    assert.equal(second.filled, 0);
+    assert.equal(second.examined, 0, "no row is re-examined once all are filled");
+    await assertBackfilled(backend, "after the second pass");
+  }
+);
+
+backendTest("backfill: the earliest terminal event by event_seq decides, whatever its type", async (backend) => {
+  // run.browser_surface_failed is outside the Postgres terminal partial index; it must still
+  // win when it comes first, and lose when a terminal of another type comes first.
+  await emitSpineEvent(startedEvent("run-surface-first", INSTANCE_A));
+  await emitSpineEvent(terminalEvent("run-surface-first", INSTANCE_A, "local_device", "run.browser_surface_failed"));
+  await emitSpineEvent(terminalEvent("run-surface-first", INSTANCE_A, "runtime", "run.failed", "second"));
+  await emitSpineEvent(startedEvent("run-surface-last", INSTANCE_A));
+  await emitSpineEvent(terminalEvent("run-surface-last", INSTANCE_A, "runtime", "run.failed"));
+  await emitSpineEvent(
+    terminalEvent("run-surface-last", INSTANCE_A, "local_device", "run.browser_surface_failed", "second")
+  );
+  await clearProvenance(backend);
+  const summary = await runStartupRunHistoryActorBackfillToCompletion();
+  assert.equal(summary.filled, 2);
+  assert.equal(await actorTypeOf(backend, "run-surface-first", INSTANCE_A), "local_device");
+  assert.equal(await actorTypeOf(backend, "run-surface-last", INSTANCE_A), "runtime");
 });
+
+backendTest(
+  "backfill: a settled row whose run has spine events but no terminal one stays NULL, never guessed",
+  async (backend) => {
+    await emitSpineEvent(startedEvent("run-no-terminal", INSTANCE_A));
+    await sql(
+      backend,
+      "UPDATE run_history SET status = 'failed', completed_at = '2026-10-01T00:01:00.000Z' WHERE run_id = 'run-no-terminal'",
+      "UPDATE run_history SET status = 'failed', completed_at = '2026-10-01T00:01:00.000Z' WHERE run_id = 'run-no-terminal'"
+    );
+    const summary = await runStartupRunHistoryActorBackfillToCompletion();
+    assert.equal(summary.filled, 0);
+    assert.equal(summary.examined, 1);
+    assert.equal(await actorTypeOf(backend, "run-no-terminal", INSTANCE_A), null);
+  }
+);
 
 backendTest(
   "backfill: rounds are bounded by the batch size, and a capped pass resumes where it left off",
@@ -349,7 +421,7 @@ backendTest(
       rounds.every((round) => round.examined <= 2),
       "no round examines more than the batch size"
     );
-    assert.ok(rounds.length >= Math.ceil((FILLABLE + UNFILLABLE_TERMINAL) / 2), "the work is split across rounds");
+    assert.ok(rounds.length >= Math.ceil(FILLABLE / 2), "the work is split across rounds");
     assert.equal(full.rounds, rounds.length);
     assert.equal(full.filled, FILLABLE);
     await assertBackfilled(backend, "batched pass");
@@ -492,17 +564,18 @@ test("selector: a device run is dropped even with no revision stamp and no marke
   assert.equal(conditionFor(preRevision), "unknown");
 });
 
-test("selector: a terminal run of unknown provenance is dropped unless it is scheduler-managed", () => {
+test("selector: a settled run of unknown provenance is dropped, scheduler-managed or not", () => {
   assert.equal(conditionFor(run({ actor_type: null })), "unknown", "unknown provenance fails closed");
   assert.equal(
     conditionFor(run({ actor_type: null, scheduler_managed: false })),
     "unknown",
     "a run no scheduler produced may be a device run"
   );
+  // scheduler_managed defaults to TRUE in production, device runs included: it proves nothing.
   assert.equal(
     conditionFor(run({ actor_type: null, scheduler_managed: true })),
-    "complete",
-    "a scheduler-managed run is a server run"
+    "unknown",
+    "scheduler_managed is not evidence of a server run"
   );
 });
 

@@ -6,10 +6,20 @@
 //
 // The live writer (server/stores/run-history-writer.ts) copies the terminal
 // spine event's actor_type onto the row it finalizes. A row finalized earlier
-// has none. This walk fills it from the run's terminal spine event: the FIRST
-// terminal event by event_seq, which is the event the live writer finalizes a
-// row from (a later duplicate terminal no-ops there). Identity is the pair
-// (run_id, connector_instance_id), never run_id alone.
+// has none. This walk fills it:
+// - A run with terminal spine events takes the actor_type of its EARLIEST
+//   terminal event by event_seq across all five terminal types, the event the
+//   live writer finalizes a row from (a later duplicate terminal no-ops there).
+// - A run with NO spine event at all takes 'runtime'. A device run always
+//   produces spine events (its run_history row is written from them), and a
+//   row with none can only come from the scheduler's own append path
+//   (scheduler-store appendRunHistory: skipped and pre-start failed runs),
+//   which records a server run by construction. So the absence of any event is
+//   itself the proof of server origin. `scheduler_managed` is NOT that proof:
+//   its column default is true, so device rows carry it too.
+// Identity is the pair (run_id, connector_instance_id), never run_id alone. A
+// spine event with a NULL connector_instance_id could belong to the row, so it
+// blocks the 'runtime' rule (fail closed) rather than being ignored.
 //
 // Shape (why it is safe on a large table):
 // - The walk keys on run_history's own primary key, in ascending id order, one
@@ -24,17 +34,17 @@
 //   actor_type NULL, and re-checks `actor_type IS NULL` in the UPDATE. A live
 //   finalize needs `status = 'running'`, so the two writers never touch the
 //   same row, and a backfill can never overwrite a live value.
-// - Idempotent: a filled row drops out of the candidate set. A row whose run
-//   has no terminal event stays NULL and is not rewritten (the UPDATE joins
-//   only rows that found an actor), so repeated boots add no dead tuples.
-// - No durable cursor. A pass re-reads from id 0 each boot; the filled rows
-//   are skipped by the `actor_type IS NULL` filter, so a capped pass resumes
-//   where the last one effectively stopped. Only rows that can never be
-//   filled are re-probed, and only until the round cap.
+// - Idempotent: a filled row drops out of the candidate set, and the UPDATE
+//   joins only rows that found an actor, so a repeated boot adds no dead
+//   tuples. After a pass every terminal row is filled except one whose run has
+//   spine events but none terminal; that case is not guessed (no sentinel) and
+//   is re-probed on the next boot, until the round cap.
+// - No durable cursor. A pass re-reads from id 0 each boot; filled rows are
+//   skipped by the `actor_type IS NULL` filter.
 //
 // A run's `run.browser_surface_failed` terminal is not in the Postgres terminal
-// partial index. It is probed only for rows the indexed lookup did not fill, so
-// the common case never scans a run's whole event window.
+// partial index, so Postgres probes it separately and compares event_seq with
+// the indexed probe: the earlier event wins, as on SQLite.
 
 import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged } from "../../lib/db.ts";
 import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
@@ -63,6 +73,7 @@ export interface RunHistoryActorBackfillSummary {
 // five terminal types; the Postgres one (idx_pg_spine_events_run_terminal)
 // covers the first four. An IN list must stay literal and identical to the
 // index predicate for the planner to use the partial index.
+const SERVER_RUN_ACTOR_TYPE = "runtime";
 const SQLITE_TERMINAL_TYPES = `'run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned'`;
 const POSTGRES_INDEXED_TERMINAL_TYPES = `'run.completed', 'run.failed', 'run.cancelled', 'run.abandoned'`;
 
@@ -85,12 +96,20 @@ export const SQLITE_FILL_ACTOR_SQL = `UPDATE run_history
      SET actor_type = found.actor_type
      FROM (
        SELECT rh.id AS id,
-              (SELECT se.actor_type FROM spine_events se
-                WHERE se.run_id = rh.run_id
-                  AND +se.connector_instance_id = rh.connector_instance_id
-                  AND se.event_type IN (${SQLITE_TERMINAL_TYPES})
-                ORDER BY se.event_seq ASC
-                LIMIT 1) AS actor_type
+              COALESCE(
+                (SELECT se.actor_type FROM spine_events se
+                  WHERE se.run_id = rh.run_id
+                    AND +se.connector_instance_id = rh.connector_instance_id
+                    AND se.event_type IN (${SQLITE_TERMINAL_TYPES})
+                  ORDER BY se.event_seq ASC
+                  LIMIT 1),
+                CASE WHEN NOT EXISTS (
+                  SELECT 1 FROM spine_events se
+                  WHERE se.run_id = rh.run_id
+                    AND (+se.connector_instance_id = rh.connector_instance_id
+                         OR +se.connector_instance_id IS NULL)
+                ) THEN '${SERVER_RUN_ACTOR_TYPE}' END
+              ) AS actor_type
        FROM run_history rh
        WHERE rh.id BETWEEN ? AND ?
          AND rh.actor_type IS NULL AND rh.run_id IS NOT NULL AND rh.status <> 'running'
@@ -147,21 +166,35 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
      SET actor_type = found.actor_type
      FROM (
        SELECT rh.id,
-              COALESCE(
-                (SELECT se.actor_type FROM spine_events se
+              CASE
+                WHEN browser.actor_type IS NOT NULL
+                     AND (indexed.actor_type IS NULL OR browser.event_seq < indexed.event_seq)
+                  THEN browser.actor_type
+                WHEN indexed.actor_type IS NOT NULL THEN indexed.actor_type
+                WHEN NOT EXISTS (
+                  SELECT 1 FROM spine_events se
                   WHERE se.run_id = rh.run_id
-                    AND se.connector_instance_id = rh.connector_instance_id
-                    AND se.event_type IN (${POSTGRES_INDEXED_TERMINAL_TYPES})
-                  ORDER BY se.event_seq ASC
-                  LIMIT 1),
-                (SELECT se.actor_type FROM spine_events se
-                  WHERE se.run_id = rh.run_id
-                    AND se.connector_instance_id = rh.connector_instance_id
-                    AND se.event_type = 'run.browser_surface_failed'
-                  ORDER BY se.event_seq ASC
-                  LIMIT 1)
-              ) AS actor_type
+                    AND (se.connector_instance_id = rh.connector_instance_id
+                         OR se.connector_instance_id IS NULL)
+                ) THEN '${SERVER_RUN_ACTOR_TYPE}'
+              END AS actor_type
        FROM run_history rh
+       LEFT JOIN LATERAL (
+         SELECT se.actor_type, se.event_seq FROM spine_events se
+         WHERE se.run_id = rh.run_id
+           AND se.connector_instance_id = rh.connector_instance_id
+           AND se.event_type IN (${POSTGRES_INDEXED_TERMINAL_TYPES})
+         ORDER BY se.event_seq ASC
+         LIMIT 1
+       ) indexed ON true
+       LEFT JOIN LATERAL (
+         SELECT se.actor_type, se.event_seq FROM spine_events se
+         WHERE se.run_id = rh.run_id
+           AND se.connector_instance_id = rh.connector_instance_id
+           AND se.event_type = 'run.browser_surface_failed'
+         ORDER BY se.event_seq ASC
+         LIMIT 1
+       ) browser ON true
        WHERE rh.id BETWEEN $1::bigint AND $2::bigint
          AND rh.actor_type IS NULL AND rh.run_id IS NOT NULL AND rh.status <> 'running'
      ) found
@@ -175,7 +208,8 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
 
 /**
  * One bounded round: the next `batchSize` terminal rows after `afterId` that
- * have no actor_type, filled from their run's terminal spine event.
+ * have no actor_type, filled from their run's earliest terminal spine event, or
+ * 'runtime' when the run has no spine event at all.
  */
 export function runRunHistoryActorBackfillRound(options: {
   readonly afterId: number;

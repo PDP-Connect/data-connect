@@ -133,7 +133,8 @@ export interface SchedulerRunHistoryRecord {
    * `run_history.actor_type` — the actor_type of the run's terminal spine
    * event (e.g. `local_device` for a run a device terminal commit recorded).
    * `null` = provenance not known: the row is still running, predates the
-   * column and is not yet backfilled, or its run has no terminal event.
+   * column and is not yet backfilled, or its run has spine events but no
+   * terminal one. The scheduler's own append writes `runtime`.
    * Selected only by the product readers.
    */
   readonly actorType?: string | null;
@@ -1059,6 +1060,9 @@ export function createSqliteSchedulerStore(): SchedulerStore {
 export function createPostgresSchedulerStore(): SchedulerStore {
   // biome-ignore assist/source/useSortedKeys: Store verbs follow the lifecycle order documented by SchedulerStore.
   return {
+    // `actor_type = 'runtime'`: the scheduler's own append is a server run by
+    // construction (see insert-run-history.sql, the SQLite twin). An existing
+    // value, the spine terminal event's actor, is kept; only a NULL is filled.
     async appendRunHistory(record) {
       const connectorInstanceId = requireRunHistoryConnectorInstanceId(record);
       rejectEmptyRunHistoryRunId(record);
@@ -1081,8 +1085,9 @@ export function createPostgresSchedulerStore(): SchedulerStore {
            completed_at,
            error,
            attempt,
-           scheduler_managed
-         ) VALUES($1, $2, $3::jsonb, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, true)
+           scheduler_managed,
+           actor_type
+         ) VALUES($1, $2, $3::jsonb, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10, $11, $12, $13, $14, $15, $16, $17, true, 'runtime')
          ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO UPDATE SET
            source_json = excluded.source_json,
            status = excluded.status,
@@ -1097,7 +1102,8 @@ export function createPostgresSchedulerStore(): SchedulerStore {
            completed_at = excluded.completed_at,
            error = excluded.error,
            attempt = excluded.attempt,
-           scheduler_managed = true`,
+           scheduler_managed = true,
+           actor_type = COALESCE(run_history.actor_type, 'runtime')`,
         [
           connectorInstanceId,
           record.connectorId,

@@ -1668,10 +1668,12 @@ CREATE TABLE IF NOT EXISTS run_history (
   scheduler_managed          INTEGER NOT NULL DEFAULT 0,
   -- Run provenance: the actor_type of the run's terminal spine event
   -- (server/stores/run-history-writer.ts), e.g. 'local_device' for a run a
-  -- device terminal commit recorded. NULL = not known: the row is still
-  -- running, predates this column and is not yet backfilled
-  -- (server/stores/run-history-actor-backfill.ts), or its run has no terminal
-  -- event. Coverage reads it (server/ref-control.ts coverageClassifyingRun).
+  -- device terminal commit recorded; 'runtime' for a row the scheduler's own
+  -- append wrote (a server run by construction). NULL = not known: the row is
+  -- still running, predates this column and is not yet backfilled
+  -- (server/stores/run-history-actor-backfill.ts), or its run has spine events
+  -- but no terminal one. Coverage reads it (server/ref-control.ts
+  -- isDeviceTerminalRun); NULL on a terminal row never counts as server.
   actor_type                 TEXT
 );
 

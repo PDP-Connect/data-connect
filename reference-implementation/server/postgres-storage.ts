@@ -3161,9 +3161,10 @@ async function bootstrapPostgresSchemaOnce({
         -- cadence/backoff readers filter on this column — see
         -- terminal-read-architecture-fable-0730.md R7.5.
         scheduler_managed BOOLEAN NOT NULL DEFAULT false,
-        -- Run provenance: the actor_type of the run's terminal spine event.
-        -- NULL = not known (still running, predates the column and not yet
-        -- backfilled, or no terminal event). See the SQLite twin in db.ts.
+        -- Run provenance: the actor_type of the run's terminal spine event, or
+        -- 'runtime' for a scheduler append. NULL = not known (still running,
+        -- predates the column and not yet backfilled, or spine events but no
+        -- terminal one). See the SQLite twin in db.ts.
         actor_type TEXT
       );
 
