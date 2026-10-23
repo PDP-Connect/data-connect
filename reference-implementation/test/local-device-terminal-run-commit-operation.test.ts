@@ -241,7 +241,40 @@ test("typed terminal coverage is green only for complete scoped store evidence",
     ),
     null
   );
-  assert.equal(normalizeTerminalCoverageFacts([fact(["collected", "collected"], false)], manifest, "bounded"), null);
+  const boundedVerdict = {
+    collection_scope: "bounded",
+    streams: [
+      {
+        scoped: false,
+        stores: [
+          { status: "collected", store: "messages" },
+          { status: "collected", store: "history" },
+        ],
+        stream: "messages",
+      },
+    ],
+    version: 1,
+  } as const;
+  const boundedFacts = boundedVerdict.streams.map((stream) => ({
+    ...fact(["collected", "collected"]),
+    scoped: stream.scoped,
+    stores: stream.stores,
+    stream: stream.stream,
+  }));
+  assert.equal(
+    normalizeTerminalCoverageFacts(boundedFacts, manifest, boundedVerdict.collection_scope)?.length,
+    1,
+    "a bounded producer verdict without a positive scope assertion remains admissible"
+  );
+  assert.equal(
+    normalizeTerminalCoverageFacts(
+      [{ ...boundedFacts[0], scoped: "false" }],
+      manifest,
+      boundedVerdict.collection_scope
+    ),
+    null,
+    "a malformed non-boolean scope assertion remains invalid"
+  );
 });
 
 test("a selected-stream terminal commit is accepted without proving omitted manifest streams", () => {
@@ -254,6 +287,58 @@ test("a selected-stream terminal commit is accepted without proving omitted mani
   const selected = [{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }];
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped"), null);
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped", { allowSubset: true })?.length, 1);
+});
+
+test("a bounded producer verdict allows positive coverage only for scoped streams", () => {
+  const manifest = {
+    streams: [
+      { coverage_stores: ["messages", "history"], coverage_strategy: "checkpoint_window", name: "messages" },
+      { coverage_stores: ["projects"], coverage_strategy: "checkpoint_window", name: "sessions" },
+    ],
+  } as const;
+  const artifactDigest = `sha256:${"b".repeat(64)}`;
+  const verdict = {
+    collection_scope: "bounded",
+    streams: [
+      {
+        scoped: false,
+        stores: [
+          { status: "collected", store: "messages" },
+          { status: "collected", store: "history" },
+        ],
+        stream: "messages",
+      },
+      { scoped: true, stores: [{ status: "collected", store: "projects" }], stream: "sessions" },
+    ],
+    version: 1,
+  } as const;
+  const facts = verdict.streams.map((stream) => ({
+    artifact_digest: artifactDigest,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: stream.scoped,
+    stores: stream.stores,
+    stream: stream.stream,
+  }));
+  const normalized = normalizeTerminalCoverageFacts(facts, manifest, verdict.collection_scope, {
+    expectedArtifactDigest: artifactDigest,
+  });
+  assert.ok(normalized);
+  const conditions = Object.fromEntries(
+    normalized.map((raw) => {
+      const fact = readRuntimeCollectionFact(raw);
+      assert.ok(fact);
+      const stream = manifest.streams.find((entry) => entry.name === fact.stream);
+      return [fact.stream, deriveStreamCoverageCondition(fact, stream)];
+    })
+  );
+  assert.deepEqual(conditions, { messages: "unknown", sessions: "complete" });
 });
 
 test("terminal run commit resolves authorization before receipt lookup and passes canonical binding", async () => {

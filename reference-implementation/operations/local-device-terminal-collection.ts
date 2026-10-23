@@ -537,7 +537,7 @@ function normalizeTerminalRunRecordFacts(
 export function normalizeTerminalCoverageFacts(
   rawFacts: readonly unknown[],
   rawManifest: unknown,
-  collectionBoundary: string,
+  _collectionBoundary: string,
   options: {
     allowSubset?: boolean;
     bindingGeneration?: number | null;
@@ -625,8 +625,7 @@ export function normalizeTerminalCoverageFacts(
       seen.has(stream) ||
       typeof entry.scoped !== "boolean" ||
       !Array.isArray(rawStores) ||
-      rawStores.length !== expected.size ||
-      (collectionBoundary !== "unscoped" && entry.scoped !== true)
+      rawStores.length !== expected.size
     ) {
       return null;
     }

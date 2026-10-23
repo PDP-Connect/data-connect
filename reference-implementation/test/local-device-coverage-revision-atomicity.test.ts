@@ -69,8 +69,18 @@ const PROFILE = {
   protocol_capabilities: ["RUN_COVERAGE_V1"],
   protocol_version: "0.2.0",
   streams: [
-    { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
-    { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },
+    {
+      coverage_stores: ["projects"],
+      coverage_strategy: "checkpoint_window",
+      name: "sessions",
+      primary_key: ["id"],
+    },
+    {
+      coverage_stores: ["derived_messages"],
+      coverage_strategy: "checkpoint_window",
+      name: "messages",
+      primary_key: ["id"],
+    },
   ],
   version: "0.0.0-revision-atomicity",
 };
@@ -107,6 +117,19 @@ interface HighWater {
   readonly revision: number;
   readonly runId: string | null;
 }
+
+type ProducerRunCoverageVerdict = {
+  readonly collection_scope: string;
+  readonly streams: readonly {
+    readonly scoped: boolean;
+    readonly stores: readonly {
+      readonly status: "collected" | "partial" | "unavailable" | "failed";
+      readonly store: string;
+    }[];
+    readonly stream: string;
+  }[];
+  readonly version: 1;
+};
 
 type TerminalCommit = Parameters<typeof commitTerminalRun>[0];
 
@@ -211,7 +234,11 @@ async function registerFixtureManifest(lane: Lane): Promise<void> {
   const streams = PROFILE.streams.map((release) => {
     const declared = catalog.streams.find((stream) => stream.name === release.name);
     assert.ok(declared, `the catalog declares ${release.name}`);
-    return { ...declared, coverage_stores: release.coverage_stores };
+    return {
+      ...declared,
+      coverage_stores: release.coverage_stores,
+      coverage_strategy: release.coverage_strategy,
+    };
   });
   await sql(
     lane,
@@ -1323,15 +1350,32 @@ function postRunStart(lane: Lane, runId: string): Promise<JsonResponse> {
 async function terminalWireBody(
   lane: Lane,
   runId: string,
-  stateDelta: Record<string, unknown> = {}
+  stateDelta: Record<string, unknown> = {},
+  coverageForScope?: (collectionScope: string) => ProducerRunCoverageVerdict
 ): Promise<Record<string, unknown>> {
   const diagnostics = await readCommittedLocalCoverageDiagnostics({
     connector_id: CONNECTOR_ID,
     connector_instance_id: lane.enrolled.connector_instance_id,
   });
   assert.ok("declaredCollectionScope" in diagnostics, "the connection declares its collection boundary");
-  const fact = (stream: string, store: string) => ({
+  const [instance] = await sql(
+    lane,
+    "SELECT manifest_generation FROM connector_instances WHERE connector_instance_id = ?",
+    "SELECT manifest_generation::integer AS manifest_generation FROM connector_instances WHERE connector_instance_id = $1",
+    [lane.enrolled.connector_instance_id]
+  );
+  const coverage = coverageForScope?.(diagnostics.declaredCollectionScope) ?? {
+    collection_scope: diagnostics.declaredCollectionScope,
+    streams: [
+      { scoped: true, stores: [{ status: "collected", store: "derived_messages" }], stream: "messages" },
+      { scoped: true, stores: [{ status: "collected", store: "projects" }], stream: "sessions" },
+    ],
+    version: 1,
+  } satisfies ProducerRunCoverageVerdict;
+  assert.equal(coverage.collection_scope, diagnostics.declaredCollectionScope);
+  const fact = (stream: ProducerRunCoverageVerdict["streams"][number]) => ({
     artifact_digest: ARTIFACT_DIGEST,
+    binding_generation: Number(instance?.manifest_generation),
     manifest_fingerprint: fingerprintDeviceAttemptManifest(PROFILE),
     runtime_accounting: {
       checkpoint_eligible: true,
@@ -1340,9 +1384,10 @@ async function terminalWireBody(
       outstanding_debt: 0,
       stream_evidence_consistent: true,
     },
-    scoped: true,
-    stores: [{ status: "collected", store }],
-    stream,
+    server_artifact_digest: ARTIFACT_DIGEST,
+    scoped: stream.scoped,
+    stores: stream.stores,
+    stream: stream.stream,
   });
   return {
     collection_boundary: diagnostics.declaredCollectionScope,
@@ -1353,7 +1398,7 @@ async function terminalWireBody(
     run_id: runId,
     source_instance_id: lane.enrolled.source_instance_id,
     state_delta: stateDelta,
-    terminal_facts: [fact("messages", "derived_messages"), fact("sessions", "projects")],
+    terminal_facts: coverage.streams.map(fact),
     version: 2,
   };
 }
@@ -1361,6 +1406,89 @@ async function terminalWireBody(
 function postTerminal(lane: Lane, body: Record<string, unknown>): Promise<JsonResponse> {
   return postJson(sourceUrl(lane, "/terminal-run-commits"), body, authHeaders(lane));
 }
+
+laneTest("bounded terminal: scoped false commits state without positive coverage for that stream", async (lane) => {
+  const runId = "run-bounded-unscoped-stream";
+  assert.equal((await postRunStart(lane, runId)).status, 201);
+  await markDrained(lane);
+  const body = await terminalWireBody(
+    lane,
+    runId,
+    { sessions: { cursor: "bounded-cursor" } },
+    (collectionScope) => ({
+      collection_scope: collectionScope,
+      streams: [
+        { scoped: false, stores: [{ status: "collected", store: "derived_messages" }], stream: "messages" },
+        { scoped: true, stores: [{ status: "collected", store: "projects" }], stream: "sessions" },
+      ],
+      version: 1,
+    })
+  );
+  assert.notEqual(body.collection_boundary, "unscoped", "the fixture exercises a bounded run");
+
+  const committed = await postTerminal(lane, body);
+  assert.equal(committed.status, 201, JSON.stringify(committed.body));
+  assert.equal(await sessionsCursor(lane), "bounded-cursor", "the accepted terminal commit advances state");
+  const [storedRun] = await sql(
+    lane,
+    "SELECT facts_json FROM run_history WHERE run_id = ?",
+    "SELECT facts_json::text AS facts_json FROM run_history WHERE run_id = $1",
+    [runId]
+  );
+  assert.ok(storedRun, "the server stores the terminal run");
+  const storedFacts = JSON.parse(String(storedRun.facts_json)) as {
+    collection_facts?: { streams?: { scoped?: unknown; stream?: unknown }[] };
+  };
+  assert.deepEqual(
+    storedFacts.collection_facts?.streams?.map(({ stream, scoped }) => [stream, scoped]),
+    [
+      ["messages", false],
+      ["sessions", true],
+    ],
+    "the committed terminal keeps each producer scope assertion"
+  );
+  assert.deepEqual(
+    await reportedConditions(lane),
+    { messages: "unknown", sessions: "complete" },
+    JSON.stringify(await projection(lane))
+  );
+  assert.notEqual(
+    (await projection(lane)).axis,
+    "complete",
+    "a stream without a positive scope assertion cannot make the run positive"
+  );
+
+  const beforeReplay = await highWater(lane);
+  const replay = await postTerminal(lane, body);
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(await sessionsCursor(lane), "bounded-cursor", "an exact replay leaves state unchanged");
+  assert.deepEqual(await highWater(lane), beforeReplay, "an exact replay does not advance the revision");
+});
+
+laneTest("bounded terminal: scoped false preserves partial and failed store statuses", async (lane) => {
+  const runId = "run-bounded-negative-unscoped-streams";
+  assert.equal((await postRunStart(lane, runId)).status, 201);
+  await markDrained(lane);
+  const body = await terminalWireBody(
+    lane,
+    runId,
+    { sessions: { cursor: "negative-cursor" } },
+    (collectionScope) => ({
+      collection_scope: collectionScope,
+      streams: [
+        { scoped: false, stores: [{ status: "partial", store: "derived_messages" }], stream: "messages" },
+        { scoped: false, stores: [{ status: "failed", store: "projects" }], stream: "sessions" },
+      ],
+      version: 1,
+    })
+  );
+  assert.notEqual(body.collection_boundary, "unscoped", "the fixture exercises a bounded run");
+
+  const committed = await postTerminal(lane, body);
+  assert.equal(committed.status, 201, JSON.stringify(committed.body));
+  assert.equal(await sessionsCursor(lane), "negative-cursor", "negative coverage does not block state commit");
+  assert.deepEqual(await reportedConditions(lane), { messages: "partial", sessions: "gaps" });
+});
 
 laneTest(
   "run order: an older run's proof that arrives after a newer run's terminal record stays history",

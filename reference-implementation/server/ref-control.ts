@@ -3993,12 +3993,23 @@ export function buildCollectionReport(input: {
       schedule: input.schedule ?? null,
     })
   );
-  return inheritStateStreamCoverageCondition(entries, entryIndexes.manifestByStream, {
-    attentionOpen: input.attentionOpen,
-    freshness: input.freshness,
-    refresh: input.refresh,
-    schedule: input.schedule ?? null,
-  }).sort((a, b) => a.stream.localeCompare(b.stream));
+  const scopedFalseStreams = new Set(
+    (input.localCoverage?.rows ?? [])
+      .filter((row) => row.scoped === false)
+      .map((row) => row.stream)
+      .filter((stream): stream is string => typeof stream === "string" && stream.length > 0)
+  );
+  return inheritStateStreamCoverageCondition(
+    entries,
+    entryIndexes.manifestByStream,
+    {
+      attentionOpen: input.attentionOpen,
+      freshness: input.freshness,
+      refresh: input.refresh,
+      schedule: input.schedule ?? null,
+    },
+    scopedFalseStreams
+  ).sort((a, b) => a.stream.localeCompare(b.stream));
 }
 
 /**
@@ -4042,11 +4053,12 @@ function inheritStateStreamCoverageCondition(
     readonly freshness: FreshnessAxis;
     readonly refresh: ConnectionRefreshEvidence | null;
     readonly schedule?: { readonly enabled: boolean } | null;
-  }
+  },
+  scopedFalseStreams: ReadonlySet<string>
 ): CollectionReportEntry[] {
   const entryByStream = new Map(entries.map((entry) => [entry.stream, entry] as const));
   return entries.map((entry) => {
-    if (entry.coverage_condition !== "unknown") {
+    if (entry.coverage_condition !== "unknown" || scopedFalseStreams.has(entry.stream)) {
       return entry;
     }
     const parentStream = localCoverageParentStream(manifestByStream.get(entry.stream));
@@ -4816,6 +4828,7 @@ interface LocalCoverageDiagnosticRow {
   readonly status?: unknown;
   readonly store?: unknown;
   readonly stream?: unknown;
+  readonly scoped?: unknown;
 }
 
 interface LocalCoverageDiagnosticAxis {
@@ -5155,7 +5168,7 @@ function deriveLocalTerminalCoverageAxis(
   let axis: CoverageAxis = normalized.length === manifest.streams?.length ? "complete" : "unknown";
   for (const rawFact of normalized) {
     const stream = rawFact.stream as string;
-    if (rawFact.scoped !== true) {
+    if (rawFact.scoped !== true && terminal.collectionScope === "unscoped") {
       return unknown;
     }
     let storeIndex = 0;
@@ -5163,10 +5176,20 @@ function deriveLocalTerminalCoverageAxis(
       store: string;
       status: string;
     }[]) {
-      const status = (rawFact.coverage_statuses as string[])[storeIndex] ?? "unknown";
+      const assertedStatus = (rawFact.coverage_statuses as string[])[storeIndex] ?? "unknown";
       storeIndex += 1;
+      const status =
+        rawFact.scoped !== true && (assertedStatus === "collected" || assertedStatus === "inventory_only")
+          ? "unknown"
+          : assertedStatus;
       const rawStore = { ...assertion, status };
-      rows.push({ collection_scope: terminal.collectionScope, status: rawStore.status, store: rawStore.store, stream });
+      rows.push({
+        collection_scope: terminal.collectionScope,
+        scoped: rawFact.scoped,
+        status: rawStore.status,
+        store: rawStore.store,
+        stream,
+      });
       if (rawStore.status !== "collected") {
         unaccountedStores.push(rawStore.store);
       }
