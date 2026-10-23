@@ -22,84 +22,16 @@ import { createScheduler } from "../runtime/scheduler.ts";
 import type { RunManagedConnectorViaController, RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
-
-const CONNECTOR_ID = "chatgpt";
-const INSTANCE_ID = "cin_chatgpt_stop_epoch";
-const OWNER = "owner-stop-epoch";
-
-const BACKGROUND_SAFE_MANIFEST = {
-  capabilities: {
-    refresh_policy: { background_safe: true, recommended_mode: "automatic" },
-  },
-  streams: [{ name: "items" }],
-};
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
-}
-
-// Lets already-resolved continuations (and the dispatch they drive) run to
-// completion without a timed wait.
-async function drain(): Promise<void> {
-  for (let i = 0; i < 20; i += 1) {
-    // biome-ignore lint/performance/noAwaitInLoops: each turn must finish before the next
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-}
-
-type ScheduleRow = { enabled: boolean } | null;
-
-function buildStore(getRow?: () => ScheduleRow) {
-  const anchor = Date.now() - 10 * 60_000;
-  return {
-    appendRunHistory: () => {
-      // no-op
-    },
-    deleteActiveRun: () => {
-      // no-op
-    },
-    ...(getRow
-      ? {
-          getSchedule: () => {
-            const row = getRow();
-            return row
-              ? {
-                  connector_id: CONNECTOR_ID,
-                  connector_instance_id: INSTANCE_ID,
-                  created_at: new Date(anchor).toISOString(),
-                  enabled: row.enabled,
-                  interval_seconds: 60,
-                  jitter_seconds: 0,
-                  updated_at: new Date(anchor).toISOString(),
-                }
-              : null;
-          },
-        }
-      : {}),
-    listLastRunTimes: () => [
-      {
-        connector_id: CONNECTOR_ID,
-        connector_instance_id: INSTANCE_ID,
-        last_run_time_ms: anchor,
-        updated_at: new Date(anchor).toISOString(),
-      },
-    ],
-    listRunHistory: () => [],
-    upsertActiveRun: () => true,
-    upsertLastRunTime: () => {
-      // no-op
-    },
-  };
-}
+import {
+  BACKGROUND_SAFE_MANIFEST,
+  buildStore,
+  CONNECTOR_ID,
+  deferred,
+  drain,
+  INSTANCE_ID,
+  OWNER,
+  type ScheduleRow,
+} from "./helpers/scheduler-stop-harness.ts";
 
 type Stage = "governor" | "preflight" | "credentials" | "state";
 
@@ -211,7 +143,7 @@ test("disable during a pending governor probe on a replaced scheduler launches n
   let row: ScheduleRow = { enabled: true };
   const h = buildHarness(
     "governor",
-    buildStore(() => row),
+    buildStore(() => row)
   );
   try {
     h.scheduler.start();
@@ -235,7 +167,7 @@ test("final admission refuses a schedule disabled in the store even if the sched
   let row: ScheduleRow = { enabled: true };
   const h = buildHarness(
     "governor",
-    buildStore(() => row),
+    buildStore(() => row)
   );
   try {
     h.scheduler.start();
@@ -256,7 +188,7 @@ test("final admission refuses a schedule deleted from the store", async () => {
   let row: ScheduleRow = { enabled: true };
   const h = buildHarness(
     "governor",
-    buildStore(() => row),
+    buildStore(() => row)
   );
   try {
     h.scheduler.start();
@@ -276,7 +208,7 @@ test("final admission refuses a schedule deleted from the store", async () => {
 test("a still-enabled schedule on a live scheduler still dispatches", async () => {
   const h = buildHarness(
     "governor",
-    buildStore(() => ({ enabled: true })),
+    buildStore(() => ({ enabled: true }))
   );
   try {
     h.scheduler.start();
@@ -293,7 +225,7 @@ test("a still-enabled schedule on a live scheduler still dispatches", async () =
 test("a stop then start dispatches on the new epoch but never on the stale one", async () => {
   const h = buildHarness(
     "governor",
-    buildStore(() => ({ enabled: true })),
+    buildStore(() => ({ enabled: true }))
   );
   try {
     h.scheduler.start();
@@ -367,9 +299,9 @@ test("production managed adapter: stop() while the governor probe is pending nev
   const scheduler = buildManagedScheduler(
     managedControllerStub(
       (call) => runNowCalls.push(call),
-      async () => "succeeded",
+      async () => "succeeded"
     ),
-    { entered: () => entered.resolve(), released: gate.promise },
+    { entered: () => entered.resolve(), released: gate.promise }
   );
   try {
     scheduler.start();
@@ -406,8 +338,8 @@ test("production managed adapter: a retry after the scheduler is stopped never r
         scheduler.stop();
         firstAttemptSettled.resolve();
         return "failed";
-      },
-    ),
+      }
+    )
   );
   try {
     scheduler.start();

@@ -821,8 +821,13 @@ export function createReferenceSchedulerManager({
       // Fires ONCE per streak/flag (dedup lives in the scheduler runtime maps
       // announcedBlockedClass + notifiedNeedsHumanSkips). Errors are swallowed
       // so a push delivery failure never crashes the scheduler loop.
-      onHumanRequiredStateEscalation: async ({ connectorId, connectorInstanceId, reason }) => {
+      onHumanRequiredStateEscalation: async ({ connectorId, connectorInstanceId, reason, shouldDeliver }) => {
         const projection = await projectEscalation(connectorId, connectorInstanceId, controller, logger);
+        // The projection awaited: the scheduler may have been stopped or the
+        // schedule disabled since the escalation was raised.
+        if (shouldDeliver && !(await shouldDeliver())) {
+          return;
+        }
         try {
           await fanoutEscalationWebPush({
             config: webPushConfig,

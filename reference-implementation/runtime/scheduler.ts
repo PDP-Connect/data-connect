@@ -29,6 +29,7 @@ import {
 } from "./run-automation-policy.ts";
 import { createRunLogger, NOOP_RUN_BASE_LOGGER } from "./run-logger.ts";
 import { createDispatchGovernor } from "./scheduler/dispatch-governor.ts";
+import { automaticDispatchStillValid } from "./scheduler/dispatch-guard.ts";
 import { createPreRunGate } from "./scheduler/pre-run-gate.ts";
 import { createRunExecutor } from "./scheduler/run-executor.ts";
 import { resolveNonNegativeMsOrInfinity } from "./scheduler-config.ts";
@@ -46,6 +47,7 @@ import type {
   ConnectorError,
   ConnectorSchedule,
   HasLegacySchedulerEventMarkerHandler,
+  HumanRequiredStateEscalationHandler,
   RunRecord,
   RunSource,
   SchedulerManifest,
@@ -496,10 +498,30 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     runtime.notifiedDisabledGrantFailures.delete(connectorInstanceId);
   }
 
+  const readScheduleEnabled = schedulerStore?.getSchedule
+    ? async (connectorInstanceId: string) =>
+        (await schedulerStore.getSchedule?.(connectorInstanceId))?.enabled === true
+    : undefined;
+
+  // Escalations come from the governor and pre-run gate during an automatic
+  // dispatch. Bind each to the epoch current when it is raised: one raised after
+  // stop() is dropped, and the handler's own `shouldDeliver` re-check (called
+  // right before its push) covers a stop or disable during its own awaits.
+  const dispatchBoundEscalation: HumanRequiredStateEscalationHandler = (info) => {
+    const signal = dispatchEpoch.signal;
+    if (signal.aborted) {
+      return;
+    }
+    return onHumanRequiredStateEscalation({
+      ...info,
+      shouldDeliver: () => automaticDispatchStillValid(signal, readScheduleEnabled, info.connectorInstanceId),
+    });
+  };
+
   const preRunGate = createPreRunGate({
     hasUnresolvedAttention,
     isNeedsHuman,
-    onHumanRequiredStateEscalation,
+    onHumanRequiredStateEscalation: dispatchBoundEscalation,
     readinessChecker,
     recordAndNotify,
     runtime,
@@ -528,12 +550,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     runtime,
     schedulerStore,
     setState,
-    ...(schedulerStore?.getSchedule
-      ? {
-          readScheduleEnabled: async (connectorInstanceId: string) =>
-            (await schedulerStore.getSchedule?.(connectorInstanceId))?.enabled === true,
-        }
-      : {}),
+    ...(readScheduleEnabled ? { readScheduleEnabled } : {}),
   });
 
   async function executeRun(
@@ -625,7 +642,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     getSourcePressureGaps,
     hasLegacySchedulerEventMarker: async (...args: Parameters<HasLegacySchedulerEventMarkerHandler>) =>
       (await schedulerStore?.hasLegacySchedulerEventMarker?.(...args)) ?? false,
-    onHumanRequiredStateEscalation,
+    onHumanRequiredStateEscalation: dispatchBoundEscalation,
     runtime,
   });
 

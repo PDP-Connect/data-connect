@@ -344,6 +344,13 @@ export type HumanRequiredStateEscalationHandler = (info: {
   readonly connectorId: string;
   readonly connectorInstanceId: string;
   readonly reason: "blocked" | "needs_attention";
+  /**
+   * Present on escalations raised by an automatic dispatch. A handler that
+   * awaits before its side effect (e.g. a push) calls it immediately before
+   * that side effect and skips delivery when it resolves false: the scheduler
+   * was stopped or the schedule disabled in the meantime.
+   */
+  readonly shouldDeliver?: () => Promise<boolean>;
 }) => void | Promise<void>;
 
 /**
