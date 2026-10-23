@@ -7,7 +7,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { closeDb, initDb } from "../server/db.ts";
-import { issueCollectionRunSequence } from "../server/stores/collection-revision-store.ts";
+import {
+	advanceSqliteCollectionRevisionInTransaction,
+	issueCollectionRunSequence,
+} from "../server/stores/collection-revision-store.ts";
 import { createSqliteConnectorStateStore } from "../server/stores/connector-state-store.ts";
 import Database from "./helpers/sqlite-driver.ts";
 
@@ -260,6 +263,90 @@ test("a previously misdirected run-sequence foreign key is repaired without losi
 	}
 });
 
+function runOrderCounters(db: ReturnType<typeof initDb>) {
+	return db
+		.prepare(
+			`SELECT run_sequence_issued, storage_epoch, run_order_sequence, run_order_run_id
+         FROM connector_instances WHERE connector_instance_id = ?`,
+		)
+		.get(CONNECTOR_INSTANCE_ID);
+}
+
+test("a repaired database keeps run-order counters at or above its retained sequences", async () => {
+	const { directory, path: dbPath } = tempDatabase();
+	try {
+		seedBrokenOrderDatabase(dbPath);
+		const db = initDb(dbPath);
+		try {
+			const repaired = runOrderCounters(db);
+			assert.equal(repaired?.storage_epoch, 1);
+			assert.equal(repaired?.run_sequence_issued, 7);
+
+			const next = await issueCollectionRunSequence({
+				connectorInstanceId: CONNECTOR_INSTANCE_ID,
+				deviceId: "device_1",
+				runId: "run_after_repair",
+				sourceInstanceId: "source_1",
+			});
+			assert.equal(next.issued.runSequence, 8);
+
+			// The older retained run cannot take the run-order marker from the newer one.
+			for (const runId of ["run_after_repair", "run_preserved"]) {
+				db.transaction(() => {
+					advanceSqliteCollectionRevisionInTransaction(
+						db,
+						CONNECTOR_INSTANCE_ID,
+						{ at: "2026-10-22T13:00:00.000Z", event: "terminal_run", runId },
+					);
+				})();
+			}
+			const marker = runOrderCounters(db);
+			assert.equal(marker?.run_order_sequence, 8);
+			assert.equal(marker?.run_order_run_id, "run_after_repair");
+		} finally {
+			closeDb();
+		}
+	} finally {
+		fs.rmSync(directory, { force: true, recursive: true });
+	}
+});
+
+test("run-order reconciliation raises a stale epoch to the retained rows and never lowers a counter", () => {
+	const { directory, path: dbPath } = tempDatabase();
+	try {
+		seedBrokenOrderDatabase(dbPath);
+		const raw = new Database(dbPath);
+		try {
+			raw.exec(
+				`UPDATE collection_run_sequences SET storage_epoch = 3 WHERE run_id = 'run_preserved'`,
+			);
+		} finally {
+			raw.close();
+		}
+		const first = initDb(dbPath);
+		try {
+			assert.equal(runOrderCounters(first)?.storage_epoch, 3);
+			assert.equal(runOrderCounters(first)?.run_sequence_issued, 7);
+			first
+				.prepare(
+					"UPDATE connector_instances SET run_sequence_issued = 20, storage_epoch = 4",
+				)
+				.run();
+		} finally {
+			closeDb();
+		}
+		const second = initDb(dbPath);
+		try {
+			assert.equal(runOrderCounters(second)?.storage_epoch, 4);
+			assert.equal(runOrderCounters(second)?.run_sequence_issued, 20);
+		} finally {
+			closeDb();
+		}
+	} finally {
+		fs.rmSync(directory, { force: true, recursive: true });
+	}
+});
+
 test("fresh collection revision schema and data stay unchanged on a second boot", async () => {
 	const { directory, path: dbPath } = tempDatabase();
 	const onSchemaMigration = () => undefined;
@@ -287,12 +374,16 @@ test("fresh collection revision schema and data stay unchanged on a second boot"
 				.prepare("SELECT * FROM collection_run_sequences ORDER BY run_id")
 				.all();
 			assert.deepEqual(first.prepare("PRAGMA foreign_key_check").all(), []);
+			assert.equal(runOrderCounters(first)?.run_sequence_issued, 1);
+			assert.equal(runOrderCounters(first)?.storage_epoch, 1);
 		} finally {
 			closeDb();
 		}
 
 		const second = initDb(dbPath, { onSchemaMigration });
 		try {
+			assert.equal(runOrderCounters(second)?.run_sequence_issued, 1);
+			assert.equal(runOrderCounters(second)?.storage_epoch, 1);
 			assert.deepEqual(revisionSchema(second), schema);
 			assert.deepEqual(
 				second.prepare("SELECT * FROM connector_state ORDER BY stream").all(),

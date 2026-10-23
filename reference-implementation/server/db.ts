@@ -3096,6 +3096,42 @@ function repairCollectionRunSequencesForeignKey(raw: SqliteDatabase): void {
   }
 }
 
+// The legacy rebuilds above can drop run_sequence_issued and storage_epoch, and
+// ensureCollectionRevisionColumns re-adds them at their defaults while
+// collection_run_sequences keeps the sequences already issued. The next run
+// start would then reuse sequence space and an older retained run could
+// outrank it. Raise (never lower) each counter to cover the retained rows.
+// run_order_sequence is left alone: it is the highest OBSERVED sequence, a
+// fresh observation sets it (RUN_ORDER_OBSERVATION), and a stale 0 only means
+// no observation has been recorded yet. Idempotent and a single indexed pass,
+// so it runs on every boot.
+function reconcileRunOrderCounters(raw: SqliteDatabase): void {
+  raw.transaction(() => {
+    raw.exec(`
+      UPDATE connector_instances
+         SET storage_epoch = (
+           SELECT MAX(rs.storage_epoch) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+         )
+       WHERE storage_epoch < COALESCE((
+           SELECT MAX(rs.storage_epoch) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+         ), 0);
+      UPDATE connector_instances
+         SET run_sequence_issued = (
+           SELECT MAX(rs.run_sequence) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+              AND rs.storage_epoch = connector_instances.storage_epoch
+         )
+       WHERE run_sequence_issued < COALESCE((
+           SELECT MAX(rs.run_sequence) FROM collection_run_sequences rs
+            WHERE rs.connector_instance_id = connector_instances.connector_instance_id
+              AND rs.storage_epoch = connector_instances.storage_epoch
+         ), 0);
+    `);
+  })();
+}
+
 function ensureConnectorSummaryEvidenceColumns(raw: SqliteDatabase): void {
   addColumnIfMissing(raw, "connector_summary_evidence", "last_record_updated_at", "TEXT");
   addColumnIfMissing(raw, "connector_summary_evidence", "stream_records_json", "TEXT NOT NULL DEFAULT '[]'");
@@ -6809,6 +6845,7 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   );
   runWithSqliteBusyRetrySync(() => ensureCollectionRevisionColumns(raw));
   runWithSqliteBusyRetrySync(() => repairCollectionRunSequencesForeignKey(raw));
+  runWithSqliteBusyRetrySync(() => reconcileRunOrderCounters(raw));
   runWithSqliteBusyRetrySync(() => migrateRecordRejectionBytePayload(raw));
   runWithSqliteBusyRetrySync(() => migrateConnectorCredentialKindCheck(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorCredentialStatusRejected(raw, opts));
