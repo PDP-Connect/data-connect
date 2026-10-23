@@ -206,7 +206,7 @@ test("SQLite: the migration flips device runs only, is ledgered, and the spine w
 let tempDbCounter = 0;
 
 test("PostgreSQL: the boot migration repairs the column default and device rows, pages, and is ledgered", {
-  skip: !POSTGRES_URL,
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
   assert.ok(POSTGRES_URL, "Postgres URL is configured when this test runs");
   tempDbCounter += 1;
