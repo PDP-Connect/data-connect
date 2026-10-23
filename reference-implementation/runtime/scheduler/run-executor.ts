@@ -56,6 +56,7 @@ import type {
   SchedulerOptions,
   SetStateHandler,
 } from "../scheduler-domain-types.ts";
+import { endsFailureStreak } from "../scheduler-backoff.ts";
 import {
   type RunConnectorError,
   runRequiresOwnerAuthRepair,
@@ -843,7 +844,10 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     wasAnnouncedBackoff: boolean,
     wasAnnouncedBlocked: boolean
   ): Promise<void> {
-    if (record.status !== "succeeded" || !(wasAnnouncedBackoff || wasAnnouncedBlocked)) {
+    // A certified partial-progress run ends the streak for the counter, so it
+    // must also reset the announce-once cells, or the next real blockage of the
+    // same class would be suppressed as already announced.
+    if (!endsFailureStreak(record) || !(wasAnnouncedBackoff || wasAnnouncedBlocked)) {
       return;
     }
     runtime.announcedBackoffClass.delete(connectorInstanceId);
@@ -1279,7 +1283,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
   ): RunRecord {
     return {
       attempt,
-      checkpointSummary: null,
+      checkpointSummary: runNowResult.checkpoint_summary || null,
       completedAt: nowIso(),
       connectorError: runNowResult.connector_error || null,
       connectorId,

@@ -76,6 +76,8 @@ export type RunStatus = "abandoned" | "cancelled" | "failed" | "skipped" | "succ
 export type GrantAccessMode = "continuous" | "single_use";
 
 export interface ConnectorError {
+  /** Connector-declared DONE.error.code, when the run reported one. */
+  readonly code?: string | null;
   readonly message?: string;
   readonly retryable?: boolean | null;
 }
@@ -373,6 +375,7 @@ export type HumanRequiredStateEscalationHandler = (info: {
  * through to the direct runConnector path unchanged.
  */
 interface ManagedConnectorRun {
+  readonly checkpoint_summary?: Record<string, unknown> | null;
   readonly connector_error?: ConnectorError | null;
   readonly failure_reason?: string | null;
   readonly known_gaps?: readonly Record<string, unknown>[] | null;
