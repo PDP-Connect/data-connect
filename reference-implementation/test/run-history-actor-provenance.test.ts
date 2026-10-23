@@ -470,6 +470,63 @@ test("backfill: SQLite probes the terminal index by run, never the whole connect
   });
 });
 
+test(
+  "backfill: PostgreSQL probes every terminal type through the run-terminal partial index",
+  { skip: POSTGRES_SKIP },
+  async () => {
+    const runId = "run-actor-index-plan";
+    await withBackend("postgres", async () => {
+      await postgresQuery(
+        `INSERT INTO run_history(
+           run_id, connector_instance_id, connector_id, source_json, status, started_at, completed_at
+         ) VALUES ($1, $2, $3, '{}'::jsonb, 'failed', $4, $4)`,
+        [runId, INSTANCE_A, CONNECTOR_ID, "2026-10-01T00:00:00.000Z"]
+      );
+      await postgresQuery(
+        `INSERT INTO spine_events(
+           event_id, event_type, occurred_at, recorded_at, scenario_id, trace_id, actor_type, actor_id,
+           object_type, object_id, status, run_id, data_json, version, connector_instance_id
+         )
+         SELECT 'f2-progress-' || n, 'run.progress_reported', '2026-10-01T00:00:00.000Z',
+                '2026-10-01T00:00:00.000Z', 'scenario', 'trace', 'runtime', 'actor',
+                'run', $1, 'running', $1, jsonb_build_object('connector_instance_id', $2::text), '1', $2
+           FROM generate_series(1, 50000) AS n`,
+        [runId, INSTANCE_A]
+      );
+      await postgresQuery(
+        `INSERT INTO spine_events(
+           event_id, event_type, occurred_at, recorded_at, scenario_id, trace_id, actor_type, actor_id,
+           object_type, object_id, status, run_id, data_json, version, connector_instance_id
+         ) VALUES ('f2-browser-terminal', 'run.browser_surface_failed', '2026-10-01T00:01:00.000Z',
+                   '2026-10-01T00:01:00.000Z', 'scenario', 'trace', 'runtime', 'actor',
+                   'run', $1, 'failed', $1, jsonb_build_object('connector_instance_id', $2::text), '1', $2)`,
+        [runId, INSTANCE_A]
+      );
+
+      const explained = await postgresQuery<{ "QUERY PLAN": string }>(
+        `EXPLAIN (ANALYZE, BUFFERS)
+         SELECT se.actor_type, se.event_seq
+           FROM spine_events se
+          WHERE se.run_id = $1
+            AND COALESCE(NULLIF(se.connector_instance_id, ''),
+                         NULLIF(se.data_json->>'connector_instance_id', ''),
+                         NULLIF(se.data_json->>'connection_id', '')) = $2::text
+            AND se.event_type IN ('run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned')
+          ORDER BY se.event_seq ASC
+          LIMIT 1`,
+        [runId, INSTANCE_A]
+      );
+      const plan = explained.rows.map((row) => row["QUERY PLAN"]).join("\n");
+      assert.match(plan, /idx_pg_spine_events_run_actor_terminal/, plan);
+      assert.doesNotMatch(plan, /Rows Removed by Filter: 50000/, plan);
+
+      const backfill = await runStartupRunHistoryActorBackfillToCompletion();
+      assert.equal(backfill.filled, 1);
+      assert.equal(await actorTypeOf("postgres", runId, INSTANCE_A), "runtime");
+    });
+  }
+);
+
 test("backfill: server boot fills historical rows before startup completes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pdpp-run-actor-boot-"));
   const dbPath = join(dir, "pdpp.sqlite");

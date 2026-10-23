@@ -46,9 +46,9 @@
 // - No durable cursor. A pass re-reads from id 0 each boot; filled rows are
 //   skipped by the `actor_type IS NULL` filter.
 //
-// A run's `run.browser_surface_failed` terminal is not in the Postgres terminal
-// partial index, so Postgres probes it separately and compares event_seq with
-// the indexed probe: the earlier event wins, as on SQLite.
+// PostgreSQL has a run-specific actor-provenance index over the same five
+// terminal types, including `run.browser_surface_failed`, so each run costs
+// one bounded probe there too.
 
 import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged } from "../../lib/db.ts";
 import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
@@ -79,7 +79,7 @@ export interface RunHistoryActorBackfillSummary {
 // index predicate for the planner to use the partial index.
 const SERVER_RUN_ACTOR_TYPE = "runtime";
 const SQLITE_TERMINAL_TYPES = `'run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned'`;
-const POSTGRES_INDEXED_TERMINAL_TYPES = `'run.completed', 'run.failed', 'run.cancelled', 'run.abandoned'`;
+const POSTGRES_TERMINAL_TYPES = `'run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned'`;
 
 function toFiniteId(value: unknown): number | null {
   const n = Number(value);
@@ -173,10 +173,7 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
        SELECT rh.id,
               CASE
                 WHEN rh.run_id IS NULL THEN '${SERVER_RUN_ACTOR_TYPE}'
-                WHEN browser.actor_type IS NOT NULL
-                     AND (indexed.actor_type IS NULL OR browser.event_seq < indexed.event_seq)
-                  THEN browser.actor_type
-                WHEN indexed.actor_type IS NOT NULL THEN indexed.actor_type
+                WHEN terminal.actor_type IS NOT NULL THEN terminal.actor_type
                 WHEN NOT EXISTS (
                   SELECT 1 FROM spine_events se
                   WHERE se.run_id = rh.run_id
@@ -189,18 +186,10 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
          SELECT se.actor_type, se.event_seq FROM spine_events se
          WHERE se.run_id = rh.run_id
            AND se.connector_instance_id = rh.connector_instance_id
-           AND se.event_type IN (${POSTGRES_INDEXED_TERMINAL_TYPES})
+           AND se.event_type IN (${POSTGRES_TERMINAL_TYPES})
          ORDER BY se.event_seq ASC
          LIMIT 1
-       ) indexed ON true
-       LEFT JOIN LATERAL (
-         SELECT se.actor_type, se.event_seq FROM spine_events se
-         WHERE se.run_id = rh.run_id
-           AND se.connector_instance_id = rh.connector_instance_id
-           AND se.event_type = 'run.browser_surface_failed'
-         ORDER BY se.event_seq ASC
-         LIMIT 1
-       ) browser ON true
+       ) terminal ON true
        WHERE rh.id BETWEEN $1::bigint AND $2::bigint
          AND rh.actor_type IS NULL AND rh.status <> 'running'
      ) found
