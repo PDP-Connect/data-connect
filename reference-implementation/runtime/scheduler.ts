@@ -21,7 +21,6 @@
  * new wire-level contract, or is it purely a runtime concern?
  */
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { SchedulerRunHistoryRecord } from "../server/stores/scheduler-store.ts";
 import {
   type AutomationRefreshPolicy,
@@ -30,8 +29,8 @@ import {
 } from "./run-automation-policy.ts";
 import { createRunLogger, NOOP_RUN_BASE_LOGGER } from "./run-logger.ts";
 import { createDispatchGovernor } from "./scheduler/dispatch-governor.ts";
-import { automaticDispatchStillValid } from "./scheduler/dispatch-guard.ts";
-import { createPreRunGate } from "./scheduler/pre-run-gate.ts";
+import { automaticDispatchStillValid, bindDispatchEscalation } from "./scheduler/dispatch-guard.ts";
+import { createPreRunGate, type EndingGateDecision } from "./scheduler/pre-run-gate.ts";
 import { createRunExecutor } from "./scheduler/run-executor.ts";
 import { resolveNonNegativeMsOrInfinity } from "./scheduler-config.ts";
 import { isTerminalGrantFailure, type TerminalReason } from "./scheduler-retry-classifier.ts";
@@ -48,7 +47,6 @@ import type {
   ConnectorError,
   ConnectorSchedule,
   HasLegacySchedulerEventMarkerHandler,
-  HumanRequiredStateEscalationHandler,
   RunRecord,
   RunSource,
   SchedulerManifest,
@@ -173,7 +171,7 @@ function resolveDispatchLivenessCeilingMs(value: number | undefined, envValue: s
   );
 }
 
-/** Sentinel distinguishing "the deadline elapsed" from any real `GateOutcome`. */
+/** Sentinel distinguishing "the deadline elapsed" from any real `GateDecision`. */
 const DISPATCH_LIVENESS_TIMEOUT = Symbol("dispatch-liveness-timeout");
 
 /**
@@ -426,10 +424,6 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
   // credentials) when the scheduler was stopped or replaced is dropped instead
   // of launching a run against a schedule the owner may since have disabled.
   let dispatchEpoch = new AbortController();
-  // The epoch signal captured by the dispatch that is running, so a callback it
-  // raises after an await still sees that epoch once `start()` replaces the
-  // current one.
-  const dispatchSignalContext = new AsyncLocalStorage<AbortSignal>();
 
   function logRunHistoryPersistFailure(record: RunRecord, message: string): void {
     createRunLogger(baseLogger, {
@@ -509,30 +503,18 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     : undefined;
 
   const dispatchStillValid = (signal: AbortSignal | undefined, connectorInstanceId: string): Promise<boolean> =>
-    automaticDispatchStillValid(signal, readScheduleEnabled, connectorInstanceId, schedulerDispatchLivenessCeilingMs);
+    automaticDispatchStillValid(signal, readScheduleEnabled, connectorInstanceId);
 
-  // Escalations come from the governor and pre-run gate during an automatic
-  // dispatch. Bind each to the epoch the originating dispatch captured at its
-  // tick (carried through its awaits by `dispatchSignalContext`), not the epoch
-  // current when it is raised: one raised after stop() is dropped even when a
-  // restart has installed a new epoch, and the handler's own `shouldDeliver`
-  // re-check (called right before its push) covers a stop or disable during its
-  // own awaits.
-  const dispatchBoundEscalation: HumanRequiredStateEscalationHandler = (info) => {
-    const signal = dispatchSignalContext.getStore() ?? dispatchEpoch.signal;
-    if (signal.aborted) {
-      return;
-    }
-    return onHumanRequiredStateEscalation({
-      ...info,
-      shouldDeliver: () => dispatchStillValid(signal, info.connectorInstanceId),
-    });
-  };
+  // Escalations come from the governor and the pre-run gate while they apply an
+  // automatic dispatch's decision, each with the epoch signal that dispatch
+  // captured at its tick. The handler's own `shouldDeliver` re-check (called
+  // right before its push) covers a stop or disable during its own awaits.
+  const raiseDispatchEscalation = bindDispatchEscalation(onHumanRequiredStateEscalation, dispatchStillValid);
 
   const preRunGate = createPreRunGate({
     hasUnresolvedAttention,
     isNeedsHuman,
-    onHumanRequiredStateEscalation: dispatchBoundEscalation,
+    onHumanRequiredStateEscalation: raiseDispatchEscalation,
     readinessChecker,
     recordAndNotify,
     runtime,
@@ -559,32 +541,54 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     rsUrl,
     runManagedConnectorViaController,
     runtime,
-    scheduleReadDeadlineMs: schedulerDispatchLivenessCeilingMs,
     schedulerStore,
     setState,
     ...(readScheduleEnabled ? { readScheduleEnabled } : {}),
   });
 
+  // Settles a gate decision that ends the dispatch. A skip is a side effect of
+  // the dispatch, so it is committed (recorded, announce-once state marked,
+  // escalation raised) only while the dispatch is still valid: scheduler epoch
+  // not aborted AND schedule still enabled in the store. A dropped skip leaves
+  // no trace, and the next valid tick decides it afresh. A manual run is the
+  // owner's own request and is never gated.
+  async function settleGateDecision(
+    decision: EndingGateDecision,
+    key: string,
+    dispatchSignal: AbortSignal | undefined,
+    isManual: boolean
+  ): Promise<RunRecord | null> {
+    if (decision.kind === "silent") {
+      return null;
+    }
+    if (!isManual && !(await dispatchStillValid(dispatchSignal, key))) {
+      return null;
+    }
+    return decision.commit();
+  }
+
   // The gate's injected callbacks (readinessChecker, getState) have no built-in
   // timeout and nothing can cancel them, so on timeout we just stop awaiting:
-  // `executeRun`'s `finally` still clears `activeRuns` normally, and the
-  // abandoned promise is never awaited again by anyone, so a late resolution
-  // cannot trigger a second emission or launch.
+  // `executeRun`'s `finally` still clears `activeRuns` normally. The abandoned
+  // gate can still resolve later, but it only ever returns a decision (see
+  // `GateDecision`): it records nothing, marks no skip as announced and raises
+  // no escalation itself. Nobody awaits or commits that late decision, so a late
+  // resolution cannot trigger a second emission or launch.
   async function runBoundedPreflight(
     schedule: ConnectorSchedule,
     key: string,
     automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
     dispatchSignal: AbortSignal | undefined
-  ): Promise<Awaited<ReturnType<typeof preRunGate.runAutomaticPreflight>> | null> {
+  ): Promise<"proceed" | RunRecord | null> {
     const preflight = await raceDispatchLivenessDeadline(
-      withDispatchSignal(dispatchSignal, () => preRunGate.runAutomaticPreflight(schedule, key, automationPolicy)),
+      preRunGate.runAutomaticPreflight(schedule, key, automationPolicy, dispatchSignal),
       schedulerDispatchLivenessCeilingMs
     );
     if (dispatchSignal?.aborted) {
       return null;
     }
     if (preflight !== DISPATCH_LIVENESS_TIMEOUT) {
-      return preflight;
+      return preflight.kind === "proceed" ? "proceed" : settleGateDecision(preflight, key, dispatchSignal, false);
     }
     // Recording the wedge is a side effect of the dispatch: skip it when the
     // schedule was disabled while the gate was stuck.
@@ -623,8 +627,8 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
         }
       }
       const grantDecision = preRunGate.gateGrantState(connectorId, connectorInstanceId, grantAccessMode);
-      if (grantDecision !== "proceed") {
-        return grantDecision;
+      if (grantDecision.kind !== "proceed") {
+        return await settleGateDecision(grantDecision, key, options.dispatchSignal, isManual);
       }
       // Not deadlined: `launchRun` owns its own much longer connector-attempt
       // watchdog (`maxRunWallClockMs`, hours-scale) once actually launched.
@@ -660,24 +664,22 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       });
   }
 
-  // Runs `fn` with `signal` as the originating dispatch's epoch, so escalations
-  // raised from its awaits bind to it (see `dispatchBoundEscalation`).
-  function withDispatchSignal<T>(signal: AbortSignal | undefined, fn: () => T): T {
-    return signal ? dispatchSignalContext.run(signal, fn) : fn();
-  }
-
-  // Emits the governor's lifecycle events and skip record, and reports whether
-  // the tick ends here (the dispatch was dropped or a skip was emitted). These
-  // outputs are side effects of the dispatch, so they need the schedule to be
-  // still enabled in the store; nothing to emit needs no durable read.
+  // Applies the governor's tick and emits its lifecycle events and skip record,
+  // and reports whether the tick ends here (the dispatch was dropped or a skip
+  // was emitted). These outputs are side effects of the dispatch, so they need
+  // the schedule to be still enabled in the store, and committing the tick is
+  // what marks its announce-once state and raises its escalation: a dropped tick
+  // marks and raises nothing. A tick with nothing to emit needs no durable read.
   async function emitGovernorOutputs(
     signal: AbortSignal,
     schedule: ConnectorSchedule,
-    { eventsToEmit, skipToEmit }: Awaited<ReturnType<typeof dispatchGovernor.evaluateBackoffDispatch>>
+    dispatch: Awaited<ReturnType<typeof dispatchGovernor.evaluateBackoffDispatch>>
   ): Promise<boolean> {
-    if ((eventsToEmit.length > 0 || skipToEmit) && !(await dispatchStillValid(signal, runtimeKey(schedule)))) {
+    const hasOutputs = dispatch.eventsToEmit.length > 0 || dispatch.skipToEmit !== null;
+    if (hasOutputs && !(await dispatchStillValid(signal, runtimeKey(schedule)))) {
       return true;
     }
+    const { eventsToEmit, skipToEmit } = dispatch.commit();
     // Emit transition markers (back_off.started, gave_up) before
     // the audit skip so the dashboard sees the lifecycle event
     // ordering: "streak detected → cooling_off pill renders →
@@ -705,7 +707,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     getSourcePressureGaps,
     hasLegacySchedulerEventMarker: async (...args: Parameters<HasLegacySchedulerEventMarkerHandler>) =>
       (await schedulerStore?.hasLegacySchedulerEventMarker?.(...args)) ?? false,
-    onHumanRequiredStateEscalation: dispatchBoundEscalation,
+    onHumanRequiredStateEscalation: raiseDispatchEscalation,
     runtime,
   });
 
@@ -738,9 +740,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       const dispatchSignal = dispatchEpoch.signal;
       let dispatch: Awaited<ReturnType<typeof dispatchGovernor.evaluateBackoffDispatch>>;
       try {
-        dispatch = await withDispatchSignal(dispatchSignal, () =>
-          dispatchGovernor.evaluateBackoffDispatch(schedule, Date.now())
-        );
+        dispatch = await dispatchGovernor.evaluateBackoffDispatch(schedule, Date.now(), dispatchSignal);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[scheduler] failed to evaluate back-off for ${schedule.connectorId}: ${message}`);

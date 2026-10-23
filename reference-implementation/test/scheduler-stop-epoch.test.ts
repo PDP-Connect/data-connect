@@ -14,6 +14,11 @@
 // no run record is created. They also pin the second defence: final admission
 // re-reads the schedule's CURRENT enabled flag from the store, so a disable is
 // honoured even when a stale scheduler instance is not stopped.
+//
+// Every test awaits a deferred that the code under test must resolve, so each
+// carries HANG_GUARD: a regression fails the test instead of hanging the file.
+// Cleanup is registered with `t.after`, not `finally`: a timed-out test body
+// never resumes, so a `finally` would not run.
 
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
@@ -28,6 +33,7 @@ import {
   CONNECTOR_ID,
   deferred,
   drain,
+  HANG_GUARD,
   INSTANCE_ID,
   OWNER,
   type ScheduleRow,
@@ -120,127 +126,115 @@ function buildHarness(stage: Stage | null, store: ReturnType<typeof buildStore>)
 }
 
 for (const stage of ["governor", "preflight", "credentials", "state"] as const) {
-  test(`stop() while the dispatch is parked at ${stage} launches nothing`, async () => {
+  test(`stop() while the dispatch is parked at ${stage} launches nothing`, HANG_GUARD, async (t) => {
     const h = buildHarness(stage, buildStore());
-    try {
-      h.scheduler.start();
-      await h.entered;
-      assert.deepEqual(h.controllerCalls, [], "no run existed before stop");
+    t.after(() => h.scheduler.stop());
 
-      h.scheduler.stop();
-      h.release();
-      await drain();
+    h.scheduler.start();
+    await h.entered;
+    assert.deepEqual(h.controllerCalls, [], "no run existed before stop");
 
-      assert.deepEqual(h.controllerCalls, [], "a stopped scheduler must not call the controller");
-      assert.deepEqual(h.completed, [], "a dropped dispatch must not record a run, skip or retry");
-    } finally {
-      h.scheduler.stop();
-    }
+    h.scheduler.stop();
+    h.release();
+    await drain();
+
+    assert.deepEqual(h.controllerCalls, [], "a stopped scheduler must not call the controller");
+    assert.deepEqual(h.completed, [], "a dropped dispatch must not record a run, skip or retry");
   });
 }
 
-test("disable during a pending governor probe on a replaced scheduler launches nothing", async () => {
+test("disable during a pending governor probe on a replaced scheduler launches nothing", HANG_GUARD, async (t) => {
   let row: ScheduleRow = { enabled: true };
   const h = buildHarness(
     "governor",
     buildStore(() => row)
   );
-  try {
-    h.scheduler.start();
-    await h.entered;
+  t.after(() => h.scheduler.stop());
 
-    // The owner disables the schedule; the manager's restart() stops the old
-    // scheduler and builds a replacement that no longer contains the schedule.
-    row = { enabled: false };
-    h.scheduler.stop();
-    h.release();
-    await drain();
+  h.scheduler.start();
+  await h.entered;
 
-    assert.deepEqual(h.controllerCalls, []);
-    assert.deepEqual(h.completed, []);
-  } finally {
-    h.scheduler.stop();
-  }
+  // The owner disables the schedule; the manager's restart() stops the old
+  // scheduler and builds a replacement that no longer contains the schedule.
+  row = { enabled: false };
+  h.scheduler.stop();
+  h.release();
+  await drain();
+
+  assert.deepEqual(h.controllerCalls, []);
+  assert.deepEqual(h.completed, []);
 });
 
-test("final admission refuses a schedule disabled in the store even if the scheduler was never stopped", async () => {
+test("final admission refuses a schedule disabled in the store even if the scheduler was never stopped", HANG_GUARD, async (t) => {
   let row: ScheduleRow = { enabled: true };
   const h = buildHarness(
     "governor",
     buildStore(() => row)
   );
-  try {
-    h.scheduler.start();
-    await h.entered;
+  t.after(() => h.scheduler.stop());
 
-    row = { enabled: false };
-    h.release();
-    await drain();
+  h.scheduler.start();
+  await h.entered;
 
-    assert.deepEqual(h.controllerCalls, [], "a stale instance must honour the current disabled flag");
-    assert.deepEqual(h.completed, []);
-  } finally {
-    h.scheduler.stop();
-  }
+  row = { enabled: false };
+  h.release();
+  await drain();
+
+  assert.deepEqual(h.controllerCalls, [], "a stale instance must honour the current disabled flag");
+  assert.deepEqual(h.completed, []);
 });
 
-test("final admission refuses a schedule deleted from the store", async () => {
+test("final admission refuses a schedule deleted from the store", HANG_GUARD, async (t) => {
   let row: ScheduleRow = { enabled: true };
   const h = buildHarness(
     "governor",
     buildStore(() => row)
   );
-  try {
-    h.scheduler.start();
-    await h.entered;
+  t.after(() => h.scheduler.stop());
 
-    row = null;
-    h.release();
-    await drain();
+  h.scheduler.start();
+  await h.entered;
 
-    assert.deepEqual(h.controllerCalls, []);
-    assert.deepEqual(h.completed, []);
-  } finally {
-    h.scheduler.stop();
-  }
+  row = null;
+  h.release();
+  await drain();
+
+  assert.deepEqual(h.controllerCalls, []);
+  assert.deepEqual(h.completed, []);
 });
 
-test("a still-enabled schedule on a live scheduler still dispatches", async () => {
+test("a still-enabled schedule on a live scheduler still dispatches", HANG_GUARD, async (t) => {
   const h = buildHarness(
     "governor",
     buildStore(() => ({ enabled: true }))
   );
-  try {
-    h.scheduler.start();
-    await h.entered;
-    h.release();
-    await h.launched;
+  t.after(() => h.scheduler.stop());
 
-    assert.deepEqual(h.controllerCalls, [CONNECTOR_ID]);
-  } finally {
-    h.scheduler.stop();
-  }
+  h.scheduler.start();
+  await h.entered;
+  h.release();
+  await h.launched;
+
+  assert.deepEqual(h.controllerCalls, [CONNECTOR_ID]);
 });
 
-test("a stop then start dispatches on the new epoch but never on the stale one", async () => {
+test("a stop then start dispatches on the new epoch but never on the stale one", HANG_GUARD, async (t) => {
   const h = buildHarness(
     "governor",
     buildStore(() => ({ enabled: true }))
   );
-  try {
-    h.scheduler.start();
-    await h.entered;
-    h.scheduler.stop();
-    h.release();
-    await drain();
-    assert.deepEqual(h.controllerCalls, [], "the pre-stop tick is dropped");
+  t.after(() => h.scheduler.stop());
 
-    h.scheduler.start();
-    await h.launched;
-    assert.deepEqual(h.controllerCalls, [CONNECTOR_ID], "the post-restart tick dispatches");
-  } finally {
-    h.scheduler.stop();
-  }
+  h.scheduler.start();
+  await h.entered;
+  h.scheduler.stop();
+  h.release();
+  await drain();
+  assert.deepEqual(h.controllerCalls, [], "the pre-stop tick is dropped");
+
+  h.scheduler.start();
+  await h.launched;
+  assert.deepEqual(h.controllerCalls, [CONNECTOR_ID], "the post-restart tick dispatches");
 });
 
 type ManagedController = Parameters<typeof createRunManagedConnectorViaController>[0];
@@ -292,7 +286,7 @@ function buildManagedScheduler(controller: ManagedController, gate?: { entered: 
   });
 }
 
-test("production managed adapter: stop() while the governor probe is pending never reaches controller.runNow", async () => {
+test("production managed adapter: stop() while the governor probe is pending never reaches controller.runNow", HANG_GUARD, async (t) => {
   const entered = deferred<void>();
   const gate = deferred<void>();
   const runNowCalls: number[] = [];
@@ -303,24 +297,21 @@ test("production managed adapter: stop() while the governor probe is pending nev
     ),
     { entered: () => entered.resolve(), released: gate.promise }
   );
-  try {
-    scheduler.start();
-    await entered.promise;
-    assert.deepEqual(runNowCalls, [], "no run existed before stop");
+  t.after(() => scheduler.stop());
 
-    scheduler.stop();
-    gate.resolve();
-    await drain();
+  scheduler.start();
+  await entered.promise;
+  assert.deepEqual(runNowCalls, [], "no run existed before stop");
 
-    assert.deepEqual(runNowCalls, [], "controller.runNow must not be called after stop");
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.stop();
+  gate.resolve();
+  await drain();
+
+  assert.deepEqual(runNowCalls, [], "controller.runNow must not be called after stop");
 });
 
-test("production managed adapter: a retry after the scheduler is stopped never reaches controller.runNow", async (t) => {
+test("production managed adapter: a retry after the scheduler is stopped never reaches controller.runNow", HANG_GUARD, async (t) => {
   initDb(":memory:");
-  t.after(() => closeDb());
   // The retry back-off is a real 1 s timer; fake only setTimeout so the test
   // advances it without waiting.
   mock.timers.enable({ apis: ["setTimeout"] });
@@ -341,15 +332,14 @@ test("production managed adapter: a retry after the scheduler is stopped never r
       }
     )
   );
-  try {
-    scheduler.start();
-    await firstAttemptSettled.promise;
-    await drain();
-    mock.timers.tick(5000);
-    await drain();
+  t.after(() => scheduler.stop());
+  t.after(() => closeDb());
 
-    assert.deepEqual(runNowCalls, [1], "the stopped scheduler must not start a retry run");
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.start();
+  await firstAttemptSettled.promise;
+  await drain();
+  mock.timers.tick(5000);
+  await drain();
+
+  assert.deepEqual(runNowCalls, [1], "the stopped scheduler must not start a retry run");
 });

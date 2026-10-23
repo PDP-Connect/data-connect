@@ -12,14 +12,15 @@
 // One rule drives all of them: an automatic dispatch is valid only while its
 // captured epoch is not aborted AND the schedule is still enabled in the store,
 // and that is re-checked immediately before every attempt starts.
+//
+// Every test awaits a deferred that the code under test must resolve, so each
+// carries HANG_GUARD: a regression fails the test instead of hanging the file.
+// Cleanup is registered with `t.after` (scheduler first, then the database): a
+// timed-out test body never resumes, so a `finally` would not run.
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test, { mock, type TestContext } from "node:test";
 
-import { createScheduler } from "../runtime/scheduler.ts";
 import type {
   HumanRequiredStateEscalationHandler,
   RunManagedConnectorViaController,
@@ -28,95 +29,21 @@ import type {
 import { closeDb, initDb } from "../server/db.ts";
 import { createEscalationDelivery } from "../server/scheduler-manager-factory.ts";
 import {
-  BACKGROUND_SAFE_MANIFEST,
   buildStore,
-  CONNECTOR_ID,
   deferred,
+  directScheduler,
   drain,
-  INSTANCE_ID,
+  HANG_GUARD,
   OWNER,
   type ScheduleRow,
+  writeConnector,
 } from "./helpers/scheduler-stop-harness.ts";
-
-// A real child connector. It appends a line to `startsPath` on START, so a
-// start that must not happen is observable as a line, then either completes or
-// crashes.
-function writeConnector(t: TestContext, behaviour: "succeed" | "crash") {
-  const dir = mkdtempSync(join(tmpdir(), "pdpp-stop-epoch-attempts-"));
-  t.after(() => rmSync(dir, { force: true, recursive: true }));
-  const connectorPath = join(dir, "connector.mjs");
-  const startsPath = join(dir, "starts.log");
-  writeFileSync(
-    connectorPath,
-    `
-import { createInterface } from 'node:readline';
-import { appendFileSync } from 'node:fs';
-const rl = createInterface({ input: process.stdin });
-rl.on('line', (line) => {
-  const msg = JSON.parse(line);
-  if (msg.type !== 'START') return;
-  appendFileSync(${JSON.stringify(startsPath)}, 'start\\n', 'utf8');
-  ${
-    behaviour === "succeed"
-      ? "process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n'); rl.close();"
-      : "process.exit(1);"
-  }
-});
-`,
-    "utf8"
-  );
-  chmodSync(connectorPath, 0o755);
-  const starts = (): number =>
-    existsSync(startsPath) ? readFileSync(startsPath, "utf8").split("\n").filter(Boolean).length : 0;
-  return { connectorPath, starts };
-}
-
-function admit(input: { connectorId: string; connectorInstanceId: string | null; ownerSubjectId: string | null }) {
-  return Promise.resolve({
-    connectorId: input.connectorId,
-    connectorInstanceId: input.connectorInstanceId ?? input.connectorId,
-    ownerSubjectId: input.ownerSubjectId ?? OWNER,
-  });
-}
-
-type SchedulerOptions = Parameters<typeof createScheduler>[0];
-
-function directScheduler(
-  connectorPath: string,
-  store: ReturnType<typeof buildStore>,
-  extra: Partial<SchedulerOptions> = {}
-) {
-  const completed: RunRecord[] = [];
-  const scheduler = createScheduler({
-    admitRunConnection: admit,
-    connectors: [
-      {
-        connectorId: CONNECTOR_ID,
-        connectorInstanceId: INSTANCE_ID,
-        connectorPath,
-        intervalMs: 60_000,
-        manifest: BACKGROUND_SAFE_MANIFEST,
-        maxRetries: 2,
-        ownerSubjectId: OWNER,
-        ownerToken: "owner-token",
-      },
-    ],
-    onInteraction: async () => ({ accepted: true, status: "cancelled" }),
-    onRunComplete: (record) => completed.push(record),
-    readinessChecker: async () => ({ ready: true }),
-    rsUrl: "http://localhost.invalid",
-    schedulerStore: store,
-    ...extra,
-  });
-  return { completed, scheduler };
-}
 
 // ── (a) direct route: durable active-run admission ─────────────────────────
 
 for (const variant of ["stop", "disable"] as const) {
-  test(`direct route: ${variant} while durable active-run admission is pending starts no connector`, async (t) => {
+  test(`direct route: ${variant} while durable active-run admission is pending starts no connector`, HANG_GUARD, async (t) => {
     initDb(":memory:");
-    t.after(() => closeDb());
     const connector = writeConnector(t, "succeed");
     const upsertEntered = deferred<void>();
     const upsertGate = deferred<void>();
@@ -133,26 +60,25 @@ for (const variant of ["stop", "disable"] as const) {
         },
       })
     );
-    try {
-      scheduler.start();
-      await upsertEntered.promise;
+    t.after(() => scheduler.stop());
+    t.after(() => closeDb());
 
-      if (variant === "stop") {
-        scheduler.stop();
-      } else {
-        row = { enabled: false };
-      }
-      upsertGate.resolve();
-      // The lease is released on every exit path; with the bug this fires only
-      // after the connector has run to completion.
-      await leaseCleared.promise;
-      await drain();
+    scheduler.start();
+    await upsertEntered.promise;
 
-      assert.equal(connector.starts(), 0, "the connector must not start for an invalidated dispatch");
-      assert.deepEqual(completed, [], "a dropped dispatch records no run, failure or skip");
-    } finally {
+    if (variant === "stop") {
       scheduler.stop();
+    } else {
+      row = { enabled: false };
     }
+    upsertGate.resolve();
+    // The lease is released on every exit path; with the bug this fires only
+    // after the connector has run to completion.
+    await leaseCleared.promise;
+    await drain();
+
+    assert.equal(connector.starts(), 0, "the connector must not start for an invalidated dispatch");
+    assert.deepEqual(completed, [], "a dropped dispatch records no run, failure or skip");
   });
 }
 
@@ -163,7 +89,6 @@ for (const variant of ["stop", "disable"] as const) {
 // the test rather than waited for.
 async function runToRetrySleep(t: TestContext, row: () => ScheduleRow) {
   initDb(":memory:");
-  t.after(() => closeDb());
   mock.timers.enable({ apis: ["setTimeout"] });
   t.after(() => mock.timers.reset());
   const connector = writeConnector(t, "crash");
@@ -180,6 +105,8 @@ async function runToRetrySleep(t: TestContext, row: () => ScheduleRow) {
       },
     })
   );
+  t.after(() => harness.scheduler.stop());
+  t.after(() => closeDb());
   const originalComplete = harness.completed.push.bind(harness.completed);
   harness.completed.push = (...records: RunRecord[]) => {
     settled.resolve();
@@ -200,44 +127,35 @@ async function runToRetrySleep(t: TestContext, row: () => ScheduleRow) {
   };
 }
 
-test("direct route: stop() then start() during the retry back-off does not resurrect the old attempt", async (t) => {
+test("direct route: stop() then start() during the retry back-off does not resurrect the old attempt", HANG_GUARD, async (t) => {
   const { connector, outcome, scheduler } = await runToRetrySleep(t, () => ({ enabled: true }));
-  try {
-    scheduler.stop();
-    scheduler.start();
-    mock.timers.tick(1000);
-    await outcome;
 
-    assert.equal(connector.starts(), 1, "the old epoch must not start attempt 2 after a stop/start");
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.stop();
+  scheduler.start();
+  mock.timers.tick(1000);
+  await outcome;
+
+  assert.equal(connector.starts(), 1, "the old epoch must not start attempt 2 after a stop/start");
 });
 
-test("direct route: a schedule disabled during the retry back-off is not retried, even without a stop", async (t) => {
+test("direct route: a schedule disabled during the retry back-off is not retried, even without a stop", HANG_GUARD, async (t) => {
   let row: ScheduleRow = { enabled: true };
-  const { connector, outcome, scheduler } = await runToRetrySleep(t, () => row);
-  try {
-    row = { enabled: false };
-    mock.timers.tick(1000);
-    await outcome;
+  const { connector, outcome } = await runToRetrySleep(t, () => row);
 
-    assert.equal(connector.starts(), 1, "a disabled schedule must not be retried");
-  } finally {
-    scheduler.stop();
-  }
+  row = { enabled: false };
+  mock.timers.tick(1000);
+  await outcome;
+
+  assert.equal(connector.starts(), 1, "a disabled schedule must not be retried");
 });
 
-test("direct route: a live, still-enabled schedule still retries", async (t) => {
-  const { connector, scheduler, secondAttemptCleared } = await runToRetrySleep(t, () => ({ enabled: true }));
-  try {
-    mock.timers.tick(1000);
-    await secondAttemptCleared;
+test("direct route: a live, still-enabled schedule still retries", HANG_GUARD, async (t) => {
+  const { connector, secondAttemptCleared } = await runToRetrySleep(t, () => ({ enabled: true }));
 
-    assert.equal(connector.starts(), 2, "an enabled schedule on a live scheduler keeps retrying");
-  } finally {
-    scheduler.stop();
-  }
+  mock.timers.tick(1000);
+  await secondAttemptCleared;
+
+  assert.equal(connector.starts(), 2, "an enabled schedule on a live scheduler keeps retrying");
 });
 
 // ── managed route: retries ─────────────────────────────────────────────────
@@ -246,7 +164,6 @@ test("direct route: a live, still-enabled schedule still retries", async (t) => 
 // back-off (`setTimeout` mocked).
 async function runManagedToRetrySleep(t: TestContext, row: () => ScheduleRow) {
   initDb(":memory:");
-  t.after(() => closeDb());
   mock.timers.enable({ apis: ["setTimeout"] });
   t.after(() => mock.timers.reset());
   const calls: number[] = [];
@@ -268,6 +185,8 @@ async function runManagedToRetrySleep(t: TestContext, row: () => ScheduleRow) {
     onRunComplete: () => settled.resolve(),
     runManagedConnectorViaController: via,
   });
+  t.after(() => scheduler.stop());
+  t.after(() => closeDb());
   scheduler.start();
   // The first attempt has run and the loop is in its back-off sleep once the
   // controller has been called and the event loop is quiet.
@@ -284,45 +203,39 @@ async function runManagedToRetrySleep(t: TestContext, row: () => ScheduleRow) {
   };
 }
 
-test("managed route: stop() during the retry back-off does not start another controller run", async (t) => {
+test("managed route: stop() during the retry back-off does not start another controller run", HANG_GUARD, async (t) => {
   const { calls, outcome, scheduler } = await runManagedToRetrySleep(t, () => ({ enabled: true }));
-  try {
-    scheduler.stop();
-    mock.timers.tick(1000);
-    await outcome;
-    assert.deepEqual(calls, [1]);
-  } finally {
-    scheduler.stop();
-  }
+
+  scheduler.stop();
+  mock.timers.tick(1000);
+  await outcome;
+
+  assert.deepEqual(calls, [1]);
 });
 
-test("managed route: a schedule disabled during the retry back-off is not retried, even without a stop", async (t) => {
+test("managed route: a schedule disabled during the retry back-off is not retried, even without a stop", HANG_GUARD, async (t) => {
   let row: ScheduleRow = { enabled: true };
-  const { calls, outcome, scheduler } = await runManagedToRetrySleep(t, () => row);
-  try {
-    row = { enabled: false };
-    mock.timers.tick(1000);
-    await outcome;
-    assert.deepEqual(calls, [1]);
-  } finally {
-    scheduler.stop();
-  }
+  const { calls, outcome } = await runManagedToRetrySleep(t, () => row);
+
+  row = { enabled: false };
+  mock.timers.tick(1000);
+  await outcome;
+
+  assert.deepEqual(calls, [1]);
 });
 
-test("managed route: a live, still-enabled schedule still retries", async (t) => {
-  const { calls, scheduler, secondCall } = await runManagedToRetrySleep(t, () => ({ enabled: true }));
-  try {
-    mock.timers.tick(1000);
-    await secondCall;
-    assert.deepEqual(calls, [1, 2]);
-  } finally {
-    scheduler.stop();
-  }
+test("managed route: a live, still-enabled schedule still retries", HANG_GUARD, async (t) => {
+  const { calls, secondCall } = await runManagedToRetrySleep(t, () => ({ enabled: true }));
+
+  mock.timers.tick(1000);
+  await secondCall;
+
+  assert.deepEqual(calls, [1, 2]);
 });
 
 // ── (c) abandoned credential lookup: no side effects ───────────────────────
 
-test("an abandoned credential lookup that rejects after stop() stamps no last-run time and marks no needs-human", async () => {
+test("an abandoned credential lookup that rejects after stop() stamps no last-run time and marks no needs-human", HANG_GUARD, async (t) => {
   const lookupEntered = deferred<void>();
   const lookupGate = deferred<void>();
   const stamps: number[] = [];
@@ -339,24 +252,22 @@ test("an abandoned credential lookup that rejects after stop() stamps no last-ru
       },
     }
   );
-  try {
-    scheduler.start();
-    await lookupEntered.promise;
-    scheduler.stop();
-    lookupGate.resolve();
-    await drain();
+  t.after(() => scheduler.stop());
 
-    assert.deepEqual(stamps, [], "an abandoned dispatch must not advance the cadence");
-    assert.deepEqual(needsHuman, [], "an abandoned dispatch must not mark the connection needs-human");
-    assert.deepEqual(completed, []);
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.start();
+  await lookupEntered.promise;
+  scheduler.stop();
+  lookupGate.resolve();
+  await drain();
+
+  assert.deepEqual(stamps, [], "an abandoned dispatch must not advance the cadence");
+  assert.deepEqual(needsHuman, [], "an abandoned dispatch must not mark the connection needs-human");
+  assert.deepEqual(completed, []);
 });
 
 // ── (d) managed-to-direct fallback after a stop ────────────────────────────
 
-test("a managed callback that resolves null after stop() drops the dispatch instead of recording a failed run", async () => {
+test("a managed callback that resolves null after stop() drops the dispatch instead of recording a failed run", HANG_GUARD, async (t) => {
   const viaEntered = deferred<void>();
   const viaGate = deferred<null>();
   const stamps: number[] = [];
@@ -371,23 +282,21 @@ test("a managed callback that resolves null after stop() drops the dispatch inst
       },
     }
   );
-  try {
-    scheduler.start();
-    await viaEntered.promise;
-    scheduler.stop();
-    viaGate.resolve(null);
-    await drain();
+  t.after(() => scheduler.stop());
 
-    assert.deepEqual(completed, [], "no attempt ran, so no run record may be finalized");
-    assert.deepEqual(stamps, [], "no attempt ran, so the cadence must not advance");
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.start();
+  await viaEntered.promise;
+  scheduler.stop();
+  viaGate.resolve(null);
+  await drain();
+
+  assert.deepEqual(completed, [], "no attempt ran, so no run record may be finalized");
+  assert.deepEqual(stamps, [], "no attempt ran, so the cadence must not advance");
 });
 
 // ── store read failure at final admission ──────────────────────────────────
 
-test("a failed schedule read at final admission drops the dispatch", async () => {
+test("a failed schedule read at final admission drops the dispatch", HANG_GUARD, async (t) => {
   const reads = deferred<void>();
   const calls: string[] = [];
   const { completed, scheduler } = directScheduler(
@@ -406,22 +315,20 @@ test("a failed schedule read at final admission drops the dispatch", async () =>
       },
     }
   );
-  try {
-    scheduler.start();
-    await reads.promise;
-    await drain();
+  t.after(() => scheduler.stop());
 
-    assert.deepEqual(calls, [], "an unreadable schedule is fail-closed");
-    assert.deepEqual(completed, []);
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.start();
+  await reads.promise;
+  await drain();
+
+  assert.deepEqual(calls, [], "an unreadable schedule is fail-closed");
+  assert.deepEqual(completed, []);
 });
 
 // ── (e) escalation push ────────────────────────────────────────────────────
 
-test("an escalation raised by an automatic dispatch is not deliverable after stop() or a disable", async () => {
-  for (const variant of ["stop", "disable"] as const) {
+for (const variant of ["stop", "disable"] as const) {
+  test(`an escalation raised by an automatic dispatch is not deliverable after ${variant === "stop" ? "stop()" : "a disable"}`, HANG_GUARD, async (t) => {
     const raised = deferred<Parameters<HumanRequiredStateEscalationHandler>[0]>();
     let row: ScheduleRow = { enabled: true };
     const { scheduler } = directScheduler(
@@ -432,25 +339,23 @@ test("an escalation raised by an automatic dispatch is not deliverable after sto
         onHumanRequiredStateEscalation: (info) => raised.resolve(info),
       }
     );
-    try {
-      scheduler.start();
-      const info = await raised.promise;
-      assert.ok(info.shouldDeliver, "an automatic escalation carries a delivery guard");
-      assert.equal(await info.shouldDeliver(), true, `${variant}: deliverable while the dispatch is valid`);
+    t.after(() => scheduler.stop());
 
-      if (variant === "stop") {
-        scheduler.stop();
-      } else {
-        row = { enabled: false };
-      }
-      assert.equal(await info.shouldDeliver(), false, `${variant}: not deliverable once the dispatch is invalid`);
-    } finally {
+    scheduler.start();
+    const info = await raised.promise;
+    assert.ok(info.shouldDeliver, "an automatic escalation carries a delivery guard");
+    assert.equal(await info.shouldDeliver(), true, "deliverable while the dispatch is valid");
+
+    if (variant === "stop") {
       scheduler.stop();
+    } else {
+      row = { enabled: false };
     }
-  }
-});
+    assert.equal(await info.shouldDeliver(), false, "not deliverable once the dispatch is invalid");
+  });
+}
 
-test("an escalation raised after stop() is never delivered", async () => {
+test("an escalation raised after stop() is never delivered", HANG_GUARD, async (t) => {
   const preflightEntered = deferred<void>();
   const preflightGate = deferred<void>();
   const raised: unknown[] = [];
@@ -469,20 +374,18 @@ test("an escalation raised after stop() is never delivered", async () => {
       },
     }
   );
-  try {
-    scheduler.start();
-    await preflightEntered.promise;
-    scheduler.stop();
-    preflightGate.resolve();
-    await drain();
+  t.after(() => scheduler.stop());
 
-    assert.deepEqual(raised, [], "a stopped scheduler must not raise an escalation");
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.start();
+  await preflightEntered.promise;
+  scheduler.stop();
+  preflightGate.resolve();
+  await drain();
+
+  assert.deepEqual(raised, [], "a stopped scheduler must not raise an escalation");
 });
 
-test("an escalation raised by a stopped epoch after a restart is bound to the old epoch and not delivered", async () => {
+test("an escalation raised by a stopped epoch after a restart is bound to the old epoch and not delivered", HANG_GUARD, async (t) => {
   const preflightEntered = deferred<void>();
   const preflightGate = deferred<void>();
   const raised: Parameters<HumanRequiredStateEscalationHandler>[0][] = [];
@@ -501,38 +404,40 @@ test("an escalation raised by a stopped epoch after a restart is bound to the ol
       },
     }
   );
-  try {
-    scheduler.start();
-    await preflightEntered.promise;
-    scheduler.stop();
-    scheduler.start();
-    await drain();
-    preflightGate.resolve();
-    await drain();
+  t.after(() => scheduler.stop());
 
-    for (const info of raised) {
-      assert.equal(await info.shouldDeliver?.(), false, "the old epoch's escalation must not adopt the new epoch");
-    }
-    assert.deepEqual(raised, [], "a stopped epoch must not raise an escalation, even after a restart");
-  } finally {
-    scheduler.stop();
+  scheduler.start();
+  await preflightEntered.promise;
+  scheduler.stop();
+  scheduler.start();
+  await drain();
+  preflightGate.resolve();
+  await drain();
+
+  for (const info of raised) {
+    assert.equal(await info.shouldDeliver?.(), false, "the old epoch's escalation must not adopt the new epoch");
   }
+  assert.deepEqual(raised, [], "a stopped epoch must not raise an escalation, even after a restart");
 });
 
 // ── (f) post-lease guard liveness ──────────────────────────────────────────
 
-test("an abort during the post-lease schedule read releases the lease and a later start can dispatch", async (t) => {
+test("an abort during the post-lease schedule read releases the lease and a later start can dispatch", HANG_GUARD, async (t) => {
   initDb(":memory:");
-  t.after(() => closeDb());
   const connector = writeConnector(t, "succeed");
   const readEntered = deferred<void>();
-  const leaseCleared = deferred<void>();
+  const firstLeaseCleared = deferred<void>();
+  const secondLeaseCleared = deferred<void>();
+  let clears = 0;
   let leased = false;
   let hang = true;
   const { scheduler } = directScheduler(
     connector.connectorPath,
     buildStore(undefined, {
-      deleteActiveRun: () => leaseCleared.resolve(),
+      deleteActiveRun: () => {
+        clears += 1;
+        (clears === 1 ? firstLeaseCleared : secondLeaseCleared).resolve();
+      },
       getSchedule: async () => {
         if (leased && hang) {
           readEntered.resolve();
@@ -546,29 +451,26 @@ test("an abort during the post-lease schedule read releases the lease and a late
       },
     })
   );
-  try {
-    scheduler.start();
-    await readEntered.promise;
-    scheduler.stop();
-    await leaseCleared.promise;
-    await drain();
-    assert.equal(connector.starts(), 0, "no connector starts for the aborted dispatch");
+  t.after(() => scheduler.stop());
+  t.after(() => closeDb());
 
-    hang = false;
-    scheduler.start();
-    for (let i = 0; i < 250 && connector.starts() === 0; i += 1) {
-      // biome-ignore lint/performance/noAwaitInLoops: poll until the child process of the restarted dispatch starts
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
-    }
-    assert.equal(connector.starts(), 1, "the key is dispatchable again after the aborted dispatch released it");
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.start();
+  await readEntered.promise;
+  scheduler.stop();
+  await firstLeaseCleared.promise;
+  await drain();
+  assert.equal(connector.starts(), 0, "no connector starts for the aborted dispatch");
+
+  hang = false;
+  scheduler.start();
+  // The restarted dispatch runs the connector and then releases its own lease.
+  await secondLeaseCleared.promise;
+  assert.equal(connector.starts(), 1, "the key is dispatchable again after the aborted dispatch released it");
 });
 
 // ── (g) credential failure: decide before any side effect ──────────────────
 
-test("a credential failure never applies its cadence and needs-human effects without its record", async () => {
+test("a credential failure never applies its cadence and needs-human effects without its record", HANG_GUARD, async (t) => {
   const stamps: number[] = [];
   const needsHuman: string[] = [];
   let failed = false;
@@ -595,30 +497,43 @@ test("a credential failure never applies its cadence and needs-human effects wit
       },
     }
   );
-  try {
-    scheduler.start();
-    await drain();
+  t.after(() => scheduler.stop());
 
-    assert.ok(readsAfterFailure >= 1, "the failure path consulted the schedule");
-    // The failure's effects and its record are applied together or not at all.
-    assert.equal(stamps.length, completed.length, "a cadence stamp needs the matching failure record");
-    assert.equal(needsHuman.length, completed.length, "a needs-human flag needs the matching failure record");
-  } finally {
-    scheduler.stop();
-  }
+  scheduler.start();
+  await drain();
+
+  assert.ok(readsAfterFailure >= 1, "the failure path consulted the schedule");
+  // The failure's effects and its record are applied together or not at all.
+  assert.equal(stamps.length, completed.length, "a cadence stamp needs the matching failure record");
+  assert.equal(needsHuman.length, completed.length, "a needs-human flag needs the matching failure record");
 });
 
 // ── (h) outer emissions follow the durable schedule ────────────────────────
 
+const WEDGE_CEILING_MS = 30;
+
 for (const enabledAtDeadline of [true, false]) {
-  test(`a wedged preflight ${enabledAtDeadline ? "records" : "does not record"} the wedge when the schedule is ${enabledAtDeadline ? "enabled" : "disabled"} at the deadline`, async () => {
+  test(`a wedged preflight ${enabledAtDeadline ? "records" : "does not record"} the wedge when the schedule is ${enabledAtDeadline ? "enabled" : "disabled"} at the deadline`, HANG_GUARD, async (t) => {
+    // The liveness ceiling is the only timer the test waits on, so it is
+    // advanced by hand instead of slept through.
+    mock.timers.enable({ apis: ["setTimeout"] });
+    t.after(() => mock.timers.reset());
     const readinessEntered = deferred<void>();
-    const row: { enabled: boolean } = { enabled: true };
+    const readAfterDeadline = deferred<void>();
+    const row = { enabled: true };
+    let deadlineElapsed = false;
     const { completed, scheduler } = directScheduler(
       "/nonexistent/connector.mjs",
-      buildStore(() => row),
+      buildStore(undefined, {
+        getSchedule: () => {
+          if (deadlineElapsed) {
+            readAfterDeadline.resolve();
+          }
+          return row;
+        },
+      }),
       {
-        dispatchLivenessCeilingMs: 30,
+        dispatchLivenessCeilingMs: WEDGE_CEILING_MS,
         readinessChecker: async () => {
           readinessEntered.resolve();
           await new Promise<never>(() => undefined);
@@ -626,27 +541,29 @@ for (const enabledAtDeadline of [true, false]) {
         },
       }
     );
-    try {
-      scheduler.start();
-      await readinessEntered.promise;
-      row.enabled = enabledAtDeadline;
-      await new Promise<void>((resolve) => setTimeout(resolve, 150));
-      await drain();
+    t.after(() => scheduler.stop());
 
-      assert.equal(
-        completed.filter((record) => record.failureReason === "scheduler_dispatch_wedged").length,
-        enabledAtDeadline ? 1 : 0
-      );
-    } finally {
-      scheduler.stop();
-    }
+    scheduler.start();
+    await readinessEntered.promise;
+    row.enabled = enabledAtDeadline;
+    deadlineElapsed = true;
+    mock.timers.tick(WEDGE_CEILING_MS);
+    // The wedge path revalidates the dispatch with one schedule read; its record
+    // (or its absence) settles in the turns that follow.
+    await readAfterDeadline.promise;
+    await drain();
+
+    assert.equal(
+      completed.filter((record) => record.failureReason === "scheduler_dispatch_wedged").length,
+      enabledAtDeadline ? 1 : 0
+    );
   });
 }
 
 // ── (i) escalation push through the real factory consumer ──────────────────
 
 for (const variant of ["stop", "disable", "none"] as const) {
-  test(`factory escalation consumer: ${variant} while the verdict projection is pending ${variant === "none" ? "delivers the push" : "sends no push"}`, async () => {
+  test(`factory escalation consumer: ${variant} while the verdict projection is pending ${variant === "none" ? "delivers the push" : "sends no push"}`, HANG_GUARD, async (t) => {
     const projectionEntered = deferred<void>();
     const projectionGate = deferred<void>();
     const handled = deferred<Promise<void>>();
@@ -654,7 +571,7 @@ for (const variant of ["stop", "disable", "none"] as const) {
     let row: ScheduleRow = { enabled: true };
     const deliver = createEscalationDelivery({
       controller: {} as Parameters<typeof createEscalationDelivery>[0]["controller"],
-      logger: { warn: () => undefined } as unknown as Parameters<typeof createEscalationDelivery>[0]["logger"],
+      logger: { warn: () => undefined },
       ownerSubjectId: OWNER,
       project: async () => {
         projectionEntered.resolve();
@@ -692,21 +609,19 @@ for (const variant of ["stop", "disable", "none"] as const) {
         },
       }
     );
-    try {
-      scheduler.start();
-      await projectionEntered.promise;
-      if (variant === "stop") {
-        scheduler.stop();
-      } else if (variant === "disable") {
-        row = { enabled: false };
-      }
-      projectionGate.resolve();
-      const settled = await handled.promise;
-      await settled;
+    t.after(() => scheduler.stop());
 
-      assert.equal(listed, variant === "none" ? 1 : 0);
-    } finally {
+    scheduler.start();
+    await projectionEntered.promise;
+    if (variant === "stop") {
       scheduler.stop();
+    } else if (variant === "disable") {
+      row = { enabled: false };
     }
+    projectionGate.resolve();
+    const settled = await handled.promise;
+    await settled;
+
+    assert.equal(listed, variant === "none" ? 1 : 0);
   });
 }

@@ -118,12 +118,6 @@ export interface RunExecutorDeps {
   rsUrl: string;
   runManagedConnectorViaController: RunManagedConnectorViaController | null;
   runtime: RunExecutorRuntimeState;
-  /**
-   * Deadline for one `readScheduleEnabled` read. A read that outlasts it (or the
-   * dispatch abort) invalidates the dispatch. Non-finite or non-positive means
-   * no deadline. The scheduler passes its pre-launch liveness ceiling.
-   */
-  scheduleReadDeadlineMs?: number;
   schedulerStore:
     | Pick<NonNullable<SchedulerOptions["schedulerStore"]>, "appendRunHistory" | "deleteActiveRun" | "upsertActiveRun">
     | null
@@ -798,7 +792,6 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     rsUrl,
     runManagedConnectorViaController,
     runtime,
-    scheduleReadDeadlineMs,
     schedulerStore,
     setState,
   } = deps;
@@ -1608,12 +1601,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     if (isManual) {
       return Promise.resolve(true);
     }
-    return automaticDispatchStillValid(
-      signal,
-      readScheduleEnabled,
-      schedule.connectorInstanceId ?? schedule.connectorId,
-      scheduleReadDeadlineMs
-    );
+    return automaticDispatchStillValid(signal, readScheduleEnabled, schedule.connectorInstanceId ?? schedule.connectorId);
   }
 
   async function launchRunWithValidatedOwner(

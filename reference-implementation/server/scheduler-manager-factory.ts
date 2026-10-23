@@ -368,24 +368,28 @@ async function resolveOwnerActionEvidence(
   }
 }
 
+/** The controller as `getConnectorSummaryForRoute` consumes it. */
+type EscalationController = Parameters<typeof getConnectorSummaryForRoute>[1];
+
+/** The logger as `fanoutEscalationWebPush` consumes it. */
+type EscalationLogger = NonNullable<Parameters<typeof fanoutEscalationWebPush>[0]["log"]>;
+
 interface EscalationProjection {
   readonly connectionUrl: string;
   readonly connectorDisplayName: string;
+  /** `null` when no verdict is available; the push is then not verdict-gated. */
   readonly renderedVerdict: object | null;
 }
 
 async function projectEscalation(
   connectorId: string,
   connectorInstanceId: string,
-  controller: Controller,
-  logger: Logger
+  controller: EscalationController,
+  logger: EscalationLogger
 ): Promise<EscalationProjection> {
   const routeId = connectorInstanceId || connectorId;
   try {
-    const summary = await getConnectorSummaryForRoute(
-      routeId,
-      controller as unknown as Parameters<typeof getConnectorSummaryForRoute>[1]
-    );
+    const summary = await getConnectorSummaryForRoute(routeId, controller);
     if (summary) {
       return {
         connectionUrl: `/sources/${encodeURIComponent(summary.connection_id || routeId)}`,
@@ -396,7 +400,7 @@ async function projectEscalation(
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.warn(
+    logger.warn?.(
       `[scheduler] verdict projection failed for escalation ${connectorId}/${routeId}; suppressing push: ${message}`
     );
   }
@@ -404,8 +408,8 @@ async function projectEscalation(
 }
 
 interface EscalationDeliveryDeps {
-  readonly controller: Controller;
-  readonly logger: Logger;
+  readonly controller: EscalationController;
+  readonly logger: EscalationLogger;
   readonly ownerSubjectId: unknown;
   /** Test seam; defaults to the controller-backed verdict projection. */
   readonly project?: typeof projectEscalation;
@@ -417,6 +421,10 @@ interface EscalationDeliveryDeps {
 // Fires ONCE per streak/flag (dedup lives in the scheduler runtime maps
 // announcedBlockedClass + notifiedNeedsHumanSkips). Errors are swallowed
 // so a push delivery failure never crashes the scheduler loop.
+//
+// The one consumer of the scheduler's escalation callback: both scheduler
+// wirings (this factory's manager and the one `startServer` builds) install it,
+// so the `shouldDeliver` re-check below holds in production.
 export function createEscalationDelivery({
   controller,
   logger,
@@ -440,12 +448,14 @@ export function createEscalationDelivery({
         log: logger,
         ownerSubjectId,
         reason,
-        renderedVerdict: projection.renderedVerdict,
         store: webPushSubscriptionStore,
+        // Without a verdict the push is not gated on one (an explicit `null`
+        // would make the fan-out suppress it).
+        ...(projection.renderedVerdict === null ? {} : { renderedVerdict: projection.renderedVerdict }),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.warn(`[scheduler] §10-F escalation push failed for ${connectorId} (${reason}): ${message}`);
+      logger.warn?.(`[scheduler] §10-F escalation push failed for ${connectorId} (${reason}): ${message}`);
     }
   };
 }
@@ -869,7 +879,7 @@ export function createReferenceSchedulerManager({
       // announcedBlockedClass + notifiedNeedsHumanSkips). Errors are swallowed
       // so a push delivery failure never crashes the scheduler loop.
       onHumanRequiredStateEscalation: createEscalationDelivery({
-        controller,
+        controller: controller as unknown as EscalationController,
         logger,
         ownerSubjectId,
         webPushConfig,

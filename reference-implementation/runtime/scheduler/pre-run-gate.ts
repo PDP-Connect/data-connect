@@ -10,14 +10,19 @@
  *
  * Extracted from `createScheduler` in scheduler.ts as a narrow factory so
  * the gate logic can be read and tested without owning the full scheduler closure.
+ *
+ * Every gate DECIDES; none of them emits. A gate that ends the dispatch with a
+ * recorded skip returns the skip as a `commit` (see `GateDecision`), and the
+ * scheduler runs it only after confirming the dispatch is still valid. A gate
+ * that is dropped therefore leaves no record, no dedup mark and no escalation.
  */
 
 import { type AutomationRefreshPolicy, projectRunAutomationPolicy } from "../run-automation-policy.ts";
 import type {
   ConnectorSchedule,
+  DispatchEscalationHandler,
   GrantAccessMode,
   HasUnresolvedAttentionHandler,
-  HumanRequiredStateEscalationHandler,
   IsNeedsHumanHandler,
   RunRecord,
   RunSource,
@@ -45,20 +50,44 @@ export interface PreRunGateRuntimeState {
 export interface PreRunGateDeps {
   hasUnresolvedAttention: HasUnresolvedAttentionHandler;
   isNeedsHuman: IsNeedsHumanHandler;
-  onHumanRequiredStateEscalation: HumanRequiredStateEscalationHandler;
+  onHumanRequiredStateEscalation: DispatchEscalationHandler;
   readinessChecker: SchedulerReadinessChecker;
   recordAndNotify: (record: RunRecord) => RunRecord;
   runtime: PreRunGateRuntimeState;
 }
 
-// ─── Gate outcome type ───────────────────────────────────────────────────────
+// ─── Gate decision type ──────────────────────────────────────────────────────
 
 /**
- * Outcome of a pre-run gate check.
- * `"proceed"` means the gate is clear; any other value is the value
- * `executeRun` must return immediately (a recorded skip or `null` for silent).
+ * What a pre-run gate decided, with its effects held back.
+ *
+ *   - `proceed`: the gate is clear; the next gate runs.
+ *   - `silent`: the dispatch ends with no record (this skip was already announced).
+ *   - `skip`: the dispatch ends with a recorded skip. Announcing it is a side
+ *     effect of the dispatch, so nothing has happened yet: `commit()` marks the
+ *     announce-once state, raises the escalation, if any, and records the skip.
+ *     The caller runs it exactly once, and only after the dispatch is confirmed
+ *     still valid (scheduler not stopped, schedule still enabled). A decision
+ *     that is dropped leaves no trace, so the next valid tick decides afresh.
+ *
+ * Resets of announce-once state that only mirror what the gate just observed
+ * (attention resolved, readiness restored, needs-human cleared) are applied when
+ * the gate decides `proceed`: they emit nothing.
  */
-export type GateOutcome = "proceed" | RunRecord | null;
+export type GateDecision =
+  | { readonly kind: "proceed" }
+  | { readonly kind: "silent" }
+  | { readonly commit: () => RunRecord; readonly kind: "skip" };
+
+/** A decision that ends the dispatch: everything but `proceed`. */
+export type EndingGateDecision = Exclude<GateDecision, { readonly kind: "proceed" }>;
+
+const PROCEED: GateDecision = Object.freeze({ kind: "proceed" });
+const SILENT: GateDecision = Object.freeze({ kind: "silent" });
+
+function skipWith(commit: () => RunRecord): GateDecision {
+  return { commit, kind: "skip" };
+}
 
 // ─── Local helpers (mirrored from scheduler.ts; kept in sync by extraction) ──
 
@@ -197,35 +226,46 @@ function buildAutomationPolicySkip(
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export interface PreRunGate {
-  decideDisabledGrant: (connectorId: string, connectorInstanceId: string) => "proceed" | "silent-skip" | RunRecord;
-  decideNotReady: (schedule: ConnectorSchedule) => Promise<"proceed" | "silent-skip" | RunRecord>;
-  gateAttention: (connectorId: string, connectorInstanceId: string, key: string) => Promise<GateOutcome>;
+  decideDisabledGrant: (connectorId: string, connectorInstanceId: string) => GateDecision;
+  decideNotReady: (schedule: ConnectorSchedule) => Promise<GateDecision>;
+  gateAttention: (connectorId: string, connectorInstanceId: string, key: string) => Promise<GateDecision>;
   gateAutomationPolicy: (
     connectorId: string,
     connectorInstanceId: string,
     key: string,
     policy: ReturnType<typeof projectRunAutomationPolicy>
-  ) => GateOutcome;
+  ) => GateDecision;
   gateGrantState: (
     connectorId: string,
     connectorInstanceId: string,
     grantAccessMode: NonNullable<ConnectorSchedule["grantAccessMode"]>
-  ) => GateOutcome;
-  gateNeedsHuman: (connectorId: string, connectorInstanceId: string, key: string) => GateOutcome;
+  ) => GateDecision;
+  gateNeedsHuman: (
+    connectorId: string,
+    connectorInstanceId: string,
+    key: string,
+    signal?: AbortSignal
+  ) => GateDecision;
   maybeSkipSingleUseExhausted: (
     connectorId: string,
     connectorInstanceId: string,
     grantAccessMode: GrantAccessMode
-  ) => RunRecord | null;
+  ) => GateDecision;
   probeUnresolvedAttention: (
     connectorId: string,
     connectorInstanceId: string
   ) => Promise<UnresolvedAttentionEvidence | null>;
+  /**
+   * `signal` is the epoch signal of the automatic dispatch running the cascade.
+   * The escalation a committed needs-human skip raises is bound to it. Without
+   * one the scheduler drops the escalation: nothing identifies the dispatch.
+   */
   runAutomaticPreflight: (
     schedule: ConnectorSchedule,
     key: string,
-    automationPolicy: ReturnType<typeof projectRunAutomationPolicy>
-  ) => Promise<GateOutcome>;
+    automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
+    signal?: AbortSignal
+  ) => Promise<GateDecision>;
 }
 
 export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
@@ -256,21 +296,19 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
     connectorId: string,
     connectorInstanceId: string,
     grantAccessMode: GrantAccessMode
-  ): RunRecord | null {
+  ): GateDecision {
     if (grantAccessMode !== "single_use" || !runtime.exhaustedGrants.has(connectorInstanceId)) {
-      return null;
+      return PROCEED;
     }
-    return recordAndNotify(buildSingleUseExhaustedSkip(connectorId, connectorInstanceId));
+    return skipWith(() => recordAndNotify(buildSingleUseExhaustedSkip(connectorId, connectorInstanceId)));
   }
 
-  type NotReadyDecision = "proceed" | "silent-skip" | RunRecord;
-
-  async function decideNotReady(schedule: ConnectorSchedule): Promise<NotReadyDecision> {
+  async function decideNotReady(schedule: ConnectorSchedule): Promise<GateDecision> {
     const readiness = await readinessChecker(schedule);
     const key = runtimeKey(schedule);
     if (!readiness || readiness.ready) {
       runtime.notifiedNotReadySkips.delete(key);
-      return "proceed";
+      return PROCEED;
     }
     const projection = projectRunAutomationPolicy({
       deploymentReadiness: {
@@ -282,40 +320,45 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
     });
     const reason = projection.reason || "scheduled connector runtime prerequisites are not currently satisfied";
     if (runtime.notifiedNotReadySkips.get(key) === reason) {
-      return "silent-skip";
+      return SILENT;
     }
-    runtime.notifiedNotReadySkips.set(key, reason);
-    return recordAndNotify(buildNotReadySkip(schedule.connectorId, reason, schedule.connectorInstanceId));
+    return skipWith(() => {
+      runtime.notifiedNotReadySkips.set(key, reason);
+      return recordAndNotify(buildNotReadySkip(schedule.connectorId, reason, schedule.connectorInstanceId));
+    });
   }
 
-  type DisabledGrantDecision = "proceed" | "silent-skip" | RunRecord;
-
-  function decideDisabledGrant(connectorId: string, connectorInstanceId: string): DisabledGrantDecision {
+  function decideDisabledGrant(connectorId: string, connectorInstanceId: string): GateDecision {
     if (!runtime.disabledGrantFailures.has(connectorInstanceId)) {
-      return "proceed";
+      return PROCEED;
     }
     if (runtime.notifiedDisabledGrantFailures.has(connectorInstanceId)) {
-      return "silent-skip";
+      return SILENT;
     }
     const terminalReason = runtime.disabledGrantFailures.get(connectorInstanceId);
     if (!terminalReason) {
-      return "proceed";
+      return PROCEED;
     }
-    runtime.notifiedDisabledGrantFailures.add(connectorInstanceId);
-    return recordAndNotify(buildDisabledGrantSkip(connectorId, terminalReason, connectorInstanceId));
+    return skipWith(() => {
+      runtime.notifiedDisabledGrantFailures.add(connectorInstanceId);
+      return recordAndNotify(buildDisabledGrantSkip(connectorId, terminalReason, connectorInstanceId));
+    });
   }
 
-  async function gateAttention(connectorId: string, connectorInstanceId: string, key: string): Promise<GateOutcome> {
+  async function gateAttention(connectorId: string, connectorInstanceId: string, key: string): Promise<GateDecision> {
     const attentionEvidence = await probeUnresolvedAttention(connectorId, connectorInstanceId);
-    if (attentionEvidence?.key) {
-      if (runtime.notifiedAttentionSkips.get(key) === attentionEvidence.key) {
-        return null;
-      }
-      runtime.notifiedAttentionSkips.set(key, attentionEvidence.key);
-      return recordAndNotify(buildUnresolvedAttentionSkip(connectorId, attentionEvidence, connectorInstanceId));
+    if (!attentionEvidence?.key) {
+      runtime.notifiedAttentionSkips.delete(key);
+      return PROCEED;
     }
-    runtime.notifiedAttentionSkips.delete(key);
-    return "proceed";
+    const attentionKey = attentionEvidence.key;
+    if (runtime.notifiedAttentionSkips.get(key) === attentionKey) {
+      return SILENT;
+    }
+    return skipWith(() => {
+      runtime.notifiedAttentionSkips.set(key, attentionKey);
+      return recordAndNotify(buildUnresolvedAttentionSkip(connectorId, attentionEvidence, connectorInstanceId));
+    });
   }
 
   function gateAutomationPolicy(
@@ -323,80 +366,86 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
     connectorInstanceId: string,
     key: string,
     policy: ReturnType<typeof projectRunAutomationPolicy>
-  ): GateOutcome {
+  ): GateDecision {
     if (policy.allowed_to_start) {
-      return "proceed";
+      return PROCEED;
     }
     const reason = policy.reason || "automatic run is not allowed by connector policy";
     const dedupeReason = `automation_policy_blocked:${reason}`;
     if (runtime.notifiedNotReadySkips.get(key) === dedupeReason) {
-      return null;
+      return SILENT;
     }
-    runtime.notifiedNotReadySkips.set(key, dedupeReason);
-    return recordAndNotify(buildAutomationPolicySkip(connectorId, reason, connectorInstanceId));
+    return skipWith(() => {
+      runtime.notifiedNotReadySkips.set(key, dedupeReason);
+      return recordAndNotify(buildAutomationPolicySkip(connectorId, reason, connectorInstanceId));
+    });
   }
 
-  function gateNeedsHuman(connectorId: string, connectorInstanceId: string, key: string): GateOutcome {
+  function gateNeedsHuman(
+    connectorId: string,
+    connectorInstanceId: string,
+    key: string,
+    signal?: AbortSignal
+  ): GateDecision {
     if (!isNeedsHuman(connectorId, connectorInstanceId)) {
       runtime.notifiedNeedsHumanSkips.delete(key);
-      return "proceed";
+      return PROCEED;
     }
     if (runtime.notifiedNeedsHumanSkips.has(key)) {
-      return null;
+      return SILENT;
     }
-    runtime.notifiedNeedsHumanSkips.add(key);
-    Promise.resolve(
-      onHumanRequiredStateEscalation({
-        connectorId,
-        connectorInstanceId,
-        reason: "needs_attention",
-      })
-    ).catch((err: unknown) => {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[scheduler] §10-F needs_attention escalation callback failed for ${connectorId}: ${message}`);
+    return skipWith(() => {
+      runtime.notifiedNeedsHumanSkips.add(key);
+      Promise.resolve(
+        onHumanRequiredStateEscalation(
+          {
+            connectorId,
+            connectorInstanceId,
+            reason: "needs_attention",
+          },
+          signal
+        )
+      ).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[scheduler] §10-F needs_attention escalation callback failed for ${connectorId}: ${message}`);
+      });
+      return recordAndNotify(buildNeedsHumanSkip(connectorId, connectorInstanceId));
     });
-    return recordAndNotify(buildNeedsHumanSkip(connectorId, connectorInstanceId));
   }
 
   async function runAutomaticPreflight(
     schedule: ConnectorSchedule,
     key: string,
-    automationPolicy: ReturnType<typeof projectRunAutomationPolicy>
-  ): Promise<GateOutcome> {
+    automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
+    signal?: AbortSignal
+  ): Promise<GateDecision> {
     const { connectorId, connectorInstanceId = connectorId } = schedule;
 
     const attention = await gateAttention(connectorId, connectorInstanceId, key);
-    if (attention !== "proceed") {
+    if (attention.kind !== "proceed") {
       return attention;
     }
     const policyDecision = gateAutomationPolicy(connectorId, connectorInstanceId, key, automationPolicy);
-    if (policyDecision !== "proceed") {
+    if (policyDecision.kind !== "proceed") {
       return policyDecision;
     }
     const notReadyDecision = await decideNotReady(schedule);
-    if (notReadyDecision === "silent-skip") {
-      return null;
-    }
-    if (notReadyDecision !== "proceed") {
+    if (notReadyDecision.kind !== "proceed") {
       return notReadyDecision;
     }
-    return gateNeedsHuman(connectorId, connectorInstanceId, key);
+    return gateNeedsHuman(connectorId, connectorInstanceId, key, signal);
   }
 
   function gateGrantState(
     connectorId: string,
     connectorInstanceId: string,
     grantAccessMode: NonNullable<ConnectorSchedule["grantAccessMode"]>
-  ): GateOutcome {
-    const singleUseSkip = maybeSkipSingleUseExhausted(connectorId, connectorInstanceId, grantAccessMode);
-    if (singleUseSkip) {
-      return singleUseSkip;
+  ): GateDecision {
+    const singleUseDecision = maybeSkipSingleUseExhausted(connectorId, connectorInstanceId, grantAccessMode);
+    if (singleUseDecision.kind !== "proceed") {
+      return singleUseDecision;
     }
-    const disabledDecision = decideDisabledGrant(connectorId, connectorInstanceId);
-    if (disabledDecision === "silent-skip") {
-      return null;
-    }
-    return disabledDecision;
+    return decideDisabledGrant(connectorId, connectorInstanceId);
   }
 
   return {

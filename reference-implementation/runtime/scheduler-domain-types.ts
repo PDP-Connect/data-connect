@@ -354,6 +354,18 @@ export type HumanRequiredStateEscalationHandler = (info: {
 }) => void | Promise<void>;
 
 /**
+ * How the dispatch governor and the pre-run gate raise an escalation: the
+ * escalation plus the epoch signal of the automatic dispatch that raised it,
+ * passed explicitly by the caller. The scheduler binds the escalation to that
+ * signal and drops it when there is none (nothing to bind it to) or when it has
+ * aborted, so no escalation is ever attributed to whichever epoch is current.
+ */
+export type DispatchEscalationHandler = (
+  info: Omit<Parameters<HumanRequiredStateEscalationHandler>[0], "shouldDeliver">,
+  signal: AbortSignal | undefined
+) => void | Promise<void>;
+
+/**
  * Routes a managed-connector scheduled run through `controller.runNow` so it
  * acquires the managed neko browser-surface lease (with a persistent CF profile)
  * instead of launching a fresh headless Chromium with an empty profile.
