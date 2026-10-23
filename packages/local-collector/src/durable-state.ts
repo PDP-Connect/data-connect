@@ -144,12 +144,15 @@ export function canonicalCollectorQueuePath(input: {
  * are never removed.
  *
  * A canonical queue that already exists next to an unmigrated package-local
- * store is never merged into or silently preferred: the outbox orders work by
- * insertion, so appending an old backlog (checkpoints, terminal commits) after
- * newer canonical rows could replay stale state. Resolution fails with
- * `legacy_state_conflict` and leaves the legacy store writable. A retirement
- * fence counts as a completed migration only when the canonical database holds
- * the same per-attempt migration id; an unproven fence is lifted, never trusted.
+ * store is never merged into or deleted: the outbox orders work by insertion,
+ * so appending an old backlog (checkpoints, terminal commits) after newer
+ * canonical rows could replay stale state. The legacy store is left unfenced
+ * and writable, the canonical path is returned so the collector keeps running,
+ * and every resolution writes a stderr warning while the legacy store still has
+ * pending rows for the source, so the backlog is never silently forgotten. A
+ * retirement fence counts as a completed migration only when the canonical
+ * database holds the same per-attempt migration id; an unproven fence is
+ * lifted, never trusted.
  */
 export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): string {
   const { configuredPath, configuredPathIsExplicit } = input;
@@ -201,9 +204,7 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
         sourceInstanceId,
         input.betweenFenceMarkerAndLockChecks
       );
-      if (pending.length > 0) {
-        throw conflictingLegacyState(canonicalPath, pending, sourceInstanceId);
-      }
+      warnAboutLegacyBacklog(canonicalPath, pending, sourceInstanceId);
       return canonicalPath;
     }
     // An empty canonical database while another legacy store has undelivered
@@ -796,6 +797,11 @@ function migrateLegacyStore(
       }
       releaseMigrationLock(lockPath);
     }
+    if (error instanceof CanonicalQueueAppeared) {
+      // The legacy store is unfenced and untouched; keep running on the canonical queue.
+      warnAboutLegacyBacklog(canonicalPath, [legacyPath], sourceInstanceId);
+      return canonicalPath;
+    }
     if (error instanceof CollectorStateResolutionError) {
       throw error;
     }
@@ -885,7 +891,7 @@ function reconcileLegacyWrites(
     // committed: a canonical queue that appeared since the snapshot holds work
     // this migration has not seen, so abort with the legacy writer still live.
     if (existsSync(canonicalPath)) {
-      throw conflictingLegacyState(canonicalPath, [legacyPath], sourceInstanceId);
+      throw new CanonicalQueueAppeared();
     }
     // Claim the source's retirement under the same write lock. A fence another
     // destination published, or is publishing, behind is never replaced; one
@@ -1105,7 +1111,7 @@ function publishSnapshot(
       if (isAlreadyExistsError(error)) {
         deleteFence(db, sourceInstanceId, migrationId);
         db.exec("COMMIT");
-        throw conflictingLegacyState(canonicalPath, [legacyPath], sourceInstanceId);
+        throw new CanonicalQueueAppeared();
       }
       if (isLinkUnsupportedError(error)) {
         deleteFence(db, sourceInstanceId, migrationId);
@@ -1248,15 +1254,66 @@ function ambiguousLegacyState(
   );
 }
 
-function conflictingLegacyState(
+/**
+ * Another process created the canonical queue while this attempt migrated. The
+ * attempt has already left the legacy store unfenced and unmerged; the caller
+ * returns the canonical path and warns about the legacy backlog.
+ */
+class CanonicalQueueAppeared extends Error {
+  constructor() {
+    super("a canonical queue appeared during the legacy migration");
+    this.name = "CanonicalQueueAppeared";
+  }
+}
+
+/**
+ * Warn, on stderr, once per legacy store that still holds undelivered rows for
+ * the source. The warning repeats on every resolution until the rows are
+ * delivered or removed; a store without such rows is silent.
+ */
+function warnAboutLegacyBacklog(
   canonicalPath: string,
   legacyPaths: readonly string[],
   sourceInstanceId: string
-): CollectorStateResolutionError {
-  return new CollectorStateResolutionError(
-    "legacy_state_conflict",
-    `local collector state for source '${sourceInstanceId}' exists in both the canonical queue ${canonicalPath} and an unmigrated legacy store (${legacyPaths.join(", ")}); the legacy store was left writable and was not migrated. The two cannot be merged safely because queue order carries checkpoints and terminal commits. Deliver the legacy backlog first by running the collector once with --queue ${legacyPaths.join(" ")}, then rerun; or pass --queue to choose one store explicitly`
-  );
+): void {
+  for (const legacyPath of legacyPaths) {
+    const pending = countPendingSourceRows(legacyPath, sourceInstanceId);
+    if (pending === 0) {
+      continue;
+    }
+    process.stderr.write(
+      `warning: the canonical local collector queue ${canonicalPath} exists for source '${sourceInstanceId}' while the legacy queue ${legacyPath} still holds ${pending} pending row(s) for it. The legacy queue was left writable and was not merged or deleted; running on the canonical queue. Run with --queue ${legacyPath} to deliver them.\n`
+    );
+  }
+}
+
+function countPendingSourceRows(path: string, sourceInstanceId: string): number {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA busy_timeout = 5000");
+    if (!tableExists(db, "local_device_outbox")) {
+      return 0;
+    }
+    // The same pending rule as inspectLegacyStore, so the warning counts exactly
+    // the rows that make resolution treat the legacy store as holding work.
+    const activeRule = tableExists(db, SUPERSESSION_TABLE) ? `AND ${activeOutboxRowPredicate()}` : "";
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS pending FROM local_device_outbox WHERE source_instance_id = ? AND status != 'succeeded' ${activeRule}`
+      )
+      .get(sourceInstanceId);
+    return Number(row?.pending ?? 0);
+  } catch (error) {
+    // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
+    throw new CollectorStateResolutionError(
+      "legacy_state_unreadable",
+      `could not count pending rows in legacy local collector state ${path}`,
+      { cause: error }
+    );
+  } finally {
+    db?.close();
+  }
 }
 
 function safeStatePathSegment(value: string): string {
