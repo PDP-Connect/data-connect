@@ -14,19 +14,20 @@
  * never saw the new record.
  *
  * Pruned history is the second way a token goes stale. With
- * PDPP_CHANGE_HISTORY_LIMIT set, pruning keeps one anchor row per live key, so
- * MIN(version) in record_changes stays at a cold key's first version while
- * other keys' predecessor snapshots are gone. A token below the stream's
- * `changes_floor` (the newest version that superseded a pruned row) can no
- * longer show that a since-deleted key was ever visible, and its tombstone
- * would be dropped silently. Such a token returns 410 `cursor_expired`.
+ * PDPP_CHANGE_HISTORY_LIMIT set, pruning keeps each live key's current anchor
+ * and its newest row at or below the retention horizon (version - limit), so
+ * every cursor at or above the horizon can resolve a predecessor snapshot and a
+ * later delete keeps its tombstone. The horizon is stored as the stream's
+ * `changes_floor`; a token below it returns 410 `cursor_expired`, because
+ * MIN(version) cannot say so (a cold anchor pins it near 1).
  *
  * Both backends run the same scenarios. The page-cursor scenario is SQLite
  * only: the PostgreSQL changes feed returns one unpaged response.
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -295,6 +296,49 @@ function defineScenarios(label: string, open: (instanceId: string) => Promise<Ba
     { historyLimit: 2 }
   );
 
+  // Versions: cold=1, victim=2, hot=3..5, sync at 5, victim deleted=6. The
+  // delete would prune victim's version-2 snapshot, its predecessor at
+  // watermark 5, if pruning kept only current anchors. Each key's newest row at
+  // or below the horizon is kept, so the tombstone must be emitted.
+  scenario(
+    "a fresh token taken just before a delete receives the tombstone",
+    async (backend) => {
+      await backend.put("cold");
+      await backend.put("victim");
+      await backend.put("hot", 1);
+      await backend.put("hot", 2);
+      await backend.put("hot", 3);
+      const synced = await backend.list({ changes_since: "beginning" });
+      assert.deepEqual(ids(synced), ["cold", "hot", "victim"]);
+      assert.ok(synced.next_changes_since);
+      await backend.remove("victim");
+      const delta = await backend.list({ changes_since: synced.next_changes_since });
+      assert.deepEqual(
+        delta.data.map((record) => [record.id, record.deleted === true]),
+        [["victim", true]]
+      );
+    },
+    { historyLimit: 2 }
+  );
+
+  // Versions: cold=1, hot=2..4, sync at 4, cold updated=5. Updating a cold key
+  // prunes nothing a current token needs, so the token must not expire.
+  scenario(
+    "updating a cold key does not expire a current token",
+    async (backend) => {
+      await backend.put("cold");
+      await backend.put("hot", 1);
+      await backend.put("hot", 2);
+      await backend.put("hot", 3);
+      const synced = await backend.list({ changes_since: "beginning" });
+      assert.ok(synced.next_changes_since);
+      await backend.put("cold", 9);
+      const delta = await backend.list({ changes_since: synced.next_changes_since });
+      assert.deepEqual(ids(delta), ["cold"]);
+    },
+    { historyLimit: 2 }
+  );
+
   scenario(
     "a bulk reset clears the pruned-history floor",
     async (backend) => {
@@ -318,3 +362,83 @@ function defineScenarios(label: string, open: (instanceId: string) => Promise<Ba
 
 defineScenarios("sqlite", sqliteBackend, false);
 defineScenarios("postgres", postgresBackend, POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set");
+
+// A database created before `changes_floor` existed may already have pruned
+// history without keeping each key's baseline. With retention on, the upgrade
+// seeds the floor at the head so existing cursors expire once; with retention
+// off nothing was pruned and the floor starts at 0.
+for (const { limit, expectSeeded } of [
+  { expectSeeded: true, limit: "3" },
+  { expectSeeded: false, limit: undefined },
+]) {
+  test(`sqlite: adding changes_floor ${expectSeeded ? "seeds it at the head" : "leaves it at 0"} when retention is ${expectSeeded ? "on" : "off"}`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cs-floor-upgrade-"));
+    const path = join(dir, "ri.sqlite");
+    const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    try {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+      initDb(path);
+      getDb()
+        .prepare("INSERT OR IGNORE INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
+        .run(CONNECTOR_KEY, JSON.stringify(MANIFEST), NOW);
+      await ingestRecord(CONNECTOR_KEY, { data: { id: "a" }, emitted_at: NOW, key: "a", stream: STREAM });
+      await ingestRecord(CONNECTOR_KEY, { data: { id: "b" }, emitted_at: NOW, key: "b", stream: STREAM });
+      await ingestRecord(CONNECTOR_KEY, { data: { id: "c" }, emitted_at: NOW, key: "c", stream: STREAM });
+      getDb().exec("ALTER TABLE version_counter DROP COLUMN changes_floor");
+      closeDb();
+
+      if (limit !== undefined) {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = limit;
+      }
+      initDb(path);
+      const row = getDb().prepare("SELECT max_version, changes_floor FROM version_counter").get() as {
+        changes_floor: number;
+        max_version: number;
+      };
+      assert.equal(row.max_version, 3);
+      assert.equal(row.changes_floor, expectSeeded ? row.max_version : 0);
+    } finally {
+      closeDb();
+      rmSync(dir, { force: true, recursive: true });
+      if (priorLimit === undefined) {
+        delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+      } else {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+      }
+    }
+  });
+}
+
+test("postgres: adding changes_floor seeds it at the head when retention is on", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  const instanceId = "cin_cs_epoch_postgres_floor_upgrade";
+  const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  const backend = await postgresBackend(instanceId);
+  try {
+    await backend.put("a");
+    await backend.put("b");
+    await backend.put("c");
+    // The test-database guard refuses to re-admit a database holding records,
+    // so empty the record tables and keep the version counter under test.
+    await postgresQuery("DELETE FROM record_changes WHERE connector_instance_id = $1", [instanceId]);
+    await postgresQuery("DELETE FROM records WHERE connector_instance_id = $1", [instanceId]);
+    await postgresQuery("ALTER TABLE version_counter DROP COLUMN changes_floor");
+    await closePostgresStorage();
+
+    process.env.PDPP_CHANGE_HISTORY_LIMIT = "3";
+    await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL as string });
+    const { rows } = await postgresQuery(
+      "SELECT max_version::int AS max_version, changes_floor::int AS changes_floor FROM version_counter WHERE connector_instance_id = $1",
+      [instanceId]
+    );
+    assert.deepEqual(rows, [{ changes_floor: 3, max_version: 3 }]);
+  } finally {
+    if (priorLimit === undefined) {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    } else {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+    await backend.teardown();
+  }
+});

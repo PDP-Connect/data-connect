@@ -1392,11 +1392,12 @@ function writeRecordChange({
 }
 
 // The retained-size delta accounting MUST count/sum exactly the rows the prune
-// DELETE will remove. Both helpers therefore carry the SAME anchor-preserving
-// `NOT EXISTS` clause as `recordsIngestPruneRecordChanges` (see
-// queries/records/ingest/prune-record-changes.sql). If these predicates ever
-// diverge, the retained-size read model would over-report pruned bytes/rows
-// for keys whose anchor we now keep. Kept in lockstep on purpose.
+// DELETE will remove. Both helpers therefore carry the SAME anchor- and
+// baseline-preserving clauses as `recordsIngestPruneRecordChanges` (see
+// queries/records/ingest/prune-record-changes.sql); each takes the horizon
+// twice. If these predicates ever diverge, the retained-size read model would
+// over-report pruned bytes/rows for keys whose anchor or baseline we keep.
+// Kept in lockstep on purpose.
 const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
   AND NOT EXISTS (
     SELECT 1
@@ -1405,6 +1406,14 @@ const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
        AND r.stream = record_changes.stream
        AND r.record_key = record_changes.record_key
        AND r.version = record_changes.version
+  )
+  AND EXISTS (
+    SELECT 1 FROM record_changes n
+     WHERE n.connector_instance_id = record_changes.connector_instance_id
+       AND n.stream = record_changes.stream
+       AND n.record_key = record_changes.record_key
+       AND n.version > record_changes.version
+       AND n.version <= ?
   )`;
 
 function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: string, versionBefore: number): number {
@@ -1416,7 +1425,7 @@ function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: str
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.bytes || 0);
 }
 
@@ -1429,40 +1438,8 @@ function getPrunedRecordChangeCount(connectorInstanceId: string, stream: string,
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.count || 0);
-}
-
-/**
- * The newest version that superseded a row the prune DELETE will remove. A
- * pruned row (k, v) is the snapshot a changes_since cursor s needs whenever
- * v <= s < next(k), so every cursor below the largest such `next(k)` can no
- * longer reconstruct the delta for k. NULL when the prune removes nothing.
- * Same predicate as the DELETE, kept in lockstep with it.
- */
-function getPrunedRecordChangeSuccessorFloor(
-  connectorInstanceId: string,
-  stream: string,
-  versionBefore: number
-): number {
-  const row = getDb()
-    .prepare(
-      `SELECT MAX((
-                SELECT MIN(n.version)
-                  FROM record_changes n
-                 WHERE n.connector_id = record_changes.connector_id
-                   AND n.stream = record_changes.stream
-                   AND n.record_key = record_changes.record_key
-                   AND n.connector_instance_id = record_changes.connector_instance_id
-                   AND n.version > record_changes.version
-              )) AS floor
-         FROM record_changes
-        WHERE connector_instance_id = ?
-          AND stream = ?
-          AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
-    )
-    .get(connectorInstanceId, stream, versionBefore);
-  return Number(row?.floor || 0);
 }
 
 /**
@@ -2285,20 +2262,20 @@ function pruneRecordChangeHistory(
   const cutoff = nextVersion - changeHistoryLimit;
   const prunedBytesForDelta = getPrunedRecordChangeJsonBytes(connectorInstanceId, stream, cutoff);
   const prunedRowsForDelta = getPrunedRecordChangeCount(connectorInstanceId, stream, cutoff);
-  // Pruning keeps only one anchor row per live key, so MIN(version) in
-  // record_changes stays at a cold key's first version forever and cannot say
-  // which cursors are still reconstructible. Record that durably, in the
-  // transaction that removes the rows.
-  const changesFloor = getPrunedRecordChangeSuccessorFloor(connectorInstanceId, stream, cutoff);
-  if (changesFloor > 0) {
+  // Pruning keeps an anchor per live key plus each key's newest row at or below
+  // the horizon, so every cursor at or above the horizon can still be
+  // reconstructed. MIN(version) in record_changes cannot say that (a cold
+  // anchor pins it near 1), so record the horizon durably, in the transaction
+  // that removes the rows. Cursors below it return cursor_expired.
+  if (cutoff > 0) {
     getDb()
       .prepare(
         `UPDATE version_counter SET changes_floor = MAX(changes_floor, ?)
           WHERE connector_instance_id = ? AND stream = ?`
       )
-      .run(changesFloor, connectorInstanceId, stream);
+      .run(cutoff, connectorInstanceId, stream);
   }
-  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff]);
+  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff, cutoff]);
   return { prunedBytesForDelta, prunedRowsForDelta };
 }
 
@@ -5226,9 +5203,10 @@ function validateChangesSinceVersions(
   }
   // The minimum above is only a lower bound: pruning keeps a sparse anchor per
   // live key, so it stays at a cold key's first version while other keys'
-  // predecessor snapshots are gone. A cursor below `changes_floor` would get
-  // its deletions silently suppressed (no predecessor to show the key was
-  // visible). `beginning` needs no predecessor and stays valid.
+  // history below the retention horizon is gone. `changes_floor` is that
+  // horizon: a cursor at or above it can resolve every key's snapshot, one
+  // below it would get its deletions silently suppressed. `beginning` needs no
+  // predecessor and stays valid.
   if (sinceVersion > 0 && sinceVersion < (vcRow?.changes_floor ?? 0)) {
     throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
   }

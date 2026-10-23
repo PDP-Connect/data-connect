@@ -38,6 +38,7 @@ import {
   type SqliteEncryptionOptions,
 } from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
+import { getChangeHistoryLimit } from "./storage-utils.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
 const LEGACY_SYNC_STATE_OWNER_SUBJECT_ID = "owner_local";
@@ -6610,10 +6611,17 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   runWithSqliteBusyRetrySync(() => migrateConnectorSyncStateInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorDetailGapInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
-  // Pre-existing DBs predate the column; 0 = no pruned history recorded.
-  runWithSqliteBusyRetrySync(() =>
-    addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")
-  );
+  // Pre-existing DBs predate the column. When retention is on, history may
+  // already have been pruned without keeping each key's baseline, so no
+  // existing cursor is known to be reconstructible: seed the floor at the
+  // head, which expires them once (clients re-sync from `beginning`).
+  runWithSqliteBusyRetrySync(() => {
+    if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
+      if (getChangeHistoryLimit() > 0) {
+        raw.exec("UPDATE version_counter SET changes_floor = max_version");
+      }
+    }
+  });
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
   // A legacy vector has no evidence that it was produced from the current

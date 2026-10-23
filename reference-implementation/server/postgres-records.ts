@@ -154,7 +154,6 @@ interface PgRow {
   emitted_at: string;
   field_text?: string | null;
   field_type?: string;
-  floor?: number | string | null;
   is_identical?: boolean;
   last_updated?: string | null;
   latest?: Date | string | null;
@@ -1750,12 +1749,7 @@ async function prunePostgresRecordChanges({
   const cutoff = nextVersion - changeHistoryLimit;
   const pruned = await client.query(
     `SELECT COUNT(*)::bigint AS count,
-            COALESCE(SUM(octet_length(COALESCE(record_json::text, ''))), 0)::bigint AS bytes,
-            MAX((SELECT MIN(n.version) FROM record_changes n
-                  WHERE n.connector_instance_id = rc.connector_instance_id
-                    AND n.stream = rc.stream
-                    AND n.record_key = rc.record_key
-                    AND n.version > rc.version))::bigint AS floor
+            COALESCE(SUM(octet_length(COALESCE(record_json::text, ''))), 0)::bigint AS bytes
        FROM record_changes rc
       WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.version <= $3
         AND NOT EXISTS (
@@ -1764,20 +1758,27 @@ async function prunePostgresRecordChanges({
              AND r.stream = rc.stream
              AND r.record_key = rc.record_key
              AND r.version = rc.version
+        )
+        AND EXISTS (
+          SELECT 1 FROM record_changes n
+           WHERE n.connector_instance_id = rc.connector_instance_id
+             AND n.stream = rc.stream
+             AND n.record_key = rc.record_key
+             AND n.version > rc.version
+             AND n.version <= $3
         )`,
     [connectorInstanceId, stream, cutoff]
   );
-  // Pruning keeps only one anchor row per live key, so MIN(version) in
-  // record_changes stays at a cold key's first version forever and cannot say
-  // which cursors are still reconstructible. `floor` is the newest version
-  // that superseded a removed row: a cursor below it has lost a predecessor
-  // snapshot. Record it durably in the transaction that removes the rows.
-  const changesFloor = Number(pruned.rows[0]?.floor || 0);
-  if (changesFloor > 0) {
+  // Pruning keeps an anchor per live key plus each key's newest row at or below
+  // the horizon, so every cursor at or above the horizon can still be
+  // reconstructed. MIN(version) in record_changes cannot say that (a cold
+  // anchor pins it near 1), so record the horizon durably, in the transaction
+  // that removes the rows. Cursors below it return cursor_expired.
+  if (cutoff > 0) {
     await client.query(
       `UPDATE version_counter SET changes_floor = GREATEST(changes_floor, $3)
         WHERE connector_instance_id = $1 AND stream = $2`,
-      [connectorInstanceId, stream, changesFloor]
+      [connectorInstanceId, stream, cutoff]
     );
   }
   await client.query(
@@ -1789,6 +1790,14 @@ async function prunePostgresRecordChanges({
             AND r.stream = rc.stream
             AND r.record_key = rc.record_key
             AND r.version = rc.version
+       )
+       AND EXISTS (
+         SELECT 1 FROM record_changes n
+          WHERE n.connector_instance_id = rc.connector_instance_id
+            AND n.stream = rc.stream
+            AND n.record_key = rc.record_key
+            AND n.version > rc.version
+            AND n.version <= $3
        )`,
     [connectorInstanceId, stream, cutoff]
   );
@@ -2329,8 +2338,9 @@ async function queryPostgresChangesSince({
   }
   // The minimum above is only a lower bound: pruning keeps a sparse anchor per
   // live key, so it stays at a cold key's first version while other keys'
-  // predecessor snapshots are gone. A cursor below `changes_floor` would get
-  // its deletions silently suppressed. `beginning` needs no predecessor.
+  // history below the retention horizon is gone. `changes_floor` is that
+  // horizon: a cursor below it would get its deletions silently suppressed.
+  // `beginning` needs no predecessor.
   if (decodedVersion > 0 && decodedVersion < changesFloor) {
     const err: PgQueryError = new Error("changes_since cursor predates pruned change history; full re-sync required");
     err.code = "cursor_expired";

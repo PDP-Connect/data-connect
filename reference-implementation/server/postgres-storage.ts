@@ -44,6 +44,7 @@ import {
 } from "./postgres-test-database-guard.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
+import { getChangeHistoryLimit } from "./storage-utils.ts";
 
 const VALID_BACKENDS = new Set(["sqlite", "postgres"]);
 const LEGACY_SYNC_STATE_OWNER_SUBJECT_ID = "owner_local";
@@ -5653,8 +5654,15 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
   );
   await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS fields_fingerprint TEXT");
-  // Oldest reconstructible changes_since watermark; 0 = no pruned history recorded.
+  // Oldest reconstructible changes_since watermark. When retention is on,
+  // history may already have been pruned without keeping each key's baseline,
+  // so seed the floor at the head on first creation: existing cursors expire
+  // once and clients re-sync from `beginning`.
+  const hadChangesFloor = await hasPostgresColumn(client, "version_counter", "changes_floor");
   await client.query("ALTER TABLE version_counter ADD COLUMN IF NOT EXISTS changes_floor BIGINT NOT NULL DEFAULT 0");
+  if (!hadChangesFloor && getChangeHistoryLimit() > 0) {
+    await client.query("UPDATE version_counter SET changes_floor = max_version");
+  }
   if (checks.every(Boolean)) {
     await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
     return;
