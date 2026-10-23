@@ -22,8 +22,10 @@ const TOP_LEVEL_REGEX_17 = /not scheduled \(gave_up/;
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Writable } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
@@ -45,6 +47,22 @@ import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-ru
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
+
+type CapturingLogger = NonNullable<NonNullable<Parameters<typeof startServer>[0]>["logger"]>;
+
+function capturingLogger(lines: string[]): CapturingLogger {
+  const loadedPino = createRequire(import.meta.url)("pino") as (
+    options: Record<string, unknown>,
+    destination: Writable
+  ) => CapturingLogger;
+  const destination = new Writable({
+    write(chunk, _encoding, callback) {
+      lines.push(Buffer.from(chunk).toString("utf8"));
+      callback();
+    },
+  });
+  return loadedPino({ level: "debug" }, destination);
+}
 
 function readServerSchedulerFixtureManifest(): Record<string, unknown> & {
   connector_id: string;
@@ -498,6 +516,11 @@ test("server-owned scheduler starts persisted enabled schedules after startup", 
     });
 
     await waitFor(() => readAttempts(attemptsPath).length === 1, 5000);
+    const schedulerStore = getDefaultSchedulerStore();
+    await waitForAsync(async () => {
+      const history = await schedulerStore.listRunHistory(20);
+      return history.some((run) => run.status === "succeeded" && run.connectorInstanceId === serverOwnedCanonicalKey);
+    }, 5000);
   } finally {
     if (server) {
       await closeServer(server);
@@ -558,16 +581,23 @@ test("server scheduler refuses a persisted local-device schedule during admissio
     closeDb();
     server = null;
 
+    const logLines: string[] = [];
     server = await startServer({
       asPort: 0,
       autoEnrollEligibleSchedules: false,
       connectionScopedRunEnvResolver: resolveCredentialFreeFixtureRunEnv,
       connectorPathResolver: () => connectorPath,
       dbPath,
+      logger: capturingLogger(logLines),
       quiet: true,
       rsPort: 0,
     });
 
+    // Scheduler hydration admits each persisted schedule before handing it to
+    // the executor, and runs asynchronously after listen. Wait for the
+    // hydration refusal itself, so the negative assertions below cannot pass
+    // merely because the scheduler has not looked at the schedule yet.
+    await waitFor(() => logLines.some((line) => line.includes("local_device_control_unsupported")), 5000);
     const schedulerStore = getDefaultSchedulerStore();
     assert.equal(readAttempts(attemptsPath).length, 0, "admission refuses before connector spawn");
     assert.deepEqual(await schedulerStore.listRunHistory(20), [], "admission refuses before creating a run to retry");
@@ -4301,6 +4331,7 @@ test("scheduler default readiness checker probes a manifest-declared executable_
 
     scheduler.start();
     await waitFor(() => readAttempts(attemptsPath).length === 1, 5000);
+    await waitFor(() => scheduler.getHistory().length > 0, 5000);
     scheduler.stop();
   } finally {
     if (previousSlackdumpBin === undefined) {
