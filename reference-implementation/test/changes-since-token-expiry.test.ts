@@ -34,6 +34,7 @@ import test from "node:test";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 import pg from "pg";
 import { fileURLToPath } from "node:url";
+import { connectorInstanceAdvisoryLockKey } from "../server/connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { SqliteDriver } from "../server/sqlite-driver.ts";
@@ -66,7 +67,7 @@ interface Backend {
   legacyToken(version: number): string;
   list(params: Record<string, unknown>, fields?: string[]): Promise<ListPage>;
   paged: boolean;
-  put(key: string, popularity?: number): Promise<void>;
+  put(key: string, popularity?: number, name?: string): Promise<void>;
   remove(key: string): Promise<void>;
   reset(stream?: string): Promise<void>;
   teardown(): Promise<void>;
@@ -89,9 +90,13 @@ function makeBackend(instanceId: string, kind: "sqlite" | "postgres", teardown: 
       return page as unknown as ListPage;
     },
     paged: kind === "sqlite",
-    put: (key, popularity) =>
+    put: (key, popularity, name) =>
       ingestRecord(target, {
-        data: popularity === undefined ? { id: key } : { id: key, popularity },
+        data: {
+          id: key,
+          ...(popularity === undefined ? {} : { popularity }),
+          ...(name === undefined ? {} : { name }),
+        },
         emitted_at: NOW,
         key,
         stream: STREAM,
@@ -681,9 +686,11 @@ const POPULARITY_BLIND_POLICY: CompactionPolicy = {
 };
 
 // A@1 (0), A@2 (1), A@3 (0) share a fingerprint under a policy that ignores
-// popularity. A plan taken while A@2 was current marks @3 removable once @3
-// exists, but @3 is now the current anchor. Applying it would erase the current
-// projection's history row and, with no successor, raise no floor.
+// popularity. The planner reads the current row (A@2), then a write lands
+// (A@3), then the planner reads the history. It marks @3 removable although @3
+// is now the current anchor. Applying it would erase the current projection's
+// history row and, with no successor, raise no floor. The wrapper below puts the
+// write exactly between the planner's two reads.
 test("postgres: compaction refuses a stale plan that would delete the current anchor", {
   skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
 }, async () => {
@@ -694,16 +701,26 @@ test("postgres: compaction refuses a stale plan that would delete the current an
   try {
     await backend.put("a", 0);
     await backend.put("a", 1);
-    const stale = await planCompaction({
+    let fired = false;
+    const racingPool = {
+      query: async (text: string, values?: unknown[]) => {
+        if (!fired && /FROM record_changes/.test(text) && /record_key = \$3/.test(text)) {
+          fired = true;
+          await backend.put("a", 0);
+        }
+        return pool.query(text, values);
+      },
+    } as unknown as pg.Pool;
+    const plan = await planCompaction({
       connectorInstanceId: instanceId,
       limitKeys: null,
       policy: POPULARITY_BLIND_POLICY,
-      pool,
+      pool: racingPool,
       stream: STREAM,
     });
-    await backend.put("a", 0);
-    const plan = { ...stale, removableByKey: new Map([["a", [3]]]), removableVersions: 1 };
-    await assert.rejects(applyCompaction({ plan, pool, runId }), /current|successor|stale/i);
+    assert.equal(fired, true, "the write must land between the planner's reads");
+    assert.deepEqual(plan.removableByKey.get("a"), [3], "the racing plan names the current anchor");
+    await assert.rejects(applyCompaction({ plan, pool, runId }), /is the current anchor or has no successor/);
     const { rows } = await pool.query(
       "SELECT version::int AS version FROM record_changes WHERE connector_instance_id = $1 AND stream = $2 ORDER BY version",
       [instanceId, STREAM]
@@ -731,6 +748,10 @@ test("postgres: compaction takes the stream counter lock before it deletes histo
   const pool = new pg.Pool({ connectionString: POSTGRES_URL });
   const runId = `cs_epoch_lock_${Date.now()}`;
   const holder = await pool.connect();
+  // Compaction waits behind the holder for at most the instance-lock budget, and
+  // the polling below can take longer than its 2 s default on a busy host.
+  const priorWait = process.env.PDPP_INGEST_LOCK_WAIT_MS;
+  process.env.PDPP_INGEST_LOCK_WAIT_MS = "30000";
   try {
     await backend.put("a", 0);
     await backend.put("a", 1);
@@ -776,6 +797,11 @@ test("postgres: compaction takes the stream counter lock before it deletes histo
     await holder.query("ROLLBACK");
     await applying;
   } finally {
+    if (priorWait === undefined) {
+      delete process.env.PDPP_INGEST_LOCK_WAIT_MS;
+    } else {
+      process.env.PDPP_INGEST_LOCK_WAIT_MS = priorWait;
+    }
     await holder.query("ROLLBACK").catch(() => undefined);
     holder.release();
     await pool.query(`DROP TABLE IF EXISTS "compact_record_history_backup_${runId}"`);
@@ -955,6 +981,499 @@ test("postgres: a history gap seeds changes_floor even when retention is off", {
       delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
     } else {
       process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+    await backend.teardown();
+  }
+});
+
+// ─── Compaction versus stream resets ────────────────────────────────────────
+
+/** Poll until `probe` returns something truthy. Lock waits are observed, not slept through. */
+async function eventually<T>(what: string, probe: () => Promise<T | false | null | undefined>): Promise<T> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const value = await probe();
+    if (value) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return assert.fail(`timed out waiting for ${what}`);
+}
+
+interface CompactionFixture {
+  backend: Backend;
+  instanceId: string;
+  pool: pg.Pool;
+  runId: string;
+}
+
+async function withCompactionFixture(name: string, run: (fixture: CompactionFixture) => Promise<void>): Promise<void> {
+  const instanceId = `cin_cs_epoch_postgres_${name}`;
+  const backend = await postgresBackend(instanceId);
+  const pool = new pg.Pool({ connectionString: POSTGRES_URL });
+  const runId = `cs_epoch_${name}_${Date.now()}`;
+  try {
+    await run({ backend, instanceId, pool, runId });
+  } finally {
+    await pool.query(`DROP TABLE IF EXISTS "compact_record_history_backup_${runId}"`);
+    await pool.end();
+    await backend.teardown();
+  }
+}
+
+function planPopularityBlind({ instanceId, pool }: Pick<CompactionFixture, "instanceId" | "pool">) {
+  return planCompaction({
+    connectorInstanceId: instanceId,
+    limitKeys: null,
+    policy: POPULARITY_BLIND_POLICY,
+    pool,
+    stream: STREAM,
+  });
+}
+
+/** Popularity 0,1,0,1,0 is five versions that a popularity-blind policy treats as one: v2..v4 are redundant. */
+async function putFlappingKey(backend: Backend): Promise<void> {
+  for (const popularity of [0, 1, 0, 1, 0]) {
+    await backend.put("a", popularity);
+  }
+}
+
+async function storedHistory(pool: pg.Pool, instanceId: string) {
+  const { rows } = await pool.query<{ name: string | null; popularity: string | null; version: number }>(
+    `SELECT version::int AS version, record_json->>'name' AS name, record_json->>'popularity' AS popularity
+       FROM record_changes WHERE connector_instance_id = $1 AND stream = $2 ORDER BY version`,
+    [instanceId, STREAM]
+  );
+  return rows;
+}
+
+async function storedFloor(pool: pg.Pool, instanceId: string): Promise<number | null> {
+  const { rows } = await pool.query<{ changes_floor: number }>(
+    "SELECT changes_floor::int AS changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+    [instanceId, STREAM]
+  );
+  return rows[0]?.changes_floor ?? null;
+}
+
+async function backupTableExists(pool: pg.Pool, runId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ present: boolean }>("SELECT to_regclass($1) IS NOT NULL AS present", [
+    `compact_record_history_backup_${runId}`,
+  ]);
+  return rows[0]?.present === true;
+}
+
+// Generation 1 writes popularity 0,1,0,1,0 at versions 1..5, and a policy that
+// ignores popularity marks versions 2..4 redundant. A bulk reset deletes the
+// stream's history, rows and counter, so generation 2 reissues versions 1..6 for
+// six different records. A plan that names versions 2..4 cannot tell its own
+// rows from these: applying it deletes n2..n4 and raises the floor to 5.
+test("postgres: compaction refuses a plan made before a stream reset reissued its version numbers", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await withCompactionFixture("compaction_reset_aba", async ({ backend, instanceId, pool, runId }) => {
+    await putFlappingKey(backend);
+    const plan = await planPopularityBlind({ instanceId, pool });
+    assert.deepEqual(plan.removableByKey.get("a"), [2, 3, 4]);
+
+    await backend.reset();
+    for (const n of [1, 2, 3, 4, 5, 6]) {
+      await backend.put("a", 0, `n${n}`);
+    }
+
+    await assert.rejects(applyCompaction({ plan, pool, runId }), /stale compaction plan/);
+    assert.deepEqual(
+      (await storedHistory(pool, instanceId)).map((row) => row.name),
+      ["n1", "n2", "n3", "n4", "n5", "n6"],
+      "no row of the new generation was deleted"
+    );
+    assert.equal(await storedFloor(pool, instanceId), 0, "the floor was not raised for rows that were not removed");
+    assert.equal(await backupTableExists(pool, runId), false, "a refused apply leaves no backup table");
+  });
+});
+
+// The reset generation alone must refuse. Here generation 2 rewrites the same
+// five payloads, so every row digest still matches the plan; only the moved
+// generation says the rows are not the ones the plan judged.
+test("postgres: compaction refuses a plan from before a reset even when the rewritten history is identical", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await withCompactionFixture("compaction_reset_identical", async ({ backend, instanceId, pool, runId }) => {
+    await putFlappingKey(backend);
+    const plan = await planPopularityBlind({ instanceId, pool });
+    await backend.reset();
+    await putFlappingKey(backend);
+
+    await assert.rejects(applyCompaction({ plan, pool, runId }), /stale compaction plan.*reset generation/);
+    assert.deepEqual(
+      (await storedHistory(pool, instanceId)).map((row) => row.version),
+      [1, 2, 3, 4, 5]
+    );
+  });
+});
+
+// The row digest alone must refuse. A connection wiped and re-enrolled under the
+// same id loses its rows without a reset, so the generation stays put and the
+// version numbers restart at 1.
+test("postgres: compaction refuses a plan whose rows were replaced without a generation change", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await withCompactionFixture("compaction_rows_replaced", async ({ backend, instanceId, pool, runId }) => {
+    await putFlappingKey(backend);
+    const plan = await planPopularityBlind({ instanceId, pool });
+    for (const table of ["record_changes", "records", "version_counter"]) {
+      await pool.query(`DELETE FROM ${table} WHERE connector_instance_id = $1`, [instanceId]);
+    }
+    for (const n of [1, 2, 3, 4, 5, 6]) {
+      await backend.put("a", 0, `n${n}`);
+    }
+    const generation = await pool.query(
+      "SELECT record_reset_generation::text AS generation FROM connector_instances WHERE connector_instance_id = $1",
+      [instanceId]
+    );
+    assert.equal(generation.rows[0]?.generation, "0", "fixture: nothing advanced the generation");
+
+    await assert.rejects(applyCompaction({ plan, pool, runId }), /stale compaction plan.*changed since the plan/);
+    assert.deepEqual(
+      (await storedHistory(pool, instanceId)).map((row) => row.name),
+      ["n1", "n2", "n3", "n4", "n5", "n6"]
+    );
+  });
+});
+
+// Every writer and every reset takes the connector instance's advisory lock
+// first. Compaction has to queue behind a writer that holds it, and give up with
+// a message an operator can act on when the wait is too long, without touching
+// any row.
+test("postgres: compaction waits on the connector-instance write lock and gives up with a clear error", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await withCompactionFixture("compaction_instance_lock", async ({ backend, instanceId, pool, runId }) => {
+    await putFlappingKey(backend);
+    const plan = await planPopularityBlind({ instanceId, pool });
+    const holder = await pool.connect();
+    const priorWait = process.env.PDPP_INGEST_LOCK_WAIT_MS;
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_xact_lock($1::bigint)", [connectorInstanceAdvisoryLockKey(instanceId)]);
+      process.env.PDPP_INGEST_LOCK_WAIT_MS = "300";
+      await assert.rejects(applyCompaction({ plan, pool, runId }), /is busy/);
+    } finally {
+      if (priorWait === undefined) {
+        delete process.env.PDPP_INGEST_LOCK_WAIT_MS;
+      } else {
+        process.env.PDPP_INGEST_LOCK_WAIT_MS = priorWait;
+      }
+      await holder.query("ROLLBACK");
+      holder.release();
+    }
+    assert.deepEqual(
+      (await storedHistory(pool, instanceId)).map((row) => row.version),
+      [1, 2, 3, 4, 5]
+    );
+    assert.equal(await storedFloor(pool, instanceId), 0);
+    assert.equal(await backupTableExists(pool, runId), false, "a refused apply leaves no backup table");
+  });
+});
+
+// A reset deletes record_changes first and version_counter last, and compaction
+// holds the version_counter row while it deletes record_changes rows. Each
+// waited on the other. Both now take the instance lock first, so a reset that
+// starts while compaction is applying queues behind it instead of deadlocking.
+// A test-held counter row parks compaction right after it took the instance
+// lock, which makes the interleaving deterministic.
+test("postgres: a reset that starts while compaction is applying queues on the instance lock instead of deadlocking", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  const priorWait = process.env.PDPP_INGEST_LOCK_WAIT_MS;
+  process.env.PDPP_INGEST_LOCK_WAIT_MS = "30000";
+  try {
+    await withCompactionFixture("compaction_reset_race", async ({ backend, instanceId, pool, runId }) => {
+      await putFlappingKey(backend);
+      const plan = await planPopularityBlind({ instanceId, pool });
+      assert.deepEqual(plan.removableByKey.get("a"), [2, 3, 4]);
+      const applyPool = new pg.Pool({ application_name: "cs_epoch_apply", connectionString: POSTGRES_URL });
+      const holder = await pool.connect();
+      let applying: Promise<{ deleted: number }> | undefined;
+      let resetting: Promise<void> | undefined;
+      try {
+        await holder.query("BEGIN");
+        await holder.query(
+          "SELECT 1 FROM version_counter WHERE connector_instance_id = $1 AND stream = $2 FOR UPDATE",
+          [instanceId, STREAM]
+        );
+        applying = applyCompaction({ plan, pool: applyPool, runId });
+        applying.catch(() => undefined);
+        await eventually("compaction to park on the counter row", async () => {
+          const { rows } = await pool.query(
+            "SELECT 1 FROM pg_stat_activity WHERE application_name = 'cs_epoch_apply' AND wait_event_type = 'Lock'"
+          );
+          return rows.length > 0;
+        });
+        resetting = backend.reset();
+        resetting.catch(() => undefined);
+        await eventually("the reset to queue on the connector-instance lock", async () => {
+          const { rows } = await pool.query(
+            "SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'advisory'"
+          );
+          return rows.length > 0;
+        });
+        await holder.query("ROLLBACK");
+
+        const [compacted] = await Promise.all([applying, resetting]);
+        assert.equal(compacted.deleted, 3, "compaction finished first, with the plan it was given");
+        assert.deepEqual(await storedHistory(pool, instanceId), [], "the reset then cleared the stream");
+        assert.equal(await storedFloor(pool, instanceId), null);
+      } finally {
+        await holder.query("ROLLBACK");
+        holder.release();
+        await Promise.allSettled([applying, resetting]);
+        await applyPool.end();
+      }
+    });
+  } finally {
+    if (priorWait === undefined) {
+      delete process.env.PDPP_INGEST_LOCK_WAIT_MS;
+    } else {
+      process.env.PDPP_INGEST_LOCK_WAIT_MS = priorWait;
+    }
+  }
+});
+
+// The floor is recorded on the counter row. Without that row compaction would
+// delete history and record no floor, so the stale tokens would stay valid.
+test("postgres: compaction refuses to remove history when the stream has no version counter row", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  await withCompactionFixture("compaction_no_counter", async ({ backend, instanceId, pool, runId }) => {
+    await putFlappingKey(backend);
+    const plan = await planPopularityBlind({ instanceId, pool });
+    await pool.query("DELETE FROM version_counter WHERE connector_instance_id = $1 AND stream = $2", [
+      instanceId,
+      STREAM,
+    ]);
+    await assert.rejects(applyCompaction({ plan, pool, runId }), /version_counter row is missing/);
+    assert.deepEqual(
+      (await storedHistory(pool, instanceId)).map((row) => row.version),
+      [1, 2, 3, 4, 5]
+    );
+    assert.equal(await backupTableExists(pool, runId), false, "a refused apply leaves no backup table");
+  });
+});
+
+// ─── Counters lost before the floor existed ─────────────────────────────────
+
+// A stream can hold history but no counter row (a lost counter). The seed only
+// updated existing rows, so the first write after the upgrade made the allocator
+// create the row with floor 0 and let stale tokens through. The seed now creates
+// the row the allocator would, then seeds every row by the same rule.
+const LOST_COUNTER_CASES = [
+  { expectedFloor: 0, gap: false, limit: undefined, name: "complete history, retention off" },
+  { expectedFloor: 3, gap: true, limit: undefined, name: "gapped history, retention off" },
+  { expectedFloor: 3, gap: false, limit: "5", name: "complete history, retention on" },
+] as const;
+
+for (const { expectedFloor, gap, limit, name } of LOST_COUNTER_CASES) {
+  test(`sqlite: the changes_floor seed restores the counter row of a stream that lost it (${name})`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cs-floor-lost-counter-"));
+    const path = join(dir, "ri.sqlite");
+    const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    try {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+      initDb(path);
+      getDb()
+        .prepare("INSERT OR IGNORE INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
+        .run(CONNECTOR_KEY, JSON.stringify(MANIFEST), NOW);
+      for (const key of ["a", "b", "c"]) {
+        await ingestRecord(CONNECTOR_KEY, { data: { id: key }, emitted_at: NOW, key, stream: STREAM });
+      }
+      getDb().exec("DELETE FROM version_counter");
+      if (gap) {
+        getDb().exec("DELETE FROM record_changes WHERE version = 2");
+      }
+      getDb().exec("ALTER TABLE version_counter DROP COLUMN changes_floor");
+      closeDb();
+
+      if (limit !== undefined) {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = limit;
+      }
+      initDb(path);
+      const rows = getDb()
+        .prepare("SELECT connector_id, stream, max_version, changes_floor FROM version_counter")
+        .all();
+      assert.deepEqual(
+        rows.map((row: object) => ({ ...row })),
+        [{ changes_floor: expectedFloor, connector_id: CONNECTOR_KEY, max_version: 3, stream: STREAM }]
+      );
+
+      // The allocator carries on from the restored row and keeps its floor.
+      await ingestRecord(CONNECTOR_KEY, { data: { id: "d" }, emitted_at: NOW, key: "d", stream: STREAM });
+      const after = getDb().prepare("SELECT max_version, changes_floor FROM version_counter").get();
+      assert.deepEqual({ ...after }, { changes_floor: expectedFloor, max_version: 4 });
+    } finally {
+      closeDb();
+      rmSync(dir, { force: true, recursive: true });
+      if (priorLimit === undefined) {
+        delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+      } else {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+      }
+    }
+  });
+}
+
+// Current rows with no history and no counter: nothing proves the stream is
+// complete, so its floor starts at the head even with retention off.
+test("sqlite: the changes_floor seed restores a counter for current rows that have no history", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cs-floor-no-history-"));
+  const path = join(dir, "ri.sqlite");
+  const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  try {
+    delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    initDb(path);
+    getDb()
+      .prepare("INSERT OR IGNORE INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
+      .run(CONNECTOR_KEY, JSON.stringify(MANIFEST), NOW);
+    for (const key of ["a", "b", "c"]) {
+      await ingestRecord(CONNECTOR_KEY, { data: { id: key }, emitted_at: NOW, key, stream: STREAM });
+    }
+    getDb().exec("DELETE FROM version_counter");
+    getDb().exec("DELETE FROM record_changes");
+    getDb().exec("ALTER TABLE version_counter DROP COLUMN changes_floor");
+    closeDb();
+
+    initDb(path);
+    const row = getDb().prepare("SELECT max_version, changes_floor FROM version_counter").get();
+    assert.deepEqual({ ...row }, { changes_floor: 3, max_version: 3 });
+  } finally {
+    closeDb();
+    rmSync(dir, { force: true, recursive: true });
+    if (priorLimit === undefined) {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    } else {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+  }
+});
+
+for (const [index, { expectedFloor, gap, limit, name }] of LOST_COUNTER_CASES.entries()) {
+  test(`postgres: the changes_floor seed restores the counter row of a stream that lost it (${name})`, {
+    skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+  }, async () => {
+    const instanceId = `cin_cs_epoch_postgres_floor_lost_counter_${index}`;
+    const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    const backend = await postgresBackend(instanceId);
+    try {
+      for (const key of ["a", "b", "c"]) {
+        await backend.put(key);
+      }
+      await postgresQuery("DELETE FROM version_counter WHERE connector_instance_id = $1", [instanceId]);
+      if (gap) {
+        await postgresQuery(
+          "DELETE FROM record_changes WHERE connector_instance_id = $1 AND stream = $2 AND version = 2",
+          [instanceId, STREAM]
+        );
+      }
+      // The test-database guard refuses to re-admit a database holding records;
+      // the history rows stay under test, which is the shape of a lost counter.
+      await postgresQuery("DELETE FROM records WHERE connector_instance_id = $1", [instanceId]);
+      await postgresQuery("ALTER TABLE version_counter DROP COLUMN changes_floor");
+      await closePostgresStorage();
+
+      if (limit !== undefined) {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = limit;
+      }
+      await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL as string });
+      const counter = await postgresQuery(
+        `SELECT connector_id, stream, max_version::int AS max_version, changes_floor::int AS changes_floor
+           FROM version_counter WHERE connector_instance_id = $1`,
+        [instanceId]
+      );
+      assert.deepEqual(counter.rows, [
+        { changes_floor: expectedFloor, connector_id: CONNECTOR_KEY, max_version: 3, stream: STREAM },
+      ]);
+
+      // The allocator carries on from the restored row and keeps its floor.
+      await backend.put("d");
+      const after = await postgresQuery(
+        "SELECT max_version::int AS max_version, changes_floor::int AS changes_floor FROM version_counter WHERE connector_instance_id = $1",
+        [instanceId]
+      );
+      assert.deepEqual(after.rows, [{ changes_floor: expectedFloor, max_version: 4 }]);
+    } finally {
+      if (priorLimit === undefined) {
+        delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+      } else {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+      }
+      await backend.teardown();
+    }
+  });
+}
+
+// ─── Seed lock ──────────────────────────────────────────────────────────────
+
+// The seed takes an ACCESS EXCLUSIVE lock on version_counter. Queued behind a
+// long-running transaction, that request makes every ingest and read of the
+// table queue behind it. A bounded lock_timeout makes startup fail instead, with
+// a message that names the cause, and the next start can seed.
+test("postgres: the changes_floor seed gives up with a clear error while a long transaction holds version_counter", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  const instanceId = "cin_cs_epoch_postgres_floor_lock_timeout";
+  const priorTimeout = process.env.PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS;
+  const backend = await postgresBackend(instanceId);
+  const holder = new pg.Client({ connectionString: POSTGRES_URL });
+  let holderOpen = false;
+  try {
+    await backend.put("a");
+    await postgresQuery("DELETE FROM record_changes WHERE connector_instance_id = $1", [instanceId]);
+    await postgresQuery("DELETE FROM records WHERE connector_instance_id = $1", [instanceId]);
+    await postgresQuery("ALTER TABLE version_counter DROP COLUMN changes_floor");
+    await closePostgresStorage();
+
+    await holder.connect();
+    holderOpen = true;
+    await holder.query("BEGIN");
+    await holder.query("SELECT 1 FROM version_counter LIMIT 1");
+
+    process.env.PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS = "300";
+    let outcome: unknown;
+    let settled = false;
+    initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL as string }).then(
+      () => {
+        settled = true;
+        outcome = "started";
+      },
+      (error: unknown) => {
+        settled = true;
+        outcome = error;
+      }
+    );
+    await eventually("startup to give up on the version_counter lock", async () => settled);
+    assert.ok(outcome instanceof Error, `startup must fail, got ${String(outcome)}`);
+    assert.match(outcome.message, /changes_floor/);
+    assert.match(outcome.message, /version_counter/);
+    assert.match(outcome.message, /300ms/);
+
+    await holder.query("ROLLBACK");
+    holderOpen = false;
+    await closePostgresStorage();
+    delete process.env.PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS;
+    await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL as string });
+    const column = await postgresQuery(
+      "SELECT 1 FROM information_schema.columns WHERE table_name = 'version_counter' AND column_name = 'changes_floor'"
+    );
+    assert.equal(column.rows.length, 1, "the next start seeds once the lock is free");
+  } finally {
+    if (holderOpen) {
+      await holder.query("ROLLBACK").catch(() => undefined);
+    }
+    await holder.end().catch(() => undefined);
+    if (priorTimeout === undefined) {
+      delete process.env.PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS;
+    } else {
+      process.env.PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS = priorTimeout;
     }
     await backend.teardown();
   }

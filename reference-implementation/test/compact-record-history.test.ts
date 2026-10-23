@@ -1011,6 +1011,10 @@ if (POSTGRES_URL) {
         PRIMARY KEY(connector_instance_id, stream)
       );
       ALTER TABLE version_counter ADD COLUMN IF NOT EXISTS changes_floor BIGINT NOT NULL DEFAULT 0;
+      CREATE TABLE IF NOT EXISTS connector_instances (
+        connector_instance_id TEXT PRIMARY KEY,
+        record_reset_generation BIGINT NOT NULL DEFAULT 0
+      );
       CREATE TABLE IF NOT EXISTS retained_size_stream (
         connector_instance_id TEXT NOT NULL,
         connector_id TEXT NOT NULL,

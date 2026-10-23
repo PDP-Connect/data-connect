@@ -178,13 +178,28 @@ carry the connection's `record_reset_generation`.
 
 Rules for the floor:
 
-- The column is created at startup. If `PDPP_CHANGE_HISTORY_LIMIT > 0` at that
-  boot, each existing stream's floor starts at its current max version, so
-  every outstanding token expires once, because earlier pruning did not keep
-  baselines. With the limit unset the floor starts at `0`. The seed runs only
-  when the column is first created; later startups keep the stored floor.
+- The column is created at startup, and the seed runs only then; later startups
+  keep the stored floor. A stream's floor starts at its current max version
+  (every outstanding token expires once, because earlier pruning did not keep
+  baselines) when `PDPP_CHANGE_HISTORY_LIMIT > 0` at that boot, or when its
+  history has a gap: fewer retained rows than versions means rows were pruned
+  or compacted earlier. A complete history starts at `0`.
+- A stream that has history or current rows but no `version_counter` row (a
+  lost counter) first gets the row the allocator would create, at the stream's
+  highest version, and then the same rule applies. Otherwise its next write
+  would recreate the row with floor `0`.
+- On PostgreSQL the seed takes an `ACCESS EXCLUSIVE` lock on `version_counter`
+  and waits for it at most 30 s (`PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS`).
+  If a long-running transaction holds the table, startup fails with an error
+  that names it, instead of queuing every ingest and read behind the lock. Start
+  again once that transaction ends.
 - `scripts/compact-record-history.ts` raises the floor, in the same transaction
-  as its deletes, to the newest version that superseded any row it removes.
+  as its deletes, to the newest version that superseded any row it removes. It
+  takes the connection's write lock first, so it cannot interleave with an
+  ingest or a stream reset. It refuses a plan ("stale compaction plan") when the
+  connection was reset since the plan was made, when a named row no longer
+  matches the digest taken at plan time, or when a named row is now the key's
+  current row. Re-run the plan.
 
 ### Expandable records
 

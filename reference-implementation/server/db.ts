@@ -6618,10 +6618,34 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // or compacted earlier, even if retention is off now. Complete histories
   // keep floor 0. A stream with skipped version numbers also reads as a gap,
   // which only costs one re-sync.
+  // A stream can hold history or current rows but no counter row (a lost
+  // counter). The allocator would create that row on the stream's next write
+  // with floor 0, so a gapped history would lose its floor then. The row is
+  // created first, at the head the allocator would continue from (it allocates
+  // above both maxima), so the seed treats it like every other counter row.
   runWithSqliteBusyRetrySync(() => {
     raw.exec("BEGIN IMMEDIATE");
     try {
       if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
+        raw.exec(
+          `INSERT INTO version_counter(connector_id, connector_instance_id, stream, max_version)
+           SELECT COALESCE(
+                    (SELECT rc.connector_id FROM record_changes rc
+                      WHERE rc.connector_instance_id = p.connector_instance_id AND rc.stream = p.stream LIMIT 1),
+                    (SELECT r.connector_id FROM records r
+                      WHERE r.connector_instance_id = p.connector_instance_id AND r.stream = p.stream LIMIT 1)),
+                  p.connector_instance_id,
+                  p.stream,
+                  MAX(COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                                 WHERE rc.connector_instance_id = p.connector_instance_id AND rc.stream = p.stream), 0),
+                      COALESCE((SELECT MAX(r.version) FROM records r
+                                 WHERE r.connector_instance_id = p.connector_instance_id AND r.stream = p.stream), 0))
+             FROM (SELECT connector_instance_id, stream FROM record_changes
+                   UNION
+                   SELECT connector_instance_id, stream FROM records) p
+            WHERE NOT EXISTS (SELECT 1 FROM version_counter vc
+                               WHERE vc.connector_instance_id = p.connector_instance_id AND vc.stream = p.stream)`
+        );
         raw.prepare(
           `UPDATE version_counter SET changes_floor = max_version
             WHERE ? = 1 OR (SELECT COUNT(*) FROM record_changes rc
