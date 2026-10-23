@@ -29,6 +29,7 @@ import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { closeTestServer, type TestServer } from "./helpers/close-test-server.ts";
 
 interface Backend {
   databaseUrl?: string;
@@ -38,13 +39,6 @@ interface Backend {
 interface JsonObject {
   // biome-ignore lint/suspicious/noExplicitAny: HTTP JSON test boundary.
   [key: string]: any;
-}
-
-interface TestServer {
-  asPort: number;
-  asServer: import("node:http").Server;
-  rsPort: number;
-  rsServer: import("node:http").Server;
 }
 
 const CLIENT_ID = "concert_recommendation_app";
@@ -107,18 +101,6 @@ async function fetchJson(
   const response = await fetch(url, options);
   const text = await response.text();
   return { body: text ? (JSON.parse(text) as JsonObject) : {}, headers: response.headers, status: response.status };
-}
-
-async function closeServer(server: TestServer | null): Promise<void> {
-  if (!server) {
-    return;
-  }
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  await Promise.allSettled([
-    new Promise<void>((resolve) => server.asServer.close(() => resolve())),
-    new Promise<void>((resolve) => server.rsServer.close(() => resolve())),
-  ]);
 }
 
 async function issueOwnerToken(asUrl: string): Promise<string> {
@@ -211,7 +193,7 @@ async function runScenario(backend: Backend): Promise<void> {
   let server: TestServer | null = null;
 
   try {
-    server = (await startServer({
+    server = await startServer({
       asPort: 0,
       ...(backend.databaseUrl ? { databaseUrl: backend.databaseUrl, storageBackend: "postgres" as const } : {}),
       dbPath: ":memory:",
@@ -221,7 +203,7 @@ async function runScenario(backend: Backend): Promise<void> {
       reconcilePolyfillManifests: false,
       rsPort: 0,
       startClientEventDeliveryWorker: false,
-    })) as TestServer;
+    });
 
     await registerConnector(runtimeManifest(connectorKey));
     const now = new Date().toISOString();
@@ -312,7 +294,7 @@ async function runScenario(backend: Backend): Promise<void> {
     // Filtered plain reads are unchanged.
     assert.deepEqual(await changedIds(rsUrl, ownerToken, filtered), ["inside", "item"], `${label}: filtered read`);
   } finally {
-    await closeServer(server);
+    if (server) await closeTestServer(server);
     configureNativeManifest(null);
     await closePostgresStorage();
     closeDb();
