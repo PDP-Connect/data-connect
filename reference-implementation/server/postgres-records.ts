@@ -2218,7 +2218,11 @@ async function visiblePostgresChange({
     return null;
   }
   const fields = effective.fields ?? null;
-  const previousProjection = previous && previousVisible ? projectFields(previous.data, fields) : null;
+  // Entering the filtered result set counts as a change; see resolveChangeGroupRecord in records.ts.
+  const previousProjection =
+    previous && previousVisible && passesRequestFilters(previous.data, compiledFilters)
+      ? projectFields(previous.data, fields)
+      : null;
   const currentProjection = projectFields(current.data, fields);
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
     return null;

@@ -116,6 +116,8 @@ Records arrive in the canonical list envelope: rows under **`data`**, with `has_
 - Page with `next_cursor` while `has_more` is true; persist `next_changes_since` per
   `(stream, connection_id)` after each successful page.
 - Apply only schema-declared filters and request only needed fields.
+- A filtered `changes_since` read emits records that enter the filter, but not records that
+  leave it (a tombstone means deletion). Re-read the filtered set in full to drop them.
 - Fetch `blob_ref.fetch_url` lazily, for blobs you actually surface.
 
 ## Failure handling

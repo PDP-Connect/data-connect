@@ -5258,8 +5258,14 @@ function resolveChangeGroupRecord(
     return null;
   }
 
+  // A record whose previous version sat outside the request's filters ENTERS the
+  // filtered result set now, so it is emitted even if its projection is
+  // unchanged. Leaving the set is not reported: tombstones mean deletion, and a
+  // filtered-out record still exists. Clients without owner filters always pass.
   const previousProjection =
-    previousVisible && previous?.data ? projectFields(previous.data, effective.fields ?? undefined) : null;
+    previousVisible && previous?.data && passesRequestFilters(previous.data, compiledFilters)
+      ? projectFields(previous.data, effective.fields ?? undefined)
+      : null;
   const currentProjection = projectFields(current.data, effective.fields ?? undefined);
 
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
