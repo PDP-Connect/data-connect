@@ -6064,6 +6064,14 @@ function migrateRunHistoryDeviceRunProvenance(raw: SqliteDatabase): void {
   if (receipt) {
     return;
   }
+  // A database with no run history has nothing to repair, and every writer now
+  // stamps the column explicitly. Writing a receipt here would put a boot-time
+  // timestamp into every fresh schema, so a restored schema snapshot would no
+  // longer equal a freshly initialized one. The first boot that finds rows
+  // runs the repair and records the receipt.
+  if (!raw.prepare("SELECT 1 FROM run_history LIMIT 1").get()) {
+    return;
+  }
   raw.transaction(() => {
     const result = raw
       .prepare(

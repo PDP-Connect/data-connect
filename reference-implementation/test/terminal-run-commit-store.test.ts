@@ -269,7 +269,7 @@ test("SQLite transaction-aware spine seam uses only the supplied handle", () => 
         status TEXT NOT NULL, known_gaps_json TEXT NOT NULL, started_at TEXT NOT NULL,
         completed_at TEXT, records_emitted INTEGER NOT NULL DEFAULT 0,
         connector_error_json TEXT, failure_reason TEXT, terminal_reason TEXT,
-        facts_json TEXT, attempt INTEGER NOT NULL
+        facts_json TEXT, attempt INTEGER NOT NULL, scheduler_managed INTEGER NOT NULL DEFAULT 0
       );
       CREATE UNIQUE INDEX run_history_identity ON run_history(run_id, connector_instance_id) WHERE run_id IS NOT NULL;
     `);

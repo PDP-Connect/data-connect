@@ -33,8 +33,8 @@ test("only reviewed files bypass outer allocation; restore remains separate", ()
   assert.equal(isDedicatedPostgresTestDatabaseName(restoreName), true);
 });
 
-test("all 38 cold-required entries remain cold, including helper-owned bootstrap", () => {
-  assert.equal(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length, 38);
+test("all 39 cold-required entries remain cold, including helper-owned bootstrap", () => {
+  assert.equal(POSTGRES_TEMPLATE_COLD_REQUIRED_FILES.length, 39);
   for (const file of POSTGRES_TEMPLATE_COLD_REQUIRED_FILES) {
     assert.equal(isPostgresTemplateEligibleFilePath(file), false, file);
   }

@@ -243,6 +243,7 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/records-instance-stream-id-keyset-index.test.ts",
   "test/rs-opaque-cursors.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
+  "test/run-history-device-run-provenance-migration.test.ts",
   "test/run-history-duplicate-run-id-identity.test.ts",
   "test/run-history-interrupted-migration-reconciliation.test.ts",
   "test/run-history-writer-authority.test.ts",
