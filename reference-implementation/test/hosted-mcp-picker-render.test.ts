@@ -567,7 +567,9 @@ test("picker states the purpose once, naming its origin, with no purpose-code UR
   );
   assert.equal(html.includes("Purpose description"), false, "no label-plus-sentence redundancy");
   assert.equal(
-    html.includes("They claim — not verified by your server"),
+    (/aria-label="What this server sets and what the app said">[\s\S]*?<\/div>/.exec(html)?.[0] ?? "").includes(
+      "They claim — not verified by your server"
+    ),
     false,
     "the purpose block must not carry the 'they claim' eyebrow — no purpose arrived in this request to attribute to the app"
   );
@@ -619,7 +621,7 @@ test("picker never states a retention the client did not declare", async () => {
     const context = html.slice(Math.max(0, (match.index ?? 0) - 600), match.index);
     assert.match(
       context,
-      /data-hosted-mcp-grant-expiry/,
+      /data-hosted-mcp-grant-expiry|data-hosted-mcp-review-ends/,
       "every '90 days' on the page must be the grant-expiry control, never a retention claim"
     );
   }
@@ -1019,4 +1021,43 @@ test("the counter is wired to selection changes, not rendered dead", async () =>
   const script = /<script>([\s\S]*)<\/script>/.exec(html);
   assert.ok(script, "picker behavior script must render");
   assert.match(script[1] ?? "", /data-hosted-mcp-counter/, "the script must bind the counter");
+});
+
+// ── The approval summary states the CHOSEN expiry and keeps the app name apart ─
+
+test("summary Ends row follows the grant-expiry control, not a fixed sentence", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  assert.equal(html.includes("no scheduled end date"), false, "no fixed 'no end date' sentence");
+  const ends = /<dd data-hosted-mcp-review-ends data-ends-by-option="([^"]*)">([^<]*)<\/dd>/.exec(html);
+  assert.ok(ends, "the Ends row is addressable");
+  const byOption = JSON.parse((ends[1] ?? "").replaceAll("&quot;", '"').replaceAll("&#39;", "'")) as Record<
+    string,
+    string
+  >;
+  assert.deepEqual(Object.keys(byOption).sort(), ["1y", "90d", "never"]);
+  assert.match(byOption["90d"] ?? "", /90 days/);
+  assert.match(byOption["1y"] ?? "", /1 year/);
+  assert.match(byOption.never ?? "", /until you revoke it/);
+  // Initial text matches the checked (default) option.
+  assert.equal(ends[2], byOption["90d"]);
+  // The page script rewrites the row from the chosen option.
+  assert.match(html, /reviewEnds\.textContent = text/);
+});
+
+test("ongoing-mode copy does not claim access lasts until revoked regardless of the expiry choice", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  assert.equal(/Ongoing access — including new matching records, until you revoke it\./.test(html), false);
+  assert.match(html, /until the end date you choose below or until you revoke access/);
+});
+
+test("summary puts a self-described app name in the client group, not beside enforced terms", async () => {
+  const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
+  const panel = html.slice(html.indexOf("data-hosted-mcp-review-terms"));
+  assert.match(
+    panel,
+    /data-authorship="client"[^>]*aria-label="App"[^>]*>[\s\S]*?<dt>App<\/dt><dd>ChatGPT<\/dd>/,
+    "unverified app name is attributed to the client"
+  );
+  const enforcedRows = /<dt>Data<\/dt>[\s\S]*?<\/dl>/.exec(panel)?.[0] ?? "";
+  assert.equal(enforcedRows.includes("ChatGPT"), false);
 });

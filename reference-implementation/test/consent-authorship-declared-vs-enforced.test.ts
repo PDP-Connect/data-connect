@@ -224,3 +224,74 @@ test("pre-review batch cards: purpose and retention are declared, not enforced",
   assert.ok(declared.includes(PURPOSE_CODE));
   assert.ok(authorshipBlocks(html, "client").includes(CLAIM));
 });
+
+// ── Self-described client metadata is a claim, never an enforced fact ────────
+
+const SELF_DESCRIBED_CLIENT = {
+  client_display: {
+    logo_uri: "https://app.example/logo.png",
+    name: "Unverified App Name",
+    policy_uri: "https://app.example/privacy",
+    tos_uri: "https://app.example/terms",
+    uri: "https://app.example",
+  },
+  client_id: "concert_app",
+  registration_mode: "pre_registered",
+};
+
+function assertClientMetadataIsAClaim(html: string): void {
+  const enforced = authorshipBlocks(html, "protocol");
+  const claims = authorshipBlocks(html, "client");
+  for (const needle of ["Unverified App Name", "https://app.example/privacy", "https://app.example/logo.png"]) {
+    assert.equal(enforced.includes(needle), false, `"${needle}" must not appear under the enforced heading`);
+    assert.ok(claims.includes(needle), `"${needle}" must appear in the client-claims group`);
+  }
+  // Server-verified identity stays enforced.
+  assert.ok(enforced.includes("concert_app"), "client id stays enforced");
+  assert.ok(enforced.includes("pre_registered"), "registration mode stays enforced");
+}
+
+test("reviewed single consent: client_display metadata is a client claim", () => {
+  const html = render({
+    request: {},
+    review: asReview({
+      ...reviewBase,
+      access_mode: "continuous",
+      client: SELF_DESCRIBED_CLIENT,
+      expires_at: null,
+    }),
+    reviewRevision: "rev1",
+  });
+  assertClientMetadataIsAClaim(html);
+});
+
+test("reviewed batch consent: client_display metadata is a client claim", () => {
+  const html = render({
+    batch: true,
+    request: {},
+    review: asReview({
+      access_mode: "continuous",
+      approved_source_indexes: [],
+      client: SELF_DESCRIBED_CLIENT,
+      expires_at: null,
+      parent_package_id: null,
+      source_narrowing: {},
+      sources: [],
+      subject: { id: "owner_local" },
+      version: "reference.batch-approval-review.v1",
+    }),
+    reviewRevision: "rev1",
+  });
+  assertClientMetadataIsAClaim(html);
+});
+
+test("reviewed single consent: single-use with no expires_at is not described as lasting until revoked", () => {
+  const html = render({
+    request: {},
+    review: asReview({ ...reviewBase, access_mode: "single_use", expires_at: null }),
+    reviewRevision: "rev1",
+  });
+  const enforced = authorshipBlocks(html, "protocol");
+  assert.equal(/until you revoke/i.test(enforced), false);
+  assert.match(enforced, /single_use/);
+});

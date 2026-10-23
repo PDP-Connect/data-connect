@@ -198,24 +198,18 @@ export const HOSTED_MCP_PICKER_SUPPORTED_ACCESS_MODES: ReadonlySet<string> = new
 // not be written as the client's commitment until the client has accepted it.
 export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "anonymize" | "delete" } | null = null;
 
-// Grant expiry (Grant fields: `expires_at`) for every hosted-MCP package
-// grant, independent of the chosen access mode: auth.ts's package-minting
-// path (`buildPackageAndRedirect` -> child-grant loop) only applies a
-// non-null `expires_at` to `single_use` grants from a review-artifact expiry
-// this picker flow never sets, so in practice both access modes always issue
-// with no expiry. Stated once here, tied to the access-mode control, so this
-// copy can never drift into contradicting whichever mode the owner picks.
-// Grant expiry (`expires_at`) is its own protocol fact, orthogonal to
-// `access_mode` — spec-core.md:889 lists grant validity, data temporal scope,
-// and access pattern as three concepts that MUST NOT be conflated.
-//
-// The prior copy ("No expiry — access lasts until you revoke it, whichever
-// access mode you choose above") restated the access mode and contradicted
-// the control directly above it: under `One-time access`, "access lasts until
-// you revoke it" is false, because a single_use grant is consumed at first
-// token issuance (spec-core.md:920). This states the expiry fact alone and
-// never mentions the mode.
-export const HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY = "This authorization has no scheduled end date.";
+// Grant expiry (Grant fields: `expires_at`) is its own protocol fact,
+// orthogonal to `access_mode` (spec-core.md:889 lists grant validity, data
+// temporal scope, and access pattern as three concepts that MUST NOT be
+// conflated). The picker lets the owner choose it, so the approval summary
+// states the CHOSEN expiry, not a fixed sentence. A one-time grant is consumed
+// at first token issuance (spec-core.md:920); that is the access mode's
+// business and is stated by the Duration row, never here.
+export function describeHostedMcpGrantExpiry(option: { days: number | null; label: string }): string {
+  return option.days === null
+    ? "No end date is scheduled. It lasts until you revoke it."
+    : `Scheduled to end in ${option.label}. You can revoke it sooner.`;
+}
 
 // Input normalization helpers.
 
@@ -1736,16 +1730,35 @@ function displayList(values: string[] | null | undefined): string {
   return values && values.length > 0 ? values.join(", ") : "None";
 }
 
-function buildReviewedClientFacts(client: ApprovalReviewClient): Array<{ label: string; value: string }> {
+/** Server-verified identity only. Self-described metadata is a client claim. */
+function buildReviewedClientIdentityFacts(client: ApprovalReviewClient): Array<{ label: string; value: string }> {
   return [
     { label: "Client ID", value: client.client_id },
     { label: "Registration mode", value: client.registration_mode },
+  ];
+}
+
+/** Metadata the client published about itself. Rendered as a claim. */
+function buildReviewedClientClaimFacts(client: ApprovalReviewClient): Array<{ label: string; value: string }> {
+  return [
     { label: "Display name", value: displayOptional(client.client_display?.name) },
     { label: "Client URI", value: displayOptional(client.client_display?.uri) },
     { label: "Logo URI", value: displayOptional(client.client_display?.logo_uri) },
     { label: "Policy URI", value: displayOptional(client.client_display?.policy_uri) },
     { label: "Terms URI", value: displayOptional(client.client_display?.tos_uri) },
   ];
+}
+
+function buildReviewedClientClaimBlock(client: ApprovalReviewClient, ui: ConsentUiRenderer): string {
+  const hasMetadata = Boolean(client.client_display && Object.values(client.client_display).some(Boolean));
+  return hasMetadata
+    ? renderAuthorshipBlock(
+        "client",
+        "Client-authored display",
+        ui.renderKeyValueList(buildReviewedClientClaimFacts(client)),
+        ui
+      )
+    : "";
 }
 
 function renderReviewedStreams(streams: ApprovalReviewStream[], ui: ConsentUiRenderer): string {
@@ -2235,11 +2248,12 @@ function renderReviewedBatchConsentHtml(
     }),
     ui.renderSurface({
       ariaLabel: "Reviewed batch decision",
-      children: renderAuthorshipBlock(
+      children: [
+        renderAuthorshipBlock(
         "protocol",
         "Reviewed batch terms",
         ui.renderKeyValueList([
-          ...buildReviewedClientFacts(review.client),
+          ...buildReviewedClientIdentityFacts(review.client),
           { label: "Subject ID", value: review.subject.id },
           ...buildEnforcedSelectionFacts({ access_mode: review.access_mode }, review.expires_at).filter(
             (fact) => fact.label !== "Selection preset"
@@ -2249,6 +2263,10 @@ function renderReviewedBatchConsentHtml(
         ]),
         ui
       ),
+        buildReviewedClientClaimBlock(review.client, ui),
+      ]
+        .filter(Boolean)
+        .join("\n"),
       surface: "human",
     }),
     sourceSections,
@@ -2461,11 +2479,12 @@ function renderReviewedSingleConsentHtml(
           "protocol",
           "Reviewed client and subject",
           ui.renderKeyValueList([
-            ...buildReviewedClientFacts(review.client),
+            ...buildReviewedClientIdentityFacts(review.client),
             { label: "Subject ID", value: review.subject.id },
           ]),
           ui
         ),
+        buildReviewedClientClaimBlock(review.client, ui),
         renderAuthorshipBlock(
           "protocol",
           "Reviewed source declaration",
@@ -3126,17 +3145,40 @@ export async function renderHostedMcpSourceSelection(
   // client identity, expiry) is stated above and repeated here only as the
   // decision's own terms — the summary is the one place they appear together
   // as a single reviewable artifact.
+  // The app name is self-described unless an operator registered the client.
+  // Domain verification proves who controls the domain, not that the name is
+  // true, so a self-described name never sits among the enforced terms.
+  const appNameIsOperatorSet = clientDisplay !== null && !clientDisplay.isUnverified && !clientDisplay.verifiedDomain;
   const reviewPanel = rows.length
     ? `<section class="hosted-ui-review" data-hosted-mcp-review aria-live="polite" aria-label="What you're allowing">
           <h2 class="pdpp-title">What you're allowing</h2>
           <p class="hosted-ui-review-empty" data-hosted-mcp-review-empty>Nothing selected yet.</p>
           <div data-hosted-mcp-review-terms hidden>
+            ${
+              appNameIsOperatorSet
+                ? ""
+                : renderAuthorshipBlock(
+                    "client",
+                    "App",
+                    `<dl class="hosted-ui-kv hosted-ui-review-terms"><dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd></dl>`,
+                    ui
+                  )
+            }
             <dl class="hosted-ui-kv hosted-ui-review-terms">
-            <dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>
+            ${appNameIsOperatorSet ? `<dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>` : ""}
             <dt>Data</dt><dd data-hosted-mcp-review-scope></dd>
             <dt>Coverage</dt><dd>Everything in each data type you check, unless you narrowed it above.</dd>
             <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
-            <dt>Ends</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
+            <dt>Ends</dt><dd data-hosted-mcp-review-ends data-ends-by-option="${ui.escapeHtml(
+              JSON.stringify(
+                Object.fromEntries(HOSTED_MCP_GRANT_EXPIRY_OPTIONS.map((o) => [o.id, describeHostedMcpGrantExpiry(o)]))
+              )
+            )}">${ui.escapeHtml(
+              describeHostedMcpGrantExpiry(
+                HOSTED_MCP_GRANT_EXPIRY_OPTIONS.find((o) => o.id === HOSTED_MCP_DEFAULT_GRANT_EXPIRY_ID) ??
+                  HOSTED_MCP_GRANT_EXPIRY_OPTIONS[0] ?? { days: null, label: "" }
+              )
+            )}</dd>
           </dl>
             ${renderAuthorshipBlock(
               "declared",
@@ -3247,7 +3289,7 @@ export async function renderHostedMcpSourceSelection(
             <input type="radio" name="access_mode" value="continuous" checked />
             <span class="hosted-ui-access-mode-body">
               <span class="hosted-ui-access-mode-label">Ongoing access</span>
-              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} can read the data you select, including new matching records, until you revoke access.</span>
+              <span class="hosted-ui-access-mode-meta">${ui.escapeHtml(clientName)} can read the data you select, including new matching records, until the end date you choose below or until you revoke access.</span>
             </span>
           </label>
           <label class="hosted-ui-access-mode-option">
@@ -3534,6 +3576,7 @@ export async function renderHostedMcpSourceSelection(
   const reviewTerms = form.querySelector("[data-hosted-mcp-review-terms]");
   const reviewScope = form.querySelector("[data-hosted-mcp-review-scope]");
   const reviewDuration = form.querySelector("[data-hosted-mcp-review-duration]");
+  const reviewEnds = form.querySelector("[data-hosted-mcp-review-ends]");
   const clientId = form.querySelector('input[name="client_id"]')?.value || "";
 
   const normalizeDateBound = (value, bound) => {
@@ -3633,7 +3676,13 @@ export async function renderHostedMcpSourceSelection(
       reviewDuration.textContent =
         decision.accessMode === "single_use"
           ? "One-time access — one retrieval, then no more without your approval."
-          : "Ongoing access — including new matching records, until you revoke it.";
+          : "Ongoing access — including new matching records.";
+    }
+    if (reviewEnds) {
+      const endsByOption = JSON.parse(reviewEnds.dataset.endsByOption || "{}");
+      const chosen = form.querySelector('input[name="grant_expiry"]:checked');
+      const text = chosen ? endsByOption[chosen.value] : "";
+      if (text) reviewEnds.textContent = text;
     }
     if (!decisionField) return;
     if (!hasSelection) {

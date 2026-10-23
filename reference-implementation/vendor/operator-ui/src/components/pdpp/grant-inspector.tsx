@@ -128,7 +128,8 @@ export function GrantInspector({
             {client.name}
           </div>
           {purposeDescription && (
-            <div className="mb-3 text-xs" style={{ color: "var(--muted-foreground)" }}>
+            <div className="mb-3 text-xs" style={{ color: "var(--muted-foreground)" }} data-authorship="declared">
+              <span style={{ opacity: 0.7 }}>Purpose the app declared: </span>
               {purposeDescription}
             </div>
           )}
@@ -162,10 +163,11 @@ export function GrantInspector({
             {retention && (
               <div>
                 <div className="mb-0.5 text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
-                  Retention
+                  Retention the app declared (not enforced by your server)
                 </div>
-                <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-                  {retention.onExpiry === "delete" ? "Deleted" : "Anonymized"} after {retention.duration}
+                <div className="text-xs" style={{ color: "var(--muted-foreground)" }} data-authorship="declared">
+                  The app says it will {retention.onExpiry === "delete" ? "delete" : "anonymize"} the data after{" "}
+                  {retention.duration}
                 </div>
               </div>
             )}
