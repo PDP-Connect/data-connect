@@ -2,9 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { chdir } from "node:process";
 import { test } from "node:test";
 import { parseArgs, resolveInspectionOptions } from "../bin/pdpp-local-collector.ts";
@@ -47,6 +57,18 @@ function seedOutbox(path: string, sourceInstanceId: string, id = `test-${sourceI
       payload: { source: sourceInstanceId },
       sourceInstanceId,
     });
+  } finally {
+    outbox.close();
+  }
+}
+
+function outboxIds(path: string, sourceInstanceId: string): string[] {
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    return outbox
+      .list({ sourceInstanceId })
+      .map((item) => item.id)
+      .sort();
   } finally {
     outbox.close();
   }
@@ -469,32 +491,212 @@ test("restart completes a handoff after failure between retirement and canonical
   });
 });
 
-test("migration fails closed when the legacy and canonical roots cross filesystems", () => {
-  if (!existsSync("/dev/shm")) {
+/**
+ * Two writable scratch directories on different filesystems, or undefined when
+ * the host offers only one. The cross-filesystem test needs real devices; a
+ * mocked stat would not exercise the rename and VACUUM paths.
+ */
+function twoFilesystemRoots(): [string, string] | undefined {
+  const created: Array<{ dev: number | bigint; root: string }> = [];
+  const candidates = [tmpdir(), homedir(), "/dev/shm", process.env.XDG_RUNTIME_DIR, "/var/tmp"];
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    try {
+      const root = mkdtempSync(join(candidate, "pdpp-durable-state-fs-"));
+      created.push({ dev: statSync(root).dev, root });
+    } catch {
+      // An unwritable candidate is simply not a usable filesystem.
+    }
+  }
+  const first = created[0];
+  const second = first ? created.find((entry) => entry.dev !== first.dev) : undefined;
+  for (const entry of created) {
+    if (entry !== first && entry !== second) {
+      rmSync(entry.root, { force: true, recursive: true });
+    }
+  }
+  return first && second ? [first.root, second.root] : undefined;
+}
+
+test("migration succeeds when the legacy store and canonical state are on different filesystems", (t) => {
+  const roots = twoFilesystemRoots();
+  if (!roots) {
+    t.skip("no second filesystem available");
     return;
   }
-  const crossFilesystemRoot = mkdtempSync(join("/dev/shm", "pdpp-durable-state-cross-"));
+  const [legacyFilesystemRoot, stateFilesystemRoot] = roots;
   try {
-    withTempRoot("pdpp-durable-state-cross-source-", (root) => {
-      const legacyPath = packageLegacyPath(join(root, "npx-temp-package"), "collector-runner-queue.sqlite");
-      seedOutbox(legacyPath, SOURCE_A);
-      assert.notEqual(statSync(join(root, "npx-temp-package")).dev, statSync(crossFilesystemRoot).dev);
-      assert.throws(
-        () =>
-          resolveCollectorQueuePath({
-            connectorId: "claude_code",
-            moduleUrl: modulePath(join(root, "npx-temp-package")),
-            sourceInstanceId: SOURCE_A,
-            stateRoot: crossFilesystemRoot,
-          }),
-        (error: unknown) =>
-          error instanceof CollectorStateResolutionError && error.code === "legacy_state_migration_failed"
-      );
-      assert.equal(existsSync(legacyPath), true);
+    const installRoot = join(legacyFilesystemRoot, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    seedOutbox(legacyPath, SOURCE_A, "pending-before-upgrade");
+    assert.notEqual(statSync(installRoot).dev, statSync(stateFilesystemRoot).dev);
+
+    const canonicalPath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot: stateFilesystemRoot,
     });
+    const resolved = resolveCollectorQueuePath({
+      connectorId: "claude_code",
+      moduleUrl: modulePath(installRoot),
+      sourceInstanceId: SOURCE_A,
+      stateRoot: stateFilesystemRoot,
+    });
+
+    assert.equal(resolved, canonicalPath);
+    assert.equal(existsSync(legacyPath), true);
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["pending-before-upgrade"]);
+    assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["pending-before-upgrade"]);
   } finally {
-    rmSync(crossFilesystemRoot, { force: true, recursive: true });
+    rmSync(legacyFilesystemRoot, { force: true, recursive: true });
+    rmSync(stateFilesystemRoot, { force: true, recursive: true });
   }
+});
+
+test("a canonical queue created during migration aborts the handoff before the legacy writer is retired", () => {
+  withTempRoot("pdpp-durable-state-concurrent-", (root) => {
+    const stateRoot = join(root, "user-state");
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(legacyPath, SOURCE_A, "pending-before-upgrade");
+
+    assert.throws(
+      () =>
+        resolveCollectorQueuePath({
+          connectorId: "claude_code",
+          moduleUrl: modulePath(installRoot),
+          sourceInstanceId: SOURCE_A,
+          stateRoot,
+          beforeMigrationReconcile: () => seedOutbox(canonicalPath, SOURCE_A, "concurrent-new-run"),
+        }),
+      (error: unknown) => error instanceof CollectorStateResolutionError && error.code === "legacy_state_conflict"
+    );
+
+    // The legacy writer was not retired: it still accepts work.
+    seedOutbox(legacyPath, SOURCE_A, "legacy-write-after-abort");
+    assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["legacy-write-after-abort", "pending-before-upgrade"]);
+    // Neither side was merged into the other, and no snapshot or lock is left.
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["concurrent-new-run"]);
+    assert.deepEqual(
+      readdirSync(dirname(canonicalPath)).filter((name) => /\.migration-|\.handoff\.lock$/.test(name)),
+      []
+    );
+
+    // The conflict is not forgotten once the canonical file exists: the legacy backlog is
+    // still reported rather than silently abandoned.
+    assert.throws(
+      () =>
+        resolveCollectorQueuePath({
+          connectorId: "claude_code",
+          moduleUrl: modulePath(installRoot),
+          sourceInstanceId: SOURCE_A,
+          stateRoot,
+        }),
+      (error: unknown) => error instanceof CollectorStateResolutionError && error.code === "legacy_state_conflict"
+    );
+  });
+});
+
+test("a canonical queue with unrelated content is not treated as a completed migration", () => {
+  withTempRoot("pdpp-durable-state-unrelated-canonical-", (root) => {
+    const stateRoot = join(root, "user-state");
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(legacyPath, SOURCE_A, "pending-before-upgrade");
+    seedOutbox(canonicalPath, SOURCE_A, "unrelated-canonical-work");
+    const resolve = () =>
+      resolveCollectorQueuePath({
+        connectorId: "claude_code",
+        moduleUrl: modulePath(installRoot),
+        sourceInstanceId: SOURCE_A,
+        stateRoot,
+      });
+
+    assert.throws(
+      resolve,
+      (error: unknown) =>
+        error instanceof CollectorStateResolutionError &&
+        error.code === "legacy_state_conflict" &&
+        error.message.includes(legacyPath) &&
+        error.message.includes(canonicalPath)
+    );
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["unrelated-canonical-work"]);
+
+    // Draining the legacy backlog (the operator's remedy, via --queue) clears the conflict.
+    const legacyOutbox = new LocalDeviceOutbox({ path: legacyPath });
+    try {
+      const [claimed] = legacyOutbox.claimReady({ holder: "operator", leaseMs: 60_000, sourceInstanceId: SOURCE_A });
+      assert.ok(claimed);
+      legacyOutbox.acknowledge({ holder: "operator", id: claimed.id, leaseEpoch: claimed.lease_epoch });
+    } finally {
+      legacyOutbox.close();
+    }
+    assert.equal(resolve(), canonicalPath);
+  });
+});
+
+test("a canonical path is not handed out while a live process holds its handoff lock", () => {
+  withTempRoot("pdpp-durable-state-lock-", (root) => {
+    const stateRoot = join(root, "user-state");
+    const canonicalPath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    mkdirSync(dirname(canonicalPath), { recursive: true });
+    const lockPath = `${canonicalPath}.handoff.lock`;
+    const resolve = () =>
+      resolveCollectorQueuePath({
+        connectorId: "claude_code",
+        moduleUrl: modulePath(join(root, "other-install")),
+        sourceInstanceId: SOURCE_A,
+        stateRoot,
+      });
+
+    writeFileSync(lockPath, `${process.pid}\n`);
+    assert.throws(
+      resolve,
+      (error: unknown) => error instanceof CollectorStateResolutionError && error.code === "legacy_state_conflict"
+    );
+    // A lock left by a dead process does not block.
+    const exited = spawnSync(process.execPath, ["-e", ""]);
+    writeFileSync(lockPath, `${exited.pid}\n`);
+    assert.equal(resolve(), canonicalPath);
+  });
+});
+
+test("a completed migration is recognised by its retirement fence, not treated as a conflict", () => {
+  withTempRoot("pdpp-durable-state-completed-", (root) => {
+    const stateRoot = join(root, "user-state");
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    seedOutbox(legacyPath, SOURCE_A, "pending-before-upgrade");
+    const resolve = () =>
+      resolveCollectorQueuePath({
+        connectorId: "claude_code",
+        moduleUrl: modulePath(installRoot),
+        sourceInstanceId: SOURCE_A,
+        stateRoot,
+      });
+
+    const first = resolve();
+    seedOutbox(first, SOURCE_A, "post-migration-work");
+
+    assert.equal(resolve(), first);
+    assert.deepEqual(outboxIds(first, SOURCE_A), ["pending-before-upgrade", "post-migration-work"]);
+  });
 });
 
 test("migration ignores an orphaned crash artifact and restart reuses the installed canonical copy", () => {

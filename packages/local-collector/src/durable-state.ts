@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
@@ -14,7 +15,6 @@ import {
   readSync,
   renameSync,
   rmSync,
-  statSync,
   writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -52,7 +52,11 @@ export interface CollectorStatePathInput {
 }
 
 export class CollectorStateResolutionError extends Error {
-  readonly code: "legacy_state_ambiguous" | "legacy_state_unreadable" | "legacy_state_migration_failed";
+  readonly code:
+    | "legacy_state_ambiguous"
+    | "legacy_state_conflict"
+    | "legacy_state_unreadable"
+    | "legacy_state_migration_failed";
 
   constructor(code: CollectorStateResolutionError["code"], message: string, options: ErrorOptions = {}) {
     super(message, options);
@@ -123,6 +127,12 @@ export function canonicalCollectorQueuePath(input: {
  * consistent SQLite snapshot, retires the migrated source in the old
  * database, and installs the snapshot at the canonical path. Old pathnames
  * are never removed.
+ *
+ * A canonical queue that already exists next to an unmigrated package-local
+ * store is never merged into or silently preferred: the outbox orders work by
+ * insertion, so appending an old backlog (checkpoints, terminal commits) after
+ * newer canonical rows could replay stale state. Resolution fails with
+ * `legacy_state_conflict` and leaves the legacy store writable.
  */
 export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): string {
   const { configuredPath, configuredPathIsExplicit } = input;
@@ -147,42 +157,47 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
     return canonicalPath;
   }
 
+  const roots = legacyRoots({
+    extraRoots: input.legacyRoots,
+    historicalStableDirectory,
+    packageDataRoot: packageDataRoot(input.moduleUrl),
+    stateDirectory,
+    stateRoot,
+  });
+
   if (existsSync(canonicalPath)) {
-    // A fully installed canonical copy is authoritative. If it is an empty
-    // database while another legacy store has rows, fail closed rather than
-    // turning an interrupted/manual initialization into silent data loss.
     if (containsSourceRows(canonicalPath, sourceInstanceId)) {
+      // A canonical copy with rows is authoritative only if no package-local
+      // store still holds an unmigrated backlog. Source rows alone do not show
+      // that the migration ran: a concurrent run can create the canonical queue
+      // first. The state directory itself is skipped because its stores are used
+      // in place and are never retired.
+      const unmigrated = findMatchingLegacyStores({
+        canonicalPath,
+        roots: roots.filter((root) => root !== stateDirectory),
+        sourceInstanceId,
+      }).filter((path) => !isWithin(stateDirectory, path) && hasUnmigratedPendingRows(path, sourceInstanceId));
+      if (unmigrated.length > 0) {
+        throw conflictingLegacyState(canonicalPath, unmigrated, sourceInstanceId);
+      }
       return canonicalPath;
     }
-    const legacyMatches = findMatchingLegacyStores({
-      canonicalPath,
-      roots: legacyRoots({
-        extraRoots: input.legacyRoots,
-        historicalStableDirectory,
-        packageDataRoot: packageDataRoot(input.moduleUrl),
-        stateDirectory,
-        stateRoot,
-      }),
-      sourceInstanceId,
-    });
+    // An empty canonical database while another legacy store has rows: fail
+    // closed rather than turning an interrupted/manual initialization into
+    // silent data loss.
+    const legacyMatches = findMatchingLegacyStores({ canonicalPath, roots, sourceInstanceId });
     if (legacyMatches.length > 0) {
       throw ambiguousLegacyState(canonicalPath, legacyMatches, sourceInstanceId);
     }
     return canonicalPath;
   }
 
-  const matches = findMatchingLegacyStores({
-    canonicalPath,
-    roots: legacyRoots({
-      extraRoots: input.legacyRoots,
-      historicalStableDirectory,
-      packageDataRoot: packageDataRoot(input.moduleUrl),
-      stateDirectory,
-      stateRoot,
-    }),
-    sourceInstanceId,
-  });
+  const matches = findMatchingLegacyStores({ canonicalPath, roots, sourceInstanceId });
   if (matches.length === 0) {
+    // The canonical file is created by the caller, outside this module. While
+    // another process holds the handoff lock, creating it here would race the
+    // installation of the migrated snapshot.
+    assertNoHandoffInProgress(canonicalPath);
     return canonicalPath;
   }
   if (matches.length > 1) {
@@ -339,6 +354,46 @@ function containsSourceRows(path: string, sourceInstanceId: string): boolean {
   }
 }
 
+/**
+ * True when the store still holds undelivered work for the source and has not
+ * been retired by a completed handoff. Delivered (`succeeded`) rows are only
+ * retained history, so they never block resolution.
+ */
+function hasUnmigratedPendingRows(path: string, sourceInstanceId: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA busy_timeout = 5000");
+    const tableExists = (name: string) =>
+      Boolean(db?.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+    if (!tableExists("local_device_outbox")) {
+      return false;
+    }
+    if (
+      tableExists("pdpp_legacy_retirements") &&
+      db.prepare("SELECT 1 AS present FROM pdpp_legacy_retirements WHERE source_instance_id = ?").get(sourceInstanceId)
+    ) {
+      return false;
+    }
+    return Boolean(
+      db
+        .prepare(
+          "SELECT 1 AS present FROM local_device_outbox WHERE source_instance_id = ? AND status != 'succeeded' LIMIT 1"
+        )
+        .get(sourceInstanceId)
+    );
+  } catch (error) {
+    // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
+    throw new CollectorStateResolutionError(
+      "legacy_state_unreadable",
+      `could not inspect legacy local collector state candidate ${path}`,
+      { cause: error }
+    );
+  } finally {
+    db?.close();
+  }
+}
+
 function migrateLegacyStore(
   legacyPath: string,
   canonicalPath: string,
@@ -353,7 +408,9 @@ function migrateLegacyStore(
   let lockAcquired = false;
   let source: DatabaseSync | undefined;
   try {
-    ensureSameFilesystem(legacyPath, canonicalPath);
+    // The snapshot is written beside the final canonical database, so the final
+    // rename is between destination siblings. The legacy store may be on a
+    // different filesystem: it is only read (VACUUM INTO) and fenced in place.
     acquireMigrationLock(lockPath);
     lockAcquired = true;
     source = new DatabaseSync(legacyPath, { readOnly: true });
@@ -377,7 +434,7 @@ function migrateLegacyStore(
     }
 
     afterRetirementFence?.();
-    installSnapshot(temporaryPath, canonicalPath, sourceInstanceId);
+    installSnapshot(temporaryPath, canonicalPath, legacyPath, sourceInstanceId);
     afterInstall?.();
     if (lockAcquired) {
       releaseMigrationLock(lockPath);
@@ -457,6 +514,12 @@ function reconcileLegacyWrites(
          WHERE source_instance_id = '${sourceInstanceId.replaceAll("'", "''")}'
       `);
     }
+    // Checked while the legacy database is write-locked and before the fence is
+    // committed: a canonical queue that appeared since the snapshot holds work
+    // this migration has not seen, so abort with the legacy writer still live.
+    if (existsSync(canonicalPath)) {
+      throw conflictingLegacyState(canonicalPath, [legacyPath], sourceInstanceId);
+    }
     installRetirementFence(source, sourceInstanceId, canonicalPath);
     source.exec("COMMIT");
     source.exec("DETACH DATABASE migrated");
@@ -510,14 +573,44 @@ function releaseMigrationLock(path: string): void {
   rmSync(path, { force: true });
 }
 
-function installSnapshot(temporaryPath: string, canonicalPath: string, sourceInstanceId: string): void {
-  if (existsSync(canonicalPath)) {
-    if (!containsSourceRows(canonicalPath, sourceInstanceId)) {
-      throw new Error("a concurrent canonical state file does not contain the requested source");
+/**
+ * Publish the snapshot at the canonical path without ever replacing a file that
+ * appeared since the pre-fence check. link(2) fails with EEXIST instead of
+ * overwriting, unlike rename(2). If a canonical queue won the race after the
+ * fence committed, lift the fence so the legacy writer is usable again.
+ */
+function installSnapshot(
+  temporaryPath: string,
+  canonicalPath: string,
+  legacyPath: string,
+  sourceInstanceId: string
+): void {
+  try {
+    linkSync(temporaryPath, canonicalPath);
+    rmSync(temporaryPath, { force: true });
+  } catch (error) {
+    if (isAlreadyExistsError(error)) {
+      throw conflictingLegacyState(
+        canonicalPath,
+        [legacyPath],
+        sourceInstanceId,
+        liftRetirementFence(legacyPath, sourceInstanceId)
+      );
     }
-    return;
+    if (!isLinkUnsupportedError(error)) {
+      throw error;
+    }
+    // Some filesystems cannot hard-link; fall back to the best available check.
+    if (existsSync(canonicalPath)) {
+      throw conflictingLegacyState(
+        canonicalPath,
+        [legacyPath],
+        sourceInstanceId,
+        liftRetirementFence(legacyPath, sourceInstanceId)
+      );
+    }
+    renameSync(temporaryPath, canonicalPath);
   }
-  renameSync(temporaryPath, canonicalPath);
   if (process.platform !== "win32") {
     chmodSync(canonicalPath, 0o600);
   }
@@ -535,12 +628,44 @@ function installSnapshot(temporaryPath: string, canonicalPath: string, sourceIns
   }
 }
 
-function ensureSameFilesystem(legacyPath: string, canonicalPath: string): void {
-  const legacyDevice = statSync(dirname(legacyPath)).dev;
-  const canonicalDevice = statSync(dirname(canonicalPath)).dev;
-  if (legacyDevice !== canonicalDevice) {
-    throw new Error("legacy state handoff crosses filesystems; refusing a non-atomic migration");
+/** Returns whether the legacy store is writable again. */
+function liftRetirementFence(legacyPath: string, sourceInstanceId: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(legacyPath);
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.prepare("DELETE FROM pdpp_legacy_retirements WHERE source_instance_id = ?").run(sourceInstanceId);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
   }
+}
+
+/** Refuse to hand out a canonical path while a live process holds its handoff lock. */
+function assertNoHandoffInProgress(canonicalPath: string): void {
+  const lockPath = `${canonicalPath}.handoff.lock`;
+  let ownerPid: number;
+  try {
+    ownerPid = Number(readFileSync(lockPath, { encoding: "utf8" }).trim());
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+  try {
+    process.kill(ownerPid, 0);
+  } catch (probeError) {
+    if (isNodeError(probeError) && probeError.code === "ESRCH") {
+      return;
+    }
+  }
+  throw new CollectorStateResolutionError(
+    "legacy_state_conflict",
+    `a legacy state handoff to ${canonicalPath} is in progress (process ${ownerPid}); retry once it finishes`
+  );
 }
 
 function installRetirementFence(source: DatabaseSync, sourceInstanceId: string, canonicalPath: string): void {
@@ -585,6 +710,21 @@ function ambiguousLegacyState(
   );
 }
 
+function conflictingLegacyState(
+  canonicalPath: string,
+  legacyPaths: readonly string[],
+  sourceInstanceId: string,
+  legacyWritable = true
+): CollectorStateResolutionError {
+  const state = legacyWritable
+    ? "the legacy store was left writable and was not migrated"
+    : "the legacy store could not be returned to a writable state; remove its pdpp_legacy_retirements row for this source";
+  return new CollectorStateResolutionError(
+    "legacy_state_conflict",
+    `local collector state for source '${sourceInstanceId}' exists in both the canonical queue ${canonicalPath} and an unmigrated legacy store (${legacyPaths.join(", ")}); ${state}. The two cannot be merged safely because queue order carries checkpoints and terminal commits. Deliver the legacy backlog first by running the collector once with --queue ${legacyPaths.join(" ")}, then rerun; or pass --queue to choose one store explicitly`
+  );
+}
+
 function safeStatePathSegment(value: string): string {
   return Buffer.from(value, "utf8").toString("base64url");
 }
@@ -604,6 +744,10 @@ function isNotFoundError(error: unknown): boolean {
 
 function isAlreadyExistsError(error: unknown): boolean {
   return isNodeError(error) && error.code === "EEXIST";
+}
+
+function isLinkUnsupportedError(error: unknown): boolean {
+  return isNodeError(error) && ["EPERM", "ENOSYS", "ENOTSUP", "EOPNOTSUPP"].includes(String(error.code));
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
