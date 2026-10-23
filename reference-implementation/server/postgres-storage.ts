@@ -3970,21 +3970,6 @@ async function bootstrapPostgresSchemaOnce({
     await migratePostgresSchedulerInstanceColumns(client);
     await migratePostgresRunHistoryRename(client);
     await migratePostgresRunHistoryCompletedAtNullable(client);
-    // After the rename/rebuild migrations above, which can swap run_history
-    // for the legacy table. A nullable ADD COLUMN with no default is
-    // catalog-only (no table rewrite), but it still needs a momentary
-    // ACCESS EXCLUSIVE lock, so it gets the same bounded lock wait as the
-    // scheduler_managed default repair below instead of queueing forever.
-    await client.query("BEGIN");
-    try {
-      await client.query("SET LOCAL lock_timeout = '5s'");
-      await client.query("SET LOCAL statement_timeout = '30s'");
-      await client.query("ALTER TABLE run_history ADD COLUMN IF NOT EXISTS actor_type TEXT");
-      await client.query("COMMIT");
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    }
     await migratePostgresRunHistorySchedulerManagedDefault(client, { log });
     await migratePostgresConnectorMaintenanceCursorNameCheck(client);
     await migratePostgresRecordsBlobSearchInstanceColumns(client);
@@ -3998,6 +3983,22 @@ async function bootstrapPostgresSchemaOnce({
     await ensurePostgresMigrationLedger(client);
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
     await migratePostgresRunHistoryDeviceRunProvenance(client, { log });
+    // After the rename/rebuild migrations and the scheduler_managed repairs
+    // above (the rename/rebuild can swap run_history for the legacy table). A nullable ADD COLUMN with no default is
+    // catalog-only (no table rewrite), but it still needs a momentary
+    // ACCESS EXCLUSIVE lock, so it gets the same bounded lock wait as the
+    // scheduler_managed repairs, which run first so a contended run_history
+    // fails boot through their own typed, resumable error paths.
+    await client.query("BEGIN");
+    try {
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      await client.query("SET LOCAL statement_timeout = '30s'");
+      await client.query("ALTER TABLE run_history ADD COLUMN IF NOT EXISTS actor_type TEXT");
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
     await migratePostgresLegacyConnectorInstancesToDefaultAccount(client);
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
     await migratePostgresConnectorSummaryEvidenceRepairChunkPageSize(client);
