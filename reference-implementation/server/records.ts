@@ -393,6 +393,12 @@ interface RecordSnapshot {
   version: number;
 }
 interface ChangesSinceCursor {
+  /**
+   * `connector_instances.record_reset_generation` (decimal text) when the
+   * token was issued. Absent on `beginning` and on tokens issued before the
+   * epoch was added; an absent epoch is generation "0".
+   */
+  epoch?: string;
   kind?: "changes_since";
   version: number;
 }
@@ -641,6 +647,7 @@ type PageOrder = "ASC" | "DESC";
 interface PaginationCursor {
   after_version?: number;
   cursor_value?: unknown;
+  epoch?: unknown;
   order?: unknown;
   primary_key?: unknown;
   session?: unknown;
@@ -4653,7 +4660,12 @@ function parseChangesSinceCursor(str: string): ChangesSinceCursor | null {
   if (decoded.kind !== "changes_since" || typeof decoded.version !== "number" || !Number.isInteger(decoded.version)) {
     return null;
   }
-  return { kind: "changes_since", version: decoded.version };
+  if (decoded.epoch === undefined) {
+    return { kind: "changes_since", version: decoded.version };
+  }
+  return typeof decoded.epoch === "string"
+    ? { epoch: decoded.epoch, kind: "changes_since", version: decoded.version }
+    : null;
 }
 
 // Self-teaching error message: when a caller passes something other than the
@@ -4689,13 +4701,16 @@ function encodeChangesPageCursor({
   sinceVersion,
   afterVersion,
   sessionMaxVersion,
+  epoch,
 }: {
   afterVersion: number;
+  epoch: string;
   sessionMaxVersion: number;
   sinceVersion: number;
 }): string {
   return encodeCursor({
     after_version: afterVersion,
+    epoch,
     kind: "page",
     session: "changes",
     session_max_version: sessionMaxVersion,
@@ -4703,8 +4718,8 @@ function encodeChangesPageCursor({
   });
 }
 
-function encodeChangesSinceCursor(version: number): string {
-  return encodeCursor({ kind: "changes_since", version });
+function encodeChangesSinceCursor(version: number, epoch: string): string {
+  return encodeCursor({ epoch, kind: "changes_since", version });
 }
 
 function getSnapshotAtVersion(
@@ -5094,8 +5109,17 @@ export async function recordCurrentGenerationUndeclaredWrite(
   });
 }
 
+/** Decimal text so values beyond 2^53-1 survive; a missing connection reads as "0". */
+function readRecordResetGeneration(connectorInstanceId: string): string {
+  const row = getOne<{ reset_generation: string }>(referenceQueries.recordsDeleteGetRecordResetGeneration, [
+    connectorInstanceId,
+  ]);
+  return String(row?.reset_generation ?? "0");
+}
+
 interface ValidatedChangeVersions {
   effectiveSessionMaxVersion: number;
+  epoch: string;
   verifiedAfterVersion: number;
   verifiedSinceVersion: number;
 }
@@ -5120,6 +5144,22 @@ function validateChangesSinceVersions(
     throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
   }
 
+  // A bulk reset deletes the stream's records, history and version counter in
+  // one transaction and advances the connection's reset generation in that
+  // same transaction, so versions can be reissued afterwards. A token (or page
+  // cursor) minted under an earlier generation names versions from a space
+  // that no longer exists and must not be replayed against the new one.
+  // `beginning` and version-0 tokens hold no consumer state and stay valid.
+  const epoch = readRecordResetGeneration(connectorInstanceId);
+  const tokenEpoch = changesSince === null ? changesCursor?.epoch : changesSince.epoch;
+  if (tokenEpoch !== undefined && typeof tokenEpoch !== "string") {
+    throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
+  }
+  const tokenHoldsNoState = changesSince !== null && changesSince.version === 0;
+  if (!tokenHoldsNoState && (tokenEpoch ?? "0") !== epoch) {
+    throw codedError("changes_since cursor predates a stream reset; full re-sync required", "cursor_expired");
+  }
+
   const vcRow = getOne<VersionCounterRow>(referenceQueries.recordsIngestGetVersionCounter, [
     connectorInstanceId,
     stream,
@@ -5139,7 +5179,7 @@ function validateChangesSinceVersions(
     throw codedError("changes_since cursor is too old; full re-sync required", "cursor_expired");
   }
 
-  return { effectiveSessionMaxVersion, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
+  return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
 }
 
 function fetchChangeGroupBatch(
@@ -5300,12 +5340,8 @@ function queryRecordsChangesSince({
   requestWarnings,
   stream,
 }: QueryRecordsChangesSinceArgs): ListResponse {
-  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion } = validateChangesSinceVersions(
-    changesSince,
-    paginationCursor,
-    connectorInstanceId,
-    stream
-  );
+  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion, epoch } =
+    validateChangesSinceVersions(changesSince, paginationCursor, connectorInstanceId, stream);
 
   const visibleChanges = collectVisibleChanges(
     connectorInstanceId,
@@ -5335,12 +5371,13 @@ function queryRecordsChangesSince({
     }
     response.next_cursor = encodeChangesPageCursor({
       afterVersion: lastGroup.latestVersion,
+      epoch,
       sessionMaxVersion: effectiveSessionMaxVersion,
       sinceVersion: verifiedSinceVersion,
     });
   }
 
-  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion);
+  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion, epoch);
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
 }

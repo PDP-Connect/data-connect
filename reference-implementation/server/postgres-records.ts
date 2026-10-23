@@ -171,6 +171,7 @@ interface PgRow {
   record_json: unknown;
   record_json_bytes?: number | string;
   record_key: string;
+  reset_generation?: string;
   semantic_time?: string | null;
   sha256?: string;
   size_bytes?: number | string;
@@ -2231,6 +2232,15 @@ async function visiblePostgresChange({
   });
 }
 
+/** Decimal text so values beyond 2^53-1 survive; a missing connection reads as "0". */
+async function readPostgresRecordResetGeneration(connectorInstanceId: string): Promise<string> {
+  const result = await postgresQuery(
+    "SELECT record_reset_generation::text AS reset_generation FROM connector_instances WHERE connector_instance_id = $1",
+    [connectorInstanceId]
+  );
+  return String(result.rows[0]?.reset_generation ?? "0");
+}
+
 async function queryPostgresChangesSince({
   compiledFilters,
   connectorInstanceId,
@@ -2252,9 +2262,28 @@ async function queryPostgresChangesSince({
   const changesSince = requestParams.changes_since;
   const decoded = changesSince === "beginning" ? { v: 0 } : decodeCursor(changesSince ?? "");
   const decodedVersion = decoded && typeof decoded.v === "number" ? decoded.v : null;
-  if (decodedVersion === null || !Number.isInteger(decodedVersion)) {
+  const tokenEpoch = decoded && "e" in decoded ? decoded.e : undefined;
+  if (
+    decodedVersion === null ||
+    !Number.isInteger(decodedVersion) ||
+    (tokenEpoch !== undefined && typeof tokenEpoch !== "string")
+  ) {
     const err: PgQueryError = new Error("Malformed changes_since cursor");
     err.code = "invalid_cursor";
+    throw err;
+  }
+  // A bulk reset deletes the stream's records, history and version counter and
+  // advances the connection's reset generation in one transaction, so versions
+  // can be reissued afterwards. A token minted under an earlier generation
+  // names a version space that no longer exists. Read the generation BEFORE
+  // the version counter: a reset landing between the two reads then yields a
+  // token that fails on its next use, never one that pairs an old version with
+  // the new generation. `beginning` and version-0 tokens hold no consumer
+  // state and stay valid.
+  const epoch = await readPostgresRecordResetGeneration(connectorInstanceId);
+  if (decodedVersion !== 0 && (tokenEpoch ?? "0") !== epoch) {
+    const err: PgQueryError = new Error("changes_since cursor predates a stream reset; full re-sync required");
+    err.code = "cursor_expired";
     throw err;
   }
   const maxResult = await postgresQuery(
@@ -2306,7 +2335,7 @@ async function queryPostgresChangesSince({
   const response: RecordListResponse = {
     data: visibleChanges,
     has_more: false,
-    next_changes_since: encodeCursor({ v: sessionMax }),
+    next_changes_since: encodeCursor({ e: epoch, v: sessionMax }),
     object: "list",
   };
   attachRequestWarningsToResponse(response, requestWarnings);
