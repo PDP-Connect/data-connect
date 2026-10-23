@@ -28,8 +28,9 @@ import type { Controller } from "../runtime/controller.ts";
 
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import {
+  __testOnlySetFoldPauseHook,
+  foldConnectorSummaryStreamFacts,
   reconcileDirtyConnectorSummaryEvidence,
-  STREAM_FACTS_FOLD_LOGIC_VERSION,
 } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
@@ -1703,19 +1704,28 @@ async function foldedStreamFacts(lane: Lane): Promise<{ readonly streams: string
   return { streams: Object.keys(facts).sort(), version: row.version === null ? null : Number(row.version) };
 }
 
-/** Pretend an earlier fold version built the cache, and mirror the source kind so no evidence repair fires. */
+/**
+ * Literal on purpose: the fold version this change introduces, and the one before it. Deriving either from the
+ * current constant would let a revert of the bump pass.
+ */
+const PREDECESSOR_FOLD_VERSION = 7;
+const UPGRADED_FOLD_VERSION = 8;
+
+/** Pretend the predecessor fold version built the cache, and mirror the source kind so no evidence repair fires. */
 async function ageFoldCache(lane: Lane, sourceKind: string): Promise<void> {
   await sql(
     lane,
     "UPDATE connector_summary_evidence SET source_kind = ?, stream_facts_fold_version = ?, dirty = 0 WHERE connector_instance_id = ?",
     "UPDATE connector_summary_evidence SET source_kind = $1, stream_facts_fold_version = $2, dirty = 0 WHERE connector_instance_id = $3",
-    [sourceKind, STREAM_FACTS_FOLD_LOGIC_VERSION - 1, lane.enrolled.connector_instance_id]
+    [sourceKind, PREDECESSOR_FOLD_VERSION, lane.enrolled.connector_instance_id]
   );
 }
 
 /** The per-stream coverage conditions the owner's collection report shows for the connection. */
-async function reportedConditions(lane: Lane): Promise<Record<string, unknown>> {
-  await reconcileDirtyConnectorSummaryEvidence(null);
+async function reportedConditions(lane: Lane, repairFirst = true): Promise<Record<string, unknown>> {
+  if (repairFirst) {
+    await reconcileDirtyConnectorSummaryEvidence(null);
+  }
   const summary = (await listConnectorSummaries()).find(
     (row) => row.connector_instance_id === lane.enrolled.connector_instance_id
   );
@@ -1743,7 +1753,34 @@ laneTest(
     await ageFoldCache(lane, "browser_collector");
     await assertNoDeviceCoverage(lane, "an unmarked device terminal on a browser_collector connection");
     const { version } = await foldedStreamFacts(lane);
-    assert.equal(version, STREAM_FACTS_FOLD_LOGIC_VERSION, "the fold replayed the cache");
+    assert.equal(version, UPGRADED_FOLD_VERSION, "the fold replayed the cache");
+  }
+);
+
+laneTest(
+  "source kind: a behind-version cache holding an unmarked device fact reads unknown before any repair runs",
+  async (lane) => {
+    await commitProof(lane, "run-behind");
+    await assertCovered(lane, "run-behind", "the device terminal covers its local_device connection");
+    await changeSourceKind(lane, "browser_collector");
+    await ageFoldCache(lane, "browser_collector");
+    // No reconcile, no maintenance sweep: this is what a read sees between a deploy and the first replay.
+    assert.deepEqual(
+      await reportedConditions(lane, false),
+      UNKNOWN_CONDITIONS,
+      "the list read credits no stream from a cache an older fold built"
+    );
+    const detail = await getConnectorDetail(CONNECTOR_ID);
+    assert.deepEqual(
+      Object.fromEntries(detail.collection_report.map((entry) => [entry.stream, entry.coverage_condition])),
+      UNKNOWN_CONDITIONS,
+      "the detail read credits no stream from a cache an older fold built"
+    );
+    assert.equal(
+      (await foldedStreamFacts(lane)).version,
+      PREDECESSOR_FOLD_VERSION,
+      "the reads repaired nothing: the cache is still the predecessor's"
+    );
   }
 );
 
@@ -1754,6 +1791,57 @@ laneTest(
     await assertCovered(lane, "run-was-local", "the device terminal covers its local_device connection");
     await changeSourceKind(lane, "browser_collector");
     await assertNoDeviceCoverage(lane, "a device terminal stored while the connection was local_device");
+  }
+);
+
+laneTest(
+  "source kind: a fold begun under local_device cannot publish after the connection's source kind changed",
+  async (lane) => {
+    await commitProof(lane, "run-fenced");
+    await assertCovered(lane, "run-fenced", "the device terminal covers its local_device connection");
+    const id = lane.enrolled.connector_instance_id;
+    // The cache as an evidence repair leaves it: no checkpoint, no facts, the current fold version.
+    await sql(
+      lane,
+      "UPDATE connector_summary_evidence SET stream_latest_facts_json = NULL, stream_facts_event_seq = NULL, stream_facts_fold_version = ?, dirty = 0 WHERE connector_instance_id = ?",
+      "UPDATE connector_summary_evidence SET stream_latest_facts_json = NULL, stream_facts_event_seq = NULL, stream_facts_fold_version = $1, dirty = 0 WHERE connector_instance_id = $2",
+      [UPGRADED_FOLD_VERSION, id]
+    );
+    const paused = gate();
+    const reached = gate();
+    let held = false;
+    __testOnlySetFoldPauseHook(async (point) => {
+      if (point === "before_cas_write" && !held) {
+        held = true;
+        reached.open();
+        await paused.wait;
+      }
+    });
+    try {
+      const inFlight = foldConnectorSummaryStreamFacts([id]);
+      await Promise.race([
+        reached.wait,
+        inFlight.then(() => assert.fail("the fold finished without reaching its compare-and-set write")),
+      ]);
+      // The fold has folded the device terminal as local_device and not yet written. The source kind changes:
+      // the repair writes the new kind on the evidence row and leaves checkpoint and version as they were.
+      await changeSourceKind(lane, "browser_collector");
+      await sql(
+        lane,
+        "UPDATE connector_summary_evidence SET source_kind = ? WHERE connector_instance_id = ?",
+        "UPDATE connector_summary_evidence SET source_kind = $1 WHERE connector_instance_id = $2",
+        ["browser_collector", id]
+      );
+      paused.open();
+      // The write built under local_device loses its CAS; the fold's own retry rereads the new kind and refuses the
+      // device terminal.
+      const outcome = await inFlight;
+      assert.ok(outcome.refused > 0, "the retry under the new source kind refuses the device terminal");
+    } finally {
+      __testOnlySetFoldPauseHook(null);
+    }
+    assert.deepEqual((await foldedStreamFacts(lane)).streams, [], "the stale fold published no device fact");
+    await assertNoDeviceCoverage(lane, "the fold after the source kind changed");
   }
 );
 
@@ -1781,7 +1869,7 @@ laneTest(
     await assertCovered(lane, "run-local", "the replayed fold keeps the local_device positive");
     assert.deepEqual(await foldedStreamFacts(lane), {
       streams: ["messages", "sessions"],
-      version: STREAM_FACTS_FOLD_LOGIC_VERSION,
+      version: UPGRADED_FOLD_VERSION,
     });
   }
 );

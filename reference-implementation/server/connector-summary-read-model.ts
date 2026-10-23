@@ -126,6 +126,12 @@ const REASON_CODES = {
    * replay, or overwrite it; this reason fails the row closed instead.
    */
   FOLD_LOGIC_VERSION_INCOMPATIBLE_FUTURE: "fold_logic_version_incompatible_future",
+  /**
+   * A row's stored `stream_facts_fold_version` is BEHIND this binary's: its
+   * cached facts were folded under older semantics and no replay has run yet.
+   * Reads present it as unobserved, never as current evidence.
+   */
+  FOLD_LOGIC_VERSION_BEHIND: "fold_logic_version_behind",
   // A source-attributed terminal event without a matching durable generation
   // is historical, never an empty/current fold result.
   TERMINAL_FACTS_HISTORICAL: "terminal_facts_historical",
@@ -767,6 +773,17 @@ function shapeTerminalFacts(row: Row) {
       state: "stale",
     };
   }
+  // The mirror of the future case: facts a replay has not yet rebuilt under
+  // this version's semantics are not evidence. The durable row is untouched;
+  // the fold replays it.
+  if (rowIsFoldLogicVersionBehind(row) && row.terminal_facts_state === "current") {
+    return {
+      as_of: row.computed_at || null,
+      event_seq: eventSeq,
+      reason_code: REASON_CODES.FOLD_LOGIC_VERSION_BEHIND,
+      state: "unobserved",
+    };
+  }
   return {
     as_of: row.computed_at || null,
     event_seq: eventSeq,
@@ -868,7 +885,10 @@ export function shapeEvidenceRow(row: Row) {
     status: row.status,
     stream_count: Number(row.stream_count || 0),
     stream_facts_event_seq: row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq),
-    stream_latest_facts: parseEvidenceJson(row.stream_latest_facts_json, null),
+    // A cache folded under an older version credits no stream until replayed.
+    stream_latest_facts: rowIsFoldLogicVersionBehind(row)
+      ? null
+      : parseEvidenceJson(row.stream_latest_facts_json, null),
     stream_records: parseEvidenceJson(row.stream_records_json, []),
     terminal_facts: shapeTerminalFacts(row),
     total_records: Number(row.total_records || 0),
@@ -1417,6 +1437,7 @@ function createStreamFactsFoldStore() {
         eventSeq,
         baselineEventSeq,
         baselineFoldVersion,
+        baselineSourceKind,
         foldVersion,
         terminalFactsState,
         terminalFactsReasonCode,
@@ -1426,6 +1447,7 @@ function createStreamFactsFoldStore() {
         eventSeq: number;
         baselineEventSeq: number | null;
         baselineFoldVersion: number | null;
+        baselineSourceKind: string | null;
         foldVersion: number | null;
         terminalFactsState: "current" | "stale";
         terminalFactsReasonCode: string | null;
@@ -1440,7 +1462,8 @@ function createStreamFactsFoldStore() {
                   canonical_evidence_revision = canonical_evidence_revision + 1
             WHERE connector_instance_id = $1
               AND stream_facts_event_seq IS NOT DISTINCT FROM $4
-              AND stream_facts_fold_version IS NOT DISTINCT FROM $8`,
+              AND stream_facts_fold_version IS NOT DISTINCT FROM $8
+              AND source_kind IS NOT DISTINCT FROM $9`,
           [
             connectorInstanceId,
             factsJson,
@@ -1450,6 +1473,7 @@ function createStreamFactsFoldStore() {
             terminalFactsState,
             terminalFactsReasonCode,
             baselineFoldVersion,
+            baselineSourceKind,
           ]
         );
         return (result.rowCount ?? 0) > 0;
@@ -1524,6 +1548,7 @@ function createStreamFactsFoldStore() {
       eventSeq,
       baselineEventSeq,
       baselineFoldVersion,
+      baselineSourceKind,
       foldVersion,
       terminalFactsState,
       terminalFactsReasonCode,
@@ -1533,6 +1558,7 @@ function createStreamFactsFoldStore() {
       eventSeq: number;
       baselineEventSeq: number | null;
       baselineFoldVersion: number | null;
+      baselineSourceKind: string | null;
       foldVersion: number | null;
       terminalFactsState: "current" | "stale";
       terminalFactsReasonCode: string | null;
@@ -1548,7 +1574,8 @@ function createStreamFactsFoldStore() {
                   canonical_evidence_revision = canonical_evidence_revision + 1
             WHERE connector_instance_id = ?
               AND stream_facts_event_seq IS ?
-              AND stream_facts_fold_version IS ?`
+              AND stream_facts_fold_version IS ?
+              AND source_kind IS ?`
         )
         .run(
           factsJson,
@@ -1558,7 +1585,8 @@ function createStreamFactsFoldStore() {
           terminalFactsReasonCode,
           connectorInstanceId,
           baselineEventSeq,
-          baselineFoldVersion
+          baselineFoldVersion,
+          baselineSourceKind
         );
       return result.changes > 0;
     },
@@ -1576,19 +1604,26 @@ function createStreamFactsFoldStore() {
  * stream_facts_fold_version IS <baseline>` predicate in test code. Never
  * used outside tests.
  */
-export function __testOnlyUpdateStreamFactsCasWrite(args: {
+export async function __testOnlyUpdateStreamFactsCasWrite(args: {
   connectorInstanceId: string;
   factsJson: string | null;
   eventSeq: number;
   baselineEventSeq: number | null;
   baselineFoldVersion?: number | null;
+  /** Omitted: the row's current source kind, so the write is fenced by nothing but its other anchors. */
+  baselineSourceKind?: string | null;
   foldVersion?: number | null;
   terminalFactsState?: "current" | "stale";
   terminalFactsReasonCode?: string | null;
-}): Promise<boolean> | boolean {
+}): Promise<boolean> {
+  const baselineSourceKind =
+    args.baselineSourceKind === undefined
+      ? (((await getConnectorSummaryEvidence(args.connectorInstanceId))?.source_kind as string | undefined) ?? null)
+      : args.baselineSourceKind;
   return createStreamFactsFoldStore().updateStreamFacts({
     ...args,
     baselineFoldVersion: args.baselineFoldVersion ?? null,
+    baselineSourceKind,
     foldVersion: args.foldVersion ?? STREAM_FACTS_FOLD_LOGIC_VERSION,
     terminalFactsReasonCode: args.terminalFactsReasonCode ?? null,
     terminalFactsState: args.terminalFactsState ?? "current",
@@ -2049,10 +2084,20 @@ function checkpointIsResumablePosition(checkpoint: unknown): boolean {
   return checkpoint !== null && checkpoint !== undefined && Number(checkpoint) > 0;
 }
 
+function evidenceRowSourceKind(row: Row): string | null {
+  return row.source_kind === null || row.source_kind === undefined ? null : String(row.source_kind);
+}
+
 /** A participant row's write-time CAS anchor, captured at seed time. */
 interface FoldCasBaseline {
   readonly eventSeq: number | null;
   readonly foldVersion: number | null;
+  /**
+   * The source kind the participant was folded under. Device terminal facts
+   * count only for a local_device connection, so a write built under another
+   * kind must lose to the repair that changed it.
+   */
+  readonly sourceKind: string | null;
 }
 
 /**
@@ -2125,6 +2170,7 @@ function seedFoldState(
     casBaselineByInstance.set(instanceId, {
       eventSeq: row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq),
       foldVersion: row.stream_facts_fold_version === null ? null : Number(row.stream_facts_fold_version),
+      sourceKind: evidenceRowSourceKind(row),
     });
     // The pass's default verdict for an instance no qualifying event touches
     // THIS round (e.g. a generation-transition boundary whose checkpoint
@@ -2407,6 +2453,7 @@ async function stampZeroCheckpointForBootstrap(
     const accepted = await foldStore.updateStreamFacts({
       baselineEventSeq: row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq),
       baselineFoldVersion: row.stream_facts_fold_version === null ? null : Number(row.stream_facts_fold_version),
+      baselineSourceKind: evidenceRowSourceKind(row),
       connectorInstanceId,
       eventSeq: 0,
       factsJson: null,
@@ -2991,10 +3038,11 @@ async function writeParticipantStreamFacts(
 ): Promise<boolean> {
   const effectiveCheckpoint = checkpointByInstance.get(instanceId) ?? null;
   const participantEventSeq = effectiveCheckpoint === null ? writeSeq : Math.max(writeSeq, effectiveCheckpoint);
-  const casBaseline = casBaselineByInstance.get(instanceId) ?? { eventSeq: null, foldVersion: null };
+  const casBaseline = casBaselineByInstance.get(instanceId) ?? { eventSeq: null, foldVersion: null, sourceKind: null };
   return foldStore.updateStreamFacts({
     baselineEventSeq: casBaseline.eventSeq,
     baselineFoldVersion: casBaseline.foldVersion,
+    baselineSourceKind: casBaseline.sourceKind,
     connectorInstanceId: instanceId,
     eventSeq: participantEventSeq,
     factsJson: Object.keys(facts).length > 0 ? JSON.stringify(facts) : null,
