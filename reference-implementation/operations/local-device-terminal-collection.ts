@@ -4,6 +4,7 @@
 import { createHash } from "node:crypto";
 import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
+import { isLocalDeviceConnection, NON_LOCAL_DEVICE_COVERAGE_REASON } from "../server/connector-instance-placement.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import { type IssuedRunSequence, RunStartConflictError } from "../server/stores/collection-revision-store.ts";
@@ -31,7 +32,7 @@ interface TerminalResponse {
 }
 
 interface AuthorizedSource {
-  readonly connectorInstance: { readonly connectorInstanceId: string };
+  readonly connectorInstance: { readonly connectorInstanceId: string; readonly sourceKind?: string | null };
   readonly sourceInstance: {
     readonly connectorId: string;
     readonly manifestGeneration?: number | null;
@@ -236,6 +237,8 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       return;
     }
 
+    const coverage = terminalCoverageEligibilityForSource(validatedFacts, authorized.connectorInstance);
+
     const result = await ctx.commitTerminalRun({
       collectionBoundary,
       commitId,
@@ -243,7 +246,8 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       connectorInstanceId: authorized.connectorInstance.connectorInstanceId,
       deviceId,
       envelopeHash,
-      normalizedFacts: validatedFacts,
+      normalizedFacts: coverage.facts,
+      ...(coverage.reason ? { coverageEligibilityReason: coverage.reason } : {}),
       runId,
       sourceInstanceId,
       stateDelta,
@@ -390,6 +394,7 @@ export async function handleLocalDeviceTerminalCollection(input: {
     // record takes the next collection revision in the same transaction, so a
     // report delayed past a newer proof retires that proof.
     const { connectorInstanceId } = authorized.connectorInstance;
+    const coverage = terminalCoverageEligibilityForSource(streams, authorized.connectorInstance);
     const event = {
       actor_id: deviceId,
       actor_type: "local_device",
@@ -402,7 +407,8 @@ export async function handleLocalDeviceTerminalCollection(input: {
           ...(collectionScope ? { collection_scope: collectionScope } : {}),
           reference_only: true,
           schema_version: 1,
-          streams,
+          ...(coverage.reason ? { coverage_eligibility_reason: coverage.reason } : {}),
+          streams: coverage.facts,
         },
         connector_instance_id: authorized.connectorInstance.connectorInstanceId,
         // Durable compatibility telemetry for retiring the split terminal
@@ -441,6 +447,19 @@ export async function handleLocalDeviceTerminalCollection(input: {
 
 function asObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function terminalCoverageEligibilityForSource(
+  facts: readonly Record<string, unknown>[],
+  instance: { readonly sourceKind?: string | null }
+): { readonly facts: readonly Record<string, unknown>[]; readonly reason: string | null } {
+  if (isLocalDeviceConnection(instance)) {
+    return { facts, reason: null };
+  }
+  return {
+    facts,
+    reason: NON_LOCAL_DEVICE_COVERAGE_REASON,
+  };
 }
 
 function readRequiredString(value: unknown): string | null {

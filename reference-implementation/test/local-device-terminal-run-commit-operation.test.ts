@@ -120,7 +120,7 @@ async function invokeBoundCoverageCommit(input: {
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -180,7 +180,7 @@ test("version 2 terminal coverage validates named stores against the manifest", 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -294,7 +294,7 @@ test("terminal run commit resolves authorization before receipt lookup and passe
     resolveAuthorizedSource: () => {
       authorized = true;
       return Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "https://registry.pdpp.dev/connectors/codex" },
       });
     },
@@ -366,7 +366,7 @@ test("a device sending the legacy connector alias still commits: both sides are 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
@@ -428,7 +428,7 @@ test("the envelope hash is computed over the connector id the device SENT, not t
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
@@ -492,7 +492,7 @@ test("an identity-alias connector still hashes correctly — the alias fix does 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex" },
       }),
   });
@@ -538,7 +538,7 @@ test("an unrelated connector id is still rejected — canonicalizing both sides 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
@@ -603,7 +603,7 @@ test("divergent receipt conflict returns a typed non-disclosing 409", async () =
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex" },
       }),
   });
@@ -652,7 +652,7 @@ test("SQLite route operation composes authorization with 201, exact response-los
         resolveAuthorizedSource: () => {
           resolved = true;
           return Promise.resolve({
-            connectorInstance: { connectorInstanceId: "cin-1" },
+            connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
             sourceInstance: { connectorId: "https://registry.pdpp.dev/connectors/codex" },
           });
         },
@@ -849,7 +849,7 @@ test("terminal commit records the server pin at admission and refuses an unbound
         res: capture.response,
         resolveAuthorizedSource: () =>
           Promise.resolve({
-            connectorInstance: { connectorInstanceId: "cin-1" },
+            connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
             sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
           }),
       });
@@ -937,7 +937,7 @@ test("terminal coverage requires the release registered for the authorized conne
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -1018,7 +1018,7 @@ test("a run bound to its registered release remains valid after the connector ca
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -1265,7 +1265,7 @@ test("a successful empty v2 terminal commit replaces every store with unknown ev
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -1364,7 +1364,7 @@ for (const eligible of [false, true]) {
       res: capture.response,
       resolveAuthorizedSource: () =>
         Promise.resolve({
-          connectorInstance: { connectorInstanceId: "cin-1" },
+          connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
           sourceInstance: { connectorId: "codex" },
         }),
     });

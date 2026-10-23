@@ -23,6 +23,8 @@ export interface ResolvedTerminalRunCommit {
   readonly commitId: string;
   readonly connectorId: string;
   readonly connectorInstanceId: string;
+  /** Stored with the terminal receipt when assertions are retained as unknown for placement. */
+  readonly coverageEligibilityReason?: string;
   readonly deviceId: string;
   readonly envelopeHash: string;
   readonly normalizedFacts: readonly Record<string, unknown>[];
@@ -133,15 +135,16 @@ function eventInputFor(
     actor_id: input.deviceId,
     actor_type: "local_device",
     data: {
-      // The connection revision this run, and the state it wrote, were
-      // committed at. It orders the record among observations and dates it.
-      collection_revision: order.collectionRevision,
       collection_facts: {
         collection_scope: input.collectionBoundary,
+        ...(input.coverageEligibilityReason ? { coverage_eligibility_reason: input.coverageEligibilityReason } : {}),
         reference_only: true,
         schema_version: input.version ?? 1,
         streams: input.normalizedFacts,
       },
+      // The connection revision this run, and the state it wrote, were
+      // committed at. It orders the record among observations and dates it.
+      collection_revision: order.collectionRevision,
       connector_instance_id: input.connectorInstanceId,
       // The run's place in run order: the sequence issued at its start (null
       // for a run without one) and the storage epoch it was recorded in. A
@@ -157,6 +160,7 @@ function eventInputFor(
           run_id: input.runId,
           source_instance_id: input.sourceInstanceId,
         },
+        ...(input.coverageEligibilityReason ? { coverage_eligibility_reason: input.coverageEligibilityReason } : {}),
         commit_id: input.commitId,
         envelope_hash: input.envelopeHash,
         response,

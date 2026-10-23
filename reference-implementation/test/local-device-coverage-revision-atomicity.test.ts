@@ -24,6 +24,8 @@ import test from "node:test";
 
 import { validateResponse } from "@pdpp/reference-contract";
 
+import type { Controller } from "../runtime/controller.ts";
+
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -81,6 +83,7 @@ interface Enrolled {
 interface Lane {
   readonly asUrl: string;
   readonly backend: Backend;
+  readonly controller?: Controller;
   readonly enrolled: Enrolled;
 }
 
@@ -251,7 +254,7 @@ async function withServerLane(
   try {
     const cookie = await ownerSessionCookie(asUrl);
     const enrolled = await enroll(asUrl, cookie);
-    const lane = { asUrl, backend, enrolled };
+    const lane = { asUrl, backend, controller: server.controller, enrolled };
     await registerFixtureManifest(lane);
     await run(lane);
   } finally {
@@ -486,9 +489,61 @@ async function assertCovered(lane: Lane, runId: string, message: string): Promis
 
 async function assertRetired(lane: Lane, message: string): Promise<void> {
   const projected = await projection(lane);
-  assert.equal(projected.axis, "unknown", message);
+  assert.equal(projected.axis, "unknown", `${message}: ${JSON.stringify(projected)}`);
   assert.equal(projected.asOf, null, `${message}: retired coverage carries no as-of`);
 }
+
+laneTest("placement: direct runNow refuses a local-device connection at shared admission", async (lane) => {
+  assert.ok(lane.controller, "server controller is available");
+  await assert.rejects(
+    lane.controller.runNow(CONNECTOR_ID, {
+      connectorInstanceId: lane.enrolled.connector_instance_id,
+      runId: "run-local-device-server-run-refused",
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: unknown }).code, "local_device_control_unsupported");
+      assert.ok((error as Error).message.includes("cannot be started by the reference server"));
+      return true;
+    }
+  );
+  const [run] = await sql(
+    lane,
+    "SELECT run_id FROM run_history WHERE run_id = ?",
+    "SELECT run_id FROM run_history WHERE run_id = $1",
+    ["run-local-device-server-run-refused"]
+  );
+  assert.equal(run, undefined, "admission refuses before a server run record is written");
+});
+
+laneTest("placement: webhook-triggered runNow refuses a local-device connection at shared admission", async (lane) => {
+  assert.ok(lane.controller, "server controller is available");
+  await assert.rejects(
+    lane.controller.runNow(CONNECTOR_ID, {
+      connectorInstanceId: lane.enrolled.connector_instance_id,
+      runId: "run-local-device-webhook-refused",
+      sourceWebhookEvent: {
+        action: "schedule_run",
+        bodyHash: "a".repeat(64),
+        eventId: "evt-local-device-webhook-refused",
+        receivedAt: EMITTED_AT,
+        sourceId: "source-webhook-local-device-refused",
+      },
+      triggerKind: "webhook",
+    }),
+    (error: unknown) => {
+      assert.equal((error as { code?: unknown }).code, "local_device_control_unsupported");
+      assert.ok((error as Error).message.includes("cannot be started by the reference server"));
+      return true;
+    }
+  );
+  const [run] = await sql(
+    lane,
+    "SELECT run_id FROM run_history WHERE run_id = ?",
+    "SELECT run_id FROM run_history WHERE run_id = $1",
+    ["run-local-device-webhook-refused"]
+  );
+  assert.equal(run, undefined, "webhook admission refuses before a server run record is written");
+});
 
 async function highWater(lane: Lane): Promise<HighWater> {
   const [row] = await sql(
@@ -1559,6 +1614,61 @@ laneTest(
 );
 
 const STREAM_NAME_PATH = /^\/streams\/\d+$/;
+
+laneTest(
+  "coverage: a browser_collector terminal commit stores the run but cannot establish a positive",
+  async (lane) => {
+    await sql(
+      lane,
+      "UPDATE connector_instances SET source_kind = 'browser_collector' WHERE connector_instance_id = ?",
+      "UPDATE connector_instances SET source_kind = 'browser_collector' WHERE connector_instance_id = $1",
+      [lane.enrolled.connector_instance_id]
+    );
+    assert.equal((await postRunStart(lane, "run-browser-source-kind")).status, 201);
+    const batch = await postBatch(lane, batchBody(lane, "batch-browser-source-kind", sessionRecords("browser-record")));
+    assert.equal(batch.status, 201, JSON.stringify(batch.body));
+
+    const committed = await postTerminal(lane, await terminalWireBody(lane, "run-browser-source-kind"));
+    assert.equal(committed.status, 201, JSON.stringify(committed.body));
+    assert.equal(await sessionRecordCount(lane), 1, "the device record remains stored");
+
+    const [run] = await sql(
+      lane,
+      "SELECT run_id, facts_json FROM run_history WHERE run_id = ?",
+      "SELECT run_id, facts_json::text AS facts_json FROM run_history WHERE run_id = $1",
+      ["run-browser-source-kind"]
+    );
+    assert.ok(run, "the browser_collector device run remains stored");
+    assert.equal(
+      (JSON.parse(String(run.facts_json)).collection_facts as Record<string, unknown>).coverage_eligibility_reason,
+      "connection_source_kind_not_local_device",
+      "run history retains the rejected coverage reason for projection"
+    );
+    const [terminal] = await sql(
+      lane,
+      "SELECT data_json FROM spine_events WHERE event_id = ?",
+      "SELECT data_json::text AS data_json FROM spine_events WHERE event_id = $1",
+      [String(committed.body?.terminal_event_id)]
+    );
+    assert.ok(terminal, "the terminal event remains stored");
+    const data = JSON.parse(String(terminal.data_json)) as Record<string, unknown>;
+    const receipt = data.terminal_run_commit_receipt as Record<string, unknown>;
+    const collectionFacts = data.collection_facts as Record<string, unknown>;
+    const facts = collectionFacts.streams as Record<string, unknown>[];
+    assert.equal(receipt.coverage_eligibility_reason, "connection_source_kind_not_local_device");
+    assert.equal(collectionFacts.coverage_eligibility_reason, "connection_source_kind_not_local_device");
+    assert.ok(facts.length > 0, "the terminal report retains its stream facts");
+    for (const fact of facts) {
+      assert.deepEqual(fact.coverage_statuses, ["collected"], "the stored run retains the device's assertion");
+      assert.deepEqual(
+        (fact.stores as Record<string, unknown>[]).map((store) => store.status),
+        ["collected"],
+        "the terminal record stores the device's collected assertions"
+      );
+    }
+    await assertRetired(lane, "a browser_collector terminal record projects no store-coverage positive");
+  }
+);
 
 laneTest("contract: owner diagnostics and connector detail validate against @pdpp/reference-contract", async (lane) => {
   await commitProof(lane, "run-a");

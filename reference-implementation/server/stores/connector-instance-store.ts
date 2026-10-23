@@ -8,6 +8,7 @@ import {
   loadOwnerConnectorInstanceGroupsSqlite,
   resolveCanonicalConnectorInstanceId,
 } from "../connector-instance-canonicalization.ts";
+import { assertRemoteControlSupported } from "../connector-instance-placement.ts";
 
 // Type definitions
 interface ConnectorInstance {
@@ -1204,7 +1205,7 @@ export async function resolveOwnerConnectorInstanceNamespace({
  * account. Keeping that policy here prevents run creators from treating a
  * connector type (or another owner's deterministic id) as a capability.
  */
-export function admitOwnerRunConnection({
+export async function admitOwnerRunConnection({
   allowDraft = false,
   ownerSubjectId,
   connectorId,
@@ -1222,7 +1223,7 @@ export function admitOwnerRunConnection({
   displayName?: string | null;
   now?: string;
 }): Promise<ConnectorInstanceNamespace> {
-  return resolveOwnerConnectorInstanceNamespace({
+  const namespace = await resolveOwnerConnectorInstanceNamespace({
     // Explicit selectors never materialize or fall through. The broader
     // resolver still supports legacy read compatibility independently.
     allowDefaultAccount: !connectorInstanceId,
@@ -1234,6 +1235,8 @@ export function admitOwnerRunConnection({
     ownerSubjectId,
     ...(now === undefined ? {} : { now }),
   });
+  assertRemoteControlSupported(namespace);
+  return namespace;
 }
 
 /**
@@ -1269,6 +1272,7 @@ export async function admitOwnerBrowserEnrollmentRunConnection({
     connectorInstanceStore,
     ownerSubjectId,
   });
+  assertRemoteControlSupported(namespace);
   const binding = namespace.sourceBinding;
   const isBrowserEnrollmentShell =
     binding !== null &&

@@ -155,6 +155,7 @@ import {
   loadOwnerConnectorInstanceGroupsSqlite,
   resolveCanonicalConnectorInstanceId,
 } from "./connector-instance-canonicalization.ts";
+import { isLocalDeviceConnection, NON_LOCAL_DEVICE_COVERAGE_REASON } from "./connector-instance-placement.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import {
   type HeartbeatRow,
@@ -600,12 +601,6 @@ export interface ConnectorRunSummary {
   readonly collection_facts: RuntimeCollectionFacts | null;
   /** The per-connection collection revision this run was committed at; `null` when the run carries none. */
   readonly collection_revision?: number | null;
-  /** Authenticated v2 device terminal evidence, kept raw until manifest and current scope are checked on read. */
-  readonly local_terminal_coverage?: {
-    readonly eligibleLocalRun: boolean;
-    readonly collectionScope: unknown;
-    readonly streams: unknown;
-  } | null;
   readonly connector_error?: ConnectorRunErrorSummary | null;
   readonly event_count: number;
   readonly failure_reason: string | null;
@@ -613,6 +608,13 @@ export interface ConnectorRunSummary {
   readonly first_at: string;
   readonly known_gaps: unknown[];
   readonly last_at: string;
+  /** Authenticated v2 device terminal evidence, kept raw until manifest and current scope are checked on read. */
+  readonly local_terminal_coverage?: {
+    readonly coverageEligibilityReason: string | null;
+    readonly eligibleLocalRun: boolean;
+    readonly collectionScope: unknown;
+    readonly streams: unknown;
+  } | null;
   readonly records_emitted?: number | null;
   /**
    * Whether this run was dispatched `recovery_only` (drains pending detail
@@ -1648,6 +1650,8 @@ function readLocalTerminalCoverage(
     return null;
   }
   return {
+    coverageEligibilityReason:
+      typeof block.coverage_eligibility_reason === "string" ? block.coverage_eligibility_reason : null,
     eligibleLocalRun:
       history.status === "succeeded" &&
       history.schedulerManaged === false &&
@@ -2885,6 +2889,9 @@ function coverageClassifyingRun(
   lastSuccessfulRun: ConnectorRunSummary | null,
   latestSettledRun: ConnectorRunSummary | null = lastRun
 ): ConnectorRunSummary | null {
+  if (latestSettledRun?.local_terminal_coverage?.coverageEligibilityReason === NON_LOCAL_DEVICE_COVERAGE_REASON) {
+    return null;
+  }
   const settledIsIntervening =
     latestSettledRun !== null &&
     latestSettledRun !== lastSuccessfulRun &&
@@ -5076,8 +5083,15 @@ function deriveLocalTerminalCoverageAxis(
   };
   // A failed scope-state read cannot establish which boundary the connection
   // currently asks the collector to cover.
-  if (!legacyAxis || typeof declaredScope !== "string" || !terminal.eligibleLocalRun || typeof terminal.collectionScope !== "string" ||
-    terminal.collectionScope !== declaredScope || !Array.isArray(terminal.streams)) {
+  if (
+    !legacyAxis ||
+    typeof declaredScope !== "string" ||
+    terminal.coverageEligibilityReason !== null ||
+    !terminal.eligibleLocalRun ||
+    typeof terminal.collectionScope !== "string" ||
+    terminal.collectionScope !== declaredScope ||
+    !Array.isArray(terminal.streams)
+  ) {
     return unknown;
   }
   const normalized = normalizeTerminalCoverageFacts(terminal.streams, manifest, terminal.collectionScope, {
@@ -5291,6 +5305,25 @@ function fenceLocalCoverageProof(
     };
   }
   return { ...axis, asOf };
+}
+
+function localDeviceCoverageForSourceKind(
+  axis: LocalCoverageDiagnosticAxis | null,
+  localDeviceBacked: boolean
+): LocalCoverageDiagnosticAxis | null {
+  if (localDeviceBacked || axis === null) {
+    return axis;
+  }
+  return {
+    ...axis,
+    asOf: null,
+    axis: "unknown",
+    evidenceAsOf: null,
+    measuredCollectionScope: null,
+    reliable: false,
+    rows: [],
+    unaccountedStores: [],
+  };
 }
 
 /**
@@ -6353,13 +6386,10 @@ export function projectConnectorSummaryConnectionHealth(input: {
   // Persisted source kind decides authority before health derives any scheduler
   // fact. A local device may have historical/foreign server runs, but they are
   // never evidence for its current device-side collection proof — UNLESS the
-  // row itself proves it is this connection's own current scheduler-managed
-  // run (`scheduler_managed = true`), not a foreign/stale artifact. A local
-  // device can still be enrolled behind this connection's own scheduler (e.g.
-  // a push-mode collector whose runs the scheduler nonetheless records), and
-  // discarding that proof unconditionally left `axes.coverage` stuck at
-  // `"unknown"` forever even when every required stream's collection report
-  // had already proven `"complete"` from the same run's evidence.
+  // row itself proves it is this connection's own scheduler-managed run, not a
+  // foreign/stale artifact. Keep that rule for historical rows written before
+  // placement admission began refusing new server runs for local-device
+  // connections.
   const localDeviceBacked = input.localDeviceBacked === true;
   const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean =>
     !localDeviceBacked || run?.scheduler_managed === true;
@@ -7297,11 +7327,11 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     runtimeOk,
     schedule,
   } = input;
-  const localDeviceBacked = instance.sourceKind === "local_device";
+  const localDeviceBacked = isLocalDeviceConnection(instance);
   // See the matching comment in `projectConnectorSummaryConnectionHealth`: a
-  // local device's run evidence is quarantined as foreign/historical UNLESS
-  // the row itself proves it is this connection's own current
-  // scheduler-managed run (`scheduler_managed = true`).
+  // local device's run evidence is quarantined as foreign/historical unless
+  // the row proves it is this connection's own scheduler-managed run. This
+  // keeps historical rows readable after placement admission blocks new ones.
   const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean =>
     !localDeviceBacked || run?.scheduler_managed === true;
   const authoritativeActiveRun = localDeviceBacked ? null : activeRun;
@@ -7340,7 +7370,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
         proofRunCoverage,
         fallbackSettledRun
       )
-    : localCoverage;
+    : localDeviceCoverageForSourceKind(localCoverage, localDeviceBacked);
   const authoritativeLatestStreamFacts = localDeviceBacked ? null : latestStreamFacts;
   const terminalSetupDisposition =
     instance.status === "draft" && authoritativeLastRun
@@ -8277,7 +8307,7 @@ async function projectConnectorSummaryForInstance(
   // `projectConnectorSummaryConnectionHealth` are the actual authority
   // boundary for run evidence: they quarantine any hydrated run that is not
   // proven `scheduler_managed`, exactly as before for every other run.
-  const localDeviceBacked = instance.sourceKind === "local_device";
+  const localDeviceBacked = isLocalDeviceConnection(instance);
   const hydrateRunSummaries = shouldHydrateRunSummariesForInstance(
     deps.includeRunSummaries,
     instance,

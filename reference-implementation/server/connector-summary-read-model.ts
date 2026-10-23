@@ -35,6 +35,7 @@
  */
 
 import { iterateDynamicSqlAcknowledged } from "../lib/db.ts";
+import { NON_LOCAL_DEVICE_COVERAGE_REASON } from "./connector-instance-placement.ts";
 import { readConnectorInstanceIdPage as readInstanceIdPage } from "./connector-summary-evidence-bounded-reconciliation.ts";
 import type { RepairCandidateReason } from "./connector-summary-evidence-engine.ts";
 import {
@@ -1258,7 +1259,9 @@ const TERMINAL_TYPES_SQL = TERMINAL_RUN_EVENT_TYPES.map((t) => `'${t}'`).join(",
 // tests previously hardcoded the then-current number and had to be edited on
 // every semantics bump, which makes a stale literal — not a real regression —
 // look like a failure.
-export const STREAM_FACTS_FOLD_LOGIC_VERSION = 6;
+// Version 7 drops device coverage rejected for its source kind and replays
+// older fold rows so cached stream facts cannot retain that claim.
+export const STREAM_FACTS_FOLD_LOGIC_VERSION = 7;
 // A route may retry a replay once after a concurrent writer wins its CAS.
 // This is deliberately small: each retry rereads the durable baseline, and
 // persistent contention fails closed in memory rather than spinning or
@@ -1626,6 +1629,9 @@ function parseTerminalFactEvent(row: Row): { payload: Row; streams: unknown[] } 
     return null;
   }
   const block = payload.collection_facts as Row | undefined;
+  if (block?.coverage_eligibility_reason === NON_LOCAL_DEVICE_COVERAGE_REASON) {
+    return null;
+  }
   const streams = block && typeof block === "object" && Array.isArray(block.streams) ? block.streams : null;
   return streams && streams.length > 0 ? { payload, streams } : null;
 }
