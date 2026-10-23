@@ -17,7 +17,14 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { chdir } from "node:process";
 import { test } from "node:test";
-import { parseArgs, resolveInspectionOptions } from "../bin/pdpp-local-collector.ts";
+// biome-ignore lint/correctness/noUnresolvedImports: Biome's Node module registry does not yet recognize node:sqlite; Node and tsc resolve the built-in module.
+import { DatabaseSync } from "node:sqlite";
+import {
+  compactOutbox,
+  parseArgs,
+  pruneSentOutboxRows,
+  resolveInspectionOptions,
+} from "../bin/pdpp-local-collector.ts";
 import {
   CollectorStateResolutionError,
   canonicalCollectorQueuePath,
@@ -1043,5 +1050,100 @@ test("superseded terminal history in a legacy store is not pending work", () => 
       () => resolveCollectorQueuePath(resolveInput(root, installRoot)),
       (error: unknown) => error instanceof CollectorStateResolutionError && error.code === "legacy_state_conflict"
     );
+  });
+});
+
+function migrationMarkers(path: string): string[] {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT migration_id FROM pdpp_migration_marker WHERE source_instance_id = ?")
+      .all(SOURCE_A)
+      .map((row) => String(row.migration_id));
+  } finally {
+    db.close();
+  }
+}
+
+test("a migrated queue whose rows were all delivered and pruned is still recognised as migrated", () => {
+  withTempRoot("pdpp-durable-state-pruned-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+    const canonicalPath = resolveCollectorQueuePath(resolveInput(root, installRoot));
+    const [marker] = migrationMarkers(canonicalPath);
+    assert.ok(marker);
+
+    // Ordinary operation: every upload succeeds, then the sent rows are pruned
+    // and the file is compacted.
+    // Acknowledge under a past clock so the sent rows are older than the prune
+    // cutoff deterministically rather than by elapsed milliseconds.
+    const claimer = new LocalDeviceOutbox({ path: canonicalPath });
+    const acknowledger = new LocalDeviceOutbox({
+      clock: () => new Date("2020-01-01T00:00:00.000Z"),
+      path: canonicalPath,
+    });
+    try {
+      for (const claimed of claimer.claimReady({
+        holder: "collector",
+        leaseMs: 60_000,
+        limit: 10,
+        sourceInstanceId: SOURCE_A,
+      })) {
+        acknowledger.acknowledge({ holder: "collector", id: claimed.id, leaseEpoch: claimed.lease_epoch });
+      }
+    } finally {
+      claimer.close();
+      acknowledger.close();
+    }
+    const pruned = pruneSentOutboxRows(
+      parseArgs([
+        "prune-sent",
+        "--queue",
+        canonicalPath,
+        "--connection-id",
+        SOURCE_A,
+        "--older-than-days",
+        "0",
+        "--apply",
+      ])
+    );
+    assert.equal(pruned.pruned, 1);
+    const compacted = compactOutbox(
+      parseArgs(["compact", "--queue", canonicalPath, "--connection-id", SOURCE_A, "--apply"])
+    );
+    assert.equal(compacted.refused, false);
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), []);
+    assert.deepEqual(migrationMarkers(canonicalPath), [marker], "prune-sent and compact keep the marker");
+
+    assert.equal(resolveCollectorQueuePath(resolveInput(root, installRoot)), canonicalPath);
+  });
+});
+
+test("an empty canonical queue without a matching migration marker still fails closed", () => {
+  withTempRoot("pdpp-durable-state-empty-unmarked-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+    new LocalDeviceOutbox({ path: canonicalPath }).close();
+    const ambiguous = (error: unknown) =>
+      error instanceof CollectorStateResolutionError && error.code === "legacy_state_ambiguous";
+
+    assert.throws(() => resolveCollectorQueuePath(resolveInput(root, installRoot)), ambiguous);
+
+    // A marker that belongs to some other attempt proves nothing either.
+    const db = new DatabaseSync(canonicalPath);
+    try {
+      db.exec(
+        `CREATE TABLE pdpp_migration_marker (source_instance_id TEXT PRIMARY KEY, migration_id TEXT NOT NULL);
+         INSERT INTO pdpp_migration_marker VALUES ('${SOURCE_A}', 'some-other-attempt')`
+      );
+    } finally {
+      db.close();
+    }
+    assert.throws(() => resolveCollectorQueuePath(resolveInput(root, installRoot)), ambiguous);
+    assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["pending-A"]);
   });
 });

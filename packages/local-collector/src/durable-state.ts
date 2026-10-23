@@ -209,18 +209,24 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
     }
     // An empty canonical database while another legacy store has rows: fail
     // closed rather than turning an interrupted/manual initialization into
-    // silent data loss.
-    const legacyMatches = findMatchingLegacyStores({ canonicalPath, roots, sourceInstanceId });
-    if (legacyMatches.length > 0) {
-      // An interrupted migration can leave a fence behind; this canonical file
-      // cannot be its product, so the legacy writer must not stay retired.
-      for (const path of legacyMatches) {
-        const status = inspectLegacyStore(path, canonicalPath, sourceInstanceId);
-        if (status.fence === "unproven") {
-          recoverUnprovenFence(path, canonicalPath, sourceInstanceId, status.migrationId);
-        }
+    // silent data loss. A canonical queue whose rows were all delivered and
+    // pruned is also empty, but it still carries the migration marker its
+    // legacy store's fence names, so that legacy store is accounted for.
+    const unaccounted: string[] = [];
+    for (const path of findMatchingLegacyStores({ canonicalPath, roots, sourceInstanceId })) {
+      const status = inspectLegacyStore(path, canonicalPath, sourceInstanceId);
+      if (status.fence === "proven") {
+        continue;
       }
-      throw ambiguousLegacyState(canonicalPath, legacyMatches, sourceInstanceId);
+      unaccounted.push(path);
+      if (status.fence === "unproven") {
+        // An interrupted migration can leave a fence behind; this canonical file
+        // cannot be its product, so the legacy writer must not stay retired.
+        recoverUnprovenFence(path, canonicalPath, sourceInstanceId, status.migrationId);
+      }
+    }
+    if (unaccounted.length > 0) {
+      throw ambiguousLegacyState(canonicalPath, unaccounted, sourceInstanceId);
     }
     return canonicalPath;
   }
