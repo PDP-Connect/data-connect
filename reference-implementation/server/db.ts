@@ -3035,6 +3035,67 @@ function ensureCollectionRevisionColumns(raw: SqliteDatabase): void {
   `);
 }
 
+// A previous boot could create collection_run_sequences before rebuilding
+// connector_instances. SQLite then retargeted its foreign key to the renamed
+// table, which those rebuilds later dropped. Rebuild only when the stored FK
+// does not name the final connector_instances table, preserving every row.
+function repairCollectionRunSequencesForeignKey(raw: SqliteDatabase): void {
+  const foreignKeys = raw
+    .prepare("PRAGMA foreign_key_list(collection_run_sequences)")
+    .all() as Array<{ table: string }>;
+  if (foreignKeys.length === 1 && foreignKeys[0]?.table === "connector_instances") {
+    return;
+  }
+
+  const foreignKeysEnabled = raw.pragma("foreign_keys", { simple: true }) === 1;
+  if (foreignKeysEnabled) {
+    raw.pragma("foreign_keys = OFF");
+  }
+  try {
+    raw.transaction(() => {
+      if (
+        raw
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'collection_run_sequences_new'")
+          .get()
+      ) {
+        throw new Error("Found unfinished collection_run_sequences migration table; refusing to overwrite it.");
+      }
+      raw.exec(`
+        CREATE TABLE collection_run_sequences_new (
+          connector_instance_id TEXT NOT NULL
+            REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+          run_id TEXT NOT NULL,
+          run_sequence INTEGER NOT NULL,
+          storage_epoch INTEGER NOT NULL,
+          device_id TEXT NOT NULL,
+          source_instance_id TEXT NOT NULL,
+          issued_at TEXT NOT NULL,
+          PRIMARY KEY (connector_instance_id, run_id)
+        );
+        INSERT INTO collection_run_sequences_new(
+          connector_instance_id, run_id, run_sequence, storage_epoch,
+          device_id, source_instance_id, issued_at
+        )
+        SELECT connector_instance_id, run_id, run_sequence, storage_epoch,
+               device_id, source_instance_id, issued_at
+          FROM collection_run_sequences;
+        DROP TABLE collection_run_sequences;
+        ALTER TABLE collection_run_sequences_new RENAME TO collection_run_sequences;
+      `);
+      const foreignKeyViolations = raw.prepare("PRAGMA foreign_key_check").all();
+      if (foreignKeyViolations.length > 0) {
+        throw new Error(
+          `collection_run_sequences migration failed foreign_key_check: ${JSON.stringify(foreignKeyViolations)}`
+        );
+      }
+    })();
+  } finally {
+    if (foreignKeysEnabled) {
+      raw.pragma("foreign_keys = ON");
+    }
+  }
+}
+
 function ensureConnectorSummaryEvidenceColumns(raw: SqliteDatabase): void {
   addColumnIfMissing(raw, "connector_summary_evidence", "last_record_updated_at", "TEXT");
   addColumnIfMissing(raw, "connector_summary_evidence", "stream_records_json", "TEXT NOT NULL DEFAULT '[]'");
@@ -6657,7 +6718,6 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   );
   runWithSqliteBusyRetrySync(() => ensureRecordResetGenerationColumn(raw));
   runWithSqliteBusyRetrySync(() => ensureRecordIdentityGenerationColumn(raw));
-  runWithSqliteBusyRetrySync(() => ensureCollectionRevisionColumns(raw));
   // Incremental add-source linkage: a later same-client ceremony records the
   // prior package it extends via `parent_package_id`. Pre-existing reference
   // DBs predate the column; add it non-destructively (NULL = a root package
@@ -6741,6 +6801,14 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   runWithSqliteBusyRetrySync(() => migrateConnectorInstancesSourceKindCheck(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorInstancesSourceKindBrowserCollector(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorInstancesStatusDraft(raw, opts));
+  // These legacy migrations rebuild connector_instances from fixed column
+  // lists. Re-add projection metadata and collection revisions after the final
+  // rebuild so state writes and the new run-sequence reference survive boot.
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "connector_instances", "manifest_generation", "INTEGER NOT NULL DEFAULT 0")
+  );
+  runWithSqliteBusyRetrySync(() => ensureCollectionRevisionColumns(raw));
+  runWithSqliteBusyRetrySync(() => repairCollectionRunSequencesForeignKey(raw));
   runWithSqliteBusyRetrySync(() => migrateRecordRejectionBytePayload(raw));
   runWithSqliteBusyRetrySync(() => migrateConnectorCredentialKindCheck(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorCredentialStatusRejected(raw, opts));
