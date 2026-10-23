@@ -1178,6 +1178,7 @@ function toRunHistorySpineEvent(event: NormalizedSpineEvent, rawData: unknown): 
   const data =
     rawData && typeof rawData === "object" && !Array.isArray(rawData) ? (rawData as Record<string, unknown>) : {};
   return {
+    actorType: event.actor_type,
     connectorId: event.source_kind === "connector" ? event.source_id : null,
     connectorInstanceId: event.connector_instance_id,
     data,

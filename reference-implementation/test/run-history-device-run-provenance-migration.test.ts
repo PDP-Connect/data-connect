@@ -1,20 +1,17 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// run_history.scheduler_managed is false for every row the spine-driven writer
-// inserts. A database that predates the column got it through
-// `ADD COLUMN ... DEFAULT true` (Postgres) / `DEFAULT 1` (SQLite), and that
-// default outlived the backfill it was written for, so the writer — which
-// leaves the column unset — stamped true on the device runs it recorded. The
-// coverage projection reads a true flag as scheduler history, so a device
-// proof could never become eligible.
+// The older spine writer left scheduler_managed unset, so the legacy
+// `DEFAULT true` / `DEFAULT 1` stamped device rows as scheduler-managed. The
+// boot migration repairs those rows, and the current writer sets false on its
+// own inserts so the legacy default cannot stamp later runs again.
 //
 // Proves, on both backends and on a table built the legacy way:
 //   - the spine writer records a device run with the flag false;
 //   - the boot migration flips an existing device row (matched by the
-//     local_device spine event for the same run AND connection) and leaves
-//     server rows alone, including a row of another connection that shares the
-//     run_id;
+//     local_device spine event for the same run AND connection, including
+//     identity that exists only in data_json, and leaves server rows alone,
+//     including a row of another connection that shares the run_id;
 //   - the pass is ledgered: a later boot skips it;
 //   - on Postgres, the column default is false afterwards and the pass pages.
 
@@ -62,7 +59,7 @@ function spineParams(spec: RunSpec, index: number) {
   assert.ok(spec.spine && spec.runId, "only runs with a spine event are seeded into the spine");
   const dataJson = JSON.stringify(spec.spine.identity === "data" ? { connector_instance_id: spec.instance } : {});
   return {
-    columnInstance: spec.instance,
+    columnInstance: spec.spine.identity === "column" ? spec.instance : null,
     dataJson,
     eventId: `evt_provenance_${index}`,
   };
@@ -122,6 +119,9 @@ function seedSqlite(): void {
          object_type, object_id, status, run_id, data_json, version, connector_instance_id
        ) VALUES (?, 'run.completed', ?, ?, 'scenario', 'trace', ?, 'actor', 'run', ?, 'succeeded', ?, ?, '1', ?)`
     ).run(spine.eventId, NOW, NOW, spec.spine.actorType, spec.runId, spec.runId, spine.dataJson, spine.columnInstance);
+    if (spec.spine.identity === "data") {
+      db.prepare("UPDATE spine_events SET connector_instance_id = NULL WHERE event_id = ?").run(spine.eventId);
+    }
   });
 }
 
@@ -151,6 +151,10 @@ test("SQLite: the migration flips device runs only, is ledgered, and the spine w
   const dbPath = makeTemporaryDbPath("pdpp-run-history-device-provenance-");
   initDb(dbPath);
   seedSqlite();
+  const sqliteDataOnlyIdentity = getDb()
+    .prepare("SELECT connector_instance_id FROM spine_events WHERE event_id = 'evt_provenance_0'")
+    .get() as { connector_instance_id: string | null };
+  assert.equal(sqliteDataOnlyIdentity.connector_instance_id, null, "identity is only in data_json");
   // A database from before the receipt existed.
   const dropReceipt = getDb().prepare("DELETE FROM storage_migration_ledger WHERE migration_id = ?");
   dropReceipt.run(RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID);
@@ -176,6 +180,7 @@ test("SQLite: the migration flips device runs only, is ledgered, and the spine w
     // The table still defaults to 1 (SQLite cannot change a default in place), so the
     // writer's own insert is what keeps a device run from being stamped true.
     const started = {
+      actorType: "runtime",
       connectorId: CONNECTOR_ID,
       connectorInstanceId: DEVICE_INSTANCE,
       data: {},
@@ -248,6 +253,13 @@ test("PostgreSQL: the boot migration repairs the column default and device rows,
              ) VALUES ($1, 'run.completed', $2, $2, 'scenario', 'trace', $3, 'actor', 'run', $4, 'succeeded', $4, $5::jsonb, '1', $6)`,
             [spine.eventId, NOW, spec.spine.actorType, spec.runId, spine.dataJson, spine.columnInstance]
           );
+          if (spec.spine.identity === "data") {
+            // The insert trigger promotes JSON identity on new rows; clear the
+            // column to model a historical row written before that trigger.
+            await postgresQuery("UPDATE spine_events SET connector_instance_id = NULL WHERE event_id = $1", [
+              spine.eventId,
+            ]);
+          }
         }
         // Push the next fixture row into a later page.
         // biome-ignore lint/performance/noAwaitInLoops: a handful of fixture rows.
@@ -257,6 +269,10 @@ test("PostgreSQL: the boot migration repairs the column default and device rows,
           [SERVER_INSTANCE, CONNECTOR_ID, NOW]
         );
       }
+      const postgresDataOnlyIdentity = await postgresQuery<{ connector_instance_id: string | null }>(
+        "SELECT connector_instance_id FROM spine_events WHERE event_id = 'evt_provenance_0'"
+      );
+      assert.equal(postgresDataOnlyIdentity.rows[0]?.connector_instance_id, null, "identity is only in data_json");
 
       const flags = async (): Promise<Map<string, boolean>> => {
         const result = await postgresQuery<{

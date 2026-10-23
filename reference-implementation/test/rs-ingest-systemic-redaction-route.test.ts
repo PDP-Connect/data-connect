@@ -105,6 +105,7 @@ async function seedConnection(): Promise<void> {
 
 function seedCancelledRun(): void {
   writeSqliteRunHistoryForSpineEvent({
+    actorType: "runtime",
     connectorId: CONNECTOR_ID,
     connectorInstanceId: CONNECTOR_INSTANCE_ID,
     data: {},
@@ -114,6 +115,7 @@ function seedCancelledRun(): void {
     status: "started",
   });
   writeSqliteRunHistoryForSpineEvent({
+    actorType: "runtime",
     connectorId: CONNECTOR_ID,
     connectorInstanceId: CONNECTOR_INSTANCE_ID,
     data: { reason: "owner_cancelled" },

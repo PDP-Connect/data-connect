@@ -1886,6 +1886,62 @@ laneTest(
   }
 );
 
+/** A device terminal as one stored before collection revisions: no revision stamp in its facts (it never carried a marker). */
+async function stripRevisionStamp(lane: Lane, runId: string): Promise<void> {
+  await sql(
+    lane,
+    "UPDATE run_history SET facts_json = json_remove(facts_json, '$.collection_revision') WHERE run_id = ?",
+    "UPDATE run_history SET facts_json = facts_json - 'collection_revision' WHERE run_id = $1",
+    [runId]
+  );
+}
+
+async function runActorType(lane: Lane, runId: string): Promise<unknown> {
+  const [row] = await sql(
+    lane,
+    "SELECT actor_type FROM run_history WHERE run_id = ?",
+    "SELECT actor_type FROM run_history WHERE run_id = $1",
+    [runId]
+  );
+  assert.ok(row, `run ${runId} has a run_history row`);
+  return row.actor_type;
+}
+
+laneTest(
+  "provenance: a pre-revision device terminal, with no revision stamp and no marker, credits nothing to a browser_collector connection",
+  async (lane) => {
+    await commitProof(lane, "run-pre-revision");
+    await assertCovered(lane, "run-pre-revision", "the device terminal covers its local_device connection");
+    assert.equal(await runActorType(lane, "run-pre-revision"), "local_device", "run history records the run's actor");
+    await stripRevisionStamp(lane, "run-pre-revision");
+    await changeSourceKind(lane, "browser_collector");
+    await assertNoDeviceCoverage(lane, "a device terminal that carries neither a revision stamp nor a marker");
+  }
+);
+
+laneTest(
+  "provenance: a scheduler_managed device run of unknown provenance credits nothing to a browser_collector connection",
+  async (lane) => {
+    await commitProof(lane, "run-unknown-provenance");
+    await assertCovered(lane, "run-unknown-provenance", "the device terminal covers its local_device connection");
+    // The row as it stood before the actor backfill reached it, from a server that kept no revision stamp.
+    // scheduler_managed is TRUE, the column default in production: device rows carry it, so it is no proof
+    // of a server run.
+    await stripRevisionStamp(lane, "run-unknown-provenance");
+    await sql(
+      lane,
+      "UPDATE run_history SET actor_type = NULL, scheduler_managed = 1 WHERE run_id = ?",
+      "UPDATE run_history SET actor_type = NULL, scheduler_managed = true WHERE run_id = $1",
+      ["run-unknown-provenance"]
+    );
+    await changeSourceKind(lane, "browser_collector");
+    await assertNoDeviceCoverage(
+      lane,
+      "a scheduler_managed device terminal whose run_history row has no provenance yet"
+    );
+  }
+);
+
 laneTest(
   "source kind: a behind-version cache holding an unmarked device fact reads unknown before any repair runs",
   async (lane) => {
