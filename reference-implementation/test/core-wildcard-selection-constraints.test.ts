@@ -73,7 +73,10 @@ test("wildcard resources reject when an expanded stream does not support them", 
 				{ streams: [{ name: "*", resources: ["x"] }] },
 				decl,
 			),
-		new RegExp(`Stream '${decl.streams[0].name}'`),
+		(error: any) => {
+			assert.deepEqual(error.streams, [decl.streams[0].name]);
+			return new RegExp(`Stream '${decl.streams[0].name}'`).test(error.message);
+		},
 	);
 });
 
@@ -105,7 +108,12 @@ test("wildcard time_range rejects, naming a stream without consent_time_field", 
 				{ streams: [{ name: "*", time_range: { since: SINCE } }] },
 				decl,
 			),
-		new RegExp(`Stream '${target.name}' does not support time_range`),
+		(error: any) => {
+			assert.deepEqual(error.streams, [target.name]);
+			return new RegExp(
+				`Stream '${target.name}' does not support time_range`,
+			).test(error.message);
+		},
 	);
 });
 
@@ -116,17 +124,48 @@ test("wildcard view that is not declared on an expanded stream rejects", () => {
 				{ streams: [{ name: "*", view: "no-such-view" }] },
 				declaration(),
 			),
-		/Unknown view 'no-such-view'/,
+		(error: any) => {
+			assert.equal(error.streams?.length, 1);
+			return /Unknown view 'no-such-view'/.test(error.message);
+		},
 	);
 });
 
-test("wildcard with no extra parameters expands to every stream with full fields", () => {
+test("wildcard with no extra parameters expands exactly as the equivalent concrete requests", () => {
 	const decl = declaration();
 	const resolved = resolveCoreSelection({ streams: [{ name: "*" }] }, decl);
-	assert.equal(resolved.length, decl.streams.length);
+	const names = decl.streams.map((s: any) => s.name);
+	assert.deepEqual(
+		resolved.map((s) => s.name),
+		names,
+	);
+	const concrete = resolveCoreSelection(
+		{ streams: names.map((name: string) => ({ name })) },
+		decl,
+	);
+	assert.deepEqual(resolved, concrete);
 	for (const stream of resolved) {
+		const declared = decl.streams.find((s: any) => s.name === stream.name);
+		assert.deepEqual(
+			stream.fields,
+			Object.keys(declared.schema.properties).sort(),
+			stream.name,
+		);
+		assert.deepEqual(stream.instance_ids, [], stream.name);
 		assert.equal(stream.resources, undefined);
 		assert.equal(stream.time_constraint, undefined);
+	}
+});
+
+test("wildcard instance_ids apply to every expanded stream", () => {
+	const decl = declaration();
+	const resolved = resolveCoreSelection(
+		{ streams: [{ instance_ids: ["cin_a"], name: "*" }] },
+		decl,
+	);
+	assert.equal(resolved.length, decl.streams.length);
+	for (const stream of resolved) {
+		assert.deepEqual(stream.instance_ids, ["cin_a"], stream.name);
 	}
 });
 
