@@ -21,9 +21,10 @@
 //   path: the spine writer requires both run_id and connector_instance_id.
 //   Legacy scheduler skips therefore take 'runtime', including rows copied
 //   from scheduler_run_history during the rename/merge migration.
-// Identity is the pair (run_id, connector_instance_id), never run_id alone. A
-// spine event with a NULL connector_instance_id could belong to the row, so it
-// blocks the 'runtime' rule (fail closed) rather than being ignored.
+// Identity is the pair (run_id, connector_instance_id), never run_id alone.
+// Older spine rows can have a NULL connector_instance_id column while retaining
+// their identity in data_json; use both representations. An event with neither
+// identity blocks the 'runtime' rule (fail closed) rather than being ignored.
 //
 // Shape (why it is safe on a large table):
 // - The walk keys on run_history's own primary key, in ascending id order, one
@@ -104,15 +105,29 @@ export const SQLITE_FILL_ACTOR_SQL = `UPDATE run_history
                 CASE WHEN rh.run_id IS NULL THEN '${SERVER_RUN_ACTOR_TYPE}' END,
                 (SELECT se.actor_type FROM spine_events se
                   WHERE se.run_id = rh.run_id
-                    AND +se.connector_instance_id = rh.connector_instance_id
+                    AND +COALESCE(
+                      NULLIF(se.connector_instance_id, ''),
+                      NULLIF(json_extract(se.data_json, '$.connector_instance_id'), ''),
+                      NULLIF(json_extract(se.data_json, '$.connection_id'), '')
+                    ) = rh.connector_instance_id
                     AND se.event_type IN (${SQLITE_TERMINAL_TYPES})
                   ORDER BY se.event_seq ASC
                   LIMIT 1),
                 CASE WHEN NOT EXISTS (
                   SELECT 1 FROM spine_events se
                   WHERE se.run_id = rh.run_id
-                    AND (+se.connector_instance_id = rh.connector_instance_id
-                         OR +se.connector_instance_id IS NULL)
+                    AND (
+                      COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(json_extract(se.data_json, '$.connector_instance_id'), ''),
+                        NULLIF(json_extract(se.data_json, '$.connection_id'), '')
+                      ) = rh.connector_instance_id
+                      OR COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(json_extract(se.data_json, '$.connector_instance_id'), ''),
+                        NULLIF(json_extract(se.data_json, '$.connection_id'), '')
+                      ) IS NULL
+                    )
                 ) THEN '${SERVER_RUN_ACTOR_TYPE}' END
               ) AS actor_type
        FROM run_history rh
@@ -177,15 +192,29 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
                 WHEN NOT EXISTS (
                   SELECT 1 FROM spine_events se
                   WHERE se.run_id = rh.run_id
-                    AND (se.connector_instance_id = rh.connector_instance_id
-                         OR se.connector_instance_id IS NULL)
+                    AND (
+                      COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(se.data_json->>'connector_instance_id', ''),
+                        NULLIF(se.data_json->>'connection_id', '')
+                      ) = rh.connector_instance_id
+                      OR COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(se.data_json->>'connector_instance_id', ''),
+                        NULLIF(se.data_json->>'connection_id', '')
+                      ) IS NULL
+                    )
                 ) THEN '${SERVER_RUN_ACTOR_TYPE}'
               END AS actor_type
        FROM run_history rh
        LEFT JOIN LATERAL (
          SELECT se.actor_type, se.event_seq FROM spine_events se
          WHERE se.run_id = rh.run_id
-           AND se.connector_instance_id = rh.connector_instance_id
+           AND COALESCE(
+             NULLIF(se.connector_instance_id, ''),
+             NULLIF(se.data_json->>'connector_instance_id', ''),
+             NULLIF(se.data_json->>'connection_id', '')
+           ) = rh.connector_instance_id
            AND se.event_type IN (${POSTGRES_TERMINAL_TYPES})
          ORDER BY se.event_seq ASC
          LIMIT 1

@@ -359,6 +359,7 @@ function writeSqliteRunHistoryWith(event: RunHistorySpineEvent, execute: SqliteR
     terminalReason,
     factsJson,
     event.actorType,
+    event.actorType,
     event.runId,
     event.connectorInstanceId,
   ]);
@@ -430,8 +431,8 @@ export async function writePostgresRunHistoryForSpineEvent(
     await client.query(
       `INSERT INTO run_history(
          run_id, connector_instance_id, connector_id, trigger_kind, source_json,
-         status, known_gaps_json, started_at, attempt
-       ) VALUES($1, $2, $3, $4, $5::jsonb, 'running', '[]'::jsonb, $6, 1)
+         status, known_gaps_json, started_at, attempt, scheduler_managed
+       ) VALUES($1, $2, $3, $4, $5::jsonb, 'running', '[]'::jsonb, $6, 1, false)
        ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO NOTHING`,
       [
         event.runId,
@@ -468,7 +469,8 @@ export async function writePostgresRunHistoryForSpineEvent(
          failure_reason = $5,
          terminal_reason = $6,
          facts_json = $7::jsonb,
-         actor_type = $8
+         actor_type = $8,
+         scheduler_managed = CASE WHEN $8 = 'local_device' THEN false ELSE scheduler_managed END
      WHERE run_id = $9
        AND connector_instance_id = $10
        AND status = 'running'`,
@@ -493,8 +495,8 @@ export async function writePostgresRunHistoryForSpineEvent(
     `INSERT INTO run_history(
        run_id, connector_instance_id, connector_id, trigger_kind, source_json,
        status, known_gaps_json, started_at, completed_at, records_emitted,
-       connector_error_json, failure_reason, terminal_reason, facts_json, actor_type, attempt
-     ) VALUES($1, $2, $3, $4, $5::jsonb, $6, '[]'::jsonb, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, $14, 1)
+       connector_error_json, failure_reason, terminal_reason, facts_json, actor_type, attempt, scheduler_managed
+     ) VALUES($1, $2, $3, $4, $5::jsonb, $6, '[]'::jsonb, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, $14, 1, false)
      ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO NOTHING`,
     [
       event.runId,

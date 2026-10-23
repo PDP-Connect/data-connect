@@ -22,7 +22,8 @@ SET status = ?,
     failure_reason = ?,
     terminal_reason = ?,
     facts_json = ?,
-    actor_type = ?
+    actor_type = ?,
+    scheduler_managed = CASE WHEN ? = 'local_device' THEN 0 ELSE scheduler_managed END
 WHERE run_id = ?
   AND connector_instance_id = ?
   AND status = 'running'

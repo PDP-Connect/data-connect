@@ -57,6 +57,8 @@ const CONNECTOR_ID = "provenance_connector";
 const INSTANCE_A = "cin_provenance_a";
 const INSTANCE_B = "cin_provenance_b";
 const READS = /^\s*SELECT\b/i;
+const POSTGRES_TERMINAL_INDEX_PLAN = /idx_pg_spine_events_run_actor_terminal/;
+const POSTGRES_RUN_FULL_SCAN_FILTER = /Rows Removed by Filter: 50000/;
 
 let databaseCounter = 0;
 let sqlitePath = "";
@@ -247,6 +249,38 @@ backendTest("writer: a terminal event's actor_type is recorded on its run_histor
   assert.equal(await actorTypeOf(backend, "run-device", INSTANCE_A), "local_device");
 });
 
+backendTest(
+  "writer: a local_device terminal clears a legacy TRUE scheduler flag on its running row",
+  async (backend) => {
+    const runId = "run-device-finalizes-after-repair";
+    await emitSpineEvent(startedEvent(runId, INSTANCE_A));
+    await sql(
+      backend,
+      "UPDATE run_history SET scheduler_managed = 1 WHERE run_id = ? AND connector_instance_id = ?",
+      "UPDATE run_history SET scheduler_managed = true WHERE run_id = $1 AND connector_instance_id = $2",
+      [runId, INSTANCE_A]
+    );
+    const [running] = await sql(
+      backend,
+      "SELECT status, scheduler_managed FROM run_history WHERE run_id = ? AND connector_instance_id = ?",
+      "SELECT status, scheduler_managed FROM run_history WHERE run_id = $1 AND connector_instance_id = $2",
+      [runId, INSTANCE_A]
+    );
+    assert.equal(running?.status, "running");
+    assert.equal(running?.scheduler_managed, backend === "postgres" ? true : 1);
+
+    await emitSpineEvent(terminalEvent(runId, INSTANCE_A, "local_device"));
+    const [finalized] = await sql(
+      backend,
+      "SELECT status, actor_type, scheduler_managed FROM run_history WHERE run_id = ? AND connector_instance_id = ?",
+      "SELECT status, actor_type, scheduler_managed FROM run_history WHERE run_id = $1 AND connector_instance_id = $2",
+      [runId, INSTANCE_A]
+    );
+    assert.equal(finalized?.actor_type, "local_device");
+    assert.equal(finalized?.scheduler_managed, backend === "postgres" ? false : 0);
+  }
+);
+
 backendTest("row backfill: a run the stage inserts from spine carries its terminal event's actor", async (backend) => {
   await emitSpineEvent(startedEvent("run-lost-device", INSTANCE_A));
   await emitSpineEvent(terminalEvent("run-lost-device", INSTANCE_A, "local_device"));
@@ -259,6 +293,101 @@ backendTest("row backfill: a run the stage inserts from spine carries its termin
   assert.equal(await actorTypeOf(backend, "run-lost-device", INSTANCE_A), "local_device");
   assert.equal(await actorTypeOf(backend, "run-lost-server", INSTANCE_A), "runtime");
 });
+
+backendTest("row backfill: terminal identity in data_json is used when the spine column is NULL", async (backend) => {
+  const runId = "run-data-only-identity";
+  await sql(
+    backend,
+    `INSERT INTO run_history(
+       run_id, connector_instance_id, connector_id, source_json, status, started_at, completed_at
+     ) VALUES (?, ?, ?, '{}', 'failed', ?, ?)`,
+    `INSERT INTO run_history(
+       run_id, connector_instance_id, connector_id, source_json, status, started_at, completed_at
+     ) VALUES ($1, $2, $3, '{}'::jsonb, 'failed', $4, $4)`,
+    backend === "sqlite"
+      ? [runId, INSTANCE_A, CONNECTOR_ID, "2026-10-01T00:00:00.000Z", "2026-10-01T00:00:00.000Z"]
+      : [runId, INSTANCE_A, CONNECTOR_ID, "2026-10-01T00:00:00.000Z"]
+  );
+  await sql(
+    backend,
+    `INSERT INTO spine_events(
+       event_id, event_type, occurred_at, recorded_at, scenario_id, trace_id, actor_type, actor_id,
+       object_type, object_id, status, run_id, data_json, version, connector_instance_id
+     ) VALUES (?, 'run.completed', ?, ?, 'scenario', 'trace', 'local_device', 'device-1',
+               'run', ?, 'succeeded', ?, ?, '1', NULL)`,
+    `INSERT INTO spine_events(
+       event_id, event_type, occurred_at, recorded_at, scenario_id, trace_id, actor_type, actor_id,
+       object_type, object_id, status, run_id, data_json, version, connector_instance_id
+     ) VALUES ($1, 'run.completed', $2, $2, 'scenario', 'trace', 'local_device', 'device-1',
+               'run', $3, 'succeeded', $3, $4::jsonb, '1', NULL)`,
+    backend === "sqlite"
+      ? [
+          "evt_data_only_identity",
+          "2026-10-01T00:01:00.000Z",
+          "2026-10-01T00:01:00.000Z",
+          runId,
+          runId,
+          JSON.stringify({ connector_instance_id: INSTANCE_A }),
+        ]
+      : [
+          "evt_data_only_identity",
+          "2026-10-01T00:01:00.000Z",
+          runId,
+          JSON.stringify({ connector_instance_id: INSTANCE_A }),
+        ]
+  );
+  await sql(
+    backend,
+    "UPDATE spine_events SET connector_instance_id = NULL WHERE event_id = ?",
+    "UPDATE spine_events SET connector_instance_id = NULL WHERE event_id = $1",
+    ["evt_data_only_identity"]
+  );
+  const [spineRow] = await sql(
+    backend,
+    "SELECT connector_instance_id FROM spine_events WHERE event_id = ?",
+    "SELECT connector_instance_id FROM spine_events WHERE event_id = $1",
+    ["evt_data_only_identity"]
+  );
+  assert.equal(spineRow?.connector_instance_id, null, "the fixture has identity only in data_json");
+
+  const round = await runRunHistoryActorBackfillRound({ afterId: 0, batchSize: 10 });
+  assert.equal(round.filled, 1);
+  assert.equal(await actorTypeOf(backend, runId, INSTANCE_A), "local_device");
+});
+
+backendTest(
+  "backfill: an unfillable full page advances to later fillable rows in the same boot pass",
+  async (backend) => {
+    const unfillableRows = 200;
+    for (let index = 1; index <= unfillableRows; index += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each emitted start creates the next ordered fixture row.
+      await emitSpineEvent(startedEvent(`run-unfillable-${index}`, INSTANCE_A));
+    }
+    await sql(
+      backend,
+      "UPDATE run_history SET status = 'failed' WHERE run_id LIKE 'run-unfillable-%'",
+      "UPDATE run_history SET status = 'failed' WHERE run_id LIKE 'run-unfillable-%'"
+    );
+    const fillableRunId = "run-fillable-after-unfillable-page";
+    await emitSpineEvent(startedEvent(fillableRunId, INSTANCE_A));
+    await emitSpineEvent(terminalEvent(fillableRunId, INSTANCE_A, "runtime"));
+    await sql(
+      backend,
+      "UPDATE run_history SET actor_type = NULL WHERE run_id = ?",
+      "UPDATE run_history SET actor_type = NULL WHERE run_id = $1",
+      [fillableRunId]
+    );
+
+    const rounds: RunHistoryActorBackfillRound[] = [];
+    const summary = await runStartupRunHistoryActorBackfillToCompletion({ onRound: (round) => rounds.push(round) });
+    assert.deepEqual(rounds, [
+      { examined: unfillableRows, filled: 0, lastId: unfillableRows },
+      { examined: 1, filled: 1, lastId: unfillableRows + 1 },
+    ]);
+    assert.deepEqual(summary, { complete: true, examined: unfillableRows + 1, filled: 1, rounds: 2 });
+    assert.equal(await actorTypeOf(backend, fillableRunId, INSTANCE_A), "runtime");
+  }
+);
 
 backendTest("scheduler append: the scheduler's own run_history write records runtime provenance", async (backend) => {
   const store = createSchedulerStore();
@@ -470,20 +599,19 @@ test("backfill: SQLite probes the terminal index by run, never the whole connect
   });
 });
 
-test(
-  "backfill: PostgreSQL probes every terminal type through the run-terminal partial index",
-  { skip: POSTGRES_SKIP },
-  async () => {
-    const runId = "run-actor-index-plan";
-    await withBackend("postgres", async () => {
-      await postgresQuery(
-        `INSERT INTO run_history(
+test("backfill: PostgreSQL probes every terminal type through the run-terminal partial index", {
+  skip: POSTGRES_SKIP,
+}, async () => {
+  const runId = "run-actor-index-plan";
+  await withBackend("postgres", async () => {
+    await postgresQuery(
+      `INSERT INTO run_history(
            run_id, connector_instance_id, connector_id, source_json, status, started_at, completed_at
          ) VALUES ($1, $2, $3, '{}'::jsonb, 'failed', $4, $4)`,
-        [runId, INSTANCE_A, CONNECTOR_ID, "2026-10-01T00:00:00.000Z"]
-      );
-      await postgresQuery(
-        `INSERT INTO spine_events(
+      [runId, INSTANCE_A, CONNECTOR_ID, "2026-10-01T00:00:00.000Z"]
+    );
+    await postgresQuery(
+      `INSERT INTO spine_events(
            event_id, event_type, occurred_at, recorded_at, scenario_id, trace_id, actor_type, actor_id,
            object_type, object_id, status, run_id, data_json, version, connector_instance_id
          )
@@ -491,20 +619,20 @@ test(
                 '2026-10-01T00:00:00.000Z', 'scenario', 'trace', 'runtime', 'actor',
                 'run', $1, 'running', $1, jsonb_build_object('connector_instance_id', $2::text), '1', $2
            FROM generate_series(1, 50000) AS n`,
-        [runId, INSTANCE_A]
-      );
-      await postgresQuery(
-        `INSERT INTO spine_events(
+      [runId, INSTANCE_A]
+    );
+    await postgresQuery(
+      `INSERT INTO spine_events(
            event_id, event_type, occurred_at, recorded_at, scenario_id, trace_id, actor_type, actor_id,
            object_type, object_id, status, run_id, data_json, version, connector_instance_id
          ) VALUES ('f2-browser-terminal', 'run.browser_surface_failed', '2026-10-01T00:01:00.000Z',
                    '2026-10-01T00:01:00.000Z', 'scenario', 'trace', 'runtime', 'actor',
                    'run', $1, 'failed', $1, jsonb_build_object('connector_instance_id', $2::text), '1', $2)`,
-        [runId, INSTANCE_A]
-      );
+      [runId, INSTANCE_A]
+    );
 
-      const explained = await postgresQuery<{ "QUERY PLAN": string }>(
-        `EXPLAIN (ANALYZE, BUFFERS)
+    const explained = await postgresQuery<{ "QUERY PLAN": string }>(
+      `EXPLAIN (ANALYZE, BUFFERS)
          SELECT se.actor_type, se.event_seq
            FROM spine_events se
           WHERE se.run_id = $1
@@ -514,18 +642,17 @@ test(
             AND se.event_type IN ('run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned')
           ORDER BY se.event_seq ASC
           LIMIT 1`,
-        [runId, INSTANCE_A]
-      );
-      const plan = explained.rows.map((row) => row["QUERY PLAN"]).join("\n");
-      assert.match(plan, /idx_pg_spine_events_run_actor_terminal/, plan);
-      assert.doesNotMatch(plan, /Rows Removed by Filter: 50000/, plan);
+      [runId, INSTANCE_A]
+    );
+    const plan = explained.rows.map((row) => row["QUERY PLAN"]).join("\n");
+    assert.match(plan, POSTGRES_TERMINAL_INDEX_PLAN, plan);
+    assert.doesNotMatch(plan, POSTGRES_RUN_FULL_SCAN_FILTER, plan);
 
-      const backfill = await runStartupRunHistoryActorBackfillToCompletion();
-      assert.equal(backfill.filled, 1);
-      assert.equal(await actorTypeOf("postgres", runId, INSTANCE_A), "runtime");
-    });
-  }
-);
+    const backfill = await runStartupRunHistoryActorBackfillToCompletion();
+    assert.equal(backfill.filled, 1);
+    assert.equal(await actorTypeOf("postgres", runId, INSTANCE_A), "runtime");
+  });
+});
 
 test("backfill: server boot fills historical rows before startup completes", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pdpp-run-actor-boot-"));
@@ -709,15 +836,16 @@ backendTest("legacy scheduler skip with NULL run_id keeps earlier runtime covera
     "SELECT run_id, status, actor_type, scheduler_managed FROM run_history WHERE run_id = 'run-before-legacy-skip'"
   );
   assert.equal(backfilledSkip?.actor_type, "runtime");
+  const previousRunId = previousSuccess?.run_id;
   const earlier = run({
     actor_type: previousSuccess?.actor_type as string,
-    run_id: String(previousSuccess?.run_id),
+    run_id: typeof previousRunId === "string" ? previousRunId : undefined,
     scheduler_managed: Boolean(previousSuccess?.scheduler_managed),
   });
   const latest = run({
     actor_type: backfilledSkip?.actor_type as string | null,
     collection_facts: null,
-    run_id: backfilledSkip?.run_id == null ? undefined : String(backfilledSkip.run_id),
+    run_id: typeof backfilledSkip?.run_id === "string" ? backfilledSkip.run_id : undefined,
     scheduler_managed: Boolean(backfilledSkip?.scheduler_managed),
     status: String(backfilledSkip?.status),
   });
