@@ -180,53 +180,32 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
       // database carrying the fence's migration id does. The state directory
       // itself is skipped because its stores are used in place and are never
       // retired.
-      const unmigrated: string[] = [];
-      let legacyWritable = true;
-      for (const path of findMatchingLegacyStores({
+      const { pending, legacyWritable } = accountForLegacyStores(
+        findMatchingLegacyStores({
+          canonicalPath,
+          roots: roots.filter((root) => root !== stateDirectory),
+          sourceInstanceId,
+        }).filter((path) => !isWithin(stateDirectory, path)),
         canonicalPath,
-        roots: roots.filter((root) => root !== stateDirectory),
-        sourceInstanceId,
-      })) {
-        if (isWithin(stateDirectory, path)) {
-          continue;
-        }
-        const status = inspectLegacyStore(path, canonicalPath, sourceInstanceId);
-        if (status.fence === "proven") {
-          continue;
-        }
-        if (status.fence === "unproven") {
-          const lifted = recoverUnprovenFence(path, canonicalPath, sourceInstanceId, status.migrationId);
-          legacyWritable = legacyWritable && lifted;
-        }
-        if (status.pending) {
-          unmigrated.push(path);
-        }
-      }
-      if (unmigrated.length > 0) {
-        throw conflictingLegacyState(canonicalPath, unmigrated, sourceInstanceId, legacyWritable);
+        sourceInstanceId
+      );
+      if (pending.length > 0) {
+        throw conflictingLegacyState(canonicalPath, pending, sourceInstanceId, legacyWritable);
       }
       return canonicalPath;
     }
-    // An empty canonical database while another legacy store has rows: fail
-    // closed rather than turning an interrupted/manual initialization into
-    // silent data loss. A canonical queue whose rows were all delivered and
-    // pruned is also empty, but it still carries the migration marker its
-    // legacy store's fence names, so that legacy store is accounted for.
-    const unaccounted: string[] = [];
-    for (const path of findMatchingLegacyStores({ canonicalPath, roots, sourceInstanceId })) {
-      const status = inspectLegacyStore(path, canonicalPath, sourceInstanceId);
-      if (status.fence === "proven") {
-        continue;
-      }
-      unaccounted.push(path);
-      if (status.fence === "unproven") {
-        // An interrupted migration can leave a fence behind; this canonical file
-        // cannot be its product, so the legacy writer must not stay retired.
-        recoverUnprovenFence(path, canonicalPath, sourceInstanceId, status.migrationId);
-      }
-    }
-    if (unaccounted.length > 0) {
-      throw ambiguousLegacyState(canonicalPath, unaccounted, sourceInstanceId);
+    // An empty canonical database while another legacy store has undelivered
+    // work: fail closed rather than turning an interrupted/manual initialization
+    // into silent data loss. A canonical queue whose rows were all delivered and
+    // pruned is also empty, but it still carries the migration marker its legacy
+    // store's fence names; a legacy store with no active work has nothing to lose.
+    const { pending } = accountForLegacyStores(
+      findMatchingLegacyStores({ canonicalPath, roots, sourceInstanceId }),
+      canonicalPath,
+      sourceInstanceId
+    );
+    if (pending.length > 0) {
+      throw ambiguousLegacyState(canonicalPath, pending, sourceInstanceId);
     }
     return canonicalPath;
   }
@@ -250,6 +229,10 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
   if (isWithin(stateDirectory, legacyPath)) {
     return legacyPath;
   }
+  // Migrating would overwrite the store's fence. Refuse if that fence belongs to
+  // a different destination whose handoff is live or already published.
+  const legacyStatus = inspectLegacyStore(legacyPath, canonicalPath, sourceInstanceId);
+  assertFenceNotForeign(legacyStatus, legacyPath, canonicalPath, sourceInstanceId);
   return migrateLegacyStore(legacyPath, canonicalPath, sourceInstanceId, {
     afterMigrationInstall: input.afterMigrationInstall,
     afterRetirementFence: input.afterRetirementFence,
@@ -393,13 +376,17 @@ function containsSourceRows(path: string, sourceInstanceId: string): boolean {
 
 interface LegacyStoreStatus {
   /**
-   * `proven`: a retirement fence whose migration id the canonical database
-   * carries. `unproven`: a fence the canonical database does not vouch for.
+   * `proven`: a retirement fence whose migration id the requested canonical
+   * database carries. `foreign`: a fence recorded for another destination whose
+   * handoff is live or whose database carries the id; it is not ours to touch.
+   * `unproven`: a fence its recorded destination does not vouch for.
    */
-  fence: "none" | "proven" | "unproven";
+  fence: "none" | "proven" | "foreign" | "unproven";
   migrationId: string | null;
   /** Undelivered work remains for the source. */
   pending: boolean;
+  /** The destination the fence was written for. */
+  recordedPath: string | null;
 }
 
 /**
@@ -417,7 +404,7 @@ function inspectLegacyStore(path: string, canonicalPath: string, sourceInstanceI
     const tableExists = (name: string) =>
       Boolean(db?.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
     if (!tableExists("local_device_outbox")) {
-      return { fence: "none", migrationId: null, pending: false };
+      return { fence: "none", migrationId: null, pending: false, recordedPath: null };
     }
     const activeRule = tableExists(SUPERSESSION_TABLE) ? `AND ${activeOutboxRowPredicate()}` : "";
     const pending = Boolean(
@@ -428,20 +415,30 @@ function inspectLegacyStore(path: string, canonicalPath: string, sourceInstanceI
         .get(sourceInstanceId)
     );
     if (!tableExists("pdpp_legacy_retirements")) {
-      return { fence: "none", migrationId: null, pending };
+      return { fence: "none", migrationId: null, pending, recordedPath: null };
     }
     const hasMigrationId = retirementHasMigrationId(db);
     const retirement = db
       .prepare(
-        `SELECT ${hasMigrationId ? "migration_id" : "NULL"} AS migration_id FROM pdpp_legacy_retirements WHERE source_instance_id = ?`
+        `SELECT canonical_path, ${hasMigrationId ? "migration_id" : "NULL"} AS migration_id FROM pdpp_legacy_retirements WHERE source_instance_id = ?`
       )
       .get(sourceInstanceId);
     if (!retirement) {
-      return { fence: "none", migrationId: null, pending };
+      return { fence: "none", migrationId: null, pending, recordedPath: null };
     }
     const migrationId = typeof retirement.migration_id === "string" ? retirement.migration_id : null;
-    const proven = migrationId !== null && readCanonicalMigrationId(canonicalPath, sourceInstanceId) === migrationId;
-    return { fence: proven ? "proven" : "unproven", migrationId, pending };
+    const recordedPath = String(retirement.canonical_path);
+    // Proof and the handoff lock are judged at the fence's recorded destination,
+    // never at whichever destination is being requested now.
+    const provenAtRecorded =
+      migrationId !== null && readCanonicalMigrationId(recordedPath, sourceInstanceId) === migrationId;
+    let fence: LegacyStoreStatus["fence"] = "unproven";
+    if (recordedPath === canonicalPath) {
+      fence = provenAtRecorded ? "proven" : "unproven";
+    } else if (provenAtRecorded || liveHandoffOwner(recordedPath) !== undefined) {
+      fence = "foreign";
+    }
+    return { fence, migrationId, pending, recordedPath };
   } catch (error) {
     // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
     throw new CollectorStateResolutionError(
@@ -456,6 +453,9 @@ function inspectLegacyStore(path: string, canonicalPath: string, sourceInstanceI
 
 /** The migration id a canonical database recorded when its snapshot was taken, if any. */
 function readCanonicalMigrationId(canonicalPath: string, sourceInstanceId: string): string | null {
+  if (!existsSync(canonicalPath)) {
+    return null;
+  }
   let db: DatabaseSync | undefined;
   try {
     db = new DatabaseSync(canonicalPath, { readOnly: true });
@@ -484,17 +484,68 @@ function retirementHasMigrationId(db: DatabaseSync): boolean {
 
 /**
  * Return a legacy store to a writable state when its fence is not backed by the
- * canonical database. Refuses while a live handoff holds the lock, because that
- * handoff may still be about to publish. Returns whether the store is writable.
+ * database it was recorded for. Refuses while a live handoff holds that
+ * destination's lock, because that handoff may still be about to publish.
+ * Returns whether the store is writable.
  */
-function recoverUnprovenFence(
-  legacyPath: string,
+function recoverUnprovenFence(legacyPath: string, status: LegacyStoreStatus, sourceInstanceId: string): boolean {
+  if (status.recordedPath !== null) {
+    assertNoHandoffInProgress(status.recordedPath);
+  }
+  return liftRetirementFence(legacyPath, sourceInstanceId, status.migrationId);
+}
+
+/**
+ * Classify the legacy stores that match a source once its canonical queue exists.
+ * Returns the stores still holding undelivered work, and whether every fence this
+ * call had to lift left its store writable. Fences that are proven are left in
+ * place; fences recorded for another destination are never lifted.
+ */
+function accountForLegacyStores(
+  paths: readonly string[],
   canonicalPath: string,
-  sourceInstanceId: string,
-  migrationId: string | null
-): boolean {
-  assertNoHandoffInProgress(canonicalPath);
-  return liftRetirementFence(legacyPath, sourceInstanceId, migrationId);
+  sourceInstanceId: string
+): { legacyWritable: boolean; pending: string[] } {
+  const pending: string[] = [];
+  let legacyWritable = true;
+  for (const path of paths) {
+    const status = inspectLegacyStore(path, canonicalPath, sourceInstanceId);
+    if (status.fence === "proven") {
+      continue;
+    }
+    if (status.fence === "foreign") {
+      // Retired elsewhere; only a backlog still sitting here is a conflict.
+      if (status.pending) {
+        assertFenceNotForeign(status, path, canonicalPath, sourceInstanceId);
+      }
+      continue;
+    }
+    if (status.fence === "unproven") {
+      // An interrupted migration can leave a fence behind; its destination does
+      // not hold its snapshot, so the legacy writer must not stay retired.
+      const lifted = recoverUnprovenFence(path, status, sourceInstanceId);
+      legacyWritable = legacyWritable && lifted;
+    }
+    if (status.pending) {
+      pending.push(path);
+    }
+  }
+  return { legacyWritable, pending };
+}
+
+function assertFenceNotForeign(
+  status: LegacyStoreStatus,
+  legacyPath: string,
+  requestedPath: string,
+  sourceInstanceId: string
+): void {
+  if (status.fence !== "foreign") {
+    return;
+  }
+  throw new CollectorStateResolutionError(
+    "legacy_state_conflict",
+    `the legacy store ${legacyPath} for source '${sourceInstanceId}' is retired to ${status.recordedPath}, not to the requested ${requestedPath}; its fence was left in place. Use the queue at ${status.recordedPath} (--queue ${status.recordedPath}), or wait for a handoff to it that is still running`
+  );
 }
 
 type MigrationHooks = Pick<
@@ -786,15 +837,15 @@ function liftRetirementFence(legacyPath: string, sourceInstanceId: string, migra
   }
 }
 
-/** Refuse to hand out a canonical path while a live process holds its handoff lock. */
-function assertNoHandoffInProgress(canonicalPath: string): void {
+/** The pid of a live process holding the handoff lock for a canonical path, if any. */
+function liveHandoffOwner(canonicalPath: string): number | undefined {
   const lockPath = `${canonicalPath}.handoff.lock`;
   let ownerPid: number;
   try {
     ownerPid = Number(readFileSync(lockPath, { encoding: "utf8" }).trim());
   } catch (error) {
     if (isNotFoundError(error)) {
-      return;
+      return undefined;
     }
     throw error;
   }
@@ -802,13 +853,21 @@ function assertNoHandoffInProgress(canonicalPath: string): void {
     process.kill(ownerPid, 0);
   } catch (probeError) {
     if (isNodeError(probeError) && probeError.code === "ESRCH") {
-      return;
+      return undefined;
     }
   }
-  throw new CollectorStateResolutionError(
-    "legacy_state_conflict",
-    `a legacy state handoff to ${canonicalPath} is in progress (process ${ownerPid}); retry once it finishes`
-  );
+  return ownerPid;
+}
+
+/** Refuse to hand out a canonical path while a live process holds its handoff lock. */
+function assertNoHandoffInProgress(canonicalPath: string): void {
+  const ownerPid = liveHandoffOwner(canonicalPath);
+  if (ownerPid !== undefined) {
+    throw new CollectorStateResolutionError(
+      "legacy_state_conflict",
+      `a legacy state handoff to ${canonicalPath} is in progress (process ${ownerPid}); retry once it finishes`
+    );
+  }
 }
 
 function installRetirementFence(

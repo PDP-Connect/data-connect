@@ -984,56 +984,66 @@ test("a filesystem without hard links fails the migration closed instead of repl
   });
 });
 
+function terminalCommit(id: string, runId: string, boundary: string) {
+  return {
+    id,
+    kind: "terminal_run_commit" as const,
+    payload: {
+      collection_boundary: boundary,
+      commit_id: id,
+      connector_id: "claude_code",
+      connector_instance_id: "cin-1",
+      run_id: runId,
+      state_delta: {},
+      terminal_facts: [],
+      version: 1,
+    },
+    sourceInstanceId: SOURCE_A,
+  };
+}
+
+/** Claim the next ready row and either acknowledge it or dead-letter it. */
+function settleNextRow(outbox: LocalDeviceOutbox, outcome: "acknowledge" | "deadLetter"): void {
+  const [claimed] = outbox.claimReady({ holder: "test", leaseMs: 60_000, sourceInstanceId: SOURCE_A });
+  assert.ok(claimed);
+  const lease = { holder: "test", id: claimed.id, leaseEpoch: claimed.lease_epoch };
+  if (outcome === "acknowledge") {
+    outbox.acknowledge(lease);
+  } else {
+    outbox.deadLetter({ ...lease, error: "400 invalid_request" });
+  }
+}
+
+/** A dead-letter terminal commit retired by an acknowledged replacement: history, not work. */
+function seedSupersededTerminalHistory(path: string): void {
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    outbox.enqueue(terminalCommit("old-terminal", "run-old", "scope-1"));
+    settleNextRow(outbox, "deadLetter");
+    outbox.enqueue(terminalCommit("new-terminal", "run-new", "scope-1"));
+    settleNextRow(outbox, "acknowledge");
+    assert.equal(
+      outbox.retireDeadLetteredTerminalCommits({
+        collectionBoundary: "scope-1",
+        connectorId: "claude_code",
+        connectorInstanceId: "cin-1",
+        replacementId: "new-terminal",
+        sourceInstanceId: SOURCE_A,
+      }),
+      1
+    );
+    assert.equal(outbox.get("old-terminal")?.status, "dead_letter", "superseded evidence is retained");
+  } finally {
+    outbox.close();
+  }
+}
+
 test("superseded terminal history in a legacy store is not pending work", () => {
   withTempRoot("pdpp-durable-state-superseded-", (root) => {
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
-    const terminal = (id: string, runId: string, boundary: string) => ({
-      id,
-      kind: "terminal_run_commit" as const,
-      payload: {
-        collection_boundary: boundary,
-        commit_id: id,
-        connector_id: "claude_code",
-        connector_instance_id: "cin-1",
-        run_id: runId,
-        state_delta: {},
-        terminal_facts: [],
-        version: 1,
-      },
-      sourceInstanceId: SOURCE_A,
-    });
-    const settle = (outbox: LocalDeviceOutbox, outcome: "acknowledge" | "deadLetter") => {
-      const [claimed] = outbox.claimReady({ holder: "test", leaseMs: 60_000, sourceInstanceId: SOURCE_A });
-      assert.ok(claimed);
-      const lease = { holder: "test", id: claimed.id, leaseEpoch: claimed.lease_epoch };
-      if (outcome === "acknowledge") {
-        outbox.acknowledge(lease);
-      } else {
-        outbox.deadLetter({ ...lease, error: "400 invalid_request" });
-      }
-    };
-    const legacy = new LocalDeviceOutbox({ path: legacyPath });
-    try {
-      legacy.enqueue(terminal("old-terminal", "run-old", "scope-1"));
-      settle(legacy, "deadLetter");
-      legacy.enqueue(terminal("new-terminal", "run-new", "scope-1"));
-      settle(legacy, "acknowledge");
-      assert.equal(
-        legacy.retireDeadLetteredTerminalCommits({
-          collectionBoundary: "scope-1",
-          connectorId: "claude_code",
-          connectorInstanceId: "cin-1",
-          replacementId: "new-terminal",
-          sourceInstanceId: SOURCE_A,
-        }),
-        1
-      );
-      assert.equal(legacy.get("old-terminal")?.status, "dead_letter", "superseded evidence is retained");
-    } finally {
-      legacy.close();
-    }
+    seedSupersededTerminalHistory(legacyPath);
     seedOutbox(canonicalPath, SOURCE_A, "canonical-work");
 
     assert.equal(resolveCollectorQueuePath(resolveInput(root, installRoot)), canonicalPath);
@@ -1041,8 +1051,8 @@ test("superseded terminal history in a legacy store is not pending work", () => 
     // A dead-letter terminal commit that nothing superseded is still undelivered work.
     const reopened = new LocalDeviceOutbox({ path: legacyPath });
     try {
-      reopened.enqueue(terminal("other-terminal", "run-other", "scope-2"));
-      settle(reopened, "deadLetter");
+      reopened.enqueue(terminalCommit("other-terminal", "run-other", "scope-2"));
+      settleNextRow(reopened, "deadLetter");
     } finally {
       reopened.close();
     }
@@ -1145,5 +1155,119 @@ test("an empty canonical queue without a matching migration marker still fails c
     }
     assert.throws(() => resolveCollectorQueuePath(resolveInput(root, installRoot)), ambiguous);
     assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["pending-A"]);
+  });
+});
+
+/** Requests that name a different canonical destination for the same source and legacy store. */
+const DIFFERENT_DESTINATIONS = [
+  { name: "another connector id", change: () => ({ connectorId: "codex" }) },
+  { name: "another state root", change: (root: string) => ({ stateRoot: join(root, "other-state") }) },
+] as const;
+
+function isConflict(error: unknown): boolean {
+  return error instanceof CollectorStateResolutionError && error.code === "legacy_state_conflict";
+}
+
+for (const destination of DIFFERENT_DESTINATIONS) {
+  for (const competitorExists of [true, false]) {
+    test(`a completed migration's fence is not lifted by a request with ${destination.name} (competing queue: ${competitorExists})`, () => {
+      withTempRoot("pdpp-durable-state-foreign-fence-", (root) => {
+        const installRoot = join(root, "npx-temp-package");
+        const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+        const base = resolveInput(root, installRoot);
+        const other = { ...base, ...destination.change(root) };
+        const otherPath = canonicalCollectorQueuePath(other);
+        seedOutbox(legacyPath, SOURCE_A, "pending-A");
+        const canonicalPath = resolveCollectorQueuePath(base);
+        if (competitorExists) {
+          seedOutbox(otherPath, SOURCE_A, "competitor-B");
+        }
+
+        // Either refusal is safe; when the request is judged against the fence, the
+        // error names both destinations. Another connector's queue in the same state
+        // directory can instead make the request ambiguous before the fence is read.
+        assert.throws(
+          () => resolveCollectorQueuePath(other),
+          (error: unknown) =>
+            error instanceof CollectorStateResolutionError &&
+            (error.code === "legacy_state_ambiguous" ||
+              (error.code === "legacy_state_conflict" &&
+                error.message.includes(canonicalPath) &&
+                error.message.includes(otherPath)))
+        );
+
+        // The fence still points at the live destination: the legacy store stays retired.
+        assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+        assert.equal(resolveCollectorQueuePath(base), canonicalPath);
+        assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["pending-A"]);
+      });
+    });
+
+    test(`an in-flight migration's fence is not lifted by a request with ${destination.name} (competing queue: ${competitorExists})`, () => {
+      withTempRoot("pdpp-durable-state-foreign-in-flight-", (root) => {
+        const installRoot = join(root, "npx-temp-package");
+        const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+        const base = resolveInput(root, installRoot);
+        const other = { ...base, ...destination.change(root) };
+        const otherPath = canonicalCollectorQueuePath(other);
+        seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+        let concurrentOutcome: unknown = "resolved";
+        const canonicalPath = resolveCollectorQueuePath({
+          ...base,
+          afterRetirementFence: () => {
+            if (competitorExists) {
+              seedOutbox(otherPath, SOURCE_A, "competitor-B");
+            }
+            try {
+              concurrentOutcome = resolveCollectorQueuePath(other);
+            } catch (error) {
+              concurrentOutcome = error;
+            }
+          },
+        });
+
+        assert.ok(
+          isConflict(concurrentOutcome),
+          `the concurrent request was refused, got ${String(concurrentOutcome)}`
+        );
+        assert.equal(existsSync(canonicalPath), true);
+        assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+        assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["pending-A"]);
+        if (!competitorExists) {
+          assert.equal(existsSync(otherPath), false, "no second snapshot was published");
+        }
+      });
+    });
+  }
+}
+
+test("an empty canonical queue does not block a legacy store whose work is all delivered", () => {
+  withTempRoot("pdpp-durable-state-empty-drained-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
+    seedOutbox(legacyPath, SOURCE_A, "delivered-A");
+    const legacy = new LocalDeviceOutbox({ path: legacyPath });
+    try {
+      settleNextRow(legacy, "acknowledge");
+    } finally {
+      legacy.close();
+    }
+    new LocalDeviceOutbox({ path: canonicalPath }).close();
+
+    assert.equal(resolveCollectorQueuePath(resolveInput(root, installRoot)), canonicalPath);
+  });
+});
+
+test("an empty canonical queue does not block a legacy store holding only superseded terminal history", () => {
+  withTempRoot("pdpp-durable-state-empty-superseded-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
+    seedSupersededTerminalHistory(legacyPath);
+    new LocalDeviceOutbox({ path: canonicalPath }).close();
+
+    assert.equal(resolveCollectorQueuePath(resolveInput(root, installRoot)), canonicalPath);
   });
 });
