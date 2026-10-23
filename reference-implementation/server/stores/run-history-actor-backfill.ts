@@ -17,6 +17,10 @@
 //   which records a server run by construction. So the absence of any event is
 //   itself the proof of server origin. `scheduler_managed` is NOT that proof:
 //   its column default is true, so device rows carry it too.
+// - A row with run_id IS NULL can only come from that legacy scheduler append
+//   path: the spine writer requires both run_id and connector_instance_id.
+//   Legacy scheduler skips therefore take 'runtime', including rows copied
+//   from scheduler_run_history during the rename/merge migration.
 // Identity is the pair (run_id, connector_instance_id), never run_id alone. A
 // spine event with a NULL connector_instance_id could belong to the row, so it
 // blocks the 'runtime' rule (fail closed) rather than being ignored.
@@ -97,6 +101,7 @@ export const SQLITE_FILL_ACTOR_SQL = `UPDATE run_history
      FROM (
        SELECT rh.id AS id,
               COALESCE(
+                CASE WHEN rh.run_id IS NULL THEN '${SERVER_RUN_ACTOR_TYPE}' END,
                 (SELECT se.actor_type FROM spine_events se
                   WHERE se.run_id = rh.run_id
                     AND +se.connector_instance_id = rh.connector_instance_id
@@ -112,7 +117,7 @@ export const SQLITE_FILL_ACTOR_SQL = `UPDATE run_history
               ) AS actor_type
        FROM run_history rh
        WHERE rh.id BETWEEN ? AND ?
-         AND rh.actor_type IS NULL AND rh.run_id IS NOT NULL AND rh.status <> 'running'
+         AND rh.actor_type IS NULL AND rh.status <> 'running'
      ) AS found
      WHERE run_history.id = found.id
        AND found.actor_type IS NOT NULL
@@ -126,7 +131,7 @@ function sqliteRound(afterId: number, batchSize: number): RunHistoryActorBackfil
       `SELECT COUNT(*) AS examined, MIN(id) AS lo, MAX(id) AS hi
        FROM (
          SELECT id FROM run_history
-         WHERE id > ? AND actor_type IS NULL AND run_id IS NOT NULL AND status <> 'running'
+         WHERE id > ? AND actor_type IS NULL AND status <> 'running'
          ORDER BY id
          LIMIT ?
        )`,
@@ -149,7 +154,7 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
     `SELECT COUNT(*)::text AS examined, MIN(id)::text AS lo, MAX(id)::text AS hi
      FROM (
        SELECT id FROM run_history
-       WHERE id > $1::bigint AND actor_type IS NULL AND run_id IS NOT NULL AND status <> 'running'
+       WHERE id > $1::bigint AND actor_type IS NULL AND status <> 'running'
        ORDER BY id
        LIMIT $2
      ) batch`,
@@ -167,6 +172,7 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
      FROM (
        SELECT rh.id,
               CASE
+                WHEN rh.run_id IS NULL THEN '${SERVER_RUN_ACTOR_TYPE}'
                 WHEN browser.actor_type IS NOT NULL
                      AND (indexed.actor_type IS NULL OR browser.event_seq < indexed.event_seq)
                   THEN browser.actor_type
@@ -196,7 +202,7 @@ async function postgresRound(afterId: number, batchSize: number): Promise<RunHis
          LIMIT 1
        ) browser ON true
        WHERE rh.id BETWEEN $1::bigint AND $2::bigint
-         AND rh.actor_type IS NULL AND rh.run_id IS NOT NULL AND rh.status <> 'running'
+         AND rh.actor_type IS NULL AND rh.status <> 'running'
      ) found
      WHERE run_history.id = found.id
        AND found.actor_type IS NOT NULL

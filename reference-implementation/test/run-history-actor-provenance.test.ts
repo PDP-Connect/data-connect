@@ -535,15 +535,23 @@ function run(overrides: Partial<RunFixture>): RunFixture {
 
 /** The `messages` stream's coverage condition the Collection Report projects from this one run. */
 function conditionFor(candidate: RunFixture): string | undefined {
+  return conditionForRuns(candidate, candidate, candidate);
+}
+
+function conditionForRuns(
+  lastRun: RunFixture,
+  lastSuccessfulRun: RunFixture,
+  latestSettledRun: RunFixture
+): string | undefined {
   const partial: Partial<ReportInput["connectionHealth"]> = {
     axes: { attention: "none", coverage: "unknown", freshness: "fresh", outbox: "idle", remote_surface: "none" },
     conditions: [],
   };
   const entries = projectCollectionReport({
     connectionHealth: partial as ReportInput["connectionHealth"],
-    lastRun: candidate,
-    lastSuccessfulRun: candidate,
-    latestSettledRun: candidate,
+    lastRun,
+    lastSuccessfulRun,
+    latestSettledRun,
     manifestStreams: [
       { coverage_strategy: "checkpoint_window", freshness_strategy: "scheduled_window", name: "messages" },
     ],
@@ -551,6 +559,113 @@ function conditionFor(candidate: RunFixture): string | undefined {
   });
   return entries.find((entry) => entry.stream === "messages")?.coverage_condition;
 }
+
+backendTest("legacy scheduler skip with NULL run_id keeps earlier runtime coverage after backfill", async (backend) => {
+  await emitSpineEvent(startedEvent("run-before-legacy-skip", INSTANCE_A));
+  await emitSpineEvent(terminalEvent("run-before-legacy-skip", INSTANCE_A, "runtime"));
+
+  const legacyTable =
+    backend === "sqlite"
+      ? `CREATE TABLE scheduler_run_history (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           connector_instance_id TEXT NOT NULL,
+           connector_id TEXT NOT NULL,
+           source_json TEXT NOT NULL,
+           status TEXT NOT NULL,
+           records_emitted INTEGER NOT NULL DEFAULT 0,
+           reported_records_emitted INTEGER,
+           checkpoint_summary_json TEXT,
+           known_gaps_json TEXT NOT NULL DEFAULT '[]',
+           connector_error_json TEXT,
+           run_id TEXT,
+           trace_id TEXT,
+           failure_reason TEXT,
+           terminal_reason TEXT,
+           started_at TEXT NOT NULL,
+           completed_at TEXT NOT NULL,
+           error TEXT,
+           attempt INTEGER NOT NULL
+         )`
+      : `CREATE TABLE scheduler_run_history (
+           id BIGSERIAL PRIMARY KEY,
+           connector_instance_id TEXT NOT NULL,
+           connector_id TEXT NOT NULL,
+           source_json JSONB NOT NULL,
+           status TEXT NOT NULL,
+           records_emitted INTEGER NOT NULL DEFAULT 0,
+           reported_records_emitted INTEGER,
+           checkpoint_summary_json JSONB,
+           known_gaps_json JSONB NOT NULL DEFAULT '[]',
+           connector_error_json JSONB,
+           run_id TEXT,
+           trace_id TEXT,
+           failure_reason TEXT,
+           terminal_reason TEXT,
+           started_at TEXT NOT NULL,
+           completed_at TEXT NOT NULL,
+           error TEXT,
+           attempt INTEGER NOT NULL
+         )`;
+  if (backend === "sqlite") {
+    getDb().exec(legacyTable);
+    getDb()
+      .prepare(
+        `INSERT INTO scheduler_run_history(
+           connector_instance_id, connector_id, source_json, status, known_gaps_json,
+           run_id, started_at, completed_at, attempt
+         ) VALUES (?, ?, '{}', 'skipped', '[]', NULL, ?, ?, 1)`
+      )
+      .run(INSTANCE_A, CONNECTOR_ID, "2026-10-01T00:02:00.000Z", "2026-10-01T00:02:00.000Z");
+    closeDb();
+    initDb(sqlitePath);
+  } else {
+    await postgresQuery(legacyTable);
+    await postgresQuery(
+      `INSERT INTO scheduler_run_history(
+         connector_instance_id, connector_id, source_json, status, known_gaps_json,
+         run_id, started_at, completed_at, attempt
+       ) VALUES ($1, $2, '{}'::jsonb, 'skipped', '[]'::jsonb, NULL, $3, $3, 1)`,
+      [INSTANCE_A, CONNECTOR_ID, "2026-10-01T00:02:00.000Z"]
+    );
+    await bootstrapPostgresSchema();
+  }
+
+  const [mergedSkip] = await sql(
+    backend,
+    "SELECT run_id, status, actor_type, scheduler_managed FROM run_history WHERE status = 'skipped' ORDER BY id DESC LIMIT 1",
+    "SELECT run_id, status, actor_type, scheduler_managed FROM run_history WHERE status = 'skipped' ORDER BY id DESC LIMIT 1"
+  );
+  assert.ok(mergedSkip, "the legacy scheduler skip was merged into run_history");
+  assert.equal(mergedSkip.run_id, null, "the legacy skip has no run id");
+  assert.equal(mergedSkip.actor_type, null, "the legacy merge leaves actor provenance for the backfill");
+
+  const backfill = await runStartupRunHistoryActorBackfillToCompletion();
+  assert.equal(backfill.filled, 1, "the NULL-run_id scheduler row is attributed at the proven boundary");
+  const [backfilledSkip] = await sql(
+    backend,
+    "SELECT run_id, status, actor_type, scheduler_managed FROM run_history WHERE status = 'skipped' ORDER BY id DESC LIMIT 1",
+    "SELECT run_id, status, actor_type, scheduler_managed FROM run_history WHERE status = 'skipped' ORDER BY id DESC LIMIT 1"
+  );
+  const [previousSuccess] = await sql(
+    backend,
+    "SELECT run_id, status, actor_type, scheduler_managed FROM run_history WHERE run_id = 'run-before-legacy-skip'",
+    "SELECT run_id, status, actor_type, scheduler_managed FROM run_history WHERE run_id = 'run-before-legacy-skip'"
+  );
+  assert.equal(backfilledSkip?.actor_type, "runtime");
+  const earlier = run({
+    actor_type: previousSuccess?.actor_type as string,
+    run_id: String(previousSuccess?.run_id),
+    scheduler_managed: Boolean(previousSuccess?.scheduler_managed),
+  });
+  const latest = run({
+    actor_type: backfilledSkip?.actor_type as string | null,
+    collection_facts: null,
+    run_id: backfilledSkip?.run_id == null ? undefined : String(backfilledSkip.run_id),
+    scheduler_managed: Boolean(backfilledSkip?.scheduler_managed),
+    status: String(backfilledSkip?.status),
+  });
+  assert.equal(conditionForRuns(latest, earlier, latest), "complete", "the prior runtime success remains coverage");
+});
 
 test("selector: an ordinary server run classifies normally", () => {
   assert.equal(conditionFor(run({ actor_type: "runtime" })), "complete");
