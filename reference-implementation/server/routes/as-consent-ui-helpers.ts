@@ -1485,22 +1485,29 @@ interface PendingConsentCumulativeRisk {
 // surface) can point at any element and name its provenance:
 //
 //   • PROTOCOL — facts the owner's server enforces/verifies (grant scope,
-//     access mode, retention, the source binding, the resolved client-identity
-//     origin). Trusted.
+//     access mode, access end from `expires_at`, the source binding, the
+//     resolved client-identity origin). Trusted. Retention is NOT here: the
+//     server does not enforce it (spec-core.md §7), and it never decides when
+//     access ends.
+//   • DECLARED — structured policy the client declared (purpose, retention).
+//     The server records and shows it but does not enforce it, so it gets its
+//     own group, apart from enforced facts and from free-text claims
+//     (spec-core.md §6: the three MUST stay distinct).
 //   • MANIFEST — the owner-trusted human descriptions for the requested streams
 //     (stream labels/details from the resolved manifest).
-//   • CLIENT   — claims the client itself authored (its self-described app name,
-//     the purpose_description, and top-level client_claims). Rendered, never
+//   • CLIENT   — free-text claims the client itself authored (its
+//     self-described app name and top-level client_claims). Rendered, never
 //     trusted: each carries a "they say / not enforced" affordance.
 //
 // `data-authorship` is the machine-readable provenance hook (one per block),
 // matching the operator-ui consent-card contract; `data-surface` keeps the
 // existing human/protocol temperature.
 
-type ConsentAuthorship = "protocol" | "manifest" | "client";
+type ConsentAuthorship = "protocol" | "manifest" | "declared" | "client";
 
 const AUTHORSHIP_EYEBROW: Record<ConsentAuthorship, string> = {
   client: "They claim — not verified by your server",
+  declared: "The app declared this — your server does not enforce it",
   manifest: "Your server describes",
   protocol: "Your server enforces",
 };
@@ -1765,15 +1772,88 @@ function renderReviewedStreams(streams: ApprovalReviewStream[], ui: ConsentUiRen
     .join("\n");
 }
 
-function buildReviewedSelectionFacts(review: SingleApprovalReviewArtifact | ApprovalReviewSourceEntry) {
+/**
+ * When access ends. Only `expires_at` ends access. Retention never does: it is
+ * the client's promise about data it already holds (spec-core.md §7).
+ */
+function describeAccessEnd(accessMode: string | null | undefined, expiresAt: string | null | undefined): string {
+  if (expiresAt) {
+    return expiresAt;
+  }
+  return accessMode === "continuous" ? "Until you revoke it" : "No end date set";
+}
+
+const ISO_DURATION_UNITS: Record<string, [string, string]> = {
+  D: ["day", "days"],
+  M: ["month", "months"],
+  W: ["week", "weeks"],
+  Y: ["year", "years"],
+};
+
+function humanizeIsoDuration(duration: string): string {
+  const match = /^P(\d+)([DWMY])$/.exec(duration);
+  const unit = match?.[2] ? ISO_DURATION_UNITS[match[2]] : undefined;
+  if (!(match && unit)) {
+    return duration;
+  }
+  const count = Number(match[1]);
+  return `${count} ${count === 1 ? unit[0] : unit[1]}`;
+}
+
+/**
+ * The retention the client declared, as a sentence about the CLIENT. Returns
+ * null when the client declared none. This is a declaration, not a server
+ * rule: the owner's server does not enforce it.
+ */
+function describeDeclaredRetention(
+  retention: { max_duration?: string | null; on_expiry?: string | null } | null | undefined
+): string | null {
+  if (!retention?.max_duration) {
+    return null;
+  }
+  const duration = humanizeIsoDuration(retention.max_duration);
+  const action = retention.on_expiry === "anonymize" || retention.on_expiry === "delete" ? retention.on_expiry : null;
+  return action
+    ? `The app says it will ${action} the data after ${duration}.`
+    : `The app says it will keep the data for up to ${duration}.`;
+}
+
+const DECLARED_NOTE = "The app declared this. Your server does not enforce it.";
+
+/** Group 1: what the owner's server enforces about the selection. */
+function buildEnforcedSelectionFacts(
+  review: { access_mode: string | null; selection_preset?: string | null },
+  expiresAt?: string | null
+): Array<{ label: string; value: string }> {
   return [
-    { label: "Purpose code", value: review.purpose_code },
-    { label: "Purpose description", value: displayOptional(review.purpose_description) },
-    { label: "Access mode", value: review.access_mode },
+    { label: "Access mode", value: displayOptional(review.access_mode) },
     { label: "Selection preset", value: displayOptional(review.selection_preset) },
-    { label: "Retention duration", value: displayOptional(review.retention?.max_duration) },
-    { label: "Retention on expiry", value: displayOptional(review.retention?.on_expiry) },
+    ...(expiresAt === undefined
+      ? []
+      : [{ label: "Access ends", value: describeAccessEnd(review.access_mode, expiresAt) }]),
   ];
+}
+
+/** Group 2: structured policy the client declared. Not enforced. */
+function buildDeclaredPolicyBlock(
+  review: {
+    purpose_code?: string | null;
+    purpose_description?: string | null;
+    retention?: { max_duration?: string | null; on_expiry?: string | null } | null | undefined;
+  },
+  ariaLabel: string,
+  ui: ConsentUiRenderer
+): string {
+  return renderAuthorshipBlock(
+    "declared",
+    ariaLabel,
+    `${ui.renderKeyValueList([
+      { label: "Purpose code", value: displayOptional(review.purpose_code) },
+      { label: "Purpose description", value: displayOptional(review.purpose_description) },
+      { label: "Retention", value: describeDeclaredRetention(review.retention) ?? "None declared" },
+    ])}<p class="hosted-ui-client-claim-disclaimer">${ui.escapeHtml(DECLARED_NOTE)}</p>`,
+    ui
+  );
 }
 
 function buildReviewedSourceFacts(
@@ -1926,17 +2006,18 @@ function buildBatchSourceCards(cards: PendingConsentCard[], ui: ConsentUiRendere
         ui.renderKeyValueList([
           { label: "Source", value: sourceLabel },
           { label: "Access mode", value: card.access_mode || "unspecified" },
+          ...(card.access_mode === "continuous"
+            ? [{ label: "Access ends", value: describeAccessEnd(card.access_mode, null) }]
+            : []),
           { label: "Sensitivity", value: card.sensitivity || "standard" },
         ]),
         ui
       );
-      // CLIENT: the client-authored purpose for this source. Rendered as a
-      // claim, never as a fact.
-      const clientPurpose = card.purpose_code || "unspecified";
-      const clientPurposeBlock = renderAuthorshipBlock(
-        "client",
-        `Client-authored purpose for ${sourceLabel}`,
-        ui.renderKeyValueList([{ label: "Stated purpose", value: clientPurpose }]),
+      // DECLARED: the purpose and retention the client declared for this
+      // source. The server shows them but does not enforce them.
+      const clientPurposeBlock = buildDeclaredPolicyBlock(
+        { purpose_code: card.purpose_code || "unspecified", retention: card.retention },
+        `Declared purpose and retention for ${sourceLabel}`,
         ui
       );
       const clientClaimsBlock = buildClientClaimsBlock(card.client_claims, ui);
@@ -2122,12 +2203,18 @@ function renderReviewedBatchConsentHtml(
         ariaLabel: `Reviewed source ${source.index + 1}`,
         children: [
           `<h3 class="pdpp-heading">${ui.escapeHtml(source.source.id)}</h3>`,
-          ui.renderKeyValueList([
-            { label: "Approval order", value: order + 1 },
-            { label: "Staged source index", value: source.index },
-            ...buildReviewedSourceFacts(source.source, source.source_declaration),
-            ...buildReviewedSelectionFacts(source),
-          ]),
+          renderAuthorshipBlock(
+            "protocol",
+            `Reviewed source ${source.index + 1} terms`,
+            ui.renderKeyValueList([
+              { label: "Approval order", value: order + 1 },
+              { label: "Staged source index", value: source.index },
+              ...buildReviewedSourceFacts(source.source, source.source_declaration),
+              ...buildEnforcedSelectionFacts(source),
+            ]),
+            ui
+          ),
+          buildDeclaredPolicyBlock(source, `Declared purpose and retention for source ${source.index + 1}`, ui),
           buildClientClaimsBlock(source.client_claims, ui),
           renderReviewedNarrowing(review.source_narrowing[String(source.index)], ui),
           `<span class="pdpp-title">Exact reviewed streams</span>${renderReviewedStreams(source.resolved_streams, ui)}`,
@@ -2148,14 +2235,20 @@ function renderReviewedBatchConsentHtml(
     }),
     ui.renderSurface({
       ariaLabel: "Reviewed batch decision",
-      children: ui.renderKeyValueList([
-        ...buildReviewedClientFacts(review.client),
-        { label: "Subject ID", value: review.subject.id },
-        { label: "Access mode", value: displayOptional(review.access_mode) },
-        { label: "Grant expiry", value: displayOptional(review.expires_at) },
-        { label: "Parent package ID", value: displayOptional(review.parent_package_id) },
-        { label: "Approved source order", value: review.approved_source_indexes.join(", ") },
-      ]),
+      children: renderAuthorshipBlock(
+        "protocol",
+        "Reviewed batch terms",
+        ui.renderKeyValueList([
+          ...buildReviewedClientFacts(review.client),
+          { label: "Subject ID", value: review.subject.id },
+          ...buildEnforcedSelectionFacts({ access_mode: review.access_mode }, review.expires_at).filter(
+            (fact) => fact.label !== "Selection preset"
+          ),
+          { label: "Parent package ID", value: displayOptional(review.parent_package_id) },
+          { label: "Approved source order", value: review.approved_source_indexes.join(", ") },
+        ]),
+        ui
+      ),
       surface: "human",
     }),
     sourceSections,
@@ -2380,22 +2473,16 @@ function renderReviewedSingleConsentHtml(
           ui
         ),
         renderAuthorshipBlock(
-          "client",
-          "Reviewed purpose",
-          [ui.renderKeyValueList(buildReviewedSelectionFacts(review)), buildClientClaimsBlock(review.client_claims, ui)]
-            .filter(Boolean)
-            .join("\n"),
-          ui
-        ),
-        renderAuthorshipBlock(
           "protocol",
           "Reviewed approval conditions",
           ui.renderKeyValueList([
+            ...buildEnforcedSelectionFacts(review, review.expires_at),
             { label: "AI training consent", value: displayAiTrainingDecision(review.ai_training_consented) },
-            { label: "Grant expiry", value: displayOptional(review.expires_at) },
           ]),
           ui
         ),
+        buildDeclaredPolicyBlock(review, "Declared purpose and retention", ui),
+        buildClientClaimsBlock(review.client_claims, ui),
         `<span class="pdpp-title">Exact reviewed streams</span>${renderReviewedStreams(review.resolved_streams, ui)}`,
         actions,
       ].join("\n"),
@@ -2452,13 +2539,13 @@ export function renderPendingGrantConsentHtml(
   const streamsBlock = buildStreamsBlock(requestedStreams, sourceLabel, manifestStreamNames, ui);
 
   const isContinuous = selection.access_mode === "continuous";
-  const hasRetentionBound = Boolean(selection.retention?.max_duration);
 
   let continuousBlock = "";
   if (isContinuous) {
-    const continuousBody = hasRetentionBound
-      ? "This is long-lived access — the client may keep reading until the grant is revoked or its retention bound is reached."
-      : "This is long-lived access with no explicit expiry. The client may keep reading until you revoke the grant.";
+    // Only `expires_at` ends access, and a request under review has none yet.
+    // Retention is the client's own promise and never ends access.
+    const continuousBody =
+      "This is long-lived access with no explicit expiry. The client may keep reading until you revoke the grant.";
     continuousBlock = `
       <div class="hosted-ui-warning" role="note">
         <span class="hosted-ui-warning-title">Continuous access</span>
@@ -2467,18 +2554,14 @@ export function renderPendingGrantConsentHtml(
   }
 
   // PROTOCOL: facts the owner's server enforces or verifies. The client-identity
-  // origin (for CIMD clients), the source binding, the access mode, and the
-  // retention bound are all server-determined — never client-asserted.
+  // origin (for CIMD clients), the source binding, the access mode, and when
+  // access ends are all server-determined — never client-asserted. Retention
+  // is NOT here: the server does not enforce it (see the declared block).
   const protocolFactsRaw: Array<{ label: string; value?: unknown; html?: string } | null> = [
     ...clientDisplay.protocolFacts,
     sourceBinding?.id ? { label: sourceFactLabel, value: sourceBinding.id } : null,
     { label: "Access mode", value: selection.access_mode },
-    selection.retention
-      ? {
-          label: "Retention",
-          value: `${selection.retention.on_expiry} after ${selection.retention.max_duration}`,
-        }
-      : null,
+    isContinuous ? { label: "Access ends", value: describeAccessEnd(selection.access_mode, null) } : null,
   ];
   const protocolFacts = protocolFactsRaw.filter(
     (x): x is { label: string; value?: unknown; html?: string } => x !== null
@@ -2488,16 +2571,19 @@ export function renderPendingGrantConsentHtml(
       ? renderAuthorshipBlock("protocol", "Protocol facts", ui.renderKeyValueList(protocolFacts), ui)
       : "";
 
-  // CLIENT: the client's own claims about itself — its self-described app name
-  // and the free-text purpose it stated. Rendered as claims, never as facts.
+  // CLIENT: the client's own claims about itself — its self-described app
+  // name. Rendered as claims, never as facts.
   const clientFactsRaw: Array<{ label: string; value?: unknown; html?: string }> = [...clientDisplay.clientFacts];
-  const clientPurpose = selection.purpose_description || selection.purpose_code;
-  if (clientPurpose) {
-    clientFactsRaw.push({ label: "Stated purpose", value: clientPurpose });
-  }
   const clientIdentityBlock =
     clientFactsRaw.length > 0
       ? renderAuthorshipBlock("client", "Client-authored display", ui.renderKeyValueList(clientFactsRaw), ui)
+      : "";
+
+  // DECLARED: the purpose and retention the client declared. Shown, not
+  // enforced.
+  const declaredBlock =
+    selection.purpose_description || selection.purpose_code || selection.retention
+      ? buildDeclaredPolicyBlock(selection, "Declared purpose and retention", ui)
       : "";
 
   // CLIENT: top-level client_claims.commitments, if any.
@@ -2530,10 +2616,11 @@ export function renderPendingGrantConsentHtml(
       children: [
         codeBlock,
         clientIdentityBlock,
-        clientClaimsBlock,
         manifestBlock,
         protocolBlock,
         continuousBlock,
+        declaredBlock,
+        clientClaimsBlock,
         actions,
       ]
         .filter(Boolean)
@@ -3043,14 +3130,23 @@ export async function renderHostedMcpSourceSelection(
     ? `<section class="hosted-ui-review" data-hosted-mcp-review aria-live="polite" aria-label="What you're allowing">
           <h2 class="pdpp-title">What you're allowing</h2>
           <p class="hosted-ui-review-empty" data-hosted-mcp-review-empty>Nothing selected yet.</p>
-          <dl class="hosted-ui-kv hosted-ui-review-terms" data-hosted-mcp-review-terms hidden>
+          <div data-hosted-mcp-review-terms hidden>
+            <dl class="hosted-ui-kv hosted-ui-review-terms">
             <dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>
             <dt>Data</dt><dd data-hosted-mcp-review-scope></dd>
             <dt>Coverage</dt><dd>Everything in each data type you check, unless you narrowed it above.</dd>
             <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
             <dt>Ends</dt><dd>${ui.escapeHtml(HOSTED_MCP_PICKER_GRANT_EXPIRY_COPY)}</dd>
-            <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildHostedMcpRetentionSentence(clientName))}</dd>
           </dl>
+            ${renderAuthorshipBlock(
+              "declared",
+              "What the app declared",
+              `<dl class="hosted-ui-kv hosted-ui-review-terms">
+            <dt>Keeping your data</dt><dd>${ui.escapeHtml(buildHostedMcpRetentionSentence(clientName))}</dd>
+          </dl>`,
+              ui
+            )}
+          </div>
         </section>`
     : "";
 

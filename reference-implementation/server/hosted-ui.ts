@@ -322,6 +322,11 @@ code, pre, kbd, samp { font-family: var(--font-mono); }
   border-left-style: dashed;
   border-left-color: var(--muted-foreground);
 }
+.hosted-ui-authorship[data-authorship="declared"] {
+  border-left-style: dotted;
+  border-left-color: var(--muted-foreground);
+}
+.hosted-ui-authorship[data-authorship="declared"] .hosted-ui-authorship-eyebrow,
 .hosted-ui-authorship[data-authorship="client"] .hosted-ui-authorship-eyebrow {
   color: var(--muted-foreground);
 }

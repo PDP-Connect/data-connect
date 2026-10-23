@@ -55,8 +55,12 @@ import { Button } from "../../ui/button.tsx";
 //   requester.verified
 //
 // Server-derived from grant fields (protocol facts) → PROTOCOL authorship:
-//   accessMode, technical.*, retention display text, access mode display text,
+//   accessMode, technical.*, access mode display text,
 //   per-connection grant scope (streams[].connections[])
+//
+// Retention is NOT protocol: the server does not enforce it (spec-core.md §7).
+//   If this card ever shows it, render it as a client declaration, apart from
+//   the enforced facts above.
 //
 // Server-generated generic copy (v0.1):
 //   optional.consequenceOn/Off

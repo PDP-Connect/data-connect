@@ -247,7 +247,13 @@ test("security: hosted consent renders the three authorship classes distinctly",
 
         // Client-authored values appear ONLY inside the client block, never
         // inside the protocol block (they must not be presented as facts).
-        for (const claim of [CLIENT_PURPOSE, CLIENT_CLAIM_COMMITMENT_A, CLIENT_CLAIM_COMMITMENT_B]) {
+        // Purpose is structured policy the client declared: its own group,
+        // never the enforced group and never the free-text claims group.
+        const declaredBlock = authorshipBlock(html, "declared");
+        assert.ok(declaredBlock.includes(CLIENT_PURPOSE), "the purpose SHALL be rendered in the declared group");
+        assert.ok(!protocolBlock.includes(CLIENT_PURPOSE), "the purpose SHALL NOT be presented as a protocol fact");
+        assert.ok(!clientBlock.includes(CLIENT_PURPOSE), "the purpose SHALL NOT be mixed with free-text claims");
+        for (const claim of [CLIENT_CLAIM_COMMITMENT_A, CLIENT_CLAIM_COMMITMENT_B]) {
           assert.ok(
             clientBlock.includes(claim),
             `client-authored value "${claim}" SHALL be rendered inside the client authorship block`
@@ -294,11 +300,11 @@ test("security: hosted consent renders the three authorship classes distinctly",
         const html = await consentResp.text();
 
         // The stated purpose is still client-authored even without client_claims.
-        const clientBlock = authorshipBlock(html, "client");
-        assert.ok(clientBlock, "client authorship block SHALL be present for the stated purpose");
+        const declaredBlock = authorshipBlock(html, "declared");
+        assert.ok(declaredBlock, "declared authorship block SHALL be present for the stated purpose");
         assert.ok(
-          clientBlock.includes(CLIENT_PURPOSE),
-          "the stated purpose SHALL be rendered as a client-authored claim"
+          declaredBlock.includes(CLIENT_PURPOSE),
+          "the stated purpose SHALL be rendered as a declared (not enforced) item"
         );
 
         // The protocol and manifest classes remain distinct.
