@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { TerminalCoverageFact } from "./local-device-client.ts";
 import { hashCanonicalJson } from "./local-device-envelope.ts";
 
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 type OutboxMigrationV3FaultPoint = "after_copy";
 let outboxMigrationV3FaultHook: ((point: OutboxMigrationV3FaultPoint) => void) | null = null;
 
@@ -128,6 +128,26 @@ export interface LocalDeviceOutboxLeaseInput {
   holder: string;
   id: string;
   leaseEpoch: number;
+}
+
+/** What the server acknowledged for a terminal run record: its run order and commit revision. */
+export interface TerminalRunAck {
+  /** The commit revision the server recorded the run at; null when the server did not say. */
+  readonly collectionRevision: number | null;
+  readonly runId: string;
+  /** The sequence the server issued at run start; null for a run without one, or an older server. */
+  readonly runSequence: number | null;
+  /** The storage epoch the server recorded the run in; null when the server did not say. */
+  readonly storageEpoch: number | null;
+}
+
+/** What the latest acknowledged receipt is a fact about. */
+export interface TerminalCoverageReceiptAsOf {
+  readonly acknowledgedAt: string;
+  readonly collectionRevision: number;
+  readonly runId: string;
+  readonly runSequence: number;
+  readonly storageEpoch: number;
 }
 
 export interface LocalDeviceOutboxFailInput extends LocalDeviceOutboxLeaseInput {
@@ -446,7 +466,7 @@ export class LocalDeviceOutbox {
     return row.next_time;
   }
 
-  acknowledge(input: LocalDeviceOutboxLeaseInput): void {
+  acknowledge(input: LocalDeviceOutboxLeaseInput & { readonly terminalAck?: TerminalRunAck }): void {
     const now = this.#now();
     this.#db.exec("BEGIN IMMEDIATE");
     try {
@@ -470,32 +490,8 @@ export class LocalDeviceOutbox {
         .prepare("SELECT source_instance_id, kind, payload_json FROM local_device_outbox WHERE id = ?")
         .get(input.id);
       if (isRecord(row) && row.kind === "terminal_run_commit" && typeof row.source_instance_id === "string") {
-        // The receipt tracks the latest ACK, including a legacy commit without
-        // coverage. Keep this in the ACK transaction so pruning cannot erase proof.
-        this.#db
-          .prepare("DELETE FROM local_device_terminal_coverage_receipts WHERE source_instance_id = ?")
-          .run(row.source_instance_id);
-        const payload = typeof row.payload_json === "string" ? JSON.parse(row.payload_json) : null;
-        if (
-          isRecord(payload) &&
-          payload.version === 2 &&
-          typeof payload.collection_boundary === "string" &&
-          payload.collection_boundary.length > 0 &&
-          Array.isArray(payload.terminal_facts) &&
-          payload.terminal_facts.length > 0 &&
-          payload.terminal_facts.every(isTerminalCoverageFact) &&
-          new Set(payload.terminal_facts.map((fact: TerminalCoverageFact) => fact.stream)).size ===
-            payload.terminal_facts.length &&
-          payload.terminal_facts.every(
-            (fact: TerminalCoverageFact) => new Set(fact.stores.map((store) => store.store)).size === fact.stores.length
-          )
-        ) {
-          this.#db
-            .prepare(`INSERT INTO local_device_terminal_coverage_receipts
-            (source_instance_id, collection_boundary, terminal_facts_json, acknowledged_at)
-            VALUES (?, ?, ?, ?)`)
-            .run(row.source_instance_id, payload.collection_boundary, JSON.stringify(payload.terminal_facts), now);
-        }
+        // Keep this in the ACK transaction so pruning cannot erase proof.
+        this.#recordTerminalReceipt(row.source_instance_id, row.payload_json, input.terminalAck ?? null, now);
       }
       this.#db.exec("COMMIT");
     } catch (error) {
@@ -504,12 +500,76 @@ export class LocalDeviceOutbox {
     }
   }
 
+  /**
+   * Replace the lane's receipt by run order, not by ACK order. A sequenced ACK
+   * replaces the stored receipt only when its (storage epoch, run sequence) is
+   * higher, or when the stored receipt has no sequence; an older run's late
+   * ACK leaves a newer receipt in place. An ACK without a sequence cannot be
+   * ordered: it clears the evidence and keeps the stored order, as the server
+   * attributes such a run to the newest issued sequence. Only a valid v2
+   * commit with facts keeps evidence; any other acknowledged run stores none.
+   */
+  #recordTerminalReceipt(
+    sourceInstanceId: string,
+    payloadJson: unknown,
+    ack: TerminalRunAck | null,
+    now: string
+  ): void {
+    const stored = this.#db
+      .prepare(
+        "SELECT run_sequence, storage_epoch FROM local_device_terminal_coverage_receipts WHERE source_instance_id = ?"
+      )
+      .get(sourceInstanceId);
+    const storedSequence = isRecord(stored) ? readOrderInteger(stored.run_sequence) : null;
+    const storedEpoch = isRecord(stored) ? readOrderInteger(stored.storage_epoch) : null;
+    const sequenced = ack !== null && ack.runSequence !== null && ack.storageEpoch !== null;
+    if (
+      sequenced &&
+      storedSequence !== null &&
+      storedEpoch !== null &&
+      !isLaterRun(ack.storageEpoch as number, ack.runSequence as number, storedEpoch, storedSequence)
+    ) {
+      return;
+    }
+    const payload = typeof payloadJson === "string" ? JSON.parse(payloadJson) : null;
+    const facts = sequenced && isRecord(payload) && isValidCoveragePayload(payload) ? payload.terminal_facts : [];
+    const boundary =
+      isRecord(payload) && typeof payload.collection_boundary === "string" ? payload.collection_boundary : "";
+    this.#db
+      .prepare(
+        `INSERT INTO local_device_terminal_coverage_receipts
+           (source_instance_id, collection_boundary, terminal_facts_json, acknowledged_at,
+            run_id, run_sequence, storage_epoch, collection_revision)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(source_instance_id) DO UPDATE SET
+           collection_boundary = excluded.collection_boundary,
+           terminal_facts_json = excluded.terminal_facts_json,
+           acknowledged_at = excluded.acknowledged_at,
+           run_id = excluded.run_id,
+           run_sequence = excluded.run_sequence,
+           storage_epoch = excluded.storage_epoch,
+           collection_revision = excluded.collection_revision`
+      )
+      .run(
+        sourceInstanceId,
+        boundary,
+        JSON.stringify(facts),
+        now,
+        ack?.runId ?? (isRecord(payload) && typeof payload.run_id === "string" ? payload.run_id : null),
+        sequenced ? ack.runSequence : storedSequence,
+        sequenced ? ack.storageEpoch : storedEpoch,
+        sequenced ? ack.collectionRevision : null
+      );
+  }
+
   latestTerminalCoverageReceipt(input: { sourceInstanceId: string }): {
+    asOf: TerminalCoverageReceiptAsOf | null;
     collectionBoundary: string;
     terminalFacts: readonly TerminalCoverageFact[];
   } | null {
     const row = this.#db
-      .prepare(`SELECT collection_boundary, terminal_facts_json
+      .prepare(`SELECT collection_boundary, terminal_facts_json, acknowledged_at,
+                       run_id, run_sequence, storage_epoch, collection_revision
       FROM local_device_terminal_coverage_receipts WHERE source_instance_id = ?`)
       .get(input.sourceInstanceId);
     if (!isRecord(row) || typeof row.collection_boundary !== "string" || typeof row.terminal_facts_json !== "string") {
@@ -532,7 +592,20 @@ export class LocalDeviceOutbox {
     ) {
       return null;
     }
-    return { collectionBoundary: row.collection_boundary, terminalFacts: facts };
+    const runSequence = readOrderInteger(row.run_sequence);
+    const storageEpoch = readOrderInteger(row.storage_epoch);
+    const collectionRevision = readOrderInteger(row.collection_revision);
+    // A receipt from before run order (outbox schema v5) has none of these:
+    // it is still readable, but it names no as-of.
+    const asOf =
+      typeof row.run_id === "string" &&
+      typeof row.acknowledged_at === "string" &&
+      runSequence !== null &&
+      storageEpoch !== null &&
+      collectionRevision !== null
+        ? { acknowledgedAt: row.acknowledged_at, collectionRevision, runId: row.run_id, runSequence, storageEpoch }
+        : null;
+    return { asOf, collectionBoundary: row.collection_boundary, terminalFacts: facts };
   }
 
   failRetryable(input: LocalDeviceOutboxFailInput): void {
@@ -1338,6 +1411,7 @@ export class LocalDeviceOutbox {
     }
     this.#applySchemaV4();
     this.#applySchemaV5();
+    this.#applySchemaV6();
     if (version < CURRENT_SCHEMA_VERSION) {
       this.#db.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION}`);
     }
@@ -1471,6 +1545,30 @@ export class LocalDeviceOutbox {
     `);
   }
 
+  /**
+   * Schema v6 — the receipt records the run it is about and its place in run
+   * order: run id, run sequence, storage epoch and commit revision. A v5
+   * receipt keeps NULLs; it stays readable and names no as-of.
+   */
+  #applySchemaV6(): void {
+    const columns = new Set(
+      this.#db
+        .prepare("PRAGMA table_info(local_device_terminal_coverage_receipts)")
+        .all()
+        .map((column) => (isRecord(column) ? String(column.name) : ""))
+    );
+    for (const [name, type] of [
+      ["run_id", "TEXT"],
+      ["run_sequence", "INTEGER"],
+      ["storage_epoch", "INTEGER"],
+      ["collection_revision", "INTEGER"],
+    ] as const) {
+      if (!columns.has(name)) {
+        this.#db.exec(`ALTER TABLE local_device_terminal_coverage_receipts ADD COLUMN ${name} ${type}`);
+      }
+    }
+  }
+
   /** Schema v5 — latest acknowledged coverage survives outbox pruning. */
   #applySchemaV5(): void {
     this.#db.exec(`
@@ -1529,6 +1627,35 @@ export class LocalDeviceOutbox {
     const version = row.user_version;
     return typeof version === "bigint" || typeof version === "number" ? Number(version) : 0;
   }
+}
+
+/** A stored run-order integer, or null when absent or unreadable. */
+function readOrderInteger(value: unknown): number | null {
+  const number = typeof value === "bigint" ? Number(value) : value;
+  return typeof number === "number" && Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
+/** Whether (epoch, sequence) orders after the stored (epoch, sequence). */
+function isLaterRun(epoch: number, sequence: number, storedEpoch: number, storedSequence: number): boolean {
+  return epoch > storedEpoch || (epoch === storedEpoch && sequence > storedSequence);
+}
+
+function isValidCoveragePayload(payload: Record<string, unknown>): payload is Record<string, unknown> & {
+  terminal_facts: TerminalCoverageFact[];
+} {
+  return (
+    payload.version === 2 &&
+    typeof payload.collection_boundary === "string" &&
+    payload.collection_boundary.length > 0 &&
+    Array.isArray(payload.terminal_facts) &&
+    payload.terminal_facts.length > 0 &&
+    payload.terminal_facts.every(isTerminalCoverageFact) &&
+    new Set(payload.terminal_facts.map((fact: TerminalCoverageFact) => fact.stream)).size ===
+      payload.terminal_facts.length &&
+    payload.terminal_facts.every(
+      (fact: TerminalCoverageFact) => new Set(fact.stores.map((store) => store.store)).size === fact.stores.length
+    )
+  );
 }
 
 export function buildLocalDeviceOutboxId(input: BuildLocalDeviceOutboxIdInput): string {

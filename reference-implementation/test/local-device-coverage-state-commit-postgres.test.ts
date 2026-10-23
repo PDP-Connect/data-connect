@@ -16,6 +16,7 @@ import test from "node:test";
 
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import {
+  issueCollectionRunSequence,
   readLocalCoverageRevisionFences,
   recordCollectionRevisionEvent,
 } from "../server/stores/collection-revision-store.ts";
@@ -107,7 +108,14 @@ test("real PostgreSQL: the collection revision orders commits and observed event
       sessions: "1",
     });
 
-    // A terminal run takes revision 2; its own state rows and its run record carry it.
+    // A terminal run takes revision 2; its own state rows and its run record carry it. The run
+    // registered its start, so it is also the run-order marker.
+    await issueCollectionRunSequence({
+      connectorInstanceId: WITH_STATE,
+      deviceId: "dev_revision_fence_pg",
+      runId: PROOF_RUN,
+      sourceInstanceId: "src_revision_fence_pg",
+    });
     await commitTerminalRun({
       collectionBoundary: "unscoped",
       commitId: `commit_${PROOF_RUN}`,
@@ -139,7 +147,12 @@ test("real PostgreSQL: the collection revision orders commits and observed event
         runId: PROOF_RUN,
       }
     );
-    assert.equal(afterRun.withState?.proofRun?.runId, PROOF_RUN, "the fence reads the run the high-water mark names");
+    assert.equal(afterRun.withState?.proofRun?.runId, PROOF_RUN, "the fence reads the run the run-order marker names");
+    assert.deepEqual(
+      afterRun.withState?.runOrder,
+      { event: "terminal_run", revision: 2, runId: PROOF_RUN, sequence: 1 },
+      "the run-order marker is the run's terminal record"
+    );
     assert.equal(afterRun.withState?.proofRun?.facts?.collection_revision, 2, "the run record carries its revision");
     assert.deepEqual(afterRun.scopeOnly?.highWater, {
       at: null,

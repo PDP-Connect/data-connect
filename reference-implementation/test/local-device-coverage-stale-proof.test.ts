@@ -53,10 +53,22 @@ import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../serve
 import { __setLocalCollectorReleaseForTest, readLocalCollectorRelease } from "../server/local-collector-profiles.ts";
 import { putSyncState } from "../server/records.ts";
 import { listConnectorSummaries } from "../server/ref-control.ts";
+import { issueCollectionRunSequence } from "../server/stores/collection-revision-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
 import { commitTerminalRun } from "../server/stores/terminal-run-commit-store.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
+
+/** Commit a terminal record for a run registered at its start, as the runtime does before its scan. */
+async function commitRegisteredTerminalRun(input: Parameters<typeof commitTerminalRun>[0]) {
+  await issueCollectionRunSequence({
+    connectorInstanceId: input.connectorInstanceId,
+    deviceId: input.deviceId,
+    runId: input.runId,
+    sourceInstanceId: input.sourceInstanceId,
+  });
+  return await commitTerminalRun(input);
+}
 
 const CONNECTOR_ID = "claude-code";
 const LOCAL_BINDING_NAME = "stale-proof-laptop";
@@ -65,11 +77,12 @@ const STREAMS = ["sessions", "messages"];
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
 const CSRF_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 
-// The fixture release declares run coverage for both streams. A negotiated run
-// binds to it; an unnegotiated run leaves the spec unbound.
+// The fixture release inventories both streams. A negotiated run binds to it;
+// an unnegotiated run leaves the spec unbound.
 const PROFILE = {
   connector_id: CONNECTOR_ID,
-  run_coverage: { version: 1 },
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+  protocol_version: "0.2.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },
@@ -513,7 +526,7 @@ async function seedV2Proof(runId: string): Promise<void> {
     },
     server_artifact_digest: release.artifactDigest,
   };
-  await commitTerminalRun({
+  await commitRegisteredTerminalRun({
     collectionBoundary: "unscoped",
     commitId: `commit_${runId}`,
     connectorId,
@@ -660,12 +673,21 @@ test("as-of: a shown proof carries its run id, release digest, revision and comm
       committed_at: PROOF_AT,
       evidence: "terminal_run",
       run_id: "run_as_of",
+      run_sequence: 1,
     });
   });
 });
 
-test("revision: an unreadable or mismatched revision fails closed", async (t) => {
-  for (const tamper of ["drop proof revision", "high-water below proof", "high-water names another run"] as const) {
+test("revision: an unreadable or mismatched revision, run sequence or storage epoch fails closed", async (t) => {
+  const tampers = [
+    "drop proof revision",
+    "drop proof run sequence",
+    "run-order marker below proof",
+    "run-order marker names another run",
+    "run-order marker at another sequence",
+    "storage epoch advanced",
+  ] as const;
+  for (const tamper of tampers) {
     // biome-ignore lint/performance/noAwaitInLoops: each case needs its own fresh database, one after another.
     await withBoundaryConnection(async () => {
       t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
@@ -677,16 +699,20 @@ test("revision: an unreadable or mismatched revision fails closed", async (t) =>
             "UPDATE run_history SET facts_json = json_remove(facts_json, '$.collection_revision') WHERE run_id = ?"
           )
           .run("run_fail_closed");
-      } else if (tamper === "high-water below proof") {
+      } else if (tamper === "drop proof run sequence") {
         getDb()
-          .prepare(
-            "UPDATE connector_instances SET collection_revision = collection_revision - 1 WHERE connector_instance_id = ?"
-          )
-          .run(connectorInstanceId);
+          .prepare("UPDATE run_history SET facts_json = json_remove(facts_json, '$.run_sequence') WHERE run_id = ?")
+          .run("run_fail_closed");
       } else {
+        const column = {
+          "run-order marker at another sequence": "run_order_sequence = run_order_sequence + 1",
+          "run-order marker below proof": "run_order_revision = run_order_revision - 1",
+          "run-order marker names another run": "run_order_run_id = 'run_other'",
+          "storage epoch advanced": "storage_epoch = storage_epoch + 1",
+        }[tamper];
         getDb()
-          .prepare("UPDATE connector_instances SET collection_revision_run_id = ? WHERE connector_instance_id = ?")
-          .run("run_other", connectorInstanceId);
+          .prepare(`UPDATE connector_instances SET ${column} WHERE connector_instance_id = ?`)
+          .run(connectorInstanceId);
       }
       const projected = await boundaryProjection();
       assert.deepEqual(projected.conditions, UNKNOWN, tamper);

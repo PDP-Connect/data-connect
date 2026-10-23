@@ -639,6 +639,8 @@ export interface RefCoverageAsOf {
   readonly committed_at: string | null;
   readonly evidence: "terminal_run";
   readonly run_id: string;
+  /** The sequence the server issued to the run at its start; it decides which proof can be current. */
+  readonly run_sequence: number;
 }
 
 export interface RefConnectorSummary {
@@ -1330,6 +1332,12 @@ export interface RefConnectionHealthSnapshot {
    */
   collection_rate?: RefCollectionRateSnapshot | null;
   conditions?: readonly RefConnectionHealthCondition[];
+  /**
+   * What `axes.coverage` is a fact about: the same value as the summary's
+   * top-level `coverage_as_of`. Optional on the mirror because a reference
+   * predating the field omits it.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   /**
    * Additive, nullable source-pressure detail-gap backlog rollup
    * ({@link RefDetailGapBacklog}). `null` when no backlog evidence was supplied

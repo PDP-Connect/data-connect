@@ -39,6 +39,12 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  collectionProfileDeclarationError,
+  isConnectorProtocolCapabilityArray,
+  RUN_COVERAGE_V1_CAPABILITY,
+  type ConnectorProtocolCapability,
+} from "@pdpp/connector-protocol";
+import {
   buildConnectScopeRequest,
   type ConnectScopeChoice,
   ConnectScopeValidationError,
@@ -52,8 +58,8 @@ import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pin
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
 import {
   COLLECTION_PROFILE_MANIFEST,
-  collectionProfileMismatch,
   type CollectionProfilePin,
+  collectionProfileMismatch,
   ensureCollectionProfileInstalled,
   installedCollectionProfile,
 } from "../src/managed/collection-profiles.ts";
@@ -1609,10 +1615,22 @@ export interface LocalOutboxStatusOutput {
    * - `not_current`: acknowledged for another release, or with no release
    *   binding, or this device selects no release. Says nothing about
    *   completeness, so it is never read as `incomplete`.
-   * - `no_evidence`: no acknowledged typed verdict, or one whose runtime
-   *   accounting is missing or malformed.
+   * - `no_evidence`: no acknowledged typed verdict, one whose runtime
+   *   accounting is missing or malformed, or one that names no as-of (a
+   *   receipt from before run order, or a run the server issued no sequence).
+   *
+   * `as_of` is what the receipt is a fact about: the run, the run sequence and
+   * storage epoch the server issued, the commit revision it recorded the run
+   * at, and when this device received the acknowledgement.
    */
   terminal_coverage: {
+    as_of: {
+      acknowledged_at: string;
+      collection_revision: number;
+      run_id: string;
+      run_sequence: number;
+      storage_epoch: number;
+    } | null;
     collection_boundary: string | null;
     verdict: "covered" | "incomplete" | "unadmitted" | "not_current" | "no_evidence";
   };
@@ -1817,6 +1835,7 @@ export function inspectLocalOutboxStatus(
       device_token_configured: Boolean(options.deviceToken),
     },
     terminal_coverage: {
+      as_of: receiptAsOf(inspection.terminalCoverage),
       collection_boundary: inspection.terminalCoverage?.collectionBoundary ?? null,
       verdict: terminalVerdict,
     },
@@ -3138,28 +3157,50 @@ export async function prepareConnectorSpec(
   return spec;
 }
 
-/** Request the optional terminal assertion only for a verified, fully instrumented selected set. */
+/** Bind the elective evidence extension to a supported base and verified manifest inventory. */
 export function bindOptionalRunCoverageToRelease(
   spec: CollectorConnectorSpec,
   pin: Pick<CollectionProfilePin, "digest">,
   rawProfile: unknown
 ): CollectorConnectorSpec {
   if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) return spec;
-  const profile = rawProfile as { run_coverage?: { version?: unknown }; streams?: unknown };
-  if (profile.run_coverage?.version !== 1 || !Array.isArray(profile.streams)) return spec;
+  const profile = rawProfile as { protocol_capabilities?: unknown; protocol_version?: unknown; streams?: unknown };
+  const profileVersion = profile.protocol_version === undefined ? "0.1.0" : profile.protocol_version;
+  const rawCapabilities = profile.protocol_capabilities === undefined ? [] : profile.protocol_capabilities;
+  const capabilities = isConnectorProtocolCapabilityArray(rawCapabilities) ? rawCapabilities : [];
+  const profileStreams = Array.isArray(profile.streams) ? profile.streams : [];
+  const declaresCoverageStores = profileStreams.some(
+    (stream) => stream !== null && typeof stream === "object" && !Array.isArray(stream) && Object.hasOwn(stream, "coverage_stores")
+  );
+  const baseSpec: CollectorConnectorSpec = {
+    ...spec,
+    collectionProfileVersion: profileVersion,
+    declaresCoverageStores,
+    protocol_capabilities: rawCapabilities as readonly ConnectorProtocolCapability[],
+  };
+  if (!Array.isArray(profile.streams)) return baseSpec;
   const inventory = new Map<string, readonly string[]>();
   for (const value of profile.streams) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return spec;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
     const stream = value as { name?: unknown; coverage_stores?: unknown };
-    if (typeof stream.name !== "string" || inventory.has(stream.name)) return spec;
+    if (typeof stream.name !== "string" || inventory.has(stream.name)) {
+      return { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
+    }
     if (Array.isArray(stream.coverage_stores) && stream.coverage_stores.length > 0 &&
       stream.coverage_stores.every((store) => typeof store === "string" && store.trim())) {
       inventory.set(stream.name, stream.coverage_stores as readonly string[]);
     }
   }
-  if (!spec.streams.every((stream) => inventory.has(stream))) return spec;
+  const coverageSpec = { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
+  if (
+    collectionProfileDeclarationError(profileVersion, rawCapabilities, declaresCoverageStores) !== null ||
+    !capabilities.includes(RUN_COVERAGE_V1_CAPABILITY) ||
+    !spec.streams.every((stream) => inventory.has(stream))
+  ) {
+    return coverageSpec;
+  }
   return {
-    ...spec,
+    ...coverageSpec,
     artifactDigest: pin.digest,
     manifestFingerprint: hashCanonicalJson(rawProfile),
     runCoverageVersion: 1,
@@ -3569,7 +3610,11 @@ interface LocalOutboxInspection {
    */
   openGaps: number;
   summary: LocalDeviceOutboxSummary;
-  terminalCoverage: { collectionBoundary: string; terminalFacts: readonly StoredTerminalFact[] } | null;
+  terminalCoverage: {
+    asOf: NonNullable<ReturnType<LocalDeviceOutbox["latestTerminalCoverageReceipt"]>>["asOf"];
+    collectionBoundary: string;
+    terminalFacts: readonly StoredTerminalFact[];
+  } | null;
 }
 
 /**
@@ -3701,6 +3746,9 @@ function terminalCoverageVerdict(
   if (latestRunOpen) {
     return "unadmitted";
   }
+  if (!receipt.asOf) {
+    return "no_evidence";
+  }
   const isSelectedRelease = (fact: StoredTerminalFact) =>
     release !== null &&
     fact.artifact_digest === release.artifactDigest &&
@@ -3722,6 +3770,21 @@ function terminalCoverageVerdict(
     )
     ? "covered"
     : "incomplete";
+}
+
+function receiptAsOf(
+  receipt: LocalOutboxInspection["terminalCoverage"]
+): LocalOutboxStatusOutput["terminal_coverage"]["as_of"] {
+  const asOf = receipt?.asOf;
+  return asOf
+    ? {
+        acknowledged_at: asOf.acknowledgedAt,
+        collection_revision: asOf.collectionRevision,
+        run_id: asOf.runId,
+        run_sequence: asOf.runSequence,
+        storage_epoch: asOf.storageEpoch,
+      }
+    : null;
 }
 
 function emptyOutboxSummary(): LocalDeviceOutboxSummary {

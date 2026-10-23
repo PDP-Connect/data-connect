@@ -119,7 +119,7 @@ test("runner exports the collector runtime capability profile with collector id"
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.id, "collector");
   const bindings = [...COLLECTOR_RUNTIME_CAPABILITIES.bindings].sort();
   assert.deepEqual(bindings, ["filesystem", "local_device", "network"]);
-  assert.deepEqual([...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities], []);
+  assert.deepEqual([...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities], ["RUN_COVERAGE_V1"]);
 });
 
 test("runner exports a stable COLLECTOR_PROTOCOL_VERSION string", () => {
@@ -2454,11 +2454,28 @@ function enqueueRecordBatch(outbox, { id, sourceInstanceId = "src-1", streams })
   });
 }
 
-/** Claim + acknowledge the next ready row, which must be `id`, so it reaches status 'succeeded' (drained). */
+// Run sequences a current server issues: each acknowledged terminal record is a later run.
+let acknowledgedRunSequence = 0;
+
+/**
+ * Claim + acknowledge the next ready row, which must be `id`, so it reaches status 'succeeded' (drained).
+ * A terminal record is acknowledged as a current server does, with its run sequence and revision.
+ */
 function drainRow(outbox, id, sourceInstanceId = "src-1") {
   const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId });
   assert.equal(claim?.id, id, `expected ${id} to be the next ready row`);
-  outbox.acknowledge({ holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
+  acknowledgedRunSequence += 1;
+  outbox.acknowledge({
+    holder: "drainer",
+    id: claim.id,
+    leaseEpoch: claim.lease_epoch,
+    terminalAck: {
+      collectionRevision: acknowledgedRunSequence,
+      runId: typeof claim.payload?.run_id === "string" ? claim.payload.run_id : claim.id,
+      runSequence: acknowledgedRunSequence,
+      storageEpoch: 1,
+    },
+  });
 }
 
 // The release this device selects for the connector, and one it has since
@@ -2549,6 +2566,19 @@ test("acknowledged v2 coverage stays covered after sent rows are pruned", async 
   assert.equal(status.outbox.counts.total, 0);
   assert.equal(status.terminal_coverage.verdict, "covered");
   assert.equal(status.terminal_coverage.collection_boundary, "unscoped");
+  // The verdict names what it is a fact about: the run and its place in run order.
+  const asOf = status.terminal_coverage.as_of;
+  assert.ok(asOf, "a covered verdict carries its as-of");
+  assert.deepEqual(
+    { ...asOf, acknowledged_at: typeof asOf.acknowledged_at },
+    {
+      acknowledged_at: "string",
+      collection_revision: acknowledgedRunSequence,
+      run_id: "terminal-covered",
+      run_sequence: acknowledgedRunSequence,
+      storage_epoch: 1,
+    }
+  );
   assert.equal(status.lifecycle_state, "covered");
   assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "ok");
   const matchingDoctor = buildLocalOutboxDoctor(status, null, {
@@ -2569,6 +2599,44 @@ test("acknowledged v2 coverage stays covered after sent rows are pruned", async 
   assert.equal(staleDoctor.terminal_coverage.verdict, "no_evidence");
   assert.equal(staleDoctor.checks.terminal_coverage, "warn");
   assert.equal(staleDoctor.status, "warning");
+});
+
+test("a receipt without a run sequence is no evidence, and an older run's late ACK does not replace a newer receipt", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    // An older server acknowledged the run without a run sequence: the device cannot order it.
+    enqueueTerminalCoverage(outbox, { id: "terminal-unsequenced", stores: [{ store: "local_files", status: "collected" }] });
+    const [unsequenced] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    assert.ok(unsequenced);
+    outbox.acknowledge({ holder: "drainer", id: unsequenced.id, leaseEpoch: unsequenced.lease_epoch });
+  } finally {
+    outbox.close();
+  }
+  const unordered = statusFor(path);
+  assert.equal(unordered.terminal_coverage.verdict, "no_evidence");
+  assert.equal(unordered.terminal_coverage.as_of, null);
+
+  const reopened = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(reopened, { id: "terminal-newer", stores: [{ store: "local_files", status: "collected" }] });
+    const newer = acknowledgedRunSequence;
+    // A run that started before it is acknowledged later, with its own, lower sequence.
+    enqueueTerminalCoverage(reopened, { id: "terminal-older", stores: [{ store: "local_files", status: "partial" }] });
+    const [older] = reopened.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    assert.ok(older);
+    reopened.acknowledge({
+      holder: "drainer",
+      id: older.id,
+      leaseEpoch: older.lease_epoch,
+      terminalAck: { collectionRevision: newer + 1, runId: "terminal-older", runSequence: newer - 1, storageEpoch: 1 },
+    });
+    const status = statusFor(path);
+    assert.equal(status.terminal_coverage.verdict, "covered", "the newer run's receipt stands");
+    assert.equal(status.terminal_coverage.as_of?.run_sequence, newer);
+  } finally {
+    reopened.close();
+  }
 });
 
 test("a later partial terminal receipt replaces a previously covered verdict", async () => {
@@ -3831,12 +3899,16 @@ async function startAcceptingDeviceServer(): Promise<{ close: () => Promise<void
         // Every successful pass commits a terminal run record; acknowledge it as the server does.
         const request = JSON.parse(body || "{}") as TerminalRunCommitRequest;
         res.writeHead(201, { "content-type": "application/json" });
+        acknowledgedRunSequence += 1;
         res.end(
           JSON.stringify({
+            collection_revision: acknowledgedRunSequence,
             commit_id: request.commit_id,
             envelope_hash: hashCanonicalJson(canonicalTerminalRunCommitEnvelope(request)),
             object: "device_terminal_run_commit",
             run_id: request.run_id,
+            run_sequence: acknowledgedRunSequence,
+            storage_epoch: 1,
             terminal_event_id: `evt-${request.run_id}`,
           })
         );

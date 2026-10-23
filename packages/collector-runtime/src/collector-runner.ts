@@ -29,7 +29,13 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EmittedMessage, RunCoverageVerdict, StartMessage, StreamScope } from "@pdpp/connector-protocol";
-import { validateHostBlobMessage, validateStreamEvidenceCounts } from "@pdpp/connector-protocol";
+import {
+  COLLECTION_PROFILE_VERSIONS,
+  collectionProfileDeclarationError,
+  RUN_COVERAGE_V1_CAPABILITY,
+  validateHostBlobMessage,
+  validateStreamEvidenceCounts,
+} from "@pdpp/connector-protocol";
 import { buildAgentVersion } from "./collector-build-info.ts";
 import { type BlobUploadPayload, isBlobUploadPayload } from "./local-device-blob-capture.ts";
 import { type LocalDeviceBlobSpool, LocalDeviceBlobSpoolMissingError } from "./local-device-blob-spool.ts";
@@ -57,6 +63,7 @@ import {
   LocalDeviceOutbox,
   type LocalDeviceOutboxItem,
   type LocalDeviceOutboxSummary,
+  type TerminalRunAck,
 } from "./local-device-outbox.ts";
 import type { LocalDeviceQueue, LocalDeviceQueueItem } from "./local-device-queue.ts";
 import { resolveConnectorCommand } from "./resolve-tsx-binary.ts";
@@ -612,10 +619,16 @@ interface CollectorConnectorSpecExtra {
   readonly args: readonly string[];
   /** Release identity of the executable used for this run. */
   readonly artifactDigest?: string;
+  /** Raw base profile version from the verified manifest, when one was loaded. */
+  readonly collectionProfileVersion?: unknown;
   /** Argv for the connector entrypoint (typically tsx + connector index.ts). */
   readonly command: string;
   /** Stable connector id used for ingest envelopes. */
   readonly connector_id: string;
+  /** Streams with a valid, non-empty manifest `coverage_stores` inventory. */
+  readonly coverageStoreStreams?: readonly string[];
+  /** True when any manifest stream declares a `coverage_stores` member. */
+  readonly declaresCoverageStores?: boolean;
   /**
    * Whether the connector declared it ENFORCES path roots at enumeration time.
    * Gates whether a roots boundary may be reported as `scoped` coverage; a
@@ -629,7 +642,7 @@ interface CollectorConnectorSpecExtra {
   readonly manifestFingerprint?: string;
   /** Optional stream resources for scoped connector runs. */
   readonly resources?: Readonly<Record<string, readonly string[]>>;
-  /** Set only when the installed manifest advertises optional store evidence. */
+  /** Set only when an accepted base profile inventories every requested stream. */
   readonly runCoverageVersion?: 1;
   /**
    * The owner-declared collection boundary this run must stay inside, as
@@ -856,6 +869,14 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
   try {
     // Preflight refusals are attempts for this lane too. They run inside the try
     // so the catch below opens the failure barrier for each of them.
+    const profileDeclarationError = collectionProfileDeclarationError(
+      config.connector.collectionProfileVersion ?? "0.1.0",
+      config.connector.protocol_capabilities,
+      config.connector.declaresCoverageStores === true
+    );
+    if (profileDeclarationError !== null) {
+      throw new Error(`Invalid Collection Profile declaration: ${profileDeclarationError}`);
+    }
     if (
       config.connector.runCoverageVersion === 1 &&
       !(
@@ -928,6 +949,11 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       recordsPending: pendingOutboxWorkCount(postDrainSummary),
     });
     const priorState = priorStateProjection.state;
+    // The run id the server orders this run by, and the one its terminal
+    // record names. Registered before the scan, so every record the scan
+    // admits is ordered after any earlier run's proof.
+    const runId = config.runId ?? randomUUID();
+    await registerRunStart({ client, config, connectorInstanceId: priorStateProjection.connectorInstanceId, runId });
 
     await client.heartbeat({
       agent_version: COLLECTOR_AGENT_VERSION,
@@ -1021,6 +1047,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       holderId,
       outbox,
       policy,
+      runId,
       terminalEvidence,
       terminalRunBoundary: collectorScopeFingerprint(declaredScope),
       terminalRunConnectorInstanceId: priorStateProjection.connectorInstanceId,
@@ -1255,6 +1282,37 @@ async function maybeSkipScanForBacklog(input: MaybeSkipScanInput): Promise<Colle
   };
 }
 
+/**
+ * Register the run with the server at its start. The answered sequence is the
+ * run's place in run order: only a run with one can produce an eligible
+ * coverage proof. A server without the route, a connection the state read did
+ * not name, or a failed call leaves the run without a sequence. The run still
+ * collects and commits its terminal record, which then reads as unknown
+ * coverage.
+ */
+async function registerRunStart(input: {
+  client: Pick<LocalDeviceClient, "startRun">;
+  config: CollectorRunConfig;
+  connectorInstanceId: string;
+  runId: string;
+}): Promise<void> {
+  if (!input.connectorInstanceId) {
+    return;
+  }
+  throwIfAborted(input.config.abortSignal);
+  try {
+    await input.client.startRun({
+      connector_id: input.config.connector.connector_id,
+      run_id: input.runId,
+      source_instance_id: input.config.sourceInstanceId,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `${input.config.connector.connector_id} run start not registered; this run cannot prove coverage (${error instanceof Error ? error.message : String(error)})\n`
+    );
+  }
+}
+
 async function readPriorStateOrBlock(input: {
   client: Pick<LocalDeviceClient, "getSourceInstanceState" | "heartbeat">;
   config: CollectorRunConfig;
@@ -1309,6 +1367,8 @@ interface StreamConnectorIntoOutboxInput {
 interface StreamConnectorIntoOutboxResult {
   bufferedState: Readonly<Record<string, unknown>>;
   bufferHighWaterMark: number;
+  /** Whether this run's START requested version 1 store evidence. */
+  coverageRequested: boolean;
   done: Extract<EmittedMessage, { type: "DONE" }> | null;
   duplicateStreamEvidence: ReadonlySet<string>;
   enqueuedBatches: number;
@@ -1359,7 +1419,7 @@ function buildTypedTerminalCoverageFacts(input: {
     return null;
   }
   if (!input.done.coverage) {
-    return input.connector.runCoverageVersion === 1 ? [] : null;
+    return input.streamResult.coverageRequested ? [] : null;
   }
 
   const evidenceRequired = input.connector.protocol_capabilities.includes("STREAM_EVIDENCE");
@@ -1392,7 +1452,7 @@ function buildTypedTerminalCoverageFacts(input: {
       },
       scoped: stream.scoped,
       stores: stream.stores.map((store) =>
-        skipCount > 0 && store.status === "collected" ? { ...store, status: "partial" as const } : store
+        !detailComplete && store.status === "collected" ? { ...store, status: "partial" as const } : store
       ),
       stream: stream.stream,
     };
@@ -1499,6 +1559,20 @@ async function streamConnectorIntoOutbox(
 ): Promise<StreamConnectorIntoOutboxResult> {
   throwIfAborted(input.abortSignal);
 
+  // START is built before spawn: a START the builder refuses starts no child.
+  const startMessage = buildCollectorStartMessage(
+    input.config.connector.streams,
+    input.config.connector.streamsToBackfill,
+    input.priorState,
+    input.config.connector.resources,
+    resolveScopedStreamTimeRanges(input.config.connector.scope, input.config.connector.timeScopableStreams),
+    // Roots only reach the connector when it declared it enforces them, so
+    // an unsupported connector cannot silently receive a boundary it will
+    // ignore while the run still looks bounded.
+    input.config.connector.enforcesSourceRoots === true ? resolveScopedSourceRoots(input.config.connector.scope) : [],
+    collectorScopeFingerprint(input.config.connector.scope),
+    connectorRequestsRunCoverage(input.config.connector) ? 1 : undefined
+  );
   const child = spawnConnector(
     input.config.connector,
     {
@@ -1639,7 +1713,9 @@ async function streamConnectorIntoOutbox(
         done = message;
         return;
       }
-      if (input.config.connector.runCoverageVersion !== 1) {
+      // Only the scope string START actually sent can be echoed.
+      const requestedScope = startMessage.run_coverage_version === 1 ? startMessage.collection_scope : undefined;
+      if (requestedScope === undefined) {
         throw new Error(`${input.config.connector.connector_id} emitted unrequested DONE coverage`);
       }
       if (message.records_emitted !== recordsObserved) {
@@ -1650,11 +1726,7 @@ async function streamConnectorIntoOutbox(
       }
       done = {
         ...message,
-        coverage: validateRunCoverageVerdict(
-          message.coverage,
-          input.config.connector.streams,
-          collectorScopeFingerprint(input.config.connector.scope)
-        ),
+        coverage: validateRunCoverageVerdict(message.coverage, input.config.connector.streams, requestedScope),
       };
     }
   };
@@ -1714,25 +1786,7 @@ async function streamConnectorIntoOutbox(
     // actionable diagnostic; do not mask it with EPIPE.
   });
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-  child.stdin.end(
-    `${JSON.stringify(
-      buildCollectorStartMessage(
-        input.config.connector.streams,
-        input.config.connector.streamsToBackfill,
-        input.priorState,
-        input.config.connector.resources,
-        resolveScopedStreamTimeRanges(input.config.connector.scope, input.config.connector.timeScopableStreams),
-        // Roots only reach the connector when it declared it enforces them, so
-        // an unsupported connector cannot silently receive a boundary it will
-        // ignore while the run still looks bounded.
-        input.config.connector.enforcesSourceRoots === true
-          ? resolveScopedSourceRoots(input.config.connector.scope)
-          : [],
-        collectorScopeFingerprint(input.config.connector.scope),
-        input.config.connector.runCoverageVersion
-      )
-    )}\n`
-  );
+  child.stdin.end(`${JSON.stringify(startMessage)}\n`);
 
   let exitCode: number | null;
   try {
@@ -1798,6 +1852,7 @@ async function streamConnectorIntoOutbox(
   return {
     bufferedState: Object.freeze(scanBudgetExceeded ? {} : { ...bufferedState }),
     bufferHighWaterMark,
+    coverageRequested: startMessage.run_coverage_version === 1,
     done: scanBudgetExceeded ? null : done,
     duplicateStreamEvidence,
     enqueuedBatches,
@@ -1969,6 +2024,7 @@ async function maybeCommitCheckpoint(input: {
   holderId: string;
   outbox: LocalDeviceOutbox;
   policy: CollectorOutboxPolicy;
+  runId: string;
   terminalEvidence: TerminalEvidence | null;
   terminalRunBoundary: string;
   terminalRunConnectorInstanceId: string;
@@ -1980,7 +2036,7 @@ async function maybeCommitCheckpoint(input: {
     return { flushedState: null, statePutFailed: false };
   }
 
-  const runId = input.config.runId ?? randomUUID();
+  const { runId } = input;
   const terminalCommitIdentity = input.terminalEvidence
     ? {
         collection_boundary: input.terminalRunBoundary,
@@ -2221,6 +2277,33 @@ export function resolveScopedSourceRoots(scope: CollectionScope | null | undefin
   ].sort();
 }
 
+/** The resources START names for one stream: its non-empty strings, possibly none. */
+function startStreamResources(resources: Readonly<Record<string, readonly string[]>>, stream: string): string[] {
+  return resources[stream]?.filter((value) => typeof value === "string" && value.length > 0) ?? [];
+}
+
+/**
+ * Whether START requests version 1 store evidence.
+ *
+ * {@link collectorScopeFingerprint} binds the time bound and the source roots,
+ * not per-stream resources. A START that narrows a stream to named resources
+ * would carry a scope string, often `unscoped`, without that restriction, and
+ * the extension forbids that. The manifest must also declare RUN_COVERAGE_V1
+ * and a non-empty inventory for every requested stream.
+ */
+function connectorRequestsRunCoverage(connector: CollectorConnectorSpec): boolean {
+  const profileVersion = connector.collectionProfileVersion ?? "0.1.0";
+  const coverageStoreStreams = new Set(connector.coverageStoreStreams ?? []);
+  return (
+    connector.runCoverageVersion === 1 &&
+    (COLLECTION_PROFILE_VERSIONS as readonly unknown[]).includes(profileVersion) &&
+    connector.protocol_capabilities.includes(RUN_COVERAGE_V1_CAPABILITY) &&
+    connector.streams.length > 0 &&
+    connector.streams.every((stream) => coverageStoreStreams.has(stream)) &&
+    connector.streams.every((stream) => startStreamResources(connector.resources ?? {}, stream).length === 0)
+  );
+}
+
 export function buildCollectorStartMessage(
   streams: readonly string[],
   streamsToBackfill: readonly string[] = [],
@@ -2231,16 +2314,23 @@ export function buildCollectorStartMessage(
   collectionScope?: string,
   runCoverageVersion?: 1
 ): StartMessage {
+  const requestsCoverage =
+    runCoverageVersion === 1 && streams.every((stream) => startStreamResources(resources, stream).length === 0);
+  // A version 1 request binds its evidence to this string (Collection Profile
+  // Section 5.1). Without one the proof would bind to no boundary.
+  if (requestsCoverage && !collectionScope?.trim()) {
+    throw new Error("a version 1 store evidence request requires a non-empty collection_scope");
+  }
   const start: StartMessage = {
-    ...(runCoverageVersion === 1 && collectionScope ? { collection_scope: collectionScope } : {}),
-    ...(runCoverageVersion === 1 ? { run_coverage_version: 1 } : {}),
+    ...(requestsCoverage && collectionScope ? { collection_scope: collectionScope } : {}),
+    ...(requestsCoverage ? { run_coverage_version: 1 } : {}),
     scope: {
       streams: streams.map((name): StreamScope => {
-        const streamResources = resources[name]?.filter((value) => typeof value === "string" && value.length > 0);
+        const streamResources = startStreamResources(resources, name);
         const timeRange = timeRanges[name];
         return {
           name,
-          ...(streamResources && streamResources.length > 0 ? { resources: streamResources } : {}),
+          ...(streamResources.length > 0 ? { resources: streamResources } : {}),
           // Only streams the caller proved scopable carry a bound. A stream
           // absent from `timeRanges` is collected whole rather than silently
           // narrowed against a field it does not have.
@@ -2788,7 +2878,7 @@ async function drainClaimedOutboxItem(
       leaseEpoch: item.lease_epoch,
       leaseMs: input.policy.leaseMs,
     });
-    await sendOutboxItem(input.client, current, {
+    const terminalAck = await sendOutboxItem(input.client, current, {
       ...(input.blobUpload ? { blobUpload: input.blobUpload } : {}),
       ...(input.spool ? { spool: input.spool } : {}),
     });
@@ -2796,6 +2886,7 @@ async function drainClaimedOutboxItem(
       holder: input.holderId,
       id: current.id,
       leaseEpoch: current.lease_epoch,
+      ...(terminalAck ? { terminalAck } : {}),
     });
     result.sent += 1;
     sentByKind[current.kind] = (sentByKind[current.kind] ?? 0) + 1;
@@ -2893,12 +2984,26 @@ interface SendOutboxItemDeps {
   spool?: LocalDeviceBlobSpool;
 }
 
+/**
+ * What the server acknowledged for a terminal record: the run's place in run
+ * order and its commit revision. The receipt keeps them so the device can show
+ * the as-of and keep a newer run's receipt over an older run's late ACK.
+ */
+function terminalRunAck(response: Awaited<ReturnType<LocalDeviceClient["commitTerminalRun"]>>): TerminalRunAck {
+  return {
+    collectionRevision: response.collection_revision ?? null,
+    runId: response.run_id,
+    runSequence: response.run_sequence ?? null,
+    storageEpoch: response.storage_epoch ?? null,
+  };
+}
+
 async function sendOutboxItem(
   client: Pick<LocalDeviceClient, "ackLocalCollectorGap" | "ingestBatch" | "putSourceInstanceState"> &
     Partial<Pick<LocalDeviceClient, "commitTerminalRun">>,
   item: LocalDeviceOutboxItem,
   deps: SendOutboxItemDeps = {}
-): Promise<void> {
+): Promise<TerminalRunAck | undefined> {
   if (item.kind === "record_batch") {
     const payload = assertRecordBatchPayload(item.payload, item.id);
     if (payload.records.length === 0) {
@@ -2928,8 +3033,7 @@ async function sendOutboxItem(
     if (!client.commitTerminalRun) {
       throw new OutboxPayloadShapeError("collector client does not support terminal_run_commit; upgrade required");
     }
-    await client.commitTerminalRun(assertTerminalRunCommitPayload(item.payload, item.id));
-    return;
+    return terminalRunAck(await client.commitTerminalRun(assertTerminalRunCommitPayload(item.payload, item.id)));
   }
   if (item.kind === "gap") {
     // Validate first so a malformed gap dead-letters via OutboxPayloadShapeError

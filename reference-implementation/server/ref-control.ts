@@ -155,6 +155,7 @@ import {
   loadOwnerConnectorInstanceGroupsSqlite,
   resolveCanonicalConnectorInstanceId,
 } from "./connector-instance-canonicalization.ts";
+import { isLocalDeviceConnection, NON_LOCAL_DEVICE_COVERAGE_REASON } from "./connector-instance-placement.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import {
   type HeartbeatRow,
@@ -601,12 +602,6 @@ export interface ConnectorRunSummary {
   readonly collection_facts: RuntimeCollectionFacts | null;
   /** The per-connection collection revision this run was committed at; `null` when the run carries none. */
   readonly collection_revision?: number | null;
-  /** Authenticated v2 device terminal evidence; checked against current manifest and scope on read. */
-  readonly local_terminal_coverage?: {
-    readonly eligibleLocalRun: boolean;
-    readonly collectionScope: unknown;
-    readonly streams: unknown;
-  } | null;
   readonly connector_error?: ConnectorRunErrorSummary | null;
   readonly event_count: number;
   readonly failure_reason: string | null;
@@ -614,6 +609,13 @@ export interface ConnectorRunSummary {
   readonly first_at: string;
   readonly known_gaps: unknown[];
   readonly last_at: string;
+  /** Authenticated v2 device terminal evidence, kept raw until manifest and current scope are checked on read. */
+  readonly local_terminal_coverage?: {
+    readonly coverageEligibilityReason: string | null;
+    readonly eligibleLocalRun: boolean;
+    readonly collectionScope: unknown;
+    readonly streams: unknown;
+  } | null;
   readonly records_emitted?: number | null;
   /**
    * Whether this run was dispatched `recovery_only` (drains pending detail
@@ -903,7 +905,7 @@ export interface ConnectorSummary {
    * `complete`. Empty when no in-scope stream universe exists.
    */
   readonly collection_report: readonly CollectionReportEntry[];
-  readonly connection_health: ConnectionHealthSnapshot;
+  readonly connection_health: ConnectorConnectionHealth;
   readonly connection_id: string;
   readonly connector_display_name: string;
   readonly connector_id: string;
@@ -1172,7 +1174,7 @@ export interface ConnectorDetail {
    * wide or zeroed snapshot. A consumer must treat `null` here as "no single
    * connection's health is resolvable," not as an absence of any problem.
    */
-  readonly connection_health: ConnectionHealthSnapshot | null;
+  readonly connection_health: ConnectorConnectionHealth | null;
   readonly connection_id: string;
   /** See {@link ConnectorSummary.coverage_as_of}; `null` when no single connection resolved. */
   readonly coverage_as_of: LocalCoverageAsOf | null;
@@ -1636,7 +1638,6 @@ function readLocalTerminalCoverage(
   history: {
     readonly connectorInstanceId?: string | null;
     readonly runId?: string | null;
-    readonly schedulerManaged?: boolean | null;
     readonly status: string;
   }
 ): NonNullable<ConnectorRunSummary["local_terminal_coverage"]> | null {
@@ -1649,9 +1650,14 @@ function readLocalTerminalCoverage(
     return null;
   }
   return {
+    coverageEligibilityReason:
+      typeof coverage.coverage_eligibility_reason === "string" ? coverage.coverage_eligibility_reason : null,
+    // A device terminal commit stamps the connection's collection revision
+    // (see `isDeviceTerminalRun`); no server run does. The row's
+    // `scheduler_managed` flag is not provenance here.
     eligibleLocalRun:
       history.status === "succeeded" &&
-      history.schedulerManaged === false &&
+      readCollectionRevision(facts?.collection_revision) !== null &&
       typeof history.connectorInstanceId === "string" &&
       typeof history.runId === "string" &&
       coverage.reference_only === true,
@@ -2885,6 +2891,47 @@ function coverageClassifyingRun(
   lastRun: ConnectorRunSummary | null,
   lastSuccessfulRun: ConnectorRunSummary | null,
   latestSettledRun: ConnectorRunSummary | null = lastRun
+): ConnectorRunSummary | null {
+  if (isDeviceTerminalRun(latestSettledRun)) {
+    return null;
+  }
+  const selected = selectCoverageClassifyingRun(lastRun, lastSuccessfulRun, latestSettledRun);
+  return isDeviceTerminalRun(selected) ? null : selected;
+}
+
+/**
+ * A run recorded by a device terminal commit. The stored coverage-eligibility
+ * marker is not the authority: a device terminal written before the marker
+ * existed, or while the connection was local_device, carries none. Every
+ * device terminal commit stamps the connection's `collection_revision` (no
+ * server run does), so that stamp identifies it. Local-device connections
+ * quarantine these rows before this point; any other source kind has no
+ * device-coverage authority, so such a run is never its coverage evidence.
+ */
+function isDeviceTerminalRun(run: ConnectorRunSummary | null): boolean {
+  if (run === null) {
+    return false;
+  }
+  return (
+    typeof run.collection_revision === "number" ||
+    run.local_terminal_coverage?.coverageEligibilityReason === NON_LOCAL_DEVICE_COVERAGE_REASON
+  );
+}
+
+/**
+ * A run the connection's own scheduler recorded. `scheduler_managed` says so,
+ * but a device terminal commit is never scheduler history whatever the flag
+ * holds: a database whose column default was once `true` can still carry such
+ * a row stamped `true`.
+ */
+function isSchedulerOwnedRun(run: ConnectorRunSummary | null): boolean {
+  return run?.scheduler_managed === true && !isDeviceTerminalRun(run);
+}
+
+function selectCoverageClassifyingRun(
+  lastRun: ConnectorRunSummary | null,
+  lastSuccessfulRun: ConnectorRunSummary | null,
+  latestSettledRun: ConnectorRunSummary | null
 ): ConnectorRunSummary | null {
   const settledIsIntervening =
     latestSettledRun !== null &&
@@ -4489,7 +4536,9 @@ function terminalCoverageByStream(
 } | null {
   const terminal = run?.local_terminal_coverage;
   if (
-    !terminal?.eligibleLocalRun ||
+    !terminal ||
+    terminal.coverageEligibilityReason !== null ||
+    !terminal.eligibleLocalRun ||
     declaredScope === null ||
     terminal.collectionScope !== declaredScope ||
     !Array.isArray(terminal.streams)
@@ -4511,10 +4560,20 @@ function terminalCoverageByStream(
     ?.artifact_binding_reason as "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined;
   const conditions = new Map<string, CoverageAxis>();
   for (const fact of normalized) {
-    if (fact.scoped !== true || typeof fact.stream !== "string" || !Array.isArray(fact.stores)) {
+    if (typeof fact.stream !== "string" || !Array.isArray(fact.stores)) {
       return null;
     }
-    conditions.set(fact.stream, terminalCoverageCondition(fact.coverage_statuses as string[], bindingReason));
+    // A whole-corpus run (`unscoped`) has no boundary to miss, so a stream
+    // without a positive scope assertion is not evidence there. A bounded run
+    // may lose the assertion for one stream: its store statuses stay visible,
+    // but a collected or inventory-only status from it proves nothing.
+    if (fact.scoped !== true && declaredScope === "unscoped") {
+      return null;
+    }
+    const statuses = (fact.coverage_statuses as string[]).map((status) =>
+      fact.scoped !== true && (status === "collected" || status === "inventory_only") ? "unknown" : status
+    );
+    conditions.set(fact.stream, terminalCoverageCondition(statuses, bindingReason));
   }
   return { bindingReason: bindingReason ?? null, conditions };
 }
@@ -4542,6 +4601,15 @@ function terminalCoverageCondition(
 }
 
 /**
+ * A connection's health as the owner projections embed it. It carries the
+ * coverage as-of itself, so a health object read on its own still names what
+ * its coverage axis is a fact about.
+ */
+export type ConnectorConnectionHealth = ConnectionHealthSnapshot & {
+  readonly coverage_as_of: LocalCoverageAsOf | null;
+};
+
+/**
  * What a shown local coverage proof is a fact about. A proof is shown only while
  * the connection's revision fence admits it, so the run, its release digest, and
  * the revision and time it was committed at travel with the coverage they qualify.
@@ -4552,12 +4620,45 @@ export interface LocalCoverageAsOf {
   readonly committed_at: string | null;
   readonly evidence: "terminal_run";
   readonly run_id: string;
+  /** The sequence the server issued to the run at its start. */
+  readonly run_sequence: number;
 }
 
 /**
- * The terminal run the connection's collection-revision high-water mark names,
- * shaped for {@link terminalCoverageByStream}. The fence reads the run by id, so
- * a skewed `completed_at` cannot hide a newer proof behind an older one.
+ * Whether the boundary read with the proof and its fence (one statement) is
+ * the boundary the rest of this projection was built from: the declared scope
+ * of the coverage read, the manifest generation of the summary evidence, and
+ * the manifest itself. A difference means a scope or manifest change landed
+ * between those reads. The projection then composes no positive from the two
+ * moments; the coverage is unknown.
+ */
+function proofBoundaryIsCoherent(
+  fence: LocalCoverageRevisionFence | null | undefined,
+  declaredCollectionScope: string | null | undefined,
+  manifestGeneration: number | null,
+  manifest: ConnectorManifest
+): boolean {
+  const boundary = fence?.boundary;
+  if (!boundary?.manifestJson || boundary.manifestGeneration === null) {
+    return false;
+  }
+  let proofManifest: unknown;
+  try {
+    proofManifest = JSON.parse(boundary.manifestJson) as unknown;
+  } catch {
+    return false;
+  }
+  return (
+    boundary.declaredCollectionScope === declaredCollectionScope &&
+    boundary.manifestGeneration === manifestGeneration &&
+    JSON.stringify(proofManifest) === JSON.stringify(manifest)
+  );
+}
+
+/**
+ * The terminal run the revision fence names, shaped for
+ * {@link terminalCoverageByStream}. The fence reads the run by id, so a
+ * skewed `completed_at` cannot hide a newer proof behind an older one.
  */
 function localProofRun(
   fence: LocalCoverageRevisionFence | null | undefined,
@@ -4567,6 +4668,8 @@ function localProofRun(
   readonly collectionRevision: number | null;
   readonly run: Pick<ConnectorRunSummary, "last_at" | "local_terminal_coverage">;
   readonly runId: string;
+  readonly runSequence: number | null;
+  readonly storageEpoch: number | null;
 } | null {
   const proofRun = fence?.proofRun;
   // A terminal run record always has a completion time; one without it is not a proof.
@@ -4576,7 +4679,6 @@ function localProofRun(
   const terminal = readLocalTerminalCoverage(proofRun.facts, {
     connectorInstanceId,
     runId: proofRun.runId,
-    schedulerManaged: proofRun.schedulerManaged,
     status: proofRun.status,
   });
   if (!terminal) {
@@ -4594,30 +4696,35 @@ function localProofRun(
     collectionRevision: readCollectionRevision(proofRun.facts?.collection_revision),
     run: { last_at: proofRun.completedAt, local_terminal_coverage: terminal },
     runId: proofRun.runId,
+    runSequence: readCollectionRevision(proofRun.facts?.run_sequence),
+    storageEpoch: readCollectionRevision(proofRun.facts?.storage_epoch),
   };
 }
 
 /**
- * Keep a local terminal proof only while it is the connection's newest observed
- * collection event.
+ * Keep a local terminal proof only while it is the run-order marker: the
+ * newest observation of the highest observed run sequence, in the current
+ * storage epoch.
  *
- * The server assigns each event that can establish or retire proof a monotonic
- * per-connection revision at commit (state commits, terminal runs, device batch
- * records, admitted and refused batches, delivered failure reports, legacy split
- * terminal reports). A proof binds to the revision it was committed at. It is
- * current only while that revision is the high-water mark; any later event
- * retires it to unknown. No wall clock is compared, so an equal or skewed
- * timestamp cannot order two commits. The proof must also be the terminal run
- * the high-water mark names, and it must name exactly one release digest.
+ * Run order decides eligibility. The server issues each run a sequence at its
+ * start, and every observation that takes a commit revision (state commits,
+ * terminal runs, admitted and refused batches, delivered failure reports) also
+ * moves the marker when its run sequence is at least the highest observed one.
+ * A proof is current only when the marker is its terminal record: the same
+ * run, sequence and commit revision, in the connection's current storage
+ * epoch. An older run's proof that arrives after a newer run's terminal record
+ * stays history. The commit revision orders observations and dates the as-of.
+ * No wall clock is compared. The proof must also name its release digest.
  *
  * Only a v2 terminal run record is a positive proof. A legacy
  * `coverage_diagnostics` state row names no run and no release, so it never
  * shows positive coverage: the projection is unknown.
  *
- * Fails closed: a missing fence, an unreadable or NULL revision, any mismatch, a
- * proof without a single release digest, or a newest settled device run that is
- * not the proof and carries no revision, whose order is ambiguous, leaves the
- * connection without current coverage.
+ * Fails closed: a missing fence, an unreadable or NULL revision, sequence or
+ * epoch, a run without an issued sequence, any mismatch, a proof without a
+ * single release digest, or a newest settled device run that is not the proof
+ * and carries no revision, whose order is ambiguous, leaves the connection
+ * without current coverage.
  */
 function fenceTerminalCoverageProof(
   coverage: ReturnType<typeof terminalCoverageByStream>,
@@ -4625,7 +4732,7 @@ function fenceTerminalCoverageProof(
   fence: LocalCoverageRevisionFence | null | undefined,
   latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null
 ): { asOf: LocalCoverageAsOf | null; coverage: ReturnType<typeof terminalCoverageByStream> } {
-  const highWater = fence?.highWater ?? null;
+  const runOrder = fence?.runOrder ?? null;
   // A settled device run record with no revision cannot be ordered against a
   // terminal proof (a pre-revision row, or a writer that assigns none). If it
   // is the newest settled run and not the proof itself, the order is
@@ -4640,12 +4747,16 @@ function fenceTerminalCoverageProof(
     coverage === null ||
     proof === null ||
     proof.artifactDigest === null ||
-    highWater === null ||
+    runOrder === null ||
     proof.collectionRevision === null ||
     unorderedLaterRun ||
-    highWater.event !== "terminal_run" ||
-    highWater.runId !== proof.runId ||
-    highWater.revision !== proof.collectionRevision
+    runOrder.event !== "terminal_run" ||
+    runOrder.runId !== proof.runId ||
+    runOrder.revision !== proof.collectionRevision ||
+    proof.runSequence === null ||
+    proof.runSequence !== runOrder.sequence ||
+    proof.storageEpoch === null ||
+    proof.storageEpoch !== fence?.storageEpoch
   ) {
     return { asOf: null, coverage: null };
   }
@@ -4654,10 +4765,11 @@ function fenceTerminalCoverageProof(
       coverage.bindingReason === null
         ? {
             artifact_digest: proof.artifactDigest,
-            collection_revision: highWater.revision,
+            collection_revision: proof.collectionRevision,
             committed_at: proof.run.last_at ?? null,
             evidence: "terminal_run",
             run_id: proof.runId,
+            run_sequence: proof.runSequence,
           }
         : null,
     coverage,
@@ -5686,16 +5798,12 @@ export function projectConnectorSummaryConnectionHealth(input: {
   // Persisted source kind decides authority before health derives any scheduler
   // fact. A local device may have historical/foreign server runs, but they are
   // never evidence for its current device-side collection proof — UNLESS the
-  // row itself proves it is this connection's own current scheduler-managed
-  // run (`scheduler_managed = true`), not a foreign/stale artifact. A local
-  // device can still be enrolled behind this connection's own scheduler (e.g.
-  // a push-mode collector whose runs the scheduler nonetheless records), and
-  // discarding that proof unconditionally left `axes.coverage` stuck at
-  // `"unknown"` forever even when every required stream's collection report
-  // had already proven `"complete"` from the same run's evidence.
+  // row itself proves it is this connection's own scheduler-managed run, not a
+  // foreign/stale artifact. Keep that rule for historical rows written before
+  // placement admission began refusing new server runs for local-device
+  // connections.
   const localDeviceBacked = input.localDeviceBacked === true;
-  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean =>
-    !localDeviceBacked || run?.scheduler_managed === true;
+  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean => !localDeviceBacked || isSchedulerOwnedRun(run);
   const authoritativeLastRun = isOwnScopedRun(input.lastRun) ? input.lastRun : null;
   const authoritativeLastSuccessfulRun = isOwnScopedRun(input.lastSuccessfulRun) ? input.lastSuccessfulRun : null;
   const fallbackSettledRun = input.latestSettledRun ?? fallbackLatestSettledRun(input.lastRun, input.lastSuccessfulRun);
@@ -6631,13 +6739,12 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     runtimeOk,
     schedule,
   } = input;
-  const localDeviceBacked = instance.sourceKind === "local_device";
+  const localDeviceBacked = isLocalDeviceConnection(instance);
   // See the matching comment in `projectConnectorSummaryConnectionHealth`: a
-  // local device's run evidence is quarantined as foreign/historical UNLESS
-  // the row itself proves it is this connection's own current
-  // scheduler-managed run (`scheduler_managed = true`).
-  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean =>
-    !localDeviceBacked || run?.scheduler_managed === true;
+  // local device's run evidence is quarantined as foreign/historical unless
+  // the row proves it is this connection's own scheduler-managed run. This
+  // keeps historical rows readable after placement admission blocks new ones.
+  const isOwnScopedRun = (run: ConnectorRunSummary | null): boolean => !localDeviceBacked || isSchedulerOwnedRun(run);
   const authoritativeActiveRun = localDeviceBacked ? null : activeRun;
   const authoritativeCollectionRate = localDeviceBacked ? null : collectionRate;
   const authoritativeEphemeralBrowserRuntime = localDeviceBacked ? null : ephemeralBrowserRuntime;
@@ -6646,17 +6753,27 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   const fallbackSettledRun = latestSettledRun ?? fallbackLatestSettledRun(lastRun, lastSuccessfulRun);
   const authoritativeLatestSettledRun = isOwnScopedRun(fallbackSettledRun) ? fallbackSettledRun : null;
   const localCollectorRelease = localDeviceBacked ? readLocalCollectorRelease(connectorId) : null;
-  // The proof is the terminal run the revision high-water mark names. Fenced
-  // here, once, so every reader of `terminalCoverage` below (the collection
-  // report, the artifact binding) and the as-of sees the same decision.
-  const proofRun = localDeviceBacked ? localProofRun(input.localRevisionFence, connectorInstanceId) : null;
+  // The proof is the terminal run the run-order marker names. Fenced here,
+  // once, so every reader of `terminalCoverage` below (the collection report,
+  // the artifact binding) and the as-of sees the same decision. A scope or
+  // manifest change between the fence read and this projection leaves no proof.
+  const proofRun =
+    localDeviceBacked &&
+    proofBoundaryIsCoherent(
+      input.localRevisionFence,
+      input.declaredLocalCollectionScope,
+      evidence?.manifest_generation ?? null,
+      manifest
+    )
+      ? localProofRun(input.localRevisionFence, connectorInstanceId)
+      : null;
   const fencedTerminal = localDeviceBacked
     ? fenceTerminalCoverageProof(
         terminalCoverageByStream(
           proofRun?.run ?? null,
           manifest,
           input.declaredLocalCollectionScope,
-          evidence?.manifest_generation ?? null,
+          input.localRevisionFence?.boundary.manifestGeneration ?? null,
           localCollectorRelease?.artifactDigest ?? null,
           localCollectorRelease ? fingerprintDeviceAttemptManifest(localCollectorRelease.manifest) : null
         ),
@@ -7012,7 +7129,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     acquisition_coverage: acquisitionCoverage,
     auto_enroll_skip_reason: recordedAutoEnrollSkipReason(instance),
     collection_report: collectionReport,
-    connection_health: connectionHealth,
+    connection_health: { ...connectionHealth, coverage_as_of: coverageAsOf },
     connection_id: connectorInstanceId,
     connector_display_name: connectorDisplayName,
     connector_id: connectorId,
@@ -7626,7 +7743,7 @@ async function projectConnectorSummaryForInstance(
   // `projectConnectorSummaryConnectionHealth` are the actual authority
   // boundary for run evidence: they quarantine any hydrated run that is not
   // proven `scheduler_managed`, exactly as before for every other run.
-  const localDeviceBacked = instance.sourceKind === "local_device";
+  const localDeviceBacked = isLocalDeviceConnection(instance);
   const hydrateRunSummaries = shouldHydrateRunSummariesForInstance(
     deps.includeRunSummaries,
     instance,
@@ -9302,6 +9419,8 @@ export interface OwnerConnectionDiagnosticsRun {
 export interface OwnerConnectionDiagnosticsHealth {
   readonly axes: ConnectionHealthSnapshot["axes"];
   readonly badges: ConnectionHealthSnapshot["badges"];
+  /** What `axes.coverage` is a fact about; the same value as the top-level `coverage_as_of`. */
+  readonly coverage_as_of: LocalCoverageAsOf | null;
   readonly last_success_at: string | null;
   readonly next_attempt_at: string | null;
   readonly reason_code: string | null;
@@ -9469,6 +9588,7 @@ export async function getOwnerConnectionDiagnostics(
     health: {
       axes: health.axes,
       badges: health.badges,
+      coverage_as_of: health.coverage_as_of,
       last_success_at: health.last_success_at,
       next_attempt_at: health.next_attempt_at,
       reason_code: health.reason_code,

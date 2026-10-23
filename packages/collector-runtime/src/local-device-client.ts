@@ -17,6 +17,8 @@ export const LOCAL_DEVICE_ENDPOINTS = {
     `/_ref/device-exporters/${encodeURIComponent(deviceId)}/source-instances/${encodeURIComponent(sourceInstanceId)}/local-collector-gaps`,
   localCollectorGapRecovered: (deviceId: string, sourceInstanceId: string) =>
     `/_ref/device-exporters/${encodeURIComponent(deviceId)}/source-instances/${encodeURIComponent(sourceInstanceId)}/local-collector-gaps/recovered`,
+  runStart: (deviceId: string, sourceInstanceId: string) =>
+    `/_ref/device-exporters/${encodeURIComponent(deviceId)}/source-instances/${encodeURIComponent(sourceInstanceId)}/run-starts`,
   selfRevoke: (deviceId: string) => `/_ref/device-exporters/${encodeURIComponent(deviceId)}/self-revoke`,
   sourceInstanceState: (deviceId: string, sourceInstanceId: string) =>
     `/_ref/device-exporters/${encodeURIComponent(deviceId)}/source-instances/${encodeURIComponent(sourceInstanceId)}/state`,
@@ -215,11 +217,31 @@ export type TerminalRunCommitRequest = TerminalRunCommitBase &
   );
 
 export interface TerminalRunCommitResponse {
+  /** The commit revision the server recorded the run at. Absent from an older server's receipt. */
+  collection_revision?: number;
   commit_id: string;
   envelope_hash: string;
   object: "device_terminal_run_commit";
   run_id: string;
+  /** The sequence the server issued at run start; null for a run with none. Absent from an older server's receipt. */
+  run_sequence?: number | null;
+  /** The storage epoch the server recorded the run in. Absent from an older server's receipt. */
+  storage_epoch?: number;
   terminal_event_id: string;
+}
+
+export interface RunStartRequest {
+  connector_id: string;
+  run_id: string;
+  source_instance_id: string;
+}
+
+export interface RunStartResponse {
+  connector_instance_id: string;
+  object: "device_run_start";
+  run_id: string;
+  run_sequence: number;
+  storage_epoch: number;
 }
 
 export interface GetSourceInstanceStateRequest {
@@ -497,11 +519,33 @@ export class LocalDeviceClient {
         response.run_id !== request.run_id ||
         response.envelope_hash !== expectedHash ||
         typeof response.terminal_event_id !== "string" ||
-        response.terminal_event_id.length === 0
+        response.terminal_event_id.length === 0 ||
+        !isOptionalRunOrder(response)
       ) {
         throw new LocalDeviceReceiptValidationError(
           "terminal run commit response did not match the submitted envelope"
         );
+      }
+      return response;
+    });
+  }
+
+  /**
+   * Register a run at its start. The server answers the run's connection-scoped
+   * sequence; only a run with one can produce an eligible coverage proof.
+   */
+  startRun(request: RunStartRequest): Promise<RunStartResponse> {
+    return this.#request<RunStartResponse>(
+      LOCAL_DEVICE_ENDPOINTS.runStart(this.#requireDeviceId(), request.source_instance_id),
+      { authenticate: true, body: { connector_id: request.connector_id, run_id: request.run_id }, method: "POST" }
+    ).then((response) => {
+      if (
+        response?.object !== "device_run_start" ||
+        response.run_id !== request.run_id ||
+        !isPositiveSafeInteger(response.run_sequence) ||
+        !isPositiveSafeInteger(response.storage_epoch)
+      ) {
+        throw new LocalDeviceReceiptValidationError("run start response did not match the registered run");
       }
       return response;
     });
@@ -618,4 +662,19 @@ export class LocalDeviceClient {
       }
     }
   }
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+/** Run-order fields are optional (an older server omits them), but present ones must be well formed. */
+function isOptionalRunOrder(response: TerminalRunCommitResponse): boolean {
+  return (
+    (response.collection_revision === undefined || isPositiveSafeInteger(response.collection_revision)) &&
+    (response.run_sequence === undefined ||
+      response.run_sequence === null ||
+      isPositiveSafeInteger(response.run_sequence)) &&
+    (response.storage_epoch === undefined || isPositiveSafeInteger(response.storage_epoch))
+  );
 }

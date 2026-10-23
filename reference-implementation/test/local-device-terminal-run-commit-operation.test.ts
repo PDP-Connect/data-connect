@@ -60,6 +60,7 @@ async function invokeBoundCoverageCommit(input: {
   claimDigest: string;
   claimManifest: Record<string, unknown>;
   claimStores: readonly string[];
+  claimStream?: string;
   currentManifest: Record<string, unknown>;
   registeredRelease: { artifactDigest: string; manifest: Record<string, unknown> } | null;
 }): Promise<{ committed: ResolvedTerminalRunCommit | null; status: number }> {
@@ -108,7 +109,7 @@ async function invokeBoundCoverageCommit(input: {
             },
             scoped: true,
             stores: input.claimStores.map((store) => ({ status: "collected", store })),
-            stream: "messages",
+            stream: input.claimStream ?? "messages",
           },
         ],
         version: 2,
@@ -119,7 +120,7 @@ async function invokeBoundCoverageCommit(input: {
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -179,7 +180,7 @@ test("version 2 terminal coverage validates named stores against the manifest", 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -240,7 +241,40 @@ test("typed terminal coverage is green only for complete scoped store evidence",
     ),
     null
   );
-  assert.equal(normalizeTerminalCoverageFacts([fact(["collected", "collected"], false)], manifest, "bounded"), null);
+  const boundedVerdict = {
+    collection_scope: "bounded",
+    streams: [
+      {
+        scoped: false,
+        stores: [
+          { status: "collected", store: "messages" },
+          { status: "collected", store: "history" },
+        ],
+        stream: "messages",
+      },
+    ],
+    version: 1,
+  } as const;
+  const boundedFacts = boundedVerdict.streams.map((stream) => ({
+    ...fact(["collected", "collected"]),
+    scoped: stream.scoped,
+    stores: stream.stores,
+    stream: stream.stream,
+  }));
+  assert.equal(
+    normalizeTerminalCoverageFacts(boundedFacts, manifest, boundedVerdict.collection_scope)?.length,
+    1,
+    "a bounded producer verdict without a positive scope assertion remains admissible"
+  );
+  assert.equal(
+    normalizeTerminalCoverageFacts(
+      [{ ...boundedFacts[0], scoped: "false" }],
+      manifest,
+      boundedVerdict.collection_scope
+    ),
+    null,
+    "a malformed non-boolean scope assertion remains invalid"
+  );
 });
 
 test("a selected-stream terminal commit is accepted without proving omitted manifest streams", () => {
@@ -253,6 +287,58 @@ test("a selected-stream terminal commit is accepted without proving omitted mani
   const selected = [{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }];
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped"), null);
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped", { allowSubset: true })?.length, 1);
+});
+
+test("a bounded producer verdict allows positive coverage only for scoped streams", () => {
+  const manifest = {
+    streams: [
+      { coverage_stores: ["messages", "history"], coverage_strategy: "checkpoint_window", name: "messages" },
+      { coverage_stores: ["projects"], coverage_strategy: "checkpoint_window", name: "sessions" },
+    ],
+  } as const;
+  const artifactDigest = `sha256:${"b".repeat(64)}`;
+  const verdict = {
+    collection_scope: "bounded",
+    streams: [
+      {
+        scoped: false,
+        stores: [
+          { status: "collected", store: "messages" },
+          { status: "collected", store: "history" },
+        ],
+        stream: "messages",
+      },
+      { scoped: true, stores: [{ status: "collected", store: "projects" }], stream: "sessions" },
+    ],
+    version: 1,
+  } as const;
+  const facts = verdict.streams.map((stream) => ({
+    artifact_digest: artifactDigest,
+    manifest_fingerprint: fingerprintDeviceAttemptManifest(manifest),
+    runtime_accounting: {
+      checkpoint_eligible: true,
+      detail_complete: true,
+      durable_admission: true,
+      outstanding_debt: 0,
+      stream_evidence_consistent: true,
+    },
+    scoped: stream.scoped,
+    stores: stream.stores,
+    stream: stream.stream,
+  }));
+  const normalized = normalizeTerminalCoverageFacts(facts, manifest, verdict.collection_scope, {
+    expectedArtifactDigest: artifactDigest,
+  });
+  assert.ok(normalized);
+  const conditions = Object.fromEntries(
+    normalized.map((raw) => {
+      const fact = readRuntimeCollectionFact(raw);
+      assert.ok(fact);
+      const stream = manifest.streams.find((entry) => entry.name === fact.stream);
+      return [fact.stream, deriveStreamCoverageCondition(fact, stream)];
+    })
+  );
+  assert.deepEqual(conditions, { messages: "unknown", sessions: "complete" });
 });
 
 test("terminal run commit resolves authorization before receipt lookup and passes canonical binding", async () => {
@@ -293,7 +379,7 @@ test("terminal run commit resolves authorization before receipt lookup and passe
     resolveAuthorizedSource: () => {
       authorized = true;
       return Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "https://registry.pdpp.dev/connectors/codex" },
       });
     },
@@ -365,7 +451,7 @@ test("a device sending the legacy connector alias still commits: both sides are 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
@@ -427,7 +513,7 @@ test("the envelope hash is computed over the connector id the device SENT, not t
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
@@ -491,7 +577,7 @@ test("an identity-alias connector still hashes correctly — the alias fix does 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex" },
       }),
   });
@@ -537,7 +623,7 @@ test("an unrelated connector id is still rejected — canonicalizing both sides 
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
@@ -602,7 +688,7 @@ test("divergent receipt conflict returns a typed non-disclosing 409", async () =
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex" },
       }),
   });
@@ -651,7 +737,7 @@ test("SQLite route operation composes authorization with 201, exact response-los
         resolveAuthorizedSource: () => {
           resolved = true;
           return Promise.resolve({
-            connectorInstance: { connectorInstanceId: "cin-1" },
+            connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
             sourceInstance: { connectorId: "https://registry.pdpp.dev/connectors/codex" },
           });
         },
@@ -848,7 +934,7 @@ test("terminal commit records the server pin at admission and refuses an unbound
         res: capture.response,
         resolveAuthorizedSource: () =>
           Promise.resolve({
-            connectorInstance: { connectorInstanceId: "cin-1" },
+            connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
             sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
           }),
       });
@@ -936,7 +1022,7 @@ test("terminal coverage requires the release registered for the authorized conne
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -1017,7 +1103,7 @@ test("a run bound to its registered release remains valid after the connector ca
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -1108,6 +1194,26 @@ test("the terminal endpoint rejects a store outside the registered inventory", a
 
   assert.equal(result.status, 400);
   assert.equal(result.committed, null);
+});
+
+// Collection Profile Section 5.8.2: a stream with no declared inventory cannot
+// prove coverage. The endpoint rejects a claim that names one, with or without
+// stores, and commits nothing.
+test("the terminal endpoint rejects a claim for a stream with no declared inventory", async () => {
+  const registeredManifest = { streams: [{ coverage_stores: ["messages"], name: "messages" }, { name: "photos" }] };
+  const digest = `sha256:${"a".repeat(64)}`;
+  for (const claimStores of [[], ["photos"]]) {
+    const result = await invokeBoundCoverageCommit({
+      claimDigest: digest,
+      claimManifest: registeredManifest,
+      claimStores,
+      claimStream: "photos",
+      currentManifest: registeredManifest,
+      registeredRelease: { artifactDigest: digest, manifest: registeredManifest },
+    });
+    assert.equal(result.status, 400, JSON.stringify(claimStores));
+    assert.equal(result.committed, null);
+  }
 });
 
 test("an instance registered to release A cannot claim a larger release B inventory", async () => {
@@ -1244,7 +1350,7 @@ test("a successful empty v2 terminal commit replaces every store with unknown ev
     res: capture.response,
     resolveAuthorizedSource: () =>
       Promise.resolve({
-        connectorInstance: { connectorInstanceId: "cin-1" },
+        connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
         sourceInstance: { connectorId: "codex", manifestGeneration: 7 },
       }),
   });
@@ -1343,7 +1449,7 @@ for (const eligible of [false, true]) {
       res: capture.response,
       resolveAuthorizedSource: () =>
         Promise.resolve({
-          connectorInstance: { connectorInstanceId: "cin-1" },
+          connectorInstance: { connectorInstanceId: "cin-1", sourceKind: "local_device" },
           sourceInstance: { connectorId: "codex" },
         }),
     });

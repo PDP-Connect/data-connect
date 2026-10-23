@@ -41,6 +41,8 @@ import {
   definitionFromProfile,
   LAYER_MEDIA_TYPES,
   managedConnectorCommand,
+  managedDefinitionsFrom,
+  managedEntrypointIndex,
   obtainManagedConnectors,
   PDP_CONNECT_CONNECTOR_IDENTITY,
   readTarGz,
@@ -48,6 +50,13 @@ import {
   type SignatureVerifier,
   UNSUPPORTED_PLATFORM_SELECTION,
 } from "../src/managed/index.ts";
+import { RuntimeCapabilityMismatchError } from "../src/errors.ts";
+import {
+  assertPlacementOrThrow,
+  COLLECTOR_RUNTIME_CAPABILITIES,
+  createBundledConnectorRegistry,
+  runCollectorConnector,
+} from "../src/runner.ts";
 
 const sha256 = (bytes: Uint8Array): string => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 const encode = (value: unknown): Uint8Array => new TextEncoder().encode(`${JSON.stringify(value, null, 2)}\n`);
@@ -286,6 +295,86 @@ test("a verified artifact installs under its digest and yields a runnable defini
     for (const file of ["config.json", "collection-profile.json", "provenance.json", "oci-manifest.json"]) {
       assert.ok(existsSync(join(releaseDir, file)), `${file} should be installed`);
     }
+  });
+});
+
+test("a signed profile's RUN_COVERAGE_V1 declaration is preserved in the managed definition", async () => {
+  const fixture = buildFixture({ profile: { protocol_capabilities: ["RUN_COVERAGE_V1"] } });
+  await withRoots(async (installRoot, durableRoot) => {
+    const managed = await obtain(fixture, installRoot, durableRoot);
+
+    assert.deepEqual([...managed[0]!.definition.protocol_capabilities], ["RUN_COVERAGE_V1"]);
+  });
+});
+
+test("a managed profile requiring an unadvertised capability fails before spawn with the typed runtime error", async () => {
+  await withRoots(async (installRoot, durableRoot) => {
+    mkdirSync(durableRoot, { recursive: true });
+    const spawnedMarker = join(durableRoot, "spawned.marker");
+    const fixture = buildFixture({
+      codeEntries: [
+        {
+          path: "collection-profile.mjs",
+          content: `await (await import("node:fs/promises")).writeFile(${JSON.stringify(spawnedMarker)}, "spawned");\n`,
+        },
+      ],
+      profile: { protocol_capabilities: ["BLOB"] },
+    });
+    const managed = await obtain(fixture, installRoot, durableRoot);
+    const registry = createBundledConnectorRegistry(
+      managedDefinitionsFrom(managed),
+      managedEntrypointIndex(managed)
+    );
+    const connector = registry[CONNECTOR_ID];
+    assert.ok(connector);
+
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: "http://127.0.0.1:1",
+        connector: {
+          args: connector.args,
+          command: connector.command,
+          connector_id: connector.connector_id,
+          protocol_capabilities: connector.protocol_capabilities,
+          runtime_requirements: { bindings: connector.bindings },
+          streams: connector.streams,
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: process.cwd(),
+        queuePath: join(durableRoot, "queue.sqlite"),
+        sourceInstanceId: "src-required-capability-refused",
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeCapabilityMismatchError);
+        if (error instanceof RuntimeCapabilityMismatchError) {
+          assert.equal(error.code, "runtime_capability_mismatch");
+          assert.equal(error.connectorId, CONNECTOR_ID);
+          assert.deepEqual(error.missing, ["BLOB"]);
+          assert.match(error.message, /missing capabilities \[BLOB\]/);
+        }
+        return true;
+      }
+    );
+
+    assert.equal(existsSync(spawnedMarker), false);
+  });
+});
+
+test("a managed profile's advisory capability does not block placement when the runtime omits it", async () => {
+  const fixture = buildFixture({ profile: { protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"] } });
+  await withRoots(async (installRoot, durableRoot) => {
+    const managed = await obtain(fixture, installRoot, durableRoot);
+    const registry = createBundledConnectorRegistry(
+      managedDefinitionsFrom(managed),
+      managedEntrypointIndex(managed)
+    );
+    const connector = registry[CONNECTOR_ID];
+    assert.ok(connector);
+
+    assert.deepEqual([...connector.protocol_capabilities], ["DETAIL_COVERAGE_KEY_SETS"]);
+    assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("DETAIL_COVERAGE_KEY_SETS"), false);
+    assert.deepEqual(assertPlacementOrThrow(connector, COLLECTOR_RUNTIME_CAPABILITIES), []);
   });
 });
 

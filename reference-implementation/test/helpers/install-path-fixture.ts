@@ -38,8 +38,8 @@ export const INSTALL_PATH_PROFILE = {
   connector_id: INSTALL_PATH_CONNECTOR_ID,
   connector_key: INSTALL_PATH_CONNECTOR_KEY,
   display_name: "Claude Code (install-path journey fixture)",
-  protocol_version: "0.1.0",
-  run_coverage: { version: 1 },
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+  protocol_version: "0.2.0",
   source: { display: { name: "Claude Code" }, id: "https://registry.pdpp.dev/sources/claude_code" },
   streams: [
     {

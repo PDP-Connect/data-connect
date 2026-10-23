@@ -155,7 +155,10 @@ import {
   stageOAuthAuthorizationCodeRequest,
   updateRegisteredClientName,
 } from "./auth.ts";
-import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
+import {
+  autoEnrollEligibleSchedules,
+  listServerRunnableConnectorInstanceIds,
+} from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
 import {
@@ -9661,7 +9664,7 @@ export async function startServer(opts: ServerOpts = {}) {
           ownerAuthSubjectId,
           canonicalId
         );
-        return instances.map((instance) => instance.connectorInstanceId);
+        return listServerRunnableConnectorInstanceIds(instances);
       },
       listConnectors: async () => {
         const manifests = await collectValidRegisteredConnectorManifests({

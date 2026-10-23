@@ -29,7 +29,8 @@ function sha256(bytes: Buffer): string {
 
 const PROFILE = {
   connector_id: "fixture_connector",
-  run_coverage: { version: 1 },
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+  protocol_version: "0.2.0",
   streams: [{ coverage_stores: ["messages_store"], name: "messages" }],
 };
 const ENTRYPOINT = Buffer.from("export {};\n");

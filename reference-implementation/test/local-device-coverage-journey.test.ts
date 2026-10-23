@@ -14,11 +14,11 @@
 // Three substitutions, all about the release the lane runs. None changes what
 // the lane does with it:
 //
-//   - The checked-in claude-code pin declares no run_coverage, so no real
-//     release can emit a v2 proof yet. The test registers a fixture release
-//     that declares it: on the server through __setLocalCollectorReleaseForTest,
-//     and on the device through bindOptionalRunCoverageToRelease, as
-//     prepareConnectorSpec binds a pinned release.
+//   - The checked-in claude-code pin is not the proof-producing release in
+//     this journey. The test registers a 0.3.0 fixture release with inventories
+//     on the server through __setLocalCollectorReleaseForTest and on the device
+//     through bindOptionalRunCoverageToRelease, as prepareConnectorSpec binds
+//     a pinned release.
 //   - Enrolment registers the eleven-stream claude-code catalog manifest. The
 //     journey narrows that entry to the release's two streams.
 //   - The owner routes read a summary read model that the server refreshes in
@@ -34,6 +34,7 @@
 /// <reference path="../../packages/local-collector/src/managed/installer-core.d.ts" />
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -42,9 +43,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import { hashCanonicalJson, LocalDeviceClient, LocalDeviceOutbox } from "@pdpp/collector-runtime";
+import { DEFAULT_COLLECTOR_OUTBOX_POLICY, drainCollectorOutbox } from "@pdpp/collector-runtime/collector-runner";
 
 import {
   bindOptionalRunCoverageToRelease,
@@ -76,6 +78,7 @@ import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summ
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { __setLocalCollectorReleaseForTest } from "../server/local-collector-profiles.ts";
+import { __setTerminalRunCommitFaultHookForTest } from "../server/stores/terminal-run-commit-store.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
 import { fixtureConnectorSource } from "./helpers/install-path-fixture.ts";
 
@@ -86,11 +89,12 @@ const STREAMS = ["sessions", "messages"];
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
 const CSRF_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 
-// The fixture release: a claude-code profile that declares run coverage for
-// both streams. The server registers it, and the device binds to it.
+// The fixture release: a claude-code 0.2.0 profile that opts into the
+// independent store-evidence extension and inventories both streams.
 const PROFILE = {
   connector_id: CONNECTOR_ID,
-  run_coverage: { version: 1 },
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+  protocol_version: "0.2.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },
@@ -164,6 +168,7 @@ interface CoverageAsOf {
   readonly committed_at: string | null;
   readonly evidence: string;
   readonly run_id: string | null;
+  readonly run_sequence: number;
 }
 
 interface OwnerConnectionRow {
@@ -455,7 +460,27 @@ function serverRunCommittedAt(runId: string): string {
   return row.completed_at;
 }
 
-/** Shown coverage is a fact about one run: its id, release digest, revision and commit time. */
+/** The sequence the server issued to one run at its start, or null when it issued none. */
+function serverRunSequence(runId: string): number | null {
+  const row = getDb().prepare("SELECT run_sequence FROM collection_run_sequences WHERE run_id = ?").get(runId) as
+    | { run_sequence: number }
+    | undefined;
+  return row ? Number(row.run_sequence) : null;
+}
+
+/** The run-order facts the server stored with one run record. */
+function serverRunOrder(runId: string): { collection_revision: unknown; run_sequence: unknown } | null {
+  const row = getDb().prepare("SELECT facts_json FROM run_history WHERE run_id = ?").get(runId) as
+    | { facts_json: string }
+    | undefined;
+  if (!row) {
+    return null;
+  }
+  const facts = JSON.parse(row.facts_json) as Record<string, unknown>;
+  return { collection_revision: facts.collection_revision, run_sequence: facts.run_sequence };
+}
+
+/** Shown coverage is a fact about one run: its id, release digest, run sequence, revision and commit time. */
 function assertCoverageAsOf(journey: Lane, owner: OwnerConnectionRow, runId: string): void {
   assert.equal(owner.coverage_as_of?.run_id, runId, "the shown coverage names the run it is a fact about");
   assert.deepEqual(owner.coverage_as_of, {
@@ -464,6 +489,7 @@ function assertCoverageAsOf(journey: Lane, owner: OwnerConnectionRow, runId: str
     committed_at: serverRunCommittedAt(runId),
     evidence: "terminal_run",
     run_id: runId,
+    run_sequence: serverRunSequence(runId),
   });
 }
 
@@ -683,6 +709,189 @@ test("J3: a run that fails before its scan leaves the lane not covered; the serv
     const cOwner = await ownerConnectionRow(journey);
     assert.equal(cOwner.connection_health.axes.coverage, "complete");
     assertCoverageAsOf(journey, cOwner, "c-complete");
+  });
+});
+
+/** Deliver what a device outbox still holds, without starting a run. */
+async function deliverQueued(journey: Lane): Promise<void> {
+  const outbox = new LocalDeviceOutbox({ path: journey.queuePath });
+  try {
+    await drainCollectorOutbox({
+      client: new LocalDeviceClient({
+        baseUrl: journey.asUrl,
+        deviceId: journey.enrolled.device_id,
+        deviceToken: journey.enrolled.device_token,
+      }),
+      connectorId: CONNECTOR_ID,
+      holderId: "journey-late-delivery",
+      outbox,
+      policy: { ...DEFAULT_COLLECTOR_OUTBOX_POLICY, retryBackoffMs: 1 },
+      sourceInstanceId: journey.enrolled.source_instance_id,
+    });
+  } finally {
+    outbox.close();
+  }
+}
+
+test("J5: an older run's proof delivered after a newer run's terminal record stays history", async () => {
+  await withJourney(async (journey) => {
+    // Run A completes its scan, but its terminal record does not reach the server: the commit fails
+    // and stays queued on A's outbox, as an outbox delay or retry leaves it.
+    __setTerminalRunCommitFaultHookForTest((point) => {
+      if (point === "after_event_insert") {
+        throw new Error("terminal commit unavailable");
+      }
+    });
+    let a: RunOutcome;
+    try {
+      a = await runOnce(journey, "complete", "a-delayed");
+    } finally {
+      __setTerminalRunCommitFaultHookForTest(null);
+    }
+    assert.equal(a.result.done?.status, "succeeded");
+    assert.equal(a.result.statePutFailed, true, "run A's terminal record is still queued");
+    assert.equal(serverRunStreams("a-delayed"), null, "the server has no terminal record for run A yet");
+
+    // Run B starts later, from a second outbox of the device, and its terminal record reaches the server first.
+    const bLane = { ...journey, queuePath: join(journey.dir, "outbox-b.sqlite") };
+    const b = await runOnce(bLane, "complete", "b-newer");
+    assert.equal(b.result.done?.status, "succeeded");
+    const bOwner = await ownerConnectionRow(journey);
+    assert.equal(bOwner.connection_health.axes.coverage, "complete");
+    assert.equal(bOwner.coverage_as_of?.run_id, "b-newer", "run B's proof is current");
+    const bRevision = bOwner.coverage_as_of?.collection_revision;
+
+    // Run A's queued terminal record now reaches the server, in commit order after run B's.
+    await deliverQueued(journey);
+    const aOrder = serverRunOrder("a-delayed");
+    assert.ok(aOrder, "the server stored run A's terminal record");
+    assert.ok(Number(aOrder.collection_revision) > Number(bRevision), "run A's record is the newer observation");
+
+    // Run order decides eligibility: run A's proof is history, and run B's stays current.
+    const owner = await ownerConnectionRow(journey);
+    assert.equal(owner.coverage_as_of?.run_id, "b-newer", "the older run's late proof does not become current");
+    assert.equal(owner.connection_health.axes.coverage, "complete");
+    assert.equal(owner.coverage_as_of?.collection_revision, bRevision, "the as-of still names run B's revision");
+    assert.deepEqual(conditions(owner), { messages: "complete", sessions: "complete" });
+    // Run A's record keeps its own as-of: it started before run B.
+    assert.ok(
+      Number(aOrder.run_sequence) < Number(owner.coverage_as_of?.run_sequence),
+      "run A's run sequence is below run B's"
+    );
+  });
+});
+
+// The collector runner in its own process. It sends its records, and when it
+// reaches its terminal record it writes a marker and waits, so the test can
+// kill it at exactly that point. Written with no template interpolation.
+const KILLED_RUNNER_SOURCE = `
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const config = JSON.parse(process.env.PDPP_JOURNEY_RUNNER_CONFIG);
+const realFetch = globalThis.fetch;
+globalThis.fetch = (input, init) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  if (url.includes("/terminal-run-commits")) {
+    writeFileSync(config.markerPath, "terminal");
+    return new Promise(() => undefined);
+  }
+  return realFetch(input, init);
+};
+const { runCollectorConnector } = await import(pathToFileURL(config.runnerPath).href);
+await runCollectorConnector(config.run);
+`;
+
+const BATCH_OBSERVATION = /^batch_(record|accepted)$/;
+
+async function waitForFile(path: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: polling checks one file, one attempt after another.
+      await readFile(path, "utf8");
+      return;
+    } catch (error) {
+      if (Date.now() > deadline) {
+        throw new Error(`timed out waiting for ${path}`, { cause: error });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+}
+
+test("J6: a runner killed after its records are admitted, before its terminal record, leaves the earlier positive unknown", async () => {
+  await withJourney(async (journey) => {
+    const a = await runOnce(journey, "complete", "a-complete");
+    assert.equal(a.result.done?.status, "succeeded");
+    assertCoverageAsOf(journey, await ownerConnectionRow(journey), "a-complete");
+    const recordsBefore = serverRecordCount(journey, "sessions");
+
+    // Run B runs in a separate process against a fresh outbox and is killed when it reaches its terminal
+    // record. Its "state" pass sends a batch the server has not seen. (A batch byte-identical to one the
+    // server already accepted is an idempotent replay, not an observation.)
+    const scriptPath = join(journey.dir, "killed-runner.mjs");
+    const markerPath = join(journey.dir, "b-terminal-reached");
+    await writeFile(scriptPath, KILLED_RUNNER_SOURCE);
+    const connector: CollectorConnectorSpec = {
+      args: [journey.childPath, "state", join(journey.dir, "start-b-killed.json"), "b-killed"],
+      command: process.execPath,
+      connector_id: CONNECTOR_ID,
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: {} },
+      streams: STREAMS,
+    };
+    const child = spawn(process.execPath, ["--import", "tsx", scriptPath], {
+      cwd: dirname(fileURLToPath(import.meta.url)),
+      env: {
+        ...process.env,
+        PDPP_JOURNEY_RUNNER_CONFIG: JSON.stringify({
+          markerPath,
+          run: {
+            baseUrl: journey.asUrl,
+            connector,
+            deviceId: journey.enrolled.device_id,
+            deviceToken: journey.enrolled.device_token,
+            executionRoot: dirname(journey.childPath),
+            outboxPolicy: { maxDrainIterations: 1, retryBackoffMs: 1 },
+            queuePath: join(journey.dir, "outbox-killed.sqlite"),
+            runId: "b-killed",
+            sourceInstanceId: journey.enrolled.source_instance_id,
+          },
+          runnerPath: fileURLToPath(new URL("../../packages/local-collector/src/runner.ts", import.meta.url)),
+        }),
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const exited = new Promise<NodeJS.Signals | null>((resolve) =>
+      child.once("exit", (_code, signal) => resolve(signal))
+    );
+    try {
+      await Promise.race([
+        waitForFile(markerPath, 60_000),
+        exited.then(() => {
+          throw new Error(`the runner exited before its terminal record: ${stderr}`);
+        }),
+      ]);
+    } finally {
+      child.kill("SIGKILL");
+    }
+    assert.equal(await exited, "SIGKILL", "the runner process was killed");
+
+    // The server admitted run B's records but never received its terminal record.
+    assert.equal(serverRunStreams("b-killed"), null, "no terminal record for run B");
+    assert.ok(serverRunSequence("b-killed") !== null, "run B registered its start");
+    assert.ok(serverRecordCount(journey, "sessions") >= recordsBefore, "run B's records were admitted");
+    assert.match(String(lastCollectionEvent(journey)), BATCH_OBSERVATION, "the newest observation is run B's ingest");
+
+    // Run B's admitted records are an observed attempt of a later run, so run A's positive is unknown.
+    const owner = await ownerConnectionRow(journey);
+    assert.equal(owner.connection_health.axes.coverage, "unknown");
+    assert.equal(owner.coverage_as_of, null);
   });
 });
 

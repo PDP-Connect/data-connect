@@ -106,20 +106,26 @@ async function cleanup(id: string): Promise<void> {
 }
 
 /**
- * Holds a real `ACCESS EXCLUSIVE` lock on `connector_instances` for
- * `holdMs` on a SEPARATE connection checked out from the app's own pool —
- * genuine PostgreSQL lock contention, not a mock, blocking any concurrent
- * plain `SELECT` against that table for the hold duration (proven directly
- * against `psql` before writing this test). This is what stands in for the
- * production incident's real cause (a slow, unindexed discovery read
- * contending with unrelated heavy I/O): either way, discovery's own
- * `SELECT ... FROM connector_instances` genuinely cannot complete quickly.
+ * Holds a real `ACCESS EXCLUSIVE` lock on `table` for `holdMs` on a SEPARATE
+ * connection checked out from the app's own pool — genuine PostgreSQL lock
+ * contention, not a mock, blocking any concurrent plain `SELECT` against that
+ * table for the hold duration (proven directly against `psql` before writing
+ * this test). This is what stands in for the production incident's real cause
+ * (a slow, unindexed discovery read contending with unrelated heavy I/O):
+ * either way, the discovery read of the locked table genuinely cannot
+ * complete quickly.
+ *
+ * Choose `table` for the statement the test needs to cancel. The terminal-facts
+ * fold runs BEFORE discovery in a bounded round and reads `connector_instances`
+ * (the canonical source-kind join in `listEvidence`) through an unbounded
+ * `postgresQuery`, so a lock on `connector_instances` stalls the fold past the
+ * round deadline and discovery never starts (see the cancellation test below).
  */
-async function withInstanceTableContention<T>(holdMs: number, fn: () => Promise<T>): Promise<T> {
+async function withTableContention<T>(table: string, holdMs: number, fn: () => Promise<T>): Promise<T> {
   const pool = getPostgresPool();
   const lockClient = await pool.connect();
   await lockClient.query("BEGIN");
-  await lockClient.query("LOCK TABLE connector_instances IN ACCESS EXCLUSIVE MODE");
+  await lockClient.query(`LOCK TABLE ${table} IN ACCESS EXCLUSIVE MODE`);
   const release = lockClient.query(`SELECT pg_sleep(${holdMs / 1000})`).then(() => lockClient.query("COMMIT"));
   try {
     // Give the lock a moment to actually be held before the contended call starts.
@@ -153,7 +159,7 @@ test(
       // (routine, since the fold runs first in the same round).
       const { postgresQueryBounded, PostgresStatementTimeoutError } = await import("../server/postgres-storage.ts");
       let caught: unknown = null;
-      await withInstanceTableContention(300, async () => {
+      await withTableContention("connector_instances", 300, async () => {
         try {
           await postgresQueryBounded("SELECT 1 FROM connector_instances WHERE connector_instance_id = $1", [id], 50);
         } catch (err) {
@@ -229,7 +235,7 @@ test(
       // way this test can distinguish the old 50ms floor from the new one
       // (a generous, never-exhausted budget would never floor at all,
       // making the floor value irrelevant to the outcome either way).
-      await withInstanceTableContention(300, () =>
+      await withTableContention("connector_instances", 300, () =>
         reconcileDirtyConnectorSummaryEvidence([id], { maxDurationMs: 200 })
       );
 
@@ -261,15 +267,19 @@ test(
       // `maxDurationMs: 200` is NOT already expired when
       // `runBoundedObservationPhases`'s `canStartWork()` admission checks
       // run (so discovery genuinely starts, unlike an already-past
-      // deadline, which short-circuits before ever calling `discover()`),
-      // but by the time discovery's own query actually executes,
-      // `withInstanceTableContention`'s 900ms of real lock contention has
-      // already been waited on -- so `remainingStatementBudgetMs` floors at
-      // exactly `MIN_STATEMENT_TIMEOUT_MS` and the contended query is
-      // genuinely cancelled by real PostgreSQL (reproduces the exact
-      // production call chain: readPostgresDiscoveryContext ->
-      // postgresQueryBounded -> PostgresStatementTimeoutError ->
-      // discoverCandidates -> observeConnectorSummaryEvidence's catch).
+      // deadline, which short-circuits before ever calling `discover()`).
+      // The lock is on `retained_size_connection`, which discovery reads
+      // (`readPostgresDiscoveryContext`) but the fold that runs first does
+      // not: discovery's earlier statements are uncontended, then its
+      // `retained_size_connection` read blocks, the round deadline has
+      // passed so `remainingStatementBudgetMs` floors at exactly
+      // `MIN_STATEMENT_TIMEOUT_MS`, and the contended query is genuinely
+      // cancelled by real PostgreSQL (reproduces the exact production call
+      // chain: readPostgresDiscoveryContext -> postgresQueryBounded ->
+      // PostgresStatementTimeoutError -> discoverCandidates ->
+      // observeConnectorSummaryEvidence's catch). Locking
+      // `connector_instances` instead would stall the fold's unbounded
+      // `listEvidence` read past the deadline, so discovery would never start.
       const originalError = console.error;
       const logs: string[] = [];
       console.error = (...args: unknown[]) => {
@@ -277,7 +287,7 @@ test(
       };
       let result: Awaited<ReturnType<typeof reconcileDirtyConnectorSummaryEvidence>>;
       try {
-        result = await withInstanceTableContention(900, () =>
+        result = await withTableContention("retained_size_connection", 900, () =>
           reconcileDirtyConnectorSummaryEvidence([id], { maxDurationMs: 200 })
         );
       } finally {
