@@ -30,6 +30,7 @@ import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import {
   __testOnlySetFoldPauseHook,
   foldConnectorSummaryStreamFacts,
+  getConnectorSummaryEvidence,
   reconcileDirtyConnectorSummaryEvidence,
 } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -1765,6 +1766,12 @@ laneTest(
     await changeSourceKind(lane, "browser_collector");
     await ageFoldCache(lane, "browser_collector");
     // No reconcile, no maintenance sweep: this is what a read sees between a deploy and the first replay.
+    // Each mask on its own: the shaped evidence withholds the cached facts and marks terminal facts behind.
+    const evidence = await getConnectorSummaryEvidence(lane.enrolled.connector_instance_id);
+    assert.ok(evidence, "the connection has shaped evidence");
+    assert.equal(evidence.stream_latest_facts, null, "a behind-version cache credits no stream facts");
+    assert.equal(evidence.terminal_facts.state, "unobserved", "a behind-version cache is not current terminal evidence");
+    assert.equal(evidence.terminal_facts.reason_code, "fold_logic_version_behind");
     assert.deepEqual(
       await reportedConditions(lane, false),
       UNKNOWN_CONDITIONS,
