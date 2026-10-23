@@ -203,12 +203,12 @@ export const HOSTED_MCP_PICKER_RETENTION: { max_duration: string; on_expiry: "an
 // temporal scope, and access pattern as three concepts that MUST NOT be
 // conflated). The picker lets the owner choose it, so the approval summary
 // states the CHOSEN expiry, not a fixed sentence. A one-time grant is consumed
-// at first token issuance (spec-core.md:920); that is the access mode's
-// business and is stated by the Duration row, never here.
+// at first token issuance (spec-core.md:920) and ignores the chosen expiry;
+// consumption and revocation are the access mode's business and are stated by
+// the Duration row. This sentence is only about the scheduled end date.
+export const HOSTED_MCP_NO_SCHEDULED_END_COPY = "No scheduled end date.";
 export function describeHostedMcpGrantExpiry(option: { days: number | null; label: string }): string {
-  return option.days === null
-    ? "No end date is scheduled. It lasts until you revoke it."
-    : `Scheduled to end in ${option.label}. You can revoke it sooner.`;
+  return option.days === null ? HOSTED_MCP_NO_SCHEDULED_END_COPY : `Scheduled to end in ${option.label}.`;
 }
 
 // Input normalization helpers.
@@ -3145,31 +3145,24 @@ export async function renderHostedMcpSourceSelection(
   // client identity, expiry) is stated above and repeated here only as the
   // decision's own terms — the summary is the one place they appear together
   // as a single reviewable artifact.
-  // The app name is self-described unless an operator registered the client.
-  // Domain verification proves who controls the domain, not that the name is
-  // true, so a self-described name never sits among the enforced terms.
-  const appNameIsOperatorSet = clientDisplay !== null && !clientDisplay.isUnverified && !clientDisplay.verifiedDomain;
   const reviewPanel = rows.length
     ? `<section class="hosted-ui-review" data-hosted-mcp-review aria-live="polite" aria-label="What you're allowing">
           <h2 class="pdpp-title">What you're allowing</h2>
           <p class="hosted-ui-review-empty" data-hosted-mcp-review-empty>Nothing selected yet.</p>
           <div data-hosted-mcp-review-terms hidden>
-            ${
-              appNameIsOperatorSet
-                ? ""
-                : renderAuthorshipBlock(
-                    "client",
-                    "App",
-                    `<dl class="hosted-ui-kv hosted-ui-review-terms"><dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd></dl>`,
-                    ui
-                  )
-            }
+            ${renderAuthorshipBlock(
+              "client",
+              "App",
+              `<dl class="hosted-ui-kv hosted-ui-review-terms"><dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd></dl>`,
+              ui
+            )}
             <dl class="hosted-ui-kv hosted-ui-review-terms">
-            ${appNameIsOperatorSet ? `<dt>App</dt><dd>${ui.escapeHtml(clientName)}</dd>` : ""}
             <dt>Data</dt><dd data-hosted-mcp-review-scope></dd>
             <dt>Coverage</dt><dd>Everything in each data type you check, unless you narrowed it above.</dd>
             <dt>Duration</dt><dd data-hosted-mcp-review-duration></dd>
-            <dt>Ends</dt><dd data-hosted-mcp-review-ends data-ends-by-option="${ui.escapeHtml(
+            <dt>Ends</dt><dd data-hosted-mcp-review-ends data-ends-single-use="${ui.escapeHtml(
+              HOSTED_MCP_NO_SCHEDULED_END_COPY
+            )}" data-ends-by-option="${ui.escapeHtml(
               JSON.stringify(
                 Object.fromEntries(HOSTED_MCP_GRANT_EXPIRY_OPTIONS.map((o) => [o.id, describeHostedMcpGrantExpiry(o)]))
               )
@@ -3676,12 +3669,20 @@ export async function renderHostedMcpSourceSelection(
       reviewDuration.textContent =
         decision.accessMode === "single_use"
           ? "One-time access — one retrieval, then no more without your approval."
-          : "Ongoing access — including new matching records.";
+          : "Ongoing access — including new matching records, until it ends or you revoke it.";
     }
     if (reviewEnds) {
       const endsByOption = JSON.parse(reviewEnds.dataset.endsByOption || "{}");
       const chosen = form.querySelector('input[name="grant_expiry"]:checked');
-      const text = chosen ? endsByOption[chosen.value] : "";
+      const value = chosen ? chosen.value : "";
+      let text = endsByOption[value] || "";
+      // A typed YYYY-MM-DD ends at the END of that day, UTC (the server's rule).
+      if (!text && /^\\d{4}-\\d{2}-\\d{2}$/.test(value)) {
+        text = "Scheduled to end at the end of " + value + " (UTC).";
+      }
+      // A one-time grant is used up at first retrieval and the server ignores
+      // the chosen expiry, so it never shows a scheduled end.
+      if (decision.accessMode === "single_use") text = reviewEnds.dataset.endsSingleUse || "";
       if (text) reviewEnds.textContent = text;
     }
     if (!decisionField) return;

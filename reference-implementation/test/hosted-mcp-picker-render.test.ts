@@ -1028,7 +1028,7 @@ test("the counter is wired to selection changes, not rendered dead", async () =>
 test("summary Ends row follows the grant-expiry control, not a fixed sentence", async () => {
   const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
   assert.equal(html.includes("no scheduled end date"), false, "no fixed 'no end date' sentence");
-  const ends = /<dd data-hosted-mcp-review-ends data-ends-by-option="([^"]*)">([^<]*)<\/dd>/.exec(html);
+  const ends = /<dd data-hosted-mcp-review-ends data-ends-single-use="[^"]*" data-ends-by-option="([^"]*)">([^<]*)<\/dd>/.exec(html);
   assert.ok(ends, "the Ends row is addressable");
   const byOption = JSON.parse((ends[1] ?? "").replaceAll("&quot;", '"').replaceAll("&#39;", "'")) as Record<
     string,
@@ -1037,7 +1037,13 @@ test("summary Ends row follows the grant-expiry control, not a fixed sentence", 
   assert.deepEqual(Object.keys(byOption).sort(), ["1y", "90d", "never"]);
   assert.match(byOption["90d"] ?? "", /90 days/);
   assert.match(byOption["1y"] ?? "", /1 year/);
-  assert.match(byOption.never ?? "", /until you revoke it/);
+  // The Ends row is only about the scheduled end date. Revocation and
+  // consumption belong to the Duration row, which depends on the access mode.
+  assert.equal(byOption.never, "No scheduled end date.");
+  assert.equal(/revoke/i.test(byOption.never ?? ""), false, "'never' makes no promise about revocation");
+  assert.match(html, /data-ends-single-use="No scheduled end date\."/, "one-time access never shows a scheduled end");
+  assert.match(html, /decision\.accessMode === "single_use"\) text = reviewEnds\.dataset\.endsSingleUse/);
+  assert.match(html, /Scheduled to end at the end of " \+ value \+ " \(UTC\)/, "a typed date is shown as end of that day, UTC");
   // Initial text matches the checked (default) option.
   assert.equal(ends[2], byOption["90d"]);
   // The page script rewrites the row from the chosen option.
@@ -1047,6 +1053,7 @@ test("summary Ends row follows the grant-expiry control, not a fixed sentence", 
 test("ongoing-mode copy does not claim access lasts until revoked regardless of the expiry choice", async () => {
   const html = await renderPicker(makeCaps(), { client: CIMD_CLIENT_SELF_DESCRIBED });
   assert.equal(/Ongoing access — including new matching records, until you revoke it\./.test(html), false);
+  assert.match(html, /Ongoing access — including new matching records, until it ends or you revoke it\./);
   assert.match(html, /until the end date you choose below or until you revoke access/);
 });
 
@@ -1060,4 +1067,12 @@ test("summary puts a self-described app name in the client group, not beside enf
   );
   const enforcedRows = /<dt>Data<\/dt>[\s\S]*?<\/dl>/.exec(panel)?.[0] ?? "";
   assert.equal(enforcedRows.includes("ChatGPT"), false);
+});
+
+test("a registered client's name is still a client claim in the summary", async () => {
+  const html = await renderPicker(makeCaps(), { client: PREREGISTERED_CLIENT });
+  const panel = html.slice(html.indexOf("data-hosted-mcp-review-terms"));
+  assert.match(panel, /data-authorship="client"[^>]*aria-label="App"[^>]*>[\s\S]*?<dt>App<\/dt><dd>Demo App<\/dd>/);
+  const enforcedRows = /<dt>Data<\/dt>[\s\S]*?<\/dl>/.exec(panel)?.[0] ?? "";
+  assert.equal(enforcedRows.includes("Demo App"), false);
 });

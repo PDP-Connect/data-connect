@@ -26,17 +26,61 @@ function DateLike({ value }: { value: string | null | undefined }) {
   return <>{value}</>;
 }
 
+const GROUP_EYEBROW = {
+  client: "They claim — not verified by your server",
+  declared: "The app declared this — your server does not enforce it",
+  protocol: "Your server enforces",
+} as const;
+
+function GrantGroup({
+  authorship,
+  children,
+}: {
+  authorship: keyof typeof GROUP_EYEBROW;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className="mt-3 border-l-2 pl-3"
+      data-authorship={authorship}
+      style={{
+        borderLeftColor: authorship === "protocol" ? "var(--primary)" : "var(--muted-foreground)",
+        borderLeftStyle: authorship === "protocol" ? "solid" : authorship === "declared" ? "dotted" : "dashed",
+      }}
+    >
+      <div className="mb-1 text-xs" data-slot="authorship-eyebrow" style={{ color: "var(--muted-foreground)" }}>
+        {GROUP_EYEBROW[authorship]}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function GrantTerm({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="mb-0.5 text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
+        {label}
+      </div>
+      <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // ─── Grant Inspector ─────────────────────────────────────────────────────────
 
 // Props contract — provenance of each field (see spec §7 Grant):
 //
-// ALL fields are protocol facts — the grant is an immutable consent artifact.
-// No client-claimed content appears here; that was resolved at consent time.
-//
-// FROM grant object (server-authoritative):
-//   grantId, issuedAt, status, client.clientId, client.name,
-//   purposeCode, purposeDescription, accessMode, expiresAt,
-//   retention, streams[]
+// Three groups, never one list (spec-core.md section 6):
+//   ENFORCED (protocol): grantId, issuedAt, status, accessMode, expiresAt,
+//     streams[]. The server holds and applies these.
+//   DECLARED: purposeCode, purposeDescription, retention. Structured policy
+//     the app declared. The server records it but does not enforce it
+//     (spec-core.md section 7: retention is not technically enforced).
+//   CLIENT CLAIMS: client.name, which comes from client_display at consent
+//     time and is self-described.
 //
 // FROM manifest display metadata (server-trusted):
 //   streams[].label, streams[].detail
@@ -104,7 +148,7 @@ export function GrantInspector({
   }[currentStatus];
 
   const accessModeLabel =
-    accessMode === "continuous" ? "Continuous access until revoked" : "Single use, consumed after first query";
+    accessMode === "continuous" ? "Continuous access, until it expires or you revoke it" : "Single use";
 
   return (
     <div style={{ maxWidth: "440px" }}>
@@ -123,60 +167,43 @@ export function GrantInspector({
             </span>
           </div>
 
-          {/* Client + purpose */}
-          <div className="mb-1 font-medium text-sm" style={{ color: "var(--foreground)" }}>
-            {client.name}
-          </div>
-          {purposeDescription && (
-            <div className="mb-3 text-xs" style={{ color: "var(--muted-foreground)" }} data-authorship="declared">
-              <span style={{ opacity: 0.7 }}>Purpose the app declared: </span>
-              {purposeDescription}
+          {/* Group 1: enforced. Facts the owner's server holds and applies. */}
+          <GrantGroup authorship="protocol">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+              <GrantTerm label="Issued">
+                <span className="font-mono">
+                  <DateLike value={issuedAt} />
+                </span>
+              </GrantTerm>
+              <GrantTerm label="Expires">
+                <span className="font-mono">
+                  <DateLike value={expiresAt ?? null} />
+                </span>
+              </GrantTerm>
+              <GrantTerm label="Access">{accessModeLabel}</GrantTerm>
             </div>
-          )}
+          </GrantGroup>
 
-          {/* Key terms grid */}
-          <div className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
-            <div>
-              <div className="mb-0.5 text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
-                Issued
-              </div>
-              <div className="font-mono text-xs" style={{ color: "var(--muted-foreground)" }}>
-                <DateLike value={issuedAt} />
-              </div>
-            </div>
-            <div>
-              <div className="mb-0.5 text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
-                Expires
-              </div>
-              <div className="font-mono text-xs" style={{ color: "var(--muted-foreground)" }}>
-                <DateLike value={expiresAt ?? null} />
-              </div>
-            </div>
-            <div>
-              <div className="mb-0.5 text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
-                Access
-              </div>
-              <div className="text-xs" style={{ color: "var(--muted-foreground)" }}>
-                {accessModeLabel}
-              </div>
-            </div>
-            {retention && (
-              <div>
-                <div className="mb-0.5 text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
-                  Retention the app declared (not enforced by your server)
-                </div>
-                <div className="text-xs" style={{ color: "var(--muted-foreground)" }} data-authorship="declared">
+          {/* Group 2: declared. Structured policy the app declared; the server does not enforce it. */}
+          <GrantGroup authorship="declared">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+              <GrantTerm label="Purpose code">
+                <span className="font-mono">{purposeCode}</span>
+              </GrantTerm>
+              {purposeDescription && <GrantTerm label="Purpose description">{purposeDescription}</GrantTerm>}
+              {retention && (
+                <GrantTerm label="Retention">
                   The app says it will {retention.onExpiry === "delete" ? "delete" : "anonymize"} the data after{" "}
                   {retention.duration}
-                </div>
-              </div>
-            )}
-          </div>
+                </GrantTerm>
+              )}
+            </div>
+          </GrantGroup>
 
-          {/* Purpose code — technical */}
-          <div className="mt-3 font-mono text-xs" style={{ color: "var(--muted-foreground)", opacity: 0.7 }}>
-            purpose: <span style={{ color: "var(--edu-fg)", opacity: 1 }}>{purposeCode}</span>
-          </div>
+          {/* Group 3: client claims. How the app describes itself. */}
+          <GrantGroup authorship="client">
+            <GrantTerm label="App name">{client.name}</GrantTerm>
+          </GrantGroup>
         </div>
 
         {/* ── Granted streams ── */}
