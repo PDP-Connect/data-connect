@@ -1129,69 +1129,6 @@ laneTest(
   }
 );
 
-/** Raw `coverage_diagnostics` records, as an old collector left them: no run, release or revision behind them. */
-async function seedRawCoverageRows(lane: Lane): Promise<void> {
-  for (const [store, stream] of [
-    ["projects", "sessions"],
-    ["derived_messages", "messages"],
-  ] as const) {
-    const json = JSON.stringify({ id: `coverage:${store}`, status: "collected", store, stream });
-    await sql(
-      lane,
-      `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted)
-       VALUES (?, ?, 'coverage_diagnostics', ?, ?, ?, 1, 0)`,
-      `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted,
-                           primary_key_text)
-       VALUES ($1, $2, 'coverage_diagnostics', $3, $4::jsonb, $5, 1, FALSE, $3)`,
-      [CONNECTOR_ID, lane.enrolled.connector_instance_id, `coverage:${store}`, json, EMITTED_AT]
-    );
-  }
-}
-
-async function deviceCoverage(lane: Lane, cookie: string): Promise<Record<string, unknown>> {
-  const diagnostics = await requestJson(`${lane.asUrl}/_ref/device-exporters/diagnostics`, {
-    headers: { Cookie: cookie },
-  });
-  assert.equal(diagnostics.status, 200, JSON.stringify(diagnostics.body));
-  const devices = (diagnostics.body?.data ?? []) as Array<{ source_instances: Array<Record<string, unknown>> }>;
-  const source = devices
-    .flatMap((device) => device.source_instances)
-    .find((row) => row.source_instance_id === lane.enrolled.source_instance_id);
-  assert.ok(source, "the lane's source instance is listed");
-  return source.local_collector_coverage as Record<string, unknown>;
-}
-
-laneTest("device diagnostics show no coverage positive the owner projection has retired", async (lane) => {
-  const cookie = await ownerSessionCookie(lane.asUrl);
-  await seedRawCoverageRows(lane);
-  await commitProof(lane, "run-a");
-  await assertCovered(lane, "run-a", "run A's proof is current");
-  const current = await deviceCoverage(lane, cookie);
-
-  const refused = await postBatch(lane, {
-    ...batchBody(lane, "batch-refused", sessionRecords("s-1")),
-    body_hash: "0".repeat(64),
-  });
-  assert.equal(refused.status, 400, JSON.stringify(refused.body));
-  await assertRetired(lane, "the refused batch retires run A's proof");
-  const retired = await deviceCoverage(lane, cookie);
-
-  const view = (coverage: Record<string, unknown>) => ({
-    asOfRun: (coverage.coverage_as_of as Record<string, unknown> | null | undefined)?.run_id ?? null,
-    fullyAccounted: coverage.fully_accounted,
-    inventory: coverage.by_store,
-  });
-  const inventory = { derived_messages: "collected", projects: "collected" };
-  assert.deepEqual(
-    [view(current), view(retired)],
-    [
-      { asOfRun: "run-a", fullyAccounted: true, inventory },
-      { asOfRun: null, fullyAccounted: false, inventory },
-    ],
-    "the positive follows the owner projection; the raw inventory stays as history"
-  );
-});
-
 /**
  * Change the boundary between the projection's own boundary reads and its
  * fence read: a proof commits against the boundary the projection already

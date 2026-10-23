@@ -236,10 +236,14 @@ for (const backend of ["sqlite", "postgres"] as const) {
       connector: {
         args: [fixture],
         artifactDigest: ARTIFACT_DIGEST,
+        // The runtime requests store evidence only for a manifest that declares RUN_COVERAGE_V1 and an inventory.
+        collectionProfileVersion: "0.2.0",
         command: process.execPath,
         connector_id: CONNECTOR_ID,
+        coverageStoreStreams: ["messages"],
+        declaresCoverageStores: true,
         manifestFingerprint: MANIFEST_FINGERPRINT,
-        protocol_capabilities: [],
+        protocol_capabilities: ["RUN_COVERAGE_V1"],
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],

@@ -4730,7 +4730,8 @@ function fenceTerminalCoverageProof(
   coverage: ReturnType<typeof terminalCoverageByStream>,
   proof: ReturnType<typeof localProofRun>,
   fence: LocalCoverageRevisionFence | null | undefined,
-  latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null
+  latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null,
+  manifestStreamCount: number
 ): { asOf: LocalCoverageAsOf | null; coverage: ReturnType<typeof terminalCoverageByStream> } {
   const runOrder = fence?.runOrder ?? null;
   // A settled device run record with no revision cannot be ordered against a
@@ -4758,11 +4759,22 @@ function fenceTerminalCoverageProof(
     proof.storageEpoch === null ||
     proof.storageEpoch !== fence?.storageEpoch
   ) {
-    return { asOf: null, coverage: null };
+    // A proof the fence does not admit shows no per-stream coverage. The
+    // release-binding reason stays, so the owner still sees why it is unknown.
+    return {
+      asOf: null,
+      coverage: coverage === null ? null : { bindingReason: coverage.bindingReason, conditions: new Map() },
+    };
   }
+  // The as-of qualifies a whole-connection positive: every manifest stream
+  // covered and no unknown store. A subset or an unknown leaves the per-stream
+  // conditions in place but names no run.
+  const conditions = [...coverage.conditions.values()];
+  const wholeConnectionKnown =
+    conditions.length === manifestStreamCount && conditions.every((condition) => condition !== "unknown");
   return {
     asOf:
-      coverage.bindingReason === null
+      coverage.bindingReason === null && wholeConnectionKnown
         ? {
             artifact_digest: proof.artifactDigest,
             collection_revision: proof.collectionRevision,
@@ -6779,7 +6791,8 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
         ),
         proofRun,
         input.localRevisionFence,
-        fallbackSettledRun
+        fallbackSettledRun,
+        manifest.streams?.length ?? 0
       )
     : null;
   const terminalCoverage = fencedTerminal?.coverage ?? null;

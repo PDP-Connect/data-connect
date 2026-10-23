@@ -356,7 +356,7 @@ test("a later successful DONE without coverage replaces an acknowledged typed ve
         protocol_capabilities: [],
         // A negotiated run that omits coverage is an empty typed verdict (v2).
         // An unnegotiated run commits a no-evidence v2 record, which replaces the receipt.
-        ...(coverage ? { runCoverageVersion: 1 } : {}),
+        ...(coverage ? { ...RUN_COVERAGE_DECLARATION, runCoverageVersion: 1 } : {}),
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
       },
@@ -4898,10 +4898,11 @@ function failureGapPassConfig(input: {
         ? {
             artifactDigest: `sha256:${"b".repeat(64)}`,
             manifestFingerprint: "a".repeat(64),
+            ...RUN_COVERAGE_DECLARATION,
+            coverageStoreStreams: ["sessions", "coverage_diagnostics"],
             runCoverageVersion: 1 as const,
           }
-        : {}),
-      protocol_capabilities: [],
+        : { protocol_capabilities: [] }),
       runtime_requirements: { bindings: {} },
       streams: ["sessions", "coverage_diagnostics"],
     },
@@ -6905,7 +6906,7 @@ test("runCollectorConnector recovers acknowledged local gaps only after a succes
         command: "node",
         connector_id: "fixture-recovered-gap",
         manifestFingerprint: "a".repeat(64),
-        protocol_capabilities: [],
+        ...RUN_COVERAGE_DECLARATION,
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
