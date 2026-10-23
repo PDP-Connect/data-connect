@@ -133,17 +133,34 @@ export async function startStdioServer(options: CreatePdppMcpServerOptions): Pro
   return { server, transport, closed };
 }
 
+// Stateless JSON mode has no server-to-client stream and no session to end.
+// Streamable HTTP (2025-11-25, "Listening for Messages from the Server") says a
+// server without a stream MUST answer GET with 405, and MAY answer DELETE with 405.
+// The SDK would instead open an SSE stream on GET that the per-request
+// `transport.close()` ends at once (200, empty body); SDK clients read that as a
+// dropped stream and reconnect in a tight loop.
+function methodNotAllowed(): Response {
+  return Response.json(
+    { jsonrpc: "2.0", error: { code: -32_000, message: "Method not allowed." }, id: null },
+    { status: 405, headers: { allow: "POST" } }
+  );
+}
+
 /**
  * Handle one hosted MCP Streamable HTTP request in stateless mode.
  *
  * The caller owns authentication and should pass an already-authorized scoped client
  * bearer as accessToken. A fresh MCP server and transport are created per request so
- * authorization state is never cached in an MCP session.
+ * authorization state is never cached in an MCP session. Only POST is served; GET
+ * and DELETE answer 405 (see `methodNotAllowed`).
  */
 export async function handleStreamableHttpRequest(
   request: Request,
   options: CreatePdppMcpServerOptions
 ): Promise<Response> {
+  if (request.method === "GET" || request.method === "DELETE") {
+    return methodNotAllowed();
+  }
   const { server } = createPdppMcpServer(options);
   // Explicitly omitting `sessionIdGenerator` (rather than setting it to
   // `undefined`) selects the SDK's stateless mode identically —

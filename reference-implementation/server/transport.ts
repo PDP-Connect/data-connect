@@ -304,6 +304,21 @@ function buildRouteSchema(manifest: RouteManifest): Record<string, JsonValue> | 
 }
 
 /**
+ * Successful `/introspect` calls (one per authenticated RS request) and any
+ * `GET`/`DELETE /mcp` answered 405 (stream-listen and session probes the stateless
+ * hosted MCP endpoint refuses) are housekeeping that a few
+ * agent sessions can generate many times a second. Auth failures (401, 403) and
+ * server errors on the same routes keep info-level detail.
+ */
+function isHighFrequencyHousekeeping(method: string, url: string, statusCode: number): boolean {
+  const path = url.split("?", 1)[0];
+  if (path === "/mcp" && (method === "GET" || method === "DELETE")) {
+    return statusCode === 405;
+  }
+  return path === "/introspect" && statusCode < 400;
+}
+
+/**
  * Build a fresh Fastify instance wired up the way PDPP wants it.
  *
  * The caller supplies a pre-built Pino logger (see `buildLogger`). We pass it
@@ -392,11 +407,14 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // Emit one structured completion record per request carrying req_id, method,
   // path, statusCode, responseTime, and — when the handler set it via
   // setReferenceTraceId() — trace_id. Kept at `info`; this is the baseline
-  // record the spec promises, not a per-status-code shape.
+  // record the spec promises, not a per-status-code shape. Exception: routes
+  // that clients hit at high frequency for housekeeping (see
+  // `isHighFrequencyHousekeeping`) log at `debug`.
   // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
   fastify.addHook("onResponse", async (request, reply) => {
     const traceId = reply.getHeader?.(PDPP_TRACE_ID_HEADER) || request.__pdppTraceId;
-    request.log.info(
+    const level = isHighFrequencyHousekeeping(request.method, request.url, reply.statusCode) ? "debug" : "info";
+    request.log[level](
       {
         method: request.method,
         req_id: request.id,
