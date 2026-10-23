@@ -1082,6 +1082,90 @@ test("superseded terminal history in a legacy store is not pending work", () => 
   });
 });
 
+function conflictError(error: unknown): error is CollectorStateResolutionError {
+  return error instanceof CollectorStateResolutionError && error.code === "legacy_state_conflict";
+}
+
+function assertLegacyWritable(legacyPath: string): void {
+  // A retired source rejects writes through the trigger fence.
+  seedOutbox(legacyPath, SOURCE_A, "legacy-write-after-race");
+}
+
+// Ported from #584 ("keep the legacy queue writable when a canonical queue already
+// exists"). #581 refuses with a typed legacy_state_conflict instead of returning the
+// canonical path; the data-safety guarantees below are the same.
+for (const [label, hookName] of [
+  ["before reconcile", "beforeMigrationReconcile"],
+  ["after the retirement fence commits", "afterRetirementFence"],
+] as const) {
+  test(`a canonical queue that appears mid-migration (${label}) leaves the legacy queue unfenced, writable and undeleted`, () => {
+    withTempRoot("pdpp-durable-state-race-", (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+      const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
+      seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
+
+      let thrown: unknown;
+      try {
+        resolveCollectorQueuePath({
+          ...resolveInput(root, installRoot),
+          [hookName]: () => seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process"),
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      assert.ok(conflictError(thrown), "typed conflict, not a silent canonical path");
+      assert.ok(thrown.message.includes(legacyPath), "error names the legacy path");
+      assert.ok(thrown.message.includes(canonicalPath), "error names the canonical path");
+      assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["legacy-pending"]);
+      assertLegacyWritable(legacyPath);
+      assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["legacy-pending", "legacy-write-after-race"]);
+      assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["canonical-from-other-process"]);
+      assert.deepEqual(
+        readdirSync(dirname(canonicalPath)).filter((name) => /\.migration-|\.handoff\.lock$/.test(name)),
+        []
+      );
+    });
+  });
+}
+
+test("a fence left by a crashed attempt is lifted when a canonical queue then appears before reconcile", () => {
+  withTempRoot("pdpp-durable-state-stale-fence-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
+    seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
+    assert.throws(() =>
+      resolveCollectorQueuePath({
+        ...resolveInput(root, installRoot),
+        afterRetirementFence: () => {
+          throw new Error("simulated crash after durable retirement");
+        },
+      })
+    );
+
+    // The crashed attempt cleaned up its own fence.
+    assertLegacyWritable(legacyPath);
+
+    assert.throws(
+      () =>
+        resolveCollectorQueuePath({
+          ...resolveInput(root, installRoot),
+          beforeMigrationReconcile: () => seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process"),
+        }),
+      conflictError
+    );
+    seedOutbox(legacyPath, SOURCE_A, "legacy-write-after-conflict");
+    assert.deepEqual(outboxIds(legacyPath, SOURCE_A), [
+      "legacy-pending",
+      "legacy-write-after-conflict",
+      "legacy-write-after-race",
+    ]);
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["canonical-from-other-process"]);
+  });
+});
+
 function migrationMarkers(path: string): string[] {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
