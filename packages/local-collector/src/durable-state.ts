@@ -367,7 +367,9 @@ function migrateLegacyStore(
     }
 
     beforeReconcile?.();
-    reconcileLegacyWrites(legacyPath, temporaryPath, canonicalPath, sourceInstanceId);
+    if (reconcileLegacyWrites(legacyPath, temporaryPath, canonicalPath, sourceInstanceId) === "canonical_exists") {
+      return abandonMigrationForExistingCanonical(legacyPath, canonicalPath, sourceInstanceId, temporaryPath, lockPath);
+    }
 
     const snapshotFd = openSync(temporaryPath, "r");
     try {
@@ -377,7 +379,9 @@ function migrateLegacyStore(
     }
 
     afterRetirementFence?.();
-    installSnapshot(temporaryPath, canonicalPath, sourceInstanceId);
+    if (installSnapshot(temporaryPath, canonicalPath, sourceInstanceId, legacyPath) === "canonical_exists") {
+      return abandonMigrationForExistingCanonical(legacyPath, canonicalPath, sourceInstanceId, temporaryPath, lockPath);
+    }
     afterInstall?.();
     if (lockAcquired) {
       releaseMigrationLock(lockPath);
@@ -403,6 +407,44 @@ function migrateLegacyStore(
 }
 
 /**
+ * Another process created the canonical queue while this migration ran. The
+ * canonical file is authoritative for the resolver, so this migration must not
+ * retire, merge or delete the legacy store: drop the temporary snapshot, free
+ * the lock and tell the operator how to deliver the legacy pending rows.
+ */
+function abandonMigrationForExistingCanonical(
+  legacyPath: string,
+  canonicalPath: string,
+  sourceInstanceId: string,
+  temporaryPath: string,
+  lockPath: string
+): string {
+  const pending = countPendingSourceRows(legacyPath, sourceInstanceId);
+  rmSync(temporaryPath, { force: true });
+  releaseMigrationLock(lockPath);
+  process.stderr.write(
+    `warning: a canonical local collector queue appeared at ${canonicalPath} while migrating the legacy queue ${legacyPath} for source '${sourceInstanceId}'. The legacy queue was left writable and was not merged or deleted. It holds ${pending} pending row(s) for this source; run with --queue ${legacyPath} to deliver them.\n`
+  );
+  return canonicalPath;
+}
+
+function countPendingSourceRows(path: string, sourceInstanceId: string): number {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA busy_timeout = 5000");
+    const row = db
+      .prepare(
+        "SELECT COUNT(*) AS pending FROM local_device_outbox WHERE source_instance_id = ? AND status IN ('ready', 'leased')"
+      )
+      .get(sourceInstanceId);
+    return Number(row?.pending ?? 0);
+  } finally {
+    db?.close();
+  }
+}
+
+/**
  * Fence the still-running legacy collector while reconciling writes that
  * landed after VACUUM INTO's snapshot. BEGIN IMMEDIATE waits for any current
  * writer, then prevents another writer until the rows are copied and a
@@ -415,12 +457,17 @@ function reconcileLegacyWrites(
   temporaryPath: string,
   canonicalPath: string,
   sourceInstanceId: string
-): void {
+): "canonical_exists" | "reconciled" {
   let source: DatabaseSync | undefined;
   try {
     source = new DatabaseSync(legacyPath);
     source.exec("PRAGMA busy_timeout = 5000");
     source.exec("BEGIN IMMEDIATE");
+    if (existsSync(canonicalPath)) {
+      // Checked under the legacy write lock and before any fence is written.
+      source.exec("ROLLBACK");
+      return "canonical_exists";
+    }
     const escapedPath = temporaryPath.replaceAll("'", "''");
     source.exec(`ATTACH DATABASE '${escapedPath}' AS migrated`);
     // VACUUM INTO can carry an earlier retirement fence into the snapshot
@@ -460,6 +507,7 @@ function reconcileLegacyWrites(
     installRetirementFence(source, sourceInstanceId, canonicalPath);
     source.exec("COMMIT");
     source.exec("DETACH DATABASE migrated");
+    return "reconciled";
   } catch (error) {
     try {
       source?.exec("ROLLBACK");
@@ -510,12 +558,18 @@ function releaseMigrationLock(path: string): void {
   rmSync(path, { force: true });
 }
 
-function installSnapshot(temporaryPath: string, canonicalPath: string, sourceInstanceId: string): void {
+function installSnapshot(
+  temporaryPath: string,
+  canonicalPath: string,
+  sourceInstanceId: string,
+  legacyPath: string
+): "canonical_exists" | "installed" {
   if (existsSync(canonicalPath)) {
-    if (!containsSourceRows(canonicalPath, sourceInstanceId)) {
-      throw new Error("a concurrent canonical state file does not contain the requested source");
-    }
-    return;
+    // The canonical file appeared after this migration's fence committed.
+    // Lift the fence so the legacy writer is not stranded behind a snapshot
+    // that is being discarded.
+    liftRetirementFence(legacyPath, sourceInstanceId);
+    return "canonical_exists";
   }
   renameSync(temporaryPath, canonicalPath);
   if (process.platform !== "win32") {
@@ -532,6 +586,33 @@ function installSnapshot(temporaryPath: string, canonicalPath: string, sourceIns
     fsyncSync(directoryFd);
   } finally {
     closeSync(directoryFd);
+  }
+  return "installed";
+}
+
+/** Remove this source's retirement row; drop the triggers only when no other source remains retired. */
+function liftRetirementFence(legacyPath: string, sourceInstanceId: string): void {
+  const db = new DatabaseSync(legacyPath);
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("DELETE FROM pdpp_legacy_retirements WHERE source_instance_id = ?").run(sourceInstanceId);
+      const remaining = db.prepare("SELECT 1 AS present FROM pdpp_legacy_retirements LIMIT 1").get();
+      if (!remaining) {
+        db.exec(`
+          DROP TRIGGER IF EXISTS pdpp_retire_outbox_insert;
+          DROP TRIGGER IF EXISTS pdpp_retire_outbox_update;
+          DROP TRIGGER IF EXISTS pdpp_retire_outbox_delete;
+        `);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.close();
   }
 }
 
