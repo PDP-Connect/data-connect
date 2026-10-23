@@ -162,6 +162,30 @@ it under Settings > Owner password. `POST /owner/logout` is listed under
 - `/v1/streams/...`
 - owner and client queries under the current reference contract
 
+### Change-history retention and `changes_since`
+
+`PDPP_CHANGE_HISTORY_LIMIT` (default `0`, unbounded) bounds each stream's
+`record_changes` history. With a limit `L`, a write at version `V` prunes rows
+at or below the horizon `V - L`, keeping each live key's current row and its
+newest row at or below the horizon. Every `changes_since` token at or above the
+horizon can therefore still be answered exactly, deletions included.
+
+The horizon is stored per stream as `version_counter.changes_floor`. A
+`changes_since` token below it, or a changes page cursor whose session snapshot
+is below it, returns `410 cursor_expired`; the client restarts from `beginning`,
+which is always accepted. A bulk stream reset also expires earlier tokens: they
+carry the connection's `record_reset_generation`.
+
+Rules for the floor:
+
+- The column is created at startup. If `PDPP_CHANGE_HISTORY_LIMIT > 0` at that
+  boot, each existing stream's floor starts at its current max version, so
+  every outstanding token expires once, because earlier pruning did not keep
+  baselines. With the limit unset the floor starts at `0`. The seed runs only
+  when the column is first created; later startups keep the stored floor.
+- `scripts/compact-record-history.ts` raises the floor, in the same transaction
+  as its deletes, to the newest version that superseded any row it removes.
+
 ### Expandable records
 
 `GET /v1/streams/:stream/records` and

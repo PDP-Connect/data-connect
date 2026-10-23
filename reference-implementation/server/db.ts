@@ -4316,7 +4316,6 @@ function migrateRecordStorageInstanceColumns(raw: SqliteDatabase, opts: Migratio
         connector_instance_id TEXT NOT NULL,
         stream        TEXT NOT NULL,
         max_version   INTEGER NOT NULL DEFAULT 0,
-        changes_floor INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
 

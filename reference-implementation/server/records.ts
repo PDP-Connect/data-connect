@@ -5198,16 +5198,24 @@ function validateChangesSinceVersions(
     stream,
   ]);
   const minVersion = minChangeRow?.min_version ?? null;
-  if (minVersion !== null && sinceVersion < minVersion - 1) {
+  // `beginning` holds no consumer state, so it needs no history below it and
+  // must stay usable as the recovery request after a 410.
+  if (sinceVersion > 0 && minVersion !== null && sinceVersion < minVersion - 1) {
     throw codedError("changes_since cursor is too old; full re-sync required", "cursor_expired");
   }
   // The minimum above is only a lower bound: pruning keeps a sparse anchor per
   // live key, so it stays at a cold key's first version while other keys'
   // history below the retention horizon is gone. `changes_floor` is that
   // horizon: a cursor at or above it can resolve every key's snapshot, one
-  // below it would get its deletions silently suppressed. `beginning` needs no
-  // predecessor and stays valid.
-  if (sinceVersion > 0 && sinceVersion < (vcRow?.changes_floor ?? 0)) {
+  // below it would get its deletions silently suppressed. A `beginning` request
+  // needs no predecessor and stays valid. A continued page of a session is
+  // read at `session_max_version`; once pruning moves the horizon past that
+  // snapshot, unseen keys' rows at it may be gone, so the session expires
+  // rather than serve an incomplete page.
+  const changesFloor = vcRow?.changes_floor ?? 0;
+  const belowFloor = sinceVersion > 0 && sinceVersion < changesFloor;
+  const sessionSnapshotPruned = changesSince === null && effectiveSessionMaxVersion < changesFloor;
+  if (belowFloor || sessionSnapshotPruned) {
     throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
   }
 

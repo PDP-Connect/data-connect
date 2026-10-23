@@ -1424,6 +1424,30 @@ export async function withPostgresTransaction<T>(
   }
 }
 
+/**
+ * Run `fn` against one REPEATABLE READ, read-only snapshot on a single client.
+ * Every statement inside sees the same committed state, so a multi-statement
+ * read cannot straddle a concurrent writer's commit.
+ */
+export async function withPostgresSnapshotRead<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPostgresPool().connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const value = await fn(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Rollback failure must not hide the original read error.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export interface BulkChunkBudget {
   chunkSize: number;
 }

@@ -30,11 +30,16 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+
+// biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
+import pg from "pg";
 import { fileURLToPath } from "node:url";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import * as postgresRecordsModule from "../server/postgres-records.ts";
 import { deleteAllRecords, ingestRecord, queryRecords } from "../server/records.ts";
+import { applyCompaction, type CompactionPolicy, planCompaction } from "../scripts/compact-record-history.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const OWNER_SUBJECT_ID = "owner_local";
@@ -339,6 +344,62 @@ function defineScenarios(label: string, open: (instanceId: string) => Promise<Ba
     { historyLimit: 2 }
   );
 
+  // One key, limit 1: A@1, A@2, A@3 prunes A@1, so MIN(version) is 2 and the
+  // old minimum check rejected `beginning` (0 < MIN - 1). The recovery request
+  // after a 410 must itself always work.
+  scenario(
+    "beginning still works after pruning raised the minimum retained version",
+    async (backend) => {
+      await backend.put("a", 1);
+      await backend.put("a", 2);
+      await backend.put("a", 3);
+      const full = await backend.list({ changes_since: "beginning" });
+      assert.deepEqual(ids(full), ["a"]);
+      assert.ok(full.next_changes_since);
+      await backend.put("a", 4);
+      const delta = await backend.list({ changes_since: full.next_changes_since });
+      assert.deepEqual(ids(delta), ["a"]);
+    },
+    { historyLimit: 1 }
+  );
+
+  // Versions: a=1, b=2, c=3, session starts at 3 (one record per page), then b
+  // changes at 4 and hot churns to 6. Pruning supersedes b's version-2 row, so
+  // the session's snapshot at 3 is gone. A continued page must be snapshot
+  // exact or 410; silently omitting b is not acceptable.
+  scenario(
+    "a beginning session whose snapshot is pruned between pages never omits a record silently",
+    async (backend) => {
+      await backend.put("a", 1);
+      await backend.put("b", 1);
+      await backend.put("c", 1);
+      const first = await backend.list({ changes_since: "beginning", limit: 1 });
+      assert.equal(first.has_more, true);
+      assert.ok(first.next_cursor);
+      await backend.put("b", 2);
+      await backend.put("hot", 1);
+      await backend.put("hot", 2);
+      const seen = new Set(ids(first));
+      let cursor: string | undefined = first.next_cursor;
+      let expired = false;
+      while (cursor) {
+        try {
+          const page = await backend.list({ cursor, limit: 1 });
+          for (const id of ids(page)) {
+            seen.add(id);
+          }
+          cursor = page.has_more ? page.next_cursor : undefined;
+        } catch (error) {
+          assert.equal((error as { code?: string }).code, "cursor_expired");
+          expired = true;
+          cursor = undefined;
+        }
+      }
+      assert.ok(expired || ["a", "b", "c"].every((id) => seen.has(id)), `silent omission: saw ${[...seen].join()}`);
+    },
+    { historyLimit: 2, needsPaging: true }
+  );
+
   scenario(
     "a bulk reset clears the pruned-history floor",
     async (backend) => {
@@ -439,6 +500,139 @@ test("postgres: adding changes_floor seeds it at the head when retention is on",
     } else {
       process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
     }
+    await backend.teardown();
+  }
+});
+
+// A pre-instance-namespace SQLite database rebuilds version_counter from scratch
+// (copying only max_version). The rebuilt counter must still get a floor, seeded
+// when retention is on, like any other upgrade.
+test("sqlite: a legacy counter-table rebuild still seeds changes_floor at the head when retention is on", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cs-floor-legacy-"));
+  const path = join(dir, "ri.sqlite");
+  const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  try {
+    delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    initDb(path);
+    getDb().exec(`
+      DROP TABLE version_counter;
+      CREATE TABLE version_counter (
+        connector_id TEXT NOT NULL,
+        stream TEXT NOT NULL,
+        max_version INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(connector_id, stream)
+      );
+      INSERT INTO version_counter(connector_id, stream, max_version) VALUES ('spotify', 'top_artists', 7);
+    `);
+    closeDb();
+
+    process.env.PDPP_CHANGE_HISTORY_LIMIT = "3";
+    initDb(path);
+    const row = getDb().prepare("SELECT max_version, changes_floor FROM version_counter").get() as {
+      changes_floor: number;
+      max_version: number;
+    };
+    assert.deepEqual({ ...row }, { changes_floor: 7, max_version: 7 });
+  } finally {
+    closeDb();
+    rmSync(dir, { force: true, recursive: true });
+    if (priorLimit === undefined) {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    } else {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+  }
+});
+
+// Versions: cold=1, victim=2, victim deleted=3 (head 3, floor 1). A reader
+// holding token 2 passes the floor check, then two concurrent ingests (hot=4,
+// 5) move the horizon to 3 and prune victim's version-2 baseline. Reading on
+// separate pool queries, the reader then dropped the tombstone and returned
+// token 3, which equals the new floor and stays valid forever. One snapshot
+// read sees the state its floor check saw and emits the tombstone.
+test("postgres: a prune landing mid-read cannot make the changes feed drop a tombstone", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+  process.env.PDPP_CHANGE_HISTORY_LIMIT = "2";
+  const backend = await postgresBackend("cin_cs_epoch_postgres_read_race");
+  try {
+    await backend.put("cold");
+    await backend.put("victim");
+    const synced = await backend.list({ changes_since: "beginning" });
+    assert.ok(synced.next_changes_since);
+    await backend.remove("victim");
+    let fired = 0;
+    postgresRecordsModule.__setPostgresChangesSinceReadHookForTest(async (point: string) => {
+      if (point === "after-floor-read" && fired === 0) {
+        fired += 1;
+        await backend.put("hot", 1);
+        await backend.put("hot", 2);
+      }
+    });
+    const delta = await backend.list({ changes_since: synced.next_changes_since });
+    assert.equal(fired, 1, "the hook must have interleaved the prune");
+    assert.deepEqual(
+      delta.data.map((record) => [record.id, record.deleted === true]),
+      [["victim", true]]
+    );
+    // The writes really did move the horizon past the reader's token.
+    const { rows } = await postgresQuery("SELECT changes_floor::int AS changes_floor FROM version_counter");
+    assert.ok(rows.some((row) => row.changes_floor > 2));
+  } finally {
+    postgresRecordsModule.__setPostgresChangesSinceReadHookForTest(null);
+    if (priorLimit === undefined) {
+      delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+    } else {
+      process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+    }
+    await backend.teardown();
+  }
+});
+
+// Compaction deletes history rows outside the ingest prune. Retention is off
+// here so only compaction can account for them. The policy ignores
+// `popularity`, so A@2 (0), A@3 (1) and A@4 (0) share a fingerprint and audit
+// mode removes A@3. A client holding token 3 would then resolve A@2 as its
+// baseline (popularity 0), see an unchanged A@4 and never learn popularity was
+// 1 in between.
+test("postgres: compaction expires tokens whose baseline it removed", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is not set",
+}, async () => {
+  const instanceId = "cin_cs_epoch_postgres_compaction";
+  const backend = await postgresBackend(instanceId);
+  const pool = new pg.Pool({ connectionString: POSTGRES_URL });
+  const runId = `cs_epoch_${Date.now()}`;
+  try {
+    await backend.put("cold");
+    await backend.put("a", 0);
+    await backend.put("a", 1);
+    const synced = await backend.list({ changes_since: "beginning" });
+    assert.ok(synced.next_changes_since);
+    await backend.put("a", 0);
+
+    const policy: CompactionPolicy = {
+      connectorIds: [CONNECTOR_KEY],
+      connectorSource: "test",
+      excludeKeys: ["popularity"],
+      stream: STREAM,
+    };
+    const plan = await planCompaction({
+      connectorInstanceId: instanceId,
+      limitKeys: null,
+      policy,
+      pool,
+      stream: STREAM,
+    });
+    assert.equal(plan.removableVersions, 1, "audit mode removes the middle version");
+    await applyCompaction({ plan, pool, runId });
+
+    await assert.rejects(backend.list({ changes_since: synced.next_changes_since }), { code: "cursor_expired" });
+    const fresh = await backend.list({ changes_since: "beginning" });
+    assert.deepEqual(ids(fresh), ["a", "cold"]);
+  } finally {
+    await pool.query(`DROP TABLE IF EXISTS "compact_record_history_backup_${runId}"`);
+    await pool.end();
     await backend.teardown();
   }
 });

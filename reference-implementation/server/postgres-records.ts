@@ -34,6 +34,7 @@ import {
   postgresQuery as rawPostgresQuery,
   runBulkChunksWithinStatementBudget,
   withPostgresBulkTransaction,
+  withPostgresSnapshotRead,
   withPostgresTransaction,
 } from "./postgres-storage.ts";
 import {
@@ -1279,6 +1280,7 @@ function isVisiblePostgresSnapshot(snapshot: RecordSnapshot | null, effective: E
 }
 
 async function getPostgresSnapshotAtVersion(
+  client: PgClient,
   connectorInstanceId: string,
   stream: string,
   recordKey: string,
@@ -1287,7 +1289,7 @@ async function getPostgresSnapshotAtVersion(
   if (!Number.isInteger(version) || version < 0) {
     return null;
   }
-  const result = await postgresQuery(
+  const result = await client.query(
     `SELECT version, record_json, emitted_at, deleted, deleted_at
        FROM record_changes
       WHERE connector_instance_id = $1
@@ -2219,6 +2221,7 @@ interface RecordListResponse extends JsonObject {
 }
 
 async function visiblePostgresChange({
+  client,
   row,
   connectorInstanceId,
   stream,
@@ -2227,6 +2230,7 @@ async function visiblePostgresChange({
   compiledFilters,
   identity,
 }: {
+  client: PgClient;
   row: PgRow;
   connectorInstanceId: string;
   stream: string;
@@ -2235,8 +2239,20 @@ async function visiblePostgresChange({
   compiledFilters: Parameters<typeof passesRequestFilters>[1];
   identity: RecordIdentity | null;
 }): Promise<ResponseRecord | null> {
-  const previous = await getPostgresSnapshotAtVersion(connectorInstanceId, stream, row.record_key, decodedVersion);
-  const current = await getPostgresSnapshotAtVersion(connectorInstanceId, stream, row.record_key, Number(row.version));
+  const previous = await getPostgresSnapshotAtVersion(
+    client,
+    connectorInstanceId,
+    stream,
+    row.record_key,
+    decodedVersion
+  );
+  const current = await getPostgresSnapshotAtVersion(
+    client,
+    connectorInstanceId,
+    stream,
+    row.record_key,
+    Number(row.version)
+  );
   const previousVisible = isVisiblePostgresSnapshot(previous, effective);
   const currentVisible = isVisiblePostgresSnapshot(current, effective);
   if (row.deleted) {
@@ -2262,12 +2278,23 @@ async function visiblePostgresChange({
 }
 
 /** Decimal text so values beyond 2^53-1 survive; a missing connection reads as "0". */
-async function readPostgresRecordResetGeneration(connectorInstanceId: string): Promise<string> {
-  const result = await postgresQuery(
+async function readPostgresRecordResetGeneration(client: PgClient, connectorInstanceId: string): Promise<string> {
+  const result = await client.query(
     "SELECT record_reset_generation::text AS reset_generation FROM connector_instances WHERE connector_instance_id = $1",
     [connectorInstanceId]
   );
   return String(result.rows[0]?.reset_generation ?? "0");
+}
+
+type PostgresChangesSinceReadHook = (point: string, context: Record<string, unknown>) => Promise<void> | void;
+let postgresChangesSinceReadHook: PostgresChangesSinceReadHook | null = null;
+
+/**
+ * Test-only seam: runs between the changes feed's epoch/floor read and its
+ * history reads, so a test can land a concurrent prune at exactly that point.
+ */
+export function __setPostgresChangesSinceReadHookForTest(hook: unknown): void {
+  postgresChangesSinceReadHook = typeof hook === "function" ? (hook as PostgresChangesSinceReadHook) : null;
 }
 
 async function queryPostgresChangesSince({
@@ -2301,83 +2328,90 @@ async function queryPostgresChangesSince({
     err.code = "invalid_cursor";
     throw err;
   }
-  // A bulk reset deletes the stream's records, history and version counter and
-  // advances the connection's reset generation in one transaction, so versions
-  // can be reissued afterwards. A token minted under an earlier generation
-  // names a version space that no longer exists. Read the generation BEFORE
-  // the version counter: a reset landing between the two reads then yields a
-  // token that fails on its next use, never one that pairs an old version with
-  // the new generation. `beginning` and version-0 tokens hold no consumer
-  // state and stay valid.
-  const epoch = await readPostgresRecordResetGeneration(connectorInstanceId);
-  if (decodedVersion !== 0 && (tokenEpoch ?? "0") !== epoch) {
-    const err: PgQueryError = new Error("changes_since cursor predates a stream reset; full re-sync required");
-    err.code = "cursor_expired";
-    throw err;
-  }
-  const maxResult = await postgresQuery(
-    "SELECT max_version, changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
-    [connectorInstanceId, stream]
-  );
-  const sessionMax = maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
-  const changesFloor = maxResult.rows[0] ? Number(maxResult.rows[0].changes_floor) : 0;
-  const minChangeResult = await postgresQuery(
-    `SELECT MIN(version)::bigint AS min_version
-       FROM record_changes
-      WHERE connector_instance_id = $1 AND stream = $2`,
-    [connectorInstanceId, stream]
-  );
-  const minVersion =
-    minChangeResult.rows[0]?.min_version === null || minChangeResult.rows[0]?.min_version === undefined
-      ? null
-      : Number(minChangeResult.rows[0].min_version);
-  if (minVersion !== null && decodedVersion < minVersion - 1) {
-    const err: PgQueryError = new Error("changes_since cursor is too old; full re-sync required");
-    err.code = "cursor_expired";
-    throw err;
-  }
-  // The minimum above is only a lower bound: pruning keeps a sparse anchor per
-  // live key, so it stays at a cold key's first version while other keys'
-  // history below the retention horizon is gone. `changes_floor` is that
-  // horizon: a cursor below it would get its deletions silently suppressed.
-  // `beginning` needs no predecessor.
-  if (decodedVersion > 0 && decodedVersion < changesFloor) {
-    const err: PgQueryError = new Error("changes_since cursor predates pruned change history; full re-sync required");
-    err.code = "cursor_expired";
-    throw err;
-  }
-  const rows = await postgresQuery(
-    `SELECT DISTINCT ON (record_key)
-            record_key, record_json, deleted, deleted_at, emitted_at, version
-     FROM record_changes
-     WHERE connector_instance_id = $1 AND stream = $2
-       AND version > $3 AND version <= $4
-     ORDER BY record_key, version DESC`,
-    [connectorInstanceId, stream, decodedVersion, sessionMax]
-  );
-  const sorted = [...rows.rows].sort((a, b) => Number(a.version) - Number(b.version));
-  const visibleChanges: ResponseRecord[] = [];
-  await sorted.reduce(async (previous, row) => {
-    await previous;
-    const visible = await visiblePostgresChange({
-      compiledFilters,
-      connectorInstanceId,
-      decodedVersion,
-      effective,
-      identity,
-      row,
-      stream,
-    });
-    if (visible) {
-      visibleChanges.push(visible);
+  // One REPEATABLE READ snapshot covers the epoch, counter/floor, change groups
+  // and every predecessor/current snapshot lookup. Separate pool queries let a
+  // concurrent ingest prune a baseline and raise the floor between them: the
+  // reader would then drop a tombstone yet return a token at the new floor,
+  // which stays valid and so never repairs the loss.
+  const response = await withPostgresSnapshotRead(async (client): Promise<RecordListResponse> => {
+    // A bulk reset deletes the stream's records, history and version counter and
+    // advances the connection's reset generation in one transaction, so versions
+    // can be reissued afterwards. A token minted under an earlier generation
+    // names a version space that no longer exists. `beginning` and version-0
+    // tokens hold no consumer state and stay valid.
+    const epoch = await readPostgresRecordResetGeneration(client, connectorInstanceId);
+    if (decodedVersion !== 0 && (tokenEpoch ?? "0") !== epoch) {
+      const err: PgQueryError = new Error("changes_since cursor predates a stream reset; full re-sync required");
+      err.code = "cursor_expired";
+      throw err;
     }
-  }, Promise.resolve());
-  const response: RecordListResponse = {
-    data: visibleChanges,
-    has_more: false,
-    next_changes_since: encodeCursor({ e: epoch, v: sessionMax }),
-    object: "list",
-  };
+    const maxResult = await client.query(
+      "SELECT max_version, changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+      [connectorInstanceId, stream]
+    );
+    const sessionMax = maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
+    const changesFloor = maxResult.rows[0] ? Number(maxResult.rows[0].changes_floor) : 0;
+    await postgresChangesSinceReadHook?.("after-floor-read", { connectorInstanceId, stream });
+    const minChangeResult = await client.query(
+      `SELECT MIN(version)::bigint AS min_version
+         FROM record_changes
+        WHERE connector_instance_id = $1 AND stream = $2`,
+      [connectorInstanceId, stream]
+    );
+    const minVersion =
+      minChangeResult.rows[0]?.min_version === null || minChangeResult.rows[0]?.min_version === undefined
+        ? null
+        : Number(minChangeResult.rows[0].min_version);
+    if (decodedVersion > 0 && minVersion !== null && decodedVersion < minVersion - 1) {
+      const err: PgQueryError = new Error("changes_since cursor is too old; full re-sync required");
+      err.code = "cursor_expired";
+      throw err;
+    }
+    // The minimum above is only a lower bound: pruning keeps a sparse anchor per
+    // live key, so it stays at a cold key's first version while other keys'
+    // history below the retention horizon is gone. `changes_floor` is that
+    // horizon: a cursor below it would get its deletions silently suppressed.
+    // `beginning` needs no predecessor.
+    if (decodedVersion > 0 && decodedVersion < changesFloor) {
+      const err: PgQueryError = new Error("changes_since cursor predates pruned change history; full re-sync required");
+      err.code = "cursor_expired";
+      throw err;
+    }
+    const rows = await client.query(
+      `SELECT DISTINCT ON (record_key)
+              record_key, record_json, deleted, deleted_at, emitted_at, version
+       FROM record_changes
+       WHERE connector_instance_id = $1 AND stream = $2
+         AND version > $3 AND version <= $4
+       ORDER BY record_key, version DESC`,
+      [connectorInstanceId, stream, decodedVersion, sessionMax]
+    );
+    const sorted = [...rows.rows].sort((a, b) => Number(a.version) - Number(b.version));
+    const visibleChanges: ResponseRecord[] = [];
+    await sorted.reduce(async (previous, row) => {
+      await previous;
+      const visible = await visiblePostgresChange({
+        client,
+        compiledFilters,
+        connectorInstanceId,
+        decodedVersion,
+        effective,
+        identity,
+        row,
+        stream,
+      });
+      if (visible) {
+        visibleChanges.push(visible);
+      }
+    }, Promise.resolve());
+    const response: RecordListResponse = {
+      data: visibleChanges,
+      has_more: false,
+      next_changes_since: encodeCursor({ e: epoch, v: sessionMax }),
+      object: "list",
+    };
+    return response;
+  });
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
 }
