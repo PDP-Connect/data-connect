@@ -89,11 +89,12 @@ const STREAMS = ["sessions", "messages"];
 const PROTOCOL_HEADERS = { "X-PDPP-Collector-Protocol": COLLECTOR_PROTOCOL_VERSION };
 const CSRF_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*\/>/;
 
-// The fixture release: a claude-code 0.3.0 profile that inventories both
-// streams. The server registers it, and the device binds to it.
+// The fixture release: a claude-code 0.2.0 profile that opts into the
+// independent store-evidence extension and inventories both streams.
 const PROFILE = {
   connector_id: CONNECTOR_ID,
-  protocol_version: "0.3.0",
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+  protocol_version: "0.2.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },

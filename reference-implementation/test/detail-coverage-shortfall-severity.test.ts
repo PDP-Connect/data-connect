@@ -1273,8 +1273,8 @@ test("a 0.1.0 manifest keeps legacy crediting and cannot declare a 0.2.0 capabil
 
 // Pre-spawn gate (Sections 3.4 and 4): an unknown capability name fails closed,
 // and a known required capability this runtime does not implement fails before
-// any connector code runs. DETAIL_COVERAGE_KEY_SETS is advisory and
-// STREAM_EVIDENCE is implemented, so both pass. BLOB is covered separately.
+// any connector code runs. DETAIL_COVERAGE_KEY_SETS and RUN_COVERAGE_V1 are
+// elective; STREAM_EVIDENCE is implemented. BLOB is covered separately.
 test("the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1292,8 +1292,7 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
     [null, UNKNOWN_CAPABILITY_PATTERN, null],
     [["OBSERVATION"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
     [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
-    // This runtime requests no store collection evidence (Section 3.4).
-    [["RUN_COVERAGE_V1"], UNSUPPORTED_CAPABILITY_PATTERN, "RUN_COVERAGE_V1"],
+    [["RUN_COVERAGE_V1"], null, null],
     [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
   ];
   for (const [protocolCapabilities, rejection, unsupported] of cases) {
@@ -1337,6 +1336,72 @@ test("START advertises the protocol capabilities this runtime implements, to eve
     assert.equal(thrown, null);
     assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"]);
   }
+});
+
+test("reference runtime starts RUN_COVERAGE_V1 electively without requesting or recording store evidence", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const manifest = {
+    ...MANIFEST,
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    streams: MANIFEST.streams.map((stream) => ({
+      ...stream,
+      coverage_stores: [`${stream.name}-store`],
+    })),
+    version: "1.1.0",
+  };
+  assert.equal(isAdmitted(await registerManifest(server, manifest)), true, "the extension manifest is admitted");
+  const terminalMessages = holdingsRun([]).map((message) =>
+    message.type === "DONE"
+      ? {
+          ...message,
+          coverage: {
+            collection_scope: "unscoped",
+            streams: ["holdings", "activity"].map((stream) => ({
+              scoped: true,
+              stores: [{ status: "collected", store: `run-coverage-${stream}-store` }],
+              stream,
+            })),
+            version: 1,
+          },
+        }
+      : message
+  );
+  const run = await runCapturingStart(server, ownerToken, manifest, terminalMessages);
+  assert.equal(run.thrown, null);
+  assert.ok(run.start, "the connector received START");
+  assert.equal("run_coverage_version" in run.start, false);
+  assert.equal(run.result?.status, "succeeded");
+  const terminalRow = getDb()
+    .prepare(
+      `SELECT data_json FROM spine_events
+       WHERE run_id = ? AND event_type IN ('run.completed', 'run.failed', 'run.cancelled')
+       ORDER BY event_seq DESC LIMIT 1`
+    )
+    .get<{ data_json: string }>(run.result?.run_id);
+  assert.ok(terminalRow, "the run has a terminal event");
+  assert.equal(JSON.stringify(JSON.parse(terminalRow.data_json)).includes("run-coverage-"), false);
+});
+
+test("reference runtime refuses 0.3.0 before spawn until the whole profile is implemented", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+  const outcome = await runCapturingStart(
+    server,
+    ownerToken,
+    {
+      ...MANIFEST,
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      protocol_version: "0.3.0",
+      streams: MANIFEST.streams.map((stream) => ({ ...stream, coverage_stores: [`${stream.name}-store`] })),
+    },
+    holdingsRun([])
+  );
+  assert.equal(outcome.start, null, "the connector was not spawned");
+  assert.ok(outcome.thrown instanceof Error);
+  assert.match(outcome.thrown.message, /protocol_version must be one of 0\.1\.0, 0\.2\.0/);
 });
 
 // BLOB is a runtime-specific extension (Collection Profile Section 7) that this

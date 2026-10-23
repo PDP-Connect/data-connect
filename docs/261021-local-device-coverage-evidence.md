@@ -40,9 +40,38 @@ The device verdict (`pdpp-local-collector status`, `terminal_coverage.verdict`) 
 
 The server's owner coverage is a fact about one admitted run, shown with its as-of. Any attempt the server observes from the same or a later run (a state commit, a terminal run record, a durable batch record, an admitted or refused batch, a delivered failure report, a legacy split terminal report) retires it to unknown; an observation that names no run counts as the newest started run. See "Run order and commit order" and "Revision fencing" below. Only an attempt the server never hears about leaves the last admitted coverage in place. Every failed run, including one that fails before its scan, leaves an open `connector_child_failure` gap on the device, so the device shows that run as `unadmitted` until a later complete run is admitted and recovers the gap.
 
-## Collection Profile amendment
+## Collection Profile extension
 
-The canonical Collection Profile is `data-connectors/docs/spec/collection-profile.md`. [Data-connectors PR #541](https://github.com/PDP-Connect/data-connectors/pull/541), stacked on #516, specifies the optional START capability, stream store declarations, terminal store collection evidence, and its relationship to detail accounting and checkpoint eligibility. Data-connectors #539 and this PR implement the amendment. The owner approves it at merge.
+The canonical Collection Profile is `data-connectors/docs/spec/collection-profile.md`. [Data-connectors PR #541](https://github.com/PDP-Connect/data-connectors/pull/541), stacked on #516, specifies the elective store-collection extension, stream store declarations, terminal evidence, and its relationship to detail accounting and checkpoint eligibility. Data-connectors #539 and this PR implement the extension. The owner approves it at merge.
+
+## Store collection extension negotiation
+
+`coverage.version: 1` versions the store evidence payload as an elective extension, negotiated by `RUN_COVERAGE_V1`. The extension applies to base profiles 0.1.0, 0.2.0, and 0.3.0. Declaring the capability never blocks spawn. A runtime that does not support the extension starts the connector, omits `START.run_coverage_version`, and records no store evidence. Using the extension does not make a runtime conformant to a base profile it does not fully implement.
+
+This data-connect runtime requests evidence only when the manifest declares `RUN_COVERAGE_V1`, its base is 0.1.0 or 0.2.0, every requested stream has a non-empty `coverage_stores` inventory, and the effective scope is bound by `collection_scope`. Any stream that declares `coverage_stores` must declare `RUN_COVERAGE_V1`. The reference runtime does not implement the extension; it accepts the capability electively and sends no positive store evidence. Both runtimes refuse base profile 0.3.0 until they implement its mandatory rules in full.
+
+## Profile 0.3.0 refusal
+
+The audit found mandatory 0.3.0 rules that the runtimes do not implement. Every 0.3.0 manifest is therefore refused at reference-runtime registration and before spawn in both runtimes. The feature gaps below are the reason for that version-level refusal; `RUN_COVERAGE_V1` remains an independent elective extension.
+
+| Mandatory feature or obligation | Reference runtime status and gap | Collector runtime status and gap |
+| --- | --- | --- |
+| `protocol_version: 0.3.0` | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN` (`reference-implementation/server/connector-manifest-validation.ts:194-205`; `reference-implementation/runtime/index.ts:2642-2654`). | `REFUSED-PRE-SPAWN` (`packages/collector-runtime/src/collector-runner.ts:941-948`). |
+| `OBSERVATION` capability and message; `diagnostic_descriptors` manifest member | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN`; `OBSERVATION` is not advertised or handled (`reference-implementation/runtime/index.ts:2597-2606, 6482-6497`), and the manifest type has no descriptor member (`reference-implementation/runtime/index.ts:173`). | `REFUSED-PRE-SPAWN`; `OBSERVATION` is not advertised (`packages/collector-runtime/src/runtime-capabilities.ts:80-90`), and the profile binder reads only version, capabilities, and streams (`packages/local-collector/bin/pdpp-local-collector.ts:3282-3304`). |
+| `DONE.error.basis` and the Section 5.11 diagnosis/recovery-hint gate | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN`; `DONE.error` has no `basis` member in the shared wire type (`packages/connector-protocol/src/connector-runtime-protocol.ts:931-936`). | `REFUSED-PRE-SPAWN`; `DONE.error` has no `basis` member in the shared wire type (`packages/connector-protocol/src/connector-runtime-protocol.ts:931-936`). |
+| Section 5.12 diagnostic data stays on the device | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN`; the runtime has no `OBSERVATION` record path (`reference-implementation/runtime/index.ts:2597-2606, 6482-6497`). | `REFUSED-PRE-SPAWN`; the collector advertises no `OBSERVATION` support (`packages/collector-runtime/src/runtime-capabilities.ts:80-90`). |
+| `parent_streams` detail accounting and declared `transform_epoch` | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN`; the `DETAIL_COVERAGE` wire type has no obligation, validator-domain, or epoch members (`packages/connector-protocol/src/connector-runtime-protocol.ts:503-563`). | `REFUSED-PRE-SPAWN`; the runner rejects `DETAIL_GAP` and `DETAIL_COVERAGE` rather than accounting them (`packages/collector-runtime/src/collector-runner.ts:1952-1954`). |
+| Runtime-sent `START.detail_debts` (required on every 0.3.0 run, including an empty array) | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN`; `START` sends `detail_gaps`, not `detail_debts` (`reference-implementation/runtime/index.ts:3489-3490`; `packages/connector-protocol/src/connector-runtime-protocol.ts:311-348`). | `REFUSED-PRE-SPAWN`; the START type and builder have no `detail_debts` member (`packages/connector-protocol/src/connector-runtime-protocol.ts:311-348`; `packages/collector-runtime/src/collector-runner.ts:2565-2585`). |
+| Fully typed portable `DETAIL_GAP_RECOVERED` lifecycle | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN`; the handler accepts partial optional fields and settles a gap claim, not the full portable seal (`reference-implementation/runtime/index.ts:2196-2213, 5945-6008`). | `REFUSED-PRE-SPAWN`; the message is not accounted by the runner, which rejects the related detail accounting messages (`packages/collector-runtime/src/collector-runner.ts:1945-1965`). |
+| Complete, empty, unchanged, and gap replacement invalidates earlier hydrated-without-record and `optional_skip_keys` exchanges | `REFUSED-AT-REGISTRATION` and `REFUSED-PRE-SPAWN`; it validates and retains these key sets but has no 0.3.0 replacement lifecycle (`reference-implementation/runtime/index.ts:1986-2020, 4192-4203`). | `REFUSED-PRE-SPAWN`; it rejects `DETAIL_COVERAGE` and has no replacement accounting (`packages/collector-runtime/src/collector-runner.ts:1952-1954`). |
+
+The universal 0.3.0 obligations include supporting `OBSERVATION`, applying the Sections 5.11–5.12 rules when diagnosis is present, and sending `START.detail_debts` on every run. In particular, `START.detail_debts` is not keyed to a manifest feature; both runtimes omit it. The version-level refusal prevents any 0.3.0 run from reaching that non-conformant START.
+
+Section 5.13 names future features and explicitly defines no behavior for them, so it adds no separate runtime obligation to this audit.
+
+## Known defect: 0.2.0 OBSERVATION
+
+Main Section 3.4 requires 0.2.0 runtimes to implement `OBSERVATION` and the mandatory Sections 5.10–5.12 accounting. Both runtimes accept 0.2.0 manifests without implementing those rules. The reference runtime rejects a declared `OBSERVATION` capability because it does not advertise it (`reference-implementation/runtime/index.ts:2596-2601`); the collector runtime also does not advertise or implement it (`packages/collector-runtime/src/runtime-capabilities.ts:75-90`). This defect is tracked by (issue: PDP-Connect/data-connect#579).
 
 ## Acceptance and release
 
@@ -205,9 +234,9 @@ were not in this note before, and they are added here.
 - "A runtime MAY request a separate run containing only instrumented streams."
   It is a permission. The rule that matters, that a connection-wide verdict
   does not cover uninstrumented streams, is kept.
-- The former manifest-level `run_coverage` advertisement is removed. The runtime
-  derives START negotiation from the pinned profile version and requested
-  streams' store inventories.
+- The former `run_coverage` manifest key is removed. The runtime derives START
+  negotiation from `RUN_COVERAGE_V1`, the supported base profile, and each
+  requested stream's store inventory.
 - "Checkpoint eligibility MUST remain governed by Sections 5.6 and 5.8." It
   restates the downgrade rule.
 - "Connector package patch versions alone MUST NOT establish wire
@@ -215,8 +244,8 @@ were not in this note before, and they are added here.
   says that profile versions are independent of connector versions and that
   rollout is runtime-first.
 - "Adding this optional feature to an already published profile requires a
-  minor profile version." Section 1 places this feature in 0.3.0, which covers
-  it.
+  minor profile version." Section 1 puts `coverage.version: 1` in a separate
+  extension, which applies to base profiles 0.1.0, 0.2.0, and 0.3.0.
 - "It also defines optional version 1 terminal store collection evidence ...
   the linked schemas do not yet establish support." Section 1 already says the
   linked schemas do not establish support for the version.
@@ -237,8 +266,10 @@ were not in this note before, and they are added here.
 | 3.2 | The manifest MUST state each store's obligation, content or metadata only. | Metadata-only inventory reads as completeness of content. | OP: "proven empty content is complete while metadata inventory stays inventory only" |
 | 3.2 | A runtime MUST NOT derive store coverage for a stream with no `coverage_stores`. | An undeclared store reads as covered. | OP: "the terminal endpoint rejects a store outside the registered inventory" |
 | 3.2 | A change to a store's obligation MUST change the manifest revision. | A proof for the old obligation survives the change. | PROJ: "catalog obligation changes invalidate proof when the binding generation advances" |
-| 3.4 | A runtime MUST request evidence only for a pinned `0.3.0` profile when every requested stream declares `coverage_stores`. | Evidence is requested under an older profile or for a stream without a complete store inventory. | LC: "a 0.3.0 manifest with inventories for requested streams requests store evidence"; LC: "a 0.2.0 manifest does not request store evidence even with inventories"; LC: "a 0.3.0 manifest does not request store evidence when a requested stream lacks inventory"; PROTO: "collectionProfileDeclarationError accepts profile versions and gates capabilities by version" |
-| 3.4 | A runtime that does not support the capability MUST refuse the connector before spawn. | Same as above, without the declaration. | RUNNER: "runCollectorConnector refuses a RUN_COVERAGE_V1 connector before spawn when its run requests no evidence" and "runCollectorConnector runs a RUN_COVERAGE_V1 connector when its START requests evidence"; CAP: "a declared RUN_COVERAGE_V1 places on the collector runtime and is missing on the provider runtime"; SEV: "the pre-spawn gate rejects unknown and unsupported required capabilities and admits implemented ones"; PROTO: "RUN_COVERAGE_V1 is a known, required capability" |
+| 3.4 | A runtime MUST request evidence only when the manifest declares elective `RUN_COVERAGE_V1`, its base profile is supported, every requested stream has a non-empty `coverage_stores` inventory, and `collection_scope` binds the effective scope. | Evidence is requested without opt-in, under an unsupported base, for a stream without inventory, or for an unbound scope. | LC: "a 0.2.0 profile with RUN_COVERAGE_V1 and inventories requests store evidence"; LC: "a 0.1.0 profile with RUN_COVERAGE_V1 and inventories requests store evidence"; LC: "RUN_COVERAGE_V1 without a requested stream inventory does not request evidence"; LC: "a manifest without RUN_COVERAGE_V1 requests no store evidence"; RUNNER: "runCollectorConnector requests no coverage when START restricts a stream to named resources" |
+| 3.4 | A runtime MUST NOT block spawn solely because a connector declares elective `RUN_COVERAGE_V1`; without extension support it MUST omit `START.run_coverage_version` and record no store evidence. | An optional extension blocks connectors that can run without it, or an unsupported runtime records evidence it cannot accept. | SEV: "reference runtime starts RUN_COVERAGE_V1 electively without requesting or recording store evidence"; RUNNER: "runCollectorConnector starts a RUN_COVERAGE_V1 connector when this run requests no evidence"; CAP: "a declared RUN_COVERAGE_V1 places on runtimes with or without the extension"; PROTO: "RUN_COVERAGE_V1 is known and elective" |
+| 3.4 | A manifest that declares `coverage_stores` MUST declare `RUN_COVERAGE_V1`; runtimes MUST refuse the mismatch at registration or before spawn. | Store obligations have no negotiated evidence contract. | connector-manifest-validation: "validateConnectorManifest refuses coverage_stores without RUN_COVERAGE_V1 at registration"; RUNNER: "runCollectorConnector refuses coverage_stores without RUN_COVERAGE_V1 before spawn" |
+| 3.4 | Runtime accounting MUST override `DONE.coverage`; incomplete or unevaluable base accounting MUST NOT produce a positive store status. | A connector's collected claim hides a skip, detail gap, or accounting the runtime cannot assess. | RUNNER: "runCollectorConnector lets SKIP_RESULT defeat a collected DONE assertion"; RUNNER: "runCollectorConnector records no 0.2.0 positive when it cannot account for DETAIL_GAP" and "... DETAIL_COVERAGE" |
 | 3.4 | When START omits `run_coverage_version`, a connector MUST omit `DONE.coverage`. | Coverage that was not requested is trusted. | JOUR: "A: without START coverage negotiation, a successful run supplies no positive coverage"; RUNNER: "a connector that does not request coverage cannot submit a positive DONE verdict" |
 | 3.4 | If version 1 was requested and a successful DONE omits `coverage` (including from producers that predate the field), the runtime MUST treat the stores as unknown and MUST NOT keep an earlier positive. | An omission is read as "not supported", and the older proof stays current. | RUNNER: "successful DONE without coverage retires earlier proof with STATE" and "... without STATE"; PROJ: "legacy terminal commit without v2 proof stays unknown" |
 | 3.4 | Negotiating this evidence MUST NOT disable or weaken detail accounting, diagnosis, or checkpoint rules. | Opting into coverage skips the accounting that protects data. | RUNNER: "runCollectorConnector lets SKIP_RESULT defeat a collected DONE assertion"; OP: "checkpoint eligibility ${eligible} governs state advancement with accounted debt" |
@@ -320,8 +351,8 @@ rule, and the 5.8.2 `scoped` rule. The DC tests check only the profile's
 wording. This repository tests the runtime and server halves of the
 inventory rule: the collector requests no evidence when a selected stream
 has no inventory (`packages/local-collector/test/collection-profiles.test.ts`:
-"a 0.3.0 manifest does not request store evidence when a requested stream
-lacks inventory"), and the server rejects a claim for such a
+"RUN_COVERAGE_V1 without a requested stream inventory does not request
+evidence"), and the server rejects a claim for such a
 stream (OP: "the terminal endpoint rejects a claim for a stream with no
 declared inventory"). No code in this repository derives a Section 3.3.9
 binding or effective-authority record from `scoped`. It only qualifies
@@ -336,8 +367,10 @@ coverage.
   per-stream `resources` or the requested stream set. When a runtime cannot
   bind the effective scope, it requests no evidence; this is conformant. The
   current runtime suppresses evidence when a START names resources.
-- Negotiation: a pinned manifest must declare `protocol_version: "0.3.0"`,
-  and every requested stream must have a non-empty `coverage_stores` inventory.
-  Otherwise the runtime omits `START.run_coverage_version`. `RUN_COVERAGE_V1`
-  is not accepted under 0.1.0 or 0.2.0, and the former `run_coverage` manifest
-  key is not read.
+- Negotiation: a manifest must declare `RUN_COVERAGE_V1`, use a base profile
+  the runtime supports, and give every requested stream a non-empty
+  `coverage_stores` inventory. The effective scope must bind to
+  `collection_scope`. Otherwise the runtime omits
+  `START.run_coverage_version`. The extension does not establish conformance
+  to an unsupported base profile; this runtime refuses 0.3.0 until it
+  implements that profile in full.

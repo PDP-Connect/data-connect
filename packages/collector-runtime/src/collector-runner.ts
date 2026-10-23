@@ -30,6 +30,8 @@ import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EmittedMessage, RunCoverageVerdict, StartMessage, StreamScope } from "@pdpp/connector-protocol";
 import {
+  COLLECTION_PROFILE_VERSIONS,
+  collectionProfileDeclarationError,
   RUN_COVERAGE_V1_CAPABILITY,
   validateHostBlobMessage,
   validateStreamEvidenceCounts,
@@ -70,7 +72,6 @@ import {
   COLLECTOR_RUNTIME_CAPABILITIES,
   type ConnectorPlacementInput,
   type RuntimeBindingName,
-  type RuntimeCapabilityProfile,
 } from "./runtime-capabilities.ts";
 
 /**
@@ -618,10 +619,16 @@ interface CollectorConnectorSpecExtra {
   readonly args: readonly string[];
   /** Release identity of the executable used for this run. */
   readonly artifactDigest?: string;
+  /** Raw base profile version from the verified manifest, when one was loaded. */
+  readonly collectionProfileVersion?: unknown;
   /** Argv for the connector entrypoint (typically tsx + connector index.ts). */
   readonly command: string;
   /** Stable connector id used for ingest envelopes. */
   readonly connector_id: string;
+  /** Streams with a valid, non-empty manifest `coverage_stores` inventory. */
+  readonly coverageStoreStreams?: readonly string[];
+  /** True when any manifest stream declares a `coverage_stores` member. */
+  readonly declaresCoverageStores?: boolean;
   /**
    * Whether the connector declared it ENFORCES path roots at enumeration time.
    * Gates whether a roots boundary may be reported as `scoped` coverage; a
@@ -635,7 +642,7 @@ interface CollectorConnectorSpecExtra {
   readonly manifestFingerprint?: string;
   /** Optional stream resources for scoped connector runs. */
   readonly resources?: Readonly<Record<string, readonly string[]>>;
-  /** Set only when the pinned 0.3.0 manifest inventories every requested stream. */
+  /** Set only when an accepted base profile inventories every requested stream. */
   readonly runCoverageVersion?: 1;
   /**
    * The owner-declared collection boundary this run must stay inside, as
@@ -931,6 +938,14 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
   try {
     // Preflight refusals are attempts for this lane too. They run inside the try
     // so the catch below opens the failure barrier for each of them.
+    const profileDeclarationError = collectionProfileDeclarationError(
+      config.connector.collectionProfileVersion ?? "0.1.0",
+      config.connector.protocol_capabilities,
+      config.connector.declaresCoverageStores === true
+    );
+    if (profileDeclarationError !== null) {
+      throw new Error(`Invalid Collection Profile declaration: ${profileDeclarationError}`);
+    }
     if (
       config.connector.runCoverageVersion === 1 &&
       !(
@@ -941,7 +956,7 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
       throw new Error("optional store evidence requires a bound manifest fingerprint and artifact digest");
     }
     throwIfAborted(config.abortSignal);
-    const satisfiedBindings = assertPlacementOrThrow(config.connector, runtimeCapabilitiesForRun(config.connector));
+    const satisfiedBindings = assertPlacementOrThrow(config.connector, COLLECTOR_RUNTIME_CAPABILITIES);
 
     const initialSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
@@ -1577,7 +1592,7 @@ function buildTypedTerminalCoverageFacts(input: {
       },
       scoped: stream.scoped,
       stores: stream.stores.map((store) =>
-        skipCount > 0 && store.status === "collected" ? { ...store, status: "partial" as const } : store
+        !detailComplete && store.status === "collected" ? { ...store, status: "partial" as const } : store
       ),
       stream: stream.stream,
     };
@@ -1776,7 +1791,7 @@ async function streamConnectorIntoOutbox(
     // ignore while the run still looks bounded.
     input.config.connector.enforcesSourceRoots === true ? resolveScopedSourceRoots(input.config.connector.scope) : [],
     collectorScopeFingerprint(input.config.connector.scope),
-    input.config.connector.runCoverageVersion
+    connectorRequestsRunCoverage(input.config.connector) ? 1 : undefined
   );
   const child = spawnConnector(
     input.config.connector,
@@ -2521,35 +2536,20 @@ function startStreamResources(resources: Readonly<Record<string, readonly string
  * {@link collectorScopeFingerprint} binds the time bound and the source roots,
  * not per-stream resources. A START that narrows a stream to named resources
  * would carry a scope string, often `unscoped`, without that restriction, and
- * Collection Profile Section 5.1 forbids that. Such a run requests no
- * evidence, so its terminal record reads unknown coverage.
+ * the extension forbids that. The manifest must also declare RUN_COVERAGE_V1
+ * and a non-empty inventory for every requested stream.
  */
-function startRequestsRunCoverage(
-  streams: readonly string[],
-  resources: Readonly<Record<string, readonly string[]>>,
-  runCoverageVersion: 1 | undefined
-): boolean {
-  return runCoverageVersion === 1 && streams.every((stream) => startStreamResources(resources, stream).length === 0);
-}
-
-/**
- * The profile a run is placed against. The collector supports RUN_COVERAGE_V1
- * only for a run whose START requests store evidence; for any other run the
- * capability is withdrawn, so a connector that cannot run without the
- * evidence is refused before spawn (Collection Profile Section 3.4).
- */
-function runtimeCapabilitiesForRun(connector: CollectorConnectorSpec): RuntimeCapabilityProfile {
-  if (startRequestsRunCoverage(connector.streams, connector.resources ?? {}, connector.runCoverageVersion)) {
-    return COLLECTOR_RUNTIME_CAPABILITIES;
-  }
-  return {
-    ...COLLECTOR_RUNTIME_CAPABILITIES,
-    protocolCapabilities: new Set(
-      [...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities].filter(
-        (capability) => capability !== RUN_COVERAGE_V1_CAPABILITY
-      )
-    ),
-  };
+function connectorRequestsRunCoverage(connector: CollectorConnectorSpec): boolean {
+  const profileVersion = connector.collectionProfileVersion ?? "0.1.0";
+  const coverageStoreStreams = new Set(connector.coverageStoreStreams ?? []);
+  return (
+    connector.runCoverageVersion === 1 &&
+    (COLLECTION_PROFILE_VERSIONS as readonly unknown[]).includes(profileVersion) &&
+    connector.protocol_capabilities.includes(RUN_COVERAGE_V1_CAPABILITY) &&
+    connector.streams.length > 0 &&
+    connector.streams.every((stream) => coverageStoreStreams.has(stream)) &&
+    connector.streams.every((stream) => startStreamResources(connector.resources ?? {}, stream).length === 0)
+  );
 }
 
 export function buildCollectorStartMessage(
@@ -2562,7 +2562,8 @@ export function buildCollectorStartMessage(
   collectionScope?: string,
   runCoverageVersion?: 1
 ): StartMessage {
-  const requestsCoverage = startRequestsRunCoverage(streams, resources, runCoverageVersion);
+  const requestsCoverage =
+    runCoverageVersion === 1 && streams.every((stream) => startStreamResources(resources, stream).length === 0);
   // A version 1 request binds its evidence to this string (Collection Profile
   // Section 5.1). Without one the proof would bind to no boundary.
   if (requestsCoverage && !collectionScope?.trim()) {

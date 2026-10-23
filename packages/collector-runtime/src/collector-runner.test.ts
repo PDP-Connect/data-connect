@@ -50,6 +50,12 @@ import {
  * process.cwd()` module constant produced when tests ran from here.
  */
 const TEST_EXECUTION_ROOT = join(import.meta.dirname, "..");
+const RUN_COVERAGE_DECLARATION = {
+  collectionProfileVersion: "0.2.0",
+  coverageStoreStreams: ["messages"],
+  declaresCoverageStores: true,
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+} as const;
 
 async function assertCoverageFixtureRejected(input: {
   coverage: unknown;
@@ -82,6 +88,7 @@ async function assertCoverageFixtureRejected(input: {
           manifestFingerprint: "a".repeat(64),
           protocol_capabilities: [],
           ...(input.resources ? { resources: input.resources } : {}),
+          ...RUN_COVERAGE_DECLARATION,
           runCoverageVersion: 1,
           runtime_requirements: { bindings: {} },
           ...(input.scope ? { scope: input.scope, timeScopableStreams: requestedStreams } : {}),
@@ -484,6 +491,7 @@ test("runCollectorConnector commits a typed DONE coverage verdict without a diag
         connector_id: "fixture-typed-coverage",
         manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
+        ...RUN_COVERAGE_DECLARATION,
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -544,6 +552,7 @@ test("runCollectorConnector lets SKIP_RESULT defeat a collected DONE assertion",
         connector_id: "fixture-skip-overrides-coverage",
         manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
+        ...RUN_COVERAGE_DECLARATION,
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -659,6 +668,7 @@ test("runCollectorConnector withholds collected coverage after an HTTP receipt r
         connector_id: "fixture-rejected-http-receipt",
         manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
+        ...RUN_COVERAGE_DECLARATION,
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -722,6 +732,7 @@ test("runCollectorConnector records withheld checkpoint accounting before a type
         connector_id: "fixture-withheld-coverage-checkpoint",
         manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
+        ...RUN_COVERAGE_DECLARATION,
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -796,6 +807,7 @@ for (const [label, scope, expectedScope] of [
           enforcesSourceRoots: true,
           manifestFingerprint: "a".repeat(64),
           protocol_capabilities: [],
+          ...RUN_COVERAGE_DECLARATION,
           runCoverageVersion: 1,
           runtime_requirements: { bindings: {} },
           ...(scope ? { scope } : {}),
@@ -888,6 +900,7 @@ for (const [versionLabel, coverageVersion] of [
             connector_id: "fixture-unknown-coverage-version",
             manifestFingerprint: "a".repeat(64),
             protocol_capabilities: [],
+            ...RUN_COVERAGE_DECLARATION,
             runCoverageVersion: 1,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
@@ -1066,6 +1079,7 @@ test("runCollectorConnector requests no coverage when START restricts a stream t
         manifestFingerprint: "a".repeat(64),
         protocol_capabilities: [],
         resources: { messages: ["C07JYF0U8BY"] },
+        ...RUN_COVERAGE_DECLARATION,
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -1101,6 +1115,7 @@ test("runCollectorConnector rejects coverage sent for a START restricted to name
  * conforming RUN_COVERAGE_V1 connector does: with coverage when START asks.
  */
 async function writeEvidenceRequiringConnector(spawnedPath: string): Promise<string> {
+  const startPath = `${spawnedPath}.start`;
   return await writeFixtureConnector({
     script: `
       const fs = await import("node:fs/promises");
@@ -1111,6 +1126,7 @@ async function writeEvidenceRequiringConnector(spawnedPath: string): Promise<str
         if (input.includes("\\n")) resolve();
       }));
       const start = JSON.parse(input.split("\\n")[0]);
+      await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
       const done = { type: "DONE", status: "succeeded", records_emitted: 0 };
       if (start.run_coverage_version === 1) {
         done.coverage = { version: 1, collection_scope: start.collection_scope,
@@ -1121,14 +1137,12 @@ async function writeEvidenceRequiringConnector(spawnedPath: string): Promise<str
   });
 }
 
-// Collection Profile Section 3.4: a connector that cannot run without store
-// collection evidence declares RUN_COVERAGE_V1. A run whose START requests no
-// evidence cannot supply it, so the collector refuses the connector before
-// spawn: before its first heartbeat, with the capability named as missing.
-test("runCollectorConnector refuses a RUN_COVERAGE_V1 connector before spawn when its run requests no evidence", async () => {
+// RUN_COVERAGE_V1 is elective. A run that cannot request evidence still starts
+// and writes no positive terminal fact.
+test("runCollectorConnector starts a RUN_COVERAGE_V1 connector when this run requests no evidence", async () => {
   const harness = await startCollectorHarness({ priorState: {} });
   try {
-    const spawnedPath = join(await createTempDir("pdpp-run-coverage-capability-refused-"), "spawned");
+    const spawnedPath = join(await createTempDir("pdpp-run-coverage-elective-"), "spawned");
     const fixture = await writeEvidenceRequiringConnector(spawnedPath);
     for (const [label, evidence] of [
       ["no store evidence configured", {}],
@@ -1138,43 +1152,108 @@ test("runCollectorConnector refuses a RUN_COVERAGE_V1 connector before spawn whe
           artifactDigest: `sha256:${"b".repeat(64)}`,
           manifestFingerprint: "a".repeat(64),
           resources: { messages: ["C07JYF0U8BY"] },
+          ...RUN_COVERAGE_DECLARATION,
           runCoverageVersion: 1,
         },
       ],
     ] as const) {
       // biome-ignore lint/performance/noAwaitInLoops: each case is one isolated run against the same harness.
-      await assert.rejects(
-        runCollectorConnector({
-          baseUrl: harness.url,
-          connector: {
-            args: [fixture],
-            command: "node",
-            connector_id: "fixture-run-coverage-required",
-            protocol_capabilities: ["RUN_COVERAGE_V1"],
-            runtime_requirements: { bindings: {} },
-            streams: ["messages"],
-            ...evidence,
-          },
-          deviceId: "device-1",
-          deviceToken: "device-token",
-          executionRoot: TEST_EXECUTION_ROOT,
-          queuePath: await tempQueuePath(),
-          sourceInstanceId: "src-run-coverage-required",
-        }),
-        (error: unknown) => {
-          assert.ok(error instanceof RuntimeCapabilityMismatchError, label);
-          assert.deepEqual(error.missing, ["RUN_COVERAGE_V1"], label);
-          return true;
-        }
+      const result = await runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-run-coverage-required",
+          ...RUN_COVERAGE_DECLARATION,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+          ...evidence,
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-run-coverage-required",
+      });
+      assert.equal(await readFile(spawnedPath, "utf8"), "spawned", `${label}: the connector started`);
+      const start = JSON.parse(await readFile(`${spawnedPath}.start`, "utf8")) as Record<string, unknown>;
+      assert.equal("run_coverage_version" in start, false, label);
+      assert.equal(result.done?.status, "succeeded", label);
+      const facts = harness.terminalCommits.at(-1)?.terminal_facts as Record<string, unknown>[] | undefined;
+      assert.equal(
+        facts?.some((fact) => Array.isArray(fact.stores)) ?? false,
+        false,
+        `${label}: no store evidence was recorded`
       );
-      const spawned = await readFile(spawnedPath, "utf8").then(
-        () => true,
-        () => false
-      );
-      assert.equal(spawned, false, `${label}: the connector never started`);
     }
-    assert.equal(harness.heartbeats.length, 0, "the refusal precedes the first heartbeat");
-    assert.equal(harness.terminalCommits.length, 0);
+    assert.equal(harness.terminalCommits.length, 2);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector refuses coverage_stores without RUN_COVERAGE_V1 before spawn", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const spawnedPath = join(await createTempDir("pdpp-coverage-stores-capability-refused-"), "spawned");
+    const fixture = await writeEvidenceRequiringConnector(spawnedPath);
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          collectionProfileVersion: "0.2.0",
+          command: "node",
+          connector_id: "fixture-coverage-stores-capability-refused",
+          coverageStoreStreams: ["messages"],
+          declaresCoverageStores: true,
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-coverage-stores-capability-refused",
+      }),
+      /coverage_stores requires protocol_capabilities RUN_COVERAGE_V1/
+    );
+    await assert.rejects(readFile(spawnedPath, "utf8"));
+    assert.equal(harness.heartbeats.length, 0);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector refuses Collection Profile 0.3.0 before spawn", async () => {
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const spawnedPath = join(await createTempDir("pdpp-profile-030-refused-"), "spawned");
+    const fixture = await writeEvidenceRequiringConnector(spawnedPath);
+    await assert.rejects(
+      runCollectorConnector({
+        baseUrl: harness.url,
+        connector: {
+          args: [fixture],
+          command: "node",
+          ...RUN_COVERAGE_DECLARATION,
+          collectionProfileVersion: "0.3.0",
+          connector_id: "fixture-profile-030-refused",
+          runCoverageVersion: 1,
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        queuePath: await tempQueuePath(),
+        sourceInstanceId: "src-profile-030-refused",
+      }),
+      /protocol_version must be one of 0\.1\.0, 0\.2\.0/
+    );
+    await assert.rejects(readFile(spawnedPath, "utf8"));
+    assert.equal(harness.heartbeats.length, 0);
   } finally {
     await harness.close();
   }
@@ -1193,6 +1272,7 @@ test("runCollectorConnector runs a RUN_COVERAGE_V1 connector when its START requ
         connector_id: "fixture-run-coverage-required",
         manifestFingerprint: "a".repeat(64),
         protocol_capabilities: ["RUN_COVERAGE_V1"],
+        ...RUN_COVERAGE_DECLARATION,
         runCoverageVersion: 1,
         runtime_requirements: { bindings: {} },
         streams: ["messages"],
@@ -1235,6 +1315,7 @@ for (const includeState of [false, true]) {
           connector_id: "fixture-coverage-retirement",
           manifestFingerprint: "a".repeat(64),
           protocol_capabilities: [],
+          ...RUN_COVERAGE_DECLARATION,
           runCoverageVersion: 1,
           runtime_requirements: { bindings: {} },
           streams: ["messages"],
@@ -1357,14 +1438,23 @@ test("a pass that reuses an acknowledged run id commits no second terminal recor
 });
 
 for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
-  test(`runCollectorConnector refuses ${effectType} without durable detail accounting`, async () => {
+  test(`runCollectorConnector records no 0.2.0 positive when it cannot account for ${effectType}`, async () => {
     const harness = await startCollectorHarness({ priorState: {} });
     try {
+      const startPath = join(await createTempDir(`pdpp-${effectType.toLowerCase()}-start-`), "start.json");
       const fixture = await writeFixtureConnector({
         script: `
+          const fs = await import("node:fs/promises");
+          let input = "";
+          await new Promise((resolve) => process.stdin.on("data", (chunk) => {
+            input += chunk;
+            if (input.includes("\\n")) resolve();
+          }));
+          const start = JSON.parse(input.split("\\n")[0]);
+          await fs.writeFile(${JSON.stringify(startPath)}, JSON.stringify(start));
           process.stdout.write(JSON.stringify({ type: ${JSON.stringify(effectType)}, stream: "messages" }) + "\\n");
           process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0,
-            coverage: { version: 1, collection_scope: "unscoped", streams: [{ stream: "messages", scoped: true,
+            coverage: { version: 1, collection_scope: start.collection_scope, streams: [{ stream: "messages", scoped: true,
               stores: [{ store: "messages", status: "collected" }] }] } }) + "\\n");
         `,
       });
@@ -1378,6 +1468,7 @@ for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
             connector_id: "fixture-detail-no-admission",
             manifestFingerprint: "a".repeat(64),
             protocol_capabilities: [],
+            ...RUN_COVERAGE_DECLARATION,
             runCoverageVersion: 1,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
@@ -1390,6 +1481,8 @@ for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
         }),
         new RegExp(`unsupported ${effectType}`)
       );
+      const start = JSON.parse(await readFile(startPath, "utf8")) as Record<string, unknown>;
+      assert.equal(start.run_coverage_version, 1, "the extension was requested for this 0.2.0 run");
       assert.equal(harness.terminalCommits.length, 0);
     } finally {
       await harness.close();
@@ -1441,6 +1534,7 @@ for (const effectType of ["DETAIL_GAP", "DETAIL_COVERAGE"] as const) {
             connector_id: `fixture-concrete-${effectType.toLowerCase()}`,
             manifestFingerprint: "a".repeat(64),
             protocol_capabilities: [],
+            ...RUN_COVERAGE_DECLARATION,
             runCoverageVersion: 1,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],
@@ -1534,6 +1628,7 @@ test("runCollectorConnector refuses a collected assertion with mismatched emitte
           connector_id: "fixture-count-mismatch",
           manifestFingerprint: "a".repeat(64),
           protocol_capabilities: [],
+          ...RUN_COVERAGE_DECLARATION,
           runCoverageVersion: 1,
           runtime_requirements: { bindings: {} },
           streams: ["messages"],
@@ -4138,6 +4233,7 @@ test("a run with invalid provenance leaves a failure gap for its lane", async ()
             command: "node",
             connector_id: "fixture-provenance-barrier",
             protocol_capabilities: [],
+            ...RUN_COVERAGE_DECLARATION,
             runCoverageVersion: 1,
             runtime_requirements: { bindings: {} },
             streams: ["messages"],

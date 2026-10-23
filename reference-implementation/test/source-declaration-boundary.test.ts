@@ -33,7 +33,8 @@ const RUNTIME_IMPORT_REGEX = /import\s+(?!type\s)[\s\S]*?from\s+["']([^"']+)["']
 // src/public/source.ts directly.
 const SOURCE_CONTRACT_PATH_REGEX = /\/dist\/public\/source\.js$/;
 const PROJECTED_DECLARATION_VERSION_REGEX = /^reference\.legacy-connector-projection\.v1:sha256:[0-9a-f]{64}$/;
-const UNSUPPORTED_PROFILE_VERSION_REGEX = /manifest\.protocol_version must be one of 0\.1\.0, 0\.2\.0, 0\.3\.0, received 0\.4\.0/;
+const UNSUPPORTED_PROFILE_VERSION_REGEX =
+  /manifest\.protocol_version must be one of 0\.1\.0, 0\.2\.0, received 0\.3\.0/;
 
 const query = {
   aggregations: {
@@ -318,9 +319,9 @@ test("legacy adapter admits Collection Profile 0.2.0 and keeps the Core declarat
   assert.deepEqual(declaration, sourceDeclarationFromLegacyConnectorManifest(legacy, attribution));
 });
 
-test("legacy adapter rejects an unknown profile version", () => {
+test("legacy adapter refuses 0.3.0 until the whole profile is implemented", () => {
   assert.throws(
-    () => sourceDeclarationFromLegacyConnectorManifest({ ...legacy, protocol_version: "0.4.0" }, attribution),
+    () => sourceDeclarationFromLegacyConnectorManifest({ ...legacy, protocol_version: "0.3.0" }, attribution),
     UNSUPPORTED_PROFILE_VERSION_REGEX
   );
 });

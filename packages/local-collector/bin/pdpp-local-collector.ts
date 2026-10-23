@@ -39,6 +39,12 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  collectionProfileDeclarationError,
+  isConnectorProtocolCapabilityArray,
+  RUN_COVERAGE_V1_CAPABILITY,
+  type ConnectorProtocolCapability,
+} from "@pdpp/connector-protocol";
+import {
   buildConnectScopeRequest,
   type ConnectScopeChoice,
   ConnectScopeValidationError,
@@ -3275,28 +3281,50 @@ export async function prepareConnectorSpec(
   return spec;
 }
 
-/** Request store evidence only for a verified 0.3.0 profile with complete selected inventories. */
+/** Bind the elective evidence extension to a supported base and verified manifest inventory. */
 export function bindOptionalRunCoverageToRelease(
   spec: CollectorConnectorSpec,
   pin: Pick<CollectionProfilePin, "digest">,
   rawProfile: unknown
 ): CollectorConnectorSpec {
   if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) return spec;
-  const profile = rawProfile as { protocol_version?: unknown; streams?: unknown };
-  if (profile.protocol_version !== "0.3.0" || !Array.isArray(profile.streams)) return spec;
+  const profile = rawProfile as { protocol_capabilities?: unknown; protocol_version?: unknown; streams?: unknown };
+  const profileVersion = profile.protocol_version === undefined ? "0.1.0" : profile.protocol_version;
+  const rawCapabilities = profile.protocol_capabilities === undefined ? [] : profile.protocol_capabilities;
+  const capabilities = isConnectorProtocolCapabilityArray(rawCapabilities) ? rawCapabilities : [];
+  const profileStreams = Array.isArray(profile.streams) ? profile.streams : [];
+  const declaresCoverageStores = profileStreams.some(
+    (stream) => stream !== null && typeof stream === "object" && !Array.isArray(stream) && Object.hasOwn(stream, "coverage_stores")
+  );
+  const baseSpec: CollectorConnectorSpec = {
+    ...spec,
+    collectionProfileVersion: profileVersion,
+    declaresCoverageStores,
+    protocol_capabilities: rawCapabilities as readonly ConnectorProtocolCapability[],
+  };
+  if (!Array.isArray(profile.streams)) return baseSpec;
   const inventory = new Map<string, readonly string[]>();
   for (const value of profile.streams) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return spec;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
     const stream = value as { name?: unknown; coverage_stores?: unknown };
-    if (typeof stream.name !== "string" || inventory.has(stream.name)) return spec;
+    if (typeof stream.name !== "string" || inventory.has(stream.name)) {
+      return { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
+    }
     if (Array.isArray(stream.coverage_stores) && stream.coverage_stores.length > 0 &&
       stream.coverage_stores.every((store) => typeof store === "string" && store.trim())) {
       inventory.set(stream.name, stream.coverage_stores as readonly string[]);
     }
   }
-  if (!spec.streams.every((stream) => inventory.has(stream))) return spec;
+  const coverageSpec = { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
+  if (
+    collectionProfileDeclarationError(profileVersion, rawCapabilities, declaresCoverageStores) !== null ||
+    !capabilities.includes(RUN_COVERAGE_V1_CAPABILITY) ||
+    !spec.streams.every((stream) => inventory.has(stream))
+  ) {
+    return coverageSpec;
+  }
   return {
-    ...spec,
+    ...coverageSpec,
     artifactDigest: pin.digest,
     manifestFingerprint: hashCanonicalJson(rawProfile),
     runCoverageVersion: 1,

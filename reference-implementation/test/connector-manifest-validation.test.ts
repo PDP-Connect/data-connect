@@ -39,8 +39,8 @@ const TOP_LEVEL_REGEX_27 =
   /capabilities\.proven\.local_collector=true requires runtime_requirements\.bindings\.filesystem/;
 const TOP_LEVEL_REGEX_28 = /credential_capture field 'password' is a secret field .* with no label/;
 const TOP_LEVEL_REGEX_29 = /credential_capture field 'password' is a secret field with zero env aliases/;
-const PROFILE_VERSION_PATTERN = /protocol_version must be one of 0\.1\.0, 0\.2\.0, 0\.3\.0, received 0\.4\.0/;
-const PROFILE_0_3_0_CAPABILITY_PATTERN = /protocol_capabilities RUN_COVERAGE_V1 require protocol_version 0\.3\.0/;
+const PROFILE_VERSION_PATTERN = /protocol_version must be one of 0\.1\.0, 0\.2\.0, received 0\.4\.0/;
+const COVERAGE_STORES_CAPABILITY_PATTERN = /coverage_stores requires protocol_capabilities RUN_COVERAGE_V1/;
 const PROFILE_0_2_0_CAPABILITY_PATTERN = /protocol_capabilities DETAIL_COVERAGE_KEY_SETS require protocol_version 0\.2\.0/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
 
@@ -218,40 +218,54 @@ test("validateBlobRefSchemaDeclaration rejects non-object, missing props, wrong 
   assert.throws(() => validateBlobRefSchemaDeclaration(stream, noRequired, "invalid_request"), TOP_LEVEL_REGEX_5);
 });
 
-// Collection Profile Sections 3.1 and 3.4 at registration: 0.1.0, 0.2.0 or
-// 0.3.0, known capability names, a 0.2.0 capability only at 0.2.0 or later,
-// and RUN_COVERAGE_V1 only at 0.3.0. A manifest
-// without protocol_version is checked as 0.1.0. The stored-manifest read path
-// skips this check so a manifest already stored stays readable.
-test("validateConnectorManifest enforces the Collection Profile declaration at registration only", () => {
+// The runtime refuses 0.3.0 until it implements the whole profile. RUN_COVERAGE_V1
+// remains an elective extension over supported 0.1.0/0.2.0 bases, and any
+// coverage_stores declaration requires that capability. The stored-manifest
+// read path skips this registration check so existing rows stay readable.
+test("validateConnectorManifest refuses 0.3.0 until the whole profile is implemented", () => {
   const keySets = { protocol_capabilities: ["DETAIL_COVERAGE_KEY_SETS"] };
   assert.doesNotThrow(() =>
     validateConnectorManifest({ ...manifestWithStream(), ...keySets, protocol_version: "0.2.0" })
   );
   assert.doesNotThrow(() => validateConnectorManifest({ ...manifestWithStream(), protocol_capabilities: ["BLOB"] }));
-  assert.doesNotThrow(() =>
-    validateConnectorManifest({
-      ...manifestWithStream(),
-      protocol_capabilities: ["RUN_COVERAGE_V1"],
-      protocol_version: "0.3.0",
-    })
-  );
   const rejected: [Record<string, unknown>, RegExp][] = [
     [{ protocol_version: "0.4.0" }, PROFILE_VERSION_PATTERN],
-    [{ protocol_capabilities: ["RUN_COVERAGE_V1"], protocol_version: "0.2.0" }, PROFILE_0_3_0_CAPABILITY_PATTERN],
+    [{ protocol_version: "0.3.0" }, /protocol_version must be one of 0\.1\.0, 0\.2\.0/],
     [{ ...keySets, protocol_version: "0.1.0" }, PROFILE_0_2_0_CAPABILITY_PATTERN],
     [keySets, PROFILE_0_2_0_CAPABILITY_PATTERN],
     [{ protocol_capabilities: ["FORGED"], protocol_version: "0.2.0" }, UNKNOWN_CAPABILITY_PATTERN],
     [{ protocol_capabilities: null, protocol_version: "0.2.0" }, UNKNOWN_CAPABILITY_PATTERN],
   ];
   for (const [fields, pattern] of rejected) {
-    const manifest = { ...manifestWithStream(), ...fields };
+    const manifest = {
+      ...manifestWithStream(),
+      ...fields,
+    };
     assert.throws(() => validateConnectorManifest(manifest), pattern, JSON.stringify(fields));
     assert.doesNotThrow(
       () => validateConnectorManifest(manifest, "connector_invalid", { skipCollectionProfileCheck: true }),
       JSON.stringify(fields)
     );
   }
+});
+
+test("validateConnectorManifest refuses coverage_stores without RUN_COVERAGE_V1 at registration", () => {
+  const manifest = {
+    ...manifestWithStream({ coverage_stores: ["messages"] }),
+    protocol_capabilities: [],
+    protocol_version: "0.2.0",
+  };
+  assert.throws(() => validateConnectorManifest(manifest), COVERAGE_STORES_CAPABILITY_PATTERN);
+});
+
+test("validateConnectorManifest accepts coverage_stores with RUN_COVERAGE_V1 on base profile 0.2.0", () => {
+  assert.doesNotThrow(() =>
+    validateConnectorManifest({
+      ...manifestWithStream({ coverage_stores: ["messages"] }),
+      protocol_capabilities: ["RUN_COVERAGE_V1"],
+      protocol_version: "0.2.0",
+    })
+  );
 });
 
 test("validateConnectorManifest accepts valid stream evidence declarations", () => {

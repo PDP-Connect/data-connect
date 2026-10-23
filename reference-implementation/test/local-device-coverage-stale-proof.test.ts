@@ -81,7 +81,8 @@ const CSRF_FIELD_PATTERN = /<input type="hidden" name="_csrf" value="([^"]+)"\s*
 // an unnegotiated run leaves the spec unbound.
 const PROFILE = {
   connector_id: CONNECTOR_ID,
-  protocol_version: "0.3.0",
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+  protocol_version: "0.2.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },

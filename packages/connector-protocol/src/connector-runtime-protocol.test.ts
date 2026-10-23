@@ -346,23 +346,22 @@ test("the capability vocabulary knows DETAIL_COVERAGE_KEY_SETS and OBSERVATION",
   ]);
 });
 
-// RUN_COVERAGE_V1 remains a known required capability when a connector
-// declares it; profile 0.3.0 does not require every connector to declare it.
-test("RUN_COVERAGE_V1 is a known, required capability", () => {
+// RUN_COVERAGE_V1 is an elective extension. A runtime that lacks it still
+// starts the connector and omits store evidence for the run.
+test("RUN_COVERAGE_V1 is known and elective", () => {
   assert.equal(isConnectorProtocolCapabilityArray(["RUN_COVERAGE_V1"]), true);
-  assert.deepEqual(unsupportedRequiredProtocolCapabilities(["RUN_COVERAGE_V1"], []), ["RUN_COVERAGE_V1"]);
+  assert.deepEqual(unsupportedRequiredProtocolCapabilities(["RUN_COVERAGE_V1"], []), []);
   assert.deepEqual(unsupportedRequiredProtocolCapabilities(["RUN_COVERAGE_V1"], ["RUN_COVERAGE_V1"]), []);
 });
 
-// Section 3.4: a runtime that does not advertise DETAIL_COVERAGE_KEY_SETS
-// still starts a connector that declares it. Every other declared capability
+// Elective capabilities never block spawn. Every other declared capability
 // is required: a runtime that does not advertise it must not start the
 // connector.
-test("an advisory capability is never unsupported; a required one is unsupported unless advertised", () => {
+test("elective capabilities never block spawn; a required one needs advertisement", () => {
   assert.deepEqual(unsupportedRequiredProtocolCapabilities(["DETAIL_COVERAGE_KEY_SETS"], []), []);
   assert.deepEqual(
     unsupportedRequiredProtocolCapabilities(
-      ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "STREAM_EVIDENCE", "BLOB"],
+      ["DETAIL_COVERAGE_KEY_SETS", "RUN_COVERAGE_V1", "OBSERVATION", "STREAM_EVIDENCE", "BLOB"],
       new Set(["STREAM_EVIDENCE"] as const)
     ),
     ["OBSERVATION", "BLOB"]
@@ -371,22 +370,22 @@ test("an advisory capability is never unsupported; a required one is unsupported
   assert.deepEqual(unsupportedRequiredProtocolCapabilities([], []), []);
 });
 
-// Section 3.1: protocol_version is the Collection Profile version, not
-// CONNECTOR_PROTOCOL_VERSION. RUN_COVERAGE_V1 is only valid in 0.3.0.
-test("collectionProfileDeclarationError accepts profile versions and gates capabilities by version", () => {
-  assert.deepEqual([...COLLECTION_PROFILE_VERSIONS], ["0.1.0", "0.2.0", "0.3.0"]);
+// protocol_version names the supported base profile; RUN_COVERAGE_V1 is an
+// elective extension over either accepted base.
+test("collectionProfileDeclarationError gates base versions and coverage declarations", () => {
+  assert.deepEqual([...COLLECTION_PROFILE_VERSIONS], ["0.1.0", "0.2.0"]);
   assert.equal(collectionProfileDeclarationError("0.1.0", undefined), null);
   assert.equal(collectionProfileDeclarationError("0.1.0", []), null);
   assert.equal(collectionProfileDeclarationError("0.1.0", ["STREAM_EVIDENCE", "BLOB"]), null);
+  assert.equal(collectionProfileDeclarationError("0.1.0", ["RUN_COVERAGE_V1"], true), null);
   assert.equal(collectionProfileDeclarationError("0.2.0", undefined), null);
   assert.equal(collectionProfileDeclarationError("0.2.0", ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION"]), null);
   assert.equal(collectionProfileDeclarationError("0.2.0", ["STREAM_EVIDENCE"]), null);
-  assert.equal(collectionProfileDeclarationError("0.3.0", ["RUN_COVERAGE_V1"]), null);
-  assert.equal(collectionProfileDeclarationError("0.3.0", []), null);
+  assert.equal(collectionProfileDeclarationError("0.2.0", ["RUN_COVERAGE_V1"], true), null);
+  assert.match(String(collectionProfileDeclarationError("0.3.0", ["RUN_COVERAGE_V1"])), /protocol_version/);
   assert.match(String(collectionProfileDeclarationError("0.1.0", ["DETAIL_COVERAGE_KEY_SETS"])), /0\.2\.0/);
   assert.match(String(collectionProfileDeclarationError("0.1.0", ["OBSERVATION"])), /OBSERVATION/);
-  assert.match(String(collectionProfileDeclarationError("0.1.0", ["RUN_COVERAGE_V1"])), /0\.3\.0/);
-  assert.match(String(collectionProfileDeclarationError("0.2.0", ["RUN_COVERAGE_V1"])), /0\.3\.0/);
+  assert.match(String(collectionProfileDeclarationError("0.1.0", [], true)), /coverage_stores.*RUN_COVERAGE_V1/);
   assert.match(String(collectionProfileDeclarationError(undefined, [])), /protocol_version/);
   assert.match(String(collectionProfileDeclarationError("0.2.0", ["FORGED"])), /protocol_capabilities/);
   assert.match(String(collectionProfileDeclarationError("0.2.0", null)), /protocol_capabilities/);

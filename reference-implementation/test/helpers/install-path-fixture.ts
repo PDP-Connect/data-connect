@@ -27,7 +27,8 @@ export const INSTALL_PATH_PROFILE = {
   connector_id: INSTALL_PATH_CONNECTOR_ID,
   connector_key: INSTALL_PATH_CONNECTOR_KEY,
   display_name: "Claude Code (install-path journey fixture)",
-  protocol_version: "0.3.0",
+  protocol_capabilities: ["RUN_COVERAGE_V1"],
+  protocol_version: "0.2.0",
   streams: [
     { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
     { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },

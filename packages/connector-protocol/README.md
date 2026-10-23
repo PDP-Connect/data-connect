@@ -64,16 +64,21 @@ arrives as `unknown` JSON.
 Connectors declare protocol capabilities with `protocol_capabilities`. The
 runtime advertises `protocolVersion` and `protocolCapabilities`, and rejects
 unknown names and missing required capabilities before spawning a connector
-(`unsupportedRequiredProtocolCapabilities`). `DETAIL_COVERAGE_KEY_SETS` is
-advisory: a runtime that does not advertise it still starts the connector.
-`RUN_COVERAGE_V1` is a required capability when a connector declares it. A
-manifest `protocol_version` is the Collection Profile version, `0.1.0`,
-`0.2.0`, or `0.3.0`; a manifest that declares `DETAIL_COVERAGE_KEY_SETS` or
-`OBSERVATION` declares `0.2.0`, and one that declares `RUN_COVERAGE_V1`
-declares `0.3.0` (`collectionProfileDeclarationError`). The collector requests
-`START.run_coverage_version` only for a pinned `0.3.0` profile when every
-requested stream declares a non-empty `coverage_stores` inventory. `SKIP_RESULT.boundary_claim` is optional, does not require a
-protocol capability, and is disclosure-only: it never affects, reduces, or
+(`unsupportedRequiredProtocolCapabilities`). `DETAIL_COVERAGE_KEY_SETS` and
+`RUN_COVERAGE_V1` are elective: a runtime that does not advertise either still
+starts the connector. Store evidence is a separately versioned extension
+(`coverage.version: 1`) that applies to base profiles `0.1.0`, `0.2.0`, and
+`0.3.0`; declaring `RUN_COVERAGE_V1` does not make a runtime conformant to a
+base profile it does not implement. This runtime accepts base profiles `0.1.0`
+and `0.2.0`, and refuses `0.3.0` until it implements the full profile. A
+manifest that declares `DETAIL_COVERAGE_KEY_SETS` or `OBSERVATION` must use
+base profile `0.2.0` on this runtime, while a stream that declares `coverage_stores` must also
+declare `RUN_COVERAGE_V1` (`collectionProfileDeclarationError`). The collector
+requests `START.run_coverage_version` only when the manifest declares the
+extension, uses a supported base profile, inventories every requested stream,
+and the effective scope is bound in `collection_scope`.
+`SKIP_RESULT.boundary_claim` is optional, does not require a protocol
+capability, and is disclosure-only: it never affects, reduces, or
 excludes anything from the servable denominator, coverage calculation, or
 connection/system health rollup, even when an independently recorded
 coverage horizon agrees with it.
