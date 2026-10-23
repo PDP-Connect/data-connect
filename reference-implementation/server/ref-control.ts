@@ -2889,9 +2889,37 @@ function coverageClassifyingRun(
   lastSuccessfulRun: ConnectorRunSummary | null,
   latestSettledRun: ConnectorRunSummary | null = lastRun
 ): ConnectorRunSummary | null {
-  if (latestSettledRun?.local_terminal_coverage?.coverageEligibilityReason === NON_LOCAL_DEVICE_COVERAGE_REASON) {
+  if (isDeviceTerminalRun(latestSettledRun)) {
     return null;
   }
+  const selected = selectCoverageClassifyingRun(lastRun, lastSuccessfulRun, latestSettledRun);
+  return isDeviceTerminalRun(selected) ? null : selected;
+}
+
+/**
+ * A run recorded by a device terminal commit. The stored coverage-eligibility
+ * marker is not the authority: a device terminal written before the marker
+ * existed, or while the connection was local_device, carries none. Every
+ * device terminal commit stamps the connection's `collection_revision` (no
+ * server run does), so that stamp identifies it. Local-device connections
+ * quarantine these rows before this point; any other source kind has no
+ * device-coverage authority, so such a run is never its coverage evidence.
+ */
+function isDeviceTerminalRun(run: ConnectorRunSummary | null): boolean {
+  if (run === null) {
+    return false;
+  }
+  return (
+    typeof run.collection_revision === "number" ||
+    run.local_terminal_coverage?.coverageEligibilityReason === NON_LOCAL_DEVICE_COVERAGE_REASON
+  );
+}
+
+function selectCoverageClassifyingRun(
+  lastRun: ConnectorRunSummary | null,
+  lastSuccessfulRun: ConnectorRunSummary | null,
+  latestSettledRun: ConnectorRunSummary | null
+): ConnectorRunSummary | null {
   const settledIsIntervening =
     latestSettledRun !== null &&
     latestSettledRun !== lastSuccessfulRun &&

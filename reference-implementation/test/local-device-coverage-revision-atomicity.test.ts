@@ -27,7 +27,10 @@ import { validateResponse } from "@pdpp/reference-contract";
 import type { Controller } from "../runtime/controller.ts";
 
 import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
-import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
+import {
+  reconcileDirtyConnectorSummaryEvidence,
+  STREAM_FACTS_FOLD_LOGIC_VERSION,
+} from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { startServer } from "../server/index.ts";
@@ -1667,6 +1670,119 @@ laneTest(
       );
     }
     await assertRetired(lane, "a browser_collector terminal record projects no store-coverage positive");
+  }
+);
+
+/** Move the connection to another source kind, as an owner or migration would, and queue its evidence for repair. */
+async function changeSourceKind(lane: Lane, sourceKind: string): Promise<void> {
+  const id = lane.enrolled.connector_instance_id;
+  await sql(
+    lane,
+    "UPDATE connector_instances SET source_kind = ? WHERE connector_instance_id = ?",
+    "UPDATE connector_instances SET source_kind = $1 WHERE connector_instance_id = $2",
+    [sourceKind, id]
+  );
+  await sql(
+    lane,
+    "UPDATE connector_summary_evidence SET dirty = 1 WHERE connector_instance_id = ?",
+    "UPDATE connector_summary_evidence SET dirty = 1 WHERE connector_instance_id = $1",
+    [id]
+  );
+}
+
+/** The folded stream-fact cache the evidence row holds, as stored. */
+async function foldedStreamFacts(lane: Lane): Promise<{ readonly streams: string[]; readonly version: number | null }> {
+  const [row] = await sql(
+    lane,
+    "SELECT stream_latest_facts_json AS facts, stream_facts_fold_version AS version FROM connector_summary_evidence WHERE connector_instance_id = ?",
+    "SELECT stream_latest_facts_json::text AS facts, stream_facts_fold_version AS version FROM connector_summary_evidence WHERE connector_instance_id = $1",
+    [lane.enrolled.connector_instance_id]
+  );
+  assert.ok(row, "the connection has an evidence row");
+  const facts = row.facts === null ? {} : (JSON.parse(String(row.facts)) as Record<string, unknown>);
+  return { streams: Object.keys(facts).sort(), version: row.version === null ? null : Number(row.version) };
+}
+
+/** Pretend an earlier fold version built the cache, and mirror the source kind so no evidence repair fires. */
+async function ageFoldCache(lane: Lane, sourceKind: string): Promise<void> {
+  await sql(
+    lane,
+    "UPDATE connector_summary_evidence SET source_kind = ?, stream_facts_fold_version = ?, dirty = 0 WHERE connector_instance_id = ?",
+    "UPDATE connector_summary_evidence SET source_kind = $1, stream_facts_fold_version = $2, dirty = 0 WHERE connector_instance_id = $3",
+    [sourceKind, STREAM_FACTS_FOLD_LOGIC_VERSION - 1, lane.enrolled.connector_instance_id]
+  );
+}
+
+/** The per-stream coverage conditions the owner's collection report shows for the connection. */
+async function reportedConditions(lane: Lane): Promise<Record<string, unknown>> {
+  await reconcileDirtyConnectorSummaryEvidence(null);
+  const summary = (await listConnectorSummaries()).find(
+    (row) => row.connector_instance_id === lane.enrolled.connector_instance_id
+  );
+  assert.ok(summary, "the lane's connection is projected");
+  return Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition]));
+}
+
+const UNKNOWN_CONDITIONS = { messages: "unknown", sessions: "unknown" };
+
+async function assertNoDeviceCoverage(lane: Lane, message: string): Promise<void> {
+  assert.deepEqual(await reportedConditions(lane), UNKNOWN_CONDITIONS, `${message}: no stream is credited`);
+  await assertRetired(lane, message);
+  assert.deepEqual((await foldedStreamFacts(lane)).streams, [], `${message}: the fold cache credits no stream`);
+}
+
+laneTest(
+  "source kind: an unmarked device terminal credits nothing to a browser_collector connection, whatever the cache holds",
+  async (lane) => {
+    await commitProof(lane, "run-unmarked");
+    await assertCovered(lane, "run-unmarked", "the device terminal covers its local_device connection");
+    assert.deepEqual((await foldedStreamFacts(lane)).streams, ["messages", "sessions"], "the fold cached its facts");
+    // The terminal carries no coverage_eligibility_reason: it predates the marker. The cache was folded by an
+    // earlier fold version that accepted it.
+    await changeSourceKind(lane, "browser_collector");
+    await ageFoldCache(lane, "browser_collector");
+    await assertNoDeviceCoverage(lane, "an unmarked device terminal on a browser_collector connection");
+    const { version } = await foldedStreamFacts(lane);
+    assert.equal(version, STREAM_FACTS_FOLD_LOGIC_VERSION, "the fold replayed the cache");
+  }
+);
+
+laneTest(
+  "source kind: a connection that stops being local_device projects its earlier device terminal as unknown",
+  async (lane) => {
+    await commitProof(lane, "run-was-local");
+    await assertCovered(lane, "run-was-local", "the device terminal covers its local_device connection");
+    await changeSourceKind(lane, "browser_collector");
+    await assertNoDeviceCoverage(lane, "a device terminal stored while the connection was local_device");
+  }
+);
+
+laneTest("source kind: an exact replay returns the stored receipt and grants no coverage", async (lane) => {
+  assert.equal((await postRunStart(lane, "run-replayed")).status, 201);
+  await markDrained(lane);
+  const body = await terminalWireBody(lane, "run-replayed");
+  const committed = await postTerminal(lane, body);
+  assert.equal(committed.status, 201, JSON.stringify(committed.body));
+  await assertCovered(lane, "run-replayed", "the device terminal covers its local_device connection");
+
+  await changeSourceKind(lane, "browser_collector");
+  const replay = await postTerminal(lane, body);
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.deepEqual(replay.body, committed.body, "the replay returns the stored receipt unchanged");
+  assert.equal((await runRows(lane, "run-replayed")).events, 1, "the replay writes no second terminal event");
+  await assertNoDeviceCoverage(lane, "a replayed receipt is not a coverage grant");
+});
+
+laneTest(
+  "source kind: a local_device connection keeps its device coverage when its fold cache is replayed",
+  async (lane) => {
+    await commitProof(lane, "run-local");
+    await ageFoldCache(lane, "local_device");
+    await assertCovered(lane, "run-local", "the replayed fold keeps the local_device positive");
+    assert.deepEqual(await foldedStreamFacts(lane), {
+      streams: ["messages", "sessions"],
+      version: STREAM_FACTS_FOLD_LOGIC_VERSION,
+    });
   }
 );
 

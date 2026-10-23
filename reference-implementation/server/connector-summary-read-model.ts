@@ -1259,9 +1259,9 @@ const TERMINAL_TYPES_SQL = TERMINAL_RUN_EVENT_TYPES.map((t) => `'${t}'`).join(",
 // tests previously hardcoded the then-current number and had to be edited on
 // every semantics bump, which makes a stale literal — not a real regression —
 // look like a failure.
-// Version 7 drops device coverage rejected for its source kind and replays
+// Version 8 drops device coverage rejected for its current source kind and replays
 // older fold rows so cached stream facts cannot retain that claim.
-export const STREAM_FACTS_FOLD_LOGIC_VERSION = 7;
+export const STREAM_FACTS_FOLD_LOGIC_VERSION = 8;
 // A route may retry a replay once after a concurrent writer wins its CAS.
 // This is deliberately small: each retry rereads the durable baseline, and
 // persistent contention fails closed in memory rather than spinning or
@@ -1401,7 +1401,7 @@ function createStreamFactsFoldStore() {
       }) {
         const { sql: scopeSql, params: scopeParams } = buildTerminalScopeFragmentPostgres(scope, 4);
         const result = await postgresQuery(
-          `SELECT event_seq, occurred_at, run_id, manifest_generation, data_json::text AS data_json
+          `SELECT event_seq, occurred_at, run_id, actor_type, manifest_generation, data_json::text AS data_json
              FROM spine_events
             WHERE event_type IN (${TERMINAL_TYPES_SQL})
               AND event_seq > $1 AND event_seq <= $2${scopeSql}
@@ -1509,7 +1509,7 @@ function createStreamFactsFoldStore() {
       const indexHint = terminalScopeIndexHintSqlite(scope);
       return getDb()
         .prepare(
-          `SELECT event_seq, occurred_at, run_id, manifest_generation, data_json
+          `SELECT event_seq, occurred_at, run_id, actor_type, manifest_generation, data_json
              FROM spine_events${indexHint}
             WHERE event_type IN (${TERMINAL_TYPES_SQL})
               AND event_seq > ? AND event_seq <= ?${scopeSql}
@@ -1892,6 +1892,7 @@ function foldTerminalEventFacts(
   factsByInstance: Map<string, Record<string, StoredStreamFactEntry>>,
   checkpointByInstance: Map<string, number | null>,
   generationByInstance: ReadonlyMap<string, number>,
+  sourceKindByInstance: ReadonlyMap<string, string>,
   generationCurrentByInstance: Map<string, boolean>,
   row: Row,
   counters: { folded: number; refused: number }
@@ -1910,6 +1911,10 @@ function foldTerminalEventFacts(
   if (!instanceId) {
     // Legacy connector-wide event: cannot be attributed to exactly one
     // connection, so it is refused rather than mixed across accounts.
+    counters.refused += 1;
+    return;
+  }
+  if (row.actor_type === "local_device" && sourceKindByInstance.get(instanceId) !== "local_device") {
     counters.refused += 1;
     return;
   }
@@ -2469,6 +2474,7 @@ async function drainTerminalEventBatches({
   factsByInstance,
   checkpointByInstance,
   generationByInstance,
+  sourceKindByInstance,
   generationCurrentByInstance,
   counters,
   ownMaxSeqByInstance,
@@ -2480,6 +2486,7 @@ async function drainTerminalEventBatches({
   factsByInstance: Map<string, Record<string, StoredStreamFactEntry>>;
   checkpointByInstance: Map<string, number | null>;
   generationByInstance: ReadonlyMap<string, number>;
+  sourceKindByInstance: ReadonlyMap<string, string>;
   generationCurrentByInstance: Map<string, boolean>;
   counters: { folded: number; refused: number };
   ownMaxSeqByInstance: ReadonlyMap<string, number>;
@@ -2534,6 +2541,7 @@ async function drainTerminalEventBatches({
           factsByInstance,
           checkpointByInstance,
           generationByInstance,
+          sourceKindByInstance,
           generationCurrentByInstance,
           row,
           counters
@@ -2778,10 +2786,12 @@ async function foldConnectorSummaryStreamFactsOnce(
   // scan.
   const ownMaxSeqByInstance = new Map<string, number>();
   const startCursorByInstance = new Map<string, number>();
+  const sourceKindByInstance = new Map<string, string>();
   for (const row of participants) {
     const instanceId = String(row.connector_instance_id);
     ownMaxSeqByInstance.set(instanceId, maxSeqByInstance.get(instanceId) ?? maxSeq);
     startCursorByInstance.set(instanceId, checkpointByInstance.get(instanceId) ?? 0);
+    sourceKindByInstance.set(instanceId, String(row.source_kind ?? ""));
   }
   const drain = await drainTerminalEventBatches({
     checkpointByInstance,
@@ -2790,6 +2800,7 @@ async function foldConnectorSummaryStreamFactsOnce(
     factsByInstance,
     foldStore,
     generationByInstance,
+    sourceKindByInstance,
     generationCurrentByInstance,
     maxEvents: typeof options.maxEvents === "number" ? options.maxEvents : null,
     ownMaxSeqByInstance,
