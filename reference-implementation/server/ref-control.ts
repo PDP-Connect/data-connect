@@ -3488,7 +3488,8 @@ function proofAgeFreshnessOverride(
 export function refineConnectionHealthWithCollectionReport(
   healthInput: Parameters<typeof projectConnectorSummaryConnectionHealth>[0],
   initialConnectionHealth: ConnectionHealthSnapshot,
-  collectionReport: readonly CollectionReportEntry[]
+  collectionReport: readonly CollectionReportEntry[],
+  options: { readonly promoteToComplete?: boolean } = {}
 ): ConnectionHealthSnapshot {
   const lastRun = filterRunGapsProvenCompleteByReport(healthInput.lastRun ?? null, collectionReport);
   const lastSuccessfulRun = filterRunGapsProvenCompleteByReport(
@@ -3509,11 +3510,15 @@ export function refineConnectionHealthWithCollectionReport(
   const reportAlignedHealth = runEvidenceRefined
     ? projectConnectorSummaryConnectionHealth(refinedHealthInput)
     : initialConnectionHealth;
-  const coverageOverride = rollupCollectionReportCoverageOverride(
+  const rolledUpOverride = rollupCollectionReportCoverageOverride(
     reportAlignedHealth.axes.coverage,
     collectionReport,
     healthInput.manifestStreams
   );
+  // A caller that cannot date the proof (a local-device connection with no
+  // as-of) must not see the connection lifted to complete by its streams.
+  const coverageOverride =
+    rolledUpOverride === "complete" && options.promoteToComplete === false ? null : rolledUpOverride;
   // The axis the connection actually settles on: the override when the report
   // degraded/upgraded it, otherwise the pre-report axis unchanged. Computing
   // `unfillableAccounted` against THIS resolved axis (not blindly whenever a
@@ -4730,8 +4735,7 @@ function fenceTerminalCoverageProof(
   coverage: ReturnType<typeof terminalCoverageByStream>,
   proof: ReturnType<typeof localProofRun>,
   fence: LocalCoverageRevisionFence | null | undefined,
-  latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null,
-  manifestStreamCount: number
+  latestSettledRun: Pick<ConnectorRunSummary, "collection_revision" | "run_id" | "scheduler_managed"> | null
 ): { asOf: LocalCoverageAsOf | null; coverage: ReturnType<typeof terminalCoverageByStream> } {
   const runOrder = fence?.runOrder ?? null;
   // A settled device run record with no revision cannot be ordered against a
@@ -4766,15 +4770,15 @@ function fenceTerminalCoverageProof(
       coverage: coverage === null ? null : { bindingReason: coverage.bindingReason, conditions: new Map() },
     };
   }
-  // The as-of qualifies a whole-connection positive: every manifest stream
-  // covered and no unknown store. A subset or an unknown leaves the per-stream
-  // conditions in place but names no run.
-  const conditions = [...coverage.conditions.values()];
-  const wholeConnectionKnown =
-    conditions.length === manifestStreamCount && conditions.every((condition) => condition !== "unknown");
+  // The as-of dates every per-stream condition the proof supports: it is
+  // present whenever at least one stream condition is not unknown, so a shown
+  // Complete chip always names its run. A subset proof is dated for the streams
+  // it covers; the connection axis still needs every required stream complete.
+  // An unbound release or a proof that supports no stream names no run.
+  const supportsAStream = [...coverage.conditions.values()].some((condition) => condition !== "unknown");
   return {
     asOf:
-      coverage.bindingReason === null && wholeConnectionKnown
+      coverage.bindingReason === null && supportsAStream
         ? {
             artifact_digest: proof.artifactDigest,
             collection_revision: proof.collectionRevision,
@@ -6791,8 +6795,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
         ),
         proofRun,
         input.localRevisionFence,
-        fallbackSettledRun,
-        manifest.streams?.length ?? 0
+        fallbackSettledRun
       )
     : null;
   const terminalCoverage = fencedTerminal?.coverage ?? null;
@@ -6931,7 +6934,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
           ...entry,
           checkpoint: "committed",
           coverage_condition: coverageCondition,
-          evidence_as_of: fallbackSettledRun?.last_at ?? null,
+          evidence_as_of: proofRun?.run.last_at ?? null,
           forward_disposition: deriveForwardDisposition({
             attentionOpen: initialConnectionHealth.axes.attention !== "none",
             coverage: coverageCondition,
@@ -6949,10 +6952,13 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
   // freshness anchor (oldest required-stream proof). The owner-facing
   // `freshness` payload field keeps reporting record recency; only the
   // health projection ages against the proof anchor.
+  // A local-device connection is never lifted to complete by its streams alone:
+  // "complete" there is a fact about one proof run, so it needs the as-of.
   const connectionHealth = refineConnectionHealthWithCollectionReport(
     healthInput,
     initialConnectionHealth,
-    collectionReport
+    collectionReport,
+    { promoteToComplete: !localDeviceBacked || coverageAsOf !== null }
   );
   const recoveredCount = detailGaps.recovered;
   // A non-current `record_snapshot` means the stored counts predate a failure,

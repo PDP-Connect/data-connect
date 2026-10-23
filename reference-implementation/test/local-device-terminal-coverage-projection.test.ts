@@ -372,6 +372,54 @@ test("selected-stream v2 proof cannot cover omitted manifest streams", async () 
   });
 });
 
+async function rewriteSeededFacts(
+  mutate: (facts: Record<string, unknown> & { collection_facts: Record<string, any> }) => void
+) {
+  const row = getDb().prepare("SELECT facts_json FROM run_history WHERE run_id = ?").get("run_terminal_coverage") as {
+    facts_json: string;
+  };
+  const facts = JSON.parse(row.facts_json);
+  mutate(facts);
+  getDb()
+    .prepare("UPDATE run_history SET facts_json = ? WHERE run_id = ?")
+    .run(JSON.stringify(facts), "run_terminal_coverage");
+}
+
+test("a terminal stamped as not from a local-device connection never projects complete", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).axis, "complete");
+    await rewriteSeededFacts((facts) => {
+      facts.collection_facts.coverage_eligibility_reason = "connection_source_kind_not_local_device";
+    });
+    const result = await projectedCoverage();
+    assert.notEqual(result.axis, "complete");
+    assert.equal(result.asOf, null);
+    assert.deepEqual(result.conditions, {
+      messages: "unknown",
+      sessions: "unknown",
+    });
+  });
+});
+
+test("an unscoped run with a stream that lost its scope assertion proves nothing", async () => {
+  await withLocalConnection(async () => {
+    await seedTerminalCoverage("collected");
+    assert.equal((await projectedCoverage()).axis, "complete");
+    await rewriteSeededFacts((facts) => {
+      for (const fact of facts.collection_facts.streams) {
+        if (fact.stream === "messages") {
+          fact.scoped = false;
+        }
+      }
+    });
+    const result = await projectedCoverage();
+    assert.notEqual(result.axis, "complete");
+    assert.equal(result.asOf, null);
+    assert.equal(result.conditions.messages, "unknown");
+  });
+});
+
 test("v2 terminal proof for an old collection scope cannot cover the current scope", async () => {
   await withLocalConnection(async () => {
     await seedTerminalCoverage("collected");

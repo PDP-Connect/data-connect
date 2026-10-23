@@ -2795,6 +2795,10 @@ test("device-exporter diagnostics scope heartbeat, ingest, and local-collector g
     assert.equal(secondSource.outbox_diagnostics.dead_letter, 1);
     assert.equal(secondSource.outbox_diagnostics.oldest_pending_at, undefined);
     const diagnosticsJson = JSON.stringify(diagnostics);
+    // PR #553 retires the raw coverage inventory; the owner summary's coverage_as_of is the only claim.
+    assert.equal(diagnosticsJson.includes("local_collector_coverage"), false);
+    assert.equal(firstSource.local_collector_coverage, undefined);
+    assert.equal(secondSource.local_collector_coverage, undefined);
     assert.equal(diagnosticsJson.includes("top-secret-token"), false);
     assert.equal(diagnosticsJson.includes("source-secret"), false);
     assert.equal(diagnosticsJson.includes("session-cookie"), false);
