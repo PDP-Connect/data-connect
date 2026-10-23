@@ -135,6 +135,9 @@ const REASON_CODES = {
   // A source-attributed terminal event without a matching durable generation
   // is historical, never an empty/current fold result.
   TERMINAL_FACTS_HISTORICAL: "terminal_facts_historical",
+  // The cached terminal was folded under a different source kind than the
+  // current connector instance, so this read cannot treat it as evidence.
+  SOURCE_KIND_MISMATCH: "source_kind_mismatch",
   // A bounded replay lost its CAS race on every attempt. The route receives
   // an in-memory stale overlay instead of trusting the competing durable map.
   TERMINAL_FOLD_CONTENTION: "terminal_fold_contention",
@@ -244,6 +247,16 @@ export function normalizeSourceEventSeq(sourceEventSeq: unknown): number | null 
 }
 
 // ---------------------------------------------------------------------------
+/** Attach the canonical connection kind to a shaped evidence-row query. */
+function withCanonicalSourceKind(query: string): string {
+  return `SELECT evidence.*, instance.connector_instance_id AS canonical_connector_instance_id,
+                 instance.source_kind AS canonical_source_kind
+            FROM (${query}) AS evidence
+            LEFT JOIN connector_instances AS instance
+              ON instance.connector_instance_id = evidence.connector_instance_id
+            ORDER BY evidence.connector_instance_id ASC`;
+}
+
 function createConnectorSummaryStore() {
   if (isPostgresStorageBackend()) {
     return {
@@ -310,7 +323,8 @@ function createConnectorSummaryStore() {
           where = `WHERE connector_instance_id = ANY($${params.length}::text[])`;
         }
         const result = await postgresQuery(
-          `SELECT connector_instance_id, connector_id, display_name, status, source_kind,
+          withCanonicalSourceKind(
+            `SELECT connector_instance_id, connector_id, display_name, status, source_kind,
                   revoked_at, total_records, stream_count, last_record_updated_at,
                   stream_records_json, retained_bytes_json, total_retained_bytes,
                   record_checkpoint_json, manifest_fingerprint,
@@ -325,8 +339,8 @@ function createConnectorSummaryStore() {
                   manifest_generation, schedule_checkpoint, run_lifecycle_event_seq,
                   list_summary_projection_reason_code
              FROM connector_summary_evidence
-             ${where}
-             ORDER BY connector_instance_id ASC`,
+             ${where}`
+          ),
           params
         );
         return result.rows;
@@ -538,13 +552,11 @@ function createConnectorSummaryStore() {
                     CAST(source_revision AS TEXT) AS source_revision,
                     manifest_generation, schedule_checkpoint, run_lifecycle_event_seq,
                     list_summary_projection_reason_code`;
+      const selectEvidence = (where = "") =>
+        withCanonicalSourceKind(`SELECT ${columns} FROM connector_summary_evidence ${where}`);
       if (connectorInstanceId) {
         return db
-          .prepare(
-            `SELECT ${columns} FROM connector_summary_evidence
-              WHERE connector_instance_id = ?
-              ORDER BY connector_instance_id ASC`
-          )
+          .prepare(selectEvidence("WHERE connector_instance_id = ?"))
           .all(connectorInstanceId);
       }
       if (connectorInstanceIds) {
@@ -553,17 +565,11 @@ function createConnectorSummaryStore() {
         }
         const placeholders = connectorInstanceIds.map(() => "?").join(", ");
         return db
-          .prepare(
-            `SELECT ${columns} FROM connector_summary_evidence
-              WHERE connector_instance_id IN (${placeholders})
-              ORDER BY connector_instance_id ASC`
-          )
+          .prepare(selectEvidence(`WHERE connector_instance_id IN (${placeholders})`))
           .all(...connectorInstanceIds);
       }
       return [
-        ...iterateDynamicSqlAcknowledged<Row>(
-          `SELECT ${columns} FROM connector_summary_evidence ORDER BY connector_instance_id ASC`
-        ),
+        ...iterateDynamicSqlAcknowledged<Row>(selectEvidence()),
       ];
     },
     listPendingMaintenanceInstanceIds({ includeIncomplete, limit }: { includeIncomplete: boolean; limit: number }) {
@@ -763,8 +769,16 @@ async function bumpAllCanonicalEvidenceRevisions(): Promise<void> {
  * binary that actually wrote it, or any future binary at that version or
  * newer) still reads `terminal_facts_state` exactly as stored: `current`.
  */
-function shapeTerminalFacts(row: Row) {
+function shapeTerminalFacts(row: Row, sourceKindMatchesCanonical: boolean) {
   const eventSeq = row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq);
+  if (!sourceKindMatchesCanonical) {
+    return {
+      as_of: null,
+      event_seq: null,
+      reason_code: REASON_CODES.SOURCE_KIND_MISMATCH,
+      state: "unobserved",
+    };
+  }
   if (rowIsFoldLogicVersionAhead(row)) {
     return {
       as_of: row.computed_at || null,
@@ -848,6 +862,9 @@ function shapeSourceRevision(row: Row): {
 export function shapeEvidenceRow(row: Row) {
   const retainedBytesState = String(row.retained_bytes_state || "unobserved");
   const sourceRevision = shapeSourceRevision(row);
+  const sourceKindMatchesCanonical =
+    row.canonical_connector_instance_id === row.connector_instance_id &&
+    row.canonical_source_kind === row.source_kind;
   return {
     canonical_evidence_revision: String(row.canonical_evidence_revision ?? "0"),
     computed_at: row.computed_at || null,
@@ -886,11 +903,12 @@ export function shapeEvidenceRow(row: Row) {
     stream_count: Number(row.stream_count || 0),
     stream_facts_event_seq: row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq),
     // A cache folded under an older version credits no stream until replayed.
-    stream_latest_facts: rowIsFoldLogicVersionBehind(row)
-      ? null
-      : parseEvidenceJson(row.stream_latest_facts_json, null),
+    stream_latest_facts:
+      !sourceKindMatchesCanonical || rowIsFoldLogicVersionBehind(row)
+        ? null
+        : parseEvidenceJson(row.stream_latest_facts_json, null),
     stream_records: parseEvidenceJson(row.stream_records_json, []),
-    terminal_facts: shapeTerminalFacts(row),
+    terminal_facts: shapeTerminalFacts(row, sourceKindMatchesCanonical),
     total_records: Number(row.total_records || 0),
     total_retained_bytes: retainedBytesState === "current" ? Number(row.total_retained_bytes || 0) : null,
   };
@@ -1463,7 +1481,12 @@ function createStreamFactsFoldStore() {
             WHERE connector_instance_id = $1
               AND stream_facts_event_seq IS NOT DISTINCT FROM $4
               AND stream_facts_fold_version IS NOT DISTINCT FROM $8
-              AND source_kind IS NOT DISTINCT FROM $9`,
+              AND source_kind IS NOT DISTINCT FROM $9
+              AND EXISTS (
+                SELECT 1 FROM connector_instances
+                 WHERE connector_instance_id = $1
+                   AND source_kind IS NOT DISTINCT FROM $9
+              )`,
           [
             connectorInstanceId,
             factsJson,
@@ -1575,7 +1598,12 @@ function createStreamFactsFoldStore() {
             WHERE connector_instance_id = ?
               AND stream_facts_event_seq IS ?
               AND stream_facts_fold_version IS ?
-              AND source_kind IS ?`
+              AND source_kind IS ?
+              AND EXISTS (
+                SELECT 1 FROM connector_instances
+                 WHERE connector_instance_id = ?
+                   AND source_kind IS ?
+              )`
         )
         .run(
           factsJson,
@@ -1586,6 +1614,8 @@ function createStreamFactsFoldStore() {
           connectorInstanceId,
           baselineEventSeq,
           baselineFoldVersion,
+          baselineSourceKind,
+          connectorInstanceId,
           baselineSourceKind
         );
       return result.changes > 0;

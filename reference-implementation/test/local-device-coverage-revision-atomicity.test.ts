@@ -1920,6 +1920,81 @@ laneTest(
 );
 
 laneTest(
+  "source kind: current local-device evidence reads unknown after a canonical-only kind change before repair",
+  async (lane) => {
+    await commitProof(lane, "run-canonical-kind-changed");
+    await assertCovered(
+      lane,
+      "run-canonical-kind-changed",
+      "the local-device terminal initially covers the connection"
+    );
+    const id = lane.enrolled.connector_instance_id;
+    // Keep the evidence row clean and untouched: this is the read window before any repair or reconcile.
+    await sql(
+      lane,
+      "UPDATE connector_instances SET source_kind = 'account' WHERE connector_instance_id = ?",
+      "UPDATE connector_instances SET source_kind = 'account' WHERE connector_instance_id = $1",
+      [id]
+    );
+
+    const evidence = await getConnectorSummaryEvidence(id);
+    assert.ok(evidence, "the connection has shaped evidence");
+    const summary = (await listConnectorSummaries()).find((row) => row.connector_instance_id === id);
+    assert.ok(summary, "the list path projects the connection");
+    const detail = await getConnectorDetail(CONNECTOR_ID);
+    const detailHealth = detail.connection_health;
+    assert.ok(detailHealth, "the detail path projects connection health");
+    const diagnostics = await getOwnerConnectionDiagnostics(id);
+    assert.ok(diagnostics, "the diagnostics path projects the connection");
+
+    assert.deepEqual(
+      {
+        evidence: {
+          dirty: evidence.dirty,
+          sourceKind: evidence.source_kind,
+          streamFacts: evidence.stream_latest_facts,
+          terminalState: evidence.terminal_facts.state,
+          terminalReason: evidence.terminal_facts.reason_code,
+        },
+        list: {
+          coverage: summary.connection_health.axes.coverage,
+          conditions: Object.fromEntries(
+            summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition])
+          ),
+          asOf: summary.coverage_as_of,
+        },
+        detail: {
+          coverage: detailHealth.axes.coverage,
+          conditions: Object.fromEntries(
+            detail.collection_report.map((entry) => [entry.stream, entry.coverage_condition])
+          ),
+          asOf: detail.coverage_as_of,
+        },
+        diagnostics: {
+          coverage: diagnostics.health.axes.coverage,
+          asOf: diagnostics.coverage_as_of,
+        },
+        storedCache: await foldedStreamFacts(lane),
+      },
+      {
+        evidence: {
+          dirty: false,
+          sourceKind: "local_device",
+          streamFacts: null,
+          terminalState: "unobserved",
+          terminalReason: "source_kind_mismatch",
+        },
+        list: { coverage: "unknown", conditions: UNKNOWN_CONDITIONS, asOf: null },
+        detail: { coverage: "unknown", conditions: UNKNOWN_CONDITIONS, asOf: null },
+        diagnostics: { coverage: "unknown", asOf: null },
+        storedCache: { streams: ["messages", "sessions"], version: UPGRADED_FOLD_VERSION },
+      },
+      "all readers withhold current cached facts when the canonical connection has left local_device"
+    );
+  }
+);
+
+laneTest(
   "source kind: a connection that stops being local_device projects its earlier device terminal as unknown",
   async (lane) => {
     await commitProof(lane, "run-was-local");
@@ -1977,6 +2052,78 @@ laneTest(
     }
     assert.deepEqual((await foldedStreamFacts(lane)).streams, [], "the stale fold published no device fact");
     await assertNoDeviceCoverage(lane, "the fold after the source kind changed");
+  }
+);
+
+laneTest(
+  "source kind: a canonical-only kind change fences a local-device fold before publication",
+  async (lane) => {
+    await commitProof(lane, "run-canonical-fold-fenced");
+    await assertCovered(
+      lane,
+      "run-canonical-fold-fenced",
+      "the local-device terminal initially covers the connection"
+    );
+    const id = lane.enrolled.connector_instance_id;
+    await sql(
+      lane,
+      "UPDATE connector_summary_evidence SET stream_latest_facts_json = NULL, stream_facts_event_seq = NULL, stream_facts_fold_version = ?, dirty = 0 WHERE connector_instance_id = ?",
+      "UPDATE connector_summary_evidence SET stream_latest_facts_json = NULL, stream_facts_event_seq = NULL, stream_facts_fold_version = $1, dirty = 0 WHERE connector_instance_id = $2",
+      [UPGRADED_FOLD_VERSION, id]
+    );
+
+    const paused = gate();
+    const reached = gate();
+    let held = false;
+    __testOnlySetFoldPauseHook(async (point) => {
+      if (point === "before_cas_write" && !held) {
+        held = true;
+        reached.open();
+        await paused.wait;
+      }
+    });
+    try {
+      const inFlight = foldConnectorSummaryStreamFacts([id]);
+      await Promise.race([
+        reached.wait,
+        inFlight.then(() => assert.fail("the fold finished without reaching its compare-and-set write")),
+      ]);
+      // Change only the canonical source kind while the local-device fold is paused at its write.
+      await sql(
+        lane,
+        "UPDATE connector_instances SET source_kind = 'account' WHERE connector_instance_id = ?",
+        "UPDATE connector_instances SET source_kind = 'account' WHERE connector_instance_id = $1",
+        [id]
+      );
+      paused.open();
+      await inFlight;
+    } finally {
+      paused.open();
+      __testOnlySetFoldPauseHook(null);
+    }
+
+    const [evidenceRow] = await sql(
+      lane,
+      `SELECT evidence.source_kind AS evidence_source_kind, instance.source_kind AS canonical_source_kind
+         FROM connector_summary_evidence AS evidence
+         JOIN connector_instances AS instance ON instance.connector_instance_id = evidence.connector_instance_id
+        WHERE evidence.connector_instance_id = ?`,
+      `SELECT evidence.source_kind AS evidence_source_kind, instance.source_kind AS canonical_source_kind
+         FROM connector_summary_evidence AS evidence
+         JOIN connector_instances AS instance ON instance.connector_instance_id = evidence.connector_instance_id
+        WHERE evidence.connector_instance_id = $1`,
+      [id]
+    );
+    assert.deepEqual(
+      evidenceRow,
+      { evidence_source_kind: "local_device", canonical_source_kind: "account" },
+      "the evidence-row fence input stays local_device while the canonical kind changes"
+    );
+    assert.deepEqual(
+      await foldedStreamFacts(lane),
+      { streams: [], version: UPGRADED_FOLD_VERSION },
+      "the fold publishes no device fact after the canonical kind changes"
+    );
   }
 );
 
