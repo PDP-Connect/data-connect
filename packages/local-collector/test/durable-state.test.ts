@@ -803,17 +803,16 @@ function resolveInput(root: string, installRoot: string) {
   };
 }
 
+/** What a killed migrator leaves at the canonical path: no queue, an empty queue, or a queue holding rows. */
+type Competitor = "empty" | "none" | "rows";
+
 /**
  * Run a migration in a child process that dies right after the retirement fence
  * commits, having first let a competing creator open the canonical queue. A real
- * exit skips every catch block, so nothing in-process can tidy the fence.
+ * exit skips every catch block, so nothing in-process can tidy the fence, the
+ * handoff lock or the unfinished snapshot.
  */
-function killMigrationAfterFence(
-  root: string,
-  installRoot: string,
-  canonicalPath: string,
-  competitorRows: boolean
-): void {
+function killMigrationAfterFence(root: string, input: ReturnType<typeof resolveInput>, competitor: Competitor): void {
   const scriptPath = join(root, "kill-after-fence.mts");
   writeFileSync(
     scriptPath,
@@ -827,16 +826,18 @@ durable.resolveCollectorQueuePath({
   sourceInstanceId: input.sourceInstanceId,
   stateRoot: input.stateRoot,
   afterRetirementFence: () => {
-    const competitor = new runner.LocalDeviceOutbox({ path: input.canonicalPath });
-    if (input.competitorRows) {
-      competitor.enqueue({
-        id: "competitor-B",
-        kind: "record_batch",
-        payload: {},
-        sourceInstanceId: input.sourceInstanceId,
-      });
+    if (input.competitor !== "none") {
+      const competitor = new runner.LocalDeviceOutbox({ path: input.canonicalPath });
+      if (input.competitor === "rows") {
+        competitor.enqueue({
+          id: "competitor-B",
+          kind: "record_batch",
+          payload: {},
+          sourceInstanceId: input.sourceInstanceId,
+        });
+      }
+      competitor.close();
     }
-    competitor.close();
     process.exit(86);
   },
 });
@@ -848,7 +849,7 @@ durable.resolveCollectorQueuePath({
       scriptPath,
       new URL("../src/durable-state.ts", import.meta.url).href,
       new URL("../src/runner.ts", import.meta.url).href,
-      JSON.stringify({ ...resolveInput(root, installRoot), canonicalPath, competitorRows }),
+      JSON.stringify({ ...input, canonicalPath: canonicalCollectorQueuePath(input), competitor }),
     ],
     { encoding: "utf8" }
   );
@@ -888,7 +889,7 @@ test("a fence left by a killed migration does not prove the canonical queue hold
     const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
     seedOutbox(legacyPath, SOURCE_A, "pending-A");
 
-    killMigrationAfterFence(root, installRoot, canonicalPath, true);
+    killMigrationAfterFence(root, resolveInput(root, installRoot), "rows");
     assert.throws(
       () => seedOutbox(legacyPath, SOURCE_A, "while-fenced"),
       /retired/,
@@ -917,7 +918,7 @@ test("a fence left by a killed migration is lifted when the competing canonical 
     const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
     seedOutbox(legacyPath, SOURCE_A, "pending-A");
 
-    killMigrationAfterFence(root, installRoot, canonicalPath, false);
+    killMigrationAfterFence(root, resolveInput(root, installRoot), "empty");
     assert.throws(
       () => resolveCollectorQueuePath(resolveInput(root, installRoot)),
       (error: unknown) => error instanceof CollectorStateResolutionError && error.code === "legacy_state_ambiguous"
@@ -1042,7 +1043,9 @@ test("superseded terminal history in a legacy store is not pending work", () => 
     seedSupersededTerminalHistory(legacyPath);
     seedOutbox(canonicalPath, SOURCE_A, "canonical-work");
 
-    assert.equal(resolveCollectorQueuePath(resolveInput(root, installRoot)), canonicalPath);
+    const history = captureStderr(() => resolveCollectorQueuePath(resolveInput(root, installRoot)));
+    assert.equal(history.result, canonicalPath);
+    assert.equal(history.stderr, "", "superseded history is not a backlog, so nothing is announced");
 
     // A dead-letter terminal commit that nothing superseded is still undelivered work.
     const reopened = new LocalDeviceOutbox({ path: legacyPath });
@@ -1104,17 +1107,26 @@ function deliverLegacyBacklog(legacyPath: string): void {
   }
 }
 
+/** Handoff locks and unfinished snapshots beside a canonical queue. */
+function migrationLeftovers(canonicalPath: string): string[] {
+  return readdirSync(dirname(canonicalPath))
+    .filter((name) => /\.migration-|\.handoff\.lock$/.test(name))
+    .sort();
+}
+
 /**
  * Shared checks for a canonical queue that exists next to a legacy backlog: the
  * canonical path is returned, nothing is merged or fenced, every resolution warns
- * while rows remain, and delivering them silences the warning.
+ * while rows remain, and delivering them silences the warning. `leftovers` names
+ * the files a killed attempt left behind, which no later attempt cleans up.
  */
 function assertKeepsRunningOnCanonical(
   root: string,
   installRoot: string,
   legacyPath: string,
   canonicalPath: string,
-  legacyIdsBefore: string[]
+  legacyIdsBefore: string[],
+  leftovers: readonly string[] = []
 ): void {
   const resolve = () => resolveCollectorQueuePath(resolveInput(root, installRoot));
   const pending = legacyIdsBefore.length;
@@ -1124,10 +1136,7 @@ function assertKeepsRunningOnCanonical(
   seedOutbox(legacyPath, SOURCE_A, "legacy-write-after-resolve");
   const legacyIds = [...legacyIdsBefore, "legacy-write-after-resolve"].sort();
   assert.deepEqual(outboxIds(legacyPath, SOURCE_A), legacyIds);
-  assert.deepEqual(
-    readdirSync(dirname(canonicalPath)).filter((name) => /\.migration-|\.handoff\.lock$/.test(name)),
-    []
-  );
+  assert.deepEqual(migrationLeftovers(canonicalPath), leftovers);
 
   // Every resolution returns the canonical path and warns again.
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -1173,37 +1182,302 @@ for (const [label, hookName] of [
   });
 }
 
-test("a fence left by a crashed attempt is lifted, then a canonical queue that appears keeps the collector on it with a warning", () => {
+test("a fence left by a killed attempt is lifted, then a canonical queue that appears keeps the collector on it with a warning", () => {
   withTempRoot("pdpp-durable-state-stale-fence-", (root) => {
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
-    const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
+    const input = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(input);
     seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
-    assert.throws(() =>
-      resolveCollectorQueuePath({
-        ...resolveInput(root, installRoot),
-        afterRetirementFence: () => {
-          throw new Error("simulated crash after durable retirement");
-        },
-      })
-    );
 
-    // The crashed attempt cleaned up its own fence.
-    assertLegacyWritable(legacyPath);
+    // A real exit skips every cleanup path, so the attempt's fence survives it.
+    killMigrationAfterFence(root, input, "none");
+    assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "while-fenced"), /retired/);
+    assert.deepEqual(fenceDestinations(legacyPath), [canonicalPath]);
+    const killedAttempt = migrationLeftovers(canonicalPath);
+    assert.equal(killedAttempt.length, 2, "the killed attempt left its handoff lock and its snapshot");
 
+    // The next attempt sees a canonical queue appear before it reconciles. The dead
+    // attempt's fence never published anything, so it is lifted under the legacy write lock.
     const { result, stderr } = captureStderr(() =>
       resolveCollectorQueuePath({
-        ...resolveInput(root, installRoot),
+        ...input,
         beforeMigrationReconcile: () => seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process"),
       })
     );
     assert.equal(result, canonicalPath);
-    assertBacklogWarning(stderr, legacyPath, canonicalPath, 2);
-    assertKeepsRunningOnCanonical(root, installRoot, legacyPath, canonicalPath, [
-      "legacy-pending",
-      "legacy-write-after-race",
-    ]);
+    assertBacklogWarning(stderr, legacyPath, canonicalPath, 1);
+    assert.deepEqual(fenceDestinations(legacyPath), [], "the dead attempt's fence was lifted, not left behind the warning");
     assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["canonical-from-other-process"]);
+    assertKeepsRunningOnCanonical(
+      root,
+      installRoot,
+      legacyPath,
+      canonicalPath,
+      ["legacy-pending"],
+      killedAttempt.filter((name) => name.endsWith(".tmp"))
+    );
+  });
+});
+
+/** Run `fn`, which must be refused, and return the refusal. A refusal must not also announce that the collector keeps running. */
+function refusal(fn: () => unknown): unknown {
+  let thrown: unknown;
+  const { stderr } = captureStderr(() =>
+    assert.throws(fn, (error: unknown) => {
+      thrown = error;
+      return true;
+    })
+  );
+  assert.equal(stderr, "", "a refused resolution writes no warning");
+  return thrown;
+}
+
+/** The message of a `legacy_state_conflict` refusal. */
+function conflictMessage(error: unknown): string {
+  assert.ok(isConflict(error), `expected legacy_state_conflict, got ${String(error)}`);
+  return (error as Error).message;
+}
+
+/** After a refusal that left the legacy fence in place: the store stays retired and nothing is left behind. */
+function assertFenceSurvived(legacyPath: string, canonicalPath: string, recordedPath: string): void {
+  assert.deepEqual(fenceDestinations(legacyPath), [recordedPath], "the fence row survives");
+  assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+  assert.deepEqual(migrationLeftovers(canonicalPath), [], "no snapshot or lock is left");
+}
+
+test("a canonical queue that appears before reconcile does not hide a fence published to another queue", () => {
+  withTempRoot("pdpp-durable-state-appeared-published-fence-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const base = resolveInput(root, installRoot);
+    const other = { ...base, stateRoot: join(root, "other-state") };
+    const canonicalPath = canonicalCollectorQueuePath(base);
+    const otherPath = canonicalCollectorQueuePath(other);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+    assert.equal(resolveCollectorQueuePath(other), otherPath);
+
+    const message = conflictMessage(
+      refusal(() =>
+        resolveCollectorQueuePath({
+          ...base,
+          beforeMigrationReconcile: () => seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process"),
+        })
+      )
+    );
+
+    assert.ok(message.includes(otherPath), "the error names the queue the legacy store is retired to");
+    assertFenceSurvived(legacyPath, canonicalPath, otherPath);
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["canonical-from-other-process"], "nothing was merged");
+    assert.deepEqual(outboxIds(otherPath, SOURCE_A), ["pending-A"]);
+  });
+});
+
+test("a canonical queue that appears before reconcile does not hide a fence owned by an in-flight migration", async () => {
+  await withTempRootAsync("pdpp-durable-state-appeared-live-fence-", async (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const base = resolveInput(root, installRoot);
+    const other = { ...base, stateRoot: join(root, "other-state") };
+    const canonicalPath = canonicalCollectorQueuePath(base);
+    const otherPath = canonicalCollectorQueuePath(other);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+    let paused: PausedMigration | undefined;
+    const message = conflictMessage(
+      refusal(() =>
+        resolveCollectorQueuePath({
+          ...base,
+          beforeMigrationReconcile: () => {
+            paused = startPausedMigration(root, other, "other");
+            seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process");
+          },
+        })
+      )
+    );
+
+    assert.ok(paused);
+    assert.ok(message.includes(otherPath), "the error names the queue the in-flight migration is publishing");
+    assert.deepEqual(fenceDestinations(legacyPath), [otherPath], "the in-flight owner's fence survives");
+    await paused.finish();
+    assertFenceSurvived(legacyPath, canonicalPath, otherPath);
+    assert.deepEqual(outboxIds(otherPath, SOURCE_A), ["pending-A"]);
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["canonical-from-other-process"]);
+  });
+});
+
+test("a canonical queue that appears before reconcile does not hide an id-less fence to a missing queue", () => {
+  withTempRoot("pdpp-durable-state-appeared-orphan-fence-", (root) => {
+    const { legacyPath, other, otherPath, recordedPath } = seedOrphanFenceStore(root, join(root, "npx-temp-package"));
+
+    const error = refusal(() =>
+      resolveCollectorQueuePath({
+        ...other,
+        beforeMigrationReconcile: () => seedOutbox(otherPath, SOURCE_A, "competitor-B"),
+      })
+    );
+
+    assert.ok(isOrphanFenceError(error, recordedPath), `the orphan fence is reported, got ${String(error)}`);
+    assertFenceSurvived(legacyPath, otherPath, recordedPath);
+    assert.equal(existsSync(recordedPath), false, "the recorded path was not created");
+    assert.deepEqual(outboxIds(otherPath, SOURCE_A), ["competitor-B"]);
+  });
+});
+
+test("a canonical queue that appears before reconcile does not hide an older release's fence to that same queue", () => {
+  withTempRoot("pdpp-durable-state-appeared-same-destination-fence-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const base = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(base);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+    seedMainFence(legacyPath, SOURCE_A, canonicalPath);
+
+    const message = conflictMessage(
+      refusal(() =>
+        resolveCollectorQueuePath({
+          ...base,
+          beforeMigrationReconcile: () => seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process"),
+        })
+      )
+    );
+
+    assert.ok(message.includes(legacyPath) && message.includes(canonicalPath), "the error names both stores");
+    assertFenceSurvived(legacyPath, canonicalPath, canonicalPath);
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["canonical-from-other-process"]);
+  });
+});
+
+const LOST_PUBLICATION_TIMINGS = [
+  { name: "exists when resolution starts", hook: undefined },
+  { name: "appears before reconcile", hook: "beforeMigrationReconcile" },
+  { name: "appears after the retirement fence", hook: "afterRetirementFence" },
+] as const;
+
+for (const timing of LOST_PUBLICATION_TIMINGS) {
+  test(`a fence whose published queue was removed keeps the conflict, without drain advice, when an unrelated canonical queue ${timing.name}`, () => {
+    withTempRoot("pdpp-durable-state-lost-publication-fence-", (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+      const base = resolveInput(root, installRoot);
+      const other = { ...base, stateRoot: join(root, "other-state") };
+      const canonicalPath = canonicalCollectorQueuePath(base);
+      const otherPath = canonicalCollectorQueuePath(other);
+      seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+      // The legacy rows were published to `otherPath`, which may since have delivered them,
+      // and then that queue was removed. Nothing is left that shows the publication happened.
+      assert.equal(resolveCollectorQueuePath(other), otherPath);
+      assert.equal(migrationMarkers(otherPath).length, 1, "the published queue carried the proof");
+      rmSync(otherPath);
+
+      const unrelated = () => seedOutbox(canonicalPath, SOURCE_A, "unrelated-canonical-work");
+      if (timing.hook === undefined) {
+        unrelated();
+      }
+      const request = timing.hook === undefined ? base : { ...base, [timing.hook]: unrelated };
+
+      // Refusing does not lift the fence, so every resolution gives the same answer.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const message = conflictMessage(refusal(() => resolveCollectorQueuePath(request)));
+        assert.ok(
+          message.includes(legacyPath) && message.includes(otherPath),
+          "the error names the legacy store and the removed queue"
+        );
+        assert.ok(!message.includes(`--queue ${legacyPath}`), "draining the legacy copy could replay delivered work");
+        assert.ok(!message.includes("Deliver the legacy backlog"), "no advice to deliver the legacy backlog");
+      }
+      assertFenceSurvived(legacyPath, canonicalPath, otherPath);
+      assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["unrelated-canonical-work"]);
+    });
+  });
+}
+
+test("an empty canonical queue that appears before reconcile is refused like one that exists at start-up", () => {
+  withTempRoot("pdpp-durable-state-appeared-empty-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const input = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(input);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+    const message = conflictMessage(
+      refusal(() =>
+        resolveCollectorQueuePath({
+          ...input,
+          beforeMigrationReconcile: () => new LocalDeviceOutbox({ path: canonicalPath }).close(),
+        })
+      )
+    );
+
+    assert.ok(message.includes(legacyPath) && message.includes(canonicalPath), "the error names both queues");
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), [], "the empty queue was neither adopted nor filled");
+    // The legacy writer was not retired and its backlog is intact.
+    seedOutbox(legacyPath, SOURCE_A, "legacy-write-after-refusal");
+    assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["legacy-write-after-refusal", "pending-A"]);
+    assert.deepEqual(migrationLeftovers(canonicalPath), []);
+    // The same state met at start-up is refused as well.
+    assert.throws(
+      () => resolveCollectorQueuePath(input),
+      (error: unknown) => error instanceof CollectorStateResolutionError && error.code === "legacy_state_ambiguous"
+    );
+  });
+});
+
+test("a canonical queue holding only another source that appears after the fence is refused, and the fence is lifted", () => {
+  withTempRoot("pdpp-durable-state-appeared-other-source-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const input = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(input);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+    const message = conflictMessage(
+      refusal(() =>
+        resolveCollectorQueuePath({
+          ...input,
+          afterRetirementFence: () => seedOutbox(canonicalPath, SOURCE_B, "other-source-work"),
+        })
+      )
+    );
+
+    assert.ok(message.includes(legacyPath) && message.includes(canonicalPath), "the error names both queues");
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), [], "this source's backlog was neither published nor merged");
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_B), ["other-source-work"]);
+    // This attempt's own fence was lifted, so the legacy writer still accepts work.
+    assert.deepEqual(fenceDestinations(legacyPath), []);
+    seedOutbox(legacyPath, SOURCE_A, "legacy-write-after-refusal");
+    assert.deepEqual(outboxIds(legacyPath, SOURCE_A), ["legacy-write-after-refusal", "pending-A"]);
+    assert.deepEqual(migrationLeftovers(canonicalPath), []);
+  });
+});
+
+test("two legacy stores with pending rows are ambiguous even when the canonical queue holds the source", () => {
+  withTempRoot("pdpp-durable-state-ambiguous-populated-", (root) => {
+    const installRoot = join(root, "package");
+    const legacyA = packageLegacyPath(installRoot, "a.sqlite");
+    const legacyB = packageLegacyPath(installRoot, "b.sqlite");
+    const canonicalPath = canonicalCollectorQueuePath(resolveInput(root, installRoot));
+    seedOutbox(legacyA, SOURCE_A, "pending-in-a");
+    seedOutbox(legacyB, SOURCE_A, "pending-in-b");
+    seedOutbox(canonicalPath, SOURCE_A, "canonical-work");
+
+    const error = refusal(() => resolveCollectorQueuePath(resolveInput(root, installRoot)));
+
+    assert.ok(
+      error instanceof CollectorStateResolutionError && error.code === "legacy_state_ambiguous",
+      `the operator must choose a store, got ${String(error)}`
+    );
+    assert.deepEqual(outboxIds(legacyA, SOURCE_A), ["pending-in-a"]);
+    assert.deepEqual(outboxIds(legacyB, SOURCE_A), ["pending-in-b"]);
+    assert.deepEqual(outboxIds(canonicalPath, SOURCE_A), ["canonical-work"]);
+
+    // Once one store is delivered a single backlog is left, and the collector keeps running.
+    deliverLegacyBacklog(legacyA);
+    const { result, stderr } = captureStderr(() => resolveCollectorQueuePath(resolveInput(root, installRoot)));
+    assert.equal(result, canonicalPath);
+    assertBacklogWarning(stderr, legacyB, canonicalPath, 1);
+    assert.ok(!stderr.includes(legacyA), "the delivered store is not reported");
   });
 });
 

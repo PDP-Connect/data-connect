@@ -146,13 +146,23 @@ export function canonicalCollectorQueuePath(input: {
  * A canonical queue that already exists next to an unmigrated package-local
  * store is never merged into or deleted: the outbox orders work by insertion,
  * so appending an old backlog (checkpoints, terminal commits) after newer
- * canonical rows could replay stale state. The legacy store is left unfenced
- * and writable, the canonical path is returned so the collector keeps running,
- * and every resolution writes a stderr warning while the legacy store still has
- * pending rows for the source, so the backlog is never silently forgotten. A
- * retirement fence counts as a completed migration only when the canonical
- * database holds the same per-attempt migration id; an unproven fence is
- * lifted, never trusted.
+ * canonical rows could replay stale state. A retirement fence counts as a
+ * completed migration only when the canonical database holds the same
+ * per-attempt migration id.
+ *
+ * The collector keeps running on the canonical queue, with a stderr warning on
+ * every resolution, only when all of these hold; any other case is refused:
+ * - the canonical database holds the source (otherwise `legacy_state_conflict`,
+ *   or `legacy_state_ambiguous` at start-up);
+ * - exactly one legacy store has pending rows for it (several are
+ *   `legacy_state_ambiguous`: the operator must choose);
+ * - that store is writable for the source. A fence on it is classified under the
+ *   legacy write lock: this attempt's own fence, or one whose attempt died before
+ *   publishing, is lifted; a fence another queue published or is publishing
+ *   behind, or one from an older release, stays and is refused;
+ * - nothing suggests its rows were already published to a queue that has since
+ *   been removed. A fence whose queue no longer exists is kept and refused,
+ *   because missing proof does not show the publication never happened.
  */
 export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): string {
   const { configuredPath, configuredPathIsExplicit } = input;
@@ -202,10 +212,9 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
         }).filter((path) => !isWithin(stateDirectory, path)),
         canonicalPath,
         sourceInstanceId,
-        input.betweenFenceMarkerAndLockChecks
+        { betweenFenceChecks: input.betweenFenceMarkerAndLockChecks, holdUnprovenFences: true }
       );
-      warnAboutLegacyBacklog(canonicalPath, pending, sourceInstanceId);
-      return canonicalPath;
+      return keepRunningOnCanonical(canonicalPath, pending, sourceInstanceId);
     }
     // An empty canonical database while another legacy store has undelivered
     // work: fail closed rather than turning an interrupted/manual initialization
@@ -216,7 +225,7 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
       findMatchingLegacyStores({ canonicalPath, roots, sourceInstanceId }),
       canonicalPath,
       sourceInstanceId,
-      input.betweenFenceMarkerAndLockChecks
+      { betweenFenceChecks: input.betweenFenceMarkerAndLockChecks }
     );
     if (pending.length > 0) {
       throw ambiguousLegacyState(canonicalPath, pending, sourceInstanceId);
@@ -516,14 +525,16 @@ type FenceBinding = { kind: "published" } | { kind: "live"; pid: number } | { ki
 function fenceBinding(
   fence: FenceRecord,
   sourceInstanceId: string,
-  betweenChecks?: (() => void) | undefined
+  betweenChecks?: (() => void) | undefined,
+  heldHandoff?: string | undefined
 ): FenceBinding {
   const published = fenceIsPublished(fence, sourceInstanceId);
   betweenChecks?.();
   if (published) {
     return { kind: "published" };
   }
-  const pid = liveHandoffOwner(fence.recordedPath);
+  // The caller holds the handoff lock of `heldHandoff`, so its owner is not a rival.
+  const pid = fence.recordedPath === heldHandoff ? undefined : liveHandoffOwner(fence.recordedPath);
   if (pid !== undefined) {
     return { kind: "live", pid };
   }
@@ -557,16 +568,64 @@ function settlePublishedFenceReadOnly(
   return fence.recordedPath === requestedPath ? "proven" : "foreign";
 }
 
+type FenceVerdict =
+  | { kind: "foreign" | "orphan" | "proven" | "unproven" }
+  | { kind: "lift"; migrationId: string };
+
+/**
+ * Classify a fence for a request for `requestedPath`. Callers hold the legacy
+ * write lock, so the verdict cannot be overtaken.
+ *
+ * - `proven`: the requested destination carries the fence's migration id.
+ * - `foreign`: another destination published, or is publishing, behind the fence.
+ * - `orphan`: an id-less fence to a missing destination; it is never lifted.
+ * - `lift`: no destination binds the fence, so its attempt died before publishing.
+ * - `unproven`: like `lift`, but the destination is gone and `holdUnproven` is set.
+ *   Missing proof does not show the publication never happened: the snapshot may
+ *   have been published, delivered, and the queue removed since. A destination
+ *   that exists without the fence's id was taken by someone else, so link(2)
+ *   could not have published there.
+ *
+ * `heldHandoff` is the destination whose handoff lock the caller holds.
+ */
+function judgeFence(
+  current: FenceRecord,
+  requestedPath: string,
+  sourceInstanceId: string,
+  options: {
+    betweenChecks?: (() => void) | undefined;
+    heldHandoff?: string | undefined;
+    holdUnproven?: boolean | undefined;
+  } = {}
+): FenceVerdict {
+  const binding = fenceBinding(current, sourceInstanceId, options.betweenChecks, options.heldHandoff);
+  if (binding.kind === "orphan") {
+    return { kind: "orphan" };
+  }
+  if (binding.kind === "none" && current.migrationId !== null) {
+    if (options.holdUnproven && !existsSync(current.recordedPath)) {
+      return { kind: "unproven" };
+    }
+    return { kind: "lift", migrationId: current.migrationId };
+  }
+  if (current.recordedPath !== requestedPath) {
+    return { kind: "foreign" };
+  }
+  if (binding.kind === "live") {
+    throw handoffInProgress(requestedPath, binding.pid);
+  }
+  return { kind: "proven" };
+}
+
 /**
  * Decide an observed fence under the legacy write lock. That lock is the one
  * serialization point for fence decisions: installing, publishing behind and
  * lifting a fence all take it, so the verdict here cannot be overtaken.
  *
  * - `absent`: the fence is already gone.
- * - `proven`: the requested destination carries the fence's migration id.
- * - `foreign`: another destination published, or is publishing, behind the fence.
  * - `lifted`: no destination binds the fence, so it was deleted.
- * - `orphan`: an id-less fence to a missing destination; it is left in place.
+ * - `unproven`: see `judgeFence`; the fence is left in place.
+ * - the other verdicts are `judgeFence`'s, and leave the fence in place.
  *
  * A fence that changed since it was observed is not decided at all.
  */
@@ -575,8 +634,8 @@ function settleFence(
   requestedPath: string,
   sourceInstanceId: string,
   observed: FenceRecord,
-  betweenChecks?: (() => void) | undefined
-): "absent" | "foreign" | "lifted" | "orphan" | "proven" {
+  options: { betweenChecks?: (() => void) | undefined; holdUnproven?: boolean | undefined } = {}
+): "absent" | "foreign" | "lifted" | "orphan" | "proven" | "unproven" {
   let db: DatabaseSync | undefined;
   try {
     db = new DatabaseSync(legacyPath);
@@ -594,24 +653,14 @@ function settleFence(
           `the retirement of ${legacyPath} for source '${sourceInstanceId}' changed while it was being checked; retry`
         );
       }
-      const binding = fenceBinding(current, sourceInstanceId, betweenChecks);
-      if (binding.kind === "orphan") {
-        db.exec("ROLLBACK");
-        return "orphan";
-      }
-      if (binding.kind === "none" && current.migrationId !== null) {
-        deleteFence(db, sourceInstanceId, current.migrationId);
+      const verdict = judgeFence(current, requestedPath, sourceInstanceId, options);
+      if (verdict.kind === "lift") {
+        deleteFence(db, sourceInstanceId, verdict.migrationId);
         db.exec("COMMIT");
         return "lifted";
       }
       db.exec("ROLLBACK");
-      if (current.recordedPath !== requestedPath) {
-        return "foreign";
-      }
-      if (binding.kind === "live") {
-        throw handoffInProgress(requestedPath, binding.pid);
-      }
-      return "proven";
+      return verdict.kind;
     } catch (error) {
       try {
         db.exec("ROLLBACK");
@@ -637,45 +686,66 @@ function settleFence(
 
 /**
  * Classify the legacy stores that match a source once its canonical queue exists.
- * Returns the stores still holding undelivered work. Fences backed by a published
- * or in-flight destination are left in place; fences nothing backs are lifted.
+ * Returns the stores still holding undelivered work, each writable for the source.
+ * Fences backed by a published or in-flight destination are left in place; fences
+ * nothing backs are lifted, unless `holdUnprovenFences` asks to keep one whose
+ * destination is gone and the store has pending rows (see `judgeFence`).
  */
 function accountForLegacyStores(
   paths: readonly string[],
   canonicalPath: string,
   sourceInstanceId: string,
-  betweenFenceChecks?: (() => void) | undefined
+  options: { betweenFenceChecks?: (() => void) | undefined; holdUnprovenFences?: boolean | undefined } = {}
 ): string[] {
   const pending: string[] = [];
   for (const path of paths) {
     const status = inspectLegacyStore(path, sourceInstanceId);
-    if (status.fence) {
-      const verdict =
-        settlePublishedFenceReadOnly(status.fence, canonicalPath, sourceInstanceId) ??
-        settleFence(path, canonicalPath, sourceInstanceId, status.fence, betweenFenceChecks);
-      if (verdict === "proven") {
-        continue;
-      }
-      if (verdict === "orphan") {
-        // Not trusted and not lifted; only a backlog still sitting here is a conflict.
-        if (status.pending) {
-          throw orphanFence(path, status.fence.recordedPath, sourceInstanceId);
-        }
-        continue;
-      }
-      if (verdict === "foreign") {
-        // Retired elsewhere; only a backlog still sitting here is a conflict.
-        if (status.pending) {
-          throw foreignFenceConflict(path, status.fence.recordedPath, canonicalPath, sourceInstanceId);
-        }
-        continue;
-      }
+    const { fence, pending: hasPending } = status;
+    if (fence && settleObservedFence(path, fence, hasPending, canonicalPath, sourceInstanceId, options) === "retired") {
+      continue;
     }
-    if (status.pending) {
+    if (hasPending) {
       pending.push(path);
     }
   }
   return pending;
+}
+
+/**
+ * Settle the fence observed on a legacy store. Returns `retired` when the fence
+ * stays and the store holds nothing to report, and `writable` when no fence is
+ * left on it. A fence that stays over a pending backlog is refused.
+ */
+function settleObservedFence(
+  path: string,
+  fence: FenceRecord,
+  hasPending: boolean,
+  canonicalPath: string,
+  sourceInstanceId: string,
+  options: { betweenFenceChecks?: (() => void) | undefined; holdUnprovenFences?: boolean | undefined }
+): "retired" | "writable" {
+  const verdict =
+    settlePublishedFenceReadOnly(fence, canonicalPath, sourceInstanceId) ??
+    settleFence(path, canonicalPath, sourceInstanceId, fence, {
+      betweenChecks: options.betweenFenceChecks,
+      holdUnproven: options.holdUnprovenFences === true && hasPending,
+    });
+  if (verdict === "absent" || verdict === "lifted") {
+    return "writable";
+  }
+  // Not trusted and not lifted; only a backlog still sitting here is a conflict.
+  if (hasPending) {
+    if (verdict === "orphan") {
+      throw orphanFence(path, fence.recordedPath, sourceInstanceId);
+    }
+    if (verdict === "foreign") {
+      throw foreignFenceConflict(path, fence.recordedPath, canonicalPath, sourceInstanceId);
+    }
+    if (verdict === "unproven") {
+      throw lostPublicationConflict(path, fence.recordedPath, canonicalPath, sourceInstanceId);
+    }
+  }
+  return "retired";
 }
 
 function foreignFenceConflict(
@@ -759,7 +829,13 @@ function migrateLegacyStore(
     }
 
     hooks.beforeMigrationReconcile?.();
-    reconcileLegacyWrites(legacyPath, temporaryPath, canonicalPath, sourceInstanceId, migrationId);
+    const supersededFence = reconcileLegacyWrites(
+      legacyPath,
+      temporaryPath,
+      canonicalPath,
+      sourceInstanceId,
+      migrationId
+    );
 
     const snapshotFd = openSync(temporaryPath, "r");
     try {
@@ -776,7 +852,8 @@ function migrateLegacyStore(
       sourceInstanceId,
       migrationId,
       hooks.linkFile ?? linkSync,
-      hooks.betweenPublishRecheckAndLink
+      hooks.betweenPublishRecheckAndLink,
+      supersededFence
     );
     published = true;
     settlePublishedSnapshot(canonicalPath);
@@ -798,9 +875,12 @@ function migrateLegacyStore(
       releaseMigrationLock(lockPath);
     }
     if (error instanceof CanonicalQueueAppeared) {
-      // The legacy store is unfenced and untouched; keep running on the canonical queue.
-      warnAboutLegacyBacklog(canonicalPath, [legacyPath], sourceInstanceId);
-      return canonicalPath;
+      // The legacy store was made writable under its write lock. The canonical
+      // queue is only a destination for this source if it holds the source.
+      if (!containsSourceRows(canonicalPath, sourceInstanceId)) {
+        throw conflictingLegacyState(canonicalPath, legacyPath, sourceInstanceId);
+      }
+      return keepRunningOnCanonical(canonicalPath, [legacyPath], sourceInstanceId);
     }
     if (error instanceof CollectorStateResolutionError) {
       throw error;
@@ -831,6 +911,8 @@ function migrateLegacyStore(
  * trigger-enforced retirement fence is committed in the legacy database.
  * The canonical pathname is a separate complete snapshot; it never aliases
  * the legacy WAL main file or its path-derived sidecars.
+ *
+ * Returns the fence this attempt's own fence replaced, if any.
  */
 function reconcileLegacyWrites(
   legacyPath: string,
@@ -838,7 +920,7 @@ function reconcileLegacyWrites(
   canonicalPath: string,
   sourceInstanceId: string,
   migrationId: string
-): void {
+): FenceRecord | null {
   let source: DatabaseSync | undefined;
   try {
     source = new DatabaseSync(legacyPath);
@@ -889,8 +971,12 @@ function reconcileLegacyWrites(
     }
     // Checked while the legacy database is write-locked and before the fence is
     // committed: a canonical queue that appeared since the snapshot holds work
-    // this migration has not seen, so abort with the legacy writer still live.
+    // this migration has not seen, so abort. The caller may keep running on that
+    // queue only if the legacy writer is live, so any fence another attempt left
+    // is judged here, under the lock, and no fence may remain.
     if (existsSync(canonicalPath)) {
+      makeLegacyWritableForAppearedQueue(source, legacyPath, canonicalPath, sourceInstanceId);
+      source.exec("COMMIT");
       throw new CanonicalQueueAppeared();
     }
     // Claim the source's retirement under the same write lock. A fence another
@@ -913,6 +999,7 @@ function reconcileLegacyWrites(
     installRetirementFence(source, sourceInstanceId, canonicalPath, migrationId);
     source.exec("COMMIT");
     source.exec("DETACH DATABASE migrated");
+    return existing;
   } catch (error) {
     try {
       source?.exec("ROLLBACK");
@@ -922,6 +1009,53 @@ function reconcileLegacyWrites(
     throw error;
   } finally {
     source?.close();
+  }
+}
+
+/**
+ * A canonical queue appeared while this attempt held the legacy write lock and
+ * its handoff lock, before it installed its own fence. Judge a fence another
+ * attempt left, in the caller's open write transaction, and delete it only when
+ * it is one that `judgeFence` lifts. Anything else is refused and left in place.
+ * Returns only once no fence remains for the source; writability is asserted,
+ * not inferred from the queue having appeared.
+ */
+function makeLegacyWritableForAppearedQueue(
+  db: DatabaseSync,
+  legacyPath: string,
+  canonicalPath: string,
+  sourceInstanceId: string
+): void {
+  const existing = readFenceRecord(db, sourceInstanceId);
+  if (existing) {
+    const verdict = judgeFence(existing, canonicalPath, sourceInstanceId, {
+      heldHandoff: canonicalPath,
+      holdUnproven: true,
+    });
+    switch (verdict.kind) {
+      case "lift":
+        deleteFence(db, sourceInstanceId, verdict.migrationId);
+        break;
+      case "orphan":
+        throw orphanFence(legacyPath, existing.recordedPath, sourceInstanceId);
+      case "foreign":
+        throw foreignFenceConflict(legacyPath, existing.recordedPath, canonicalPath, sourceInstanceId);
+      case "unproven":
+        throw lostPublicationConflict(legacyPath, existing.recordedPath, canonicalPath, sourceInstanceId);
+      default:
+        throw fenceForAppearedQueue(legacyPath, canonicalPath, sourceInstanceId);
+    }
+  }
+  assertNoFence(db, legacyPath, sourceInstanceId);
+}
+
+/** The legacy store accepts writes for the source only while no fence row names it. */
+function assertNoFence(db: DatabaseSync, legacyPath: string, sourceInstanceId: string): void {
+  if (readFenceRecord(db, sourceInstanceId)) {
+    throw new CollectorStateResolutionError(
+      "legacy_state_conflict",
+      `the retirement fence for source '${sourceInstanceId}' in ${legacyPath} is still in place, so the legacy store cannot be left writable; nothing was published and the original store was retained`
+    );
   }
 }
 
@@ -1081,7 +1215,9 @@ function releaseMigrationLock(path: string): void {
  * to lift or replace the fence, so none of them can act on a stale view of a
  * snapshot that is being published. If the fence is no longer this attempt's,
  * nothing is published. If the link fails, the fence is lifted in the same
- * transaction so the legacy writer is usable again.
+ * transaction so the legacy writer is usable again. If a competing creator wins
+ * the path and this attempt had replaced a fence whose queue is gone, that fence
+ * is put back instead (see `judgeFence`).
  */
 function publishSnapshot(
   temporaryPath: string,
@@ -1090,7 +1226,8 @@ function publishSnapshot(
   sourceInstanceId: string,
   migrationId: string,
   link: (existingPath: string, newPath: string) => void,
-  betweenRecheckAndLink?: (() => void) | undefined
+  betweenRecheckAndLink?: (() => void) | undefined,
+  supersededFence?: FenceRecord | null | undefined
 ): void {
   let db: DatabaseSync | undefined;
   try {
@@ -1109,7 +1246,17 @@ function publishSnapshot(
       link(temporaryPath, canonicalPath);
     } catch (error) {
       if (isAlreadyExistsError(error)) {
+        if (supersededFence?.migrationId && !existsSync(supersededFence.recordedPath)) {
+          // The older fence's queue is gone: it may have been published and delivered.
+          // Keep that evidence in place of this attempt's fence rather than lifting it.
+          db.prepare(
+            "UPDATE pdpp_legacy_retirements SET canonical_path = ?, migration_id = ? WHERE source_instance_id = ? AND migration_id = ?"
+          ).run(supersededFence.recordedPath, supersededFence.migrationId, sourceInstanceId, migrationId);
+          db.exec("COMMIT");
+          throw lostPublicationConflict(legacyPath, supersededFence.recordedPath, canonicalPath, sourceInstanceId);
+        }
         deleteFence(db, sourceInstanceId, migrationId);
+        assertNoFence(db, legacyPath, sourceInstanceId);
         db.exec("COMMIT");
         throw new CanonicalQueueAppeared();
       }
@@ -1255,9 +1402,9 @@ function ambiguousLegacyState(
 }
 
 /**
- * Another process created the canonical queue while this attempt migrated. The
- * attempt has already left the legacy store unfenced and unmerged; the caller
- * returns the canonical path and warns about the legacy backlog.
+ * Another process created the canonical queue while this attempt migrated. By the
+ * time this is thrown the legacy store holds no fence for the source (asserted
+ * under its write lock); the caller still checks that the queue holds the source.
  */
 class CanonicalQueueAppeared extends Error {
   constructor() {
@@ -1267,24 +1414,70 @@ class CanonicalQueueAppeared extends Error {
 }
 
 /**
- * Warn, on stderr, once per legacy store that still holds undelivered rows for
+ * The canonical queue holds the source. Keep running on it, and warn, while one
+ * legacy store still has pending rows; several are the operator's decision.
+ */
+function keepRunningOnCanonical(canonicalPath: string, pending: readonly string[], sourceInstanceId: string): string {
+  const [legacyPath, ...others] = pending;
+  if (legacyPath === undefined) {
+    return canonicalPath;
+  }
+  if (others.length > 0) {
+    throw ambiguousLegacyState(canonicalPath, pending, sourceInstanceId);
+  }
+  warnAboutLegacyBacklog(canonicalPath, legacyPath, sourceInstanceId);
+  return canonicalPath;
+}
+
+/**
+ * Warn, on stderr, when a writable legacy store still holds undelivered rows for
  * the source. The warning repeats on every resolution until the rows are
  * delivered or removed; a store without such rows is silent.
  */
-function warnAboutLegacyBacklog(
-  canonicalPath: string,
-  legacyPaths: readonly string[],
-  sourceInstanceId: string
-): void {
-  for (const legacyPath of legacyPaths) {
-    const pending = countPendingSourceRows(legacyPath, sourceInstanceId);
-    if (pending === 0) {
-      continue;
-    }
-    process.stderr.write(
-      `warning: the canonical local collector queue ${canonicalPath} exists for source '${sourceInstanceId}' while the legacy queue ${legacyPath} still holds ${pending} pending row(s) for it. The legacy queue was left writable and was not merged or deleted; running on the canonical queue. Run with --queue ${legacyPath} to deliver them.\n`
-    );
+function warnAboutLegacyBacklog(canonicalPath: string, legacyPath: string, sourceInstanceId: string): void {
+  const pending = countPendingSourceRows(legacyPath, sourceInstanceId);
+  if (pending === 0) {
+    return;
   }
+  process.stderr.write(
+    `warning: the canonical local collector queue ${canonicalPath} exists for source '${sourceInstanceId}' while the legacy queue ${legacyPath} still holds ${pending} pending row(s) for it. The legacy queue was left writable and was not merged or deleted; running on the canonical queue. Run with --queue ${legacyPath} to deliver them.\n`
+  );
+}
+
+function conflictingLegacyState(
+  canonicalPath: string,
+  legacyPath: string,
+  sourceInstanceId: string
+): CollectorStateResolutionError {
+  return new CollectorStateResolutionError(
+    "legacy_state_conflict",
+    `local collector state for source '${sourceInstanceId}' exists in both the canonical queue ${canonicalPath} and an unmigrated legacy store (${legacyPath}); the legacy store was left writable and was not migrated. The two cannot be merged safely because queue order carries checkpoints and terminal commits. Deliver the legacy backlog first by running the collector once with --queue ${legacyPath}, then rerun; or pass --queue to choose one store explicitly`
+  );
+}
+
+/** The fence names a queue that no longer exists, so its rows may already have been delivered from it. */
+function lostPublicationConflict(
+  legacyPath: string,
+  recordedPath: string,
+  canonicalPath: string,
+  sourceInstanceId: string
+): CollectorStateResolutionError {
+  return new CollectorStateResolutionError(
+    "legacy_state_conflict",
+    `the legacy store ${legacyPath} for source '${sourceInstanceId}' carries a retirement fence recorded for ${recordedPath}, which no longer exists, while the canonical queue ${canonicalPath} exists. Nothing shows whether ${recordedPath} was published and delivered the legacy rows before it was removed, so the legacy store was not drained, merged or migrated and its fence was left in place. Pass --queue ${canonicalPath} to continue on the canonical queue once you have confirmed that those rows were delivered or are no longer needed`
+  );
+}
+
+/** The fence already names the requested queue, which appeared while this attempt was migrating. */
+function fenceForAppearedQueue(
+  legacyPath: string,
+  canonicalPath: string,
+  sourceInstanceId: string
+): CollectorStateResolutionError {
+  return new CollectorStateResolutionError(
+    "legacy_state_conflict",
+    `the legacy store ${legacyPath} for source '${sourceInstanceId}' already carries a retirement fence recorded for the requested queue ${canonicalPath}, which appeared while this attempt was migrating; nothing was published and the fence was left in place. Rerun to resolve against the existing queue`
+  );
 }
 
 function countPendingSourceRows(path: string, sourceInstanceId: string): number {
