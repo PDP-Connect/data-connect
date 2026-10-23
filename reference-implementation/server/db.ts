@@ -2088,11 +2088,15 @@ CREATE TABLE IF NOT EXISTS connector_checkpoint_withholds (
   PRIMARY KEY (connector_id, connector_instance_id, grant_id, state_stream)
 );
 
+-- changes_floor: the oldest changes_since watermark whose delta can still be
+-- reconstructed. History pruning advances it; see pruneRecordChangeHistory.
+-- Lives on the counter row so a bulk reset (which deletes the row) clears it.
 CREATE TABLE IF NOT EXISTS version_counter (
   connector_id  TEXT NOT NULL,
   connector_instance_id TEXT NOT NULL,
   stream        TEXT NOT NULL,
   max_version   INTEGER NOT NULL DEFAULT 0,
+  changes_floor INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(connector_instance_id, stream)
 );
 
@@ -4311,6 +4315,7 @@ function migrateRecordStorageInstanceColumns(raw: SqliteDatabase, opts: Migratio
         connector_instance_id TEXT NOT NULL,
         stream        TEXT NOT NULL,
         max_version   INTEGER NOT NULL DEFAULT 0,
+        changes_floor INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
 
@@ -6605,6 +6610,10 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   runWithSqliteBusyRetrySync(() => migrateConnectorSyncStateInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorDetailGapInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
+  // Pre-existing DBs predate the column; 0 = no pruned history recorded.
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")
+  );
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
   // A legacy vector has no evidence that it was produced from the current

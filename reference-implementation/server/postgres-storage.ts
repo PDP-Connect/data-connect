@@ -3183,6 +3183,7 @@ async function bootstrapPostgresSchemaOnce({
         connector_instance_id TEXT NOT NULL,
         stream TEXT NOT NULL,
         max_version BIGINT NOT NULL DEFAULT 0,
+        changes_floor BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
 
@@ -5652,6 +5653,8 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
   );
   await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS fields_fingerprint TEXT");
+  // Oldest reconstructible changes_since watermark; 0 = no pruned history recorded.
+  await client.query("ALTER TABLE version_counter ADD COLUMN IF NOT EXISTS changes_floor BIGINT NOT NULL DEFAULT 0");
   if (checks.every(Boolean)) {
     await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
     return;

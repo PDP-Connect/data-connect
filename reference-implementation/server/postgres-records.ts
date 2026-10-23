@@ -138,6 +138,7 @@ interface PgRow {
   blob_bytes?: number | string;
   blob_id?: string;
   bytes?: number | string;
+  changes_floor?: number | string;
   connector_count?: number | string;
   connector_id?: string;
   connector_instance_id?: string;
@@ -153,6 +154,7 @@ interface PgRow {
   emitted_at: string;
   field_text?: string | null;
   field_type?: string;
+  floor?: number | string | null;
   is_identical?: boolean;
   last_updated?: string | null;
   latest?: Date | string | null;
@@ -1748,7 +1750,12 @@ async function prunePostgresRecordChanges({
   const cutoff = nextVersion - changeHistoryLimit;
   const pruned = await client.query(
     `SELECT COUNT(*)::bigint AS count,
-            COALESCE(SUM(octet_length(COALESCE(record_json::text, ''))), 0)::bigint AS bytes
+            COALESCE(SUM(octet_length(COALESCE(record_json::text, ''))), 0)::bigint AS bytes,
+            MAX((SELECT MIN(n.version) FROM record_changes n
+                  WHERE n.connector_instance_id = rc.connector_instance_id
+                    AND n.stream = rc.stream
+                    AND n.record_key = rc.record_key
+                    AND n.version > rc.version))::bigint AS floor
        FROM record_changes rc
       WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.version <= $3
         AND NOT EXISTS (
@@ -1760,6 +1767,19 @@ async function prunePostgresRecordChanges({
         )`,
     [connectorInstanceId, stream, cutoff]
   );
+  // Pruning keeps only one anchor row per live key, so MIN(version) in
+  // record_changes stays at a cold key's first version forever and cannot say
+  // which cursors are still reconstructible. `floor` is the newest version
+  // that superseded a removed row: a cursor below it has lost a predecessor
+  // snapshot. Record it durably in the transaction that removes the rows.
+  const changesFloor = Number(pruned.rows[0]?.floor || 0);
+  if (changesFloor > 0) {
+    await client.query(
+      `UPDATE version_counter SET changes_floor = GREATEST(changes_floor, $3)
+        WHERE connector_instance_id = $1 AND stream = $2`,
+      [connectorInstanceId, stream, changesFloor]
+    );
+  }
   await client.query(
     `DELETE FROM record_changes rc
      WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.version <= $3
@@ -2287,10 +2307,11 @@ async function queryPostgresChangesSince({
     throw err;
   }
   const maxResult = await postgresQuery(
-    "SELECT max_version FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
+    "SELECT max_version, changes_floor FROM version_counter WHERE connector_instance_id = $1 AND stream = $2",
     [connectorInstanceId, stream]
   );
   const sessionMax = maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
+  const changesFloor = maxResult.rows[0] ? Number(maxResult.rows[0].changes_floor) : 0;
   const minChangeResult = await postgresQuery(
     `SELECT MIN(version)::bigint AS min_version
        FROM record_changes
@@ -2303,6 +2324,15 @@ async function queryPostgresChangesSince({
       : Number(minChangeResult.rows[0].min_version);
   if (minVersion !== null && decodedVersion < minVersion - 1) {
     const err: PgQueryError = new Error("changes_since cursor is too old; full re-sync required");
+    err.code = "cursor_expired";
+    throw err;
+  }
+  // The minimum above is only a lower bound: pruning keeps a sparse anchor per
+  // live key, so it stays at a cold key's first version while other keys'
+  // predecessor snapshots are gone. A cursor below `changes_floor` would get
+  // its deletions silently suppressed. `beginning` needs no predecessor.
+  if (decodedVersion > 0 && decodedVersion < changesFloor) {
+    const err: PgQueryError = new Error("changes_since cursor predates pruned change history; full re-sync required");
     err.code = "cursor_expired";
     throw err;
   }

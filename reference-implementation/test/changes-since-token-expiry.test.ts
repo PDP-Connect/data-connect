@@ -13,6 +13,14 @@
  * returned a version-1 watermark, so the consumer kept the deleted rows and
  * never saw the new record.
  *
+ * Pruned history is the second way a token goes stale. With
+ * PDPP_CHANGE_HISTORY_LIMIT set, pruning keeps one anchor row per live key, so
+ * MIN(version) in record_changes stays at a cold key's first version while
+ * other keys' predecessor snapshots are gone. A token below the stream's
+ * `changes_floor` (the newest version that superseded a pruned row) can no
+ * longer show that a since-deleted key was ever visible, and its tombstone
+ * would be dropped silently. Such a token returns 410 `cursor_expired`.
+ *
  * Both backends run the same scenarios. The page-cursor scenario is SQLite
  * only: the PostgreSQL changes feed returns one unpaged response.
  */
@@ -40,7 +48,7 @@ const STREAM = MANIFEST.streams[0].name;
 const OTHER_STREAM = MANIFEST.streams[1].name;
 
 interface ListPage {
-  data: Array<{ id: string }>;
+  data: Array<{ deleted?: boolean; id: string }>;
   has_more: boolean;
   next_changes_since?: string;
   next_cursor?: string;
@@ -51,7 +59,8 @@ interface Backend {
   legacyToken(version: number): string;
   list(params: Record<string, unknown>): Promise<ListPage>;
   paged: boolean;
-  put(key: string, stream?: string): Promise<void>;
+  put(key: string, popularity?: number): Promise<void>;
+  remove(key: string): Promise<void>;
   reset(stream?: string): Promise<void>;
   teardown(): Promise<void>;
 }
@@ -72,8 +81,21 @@ function makeBackend(instanceId: string, kind: "sqlite" | "postgres", teardown: 
       return page as unknown as ListPage;
     },
     paged: kind === "sqlite",
-    put: (key, stream = STREAM) =>
-      ingestRecord(target, { data: { id: key }, emitted_at: NOW, key, stream }) as unknown as Promise<void>,
+    put: (key, popularity) =>
+      ingestRecord(target, {
+        data: popularity === undefined ? { id: key } : { id: key, popularity },
+        emitted_at: NOW,
+        key,
+        stream: STREAM,
+      }) as unknown as Promise<void>,
+    remove: (key) =>
+      ingestRecord(target, {
+        data: { id: key },
+        emitted_at: NOW,
+        key,
+        op: "delete",
+        stream: STREAM,
+      }) as unknown as Promise<void>,
     reset: async (stream = STREAM) => {
       await deleteAllRecords(target, stream);
     },
@@ -131,17 +153,26 @@ function defineScenarios(label: string, open: (instanceId: string) => Promise<Ba
   const scenario = (
     name: string,
     run: (backend: Backend) => Promise<void>,
-    options: { needsPaging?: boolean } = {}
+    options: { historyLimit?: number; needsPaging?: boolean } = {}
   ) => {
     const instanceId = `cin_cs_epoch_${label}_${name.replace(/\W+/g, "_").slice(0, 40)}`;
     test(`${label}: ${name}`, {
       skip: skip || (options.needsPaging && label !== "sqlite" ? "PostgreSQL changes feed is unpaged" : false),
     }, async () => {
+      const priorLimit = process.env.PDPP_CHANGE_HISTORY_LIMIT;
+      if (options.historyLimit !== undefined) {
+        process.env.PDPP_CHANGE_HISTORY_LIMIT = String(options.historyLimit);
+      }
       const backend = await open(instanceId);
       try {
         await run(backend);
       } finally {
         await backend.teardown();
+        if (priorLimit === undefined) {
+          delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
+        } else {
+          process.env.PDPP_CHANGE_HISTORY_LIMIT = priorLimit;
+        }
       }
     });
   };
@@ -217,6 +248,71 @@ function defineScenarios(label: string, open: (instanceId: string) => Promise<Ba
       await assert.rejects(backend.list({ cursor: first.next_cursor, limit: 1 }), { code: "cursor_expired" });
     },
     { needsPaging: true }
+  );
+
+  // Versions: cold=1, victim=2, hot=3..5 (hot's older rows are pruned), victim
+  // deleted=6. Victim's version-2 row is then pruned, so a watermark-2 cursor
+  // cannot tell the tombstone is a deletion of a record the consumer holds.
+  scenario(
+    "a token whose predecessor snapshots were pruned is rejected instead of dropping a tombstone",
+    async (backend) => {
+      await backend.put("cold");
+      await backend.put("victim");
+      const synced = await backend.list({ changes_since: "beginning" });
+      assert.deepEqual(ids(synced), ["cold", "victim"]);
+      assert.ok(synced.next_changes_since);
+      await backend.put("hot", 1);
+      await backend.put("hot", 2);
+      await backend.put("hot", 3);
+      await backend.remove("victim");
+      await assert.rejects(backend.list({ changes_since: synced.next_changes_since }), { code: "cursor_expired" });
+      const fresh = await backend.list({ changes_since: "beginning" });
+      assert.deepEqual(ids(fresh), ["cold", "hot"], "a full re-sync sees the post-delete state");
+    },
+    { historyLimit: 2 }
+  );
+
+  // Versions: cold=1, hot=2..4 (pruning advances the floor to 4), victim=5,
+  // token at 5, victim deleted=6. The token is newer than every pruned row.
+  scenario(
+    "a token newer than the pruned range still receives the tombstone",
+    async (backend) => {
+      await backend.put("cold");
+      await backend.put("hot", 1);
+      await backend.put("hot", 2);
+      await backend.put("hot", 3);
+      await backend.put("victim");
+      const synced = await backend.list({ changes_since: "beginning" });
+      assert.deepEqual(ids(synced), ["cold", "hot", "victim"]);
+      assert.ok(synced.next_changes_since);
+      await backend.remove("victim");
+      const delta = await backend.list({ changes_since: synced.next_changes_since });
+      assert.deepEqual(
+        delta.data.map((record) => [record.id, record.deleted === true]),
+        [["victim", true]]
+      );
+    },
+    { historyLimit: 2 }
+  );
+
+  scenario(
+    "a bulk reset clears the pruned-history floor",
+    async (backend) => {
+      for (const key of ["a", "b", "c", "d"]) {
+        await backend.put(key, 1);
+        await backend.put(key, 2);
+      }
+      await backend.reset();
+      await backend.put("e");
+      await backend.put("f");
+      await backend.put("g");
+      const synced = await backend.list({ changes_since: "beginning" });
+      assert.ok(synced.next_changes_since);
+      await backend.put("h");
+      const delta = await backend.list({ changes_since: synced.next_changes_since });
+      assert.deepEqual(ids(delta), ["h"]);
+    },
+    { historyLimit: 2 }
   );
 }
 

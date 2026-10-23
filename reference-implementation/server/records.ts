@@ -421,6 +421,7 @@ interface ChangeGroupRow {
   record_key: string;
 }
 interface VersionCounterRow {
+  changes_floor: number;
   max_version: number;
 }
 interface MinVersionRow {
@@ -1433,6 +1434,38 @@ function getPrunedRecordChangeCount(connectorInstanceId: string, stream: string,
 }
 
 /**
+ * The newest version that superseded a row the prune DELETE will remove. A
+ * pruned row (k, v) is the snapshot a changes_since cursor s needs whenever
+ * v <= s < next(k), so every cursor below the largest such `next(k)` can no
+ * longer reconstruct the delta for k. NULL when the prune removes nothing.
+ * Same predicate as the DELETE, kept in lockstep with it.
+ */
+function getPrunedRecordChangeSuccessorFloor(
+  connectorInstanceId: string,
+  stream: string,
+  versionBefore: number
+): number {
+  const row = getDb()
+    .prepare(
+      `SELECT MAX((
+                SELECT MIN(n.version)
+                  FROM record_changes n
+                 WHERE n.connector_id = record_changes.connector_id
+                   AND n.stream = record_changes.stream
+                   AND n.record_key = record_changes.record_key
+                   AND n.connector_instance_id = record_changes.connector_instance_id
+                   AND n.version > record_changes.version
+              )) AS floor
+         FROM record_changes
+        WHERE connector_instance_id = ?
+          AND stream = ?
+          AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
+    )
+    .get(connectorInstanceId, stream, versionBefore);
+  return Number(row?.floor || 0);
+}
+
+/**
  * Encode a compound key to its canonical string form (minified JSON array or plain string)
  */
 export function encodeKey(key: unknown): string {
@@ -2252,6 +2285,19 @@ function pruneRecordChangeHistory(
   const cutoff = nextVersion - changeHistoryLimit;
   const prunedBytesForDelta = getPrunedRecordChangeJsonBytes(connectorInstanceId, stream, cutoff);
   const prunedRowsForDelta = getPrunedRecordChangeCount(connectorInstanceId, stream, cutoff);
+  // Pruning keeps only one anchor row per live key, so MIN(version) in
+  // record_changes stays at a cold key's first version forever and cannot say
+  // which cursors are still reconstructible. Record that durably, in the
+  // transaction that removes the rows.
+  const changesFloor = getPrunedRecordChangeSuccessorFloor(connectorInstanceId, stream, cutoff);
+  if (changesFloor > 0) {
+    getDb()
+      .prepare(
+        `UPDATE version_counter SET changes_floor = MAX(changes_floor, ?)
+          WHERE connector_instance_id = ? AND stream = ?`
+      )
+      .run(changesFloor, connectorInstanceId, stream);
+  }
   exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff]);
   return { prunedBytesForDelta, prunedRowsForDelta };
 }
@@ -5177,6 +5223,14 @@ function validateChangesSinceVersions(
   const minVersion = minChangeRow?.min_version ?? null;
   if (minVersion !== null && sinceVersion < minVersion - 1) {
     throw codedError("changes_since cursor is too old; full re-sync required", "cursor_expired");
+  }
+  // The minimum above is only a lower bound: pruning keeps a sparse anchor per
+  // live key, so it stays at a cold key's first version while other keys'
+  // predecessor snapshots are gone. A cursor below `changes_floor` would get
+  // its deletions silently suppressed (no predecessor to show the key was
+  // visible). `beginning` needs no predecessor and stays valid.
+  if (sinceVersion > 0 && sinceVersion < (vcRow?.changes_floor ?? 0)) {
+    throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
   }
 
   return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
