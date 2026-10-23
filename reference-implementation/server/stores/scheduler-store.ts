@@ -129,6 +129,14 @@ export type SourceWebhookRunAdmission =
   | { readonly kind: "conflict"; readonly receipt: SourceWebhookRunReceipt };
 
 export interface SchedulerRunHistoryRecord {
+  /**
+   * `run_history.actor_type` — the actor_type of the run's terminal spine
+   * event (e.g. `local_device` for a run a device terminal commit recorded).
+   * `null` = provenance not known: the row is still running, predates the
+   * column and is not yet backfilled, or its run has no terminal event.
+   * Selected only by the product readers.
+   */
+  readonly actorType?: string | null;
   readonly attempt: number;
   readonly checkpointSummary: Record<string, unknown> | null;
   readonly completedAt: string;
@@ -374,7 +382,8 @@ const SCHEDULER_RUN_HISTORY_COLUMNS = `
 // `toConnectorRunSummary`-equivalent product readers never need a
 // per-run `readRunTerminalEventData` spine read on GET (G1).
 const PRODUCT_RUN_HISTORY_COLUMNS = `${SCHEDULER_RUN_HISTORY_COLUMNS},
-  facts_json`;
+  facts_json,
+  actor_type`;
 
 // ─── SQLite implementation ──────────────────────────────────────────────────
 
@@ -389,6 +398,7 @@ interface ScheduleSqliteRow {
 }
 
 interface SchedulerRunHistoryRow extends Record<string, unknown> {
+  readonly actor_type?: string | null;
   readonly attempt: number;
   readonly checkpoint_summary_json: unknown;
   readonly completed_at: string;
@@ -453,6 +463,7 @@ function asObjectArray(value: unknown): readonly Record<string, unknown>[] {
 // their own SQL `status <> 'running'` filter to make that narrowing sound.
 function rowToProductRunHistoryRecord(row: SchedulerRunHistoryRow): ProductRunHistoryRecord {
   const record: ProductRunHistoryRecord = {
+    ...(row.actor_type === undefined ? {} : { actorType: row.actor_type }),
     attempt: row.attempt,
     checkpointSummary: asObjectOrNull(parseJsonValue(row.checkpoint_summary_json, null)),
     completedAt: row.completed_at,
@@ -1478,6 +1489,7 @@ export function createPostgresSchedulerStore(): SchedulerStore {
                   history.attempt,
                   history.scheduler_managed,
                   history.facts_json,
+                  history.actor_type,
                   ROW_NUMBER() OVER (
                     PARTITION BY history.connector_instance_id
                     ORDER BY COALESCE(history.completed_at, history.started_at) DESC, history.id DESC
@@ -1531,6 +1543,7 @@ export function createPostgresSchedulerStore(): SchedulerStore {
                   history.attempt,
                   history.scheduler_managed,
                   history.facts_json,
+                  history.actor_type,
                   ROW_NUMBER() OVER (
                     PARTITION BY history.connector_instance_id
                     ORDER BY COALESCE(history.completed_at, history.started_at) DESC, history.id DESC

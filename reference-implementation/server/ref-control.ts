@@ -155,7 +155,7 @@ import {
   loadOwnerConnectorInstanceGroupsSqlite,
   resolveCanonicalConnectorInstanceId,
 } from "./connector-instance-canonicalization.ts";
-import { isLocalDeviceConnection, NON_LOCAL_DEVICE_COVERAGE_REASON } from "./connector-instance-placement.ts";
+import { isLocalDeviceConnection, LOCAL_DEVICE_ACTOR_TYPE } from "./connector-instance-placement.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import {
   type HeartbeatRow,
@@ -599,6 +599,14 @@ export interface ConnectorRunSummary {
    * `collection_report`; never final coverage truth.
    */
   readonly collection_facts: RuntimeCollectionFacts | null;
+  /**
+   * `run_history.actor_type`: the actor_type of the run's terminal spine event
+   * (`local_device` for a run a device terminal commit recorded). `null` =
+   * provenance not known (still running, predates the column and not yet
+   * backfilled, or no terminal event). `undefined` = this summary was not read
+   * from `run_history`, so it carries no provenance to judge.
+   */
+  readonly actor_type?: string | null;
   /** The per-connection collection revision this run was committed at; `null` when the run carries none. */
   readonly collection_revision?: number | null;
   readonly connector_error?: ConnectorRunErrorSummary | null;
@@ -1610,6 +1618,7 @@ function productRunHistoryToConnectorRunSummary(
       ? facts.browser_surface_wait_reason
       : null;
   return {
+    actor_type: history.actorType ?? null,
     collection_facts: readCollectionFactsFromTerminalData(facts),
     collection_revision: readCollectionRevision(facts?.collection_revision),
     local_terminal_coverage: readLocalTerminalCoverage(facts, history),
@@ -2899,22 +2908,40 @@ function coverageClassifyingRun(
 }
 
 /**
- * A run recorded by a device terminal commit. The stored coverage-eligibility
- * marker is not the authority: a device terminal written before the marker
- * existed, or while the connection was local_device, carries none. Every
- * device terminal commit stamps the connection's `collection_revision` (no
- * server run does), so that stamp identifies it. Local-device connections
- * quarantine these rows before this point; any other source kind has no
- * device-coverage authority, so such a run is never its coverage evidence.
+ * Whether a run may be a device terminal commit, so it is never coverage
+ * evidence. The authority is the run's provenance, `run_history.actor_type`:
+ * the actor_type of its terminal spine event, which both device terminal
+ * writers set to `local_device` (server/stores/terminal-run-commit-store.ts,
+ * operations/local-device-terminal-collection.ts) and no server run uses. It
+ * does not depend on what the row's facts carry (a revision stamp, a stored
+ * ineligibility marker), which a device terminal written before those existed
+ * lacks.
+ *
+ * - `local_device`: a device run. Dropped.
+ * - another actor_type: a server run. Kept.
+ * - `null` (provenance unknown): dropped, because the run may be a device
+ *   run and a non-device connection must not credit one. Two proofs of server
+ *   origin keep it: a scheduler-managed run (the scheduler never runs a
+ *   device's terminal commit) and a nonterminal run (a device run is
+ *   recorded only at its terminal commit). Once the startup backfill
+ *   (server/stores/run-history-actor-backfill.ts) has run, `null` remains only
+ *   for a terminal run with no terminal spine event.
+ * - `undefined`: the summary did not come from `run_history`; not judged here.
+ *
+ * Source kind is applied before this point: a local-device connection
+ * quarantines non-scheduler-managed runs (`localDeviceBacked`), and the
+ * Collection Report skips run facts for it. So a device run is coverage
+ * evidence for no connection through this selector, and the stream-facts fold
+ * credits it only while the connection is `local_device`.
  */
 function isDeviceTerminalRun(run: ConnectorRunSummary | null): boolean {
-  if (run === null) {
+  if (run === null || run.actor_type === undefined) {
     return false;
   }
-  return (
-    typeof run.collection_revision === "number" ||
-    run.local_terminal_coverage?.coverageEligibilityReason === NON_LOCAL_DEVICE_COVERAGE_REASON
-  );
+  if (run.actor_type === null) {
+    return !(run.scheduler_managed === true || isActiveRunSummaryStatus(run.status));
+  }
+  return run.actor_type === LOCAL_DEVICE_ACTOR_TYPE;
 }
 
 /**

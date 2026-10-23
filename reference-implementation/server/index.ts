@@ -640,6 +640,7 @@ import {
   markAcceptedRecordRejectionsStale,
   type RecordRejectionReceipt,
 } from "./stores/record-rejection-store.ts";
+import { runStartupRunHistoryActorBackfillToCompletion } from "./stores/run-history-actor-backfill.ts";
 import {
   createResumableRunHistoryBackfillStage,
   runStartupRunHistoryBackfillToCompletion,
@@ -1143,6 +1144,11 @@ const CONNECTOR_MAINTENANCE_EVIDENCE_SWEEP_PAGE_SIZE = 25;
 const STARTUP_RUN_HISTORY_BACKFILL_MAX_DURATION_MS = 2000;
 const STARTUP_RUN_HISTORY_BACKFILL_BATCH_SIZE = 25;
 const STARTUP_RUN_HISTORY_BACKFILL_MAX_ROUNDS = 20;
+// Run provenance (run_history.actor_type) for rows that predate the column.
+// Rounds are short single statements over this many rows; see
+// server/stores/run-history-actor-backfill.ts.
+const STARTUP_RUN_HISTORY_ACTOR_BACKFILL_BATCH_SIZE = 200;
+const STARTUP_RUN_HISTORY_ACTOR_BACKFILL_MAX_ROUNDS = 1000;
 
 /**
  * Walks `runBoundedSummaryEvidenceSweep` to completion across up to
@@ -9818,7 +9824,27 @@ export async function startServer(opts: ServerOpts = {}) {
   // on the next periodic tick; LIST renders `not yet observed
   // (backfilling)` for any run not yet in run_history in the meantime,
   // never a spine fallback.
-  const startupRunHistoryBackfillDone = new Promise<void>((resolve) => {
+  const startupRunHistoryActorBackfillDone = new Promise<void>((resolve) => {
+    setImmediate(() => {
+      // biome-ignore lint/complexity/noVoid: The side effect is intentionally fire-and-forget by this runtime contract.
+      void runStartupRunHistoryActorBackfillToCompletion({
+        batchSize: STARTUP_RUN_HISTORY_ACTOR_BACKFILL_BATCH_SIZE,
+        maxRounds: STARTUP_RUN_HISTORY_ACTOR_BACKFILL_MAX_ROUNDS,
+      })
+        .then((summary) => {
+          if (summary.filled > 0 || !summary.complete) {
+            logger.info(summary, "startup run-history actor backfill observation");
+          }
+        })
+        .catch((err) => {
+          // Rows left NULL are treated as unknown provenance, which fails closed for
+          // coverage; the next boot continues.
+          logger.warn({ err }, "startup run-history actor backfill failed; the next boot will retry");
+        })
+        .finally(resolve);
+    });
+  });
+  const startupRunHistoryRowBackfillDone = new Promise<void>((resolve) => {
     setImmediate(() => {
       // biome-ignore lint/complexity/noVoid: The side effect is intentionally fire-and-forget by this runtime contract.
       void runStartupRunHistoryBackfillToCompletion({
@@ -9847,6 +9873,10 @@ export async function startServer(opts: ServerOpts = {}) {
         .finally(resolve);
     });
   });
+  const startupRunHistoryBackfillDone = Promise.all([
+    startupRunHistoryRowBackfillDone,
+    startupRunHistoryActorBackfillDone,
+  ]).then(() => undefined);
   if (opts.awaitStartupBackfill === true) {
     await startupBackfillDone;
   }

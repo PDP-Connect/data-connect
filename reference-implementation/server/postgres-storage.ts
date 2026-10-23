@@ -3160,7 +3160,11 @@ async function bootstrapPostgresSchemaOnce({
         -- (server/stores/run-history-writer.ts) sets this false. Scheduler
         -- cadence/backoff readers filter on this column — see
         -- terminal-read-architecture-fable-0730.md R7.5.
-        scheduler_managed BOOLEAN NOT NULL DEFAULT false
+        scheduler_managed BOOLEAN NOT NULL DEFAULT false,
+        -- Run provenance: the actor_type of the run's terminal spine event.
+        -- NULL = not known (still running, predates the column and not yet
+        -- backfilled, or no terminal event). See the SQLite twin in db.ts.
+        actor_type TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_pg_run_history_connector_completed
@@ -3957,6 +3961,21 @@ async function bootstrapPostgresSchemaOnce({
     await migratePostgresSchedulerInstanceColumns(client);
     await migratePostgresRunHistoryRename(client);
     await migratePostgresRunHistoryCompletedAtNullable(client);
+    // After the rename/rebuild migrations above, which can swap run_history
+    // for the legacy table. A nullable ADD COLUMN with no default is
+    // catalog-only (no table rewrite), but it still needs a momentary
+    // ACCESS EXCLUSIVE lock, so it gets the same bounded lock wait as the
+    // scheduler_managed default repair below instead of queueing forever.
+    await client.query("BEGIN");
+    try {
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      await client.query("SET LOCAL statement_timeout = '30s'");
+      await client.query("ALTER TABLE run_history ADD COLUMN IF NOT EXISTS actor_type TEXT");
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
     await migratePostgresRunHistorySchedulerManagedDefault(client, { log });
     await migratePostgresConnectorMaintenanceCursorNameCheck(client);
     await migratePostgresRecordsBlobSearchInstanceColumns(client);

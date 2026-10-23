@@ -77,6 +77,12 @@ export function isRunHistoryRelevantEventType(eventType: string | null | undefin
 }
 
 export interface RunHistorySpineEvent {
+  /**
+   * The event's actor_type. A terminal event's value is stored as the run's
+   * provenance (`run_history.actor_type`), e.g. `local_device` for a run a
+   * device terminal commit recorded.
+   */
+  readonly actorType: string;
   readonly connectorId: string | null;
   readonly connectorInstanceId: string | null;
   readonly data: Record<string, unknown>;
@@ -352,6 +358,7 @@ function writeSqliteRunHistoryWith(event: RunHistorySpineEvent, execute: SqliteR
     failureReason,
     terminalReason,
     factsJson,
+    event.actorType,
     event.runId,
     event.connectorInstanceId,
   ]);
@@ -373,6 +380,7 @@ function writeSqliteRunHistoryWith(event: RunHistorySpineEvent, execute: SqliteR
     failureReason,
     terminalReason,
     factsJson,
+    event.actorType,
   ]);
 }
 
@@ -459,9 +467,10 @@ export async function writePostgresRunHistoryForSpineEvent(
          connector_error_json = $4::jsonb,
          failure_reason = $5,
          terminal_reason = $6,
-         facts_json = $7::jsonb
-     WHERE run_id = $8
-       AND connector_instance_id = $9
+         facts_json = $7::jsonb,
+         actor_type = $8
+     WHERE run_id = $9
+       AND connector_instance_id = $10
        AND status = 'running'`,
     [
       terminalStatus,
@@ -471,6 +480,7 @@ export async function writePostgresRunHistoryForSpineEvent(
       failureReason,
       terminalReason,
       factsJson,
+      event.actorType,
       event.runId,
       event.connectorInstanceId,
     ]
@@ -483,8 +493,8 @@ export async function writePostgresRunHistoryForSpineEvent(
     `INSERT INTO run_history(
        run_id, connector_instance_id, connector_id, trigger_kind, source_json,
        status, known_gaps_json, started_at, completed_at, records_emitted,
-       connector_error_json, failure_reason, terminal_reason, facts_json, attempt
-     ) VALUES($1, $2, $3, $4, $5::jsonb, $6, '[]'::jsonb, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, 1)
+       connector_error_json, failure_reason, terminal_reason, facts_json, actor_type, attempt
+     ) VALUES($1, $2, $3, $4, $5::jsonb, $6, '[]'::jsonb, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb, $14, 1)
      ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO NOTHING`,
     [
       event.runId,
@@ -500,6 +510,7 @@ export async function writePostgresRunHistoryForSpineEvent(
       failureReason,
       terminalReason,
       factsJson,
+      event.actorType,
     ]
   );
 }
