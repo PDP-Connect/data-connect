@@ -58,6 +58,7 @@ import {
   nonNullSchemaTypes,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
 } from "./record-filters.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import {
@@ -2218,11 +2219,7 @@ async function visiblePostgresChange({
     return null;
   }
   const fields = effective.fields ?? null;
-  // Entering the filtered result set counts as a change; see resolveChangeGroupRecord in records.ts.
-  const previousProjection =
-    previous && previousVisible && passesRequestFilters(previous.data, compiledFilters)
-      ? projectFields(previous.data, fields)
-      : null;
+  const previousProjection = previous && previousVisible ? projectFields(previous.data, fields) : null;
   const currentProjection = projectFields(current.data, fields);
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
     return null;
@@ -2510,6 +2507,7 @@ export async function postgresQueryRecords(
   );
 
   if (requestParams.changes_since !== null && requestParams.changes_since !== undefined) {
+    rejectFiltersWithChangesFeed(compiledFilters);
     return queryPostgresChangesSince({
       compiledFilters,
       connectorInstanceId,

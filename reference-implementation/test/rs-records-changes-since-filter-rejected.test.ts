@@ -2,24 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Filtered `changes_since` on both storage backends.
+ * Owner `filter[...]` combined with `changes_since` is rejected on both storage backends.
  *
  * spec-core §8: `changes_since` returns the full current state of each record
- * whose authorized projection changed, plus tombstones for deletions. Filters
- * are owner-token-only. A client that applies each filtered delta to the
- * previous filtered result must end up with what a full filtered read returns
- * at the new watermark, so a record that ENTERS the filtered set is emitted
- * even when its projected bytes did not change (sparse `fields` that omit the
- * filtered field make that the common case).
+ * whose authorized projection changed, plus tombstones for deletions. A
+ * filtered feed would have to report records that ENTER and LEAVE the filtered
+ * set. Entry is expressible as an upsert; exit is not, because a tombstone means
+ * deletion and the wire format has no membership-exit entry. Serving the feed
+ * anyway made a client mirror drift silently while the watermark advanced, so
+ * the combination is rejected with 400 `invalid_request` until an exit
+ * representation exists. Unfiltered `changes_since` and filtered plain reads are
+ * unchanged.
  *
- * Exit is a known limitation: a record that leaves the filtered set is not
- * reported. A tombstone means deletion and the record still exists, and the
- * wire format has no membership-exit entry. The test pins that behaviour so a
- * future wire-format decision has to change it deliberately.
- *
- * The SQLite and PostgreSQL paths implement eligibility separately
- * (server/records.ts resolveChangeGroupRecord, server/postgres-records.ts
- * visiblePostgresChange), so the same scenario runs over HTTP against both.
+ * The SQLite and PostgreSQL paths validate separately (server/records.ts
+ * validateQueryCursors, server/postgres-records.ts queryPostgresRecords), so the
+ * same scenario runs over HTTP against both.
  */
 
 import assert from "node:assert/strict";
@@ -90,7 +87,7 @@ function runtimeManifest(connectorKey: string): JsonObject {
 function localFulfillment(sourceId: string, connectorKey: string): JsonObject {
   return {
     source_declaration: {
-      declaration_version: "rs-changes-since-filter-entry-v1",
+      declaration_version: "rs-changes-since-filter-rejected-v1",
       display: { name: "Filtered changes_since" },
       extensions: {},
       protocol_version: "0.1.0",
@@ -156,7 +153,7 @@ async function approveClientGrant(asUrl: string, sourceId: string): Promise<stri
       authorization_details: [
         {
           access_mode: "continuous",
-          purpose_code: "https://pdpp.dev/purpose/rs-changes-since-filter-entry-test",
+          purpose_code: "https://pdpp.dev/purpose/rs-changes-since-filter-rejected-test",
           source: { id: sourceId, kind: "provider_native" },
           streams: [{ fields: ["id", "status", "title"], name: "notes" }],
           type: "https://pdpp.dev/data-access",
@@ -208,7 +205,7 @@ async function watermark(rsUrl: string, token: string, query: string): Promise<s
 
 async function runScenario(backend: Backend): Promise<void> {
   const suffix = `${backend.name}_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
-  const connectorKey = `rs_changes_filter_${suffix}`;
+  const connectorKey = `rs_changes_filter_rej_${suffix}`;
   const connectorInstanceId = `cin_${suffix}`;
   const sourceId = `https://sources.example/${suffix}`;
   let server: TestServer | null = null;
@@ -254,44 +251,66 @@ async function runScenario(backend: Backend): Promise<void> {
     const ownerToken = await issueOwnerToken(asUrl);
     const clientToken = await approveClientGrant(asUrl, sourceId);
 
-    const filtered = "fields=id&filter[status]=active";
     const label = backend.name;
+    const filtered = "fields=id&filter[status]=active";
 
-    const baselineIds = await changedIds(rsUrl, ownerToken, `${filtered}&changes_since=beginning`);
-    assert.deepEqual(baselineIds, ["inside", "leaver"], `${label}: filtered baseline`);
-    const ownerMark = await watermark(rsUrl, ownerToken, `${filtered}&changes_since=beginning`);
+    const ownerMark = await watermark(rsUrl, ownerToken, "changes_since=beginning");
     const clientMark = await watermark(rsUrl, clientToken, "changes_since=beginning");
 
-    await write("item", "active", "T0"); // enters the filter; fields=id projection unchanged
-    await write("stay", "inactive", "T1"); // stays outside the filter
-    await write("inside", "active", "T1"); // stays inside; fields=id projection unchanged
-    await write("leaver", "inactive", "T0"); // leaves the filter
+    await write("item", "active", "T1");
+    await write("leaver", "inactive", "T0");
 
-    const delta = await changedIds(rsUrl, ownerToken, `${filtered}&changes_since=${encodeURIComponent(ownerMark)}`);
-    assert.deepEqual(delta, ["item"], `${label}: only the record entering the filter is emitted`);
+    // Filtered changes_since is rejected for the bootstrap token and for a stored watermark.
+    for (const since of ["beginning", ownerMark]) {
+      const rejected = await fetchJson(
+        `${rsUrl}/v1/streams/notes/records?${filtered}&changes_since=${encodeURIComponent(since)}`,
+        bearer(ownerToken)
+      );
+      assert.equal(rejected.status, 400, `${label} changes_since=${since}: ${JSON.stringify(rejected.body)}`);
+      assert.equal(rejected.body.error?.code, "invalid_request", label);
+      assert.equal(rejected.body.error?.type, "invalid_request_error", label);
+      assert.match(rejected.body.error?.message, /filter.*not supported with changes_since/, label);
+      assert.equal(Object.hasOwn(rejected.body, "data"), false, label);
+    }
 
-    // Applying the delta to the previous filtered result matches a full read, except for the
-    // documented exit limitation: `leaver` stays in the mirror because no exit entry exists.
-    const full = await changedIds(rsUrl, ownerToken, filtered);
-    assert.deepEqual(full, ["inside", "item"], `${label}: full filtered read`);
-    const mirror = new Set([...baselineIds, ...delta]);
-    assert.deepEqual([...mirror].sort(), ["inside", "item", "leaver"], `${label}: known exit limitation`);
-
-    // A hidden-field-only change on an unfiltered client read is still not emitted.
-    // The earlier writes changed `title`, which the grant authorizes, so re-baseline first.
-    const clientMark2 = await watermark(rsUrl, clientToken, `changes_since=${encodeURIComponent(clientMark)}`);
-    await write("inside", "active", "T1", "rotated-secret");
+    // Unfiltered changes_since is unchanged: owner and client both see the writes.
     assert.deepEqual(
-      await changedIds(rsUrl, clientToken, `changes_since=${encodeURIComponent(clientMark2)}`),
-      [],
-      `${label}: hidden-field-only change must not be emitted to a client`
+      await changedIds(rsUrl, ownerToken, `changes_since=${encodeURIComponent(ownerMark)}`),
+      ["item", "leaver"],
+      `${label}: unfiltered owner changes_since`
     );
-    await write("inside", "active", "T2", "rotated-secret");
     assert.deepEqual(
-      await changedIds(rsUrl, clientToken, `changes_since=${encodeURIComponent(clientMark2)}`),
-      ["inside"],
-      `${label}: an authorized-field change is emitted to a client`
+      await changedIds(rsUrl, clientToken, `changes_since=${encodeURIComponent(clientMark)}`),
+      ["item", "leaver"],
+      `${label}: client changes_since`
     );
+
+    // SQLite pages a changes session with `cursor`; a continued page must not smuggle filters in.
+    // PostgreSQL returns the whole changes window in one page and issues no `next_cursor`.
+    if (backend.name === "sqlite") {
+      const firstPage = await fetchJson(
+        `${rsUrl}/v1/streams/notes/records?changes_since=${encodeURIComponent(ownerMark)}&limit=1`,
+        bearer(ownerToken)
+      );
+      assert.equal(firstPage.status, 200, JSON.stringify(firstPage.body));
+      assert.equal(firstPage.body.has_more, true, "two changes at limit=1 must page");
+      const nextCursor = encodeURIComponent(String(firstPage.body.next_cursor));
+      const continued = await fetchJson(
+        `${rsUrl}/v1/streams/notes/records?cursor=${nextCursor}&limit=1`,
+        bearer(ownerToken)
+      );
+      assert.equal(continued.status, 200, JSON.stringify(continued.body));
+      const smuggled = await fetchJson(
+        `${rsUrl}/v1/streams/notes/records?cursor=${nextCursor}&limit=1&${filtered}`,
+        bearer(ownerToken)
+      );
+      assert.equal(smuggled.status, 400, JSON.stringify(smuggled.body));
+      assert.equal(smuggled.body.error?.code, "invalid_request");
+      assert.match(smuggled.body.error?.message, /filter.*not supported with changes_since/);
+    }
+
+    // Filtered plain reads are unchanged.
+    assert.deepEqual(await changedIds(rsUrl, ownerToken, filtered), ["inside", "item"], `${label}: filtered read`);
   } finally {
     await closeServer(server);
     configureNativeManifest(null);
@@ -300,10 +319,10 @@ async function runScenario(backend: Backend): Promise<void> {
   }
 }
 
-test("filtered changes_since emits records entering the filter on SQLite", () => runScenario({ name: "sqlite" }));
+test("filtered changes_since is rejected on SQLite", () => runScenario({ name: "sqlite" }));
 
 test(
-  "filtered changes_since emits records entering the filter on PostgreSQL",
+  "filtered changes_since is rejected on PostgreSQL",
   { skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is required" },
   () => {
     assert.ok(POSTGRES_URL);

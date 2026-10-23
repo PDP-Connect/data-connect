@@ -25,7 +25,7 @@ A correct owner-agent never answers a question by scanning every record. The pat
    state. A multi-connection deployment (two Gmail accounts, two banks) needs per-connection
    cursors, not one global cursor.
 3. **Deltas, not scans.** After the first bounded pass, every refresh uses
-   `changes_since=<cursor>` plus declared filters, pagination, and field projection.
+   `changes_since=<cursor>` plus pagination and field projection (no `filter[...]`; see below).
 4. **Refresh metadata on a cadence.** New streams and connections appear over time;
    re-fetch schema/stream metadata periodically so "future data" is discovered, not guessed.
 
@@ -116,8 +116,10 @@ Records arrive in the canonical list envelope: rows under **`data`**, with `has_
 - Page with `next_cursor` while `has_more` is true; persist `next_changes_since` per
   `(stream, connection_id)` after each successful page.
 - Apply only schema-declared filters and request only needed fields.
-- A filtered `changes_since` read emits records that enter the filter, but not records that
-  leave it (a tombstone means deletion). Re-read the filtered set in full to drop them.
+- Do not combine `filter[...]` with `changes_since`: the server rejects it with 400
+  `invalid_request`. A delta cannot report a record that leaves the filter (a tombstone means
+  deletion), so a filtered mirror would go stale. Sync the stream unfiltered with `changes_since`
+  and filter locally, or re-read the filtered set in full.
 - Fetch `blob_ref.fetch_url` lazily, for blobs you actually surface.
 
 ## Failure handling

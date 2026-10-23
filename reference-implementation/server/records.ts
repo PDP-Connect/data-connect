@@ -119,6 +119,7 @@ import {
   jsonPathForTopLevelField,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
   type TimeConstraint,
 } from "./record-filters.ts";
 import {
@@ -5258,14 +5259,8 @@ function resolveChangeGroupRecord(
     return null;
   }
 
-  // A record whose previous version sat outside the request's filters ENTERS the
-  // filtered result set now, so it is emitted even if its projection is
-  // unchanged. Leaving the set is not reported: tombstones mean deletion, and a
-  // filtered-out record still exists. Clients without owner filters always pass.
   const previousProjection =
-    previousVisible && previous?.data && passesRequestFilters(previous.data, compiledFilters)
-      ? projectFields(previous.data, effective.fields ?? undefined)
-      : null;
+    previousVisible && previous?.data ? projectFields(previous.data, effective.fields ?? undefined) : null;
   const currentProjection = projectFields(current.data, effective.fields ?? undefined);
 
   if (previousProjection && JSON.stringify(previousProjection) === JSON.stringify(currentProjection)) {
@@ -5474,7 +5469,8 @@ interface ValidatedQueryContext {
 
 function validateQueryCursors(
   requestParams: RequestParams,
-  expansions: ReturnType<typeof normalizeExpandRequest>
+  expansions: ReturnType<typeof normalizeExpandRequest>,
+  compiledFilters: readonly CompiledFilter[]
 ): { changesSince: ChangesSinceCursor | null; paginationCursor: PaginationCursor | null } {
   const changesSince =
     typeof requestParams.changes_since === "string" ? parseChangesSinceCursor(requestParams.changes_since) : null;
@@ -5488,6 +5484,7 @@ function validateQueryCursors(
   }
   if (changesSince !== null || paginationCursor?.session === "changes") {
     rejectListOnlyParamsForChangesFeed(requestParams);
+    rejectFiltersWithChangesFeed(compiledFilters);
   }
   if ((changesSince !== null || paginationCursor?.session === "changes") && expansions.length) {
     throw invalidQueryError("expand is not supported with changes_since", "invalid_expand");
@@ -5537,7 +5534,7 @@ async function validateQueryRecordsRequest(
     requestWarnings.push(buildLimitClampedWarning(requestedLimit));
   }
 
-  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions);
+  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, compiledFilters);
 
   return {
     changesSince,
