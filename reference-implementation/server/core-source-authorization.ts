@@ -314,10 +314,18 @@ export function resolveCoreSelection(
     requests = cloneJson(preset.streams) as CoreStreamSelection[];
   }
   if (requests.length === 1 && requests[0]?.name === "*") {
-    const instanceIds = requests[0].instance_ids;
+    // Core §6 wildcard note (spec-core.md "Note on wildcards") and §5 selection rules: the requested parameters apply to every expanded
+    // stream and each expansion is validated like a concrete request, so a
+    // stream that cannot honor a constraint rejects the request instead of
+    // being silently broadened.
+    const wildcard = requests[0];
     requests = manifestStreams(declaration).map((stream) => ({
-      ...(instanceIds ? { instance_ids: [...instanceIds] } : {}),
+      ...(wildcard.fields ? { fields: [...wildcard.fields] } : {}),
+      ...(wildcard.instance_ids ? { instance_ids: [...wildcard.instance_ids] } : {}),
       name: stream.name,
+      ...(wildcard.resources ? { resources: [...wildcard.resources] } : {}),
+      ...(wildcard.time_range ? { time_range: { ...wildcard.time_range } } : {}),
+      ...(wildcard.view ? { view: wildcard.view } : {}),
     }));
   }
   return requests.map((request) => {
