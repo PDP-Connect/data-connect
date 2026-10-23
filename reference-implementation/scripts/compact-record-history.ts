@@ -980,22 +980,47 @@ export async function applyCompaction({ pool, plan, runId }: ApplyCompactionInpu
   try {
     await client.query("BEGIN");
 
+    // Ingest locks the stream's version_counter row before it touches history.
+    // Take that lock first so the two never wait on each other in opposite
+    // order, and so no ingest can move a key's current anchor while we check it.
+    await client.query(
+      `SELECT 1 FROM version_counter WHERE connector_instance_id = $1 AND stream = $2 FOR UPDATE`,
+      [plan.connectorInstanceId, plan.stream]
+    );
+
     for (const [recordKey, versions] of plan.removableByKey) {
       const versionsAsNumbers = versions.map(Number);
-      // Read successors BEFORE the delete, from the rows that are actually
-      // present now, so a plan made earlier cannot understate the frontier.
-      const successor = await client.query(
-        `SELECT MAX((SELECT MIN(n.version) FROM record_changes n
-                      WHERE n.connector_instance_id = rc.connector_instance_id
-                        AND n.stream = rc.stream
-                        AND n.record_key = rc.record_key
-                        AND n.version > rc.version))::bigint AS floor
+      // Revalidate the plan against the rows that are present now. A plan made
+      // before a later ingest can name the key's current anchor; a floor cannot
+      // recover a deleted current projection, so refuse instead of deleting it.
+      const current = await client.query(
+        `SELECT version::bigint AS version FROM records
+          WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3`,
+        [plan.connectorInstanceId, plan.stream, recordKey]
+      );
+      const currentVersion = Number(current.rows[0]?.version ?? 0);
+      // Each removed row's newest successor, read BEFORE the delete from the
+      // rows present now, so an old plan cannot understate the frontier.
+      const successors = await client.query(
+        `SELECT rc.version::bigint AS version,
+                (SELECT MIN(n.version) FROM record_changes n
+                  WHERE n.connector_instance_id = rc.connector_instance_id
+                    AND n.stream = rc.stream
+                    AND n.record_key = rc.record_key
+                    AND n.version > rc.version)::bigint AS successor
            FROM record_changes rc
           WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.record_key = $3
             AND rc.version = ANY($4::bigint[])`,
         [plan.connectorInstanceId, plan.stream, recordKey, versionsAsNumbers]
       );
-      changesFloor = Math.max(changesFloor, Number(successor.rows[0]?.floor || 0));
+      for (const row of successors.rows) {
+        if (row.successor === null || Number(row.version) >= currentVersion) {
+          throw new Error(
+            `stale compaction plan for ${plan.connectorInstanceId}/${plan.stream}/${recordKey}: version ${row.version} is the current anchor or has no successor (current ${currentVersion}); re-run the plan`
+          );
+        }
+        changesFloor = Math.max(changesFloor, Number(row.successor));
+      }
       // biome-ignore lint/performance/noAwaitInLoops: every insert/delete pair in this loop shares ONE pg.PoolClient inside a single BEGIN/COMMIT transaction -- a pg client serializes queries on one connection regardless, and parallelizing here would not overlap I/O, only reorder statements inside the transaction non-deterministically.
       const insertRes = await client.query(
         `INSERT INTO ${quoteIdent(backupTable)}

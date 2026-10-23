@@ -6610,15 +6610,32 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   runWithSqliteBusyRetrySync(() => migrateConnectorSyncStateInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorDetailGapInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
-  // Pre-existing DBs predate the column. When retention is on, history may
-  // already have been pruned without keeping each key's baseline, so no
-  // existing cursor is known to be reconstructible: seed the floor at the
-  // head, which expires them once (clients re-sync from `beginning`).
+  // Pre-existing DBs predate the column. The column and its seed commit
+  // together: an interrupted seed must not leave a column that makes the next
+  // startup skip it. Seed the floor at the head (existing cursors expire once;
+  // clients re-sync from `beginning`) when retention is on, or when a stream's
+  // history has a gap: fewer retained rows than versions means rows were pruned
+  // or compacted earlier, even if retention is off now. Complete histories
+  // keep floor 0. A stream with skipped version numbers also reads as a gap,
+  // which only costs one re-sync.
   runWithSqliteBusyRetrySync(() => {
-    if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
-      if (getChangeHistoryLimit() > 0) {
-        raw.exec("UPDATE version_counter SET changes_floor = max_version");
+    raw.exec("BEGIN IMMEDIATE");
+    try {
+      if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
+        raw.prepare(
+          `UPDATE version_counter SET changes_floor = max_version
+            WHERE ? = 1 OR (SELECT COUNT(*) FROM record_changes rc
+                             WHERE rc.connector_instance_id = version_counter.connector_instance_id
+                               AND rc.stream = version_counter.stream)
+                           < MAX(max_version, COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                                                         WHERE rc.connector_instance_id = version_counter.connector_instance_id
+                                                           AND rc.stream = version_counter.stream), 0))`
+        ).run(getChangeHistoryLimit() > 0 ? 1 : 0);
       }
+      raw.exec("COMMIT");
+    } catch (error) {
+      raw.exec("ROLLBACK");
+      throw error;
     }
   });
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));

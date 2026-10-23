@@ -5678,16 +5678,8 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
   );
   await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS fields_fingerprint TEXT");
-  // Oldest reconstructible changes_since watermark. When retention is on,
-  // history may already have been pruned without keeping each key's baseline,
-  // so seed the floor at the head on first creation: existing cursors expire
-  // once and clients re-sync from `beginning`.
-  const hadChangesFloor = await hasPostgresColumn(client, "version_counter", "changes_floor");
-  await client.query("ALTER TABLE version_counter ADD COLUMN IF NOT EXISTS changes_floor BIGINT NOT NULL DEFAULT 0");
-  if (!hadChangesFloor && getChangeHistoryLimit() > 0) {
-    await client.query("UPDATE version_counter SET changes_floor = max_version");
-  }
   if (checks.every(Boolean)) {
+    await ensurePostgresChangesFloor(client);
     await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
     return;
   }
@@ -5823,7 +5815,52 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
     throw err;
   }
+  await ensurePostgresChangesFloor(client);
   await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
+}
+
+// Oldest reconstructible changes_since watermark. The column and its seed
+// commit in one transaction: an interrupted seed must not leave a column that
+// makes the next startup skip it. Runs after the instance-namespace migration
+// so version_counter and record_changes both carry connector_instance_id.
+// Seed the floor at the head (existing cursors expire once; clients re-sync from
+// `beginning`) when retention is on, or when a stream's history has a gap: fewer
+// retained rows than versions means rows were pruned or compacted earlier, even
+// if retention is off now. Complete histories keep floor 0. A stream with
+// skipped version numbers also reads as a gap, which only costs one re-sync.
+async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
+  if (await hasPostgresColumn(client, "version_counter", "changes_floor")) {
+    return;
+  }
+  await client.query("BEGIN");
+  try {
+    // Serialize concurrent starters: the loser re-checks after the winner commits.
+    await client.query("LOCK TABLE version_counter IN ACCESS EXCLUSIVE MODE");
+    if (!(await hasPostgresColumn(client, "version_counter", "changes_floor"))) {
+      await client.query("ALTER TABLE version_counter ADD COLUMN changes_floor BIGINT NOT NULL DEFAULT 0");
+      await client.query(
+        `UPDATE version_counter SET changes_floor = max_version
+          WHERE $1::boolean OR (
+            SELECT COUNT(*) FROM record_changes rc
+             WHERE rc.connector_instance_id = version_counter.connector_instance_id
+               AND rc.stream = version_counter.stream
+          ) < GREATEST(max_version, COALESCE((
+            SELECT MAX(rc.version) FROM record_changes rc
+             WHERE rc.connector_instance_id = version_counter.connector_instance_id
+               AND rc.stream = version_counter.stream
+          ), 0))`,
+        [getChangeHistoryLimit() > 0]
+      );
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The original error is what the caller needs.
+    }
+    throw err;
+  }
 }
 
 async function ensurePostgresRecordsBlobSearchInstanceIndexes(client: PoolClient): Promise<void> {
