@@ -539,7 +539,17 @@ function settlePublishedFenceReadOnly(
   requestedPath: string,
   sourceInstanceId: string
 ): "foreign" | "proven" | undefined {
-  const published = fenceIsPublished(fence, sourceInstanceId);
+  let published: boolean;
+  try {
+    published = fenceIsPublished(fence, sourceInstanceId);
+  } catch (error) {
+    // biome-ignore lint/style/useErrorCause: CollectorStateResolutionError forwards the cause through its custom constructor.
+    throw new CollectorStateResolutionError(
+      "legacy_state_unreadable",
+      `could not read the destination ${fence.recordedPath} that a retirement fence names`,
+      { cause: error }
+    );
+  }
   if (!published) {
     return undefined;
   }
@@ -555,6 +565,7 @@ function settlePublishedFenceReadOnly(
  * - `proven`: the requested destination carries the fence's migration id.
  * - `foreign`: another destination published, or is publishing, behind the fence.
  * - `lifted`: no destination binds the fence, so it was deleted.
+ * - `orphan`: an id-less fence to a missing destination; it is left in place.
  *
  * A fence that changed since it was observed is not decided at all.
  */
@@ -564,7 +575,7 @@ function settleFence(
   sourceInstanceId: string,
   observed: FenceRecord,
   betweenChecks?: (() => void) | undefined
-): "absent" | "foreign" | "lifted" | "proven" {
+): "absent" | "foreign" | "lifted" | "orphan" | "proven" {
   let db: DatabaseSync | undefined;
   try {
     db = new DatabaseSync(legacyPath);
@@ -585,7 +596,7 @@ function settleFence(
       const binding = fenceBinding(current, sourceInstanceId, betweenChecks);
       if (binding.kind === "orphan") {
         db.exec("ROLLBACK");
-        throw orphanFence(legacyPath, current.recordedPath, sourceInstanceId);
+        return "orphan";
       }
       if (binding.kind === "none" && current.migrationId !== null) {
         deleteFence(db, sourceInstanceId, current.migrationId);
@@ -644,6 +655,13 @@ function accountForLegacyStores(
       if (verdict === "proven") {
         continue;
       }
+      if (verdict === "orphan") {
+        // Not trusted and not lifted; only a backlog still sitting here is a conflict.
+        if (status.pending) {
+          throw orphanFence(path, status.fence.recordedPath, sourceInstanceId);
+        }
+        continue;
+      }
       if (verdict === "foreign") {
         // Retired elsewhere; only a backlog still sitting here is a conflict.
         if (status.pending) {
@@ -682,10 +700,16 @@ function orphanFence(
   );
 }
 
-function handoffInProgress(canonicalPath: string, ownerPid: number): CollectorStateResolutionError {
+function handoffInProgress(
+  canonicalPath: string,
+  ownerPid: number | undefined,
+  cause?: unknown
+): CollectorStateResolutionError {
+  const owner = ownerPid ? ` (process ${ownerPid})` : "";
   return new CollectorStateResolutionError(
     "legacy_state_conflict",
-    `a legacy state handoff to ${canonicalPath} is in progress (process ${ownerPid}); retry once it finishes`
+    `a legacy state handoff to ${canonicalPath} is in progress${owner}; retry once it finishes`,
+    cause === undefined ? {} : { cause }
   );
 }
 
@@ -721,7 +745,7 @@ function migrateLegacyStore(
     // The snapshot is written beside the final canonical database, so the final
     // rename is between destination siblings. The legacy store may be on a
     // different filesystem: it is only read (VACUUM INTO) and fenced in place.
-    acquireMigrationLock(lockPath);
+    acquireMigrationLock(lockPath, canonicalPath);
     lockAcquired = true;
     source = new DatabaseSync(legacyPath, { readOnly: true });
     source.exec("PRAGMA busy_timeout = 5000");
@@ -871,7 +895,12 @@ function reconcileLegacyWrites(
     // belongs to an interrupted handoff to the same path and is retried.
     const existing = readFenceRecord(source, sourceInstanceId);
     if (existing && existing.recordedPath !== canonicalPath) {
-      if (existing.migrationId === null || fenceBinding(existing, sourceInstanceId).kind !== "none") {
+      const binding = fenceBinding(existing, sourceInstanceId);
+      if (binding.kind === "orphan") {
+        // Advising --queue here would create the recorded path and make this fence look proven.
+        throw orphanFence(legacyPath, existing.recordedPath, sourceInstanceId);
+      }
+      if (existing.migrationId === null || binding.kind !== "none") {
         throw foreignFenceConflict(legacyPath, existing.recordedPath, canonicalPath, sourceInstanceId);
       }
     }
@@ -893,7 +922,7 @@ function reconcileLegacyWrites(
 /** An empty lock file this young may be an owner between creating and writing it. */
 const LOCK_WRITE_GRACE_MS = 2000;
 
-function acquireMigrationLock(path: string): void {
+function acquireMigrationLock(path: string, canonicalPath: string): void {
   try {
     const fd = openSync(path, "wx", 0o600);
     try {
@@ -910,18 +939,15 @@ function acquireMigrationLock(path: string): void {
     try {
       owner = readLockOwner(path);
     } catch (lockReadError) {
-      throw new Error(`legacy state handoff is already in progress: ${path}`, {
-        cause: lockReadError,
-      });
+      // An unreadable lock cannot be shown dead, so it is treated as held.
+      throw handoffInProgress(canonicalPath, undefined, lockReadError);
     }
     if (!owner.live) {
       rmSync(path, { force: true });
-      acquireMigrationLock(path);
+      acquireMigrationLock(path, canonicalPath);
       return;
     }
-    throw new Error(`legacy state handoff is already in progress: ${path}`, {
-      cause: error,
-    });
+    throw handoffInProgress(canonicalPath, owner.pid);
   }
 }
 

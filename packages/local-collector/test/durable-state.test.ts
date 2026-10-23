@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -1700,9 +1701,22 @@ test("the legacy write lock is held from the publish re-check through link", () 
   });
 });
 
+function readableBootId(): string | undefined {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const LINUX_ONLY = {
-  skip: !existsSync("/proc/self/stat") && "needs /proc",
+  skip: (!existsSync("/proc/self/stat") || readableBootId() === undefined) && "needs /proc and a readable boot_id",
 } as const;
+
+function procStartTime(pid: number | "self"): string {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] as string;
+}
 
 function lockCase(name: string, contents: string | undefined, expectLive: boolean, backdate = true): void {
   test(`a handoff lock that is ${name} is ${expectLive ? "live" : "dead"}`, () => {
@@ -1731,14 +1745,6 @@ function lockCase(name: string, contents: string | undefined, expectLive: boolea
   });
 }
 
-function ownIdentity(): { boot: string; start: string } {
-  const stat = readFileSync("/proc/self/stat", "utf8");
-  return {
-    boot: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
-    start: stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] as string,
-  };
-}
-
 lockCase("empty and old", "", false);
 lockCase("empty and just created (owner may still be writing)", "", true, false);
 lockCase("garbled", "not-a-pid\n", false);
@@ -1747,7 +1753,7 @@ lockCase("a negative pid", "-1\n", false);
 lockCase("a pid with trailing garbage", `${process.pid}abc\n`, false);
 lockCase("this process with only a pid", `${process.pid}\n`, true);
 if (!LINUX_ONLY.skip) {
-  const identity = ownIdentity();
+  const identity = { boot: readableBootId() as string, start: procStartTime("self") };
   lockCase(
     "this process with its recorded identity",
     `${process.pid}\nstart=${identity.start}\nboot=${identity.boot}\n`,
@@ -1759,7 +1765,8 @@ if (!LINUX_ONLY.skip) {
     `${process.pid}\nstart=${identity.start}\nboot=00000000-0000-0000-0000-000000000000\n`,
     false
   );
-  lockCase("pid 1 (EPERM) with a mismatched start time", "1\nstart=1\n", false);
+  // Pid 1 is not ours to signal (EPERM) unless we are root; either way its real start time plus one is a mismatch.
+  lockCase("pid 1 with a mismatched start time", `1\nstart=${Number(procStartTime(1)) + 1}\n`, false);
 }
 
 test("a migration takes over a handoff lock with an unreadable owner", () => {
@@ -1804,3 +1811,189 @@ for (const fenceKind of ["migration id", "no migration id (origin/main)"] as con
     });
   });
 }
+
+/** Seed `legacyPath` with one pending row and an id-less (origin/main) fence to a destination that does not exist. */
+function seedOrphanFenceStore(root: string, installRoot: string) {
+  const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+  const base = resolveInput(root, installRoot);
+  const recordedPath = canonicalCollectorQueuePath(base);
+  const other = { ...base, stateRoot: join(root, "other-state") };
+  const otherPath = canonicalCollectorQueuePath(other);
+  seedOutbox(legacyPath, SOURCE_A, "pending-A");
+  seedMainFence(legacyPath, SOURCE_A, recordedPath);
+  return { base, legacyPath, other, otherPath, recordedPath };
+}
+
+function isOrphanFenceError(error: unknown, recordedPath: string): boolean {
+  return (
+    isConflict(error) &&
+    (error as Error).message.includes("older release") &&
+    !(error as Error).message.includes(`--queue ${recordedPath}`)
+  );
+}
+
+test("an id-less fence to a missing path is reported as an orphan, not as advice to create that path", () => {
+  withTempRoot("pdpp-durable-state-orphan-reconcile-", (root) => {
+    const { legacyPath, other, otherPath, recordedPath } = seedOrphanFenceStore(root, join(root, "npx-temp-package"));
+
+    assert.throws(
+      () => resolveCollectorQueuePath(other),
+      (error: unknown) => isOrphanFenceError(error, recordedPath)
+    );
+    assert.equal(existsSync(otherPath), false, "no snapshot was published");
+    assert.equal(existsSync(recordedPath), false, "the recorded path was not created");
+    assert.deepEqual(fenceDestinations(legacyPath), [recordedPath], "the fence row survives");
+    assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+  });
+});
+
+test("an orphan fence found while the requested queue exists blocks a pending backlog and keeps the fence", () => {
+  withTempRoot("pdpp-durable-state-orphan-settle-", (root) => {
+    const { legacyPath, other, otherPath, recordedPath } = seedOrphanFenceStore(root, join(root, "npx-temp-package"));
+    seedOutbox(otherPath, SOURCE_A, "competitor-B");
+
+    assert.throws(
+      () => resolveCollectorQueuePath(other),
+      (error: unknown) => isOrphanFenceError(error, recordedPath)
+    );
+    assert.deepEqual(fenceDestinations(legacyPath), [recordedPath], "the fence row survives");
+    assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+    assert.equal(existsSync(recordedPath), false);
+  });
+});
+
+test("an orphan fence over a fully delivered legacy store does not block the requested queue", () => {
+  withTempRoot("pdpp-durable-state-orphan-delivered-", (root) => {
+    const { legacyPath, other, otherPath, recordedPath } = seedOrphanFenceStore(root, join(root, "npx-temp-package"));
+    seedOutbox(otherPath, SOURCE_A, "competitor-B");
+    // Deliver the legacy row. The fence's triggers block updates, so drop them for the seed.
+    const db = new DatabaseSync(legacyPath);
+    try {
+      db.exec("DROP TRIGGER pdpp_retire_outbox_update");
+      db.exec("UPDATE local_device_outbox SET status = 'succeeded'");
+    } finally {
+      db.close();
+    }
+
+    assert.equal(resolveCollectorQueuePath(other), otherPath);
+    assert.deepEqual(fenceDestinations(legacyPath), [recordedPath], "the fence is neither lifted nor trusted");
+  });
+});
+
+test("an unreadable recorded destination is reported as unreadable state, not a raw SQLite error", () => {
+  withTempRoot("pdpp-durable-state-unreadable-fence-target-", (root) => {
+    const { legacyPath, other, otherPath, recordedPath } = seedOrphanFenceStore(root, join(root, "npx-temp-package"));
+    seedOutbox(otherPath, SOURCE_A, "competitor-B");
+    const db = new DatabaseSync(legacyPath);
+    try {
+      db.exec("ALTER TABLE pdpp_legacy_retirements ADD COLUMN migration_id TEXT");
+      db.prepare("UPDATE pdpp_legacy_retirements SET migration_id = 'some-attempt'").run();
+    } finally {
+      db.close();
+    }
+    mkdirSync(dirname(recordedPath), { recursive: true });
+    writeFileSync(recordedPath, "this is not a database, and it is long enough to be read as a header ".repeat(20));
+
+    assert.throws(
+      () => resolveCollectorQueuePath(other),
+      (error: unknown) => error instanceof CollectorStateResolutionError && error.code === "legacy_state_unreadable"
+    );
+  });
+});
+
+test("a held handoff lock is reported as a handoff in progress, without advice to select the legacy store", () => {
+  withTempRoot("pdpp-durable-state-lock-held-message-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const base = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(base);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+    mkdirSync(dirname(canonicalPath), { recursive: true });
+    writeFileSync(`${canonicalPath}.handoff.lock`, `${process.pid}\n`);
+
+    assert.throws(
+      () => resolveCollectorQueuePath(base),
+      (error: unknown) =>
+        isConflict(error) &&
+        (error as Error).message.includes("in progress") &&
+        !(error as Error).message.includes("--queue")
+    );
+    assert.equal(existsSync(canonicalPath), false);
+  });
+});
+
+test("the legacy write lock is held through the link call itself", () => {
+  withTempRoot("pdpp-durable-state-link-window-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+    let probed = false;
+    resolveCollectorQueuePath({
+      ...resolveInput(root, installRoot),
+      linkFile: (existingPath, newPath) => {
+        probed = true;
+        const other = new DatabaseSync(legacyPath);
+        try {
+          other.exec("PRAGMA busy_timeout = 0");
+          assert.throws(() => other.exec("BEGIN IMMEDIATE"), /locked|busy/i);
+        } finally {
+          other.close();
+        }
+        linkSync(existingPath, newPath);
+      },
+    });
+    assert.equal(probed, true);
+  });
+});
+
+test("the lock file the code writes records this process's real identity", { ...LINUX_ONLY }, () => {
+  withTempRoot("pdpp-durable-state-real-lock-file-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const base = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(base);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+    let lockText: string | undefined;
+    resolveCollectorQueuePath({
+      ...base,
+      beforeMigrationReconcile: () => {
+        lockText = readFileSync(`${canonicalPath}.handoff.lock`, "utf8");
+      },
+    });
+    assert.deepEqual(lockText?.trim().split("\n"), [
+      String(process.pid),
+      `start=${procStartTime("self")}`,
+      `boot=${readableBootId()}`,
+    ]);
+  });
+});
+
+test("a failure after the link keeps the fence: publication is recorded before it is settled", () => {
+  withTempRoot("pdpp-durable-state-published-before-settle-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const base = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(base);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+
+    assert.throws(
+      () =>
+        resolveCollectorQueuePath({
+          ...base,
+          // Link, then make the canonical name vanish so the later chmod throws.
+          linkFile: (existingPath, newPath) => {
+            linkSync(existingPath, newPath);
+            rmSync(newPath);
+          },
+        }),
+      (error: unknown) =>
+        error instanceof CollectorStateResolutionError &&
+        error.code === "legacy_state_migration_failed" &&
+        !error.message.includes(`--queue ${legacyPath}`)
+    );
+    assert.deepEqual(fenceDestinations(legacyPath), [canonicalPath], "the fence was not lifted");
+    assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+  });
+});
