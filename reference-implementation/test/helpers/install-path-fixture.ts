@@ -17,11 +17,22 @@ export const INSTALL_PATH_COLLECTOR_ID = "claude_code";
 export const INSTALL_PATH_REPOSITORY = `pdp-connect/connector/${INSTALL_PATH_CONNECTOR_KEY}`;
 export const INSTALL_PATH_VERSION = "0.1.0";
 
+/** The only record shape the fixture connector emits: `{ id }`. */
+const FIXTURE_RECORD_SCHEMA = {
+  type: "object",
+  properties: { id: { type: "string" } },
+  required: ["id"],
+};
+
 /**
  * The collection profile both releases carry. The two releases differ only in
  * their code layer, so this manifest is byte-identical across them: a
  * republished version with new bytes is the case the artifact digest, not the
  * version, has to catch.
+ *
+ * The source and the stream schema, selection and semantics are what the
+ * builder needs to compute the source declaration it puts in every release. The
+ * declaration validates against the producer's contract, which requires them.
  */
 export const INSTALL_PATH_PROFILE = {
   connector_id: INSTALL_PATH_CONNECTOR_ID,
@@ -29,9 +40,24 @@ export const INSTALL_PATH_PROFILE = {
   display_name: "Claude Code (install-path journey fixture)",
   protocol_capabilities: ["RUN_COVERAGE_V1"],
   protocol_version: "0.2.0",
+  source: { display: { name: "Claude Code" }, id: "https://registry.pdpp.dev/sources/claude_code" },
   streams: [
-    { coverage_stores: ["projects"], name: "sessions", primary_key: ["id"] },
-    { coverage_stores: ["derived_messages"], name: "messages", primary_key: ["id"] },
+    {
+      coverage_stores: ["projects"],
+      name: "sessions",
+      primary_key: ["id"],
+      schema: FIXTURE_RECORD_SCHEMA,
+      selection: { fields: true, resources: true },
+      semantics: "mutable_state",
+    },
+    {
+      coverage_stores: ["derived_messages"],
+      name: "messages",
+      primary_key: ["id"],
+      schema: FIXTURE_RECORD_SCHEMA,
+      selection: { fields: true, resources: true },
+      semantics: "append_only",
+    },
   ],
   version: INSTALL_PATH_VERSION,
 };

@@ -236,7 +236,6 @@ const KNOWN_CONDITION_REASONS = new Set([
   "collection_succeeded_local_device",
   "coverage_complete_unfillable_accounted",
   "coverage_unknown",
-  "coverage_unknown_stale_collector",
   "credential_continuity_not_applicable",
   "credential_continuity_proven",
   "credential_continuity_unproven",

@@ -85,35 +85,9 @@ export const messagesSchema = z.object({
 	direction: z.string().regex(DIRECTION_RE),
 });
 
-const coverageStatusSchema = z.enum([
-	"collected",
-	"inventory_only",
-	"excluded",
-	"deferred",
-	"missing",
-	"unsupported",
-]);
-
-/**
- * coverage_diagnostics stream: one row per known local store (currently just
- * "gmcli_archive") reporting whether gmcli is installed/paired/readable.
- * Shared shape with apple_photos/claude_code/codex's coverage_diagnostics —
- * see src/local-source-inventory.ts's CoverageRecord.
- */
-export const coverageDiagnosticsSchema = z.object({
-	id: pdppSafeText,
-	store: pdppSafeText,
-	stream: pdppSafeText.nullable(),
-	status: coverageStatusSchema,
-	reason: pdppSafeText.max(512),
-});
-
-/**
- * Stream → schema registry. Single source of truth for emitted streams.
- */
+/** Stream → schema registry. Single source of truth for emitted streams. */
 export const SCHEMAS: Record<string, z.ZodTypeAny> = {
 	messages: messagesSchema,
-	coverage_diagnostics: coverageDiagnosticsSchema,
 };
 
 export const validateRecord = makeValidateRecord(SCHEMAS);

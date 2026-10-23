@@ -52,12 +52,9 @@ export {
 export {
   buildCollectorStartMessage,
   COLLECTION_SCOPE_STATE_KEY,
-  COLLECTOR_COVERAGE_STATUSES,
   type CollectionScope,
   type CollectorChildContext,
-  type CollectorCompletenessSummary,
   type CollectorConnectorSpec,
-  type CollectorCoverageStatus,
   type CollectorEnrollmentConfig,
   type CollectorRunConfig,
   type CollectorRunResult,
@@ -72,7 +69,6 @@ export {
   readCollectionScopeFromState,
   resolveScopedStreamTimeRanges,
   runCollectorConnector,
-  summarizeCollectorCompleteness,
   transformRecordsToCollectorEnvelopes,
 } from "./collector-runner.ts";
 export {

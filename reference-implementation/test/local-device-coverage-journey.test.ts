@@ -1333,10 +1333,11 @@ test("J2-install: a release installed through the shipped collection-profile pat
       installedA.entrypoint.startsWith(installRoot),
       "the entrypoint lies inside the install store",
     );
+    // The image and its source declaration referrer are each verified, so each install checks two signatures.
     assert.deepEqual(
       reported,
-      [publishIdentity],
-      "the signature check ran once, for the publish identity",
+      [publishIdentity, publishIdentity],
+      "the signature check ran for A's image and for its declaration referrer, both for the publish identity",
     );
     const releaseA = await readShippedRelease(installedA, pinA);
     const selectedA = selectedShipped(installRoot, pinA);
@@ -1434,8 +1435,8 @@ test("J2-install: a release installed through the shipped collection-profile pat
       );
       assert.deepEqual(
         reported,
-        [publishIdentity, publishIdentity],
-        "B's signature check ran too",
+        [publishIdentity, publishIdentity, publishIdentity, publishIdentity],
+        "B's image and its declaration referrer were checked too",
       );
       const selectedB = selectedShipped(installRoot, pinB);
       assert.equal(

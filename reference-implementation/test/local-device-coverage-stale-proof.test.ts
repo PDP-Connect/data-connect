@@ -722,11 +722,30 @@ test("revision: an unreadable or mismatched revision, run sequence or storage ep
   }
 });
 
-// Legacy path: no v2 run exists, only a committed `coverage_diagnostics`
-// snapshot. That snapshot names no run and no release digest, so it is never a
-// positive proof: the projection is unknown even while its commit is the
-// newest event.
+// Retired stream: a `coverage_diagnostics` snapshot from an older device is
+// ingestible but grants no coverage credit. Only a typed v2 proof can credit.
 const LEGACY_DIAGNOSTICS_STREAM = "coverage_diagnostics";
+
+test("store: a legacy diagnostics snapshot grants no coverage credit, before or after a later state commit", async (t) => {
+  await withBoundaryConnection(async () => {
+    const stores = expectedLocalCoverageStoreDescriptors(connectorId);
+    assert.ok(stores, "the claude-code inventory declares its coverage stores");
+    const snapshot = {
+      fetched_at: PROOF_AT,
+      stores: stores.map(({ store, stream }) => ({ status: "collected", store, stream })),
+    };
+    t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
+    // The snapshot is the newest commit, and it still grants nothing.
+    await putSyncState(BOUNDARY_TARGET, { [LEGACY_DIAGNOSTICS_STREAM]: snapshot });
+    const newest = await boundaryProjection();
+    assert.notEqual(newest.axis, "complete", "a legacy snapshot is not a coverage proof");
+    assert.equal(newest.asOf, null, "a retired snapshot shows no as-of");
+
+    t.mock.timers.setTime(Date.parse(PROOF_AT) + 1);
+    await putSyncState(BOUNDARY_TARGET, { messages: { cursor: "later" } });
+    assert.notEqual((await boundaryProjection()).axis, "complete", "a later state commit does not credit it either");
+  });
+});
 
 test("revision: a legacy diagnostics snapshot never shows positive coverage, even as the newest commit", async (t) => {
   await withBoundaryConnection(async () => {

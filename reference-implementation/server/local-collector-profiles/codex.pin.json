@@ -1,6 +1,6 @@
 {
   "connector_key": "codex",
-  "version": "0.3.0",
-  "digest": "sha256:bb75129071d1afcf60bf5e20097b84e1262d3cb2ce3ca5b3c228d23f00495d28",
-  "profile_sha256": "sha256:3287a16b01517439443e8641e97c7f1bfcb358d01641d3b3490331b2ddc107ab"
+  "version": "0.3.15",
+  "digest": "sha256:6df59e78fcfd79cef46c0b3ef512a7bc3c921cf9536cabb647893e7ca131437e",
+  "profile_sha256": "sha256:d16789f5621bbaab27130c18de00ce4fb46a40f05956af88d5605a14c7e04e13"
 }

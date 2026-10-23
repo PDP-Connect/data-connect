@@ -60,9 +60,8 @@
  * indefinitely, not just up to whatever a fixed oldest-first prefix once
  * captured. The cost moves to the OTHER end: history older than the newest
  * N in a limit-hitting conversation is not fetched. This connector emits an
- * explicit `coverage_diagnostics` reason plus a dedicated SKIP_RESULT
- * diagnostic when any conversation hits that cap, rather than silently
- * returning a partial history as if it were complete. Similarly, the
+ * explicit SKIP_RESULT diagnostic when any conversation hits that cap,
+ * rather than silently returning a partial history as if it were complete. Similarly, the
  * number of conversations scanned per run is capped (GMCLI_MAX_CHATS).
  * `chats list` is always called with an explicit `--limit` sized to
  * `GMCLI_MAX_CHATS + 1` — never left unset, since gmcli's own `chats list`
@@ -133,12 +132,6 @@
  * not a field gmcli's Message struct exposes (only `source_platform`,
  * which is honored as-is), and reactions arrive as an opaque
  * `reactions_json` string this connector does not attempt to parse.
- *
- * COVERAGE_DIAGNOSTICS: this connector reports one coverage row (store
- * "gmcli_archive") describing whether gmcli is installed, paired, and
- * queryable — emitted BEFORE any early-return SKIP_RESULT path, mirroring
- * apple_photos's "always leave durable, honest coverage evidence" rule
- * (see apple_photos/index.ts's COVERAGE_DIAGNOSTICS header comment).
  */
 
 import { spawn } from "node:child_process";
@@ -149,7 +142,6 @@ import {
 	runConnector,
 } from "../../src/connector-runtime.ts";
 import { openFingerprintCursor } from "../../src/fingerprint-cursor.ts";
-import type { CoverageRecord } from "../../src/local-source-inventory.ts";
 import type { GmcliResult } from "./fixtures.ts";
 import { validateRecord } from "./schemas.ts";
 
@@ -449,8 +441,8 @@ export function parseGmcliMessagesJson(
 // pagination flag exists in the CLI. These caps bound total subprocess
 // output/runtime per run; a chat that returns exactly the limit is treated
 // as POSSIBLY truncated (gmcli gives no "there were more" signal), and a
-// dedicated coverage_diagnostics/SKIP-adjacent diagnostic surfaces that
-// honestly rather than silently presenting a partial history as complete.
+// SKIP_RESULT diagnostic surfaces the limit rather than silently presenting
+// a partial history as complete.
 
 const DEFAULT_MESSAGES_PER_CHAT_LIMIT = 500;
 const DEFAULT_MAX_CHATS = 200;
@@ -516,23 +508,6 @@ export function sortChatsByRecency(
 	});
 }
 
-// ─── Coverage diagnostics ────────────────────────────────────────────────
-
-const GMCLI_ARCHIVE_STORE = "gmcli_archive";
-
-function buildCoverageRecord(
-	status: CoverageRecord["status"],
-	reason: string,
-): CoverageRecord {
-	return {
-		id: `coverage:${GMCLI_ARCHIVE_STORE}`,
-		store: GMCLI_ARCHIVE_STORE,
-		stream: "messages",
-		status,
-		reason,
-	};
-}
-
 // ─── Fetch + classify (extracted so `collect()` stays a thin dispatcher) ──
 
 interface GmcliFetchOutcome {
@@ -548,8 +523,6 @@ interface GmcliFetchOutcome {
 	 *  — this connector has no way to learn the exact true count without an
 	 *  unbounded fetch, which would defeat the whole purpose of the cap. */
 	readonly chatsTruncated?: { atLeastTotalCount: number; scannedCount: number };
-	readonly coverageReason: string;
-	readonly coverageStatus: CoverageRecord["status"];
 	/**
 	 * Flat `reason`/`message` fields (not a nested `skip: { reason, message
 	 * }` object) so the emission call site in `collect()` can write a
@@ -571,24 +544,17 @@ function classifyGmcliFetchError(err: unknown): GmcliFetchOutcome {
 	const message = err instanceof Error ? err.message : String(err);
 	if (err instanceof GmcliError && err.kind === "not_installed") {
 		return {
-			coverageStatus: "missing",
-			coverageReason: "gmcli binary not found on PATH/GMCLI_BIN.",
 			reason: "gmcli_not_installed",
 			message,
 		};
 	}
 	if (err instanceof GmcliError && err.kind === "not_paired") {
 		return {
-			coverageStatus: "excluded",
-			coverageReason:
-				"gmcli is installed but the Android device is not paired.",
 			reason: "gmcli_not_paired",
 			message,
 		};
 	}
 	return {
-		coverageStatus: "unsupported",
-		coverageReason: `gmcli query failed: ${message}`,
 		reason: "gmcli_query_failed",
 		message,
 	};
@@ -642,8 +608,7 @@ async function fetchChatMessages(
  * GMCLI_MAX_CHATS/GMCLI_MESSAGES_PER_CHAT_LIMIT. Collapses every failure
  * mode (binary missing, not paired, query failure, schema drift) into one
  * discriminated outcome. `collect()` only has to branch on `outcome.reason`
- * vs `outcome.parsed` — the fine-grained SKIP_RESULT reason and coverage
- * status/reason live here.
+ * vs `outcome.parsed` — the fine-grained SKIP_RESULT reason lives here.
  *
  * `chats list` is called with an explicit `--limit`, sized to `maxChats + 1`
  * — NOT left unset. gmcli's own `chats list` defaults `--limit` to 50
@@ -702,8 +667,6 @@ export async function fetchAndParseGmcliMessages(
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		return {
-			coverageStatus: "unsupported",
-			coverageReason: `gmcli chats output did not match the expected shape: ${message}`,
 			reason: "gmcli_schema_drift",
 			message,
 		};
@@ -733,8 +696,6 @@ export async function fetchAndParseGmcliMessages(
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			return {
-				coverageStatus: "unsupported",
-				coverageReason: `gmcli messages query failed for a conversation: ${message}`,
 				reason: "gmcli_query_failed",
 				message,
 			};
@@ -745,17 +706,6 @@ export async function fetchAndParseGmcliMessages(
 		}
 	}
 
-	const truncationNote =
-		truncatedChatIds.length > 0
-			? ` ${String(truncatedChatIds.length)} conversation(s) hit the per-chat limit (${String(perChatLimit)}) and may have older messages not fetched this run.`
-			: "";
-	// `orderedChats.length` here is exactly `chatsListProbeLimit`
-	// (`maxChats + 1`) whenever truncated — it is a LOWER BOUND on the real
-	// total, not the true count (see GmcliFetchOutcome's chatsTruncated doc).
-	const chatsBoundNote = chatsTruncated
-		? ` Only the ${String(maxChats)} most recently active of at least ${String(orderedChats.length)} conversations were scanned this run.`
-		: "";
-
 	return {
 		...(chatsTruncated
 			? {
@@ -765,8 +715,6 @@ export async function fetchAndParseGmcliMessages(
 					},
 				}
 			: {}),
-		coverageStatus: "collected",
-		coverageReason: `gmcli reported ${String(parsed.length)} message(s) across ${String(boundedChats.length)} conversation(s).${truncationNote}${chatsBoundNote}`,
 		parsed,
 		truncated: truncatedChatIds,
 	};
@@ -784,13 +732,6 @@ export async function collect({
 	progress,
 }: CollectContext): Promise<void> {
 	const outcome = await fetchAndParseGmcliMessages();
-
-	if (requested.has("coverage_diagnostics")) {
-		await emitRecord(
-			"coverage_diagnostics",
-			buildCoverageRecord(outcome.coverageStatus, outcome.coverageReason),
-		);
-	}
 
 	if (outcome.reason) {
 		// outcome.reason/outcome.message are flat fields on GmcliFetchOutcome
