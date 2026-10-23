@@ -4,10 +4,7 @@
 import { randomBytes } from "node:crypto";
 import { getDb } from "../server/db.ts";
 import { isPostgresStorageBackend } from "../server/postgres-storage.ts";
-import {
-  advanceSqliteCollectionRevisionInTransaction,
-  hasIssuedCollectionRunSequenceInSqliteTransaction,
-} from "../server/stores/collection-revision-store.ts";
+import { advanceSqliteCollectionRevisionInTransaction } from "../server/stores/collection-revision-store.ts";
 import {
   isRunHistoryRelevantEventType,
   isRunTerminalEventType,
@@ -507,12 +504,7 @@ export function appendSqliteSpineEventInTransaction(
   assertRunEventHasConnectorInstanceId(input);
   assertRunStartedIsStamped(input);
   const event = normalizeSpineEventInput(input);
-  if (
-    isRunTerminalEventType(event.event_type) &&
-    event.connector_instance_id &&
-    !hasCollectionRevision(input.data) &&
-    hasIssuedCollectionRunSequenceInSqliteTransaction(db, event.connector_instance_id)
-  ) {
+  if (isRunTerminalEventType(event.event_type) && event.connector_instance_id && !hasCollectionRevision(input.data)) {
     advanceSqliteCollectionRevisionInTransaction(db, event.connector_instance_id, {
       at: event.occurred_at,
       event: "terminal_run",

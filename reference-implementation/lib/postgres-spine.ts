@@ -11,10 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { postgresQuery, withPostgresTransaction } from "../server/postgres-storage.ts";
-import {
-  advancePostgresCollectionRevisionInTransaction,
-  hasIssuedCollectionRunSequenceInPostgresTransaction,
-} from "../server/stores/collection-revision-store.ts";
+import { advancePostgresCollectionRevisionInTransaction } from "../server/stores/collection-revision-store.ts";
 import {
   isRunHistoryRelevantEventType,
   isRunTerminalEventType,
@@ -1228,12 +1225,7 @@ async function appendNormalizedPostgresSpineEventInTransaction(
   rawData: unknown,
   hooks: PostgresSpineTransactionHooks = {}
 ): Promise<SpineEventRecord | null> {
-  if (
-    isRunTerminalEventType(event.event_type) &&
-    event.connector_instance_id &&
-    !hasCollectionRevision(rawData) &&
-    (await hasIssuedCollectionRunSequenceInPostgresTransaction(client, event.connector_instance_id))
-  ) {
+  if (isRunTerminalEventType(event.event_type) && event.connector_instance_id && !hasCollectionRevision(rawData)) {
     await advancePostgresCollectionRevisionInTransaction(client, event.connector_instance_id, {
       at: event.occurred_at,
       event: "terminal_run",

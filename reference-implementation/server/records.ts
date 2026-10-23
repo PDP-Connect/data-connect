@@ -142,12 +142,10 @@ import {
   resolveStorageConnectorInstanceId,
 } from "./storage-utils.ts";
 import {
-  type CollectionObservationGate,
   type CollectionRevisionEventInput,
   type LocalCoverageRevisionFence,
   readLocalCoverageRevisionFences,
   requireSqliteCollectionObservationInTransaction,
-  setCollectionObservationGate,
 } from "./stores/collection-revision-store.ts";
 import {
   ConnectorInstanceResolutionError,
@@ -210,7 +208,6 @@ interface AttemptContext {
 type DeviceReservation = Record<string, unknown> & { inputIndex: number };
 interface RecordIngestOptions {
   attemptContext?: AttemptContext;
-  collectionObservationGate?: CollectionObservationGate;
   collectionRevision?: CollectionRevisionEventInput;
   coordinatorOwnership?: ConnectorInstanceWriteOwnership;
   deferIndexes?: boolean;
@@ -1666,41 +1663,11 @@ export async function assertConnectorInstanceWritable(connectorInstanceId: strin
  * transaction, never before it. See
  * harden-connector-instance-write-fence-transaction-native.
  */
-export function assertSqliteConnectorInstanceWritableWithinTransaction(
-  connectorInstanceId: string,
-  collectionObservationGate?: CollectionObservationGate
-): void {
-  const readsRunOrder = collectionObservationGate?.checked === false;
-  const row: { current_epoch_run_sequence_issued?: unknown; status?: string } | null = readsRunOrder
-    ? (getOne(referenceQueries.connectorInstancesGetWriteGateState, [connectorInstanceId]) as {
-        current_epoch_run_sequence_issued?: unknown;
-        status?: string;
-      } | null)
-    : (getOne(referenceQueries.connectorInstancesGetById, [connectorInstanceId]) as { status?: string } | null);
-  if (collectionObservationGate?.checked === false) {
-    setCollectionObservationGate(collectionObservationGate, row?.current_epoch_run_sequence_issued);
-  }
-  const status = row?.status ?? null;
+export function assertSqliteConnectorInstanceWritableWithinTransaction(connectorInstanceId: string): void {
+  const status =
+    (getOne(referenceQueries.connectorInstancesGetById, [connectorInstanceId]) as { status?: string } | null)?.status ??
+    null;
   assertConnectorInstanceStatusWritable(status, connectorInstanceId);
-}
-
-function maybeObserveSqliteCollectionRevision(
-  connectorInstanceId: string,
-  collectionRevision: CollectionRevisionEventInput | undefined,
-  gate: CollectionObservationGate | undefined
-): void {
-  if (!(collectionRevision && gate)) {
-    return;
-  }
-  if (!gate.checked) {
-    const row = getOne(referenceQueries.connectorInstancesGetWriteGateState, [connectorInstanceId]) as {
-      current_epoch_run_sequence_issued?: unknown;
-    } | null;
-    setCollectionObservationGate(gate, row?.current_epoch_run_sequence_issued);
-  }
-  if (gate.enabled) {
-    requireSqliteCollectionObservationInTransaction(getDb(), connectorInstanceId, collectionRevision);
-  }
 }
 
 /**
@@ -1925,7 +1892,6 @@ async function ingestRecordsWithinCoordinator(
   const changedRecords: DeferredRecordIndex[] = [];
   const loggingConnectorId = connectorIdForStorageTarget(storageTarget);
   const loggingConnectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, loggingConnectorId);
-  const collectionObservationGate: CollectionObservationGate = { checked: false, enabled: false };
   const perRecordOptions: RecordIngestOptions = {
     deferIndexes: true,
     // Re-verified inside EVERY record's own durable write transaction on
@@ -1937,7 +1903,6 @@ async function ingestRecordsWithinCoordinator(
     // check closes the delete-or-revoke/write TOCTOU for every record, not
     // just the first.
     ...(options.collectionRevision ? { collectionRevision: options.collectionRevision } : {}),
-    collectionObservationGate,
     ...(options.requireConnectionAdmission ? { requireConnectionAdmission: options.requireConnectionAdmission } : {}),
     ...(options.runId ? { runId: options.runId } : {}),
   };
@@ -2098,7 +2063,6 @@ function toPostgresIngestOptions(options: RecordIngestOptions) {
   const attemptContext = toPostgresAttemptContext(options.attemptContext);
   return {
     ...(attemptContext ? { attemptContext } : {}),
-    ...(options.collectionObservationGate ? { collectionObservationGate: options.collectionObservationGate } : {}),
     ...(options.collectionRevision ? { collectionRevision: options.collectionRevision } : {}),
     ...(options.deviceReservation ? { deviceReservation: options.deviceReservation } : {}),
     ...(options.requireConnectionAdmission ? { requireConnectionAdmission: options.requireConnectionAdmission } : {}),
@@ -2322,9 +2286,6 @@ async function ingestSqliteRecord(
   const { stream, key, data, emitted_at, op = "upsert" } = record;
   const recordKey = encodeKey(key);
   const recordJson = data ? JSON.stringify(data) : null;
-  const collectionObservationGate = options.collectionRevision
-    ? (options.collectionObservationGate ?? { checked: false, enabled: false })
-    : undefined;
 
   // Validate record identity against the manifest-declared primary_key. The
   // record `key` is the ordered tuple of primary-key field values; each
@@ -2357,9 +2318,11 @@ async function ingestSqliteRecord(
   const outcome = writeTransaction<DurableIngestOutcome>(() => {
     assertSqliteRunStillAdmitted(options.runId, connectorInstanceId);
     if (options.requireConnectionAdmission) {
-      assertSqliteConnectorInstanceWritableWithinTransaction(connectorInstanceId, collectionObservationGate);
+      assertSqliteConnectorInstanceWritableWithinTransaction(connectorInstanceId);
     }
-    maybeObserveSqliteCollectionRevision(connectorInstanceId, options.collectionRevision, collectionObservationGate);
+    if (options.collectionRevision) {
+      requireSqliteCollectionObservationInTransaction(getDb(), connectorInstanceId, options.collectionRevision);
+    }
     const finishDurableOutcome = (value: DurableIngestOutcome): DurableIngestOutcome => {
       if (options.deviceReservation) {
         advanceSqliteDeviceIngestPrefix(options.deviceReservation, options.deviceReservation.inputIndex);

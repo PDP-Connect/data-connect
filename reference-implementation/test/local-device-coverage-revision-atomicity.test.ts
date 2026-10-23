@@ -347,35 +347,6 @@ function postBatch(lane: Lane, body: Record<string, unknown>): Promise<JsonRespo
   return postJson(deviceUrl(lane, "/ingest-batches"), body, authHeaders(lane));
 }
 
-async function seedReferenceRuntimeRun(lane: Lane, runId: string): Promise<void> {
-  await sql(
-    lane,
-    `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, known_gaps_json, started_at, attempt)
-     VALUES (?, ?, ?, '{}', 'running', '[]', ?, 1)`,
-    `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, known_gaps_json, started_at, attempt)
-     VALUES ($1, $2, $3, '{}'::jsonb, 'running', '[]'::jsonb, $4, 1)`,
-    [runId, lane.enrolled.connector_instance_id, CONNECTOR_ID, EMITTED_AT]
-  );
-}
-
-async function postReferenceRuntimeRecord(lane: Lane, runId: string, recordId: string): Promise<JsonResponse> {
-  const { getRuntimeOwnerToken, rsUrl } = lane;
-  assert.ok(rsUrl, "the lane exposes the reference resource server");
-  assert.ok(getRuntimeOwnerToken, "the lane can mint a runtime owner token");
-  const ingestUrl = new URL("/v1/ingest/sessions", rsUrl);
-  ingestUrl.searchParams.set("connector_id", CONNECTOR_ID);
-  ingestUrl.searchParams.set("connector_instance_id", lane.enrolled.connector_instance_id);
-  ingestUrl.searchParams.set("run_id", runId);
-  return await requestJson(ingestUrl.toString(), {
-    body: `${JSON.stringify({ data: { id: recordId }, emitted_at: EMITTED_AT, key: recordId })}\n`,
-    headers: {
-      Authorization: `Bearer ${await getRuntimeOwnerToken()}`,
-      "Content-Type": "application/x-ndjson",
-    },
-    method: "POST",
-  });
-}
-
 function postFailureReport(lane: Lane, runId: string): Promise<JsonResponse> {
   return postJson(
     sourceUrl(lane, "/local-collector-gaps"),
@@ -543,17 +514,6 @@ async function highWater(lane: Lane): Promise<HighWater> {
     revision: Number(row.revision),
     runId: (row.run_id as string | null) ?? null,
   };
-}
-
-async function collectionRevisionAt(lane: Lane): Promise<string | null> {
-  const [row] = await sql(
-    lane,
-    "SELECT collection_revision_at AS at FROM connector_instances WHERE connector_instance_id = ?",
-    "SELECT collection_revision_at AS at FROM connector_instances WHERE connector_instance_id = $1",
-    [lane.enrolled.connector_instance_id]
-  );
-  assert.ok(row, "the connection has a revision timestamp row");
-  return (row.at as string | null) ?? null;
 }
 
 async function sessionRecordCount(lane: Lane): Promise<number> {
@@ -1283,22 +1243,6 @@ async function runOrder(lane: Lane): Promise<RunOrderRow> {
   };
 }
 
-async function currentEpochRunSequenceCount(lane: Lane): Promise<number> {
-  const [row] = await sql(
-    lane,
-    `SELECT COUNT(*) AS n
-       FROM collection_run_sequences AS rs
-       JOIN connector_instances AS ci USING (connector_instance_id)
-      WHERE rs.connector_instance_id = ? AND rs.storage_epoch = ci.storage_epoch`,
-    `SELECT COUNT(*)::integer AS n
-       FROM collection_run_sequences AS rs
-       JOIN connector_instances AS ci USING (connector_instance_id)
-      WHERE rs.connector_instance_id = $1 AND rs.storage_epoch = ci.storage_epoch`,
-    [lane.enrolled.connector_instance_id]
-  );
-  return Number(row?.n ?? 0);
-}
-
 /** The run-order facts the server stored with one run record. */
 async function storedRunOrder(
   lane: Lane,
@@ -1418,82 +1362,6 @@ laneTest("run order: an unregistered attempt retires prior coverage and cannot e
   await assertCovered(lane, "run-registered", "a registered run's proof is current");
 });
 
-laneTest(
-  "reference runtime records without a current-epoch device run leave revision and run order unchanged",
-  async (lane) => {
-    assert.equal(await issueRun(lane, "device-run-from-prior-epoch"), 1);
-    assert.ok((await beginStorageEpochAfterRestore()).connections >= 1);
-    const beforeRevision = await highWater(lane);
-    const beforeRevisionAt = await collectionRevisionAt(lane);
-    const beforeRunOrder = await runOrder(lane);
-    assert.equal(beforeRunOrder.issued, 1, "the cumulative sequence counter includes the prior epoch");
-    assert.equal(await currentEpochRunSequenceCount(lane), 0, "no device sequence has been issued in this epoch");
-
-    const runId = "reference-run-without-device-sequence";
-    await seedReferenceRuntimeRun(lane, runId);
-    const ingested = await postReferenceRuntimeRecord(lane, runId, "reference-record-without-device-run");
-    assert.equal(ingested.status, 200, JSON.stringify(ingested.body));
-    assert.equal(ingested.body?.records_accepted, 1, JSON.stringify(ingested.body));
-    assert.equal(await sessionRecordCount(lane), 1);
-    assert.deepEqual(await highWater(lane), beforeRevision, "record ingestion leaves revision columns untouched");
-    assert.equal(
-      await collectionRevisionAt(lane),
-      beforeRevisionAt,
-      "record ingestion leaves the revision timestamp untouched"
-    );
-    assert.deepEqual(await runOrder(lane), beforeRunOrder, "record ingestion leaves run-order columns untouched");
-
-    await emitSpineEvent({
-      actor_id: CONNECTOR_ID,
-      actor_type: "runtime",
-      data: {
-        connector_instance_id: lane.enrolled.connector_instance_id,
-        reason: "connector_reported_failed",
-        source: { id: CONNECTOR_ID, kind: "connector" },
-      },
-      event_type: "run.failed",
-      object_id: runId,
-      object_type: "run",
-      run_id: runId,
-      status: "failed",
-    });
-    assert.deepEqual(
-      await highWater(lane),
-      beforeRevision,
-      "terminal failure without a device sequence is not an observation"
-    );
-    assert.equal(
-      await collectionRevisionAt(lane),
-      beforeRevisionAt,
-      "terminal failure leaves the revision timestamp untouched"
-    );
-    assert.deepEqual(await runOrder(lane), beforeRunOrder, "terminal failure leaves run-order columns untouched");
-  }
-);
-
-laneTest("revision write failure does not fail reference records without device run state", async (lane) => {
-  const beforeRevision = await highWater(lane);
-  const beforeRevisionAt = await collectionRevisionAt(lane);
-  const beforeRunOrder = await runOrder(lane);
-  assert.equal(beforeRunOrder.issued, 0, "no device run sequence has been issued");
-  const runId = "reference-run-with-revision-trigger";
-  await seedReferenceRuntimeRun(lane, runId);
-
-  const restore = await failRevisionWrites(lane);
-  let ingested: JsonResponse;
-  try {
-    ingested = await postReferenceRuntimeRecord(lane, runId, "reference-record-with-revision-trigger");
-  } finally {
-    await restore();
-  }
-  assert.equal(ingested.status, 200, JSON.stringify(ingested.body));
-  assert.equal(ingested.body?.records_accepted, 1, JSON.stringify(ingested.body));
-  assert.equal(await sessionRecordCount(lane), 1, "the record commits while revision writes are unavailable");
-  assert.deepEqual(await highWater(lane), beforeRevision, "ingestion does not try to write a revision");
-  assert.equal(await collectionRevisionAt(lane), beforeRevisionAt, "ingestion leaves the revision timestamp untouched");
-  assert.deepEqual(await runOrder(lane), beforeRunOrder, "ingestion does not try to write a run-order marker");
-});
-
 laneTest("cross-runtime reference records and failures retire device coverage without run sequences", async (lane) => {
   await commitProof(lane, "device-run-covered");
   const pendingDeviceRunId = "device-run-pending-after-reference";
@@ -1502,8 +1370,30 @@ laneTest("cross-runtime reference records and failures retire device coverage wi
   const referenceRunId = "reference-run-record-batch";
   // A reference runtime run normally creates this admission row at run.started;
   // it deliberately has no collection_run_sequences entry.
-  await seedReferenceRuntimeRun(lane, referenceRunId);
-  const ingested = await postReferenceRuntimeRecord(lane, referenceRunId, "reference-record");
+  await sql(
+    lane,
+    `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, known_gaps_json, started_at, attempt)
+     VALUES (?, ?, ?, '{}', 'running', '[]', ?, 1)`,
+    `INSERT INTO run_history(run_id, connector_instance_id, connector_id, source_json, status, known_gaps_json, started_at, attempt)
+     VALUES ($1, $2, $3, '{}'::jsonb, 'running', '[]'::jsonb, $4, 1)`,
+    [referenceRunId, lane.enrolled.connector_instance_id, CONNECTOR_ID, EMITTED_AT]
+  );
+  const { getRuntimeOwnerToken, rsUrl } = lane;
+  assert.ok(rsUrl, "the cross-runtime lane exposes the reference resource server");
+  assert.ok(getRuntimeOwnerToken, "the cross-runtime lane can mint a runtime owner token");
+  const ingestUrl = new URL("/v1/ingest/sessions", rsUrl);
+  ingestUrl.searchParams.set("connector_id", CONNECTOR_ID);
+  ingestUrl.searchParams.set("connector_instance_id", lane.enrolled.connector_instance_id);
+  ingestUrl.searchParams.set("run_id", referenceRunId);
+  const runtimeOwnerToken = await getRuntimeOwnerToken();
+  const ingested = await requestJson(ingestUrl.toString(), {
+    body: `${JSON.stringify({ data: { id: "reference-record" }, emitted_at: EMITTED_AT, key: "reference-record" })}\n`,
+    headers: {
+      Authorization: `Bearer ${runtimeOwnerToken}`,
+      "Content-Type": "application/x-ndjson",
+    },
+    method: "POST",
+  });
   assert.equal(ingested.status, 200, JSON.stringify(ingested.body));
   assert.equal(ingested.body?.records_accepted, 1, JSON.stringify(ingested.body));
   assert.equal((await highWater(lane)).event, "batch_record");

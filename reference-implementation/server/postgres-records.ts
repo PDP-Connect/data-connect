@@ -68,10 +68,8 @@ import {
   resolveStorageConnectorInstanceId,
 } from "./storage-utils.ts";
 import {
-  type CollectionObservationGate,
   type CollectionRevisionEventInput,
   requirePostgresCollectionObservationInTransaction,
-  setCollectionObservationGate,
 } from "./stores/collection-revision-store.ts";
 import { createPostgresConnectorInstanceStore } from "./stores/connector-instance-store.ts";
 import { advancePostgresDeviceIngestPrefix } from "./stores/device-exporter-store.ts";
@@ -267,7 +265,6 @@ interface IngestRecord {
 
 interface IngestOptions {
   attemptContext?: DeviceAttemptContext | null;
-  collectionObservationGate?: CollectionObservationGate;
   collectionRevision?: CollectionRevisionEventInput;
   deviceReservation?: JsonObject & { inputIndex: number };
   /** See RecordIngestOptions.requireConnectionAdmission in server/records.ts. */
@@ -1922,33 +1919,13 @@ async function assertPostgresRunStillAdmitted(
 async function assertPostgresRecordIngestPreconditions(
   client: PostgresTransactionClient,
   connectorInstanceId: string,
-  options: Pick<
-    IngestOptions,
-    "collectionObservationGate" | "collectionRevision" | "requireConnectionAdmission" | "runId"
-  >
+  options: Pick<IngestOptions, "collectionRevision" | "requireConnectionAdmission" | "runId">
 ): Promise<void> {
-  const collectionObservationGate = options.collectionRevision
-    ? (options.collectionObservationGate ?? { checked: false, enabled: false })
-    : undefined;
   if (options.requireConnectionAdmission) {
-    await assertPostgresConnectorInstanceWritable(client, connectorInstanceId, collectionObservationGate);
+    await assertPostgresConnectorInstanceWritable(client, connectorInstanceId);
   }
   await assertPostgresRunStillAdmitted(client, options.runId, connectorInstanceId);
-  if (options.collectionRevision && collectionObservationGate && !collectionObservationGate.checked) {
-    const result = await client.query<{ current_epoch_run_sequence_issued: unknown }>(
-      `SELECT EXISTS (
-         SELECT 1 FROM collection_run_sequences AS rs
-          WHERE rs.connector_instance_id = ci.connector_instance_id
-            AND rs.storage_epoch = ci.storage_epoch
-       ) AS current_epoch_run_sequence_issued
-         FROM connector_instances AS ci
-        WHERE ci.connector_instance_id = $1
-        FOR UPDATE OF ci`,
-      [connectorInstanceId]
-    );
-    setCollectionObservationGate(collectionObservationGate, result.rows[0]?.current_epoch_run_sequence_issued);
-  }
-  if (options.collectionRevision && collectionObservationGate?.enabled) {
+  if (options.collectionRevision) {
     await requirePostgresCollectionObservationInTransaction(client, connectorInstanceId, options.collectionRevision);
   }
 }
@@ -2006,29 +1983,14 @@ async function maybeAfterConnectorInstanceAdmissionLockPhase(
 
 async function assertPostgresConnectorInstanceWritable(
   client: PostgresTransactionClient,
-  connectorInstanceId: string,
-  collectionObservationGate?: CollectionObservationGate
+  connectorInstanceId: string
 ): Promise<void> {
-  const readsRunOrder = collectionObservationGate && !collectionObservationGate.checked;
   const {
     rows: [row],
-  } = await client.query<{ current_epoch_run_sequence_issued?: unknown; status: string }>(
-    readsRunOrder
-      ? `SELECT ci.status,
-                EXISTS (
-                  SELECT 1 FROM collection_run_sequences AS rs
-                   WHERE rs.connector_instance_id = ci.connector_instance_id
-                     AND rs.storage_epoch = ci.storage_epoch
-                ) AS current_epoch_run_sequence_issued
-           FROM connector_instances AS ci
-          WHERE ci.connector_instance_id = $1
-          FOR UPDATE OF ci`
-      : "SELECT status FROM connector_instances WHERE connector_instance_id = $1 FOR UPDATE",
+  } = await client.query<{ status: string }>(
+    "SELECT status FROM connector_instances WHERE connector_instance_id = $1 FOR UPDATE",
     [connectorInstanceId]
   );
-  if (readsRunOrder && collectionObservationGate) {
-    setCollectionObservationGate(collectionObservationGate, row?.current_epoch_run_sequence_issued);
-  }
   await maybeAfterConnectorInstanceAdmissionLockPhase("after-connector-instance-admission-lock", {
     connectorInstanceId,
   });
