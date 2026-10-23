@@ -557,6 +557,28 @@ async function failRevisionWrites(lane: Lane, event?: string): Promise<() => Pro
   };
 }
 
+/** Fail run-start persistence once, then let the terminal route record its unregistered run. */
+async function failRunStartWrites(lane: Lane): Promise<() => Promise<void>> {
+  if (lane.backend === "postgres") {
+    await postgresQuery(`CREATE FUNCTION pdpp_test_fail_run_start() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected run-start failure'; END $$`);
+    await postgresQuery(`CREATE TRIGGER pdpp_test_fail_run_start
+      BEFORE INSERT ON collection_run_sequences FOR EACH ROW
+      EXECUTE FUNCTION pdpp_test_fail_run_start()`);
+    return async () => {
+      await postgresQuery("DROP TRIGGER pdpp_test_fail_run_start ON collection_run_sequences");
+      await postgresQuery("DROP FUNCTION pdpp_test_fail_run_start()");
+    };
+  }
+  getDb().exec(`CREATE TRIGGER pdpp_test_fail_run_start
+    BEFORE INSERT ON collection_run_sequences
+    BEGIN SELECT RAISE(ABORT, 'injected run-start failure'); END`);
+  return () => {
+    getDb().exec("DROP TRIGGER pdpp_test_fail_run_start");
+    return Promise.resolve();
+  };
+}
+
 /** A promise the test resolves to release a paused batch. */
 function gate(): { readonly open: () => void; readonly wait: Promise<void> } {
   let open: () => void = () => undefined;
@@ -1557,6 +1579,101 @@ laneTest("contract: owner diagnostics and connector detail validate against @pdp
     ? []
     : (detailResult.errors as { instancePath: string }[]).filter((error) => !STREAM_NAME_PATH.test(error.instancePath));
   assert.deepEqual(detailErrors, [], "the connector detail matches the contract outside the known streams mismatch");
+});
+
+laneTest("contract: terminal commit, replay, unregistered run and legacy receipt validate as sent", async (lane) => {
+  const runId = "run-contract-fresh";
+  const registered = await postRunStart(lane, runId);
+  assert.equal(registered.status, 201, JSON.stringify(registered.body));
+  const freshWireBody = await terminalWireBody(lane, runId);
+  const fresh = await postTerminal(lane, freshWireBody);
+  assert.equal(fresh.status, 201, JSON.stringify(fresh.body));
+  assert.ok(fresh.body);
+  assert.equal(typeof fresh.body.collection_revision, "number");
+  assert.equal(typeof fresh.body.run_sequence, "number");
+  assert.equal(typeof fresh.body.storage_epoch, "number");
+  const freshValidation = validateResponse("refCommitDeviceExporterTerminalRun", {
+    body: fresh.body,
+    status: fresh.status,
+  });
+  assert.equal(freshValidation.ok, true, `fresh terminal response: ${JSON.stringify(freshValidation)}`);
+  assert.deepEqual(freshValidation, { ok: true, skipped: false });
+
+  const replay = await postTerminal(lane, freshWireBody);
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.deepEqual(replay.body, fresh.body, "an exact replay returns the stored receipt");
+  const replayValidation = validateResponse("refCommitDeviceExporterTerminalRun", {
+    body: replay.body,
+    status: replay.status,
+  });
+  assert.equal(replayValidation.ok, true, `exact replay response: ${JSON.stringify(replayValidation)}`);
+  assert.deepEqual(replayValidation, { ok: true, skipped: false });
+
+  const unregisteredRunId = "run-contract-start-failed";
+  const restoreRunStartWrites = await failRunStartWrites(lane);
+  let failedStart: JsonResponse;
+  try {
+    failedStart = await postRunStart(lane, unregisteredRunId);
+  } finally {
+    await restoreRunStartWrites();
+  }
+  assert.ok(
+    failedStart.status >= 500,
+    `the injected START registration failure is surfaced: ${JSON.stringify(failedStart.body)}`
+  );
+  const unregistered = await postTerminal(lane, await terminalWireBody(lane, unregisteredRunId));
+  assert.equal(unregistered.status, 201, JSON.stringify(unregistered.body));
+  assert.ok(unregistered.body);
+  assert.equal(unregistered.body.run_sequence, null, "the failed START registration issued no run sequence");
+  const unregisteredValidation = validateResponse("refCommitDeviceExporterTerminalRun", {
+    body: unregistered.body,
+    status: unregistered.status,
+  });
+  assert.equal(
+    unregisteredValidation.ok,
+    true,
+    `unregistered terminal response: ${JSON.stringify(unregisteredValidation)}`
+  );
+  assert.deepEqual(unregisteredValidation, { ok: true, skipped: false });
+
+  const legacyRunId = "run-contract-legacy-receipt";
+  assert.equal((await postRunStart(lane, legacyRunId)).status, 201);
+  const legacyWireBody = await terminalWireBody(lane, legacyRunId);
+  const original = await postTerminal(lane, legacyWireBody);
+  assert.equal(original.status, 201, JSON.stringify(original.body));
+  const [stored] = await sql(
+    lane,
+    "SELECT event_id, data_json FROM spine_events WHERE run_id = ? AND event_type = 'run.completed'",
+    "SELECT event_id, data_json::text AS data_json FROM spine_events WHERE run_id = $1 AND event_type = 'run.completed'",
+    [legacyRunId]
+  );
+  assert.ok(stored, "the server stored the original terminal receipt");
+  const legacyEvent = JSON.parse(String(stored.data_json)) as Record<string, unknown>;
+  const legacyReceipt = legacyEvent.terminal_run_commit_receipt as Record<string, unknown>;
+  const legacyResponse = legacyReceipt.response as Record<string, unknown>;
+  for (const field of ["collection_revision", "run_sequence", "storage_epoch"] as const) {
+    delete legacyEvent[field];
+    delete legacyResponse[field];
+  }
+  await sql(
+    lane,
+    "UPDATE spine_events SET data_json = ? WHERE event_id = ?",
+    "UPDATE spine_events SET data_json = $1::jsonb WHERE event_id = $2",
+    [JSON.stringify(legacyEvent), stored.event_id]
+  );
+  const legacyReplay = await postTerminal(lane, legacyWireBody);
+  assert.equal(legacyReplay.status, 200, JSON.stringify(legacyReplay.body));
+  assert.ok(legacyReplay.body);
+  assert.deepEqual(legacyReplay.body, legacyResponse, "the legacy replay returns the stored pre-run-order receipt");
+  for (const field of ["collection_revision", "run_sequence", "storage_epoch"] as const) {
+    assert.equal(field in legacyReplay.body, false, `legacy replay omits ${field}`);
+  }
+  const legacyValidation = validateResponse("refCommitDeviceExporterTerminalRun", {
+    body: legacyReplay.body,
+    status: legacyReplay.status,
+  });
+  assert.equal(legacyValidation.ok, true, `legacy replay response: ${JSON.stringify(legacyValidation)}`);
+  assert.deepEqual(legacyValidation, { ok: true, skipped: false });
 });
 
 // Bounded by the test timeout: a hang fails the test, and PostgreSQL reports a
