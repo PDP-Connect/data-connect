@@ -1072,6 +1072,7 @@ async function migratePostgresRecordRejectionBytePayload(client: PoolClient): Pr
 
 // Postgres SQLSTATE raised when a statement is cancelled by `statement_timeout`.
 const POSTGRES_STATEMENT_TIMEOUT_SQLSTATE = "57014";
+const POSTGRES_LOCK_TIMEOUT_SQLSTATE = "55P03";
 
 /**
  * Thrown by `postgresQueryBounded` when Postgres itself cancelled the
@@ -3956,7 +3957,7 @@ async function bootstrapPostgresSchemaOnce({
     await migratePostgresSchedulerInstanceColumns(client);
     await migratePostgresRunHistoryRename(client);
     await migratePostgresRunHistoryCompletedAtNullable(client);
-    await migratePostgresRunHistorySchedulerManagedDefault(client);
+    await migratePostgresRunHistorySchedulerManagedDefault(client, { log });
     await migratePostgresConnectorMaintenanceCursorNameCheck(client);
     await migratePostgresRecordsBlobSearchInstanceColumns(client);
     // Legacy blob tables gain connector_instance_id in the migration above.
@@ -5649,20 +5650,122 @@ async function migratePostgresRunHistoryCompletedAtNullable(client: PoolClient):
 // default to the fresh-schema value. Only the default changes; rows are
 // repaired by migratePostgresRunHistoryDeviceRunProvenance. The ALTER takes
 // an exclusive table lock, so it runs only when the default differs.
-async function migratePostgresRunHistorySchedulerManagedDefault(client: PoolClient): Promise<void> {
-  const result = await client.query<{ column_default: string | null }>(
-    `SELECT column_default FROM information_schema.columns
-       WHERE table_schema = current_schema() AND table_name = 'run_history' AND column_name = 'scheduler_managed'`
-  );
-  const columnDefault = result.rows[0]?.column_default;
-  if (columnDefault === undefined || columnDefault === "false") {
-    return;
-  }
-  await client.query("ALTER TABLE run_history ALTER COLUMN scheduler_managed SET DEFAULT false");
-}
-
 const PG_RUN_HISTORY_PROVENANCE_BATCH_ROWS = 2000;
 const PG_RUN_HISTORY_PROVENANCE_LEASE_MS = 15 * 60 * 1000;
+const PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS = 3;
+const PG_RUN_HISTORY_MIGRATION_RETRY_INITIAL_DELAY_MS = 100;
+const PG_RUN_HISTORY_MIGRATION_RETRY_MAX_DELAY_MS = 500;
+const PG_RUN_HISTORY_DEFAULT_LOCK_TIMEOUT_MS = 5_000;
+const PG_RUN_HISTORY_DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
+const PG_RUN_HISTORY_PROVENANCE_LOCK_TIMEOUT_MS = 1_000;
+const PG_RUN_HISTORY_PROVENANCE_STATEMENT_TIMEOUT_MS = 30_000;
+
+interface PostgresMigrationTimeouts {
+  readonly lockTimeoutMs: number;
+  readonly statementTimeoutMs: number;
+}
+
+const PG_RUN_HISTORY_DEFAULT_TIMEOUTS: PostgresMigrationTimeouts = {
+  lockTimeoutMs: PG_RUN_HISTORY_DEFAULT_LOCK_TIMEOUT_MS,
+  statementTimeoutMs: PG_RUN_HISTORY_DEFAULT_STATEMENT_TIMEOUT_MS,
+};
+
+const PG_RUN_HISTORY_PROVENANCE_TIMEOUTS: PostgresMigrationTimeouts = {
+  lockTimeoutMs: PG_RUN_HISTORY_PROVENANCE_LOCK_TIMEOUT_MS,
+  statementTimeoutMs: PG_RUN_HISTORY_PROVENANCE_STATEMENT_TIMEOUT_MS,
+};
+
+async function withPostgresMigrationTimeouts<T>(
+  client: PoolClient,
+  timeouts: PostgresMigrationTimeouts,
+  operation: () => Promise<T>
+): Promise<T> {
+  await client.query("BEGIN");
+  try {
+    // SET LOCAL reverts on COMMIT and ROLLBACK, so bootstrap never changes the
+    // session settings of the pooled connection it releases afterwards.
+    await client.query(`SET LOCAL lock_timeout = ${timeouts.lockTimeoutMs}`);
+    await client.query(`SET LOCAL statement_timeout = ${timeouts.statementTimeoutMs}`);
+    const result = await operation();
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Rollback failure must not hide the original migration error.
+    }
+    throw err;
+  }
+}
+
+function postgresMigrationTimeoutKind(err: unknown): "lock_timeout" | "statement_timeout" | null {
+  const code = (err as { code?: string } | null)?.code;
+  if (code === POSTGRES_LOCK_TIMEOUT_SQLSTATE) {
+    return "lock_timeout";
+  }
+  return code === POSTGRES_STATEMENT_TIMEOUT_SQLSTATE ? "statement_timeout" : null;
+}
+
+function postgresRunHistoryMigrationRetryDelayMs(attempt: number): number {
+  return Math.min(
+    PG_RUN_HISTORY_MIGRATION_RETRY_MAX_DELAY_MS,
+    PG_RUN_HISTORY_MIGRATION_RETRY_INITIAL_DELAY_MS * 2 ** (attempt - 1)
+  );
+}
+
+async function retryPostgresRunHistoryMigrationTimeout<T>(
+  operationName: string,
+  timeouts: PostgresMigrationTimeouts,
+  log: StorageLog,
+  operation: () => Promise<T>
+): Promise<T> {
+  for (let attempt = 1; attempt <= PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await operation();
+    } catch (err) {
+      const timeoutKind = postgresMigrationTimeoutKind(err);
+      if (!timeoutKind) {
+        throw err;
+      }
+      if (attempt === PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS) {
+        throw new Error(
+          `Postgres boot migration ${operationName} timed out after ${attempt} attempts (${timeoutKind}; lock_timeout=${timeouts.lockTimeoutMs}ms; statement_timeout=${timeouts.statementTimeoutMs}ms). The timed-out transaction rolled back and the last committed migration cursor remains intact. Bootstrap stopped to avoid serving with incomplete run_history ownership data. Resolve transactions blocking run_history or spine_events (inspect pg_stat_activity/pg_locks), then restart.`,
+          { cause: err }
+        );
+      }
+      const delayMs = postgresRunHistoryMigrationRetryDelayMs(attempt);
+      log(
+        `[PDPP] ${operationName}: ${timeoutKind} on attempt ${attempt}/${PG_RUN_HISTORY_MIGRATION_RETRY_ATTEMPTS}; retrying in ${delayMs}ms`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error(`Postgres boot migration ${operationName} exhausted its retry loop unexpectedly.`);
+}
+
+async function migratePostgresRunHistorySchedulerManagedDefault(
+  client: PoolClient,
+  { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
+): Promise<void> {
+  await retryPostgresRunHistoryMigrationTimeout(
+    "run_history scheduler_managed default repair",
+    PG_RUN_HISTORY_DEFAULT_TIMEOUTS,
+    log,
+    () =>
+      withPostgresMigrationTimeouts(client, PG_RUN_HISTORY_DEFAULT_TIMEOUTS, async () => {
+        const result = await client.query<{ column_default: string | null }>(
+          `SELECT column_default FROM information_schema.columns
+             WHERE table_schema = current_schema() AND table_name = 'run_history' AND column_name = 'scheduler_managed'`
+        );
+        const columnDefault = result.rows[0]?.column_default;
+        if (columnDefault === undefined || columnDefault === "false") {
+          return;
+        }
+        await client.query("ALTER TABLE run_history ALTER COLUMN scheduler_managed SET DEFAULT false");
+      })
+  );
+}
 
 /**
  * Correct `scheduler_managed` on the run_history rows a device wrote.
@@ -5700,57 +5803,64 @@ async function migratePostgresRunHistoryDeviceRunProvenance(
   let cursor = claim.cursor ?? "0";
   let changedRows = 0;
   for (;;) {
-    // biome-ignore lint/performance/noAwaitInLoops: Pages are sequential by contract — each cursor is valid only after the previous page committed.
-    const page = await client.query<{ upper_id: string | null }>(
-      `SELECT MAX(id)::text AS upper_id
-         FROM (SELECT id FROM run_history WHERE id > $1::bigint ORDER BY id LIMIT $2) page`,
-      [cursor, PG_RUN_HISTORY_PROVENANCE_BATCH_ROWS]
-    );
-    const upperId = page.rows[0]?.upper_id;
-    if (!upperId) {
-      break;
-    }
-    await client.query("BEGIN");
     try {
-      const updated = await client.query(
-        `UPDATE run_history rh
-            SET scheduler_managed = false
-          WHERE rh.id > $1::bigint AND rh.id <= $2::bigint
-            AND rh.scheduler_managed
-            AND rh.run_id IS NOT NULL
-            AND EXISTS (
-              SELECT 1 FROM spine_events s
-               WHERE s.run_id = rh.run_id
-                 AND s.event_type IN ('run.completed', 'run.failed', 'run.cancelled', 'run.abandoned')
-                 AND s.actor_type = 'local_device'
-                 AND COALESCE(
-                   NULLIF(s.connector_instance_id, ''),
-                   NULLIF(s.data_json->>'connector_instance_id', ''),
-                   NULLIF(s.data_json->>'connection_id', '')
-                 ) = rh.connector_instance_id
-            )`,
-        [cursor, upperId]
+      // Pages are sequential by contract: each cursor is valid only after the previous page committed.
+      const page = await retryPostgresRunHistoryMigrationTimeout(
+        `run_history device-run provenance page after id ${cursor}`,
+        PG_RUN_HISTORY_PROVENANCE_TIMEOUTS,
+        log,
+        () =>
+          withPostgresMigrationTimeouts(client, PG_RUN_HISTORY_PROVENANCE_TIMEOUTS, async () => {
+            const pageRows = await client.query<{ upper_id: string | null }>(
+              `SELECT MAX(id)::text AS upper_id
+                 FROM (SELECT id FROM run_history WHERE id > $1::bigint ORDER BY id LIMIT $2) page`,
+              [cursor, PG_RUN_HISTORY_PROVENANCE_BATCH_ROWS]
+            );
+            const upperId = pageRows.rows[0]?.upper_id;
+            if (!upperId) {
+              return null;
+            }
+            const updated = await client.query(
+              `UPDATE run_history rh
+                  SET scheduler_managed = false
+                WHERE rh.id > $1::bigint AND rh.id <= $2::bigint
+                  AND rh.scheduler_managed
+                  AND rh.run_id IS NOT NULL
+                  AND EXISTS (
+                    SELECT 1 FROM spine_events s
+                     WHERE s.run_id = rh.run_id
+                       AND s.event_type IN ('run.completed', 'run.failed', 'run.cancelled', 'run.abandoned')
+                       AND s.actor_type = 'local_device'
+                       AND COALESCE(
+                         NULLIF(s.connector_instance_id, ''),
+                         NULLIF(s.data_json->>'connector_instance_id', ''),
+                         NULLIF(s.data_json->>'connection_id', '')
+                       ) = rh.connector_instance_id
+                  )`,
+              [cursor, upperId]
+            );
+            const batchChangedRows = updated.rowCount ?? 0;
+            await advancePostgresMigrationCursor(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+              changedRows: batchChangedRows,
+              cursor: upperId,
+              nowIso: new Date().toISOString(),
+            });
+            return { upperId, batchChangedRows };
+          })
       );
-      const batchChangedRows = updated.rowCount ?? 0;
-      await advancePostgresMigrationCursor(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
-        changedRows: batchChangedRows,
-        cursor: upperId,
-        nowIso: new Date().toISOString(),
-      });
-      await client.query("COMMIT");
-      cursor = upperId;
-      changedRows += batchChangedRows;
+      if (!page) {
+        break;
+      }
+      cursor = page.upperId;
+      changedRows += page.batchChangedRows;
     } catch (err) {
       try {
-        await client.query("ROLLBACK");
-      } catch {
-        // Rollback failure must not hide the original migration error.
-      }
-      try {
-        await blockPostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
-          error: err instanceof Error ? err.message : String(err),
-          nowIso: new Date().toISOString(),
-        });
+        await withPostgresMigrationTimeouts(client, PG_RUN_HISTORY_PROVENANCE_TIMEOUTS, () =>
+          blockPostgresMigration(client, RUN_HISTORY_DEVICE_RUN_PROVENANCE_MIGRATION_ID, {
+            error: err instanceof Error ? err.message : String(err),
+            nowIso: new Date().toISOString(),
+          })
+        );
       } catch {
         // A ledger write failure must not hide the original migration error.
       }
