@@ -61,6 +61,11 @@ interface PostgresHandle {
   query: (sql: string, params: readonly unknown[]) => Promise<{ readonly rows: readonly unknown[] }>;
 }
 
+export interface CollectionObservationGate {
+  checked: boolean;
+  enabled: boolean;
+}
+
 /**
  * The revision for an observed event could not be recorded, so the event
  * itself must not commit or be acknowledged. Device routes answer it with
@@ -102,6 +107,73 @@ const POSTGRES_ADVANCEABLE = `collection_revision BETWEEN 0 AND ${MAX_ADVANCEABL
 export function readCollectionRevision(value: unknown): number | null {
   const revision = typeof value === "string" && DECIMAL_DIGITS.test(value) ? Number(value) : value;
   return typeof revision === "number" && Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
+export function currentEpochRunSequenceExists(value: unknown): boolean {
+  return value === true || value === 1 || value === "1";
+}
+
+export function setCollectionObservationGate(
+  gate: CollectionObservationGate,
+  currentEpochSequenceExists: unknown
+): void {
+  if (gate.checked) {
+    return;
+  }
+  gate.checked = true;
+  gate.enabled = currentEpochRunSequenceExists(currentEpochSequenceExists);
+}
+
+/** Read the run-order gate from the caller's handle when its schema has both required tables. */
+export function hasIssuedCollectionRunSequenceInSqliteTransaction(
+  db: SqliteHandle,
+  connectorInstanceId: string
+): boolean {
+  const table = db
+    .prepare(
+      `SELECT 1 AS present FROM sqlite_schema
+        WHERE type = 'table'
+          AND name = 'connector_instances'
+          AND EXISTS (
+            SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'collection_run_sequences'
+          )`
+    )
+    .get();
+  if (!table) {
+    return false;
+  }
+  const row = db
+    .prepare(
+      `SELECT EXISTS (
+         SELECT 1 FROM collection_run_sequences AS rs
+          WHERE rs.connector_instance_id = ci.connector_instance_id
+            AND rs.storage_epoch = ci.storage_epoch
+       ) AS current_epoch_run_sequence_issued
+         FROM connector_instances AS ci
+        WHERE ci.connector_instance_id = ?`
+    )
+    .get(connectorInstanceId) as { current_epoch_run_sequence_issued?: unknown } | undefined;
+  return currentEpochRunSequenceExists(row?.current_epoch_run_sequence_issued);
+}
+
+/** Read the run-order gate and lock its connection row on the caller's transaction handle. */
+export async function hasIssuedCollectionRunSequenceInPostgresTransaction(
+  client: PostgresHandle,
+  connectorInstanceId: string
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT EXISTS (
+       SELECT 1 FROM collection_run_sequences AS rs
+        WHERE rs.connector_instance_id = ci.connector_instance_id
+          AND rs.storage_epoch = ci.storage_epoch
+     ) AS current_epoch_run_sequence_issued
+       FROM connector_instances AS ci
+      WHERE ci.connector_instance_id = $1
+      FOR UPDATE OF ci`,
+    [connectorInstanceId]
+  );
+  const row = result.rows[0] as { current_epoch_run_sequence_issued?: unknown } | undefined;
+  return currentEpochRunSequenceExists(row?.current_epoch_run_sequence_issued);
 }
 
 interface AdvancedRevision {
