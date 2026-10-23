@@ -11,8 +11,10 @@ import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 
 import { postgresQuery, withPostgresTransaction } from "../server/postgres-storage.ts";
+import { advancePostgresCollectionRevisionInTransaction } from "../server/stores/collection-revision-store.ts";
 import {
   isRunHistoryRelevantEventType,
+  isRunTerminalEventType,
   type RunHistorySpineEvent,
   writePostgresRunHistoryForSpineEvent,
 } from "../server/stores/run-history-writer.ts";
@@ -1223,6 +1225,13 @@ async function appendNormalizedPostgresSpineEventInTransaction(
   rawData: unknown,
   hooks: PostgresSpineTransactionHooks = {}
 ): Promise<SpineEventRecord | null> {
+  if (isRunTerminalEventType(event.event_type) && event.connector_instance_id && !hasCollectionRevision(rawData)) {
+    await advancePostgresCollectionRevisionInTransaction(client, event.connector_instance_id, {
+      at: event.occurred_at,
+      event: "terminal_run",
+      runId: event.run_id,
+    });
+  }
   const result = await client.query<SpineEventRow>(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
   await hooks.afterEventInsert?.();
   if (isRunHistoryRelevantEventType(event.event_type)) {
@@ -1252,11 +1261,16 @@ export async function postgresEmitSpineEventInTransaction(
   input: PostgresSpineEventInput = {}
 ): Promise<SpineEventRecord | null> {
   const event = normalize(input);
-  const result = await client.query<SpineEventRow>(SPINE_INSERT_EVENT_SQL, spineInsertEventParams(event));
-  if (isRunHistoryRelevantEventType(event.event_type)) {
-    await writePostgresRunHistoryForSpineEvent(client, toRunHistorySpineEvent(event, input.data));
-  }
-  return hydrate(result.rows[0]);
+  return await appendNormalizedPostgresSpineEventInTransaction(client, event, input.data);
+}
+
+function hasCollectionRevision(data: unknown): boolean {
+  return Boolean(
+    data &&
+      typeof data === "object" &&
+      !Array.isArray(data) &&
+      typeof (data as Record<string, unknown>).collection_revision === "number"
+  );
 }
 
 export async function postgresListSpineEventsPage(

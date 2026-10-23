@@ -142,8 +142,10 @@ import {
   resolveStorageConnectorInstanceId,
 } from "./storage-utils.ts";
 import {
+  type CollectionRevisionEventInput,
   type LocalCoverageRevisionFence,
   readLocalCoverageRevisionFences,
+  requireSqliteCollectionObservationInTransaction,
 } from "./stores/collection-revision-store.ts";
 import {
   ConnectorInstanceResolutionError,
@@ -206,6 +208,7 @@ interface AttemptContext {
 type DeviceReservation = Record<string, unknown> & { inputIndex: number };
 interface RecordIngestOptions {
   attemptContext?: AttemptContext;
+  collectionRevision?: CollectionRevisionEventInput;
   coordinatorOwnership?: ConnectorInstanceWriteOwnership;
   deferIndexes?: boolean;
   deviceFinalInputIndex?: number;
@@ -1737,7 +1740,7 @@ export async function ingestRecords(
   storageTarget: RecordStorageTarget,
   records: readonly RecordEnvelope[],
   afterRecord?: RecordIngestAfterRecord,
-  options: Pick<RecordIngestOptions, "requireConnectionAdmission" | "runId"> = {}
+  options: Pick<RecordIngestOptions, "collectionRevision" | "requireConnectionAdmission" | "runId"> = {}
 ): Promise<RecordIngestBatchOutcome[]> {
   const coordinationConnectorId = connectorIdForStorageTarget(storageTarget);
   const coordinationInstanceId = resolveStorageConnectorInstanceId(storageTarget, coordinationConnectorId);
@@ -1746,13 +1749,7 @@ export async function ingestRecords(
     releaseFence = resolve;
   });
   try {
-    const batch = await ingestRecordsWithinCoordinator(
-      storageTarget,
-      records,
-      afterRecord,
-      options.runId,
-      options.requireConnectionAdmission
-    );
+    const batch = await ingestRecordsWithinCoordinator(storageTarget, records, afterRecord, options);
     if (batch.changedRecords.length > 0) {
       // Fire-and-forget: the HTTP batch ack must not await derived index
       // work (see the single-record path's identical reasoning at
@@ -1889,8 +1886,7 @@ async function ingestRecordsWithinCoordinator(
   storageTarget: RecordStorageTarget,
   records: readonly RecordEnvelope[],
   afterRecord?: RecordIngestAfterRecord,
-  runId?: string | null,
-  requireConnectionAdmission?: boolean
+  options: Pick<RecordIngestOptions, "collectionRevision" | "requireConnectionAdmission" | "runId"> = {}
 ): Promise<IngestRecordsWithinCoordinatorResult> {
   const outcomes: Array<RecordIngestBatchOutcome | undefined> = new Array(records.length);
   const changedRecords: DeferredRecordIndex[] = [];
@@ -1906,8 +1902,9 @@ async function ingestRecordsWithinCoordinator(
     // any lock across the whole batch, so only a per-record, in-transaction
     // check closes the delete-or-revoke/write TOCTOU for every record, not
     // just the first.
-    ...(requireConnectionAdmission ? { requireConnectionAdmission } : {}),
-    ...(runId ? { runId } : {}),
+    ...(options.collectionRevision ? { collectionRevision: options.collectionRevision } : {}),
+    ...(options.requireConnectionAdmission ? { requireConnectionAdmission: options.requireConnectionAdmission } : {}),
+    ...(options.runId ? { runId: options.runId } : {}),
   };
   // Computed once per batch, not per record: the storage backend cannot
   // change mid-batch, and this decides whether the explicit yield below
@@ -1965,7 +1962,7 @@ async function ingestRecordsWithinCoordinator(
       // above explains why the detail must appear here at all.
       const logIngestFailure = ingestFailureLogLevel(classified) === "warn" ? console.warn : console.error;
       logIngestFailure(
-        `[records] ingest write failed connector_instance_id=${loggingConnectorInstanceId} run_id=${runId ?? "unknown"} ` +
+        `[records] ingest write failed connector_instance_id=${loggingConnectorInstanceId} run_id=${options.runId ?? "unknown"} ` +
           `stream=${record.stream} code=${classified.code} retryable=${classified.retryable}: ${classified.message}`
       );
     }
@@ -1984,7 +1981,7 @@ async function ingestRecordsWithinCoordinator(
         };
         // Same server-log-only rationale as the write-failure branch above.
         console.error(
-          `[records] ingest afterRecord failed connector_instance_id=${loggingConnectorInstanceId} run_id=${runId ?? "unknown"} ` +
+          `[records] ingest afterRecord failed connector_instance_id=${loggingConnectorInstanceId} run_id=${options.runId ?? "unknown"} ` +
             `stream=${record.stream} code=${classified.code} retryable=${classified.retryable}: ${classified.message}`
         );
       }
@@ -2066,6 +2063,7 @@ function toPostgresIngestOptions(options: RecordIngestOptions) {
   const attemptContext = toPostgresAttemptContext(options.attemptContext);
   return {
     ...(attemptContext ? { attemptContext } : {}),
+    ...(options.collectionRevision ? { collectionRevision: options.collectionRevision } : {}),
     ...(options.deviceReservation ? { deviceReservation: options.deviceReservation } : {}),
     ...(options.requireConnectionAdmission ? { requireConnectionAdmission: options.requireConnectionAdmission } : {}),
     ...(options.runId ? { runId: options.runId } : {}),
@@ -2321,6 +2319,9 @@ async function ingestSqliteRecord(
     assertSqliteRunStillAdmitted(options.runId, connectorInstanceId);
     if (options.requireConnectionAdmission) {
       assertSqliteConnectorInstanceWritableWithinTransaction(connectorInstanceId);
+    }
+    if (options.collectionRevision) {
+      requireSqliteCollectionObservationInTransaction(getDb(), connectorInstanceId, options.collectionRevision);
     }
     const finishDurableOutcome = (value: DurableIngestOutcome): DurableIngestOutcome => {
       if (options.deviceReservation) {

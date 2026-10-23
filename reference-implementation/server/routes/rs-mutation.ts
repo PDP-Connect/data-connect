@@ -87,6 +87,7 @@ import {
 } from "../../operations/rs-records-ingest/index.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import { HOSTED_INGEST_MAX_LINE_BYTES } from "../hosted-ingest-limits.ts";
+import type { CollectionRevisionEventInput } from "../stores/collection-revision-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
@@ -236,10 +237,12 @@ async function ingestRecordClassified(
   ctx: MountRsMutationContext,
   namespace: ConnectorNamespaceLike,
   record: Record<string, unknown>,
-  runId: string | null
+  runId: string | null,
+  collectionRevision?: CollectionRevisionEventInput
 ): Promise<unknown> {
   try {
     return await ctx.ingestRecord(ctx.storageTargetForConnectorNamespace(namespace), record, {
+      ...(collectionRevision ? { collectionRevision } : {}),
       requireConnectionAdmission: Boolean(namespace.connectorInstanceId),
       runId,
     });
@@ -431,14 +434,22 @@ export interface MountRsMutationContext {
   readonly ingestRecord: (
     target: StorageTargetLike,
     record: unknown,
-    options?: { requireConnectionAdmission?: boolean; runId?: string | null }
+    options?: {
+      collectionRevision?: CollectionRevisionEventInput;
+      requireConnectionAdmission?: boolean;
+      runId?: string | null;
+    }
   ) => Promise<unknown>;
   /** Optional common-path batch capability; hosts without it use the ordered fallback. */
   readonly ingestRecords?: (
     target: StorageTargetLike,
     records: readonly unknown[],
     afterRecord?: (record: unknown, outcome: unknown) => Promise<void>,
-    options?: { requireConnectionAdmission?: boolean; runId?: string | null }
+    options?: {
+      collectionRevision?: CollectionRevisionEventInput;
+      requireConnectionAdmission?: boolean;
+      runId?: string | null;
+    }
   ) => Promise<readonly unknown[]>;
   readonly insertOrReplayRecordRejection?: (input: {
     auditActorId: string;
@@ -1204,7 +1215,10 @@ export function mountRsRecordsIngest(app: AppLike, ctx: MountRsMutationContext):
         },
         ingestRecord: async (cid: string, _cin: string | null, record: Record<string, unknown>) => {
           const namespace = storageNamespace ?? (await resolveAdmittedNamespace(cid, _cin));
-          const result = await ingestRecordClassified(ctx, namespace, record, runId);
+          const collectionRevision = namespace.connectorInstanceId
+            ? { at: new Date().toISOString(), event: "batch_record" as const, runId }
+            : undefined;
+          const result = await ingestRecordClassified(ctx, namespace, record, runId, collectionRevision);
           if (ctx.getLatestAcquisitionBatchForConnection && namespace.connectorInstanceId) {
             acquisitionBatchPromise ??= Promise.resolve(
               ctx.getLatestAcquisitionBatchForConnection(namespace.connectorInstanceId)
@@ -1255,6 +1269,9 @@ export function mountRsRecordsIngest(app: AppLike, ctx: MountRsMutationContext):
                 records: readonly Record<string, unknown>[]
               ): Promise<readonly (IngestLineFailure | null)[]> {
                 const namespace = storageNamespace ?? (await resolveAdmittedNamespace(cid, cin));
+                const collectionRevision = namespace.connectorInstanceId
+                  ? { at: new Date().toISOString(), event: "batch_record" as const, runId }
+                  : undefined;
                 // biome-ignore lint/suspicious/noUnnecessaryConditions: Express route params are nullable at runtime even though the local adapter type narrows them.
                 const streamName = req.params.stream ?? "";
                 const getLatestAcquisitionBatch = ctx.getLatestAcquisitionBatchForConnection;
@@ -1282,7 +1299,11 @@ export function mountRsRecordsIngest(app: AppLike, ctx: MountRsMutationContext):
                   ctx.storageTargetForConnectorNamespace(namespace),
                   records,
                   afterRecord,
-                  { requireConnectionAdmission: Boolean(namespace.connectorInstanceId), runId }
+                  {
+                    ...(collectionRevision ? { collectionRevision } : {}),
+                    requireConnectionAdmission: Boolean(namespace.connectorInstanceId),
+                    runId,
+                  }
                 );
                 return mapBatchIngestOutcomes(records, outcomes);
               },
