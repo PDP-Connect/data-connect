@@ -67,6 +67,7 @@ export interface CatalogManifestLike {
   connector_key?: string | null;
   display_name?: string | null;
   icon?: {
+    background?: string | null;
     color?: string | null;
     kind?: string | null;
     svg?: string | null;
@@ -170,6 +171,7 @@ export interface OwnerConnectorTemplateLike {
   display_name?: string | null;
   /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
   icon?: {
+    background?: string | null;
     color?: string | null;
     kind?: string | null;
     svg?: string | null;

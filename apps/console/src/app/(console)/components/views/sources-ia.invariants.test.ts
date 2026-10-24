@@ -111,7 +111,7 @@ const LIST_CONNECTOR_MANIFESTS_RE = /listConnectorManifests\(\)/;
 const LIST_OWNER_CONNECTOR_TEMPLATES_RE = /listOwnerConnectorTemplates\(\)/;
 const BUILD_CONNECTOR_CATALOG_RE = /buildOwnerConnectorCatalog\(manifests, templates, installSnapshot\?\.catalog \?\? \[\]\)/;
 const SOURCE_SETUP_CATALOG_RE = /<SourceSetupCatalog/;
-const SOURCE_SETUP_SECTION_RE = /title="Add data"/;
+const SOURCE_SETUP_SECTION_RE = /title="Add a source"/;
 const SOURCE_SEARCH_RE = /name="source_q"[\s\S]*?Search source name or connector key/;
 const SOURCE_CARD_RE = /data-testid=\{`source-setup-\$\{entry\.connectorKey\}`\}/;
 const SOURCE_ACQUISITION_PATHS_RE = /data-testid="source-acquisition-paths"/;

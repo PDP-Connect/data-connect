@@ -98,15 +98,21 @@ interface MonogramProps {
   tinted?: boolean;
 }
 
-const WHITESPACE_RE = /\s+/;
+const PARENTHETICAL_RE = /\([^)]*\)/g;
+const WORD_RE = /[\p{L}\p{N}]+/gu;
 
-/** Derive a 2-letter monogram from a client name. */
+/**
+ * Derive a 2-letter monogram from a client name. A parenthetical qualifier
+ * ("Strava (Browser Sign-In)") is not part of the brand, and punctuation is
+ * never an initial, so that name reads "ST", not "S(".
+ */
 function toMonogram(name: string): string {
-  const words = name.trim().split(WHITESPACE_RE);
-  if (words.length >= 2 && words[0] && words[1]) {
-    return ((words[0][0] ?? "") + (words[1][0] ?? "")).toUpperCase();
+  const words = name.replace(PARENTHETICAL_RE, " ").match(WORD_RE) ?? name.match(WORD_RE) ?? [];
+  const [first, second] = words;
+  if (first && second) {
+    return ((first[0] ?? "") + (second[0] ?? "")).toUpperCase();
   }
-  return name.slice(0, 2).toUpperCase();
+  return (first ?? name.trim()).slice(0, 2).toUpperCase();
 }
 
 // A small fixed palette of readable, distinguishable hues (not a brand color

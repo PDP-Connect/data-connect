@@ -98,3 +98,13 @@ test("returns null for an empty or blank path", async () => {
     assert.equal(await resolveConnectorIconFromManifestPath(dir, "   "), null);
   });
 });
+
+test("carries the manifest's brand colour so the icon can draw its tile", async () => {
+  await withManifestsDir(async (dir) => {
+    await mkdir(join(dir, "icons"), { recursive: true });
+    await writeFile(join(dir, "icons", "strava.svg"), '<svg viewBox="0 0 24 24"><path d="M1 2" /></svg>');
+    const icon = await resolveConnectorIconFromManifestPath(dir, "icons/strava.svg", "#FC4C02");
+    assert.equal(icon?.background, "#FC4C02");
+    assert.equal((await resolveConnectorIconFromManifestPath(dir, "icons/strava.svg"))?.background, undefined);
+  });
+});
