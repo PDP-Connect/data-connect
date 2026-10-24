@@ -21,6 +21,9 @@ let browser: BrowserGlobals | undefined;
 
 const noop = () => false;
 
+// The drawer tests do not exercise the theme toggle; the shell only paints the theme it is given.
+const THEME_PROPS = { onToggleTheme: noop, theme: "dark" } as const;
+
 function globalValue(name: string, dom: JSDOM, windowObject: Record<string, unknown>) {
   if (name === "window" || name === "self") {
     return dom.window;
@@ -139,7 +142,12 @@ test("mobile drawer opens as a named dialog, traps focus, and restores the trigg
   const { RecordroomShell } = await import("./shell-frame.tsx");
   act(() => {
     currentBrowser.root.render(
-      app(createElement(RecordroomShell, null, createElement("button", { type: "button" }, "Outside action")))
+      app(
+        createElement(RecordroomShell, {
+          ...THEME_PROPS,
+          children: createElement("button", { type: "button" }, "Outside action"),
+        })
+      )
     );
   });
 
@@ -209,7 +217,9 @@ test("backdrop and close button dismiss the drawer", async () => {
   assert.ok(currentBrowser);
   const { RecordroomShell } = await import("./shell-frame.tsx");
   act(() => {
-    currentBrowser.root.render(app(createElement(RecordroomShell, null, createElement("p", null, "Content"))));
+    currentBrowser.root.render(
+      app(createElement(RecordroomShell, { ...THEME_PROPS, children: createElement("p", null, "Content") }))
+    );
   });
 
   const trigger = host.querySelector<HTMLButtonElement>(".rr-menu-btn");

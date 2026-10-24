@@ -31,9 +31,12 @@
  *       source collection.
  *   `NAV_GROUPS` is a typed array so leaf views / future edits are trivial.
  *
- * THEME: the toggle flips BOTH `data-theme` and the `dark` class on <html> so
- * the Ink Carbon tokens (light `:root`, dark `[data-theme="dark"]`) and
- * the existing Tailwind/shadcn `dark:` variants react together.
+ * THEME: the shell does not own the theme. The caller passes the painted
+ * `theme` and an `onToggleTheme` handler, and applies and stores the choice so
+ * a full page load keeps it (the console routes both through next-themes). It
+ * must set BOTH `data-theme` and the `dark` class on <html>: the Ink Carbon
+ * tokens (light `:root`, dark `[data-theme="dark"]`) and the existing
+ * Tailwind/shadcn `dark:` variants key off different ones.
  *
  * OWNER IDENTITY: there is none to show — owner auth is invisible (cookie-gated).
  * The footer is a host line + build crumb, NOT a user menu.
@@ -42,7 +45,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import "./components.css";
 import {
   IcDialog,
@@ -220,11 +223,22 @@ function NavList({ pathname, onNavigate }: { onNavigate?: () => void; pathname: 
 
 // ─── Footer host block ────────────────────────────────────────────
 
-function FootBlock({ host, build }: { build: string; host: string }) {
+type ShellTheme = "dark" | "light";
+
+function FootBlock({
+  host,
+  build,
+  theme,
+  onToggleTheme,
+}: {
+  build: string;
+  host: string;
+  onToggleTheme: () => void;
+  theme: ShellTheme;
+}) {
   // Theme toggle lives here in the sidebar footer — a quiet utility, not a
-  // front-and-center header action. The hook flips <html> so any toggle
-  // instance stays in sync via the DOM.
-  const [theme, toggleTheme] = useThemeToggle();
+  // front-and-center header action. The caller owns the theme state (the
+  // console routes it through next-themes so the choice persists).
   const themeLabel = theme === "dark" ? "Dark" : "Light";
   const themeTitle = theme === "dark" ? "Switch to light" : "Switch to dark";
   return (
@@ -233,54 +247,11 @@ function FootBlock({ host, build }: { build: string; host: string }) {
         {host} · {build}
       </span>
       <span className="rr-side__motto">your data, at home</span>
-      <button className="rr-side__theme rr-chrome-btn" onClick={toggleTheme} title={themeTitle} type="button">
+      <button className="rr-side__theme rr-chrome-btn" onClick={onToggleTheme} title={themeTitle} type="button">
         {themeLabel}
       </button>
     </div>
   );
-}
-
-// ─── Theme toggle (flips <html> data-theme + dark class) ──────────
-
-type Theme = "dark" | "light";
-
-function readInitialTheme(): Theme {
-  if (typeof document === "undefined") {
-    return "dark";
-  }
-  const attr = document.documentElement.getAttribute("data-theme");
-  if (attr === "light") {
-    return "light";
-  }
-  if (attr === "dark") {
-    return "dark";
-  }
-  return document.documentElement.classList.contains("dark") ? "dark" : "light";
-}
-
-function applyTheme(theme: Theme) {
-  const root = document.documentElement;
-  root.setAttribute("data-theme", theme);
-  root.classList.toggle("dark", theme === "dark");
-}
-
-function useThemeToggle(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>("dark");
-
-  // Sync from the SSR-rendered <html> on mount (avoids a hydration flip).
-  useEffect(() => {
-    setTheme(readInitialTheme());
-  }, []);
-
-  const toggle = useCallback(() => {
-    setTheme((cur) => {
-      const next: Theme = cur === "dark" ? "light" : "dark";
-      applyTheme(next);
-      return next;
-    });
-  }, []);
-
-  return [theme, toggle];
 }
 
 // ─── RecordroomShell ──────────────────────────────────────────────
@@ -293,12 +264,18 @@ interface RecordroomShellProps {
   host?: string;
   /** Called when the ⌘K jump affordance is activated (open a command palette). */
   onJump?: () => void;
+  /** Called when the owner presses the theme toggle; the caller stores the choice. */
+  onToggleTheme: () => void;
+  /** The theme currently painted; drives the toggle's label. */
+  theme: ShellTheme;
 }
 
 export function RecordroomShell({
   children,
   host = "this server",
   onJump,
+  onToggleTheme,
+  theme,
   build,
 }: RecordroomShellProps) {
   const identity = DATACONNECT_PRODUCT_IDENTITY;
@@ -321,7 +298,7 @@ export function RecordroomShell({
             <NavList pathname={pathname} />
           </nav>
           <div className="rr-side__spacer" />
-          <FootBlock build={resolvedBuild} host={host} />
+          <FootBlock build={resolvedBuild} host={host} onToggleTheme={onToggleTheme} theme={theme} />
         </aside>
 
         {/* ─── Main column ─── */}
@@ -368,7 +345,7 @@ export function RecordroomShell({
               <div className="rr-drawer__nav">
                 <NavList onNavigate={closeDrawer} pathname={pathname} />
               </div>
-              <FootBlock build={resolvedBuild} host={host} />
+              <FootBlock build={resolvedBuild} host={host} onToggleTheme={onToggleTheme} theme={theme} />
             </nav>
           </IcDialogPopup>
         </IcDialogPortal>
