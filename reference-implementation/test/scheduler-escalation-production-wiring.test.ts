@@ -26,48 +26,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closeDb, getDb, initDb } from "../server/db.ts";
+import { closeDb, initDb } from "../server/db.ts";
 import { createReferenceSchedulerManager } from "../server/index.ts";
 import { getDefaultSchedulerStore } from "../server/stores/scheduler-store.ts";
 import { CONNECTOR_ID, deferred, drain, HANG_GUARD, INSTANCE_ID, OWNER } from "./helpers/scheduler-stop-harness.ts";
-import { seedEnabledSchedule } from "./helpers/seed-enabled-schedule.ts";
-
-const CREATED_AT = "2026-08-10T00:00:00.000Z";
-
-function seedBackgroundSafeConnection(): void {
-  const manifest = {
-    capabilities: {
-      public_listing: { tier: "supported" },
-      refresh_policy: {
-        background_safe: true,
-        rationale: "Refreshes unattended in the background.",
-        recommended_mode: "automatic",
-      },
-    },
-    connector_id: CONNECTOR_ID,
-    display_name: CONNECTOR_ID,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: "id",
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      },
-    ],
-    version: "1.0.0",
-  };
-  getDb()
-    .prepare("INSERT INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
-    .run(CONNECTOR_ID, JSON.stringify(manifest), CREATED_AT);
-  getDb()
-    .prepare(
-      `INSERT INTO connector_instances(
-         connector_instance_id, owner_subject_id, connector_id, display_name, status,
-         source_kind, source_binding_key, source_binding_json, created_at, updated_at, revoked_at
-       ) VALUES (?, ?, ?, ?, 'active', 'account', ?, '{}', ?, ?, NULL)`
-    )
-    .run(INSTANCE_ID, OWNER, CONNECTOR_ID, CONNECTOR_ID, INSTANCE_ID, CREATED_AT, CREATED_AT);
-}
+import { seedBackgroundSafeConnection, seedEnabledSchedule } from "./helpers/seed-enabled-schedule.ts";
 
 const CASES = [
   { name: "a valid escalation sends the push", pushes: 1, variant: "none" },
@@ -78,7 +41,7 @@ const CASES = [
 for (const { name, pushes, variant } of CASES) {
   test(`production scheduler wiring: ${name}`, HANG_GUARD, async (t) => {
     initDb(":memory:");
-    seedBackgroundSafeConnection();
+    seedBackgroundSafeConnection(CONNECTOR_ID, INSTANCE_ID, OWNER);
     const store = getDefaultSchedulerStore();
     await seedEnabledSchedule(store, CONNECTOR_ID, INSTANCE_ID);
 

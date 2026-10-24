@@ -840,3 +840,168 @@ test("a schedule read that never settles while a gate skip is validated drops th
   assert.equal(completed.length, 1);
   assert.equal(escalations.length, 1);
 });
+
+// ── a dropped escalation is delivered later; a batch cut short is announced later ──
+
+const DROPPING_ONCE = (calls: EscalationInfo[]): HumanRequiredStateEscalationHandler => {
+  return (info) => {
+    calls.push(info);
+    return calls.length === 1 ? "dropped" : undefined;
+  };
+};
+
+test("a needs-human escalation the handler dropped is raised again on a later valid tick, once, without a second skip", HANG_GUARD, async (t) => {
+  const calls: EscalationInfo[] = [];
+  const handler = DROPPING_ONCE(calls);
+  const { completed, scheduler } = directScheduler(
+    UNUSED_CONNECTOR,
+    buildStore(() => ({ enabled: true })),
+    { isNeedsHuman: () => true, onHumanRequiredStateEscalation: (info) => handler(info) }
+  );
+  t.after(() => scheduler.stop());
+
+  scheduler.start();
+  await drain();
+  assert.equal(completed.length, 1, "the needs-human skip is recorded");
+  assert.equal(calls.length, 1, "the first push was dropped");
+
+  scheduler.stop();
+  scheduler.start();
+  await drain();
+  assert.equal(completed.length, 1, "the skip is not recorded again");
+  assert.equal(calls.length, 2, "the dropped push is raised again");
+
+  scheduler.stop();
+  scheduler.start();
+  await drain();
+  assert.equal(completed.length, 1);
+  assert.equal(calls.length, 2, "a delivered push is not raised a third time");
+});
+
+test("a gave_up escalation the handler dropped is raised again on a later valid tick, once, without a second gave_up", HANG_GUARD, async (t) => {
+  const calls: EscalationInfo[] = [];
+  const handler = DROPPING_ONCE(calls);
+  const { completed, scheduler } = directScheduler(
+    UNUSED_CONNECTOR,
+    buildStore(undefined, {
+      getSchedule: async () => ({ enabled: true }),
+      listRunHistory: () => storedFailures(BLOCKED_PROMOTION_THRESHOLD),
+    }),
+    { onHumanRequiredStateEscalation: (info) => handler(info) }
+  );
+  t.after(() => scheduler.stop());
+
+  scheduler.start();
+  await drain();
+  assert.deepEqual(errorKinds(completed), BLOCKED_KINDS);
+  assert.equal(calls.length, 1, "the first push was dropped");
+
+  scheduler.stop();
+  scheduler.start();
+  await drain();
+  assert.deepEqual(errorKinds(completed), BLOCKED_KINDS, "the streak is not announced again");
+  assert.equal(calls.length, 2, "the dropped push is raised again");
+
+  scheduler.stop();
+  scheduler.start();
+  await drain();
+  assert.equal(calls.length, 2, "a delivered push is not raised a third time");
+});
+
+test("a governor batch cut short by an observer's stop() emits no more, and the next valid tick announces the rest once", HANG_GUARD, async (t) => {
+  const delivered: EscalationInfo[] = [];
+  let stopOnFirst = true;
+  const holder: { stop: () => void } = { stop: () => undefined };
+  const { completed, scheduler } = directScheduler(
+    UNUSED_CONNECTOR,
+    buildStore(undefined, {
+      getSchedule: async () => ({ enabled: true }),
+      listRunHistory: () => storedFailures(BLOCKED_PROMOTION_THRESHOLD),
+    }),
+    {
+      onHumanRequiredStateEscalation: async (info) => {
+        if (!(await info.shouldDeliver?.())) {
+          return "dropped";
+        }
+        delivered.push(info);
+        return undefined;
+      },
+      onRunComplete: () => {
+        if (stopOnFirst) {
+          stopOnFirst = false;
+          holder.stop();
+        }
+      },
+    }
+  );
+  holder.stop = () => scheduler.stop();
+  t.after(() => scheduler.stop());
+
+  scheduler.start();
+  await drain();
+  assert.deepEqual(errorKinds(completed), ["schedule.back_off.started"], "nothing is emitted after the stop");
+  assert.equal(delivered.length, 0, "no push for a gave_up that was not emitted");
+
+  scheduler.start();
+  await drain();
+  // The audit skip belongs to `back_off.started`, which was emitted and so is
+  // persisted evidence; only the unemitted `gave_up` is announced later.
+  assert.deepEqual(
+    errorKinds(completed),
+    ["schedule.back_off.started", "schedule.gave_up"],
+    "the unemitted gave_up is announced by the next valid tick"
+  );
+  assert.equal(delivered.length, 1, "one push for the one gave_up");
+
+  scheduler.stop();
+  scheduler.start();
+  await drain();
+  assert.deepEqual(errorKinds(completed), ["schedule.back_off.started", "schedule.gave_up"]);
+  assert.equal(delivered.length, 1);
+});
+
+test("a gate evaluation abandoned before it resolved cannot reset the announce-once state a newer evaluation committed", async () => {
+  const runtime: PreRunGateRuntimeState = {
+    disabledGrantFailures: new Map(),
+    exhaustedGrants: new Set(),
+    notifiedAttentionSkips: new Map(),
+    notifiedDisabledGrantFailures: new Set(),
+    notifiedNeedsHumanSkips: new Set(),
+    notifiedNotReadySkips: new Map(),
+  };
+  const records: RunRecord[] = [];
+  const first = deferred<SchedulerReadinessResult>();
+  const answers: Array<Promise<SchedulerReadinessResult>> = [
+    first.promise,
+    Promise.resolve({ ready: false, reason: "offline" }),
+    Promise.resolve({ ready: false, reason: "offline" }),
+  ];
+  const gate = createPreRunGate({
+    hasUnresolvedAttention: async () => null,
+    isNeedsHuman: () => false,
+    onHumanRequiredStateEscalation: () => undefined,
+    readinessChecker: () => answers.shift() ?? Promise.resolve({ ready: true }),
+    recordAndNotify: (record) => {
+      records.push(record);
+      return record;
+    },
+    runtime,
+  });
+  const schedule = buildConnectorSchedule(UNUSED_CONNECTOR);
+
+  const abandoned = gate.decideNotReady(schedule);
+  expectSkip(await gate.decideNotReady(schedule)).commit();
+  assert.equal(records.length, 1);
+
+  first.resolve({ ready: true });
+  const late = await abandoned;
+  assert.equal(late.kind, "proceed");
+  assert.equal(runtime.notifiedNotReadySkips.size, 1, "an evaluation nobody commits resets nothing");
+
+  expectEnding(await gate.decideNotReady(schedule), "silent");
+  assert.equal(records.length, 1, "the unchanged condition is not announced again");
+
+  // Committed, the same reset does apply.
+  late.commit?.();
+  assert.equal(runtime.notifiedNotReadySkips.size, 0);
+});

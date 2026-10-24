@@ -66,7 +66,7 @@ export function bindDispatchEscalation(
 ): DispatchEscalationHandler {
   return (info, signal) => {
     if (!signal || signal.aborted) {
-      return;
+      return "dropped";
     }
     return handler({ ...info, shouldDeliver: () => stillValid(signal, info.connectorInstanceId) });
   };

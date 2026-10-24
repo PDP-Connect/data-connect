@@ -401,7 +401,7 @@ async function projectEscalation(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.warn?.(
-      `[scheduler] verdict projection failed for escalation ${connectorId}/${routeId}; suppressing push: ${message}`
+      `[scheduler] verdict projection failed for escalation ${connectorId}/${routeId}; delivering the push without a verdict: ${message}`
     );
   }
   return { connectionUrl: "/deployment", connectorDisplayName: connectorId, renderedVerdict: null };
@@ -438,7 +438,7 @@ export function createEscalationDelivery({
     // The projection awaited: the scheduler may have been stopped or the
     // schedule disabled since the escalation was raised.
     if (shouldDeliver && !(await shouldDeliver())) {
-      return;
+      return "dropped";
     }
     try {
       await fanoutEscalationWebPush({
@@ -457,6 +457,7 @@ export function createEscalationDelivery({
       const message = err instanceof Error ? err.message : String(err);
       logger.warn?.(`[scheduler] §10-F escalation push failed for ${connectorId} (${reason}): ${message}`);
     }
+    return undefined;
   };
 }
 
@@ -546,6 +547,8 @@ export function createRunManagedConnectorViaController(
     if (handle.status && SURFACE_UNAVAILABLE_HANDLE_STATUSES.includes(handle.status)) {
       return handle as Awaited<ReturnType<NonNullable<SchedulerOptions["runManagedConnectorViaController"]>>>;
     }
+    // From here the run exists: whatever ends it is the outcome of an attempt.
+    opts.onStarted?.();
     // Run was dispatched (status "started"). Await its real terminal
     // outcome so the scheduler records the true succeeded/failed status
     // and its failure-streak / back-off machinery fires correctly.

@@ -17,6 +17,7 @@
  * that is dropped therefore leaves no record, no dedup mark and no escalation.
  */
 
+import { createEscalationLedger, type EscalationLedger } from "./escalation-ledger.ts";
 import { type AutomationRefreshPolicy, projectRunAutomationPolicy } from "../run-automation-policy.ts";
 import type {
   ConnectorSchedule,
@@ -48,6 +49,8 @@ export interface PreRunGateRuntimeState {
 }
 
 export interface PreRunGateDeps {
+  /** Delivery state of the escalations raised here; defaults to a private ledger. */
+  escalationLedger?: EscalationLedger;
   hasUnresolvedAttention: HasUnresolvedAttentionHandler;
   isNeedsHuman: IsNeedsHumanHandler;
   onHumanRequiredStateEscalation: DispatchEscalationHandler;
@@ -70,19 +73,27 @@ export interface PreRunGateDeps {
  *     still valid (scheduler not stopped, schedule still enabled). A decision
  *     that is dropped leaves no trace, so the next valid tick decides afresh.
  *
- * Resets of announce-once state that only mirror what the gate just observed
- * (attention resolved, readiness restored, needs-human cleared) are applied when
- * the gate decides `proceed`: they emit nothing.
+ * Resets of announce-once state that mirror what the gate observed (attention
+ * resolved, readiness restored, needs-human cleared) are held back too. They ride
+ * on the decision's optional `commit`, which the caller runs, once, only while
+ * the dispatch is valid: an abandoned evaluation (one that outlived the liveness
+ * ceiling) is never committed, so its stale observation cannot reset the state a
+ * newer evaluation has since committed. `silent` and `proceed` commits record
+ * nothing; a `silent` commit may also re-raise an escalation that was dropped.
  */
 export type GateDecision =
-  | { readonly kind: "proceed" }
-  | { readonly kind: "silent" }
+  | { readonly commit?: () => void; readonly kind: "proceed" }
+  | { readonly commit?: () => void; readonly kind: "silent" }
   | { readonly commit: () => RunRecord; readonly kind: "skip" };
 
 /** A decision that ends the dispatch: everything but `proceed`. */
 export type EndingGateDecision = Exclude<GateDecision, { readonly kind: "proceed" }>;
 
 const PROCEED: GateDecision = Object.freeze({ kind: "proceed" });
+
+function proceedWith(commit: () => void): GateDecision {
+  return { commit, kind: "proceed" };
+}
 const SILENT: GateDecision = Object.freeze({ kind: "silent" });
 
 function skipWith(commit: () => RunRecord): GateDecision {
@@ -270,6 +281,7 @@ export interface PreRunGate {
 
 export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
   const {
+    escalationLedger: ledger = createEscalationLedger(),
     hasUnresolvedAttention,
     isNeedsHuman,
     onHumanRequiredStateEscalation,
@@ -307,8 +319,11 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
     const readiness = await readinessChecker(schedule);
     const key = runtimeKey(schedule);
     if (!readiness || readiness.ready) {
-      runtime.notifiedNotReadySkips.delete(key);
-      return PROCEED;
+      return runtime.notifiedNotReadySkips.has(key)
+        ? proceedWith(() => {
+            runtime.notifiedNotReadySkips.delete(key);
+          })
+        : PROCEED;
     }
     const projection = projectRunAutomationPolicy({
       deploymentReadiness: {
@@ -348,8 +363,11 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
   async function gateAttention(connectorId: string, connectorInstanceId: string, key: string): Promise<GateDecision> {
     const attentionEvidence = await probeUnresolvedAttention(connectorId, connectorInstanceId);
     if (!attentionEvidence?.key) {
-      runtime.notifiedAttentionSkips.delete(key);
-      return PROCEED;
+      return runtime.notifiedAttentionSkips.has(key)
+        ? proceedWith(() => {
+            runtime.notifiedAttentionSkips.delete(key);
+          })
+        : PROCEED;
     }
     const attentionKey = attentionEvidence.key;
     if (runtime.notifiedAttentionSkips.get(key) === attentionKey) {
@@ -387,28 +405,24 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
     key: string,
     signal?: AbortSignal
   ): GateDecision {
+    const info = { connectorId, connectorInstanceId, reason: "needs_attention" } as const;
     if (!isNeedsHuman(connectorId, connectorInstanceId)) {
-      runtime.notifiedNeedsHumanSkips.delete(key);
-      return PROCEED;
+      return runtime.notifiedNeedsHumanSkips.has(key) || ledger.isUndelivered(info.reason, connectorInstanceId)
+        ? proceedWith(() => {
+            runtime.notifiedNeedsHumanSkips.delete(key);
+            ledger.clear(info.reason, connectorInstanceId);
+          })
+        : PROCEED;
     }
     if (runtime.notifiedNeedsHumanSkips.has(key)) {
-      return SILENT;
+      // The skip was recorded already. If its push was dropped, raise it again.
+      return ledger.isUndelivered(info.reason, connectorInstanceId)
+        ? { commit: () => ledger.raise(onHumanRequiredStateEscalation, info, signal), kind: "silent" }
+        : SILENT;
     }
     return skipWith(() => {
       runtime.notifiedNeedsHumanSkips.add(key);
-      Promise.resolve(
-        onHumanRequiredStateEscalation(
-          {
-            connectorId,
-            connectorInstanceId,
-            reason: "needs_attention",
-          },
-          signal
-        )
-      ).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[scheduler] §10-F needs_attention escalation callback failed for ${connectorId}: ${message}`);
-      });
+      ledger.raise(onHumanRequiredStateEscalation, info, signal);
       return recordAndNotify(buildNeedsHumanSkip(connectorId, connectorInstanceId));
     });
   }
@@ -421,19 +435,48 @@ export function createPreRunGate(deps: PreRunGateDeps): PreRunGate {
   ): Promise<GateDecision> {
     const { connectorId, connectorInstanceId = connectorId } = schedule;
 
-    const attention = await gateAttention(connectorId, connectorInstanceId, key);
-    if (attention.kind !== "proceed") {
-      return attention;
-    }
-    const policyDecision = gateAutomationPolicy(connectorId, connectorInstanceId, key, automationPolicy);
-    if (policyDecision.kind !== "proceed") {
-      return policyDecision;
-    }
-    const notReadyDecision = await decideNotReady(schedule);
-    if (notReadyDecision.kind !== "proceed") {
-      return notReadyDecision;
-    }
-    return gateNeedsHuman(connectorId, connectorInstanceId, key, signal);
+    // Resets from the stages that cleared ride on whichever decision ends the
+    // cascade, so they are committed (or abandoned) together with it.
+    const resets: Array<() => void> = [];
+    const settle = (decision: GateDecision): GateDecision => {
+      if (resets.length === 0) {
+        return decision;
+      }
+      const runResets = (): void => {
+        for (const reset of resets) {
+          reset();
+        }
+      };
+      if (decision.kind === "skip") {
+        const { commit } = decision;
+        return skipWith(() => {
+          runResets();
+          return commit();
+        });
+      }
+      const { commit } = decision;
+      const combined = (): void => {
+        runResets();
+        commit?.();
+      };
+      return decision.kind === "silent" ? { commit: combined, kind: "silent" } : proceedWith(combined);
+    };
+    const stage = (decision: GateDecision): GateDecision | null => {
+      if (decision.kind === "proceed") {
+        if (decision.commit) {
+          resets.push(decision.commit);
+        }
+        return null;
+      }
+      return settle(decision);
+    };
+
+    const ended =
+      stage(await gateAttention(connectorId, connectorInstanceId, key)) ??
+      stage(gateAutomationPolicy(connectorId, connectorInstanceId, key, automationPolicy)) ??
+      stage(await decideNotReady(schedule)) ??
+      stage(gateNeedsHuman(connectorId, connectorInstanceId, key, signal));
+    return ended ?? settle(PROCEED);
   }
 
   function gateGrantState(

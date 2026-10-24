@@ -767,6 +767,13 @@ function controllerRunNowDeferReason(err: unknown): string | null {
   return null;
 }
 
+/**
+ * `routeScheduledManagedRun` result for a dispatch that was invalidated before
+ * the controller started a run. Not `null`: that means "not a managed connector",
+ * and sends the dispatch to the direct route.
+ */
+const MANAGED_DISPATCH_DROPPED = Symbol("managed-dispatch-dropped");
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
@@ -1365,9 +1372,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       dispatchSignal?: AbortSignal;
       maxRetries?: number;
       recoveryOnly?: boolean;
-      stillAdmitted?: () => Promise<boolean>;
-    } = {}
-  ): Promise<RunRecord | null> {
+      stillAdmitted: () => Promise<boolean>;
+    }
+  ): Promise<RunRecord | typeof MANAGED_DISPATCH_DROPPED | null> {
     const maxRetries =
       options.maxRetries !== undefined && Number.isFinite(options.maxRetries)
         ? Math.max(0, Math.trunc(options.maxRetries))
@@ -1379,10 +1386,14 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       attempt++;
       const startedAt = nowIso();
       let runNowResult: Awaited<ReturnType<RunManagedConnectorViaController>>;
+      let runStarted = false;
       try {
         // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
         runNowResult = await via(connectorId, {
           connectorInstanceId,
+          onStarted: () => {
+            runStarted = true;
+          },
           ownerSubjectId,
           ownerToken,
           priorityClass: "background",
@@ -1392,6 +1403,14 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           triggerKind: "scheduled",
         });
       } catch (err) {
+        // A rejection before the controller started a run is a no-start outcome of
+        // this dispatch, not the outcome of an attempt. The controller call was
+        // pending while the owner may have stopped the scheduler or disabled the
+        // schedule, so recording it (and advancing the cadence) needs the dispatch
+        // to be valid still. A run that did start is an attempt and is recorded.
+        if (!runStarted && !(await options.stillAdmitted())) {
+          return MANAGED_DISPATCH_DROPPED;
+        }
         const deferReason = controllerRunNowDeferReason(err);
         if (deferReason) {
           return recordAndNotify(buildBrowserSurfaceUnavailableSkip(connectorId, deferReason, connectorInstanceId));
@@ -1408,6 +1427,11 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       }
 
       if (runNowResult.status && BROWSER_SURFACE_UNAVAILABLE_STATUSES.has(runNowResult.status)) {
+        // No run was started (see `BROWSER_SURFACE_UNAVAILABLE_STATUSES`): the
+        // skip is a side effect of the dispatch and needs it to be valid still.
+        if (!(await options.stillAdmitted())) {
+          return MANAGED_DISPATCH_DROPPED;
+        }
         return recordAndNotify(
           buildBrowserSurfaceUnavailableSkip(connectorId, runNowResult.status, connectorInstanceId)
         );
@@ -1429,7 +1453,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         // between it and the next `via` call.
         if (!options.dispatchSignal?.aborted) {
           await sleep(backoffDelayMs(attempt));
-          if (!options.stillAdmitted || (await options.stillAdmitted())) {
+          if (await options.stillAdmitted()) {
             continue;
           }
         }
@@ -1575,14 +1599,15 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
   ): Promise<RunRecord | null> {
     const { connectorId, connectorInstanceId = connectorId, ownerSubjectId } = schedule;
     if (typeof ownerSubjectId !== "string" || ownerSubjectId.trim().length === 0) {
-      return Promise.resolve(
-        recordAndNotify(
-          buildCredentialResolutionFailure(
-            connectorId,
-            "scheduler ownerSubjectId is required and must be nonblank",
-            connectorInstanceId
-          )
-        )
+      const failure = buildCredentialResolutionFailure(
+        connectorId,
+        "scheduler ownerSubjectId is required and must be nonblank",
+        connectorInstanceId
+      );
+      // A configuration fault, but still a record written by the dispatch: an
+      // automatic one writes it only while it is valid.
+      return scheduledLaunchAdmitted(schedule, isManual, options.dispatchSignal).then((admitted) =>
+        admitted ? recordAndNotify(failure) : null
       );
     }
     return launchRunWithValidatedOwner(schedule, isManual, automationPolicy, options);
@@ -1725,6 +1750,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         ownerSubjectId,
         managedRunOptions
       );
+      if (managed === MANAGED_DISPATCH_DROPPED) {
+        return null;
+      }
       if (managed !== null) {
         return managed;
       }

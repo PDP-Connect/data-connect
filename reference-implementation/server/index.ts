@@ -10437,6 +10437,8 @@ export function createReferenceSchedulerManager({
           if (handle.status && surfaceUnavailableStatuses.has(handle.status)) {
             return handle as unknown as Awaited<ReturnType<RunManagedFn>>;
           }
+          // From here the run exists: whatever ends it is the outcome of an attempt.
+          opts.onStarted?.();
           const terminalStatus = await controller.awaitRun(handle.run_id);
           const terminalEvent = await getRunTerminalEvent(handle.run_id);
           const terminalData =

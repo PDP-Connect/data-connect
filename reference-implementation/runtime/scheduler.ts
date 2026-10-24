@@ -30,6 +30,7 @@ import {
 import { createRunLogger, NOOP_RUN_BASE_LOGGER } from "./run-logger.ts";
 import { createDispatchGovernor } from "./scheduler/dispatch-governor.ts";
 import { automaticDispatchStillValid, bindDispatchEscalation } from "./scheduler/dispatch-guard.ts";
+import { createEscalationLedger } from "./scheduler/escalation-ledger.ts";
 import { createPreRunGate, type EndingGateDecision } from "./scheduler/pre-run-gate.ts";
 import { createRunExecutor } from "./scheduler/run-executor.ts";
 import { resolveNonNegativeMsOrInfinity } from "./scheduler-config.ts";
@@ -511,7 +512,10 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
   // right before its push) covers a stop or disable during its own awaits.
   const raiseDispatchEscalation = bindDispatchEscalation(onHumanRequiredStateEscalation, dispatchStillValid);
 
+  const escalationLedger = createEscalationLedger();
+
   const preRunGate = createPreRunGate({
+    escalationLedger,
     hasUnresolvedAttention,
     isNeedsHuman,
     onHumanRequiredStateEscalation: raiseDispatchEscalation,
@@ -558,10 +562,14 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     dispatchSignal: AbortSignal | undefined,
     isManual: boolean
   ): Promise<RunRecord | null> {
-    if (decision.kind === "silent") {
+    if (decision.kind === "silent" && !decision.commit) {
       return null;
     }
     if (!isManual && !(await dispatchStillValid(dispatchSignal, key))) {
+      return null;
+    }
+    if (decision.kind === "silent") {
+      decision.commit?.();
       return null;
     }
     return decision.commit();
@@ -588,7 +596,18 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       return null;
     }
     if (preflight !== DISPATCH_LIVENESS_TIMEOUT) {
-      return preflight.kind === "proceed" ? "proceed" : settleGateDecision(preflight, key, dispatchSignal, false);
+      if (preflight.kind !== "proceed") {
+        return settleGateDecision(preflight, key, dispatchSignal, false);
+      }
+      // Resets of announce-once state are applied only for a dispatch that is
+      // still valid and whose evaluation was not abandoned.
+      if (preflight.commit) {
+        if (!(await dispatchStillValid(dispatchSignal, key))) {
+          return null;
+        }
+        preflight.commit();
+      }
+      return "proceed";
     }
     // Recording the wedge is a side effect of the dispatch: skip it when the
     // schedule was disabled while the gate was stuck.
@@ -679,22 +698,31 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     if (hasOutputs && !(await dispatchStillValid(signal, runtimeKey(schedule)))) {
       return true;
     }
-    const { eventsToEmit, skipToEmit } = dispatch.commit();
+    const emission = dispatch.commit();
     // Emit transition markers (back_off.started, gave_up) before
     // the audit skip so the dashboard sees the lifecycle event
     // ordering: "streak detected → cooling_off pill renders →
     // (maybe) blocked pill renders → audit skip explains why we
     // went quiet". Each entry is one-shot per streak so the
     // history doesn't drown in duplicates on every tick.
-    for (const event of eventsToEmit) {
-      recordAndNotify(event);
-    }
-    if (skipToEmit) {
+    //
+    // `recordAndNotify` runs the `onRunComplete` observer synchronously, and an
+    // observer may stop the scheduler. Each record is therefore emitted only while
+    // the epoch is still live, and the records left over are released: their
+    // announce-once state is unmarked so a later valid tick announces them.
+    const pending = [...emission.eventsToEmit, ...(emission.skipToEmit ? [emission.skipToEmit] : [])];
+    for (const [index, record] of pending.entries()) {
+      if (signal.aborted) {
+        emission.release(pending.slice(index));
+        return true;
+      }
       // One-shot back-off announcement. We record + persist + notify
       // exactly like other skip records so the UI/audit can see why
       // the connector went quiet. We do NOT executeRun in this case
       // because by definition the back-off window has not elapsed.
-      recordAndNotify(skipToEmit);
+      recordAndNotify(record);
+    }
+    if (emission.skipToEmit) {
       return true;
     }
     return false;
@@ -707,6 +735,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     getSourcePressureGaps,
     hasLegacySchedulerEventMarker: async (...args: Parameters<HasLegacySchedulerEventMarkerHandler>) =>
       (await schedulerStore?.hasLegacySchedulerEventMarker?.(...args)) ?? false,
+    escalationLedger,
     onHumanRequiredStateEscalation: raiseDispatchEscalation,
     runtime,
   });

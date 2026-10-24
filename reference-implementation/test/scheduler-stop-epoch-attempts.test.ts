@@ -27,12 +27,13 @@ import type {
   RunRecord,
 } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import { createEscalationDelivery } from "../server/scheduler-manager-factory.ts";
+import { createEscalationDelivery, createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
 import {
   buildStore,
   deferred,
   directScheduler,
   drain,
+  eventOrQuiet,
   HANG_GUARD,
   OWNER,
   type ScheduleRow,
@@ -605,7 +606,7 @@ for (const variant of ["stop", "disable", "none"] as const) {
       {
         isNeedsHuman: () => true,
         onHumanRequiredStateEscalation: (info) => {
-          handled.resolve(Promise.resolve(deliver(info)));
+          handled.resolve(Promise.resolve(deliver(info)).then(() => undefined));
         },
       }
     );
@@ -623,5 +624,257 @@ for (const variant of ["stop", "disable", "none"] as const) {
     await settled;
 
     assert.equal(listed, variant === "none" ? 1 : 0);
+  });
+}
+
+// ── (j) managed route: no-start outcomes follow the durable dispatch ───────
+
+// The controller call is pending while the surface is acquired and admitted.
+// If it then ends WITHOUT having started a run, what it reports is a no-start
+// outcome of the dispatch (a skip, or a failure plus the cadence stamp), not the
+// outcome of an attempt. Recording it is a side effect, so it needs the dispatch
+// to still be valid. A run the controller did start is an attempt and always
+// finalizes (see the control below).
+
+interface NoStartOutcome {
+  readonly name: string;
+  /** The record a dispatch that is still valid writes for it. */
+  readonly recorded: RegExp;
+  /** Settles the pending controller call. */
+  readonly settle: () => { run_id: string; status: string; trace_id: string };
+  /** Whether recording it also advances the cadence. */
+  readonly stamps: boolean;
+}
+
+const NO_START_OUTCOMES: readonly NoStartOutcome[] = [
+  {
+    name: "a surface-unavailable status",
+    recorded: /^browser_surface_unavailable: surface_failed$/,
+    settle: () => ({ run_id: "run_none", status: "surface_failed", trace_id: "trace" }),
+    stamps: false,
+  },
+  {
+    name: "a run_already_active rejection",
+    recorded: /^browser_surface_unavailable: run_already_active$/,
+    settle: () => {
+      throw Object.assign(new Error("Connector already has an active run"), { code: "run_already_active" });
+    },
+    stamps: false,
+  },
+  {
+    name: "a rejection before the run started",
+    recorded: /^controller_run_now_failed: surface acquisition failed$/,
+    settle: () => {
+      throw new Error("surface acquisition failed");
+    },
+    stamps: true,
+  },
+];
+
+for (const outcome of NO_START_OUTCOMES) {
+  for (const how of ["stop", "disable", "none"] as const) {
+    const title =
+      how === "none"
+        ? `managed route: ${outcome.name} is recorded while the dispatch is valid`
+        : `managed route: ${outcome.name} after ${how === "stop" ? "stop()" : "a disable"} records nothing and does not advance the cadence`;
+    test(title, HANG_GUARD, async (t) => {
+      const viaEntered = deferred<void>();
+      const viaGate = deferred<void>();
+      const recorded = deferred<void>();
+      const stamps: number[] = [];
+      let row: ScheduleRow = { enabled: true };
+      const { completed, scheduler } = directScheduler(
+        "/nonexistent/connector.mjs",
+        buildStore(() => row, { upsertLastRunTime: () => stamps.push(1) }),
+        {
+          isManagedConnector: () => true,
+          onRunComplete: () => recorded.resolve(),
+          runManagedConnectorViaController: async () => {
+            viaEntered.resolve();
+            await viaGate.promise;
+            return outcome.settle();
+          },
+        },
+        { maxRetries: 0 }
+      );
+      t.after(() => scheduler.stop());
+
+      scheduler.start();
+      await viaEntered.promise;
+      if (how === "stop") {
+        scheduler.stop();
+      } else if (how === "disable") {
+        row = { enabled: false };
+      }
+      viaGate.resolve();
+      await eventOrQuiet(recorded.promise);
+
+      if (how === "none") {
+        assert.equal(completed.length, 1, "a valid dispatch records its no-start outcome");
+        assert.match(completed[0]?.error ?? "", outcome.recorded);
+        assert.equal(stamps.length, outcome.stamps ? 1 : 0);
+      } else {
+        assert.deepEqual(
+          { records: completed.map((record) => record.error), stamps: stamps.length },
+          { records: [], stamps: 0 },
+          "no run started, so an invalidated dispatch records nothing and does not advance the cadence"
+        );
+      }
+    });
+  }
+}
+
+for (const how of ["stop", "disable"] as const) {
+  test(`managed route: a run the controller started finalizes after ${how === "stop" ? "stop()" : "a disable"}`, HANG_GUARD, async (t) => {
+    const viaEntered = deferred<void>();
+    const viaGate = deferred<void>();
+    const recorded = deferred<void>();
+    const stamps: number[] = [];
+    let row: ScheduleRow = { enabled: true };
+    const { completed, scheduler } = directScheduler(
+      "/nonexistent/connector.mjs",
+      buildStore(() => row, { upsertLastRunTime: () => stamps.push(1) }),
+      {
+        isManagedConnector: () => true,
+        onRunComplete: () => recorded.resolve(),
+        runManagedConnectorViaController: async () => {
+          viaEntered.resolve();
+          await viaGate.promise;
+          return { failure_reason: "boom", run_id: "run_started", status: "failed", trace_id: "trace" };
+        },
+      },
+      { maxRetries: 0 }
+    );
+    t.after(() => scheduler.stop());
+
+    scheduler.start();
+    await viaEntered.promise;
+    if (how === "stop") {
+      scheduler.stop();
+    } else {
+      row = { enabled: false };
+    }
+    viaGate.resolve();
+    await eventOrQuiet(recorded.promise);
+
+    assert.deepEqual(
+      completed.map((record) => [record.status, record.runId]),
+      [["failed", "run_started"]],
+      "an attempt that started is finalized even though the dispatch has since been invalidated"
+    );
+    assert.equal(stamps.length, 1, "a started attempt advances the cadence");
+  });
+}
+
+// The shipped adapters, not a bare callback: `controller.runNow` is what is
+// pending while the surface is acquired.
+
+type AdapterController = Parameters<typeof createRunManagedConnectorViaController>[0];
+
+function adapterController(hooks: {
+  awaitRun?: () => Promise<string>;
+  runNow: () => Promise<{ run_id: string; status: string; trace_id: string }>;
+}): AdapterController {
+  return {
+    awaitRun: hooks.awaitRun ?? (() => Promise.resolve("succeeded")),
+    browserSurfaceLeaseManager: { isManagedConnector: () => true },
+    runNow: hooks.runNow,
+  } as unknown as AdapterController;
+}
+
+for (const how of ["stop", "disable"] as const) {
+  for (const ending of ["surface_failed", "rejection"] as const) {
+    test(`factory managed adapter: controller.runNow ending in ${ending === "rejection" ? "a rejection" : "surface_failed"} after ${how === "stop" ? "stop()" : "a disable"} records nothing`, HANG_GUARD, async (t) => {
+      const runNowEntered = deferred<void>();
+      const runNowGate = deferred<void>();
+      const recorded = deferred<void>();
+      const stamps: number[] = [];
+      let row: ScheduleRow = { enabled: true };
+      const runner = createRunManagedConnectorViaController(
+        adapterController({
+          runNow: async () => {
+            runNowEntered.resolve();
+            await runNowGate.promise;
+            if (ending === "rejection") {
+              throw new Error("surface acquisition failed");
+            }
+            return { run_id: "run_surface", status: "surface_failed", trace_id: "trace" };
+          },
+        })
+      );
+      const { completed, scheduler } = directScheduler(
+        "/nonexistent/connector.mjs",
+        buildStore(() => row, { upsertLastRunTime: () => stamps.push(1) }),
+        {
+          isManagedConnector: () => true,
+          onRunComplete: () => recorded.resolve(),
+          runManagedConnectorViaController: runner ?? null,
+        },
+        { maxRetries: 0 }
+      );
+      t.after(() => scheduler.stop());
+
+      scheduler.start();
+      await runNowEntered.promise;
+      if (how === "stop") {
+        scheduler.stop();
+      } else {
+        row = { enabled: false };
+      }
+      runNowGate.resolve();
+      await eventOrQuiet(recorded.promise);
+
+      assert.deepEqual(
+        { records: completed.map((record) => record.error), stamps: stamps.length },
+        { records: [], stamps: 0 },
+        "no run started, so an invalidated dispatch records nothing and does not advance the cadence"
+      );
+    });
+  }
+
+  test(`factory managed adapter: a run that started still finalizes when awaiting it rejects after ${how === "stop" ? "stop()" : "a disable"}`, HANG_GUARD, async (t) => {
+    const awaitEntered = deferred<void>();
+    const awaitGate = deferred<void>();
+    const recorded = deferred<void>();
+    const stamps: number[] = [];
+    let row: ScheduleRow = { enabled: true };
+    const runner = createRunManagedConnectorViaController(
+      adapterController({
+        awaitRun: async () => {
+          awaitEntered.resolve();
+          await awaitGate.promise;
+          throw new Error("terminal read failed");
+        },
+        runNow: () => Promise.resolve({ run_id: "run_started", status: "started", trace_id: "trace" }),
+      })
+    );
+    const { completed, scheduler } = directScheduler(
+      "/nonexistent/connector.mjs",
+      buildStore(() => row, { upsertLastRunTime: () => stamps.push(1) }),
+      {
+        isManagedConnector: () => true,
+        onRunComplete: () => recorded.resolve(),
+        runManagedConnectorViaController: runner ?? null,
+      },
+      { maxRetries: 0 }
+    );
+    t.after(() => scheduler.stop());
+
+    scheduler.start();
+    await awaitEntered.promise;
+    if (how === "stop") {
+      scheduler.stop();
+    } else {
+      row = { enabled: false };
+    }
+    awaitGate.resolve();
+    await eventOrQuiet(recorded.promise);
+
+    assert.deepEqual(
+      completed.map((record) => record.error),
+      ["controller_run_now_failed: terminal read failed"],
+      "the run was started, so its failure is recorded even though the dispatch was invalidated"
+    );
+    assert.equal(stamps.length, 1);
   });
 }

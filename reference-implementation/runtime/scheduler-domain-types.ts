@@ -351,7 +351,14 @@ export type HumanRequiredStateEscalationHandler = (info: {
    * was stopped or the schedule disabled in the meantime.
    */
   readonly shouldDeliver?: () => Promise<boolean>;
-}) => void | Promise<void>;
+}) => EscalationOutcome | Promise<EscalationOutcome>;
+
+/**
+ * What a handler reports for an escalation. `"dropped"` means nothing was
+ * delivered (the dispatch was stale), so the scheduler raises it again on a later
+ * valid tick; anything else counts as delivered or attempted.
+ */
+export type EscalationOutcome = void | "dropped";
 
 /**
  * How the dispatch governor and the pre-run gate raise an escalation: the
@@ -363,7 +370,7 @@ export type HumanRequiredStateEscalationHandler = (info: {
 export type DispatchEscalationHandler = (
   info: Omit<Parameters<HumanRequiredStateEscalationHandler>[0], "shouldDeliver">,
   signal: AbortSignal | undefined
-) => void | Promise<void>;
+) => EscalationOutcome | Promise<EscalationOutcome>;
 
 /**
  * Routes a managed-connector scheduled run through `controller.runNow` so it
@@ -408,6 +415,15 @@ export type RunManagedConnectorViaController = (
   connectorId: string,
   opts: {
     connectorInstanceId: string;
+    /**
+     * The adapter calls this once `controller.runNow` has started a run, before it
+     * awaits the run's outcome. Until then a rejection or a surface-unavailable
+     * status is a no-start outcome: the scheduler records it only while the
+     * dispatch is still valid. From then on the run is an attempt, and whatever
+     * ends it is recorded. An adapter that never calls it has all its outcomes
+     * treated as no-start outcomes.
+     */
+    onStarted?: () => void;
     ownerSubjectId: string;
     ownerToken: string;
     priorityClass: "background";

@@ -44,6 +44,7 @@ import {
   type PendingPressureGap,
   type SourcePressureCooldownDecision,
 } from "../scheduler-source-pressure-cooldown.ts";
+import { createEscalationLedger, type EscalationLedger } from "./escalation-ledger.ts";
 import { resolveSchedulerMarkers } from "./recovery-instance-scope.ts";
 
 // ─── Dep types ───────────────────────────────────────────────────────────────
@@ -61,6 +62,8 @@ export interface DispatchGovernorRuntimeState {
 }
 
 export interface DispatchGovernorDeps {
+  /** Delivery state of the escalations raised here; defaults to a private ledger. */
+  escalationLedger?: EscalationLedger;
   getForwardEvidenceDebt: GetForwardEvidenceDebtHandler;
   getLastSuccessfulRunAt: GetLastSuccessfulRunAtHandler;
   getNonPressureRecoverableCount: GetNonPressureRecoverableCountHandler;
@@ -483,6 +486,13 @@ export function decideBackoffDispatch(inputs: DecideBackoffDispatchInputs): Deci
 /** The records a committed tick emits: transition markers first, then the audit skip. */
 export interface GovernorEmission {
   eventsToEmit: RunRecord[];
+  /**
+   * Gives back the announce-once cells of records the caller did not emit (the
+   * scheduler was stopped part-way through the batch): each cell goes back to the
+   * value it had before the commit, unless something newer has replaced it. The
+   * next valid tick then announces those records.
+   */
+  release: (unemitted: readonly RunRecord[]) => void;
   skipToEmit: RunRecord | null;
 }
 
@@ -557,6 +567,10 @@ interface TickInputs {
 }
 
 interface TickPlan {
+  readonly backoffStartedEvent: RunRecord | null;
+  /** True when the streak is blocked right now (a blocked streak keeps its undelivered push). */
+  readonly blockedNow: boolean;
+  readonly gaveUpEvent: RunRecord | null;
   /** Marks this plan's announce-once cells (back-off, blocked, cooling-off). */
   readonly applyDedup: () => void;
   readonly eligible: boolean;
@@ -570,6 +584,7 @@ interface TickPlan {
 
 export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGovernor {
   const {
+    escalationLedger: ledger = createEscalationLedger(),
     getForwardEvidenceDebt,
     getLastSuccessfulRunAt,
     hasLegacySchedulerEventMarker = async () => false,
@@ -721,26 +736,39 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
     schedule: ConnectorSchedule,
     decision: BackoffDecision,
     history: readonly RunRecord[]
-  ): { escalate: boolean; eventsToEmit: RunRecord[]; skipToEmit: RunRecord | null } {
+  ): {
+    backoffStartedEvent: RunRecord | null;
+    escalate: boolean;
+    eventsToEmit: RunRecord[];
+    gaveUpEvent: RunRecord | null;
+    skipToEmit: RunRecord | null;
+  } {
     // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
     const connectorId = schedule.connectorId;
     const key = runtimeKey(schedule);
     let skipToEmit: RunRecord | null = null;
     let escalate = false;
+    let backoffStartedEvent: RunRecord | null = null;
+    let gaveUpEvent: RunRecord | null = null;
     const eventsToEmit: RunRecord[] = [];
     for (const transition of value.transitions) {
       if (transition.kind === "backoff_started") {
         skipToEmit = buildBackoffSkip(connectorId, decision, schedule.connectorInstanceId);
-        eventsToEmit.push(buildBackoffStartedEvent(connectorId, decision, schedule.connectorInstanceId));
+        backoffStartedEvent = buildBackoffStartedEvent(connectorId, decision, schedule.connectorInstanceId);
+        eventsToEmit.push(backoffStartedEvent);
       } else {
-        eventsToEmit.push(
-          buildGaveUpEvent(connectorId, decision, findLastSuccessAt(history, key), schedule.connectorInstanceId)
+        gaveUpEvent = buildGaveUpEvent(
+          connectorId,
+          decision,
+          findLastSuccessAt(history, key),
+          schedule.connectorInstanceId
         );
+        eventsToEmit.push(gaveUpEvent);
         // §10-F: first entry into blocked state — one push escalation.
         escalate = true;
       }
     }
-    return { escalate, eventsToEmit, skipToEmit };
+    return { backoffStartedEvent, escalate, eventsToEmit, gaveUpEvent, skipToEmit };
   }
 
   // Applies the announce-once cell mutations the pure decision prescribes.
@@ -772,12 +800,14 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
       reasonClass: decision.reasonClass,
       recoveryOnly: tick.recoveryOnly,
     });
-    const { escalate, eventsToEmit, skipToEmit: backoffSkip } = buildBackoffOutputs(
-      backoffDecision,
-      schedule,
-      decision,
-      history
-    );
+    const outputs = buildBackoffOutputs(backoffDecision, schedule, decision, history);
+    const { eventsToEmit, skipToEmit: backoffSkip } = outputs;
+    // A blocked streak whose `gave_up` push was dropped is escalated again; the
+    // `gave_up` record itself is announced once.
+    const blocked = decision.recommendedHealthState === "blocked";
+    const escalate =
+      outputs.escalate ||
+      (blocked && backoffDecision.announcedBlockedMutation === "set" && ledger.isUndelivered("blocked", key));
 
     // Source-pressure cooldown is layered on top of failure back-off. Pending
     // pressure gaps alone do not defer forever; only a future `nextRunAt` does.
@@ -795,6 +825,9 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
       : planCooldownSkip(schedule, key, cooldown, cooldownDefers, backoffSkip);
 
     return {
+      backoffStartedEvent: outputs.backoffStartedEvent,
+      blockedNow: blocked && backoffDecision.announcedBlockedMutation === "set",
+      gaveUpEvent: outputs.gaveUpEvent,
       applyDedup: () => {
         applyBackoffDedup(backoffDecision, key, decision.reasonClass);
         if (cooldownPlan) {
@@ -815,24 +848,55 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
   // scheduler's stance on observer failures (never block dispatch).
   function commitTick(tick: TickInputs, signal: AbortSignal | undefined): GovernorEmission {
     const plan = planTick(tick);
+    const { key } = tick;
+    const before = {
+      backoff: runtime.announcedBackoffClass.get(key),
+      blocked: runtime.announcedBlockedClass.get(key),
+      cooldown: runtime.notifiedCooldownIdentity.get(key),
+    };
     plan.applyDedup();
+    const after = {
+      backoff: runtime.announcedBackoffClass.get(key),
+      blocked: runtime.announcedBlockedClass.get(key),
+      cooldown: runtime.notifiedCooldownIdentity.get(key),
+    };
+    const { connectorId } = tick.schedule;
     if (plan.escalate) {
-      const { connectorId } = tick.schedule;
-      Promise.resolve(
-        onHumanRequiredStateEscalation(
-          {
-            connectorId,
-            connectorInstanceId: tick.schedule.connectorInstanceId ?? connectorId,
-            reason: "blocked",
-          },
-          signal
-        )
-      ).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[scheduler] §10-F escalation callback failed for ${connectorId}: ${message}`);
-      });
+      ledger.raise(
+        onHumanRequiredStateEscalation,
+        { connectorId, connectorInstanceId: tick.schedule.connectorInstanceId ?? connectorId, reason: "blocked" },
+        signal
+      );
+    } else if (!plan.blockedNow) {
+      ledger.clear("blocked", key);
     }
-    return { eventsToEmit: plan.eventsToEmit, skipToEmit: plan.skipToEmit };
+    const restore = <T>(cells: Map<string, T>, was: T | undefined, set: T | undefined): void => {
+      if (cells.get(key) !== set) {
+        return;
+      }
+      if (was === undefined) {
+        cells.delete(key);
+      } else {
+        cells.set(key, was);
+      }
+    };
+    return {
+      eventsToEmit: plan.eventsToEmit,
+      release: (unemitted) => {
+        for (const record of unemitted) {
+          if (record === plan.backoffStartedEvent) {
+            restore(runtime.announcedBackoffClass, before.backoff, after.backoff);
+          }
+          if (record === plan.gaveUpEvent) {
+            restore(runtime.announcedBlockedClass, before.blocked, after.blocked);
+          }
+          if (record === plan.skipToEmit) {
+            restore(runtime.notifiedCooldownIdentity, before.cooldown, after.cooldown);
+          }
+        }
+      },
+      skipToEmit: plan.skipToEmit,
+    };
   }
 
   // Pure dispatch-gate: given the current history + lastRun for a
