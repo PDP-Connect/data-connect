@@ -717,6 +717,18 @@ export function SourceSetupCatalog({
   // already loaded. Only the query is mirrored into the URL (replaceState, so
   // no navigation and no server work) so a copied link reopens the search.
   const [query, setQuery] = useState(initialQuery);
+  // The URL stays the source of truth for the query: a new `source_q` prop
+  // (navigation that keeps this component mounted) or back/forward replaces it.
+  const [seenInitialQuery, setSeenInitialQuery] = useState(initialQuery);
+  if (initialQuery !== seenInitialQuery) {
+    setSeenInitialQuery(initialQuery);
+    setQuery(initialQuery);
+  }
+  useEffect(() => {
+    const syncFromUrl = () => setQuery(new URLSearchParams(window.location.search).get("source_q") ?? "");
+    window.addEventListener("popstate", syncFromUrl);
+    return () => window.removeEventListener("popstate", syncFromUrl);
+  }, []);
   const [sort, setSort] = useState<CatalogSort>("name");
   const [maturity, setMaturity] = useState<CatalogMaturityFilter>("all");
   const [worksHereOnly, setWorksHereOnly] = useState(false);

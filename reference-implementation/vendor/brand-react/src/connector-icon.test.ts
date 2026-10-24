@@ -8,6 +8,7 @@
  * unrecognized icon.kind degrades to the fallback rather than throwing.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -104,4 +105,15 @@ test("brandTileColors accepts only plain hex colours, so a manifest value cannot
   );
   assert.doesNotMatch(html, /position:fixed/);
   assert.doesNotMatch(html, /--tile/);
+});
+
+test("the brand tile sizes its glyph relative to the tile, not with percentage padding", () => {
+  const css = readFileSync(new URL("./connector-icon.css", import.meta.url), "utf8");
+  const tileRule = css.match(/\.pdpp-connector-icon--tile\s*\{[^}]*\}/)?.[0] ?? "";
+  // Percentage padding resolves against the parent's width, so a wide row
+  // would give a huge padding and an oversized tile.
+  assert.doesNotMatch(tileRule, /padding:\s*[\d.]+%/);
+  const svgRule = css.match(/\.pdpp-connector-icon--tile svg\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(svgRule, /width:\s*\d+%/);
+  assert.match(svgRule, /height:\s*\d+%/);
 });

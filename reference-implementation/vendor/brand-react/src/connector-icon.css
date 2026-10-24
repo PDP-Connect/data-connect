@@ -27,12 +27,14 @@
    glyph stays legible on a light tile colour and in both themes. The hairline
    ring keeps a near-black or near-white tile visible against the card. */
 .pdpp-connector-icon--tile {
-  box-sizing: border-box;
-  padding: 18%;
   border-radius: 22%;
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--foreground) 14%, transparent);
 }
 
+/* The glyph is sized as a share of the tile itself. Percentage padding would
+   resolve against the parent's width, not the 20 or 32 px tile. */
 .pdpp-connector-icon--tile svg {
+  width: 64%;
+  height: 64%;
   fill: var(--pdpp-connector-glyph, #fff);
 }

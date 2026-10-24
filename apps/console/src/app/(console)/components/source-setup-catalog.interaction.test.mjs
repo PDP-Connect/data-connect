@@ -51,7 +51,7 @@ globalThis.React = React;
 mock.module("server-only", { exports: {} });
 const navigationExports = { ...navigation, useRouter: () => ({ refresh() {} }) };
 mock.module("next/navigation", { exports: { ...navigationExports, default: navigationExports } });
-const { render, fireEvent, cleanup, within } = await import("@testing-library/react");
+const { render, fireEvent, cleanup, within, act } = await import("@testing-library/react");
 const { SourceSetupCatalog } = await import("./source-setup-catalog.tsx");
 
 afterEach(() => {
@@ -161,4 +161,35 @@ test("the works-on-this-device filter removes rows with no setup path", () => {
   assert.ok(view.getByTestId("unavailable-connectors-disclosure"));
   fireEvent.click(view.getByTestId("works-here-filter"));
   assert.equal(view.queryByTestId("unavailable-connectors-disclosure"), null);
+});
+
+test("back/forward and a new source_q prop replace the query shown", () => {
+  window.history.replaceState(null, "", "/sources/add?source_q=alp");
+  const view = render(React.createElement(SourceSetupCatalog, { catalog, query: "alp" }));
+  assert.deepEqual(rows(view.container), ["source-setup-alpha"]);
+
+  const input = view.getByLabelText("Search data sources");
+  fireEvent.change(input, { target: { value: "gam" } });
+  assert.deepEqual(rows(view.container), ["source-setup-gamma"]);
+
+  // Back: the browser restores the earlier URL and fires popstate.
+  window.history.replaceState(null, "", "/sources/add?source_q=alp");
+  act(() => {
+    window.dispatchEvent(new window.PopStateEvent("popstate"));
+  });
+  assert.equal(input.value, "alp");
+  assert.deepEqual(rows(view.container), ["source-setup-alpha"]);
+
+  // Forward to a URL with no query clears it.
+  window.history.replaceState(null, "", "/sources/add");
+  act(() => {
+    window.dispatchEvent(new window.PopStateEvent("popstate"));
+  });
+  assert.equal(input.value, "");
+  assert.equal(rows(view.container).length, 3);
+
+  // Navigation that keeps the component mounted passes a new prop.
+  view.rerender(React.createElement(SourceSetupCatalog, { catalog, query: "bet" }));
+  assert.equal(input.value, "bet");
+  assert.deepEqual(rows(view.container), ["source-setup-beta"]);
 });
