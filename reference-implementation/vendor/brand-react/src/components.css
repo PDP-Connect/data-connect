@@ -999,6 +999,29 @@
   flex-direction: column;
   gap: 12px;
 }
+/* Recent-syncs filters: one row of labelled selects. Each select sizes to its own
+   label instead of the row, and the row wraps only when it runs out of width. */
+.rr-sync__recent-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+}
+.rr-sync__filter {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+.rr-sync__filter-label {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+.rr-sync__filter .pdpp-select {
+  width: auto;
+  min-width: 160px;
+}
 .rr-sync__section-head {
   display: flex;
   gap: 14px;
@@ -2661,11 +2684,14 @@
   background: color-mix(in oklab, var(--primary) 15%, var(--background));
   opacity: 1;
 }
-/* The popover — same card/elevation grammar as the Options disclosure body. */
+/* The popover — same card/elevation grammar as the Options disclosure body.
+   Right-anchored like the Options body: the chip sits at the right end of the
+   search row, so a 280px card hung from its left edge runs off the window. */
 .rr-x-datechip__popover {
   position: absolute;
   top: calc(100% + 4px);
-  left: 0;
+  right: 0;
+  left: auto;
   z-index: 50;
   display: flex;
   flex-direction: column;
@@ -4836,6 +4862,8 @@ a.rr-x-row {
   .rr-x-searchrow {
     flex-direction: column;
     gap: 8px;
+    /* The date sheet anchors to this bar, not to its chip (see the sheet rule below). */
+    position: relative;
   }
   /* D12 mobile: the controls sub-row becomes a real flex row so sort + Options
      sit side-by-side on one line, not stacked (display:contents on desktop
@@ -4856,6 +4884,9 @@ a.rr-x-row {
   }
   .rr-x-datechip {
     flex-shrink: 0;
+    /* A positioned chip would be the popover's containing block, and the chip is only
+       as wide as its label. Static lets the command bar contain the sheet. */
+    position: static;
   }
   /* Mobile: the Date popover becomes a full-width sheet anchored to the command bar,
      so the From/To inputs and presets have room at 390px (matches the mobile filter
