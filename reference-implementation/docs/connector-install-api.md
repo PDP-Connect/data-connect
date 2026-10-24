@@ -29,6 +29,14 @@ version. `catalog_connector_id`, `display_name`, `published_at`, `tier`,
 and `setup_modality` are omitted when unavailable. Install accepts only a
 digest that is present in this result.
 
+The server keeps the last verified catalog in memory and serves it from this
+endpoint for `PDPP_CONNECTOR_CATALOG_TTL_MS` (default 5 minutes). If a refresh
+fails, the server keeps serving that copy, logs the failure, and tries the
+source again after the next TTL window. A catalog that fails signature or shape
+checks is rejected and does not replace the copy. Install and update always
+fetch and verify the catalog before they choose a digest, so they never act on
+a copy older than the request.
+
 `GET /v1/owner/connector-install/status` returns:
 
 ```json
