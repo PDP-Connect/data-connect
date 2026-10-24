@@ -103,7 +103,11 @@ import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
-import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
+import {
+  createEscalationDelivery,
+  probeNonPressureRecoverableCount,
+  probeSourcePressureGaps,
+} from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
@@ -659,7 +663,6 @@ import { createStreamingSessionStore } from "./streaming/sessions.ts";
 import { buildLogger, createApp } from "./transport.ts";
 import {
   createWebPushSubscriptionStore,
-  fanoutEscalationWebPush,
   fanoutPendingInteractionWebPush,
   fanoutTestWebPush,
   resolveWebPushConfig,
@@ -10251,7 +10254,7 @@ function logScheduleRefreshSkip(
   );
 }
 
-function createReferenceSchedulerManager({
+export function createReferenceSchedulerManager({
   connectionScopedRunEnvResolver = buildConnectionScopedRunEnvResolver(),
   controller,
   connectorEnvironmentPolicy,
@@ -10434,6 +10437,8 @@ function createReferenceSchedulerManager({
           if (handle.status && surfaceUnavailableStatuses.has(handle.status)) {
             return handle as unknown as Awaited<ReturnType<RunManagedFn>>;
           }
+          // From here the run exists: whatever ends it is the outcome of an attempt.
+          opts.onStarted?.();
           const terminalStatus = await controller.awaitRun(handle.run_id);
           const terminalEvent = await getRunTerminalEvent(handle.run_id);
           const terminalData =
@@ -10702,48 +10707,16 @@ function createReferenceSchedulerManager({
       // §10-F: push escalation on transition into human-required state.
       // Fires ONCE per streak/flag (dedup lives in the scheduler runtime maps
       // announcedBlockedClass + notifiedNeedsHumanSkips). Errors are swallowed
-      // so a push delivery failure never crashes the scheduler loop.
-      // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
-      onHumanRequiredStateEscalation: async ({ connectorId, connectorInstanceId, reason }) => {
-        let connectorDisplayName = connectorId;
-        let connectionUrl = "/deployment";
-        // biome-ignore lint/suspicious/noEvolvingTypes: This runtime-untyped boundary requires staged type narrowing.
-        let renderedVerdict = null;
-        const routeId = connectorInstanceId || connectorId;
-        try {
-          const summary = await getConnectorSummaryForRoute(routeId, controller);
-          if (summary) {
-            connectorDisplayName = summary.display_name || summary.connector_display_name || connectorId;
-            connectionUrl = `/sources/${encodeURIComponent(summary.connection_id || routeId)}`;
-            renderedVerdict = summary.rendered_verdict;
-          }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          logger?.warn?.(
-            `[scheduler] verdict projection failed for escalation ${connectorId}/${routeId}; suppressing push: ${message}`
-          );
-        }
-        try {
-          await fanoutEscalationWebPush({
-            config: webPushConfig,
-            connectionUrl,
-            connectorDisplayName,
-            ownerSubjectId,
-            reason,
-            store: webPushSubscriptionStore,
-            ...(renderedVerdict === null
-              ? {}
-              : {
-                  renderedVerdict:
-                    renderedVerdict as unknown as import("../server/web-push-notifications.ts").EscalationRenderedVerdict,
-                }),
-            log: logger,
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          logger?.warn?.(`[scheduler] §10-F escalation push failed for ${connectorId} (${reason}): ${message}`);
-        }
-      },
+      // so a push delivery failure never crashes the scheduler loop. The shared
+      // consumer re-checks `shouldDeliver` after its verdict projection, so an
+      // escalation from a stopped scheduler or a disabled schedule sends no push.
+      onHumanRequiredStateEscalation: createEscalationDelivery({
+        controller,
+        logger,
+        ownerSubjectId,
+        webPushConfig,
+        webPushSubscriptionStore,
+      }),
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
       onInteraction: async (...args: unknown[]) => {
         const interaction = args[0] as Record<string, unknown>;

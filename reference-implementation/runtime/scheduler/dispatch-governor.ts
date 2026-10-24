@@ -8,6 +8,13 @@
  * source-pressure cooldown, and recovery-only eligibility for a connector.
  * Called by the tick loop in `startScheduledLoops` (scheduler.ts).
  *
+ * Evaluating a tick DECIDES; it emits nothing and marks nothing. The tick's
+ * announce-once state, its §10-F escalation and the records it would emit are
+ * applied by `commit()` on the evaluation result, which the scheduler calls only
+ * after confirming the dispatch is still valid (scheduler not stopped, schedule
+ * still enabled). A tick that is dropped before then leaves no trace, so the
+ * next valid tick announces afresh.
+ *
  * Owns:
  *   - evaluateBackoffDispatch — the main per-tick dispatch decision
  *   - resolveCooldownSkip     — one-shot cooling-off skip dedup
@@ -22,12 +29,12 @@ import { filterFreshPressureRows, resolveRecoveryFirstMode } from "../recovery-d
 import { type BackoffDecision, computeNextRunWithBackoff, endsFailureStreak } from "../scheduler-backoff.ts";
 import type {
   ConnectorSchedule,
+  DispatchEscalationHandler,
   GetForwardEvidenceDebtHandler,
   GetLastSuccessfulRunAtHandler,
   GetNonPressureRecoverableCountHandler,
   GetSourcePressureGapsHandler,
   HasLegacySchedulerEventMarkerHandler,
-  HumanRequiredStateEscalationHandler,
   RunRecord,
   RunSource,
 } from "../scheduler-domain-types.ts";
@@ -37,6 +44,7 @@ import {
   type PendingPressureGap,
   type SourcePressureCooldownDecision,
 } from "../scheduler-source-pressure-cooldown.ts";
+import { createEscalationLedger, type EscalationLedger } from "./escalation-ledger.ts";
 import { resolveSchedulerMarkers } from "./recovery-instance-scope.ts";
 
 // ─── Dep types ───────────────────────────────────────────────────────────────
@@ -54,12 +62,14 @@ export interface DispatchGovernorRuntimeState {
 }
 
 export interface DispatchGovernorDeps {
+  /** Delivery state of the escalations raised here; defaults to a private ledger. */
+  escalationLedger?: EscalationLedger;
   getForwardEvidenceDebt: GetForwardEvidenceDebtHandler;
   getLastSuccessfulRunAt: GetLastSuccessfulRunAtHandler;
   getNonPressureRecoverableCount: GetNonPressureRecoverableCountHandler;
   getSourcePressureGaps: GetSourcePressureGapsHandler;
   hasLegacySchedulerEventMarker?: HasLegacySchedulerEventMarkerHandler;
-  onHumanRequiredStateEscalation: HumanRequiredStateEscalationHandler;
+  onHumanRequiredStateEscalation: DispatchEscalationHandler;
   runtime: DispatchGovernorRuntimeState;
 }
 
@@ -473,17 +483,53 @@ export function decideBackoffDispatch(inputs: DecideBackoffDispatchInputs): Deci
 
 // ─── Public interface ─────────────────────────────────────────────────────────
 
+/** The records a committed tick emits: transition markers first, then the audit skip. */
+export interface GovernorEmission {
+  eventsToEmit: RunRecord[];
+  /**
+   * Gives back the announce-once cells of records the caller did not emit (the
+   * scheduler was stopped part-way through the batch): each cell goes back to the
+   * value it had before the commit, unless something newer has replaced it. The
+   * next valid tick then announces those records.
+   */
+  release: (unemitted: readonly RunRecord[]) => void;
+  skipToEmit: RunRecord | null;
+}
+
 export interface EvaluateBackoffDispatchResult {
+  /**
+   * Applies this tick: marks its announce-once cells, raises its §10-F
+   * escalation and returns the records to emit. Call it once, at the moment the
+   * caller acts on the tick, and only for a dispatch that is still valid.
+   *
+   * The announce-once state is read again here, not taken from the evaluation:
+   * an overlapping tick may have announced the same streak while the caller was
+   * awaiting its validity check, and the check-and-mark must stay one step.
+   * Hence the returned records can differ from the preview below, never by more
+   * than an announcement another tick already made.
+   */
+  commit: () => GovernorEmission;
   decision: BackoffDecision;
   eligible: boolean;
+  /** Preview: what committing now would emit. Nothing has been marked or raised. */
   eventsToEmit: RunRecord[];
   /** True when the run may only drain non-source-pressure recovery gaps (SLVP-ideal §4.3). */
   recoveryOnly: boolean;
+  /** Preview: see `eventsToEmit`. */
   skipToEmit: RunRecord | null;
 }
 
 export interface DispatchGovernor {
-  evaluateBackoffDispatch: (schedule: ConnectorSchedule, now: number) => Promise<EvaluateBackoffDispatchResult>;
+  /**
+   * `signal` is the epoch signal of the automatic dispatch being evaluated; the
+   * escalation `commit()` raises is bound to it. Without one the scheduler drops
+   * the escalation: nothing identifies the dispatch that raised it.
+   */
+  evaluateBackoffDispatch: (
+    schedule: ConnectorSchedule,
+    now: number,
+    signal?: AbortSignal
+  ) => Promise<EvaluateBackoffDispatchResult>;
   resolveCooldownSkip: (
     schedule: ConnectorSchedule,
     key: string,
@@ -493,10 +539,52 @@ export interface DispatchGovernor {
   ) => RunRecord | null;
 }
 
+// ─── Tick plan types ─────────────────────────────────────────────────────────
+
+/**
+ * What the cooling-off dedup would do. `identity` is the value the cell takes
+ * when the plan is applied; `null` clears it (pressure recovered, so a future
+ * pressure window announces afresh).
+ */
+interface CooldownPlan {
+  readonly identity: string | null;
+  readonly skip: RunRecord | null;
+}
+
+/** Everything one tick's dispatch evaluation needs once its probes are done. */
+interface TickInputs {
+  readonly cooldown: SourcePressureCooldownDecision;
+  readonly cooldownDefers: boolean;
+  readonly decision: BackoffDecision;
+  /** Forward-walk eligibility BEFORE the blocked override. */
+  readonly eligible: boolean;
+  readonly history: readonly RunRecord[];
+  readonly key: string;
+  readonly markerEvidence: Awaited<ReturnType<typeof resolveSchedulerMarkers>>;
+  /** Recovery-only flag BEFORE the blocked override. */
+  readonly recoveryOnly: boolean;
+  readonly schedule: ConnectorSchedule;
+}
+
+interface TickPlan {
+  readonly backoffStartedEvent: RunRecord | null;
+  /** True when the streak is blocked right now (a blocked streak keeps its undelivered push). */
+  readonly blockedNow: boolean;
+  readonly gaveUpEvent: RunRecord | null;
+  /** Marks this plan's announce-once cells (back-off, blocked, cooling-off). */
+  readonly applyDedup: () => void;
+  readonly eligible: boolean;
+  readonly escalate: boolean;
+  readonly eventsToEmit: RunRecord[];
+  readonly recoveryOnly: boolean;
+  readonly skipToEmit: RunRecord | null;
+}
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGovernor {
   const {
+    escalationLedger: ledger = createEscalationLedger(),
     getForwardEvidenceDebt,
     getLastSuccessfulRunAt,
     hasLegacySchedulerEventMarker = async () => false,
@@ -589,9 +677,44 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
   }
 
   // Decide whether this tick should emit a one-shot source-pressure cooling-off
-  // skip record. Manages the per-connection dedup map so the audit log shows
-  // one record per pressure identity and re-arms when pressure clears. Returns
-  // the (possibly unchanged) skip record the caller should emit.
+  // skip record, against the CURRENT per-connection dedup map. Pure: the map is
+  // read, never written.
+  function planCooldownSkip(
+    schedule: ConnectorSchedule,
+    key: string,
+    cooldown: SourcePressureCooldownDecision,
+    cooldownDefers: boolean,
+    existingSkip: RunRecord | null
+  ): CooldownPlan {
+    if (!(cooldownDefers && cooldown.identity)) {
+      // Pressure recovered (no pending pressure gaps): clear the announcement
+      // so a future pressure window emits a fresh cooling-off skip. Also
+      // re-arm once the current cooldown is due, because a run may create a new
+      // cooldown window with the same pressure identity.
+      return { identity: null, skip: existingSkip };
+    }
+    const alreadyAnnounced = runtime.notifiedCooldownIdentity.get(key) === cooldown.identity;
+    if (existingSkip || alreadyAnnounced) {
+      return { identity: cooldown.identity, skip: existingSkip };
+    }
+    return {
+      identity: cooldown.identity,
+      skip: buildSourcePressureCooldownSkip(schedule.connectorId, cooldown, schedule.connectorInstanceId),
+    };
+  }
+
+  function applyCooldownPlan(key: string, plan: CooldownPlan): void {
+    if (plan.identity === null) {
+      runtime.notifiedCooldownIdentity.delete(key);
+    } else {
+      runtime.notifiedCooldownIdentity.set(key, plan.identity);
+    }
+  }
+
+  // Decides AND applies, for callers that act on the skip at once. Manages the
+  // per-connection dedup map so the audit log shows one record per pressure
+  // identity and re-arms when pressure clears. Returns the (possibly unchanged)
+  // skip record the caller should emit.
   function resolveCooldownSkip(
     schedule: ConnectorSchedule,
     key: string,
@@ -599,39 +722,57 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
     cooldownDefers: boolean,
     existingSkip: RunRecord | null
   ): RunRecord | null {
-    if (!(cooldownDefers && cooldown.identity)) {
-      // Pressure recovered (no pending pressure gaps): clear the announcement
-      // so a future pressure window emits a fresh cooling-off skip. Also
-      // re-arm once the current cooldown is due, because a run may create a new
-      // cooldown window with the same pressure identity.
-      runtime.notifiedCooldownIdentity.delete(key);
-      return existingSkip;
-    }
-    const alreadyAnnounced = runtime.notifiedCooldownIdentity.get(key) === cooldown.identity;
-    runtime.notifiedCooldownIdentity.set(key, cooldown.identity);
-    if (existingSkip || alreadyAnnounced) {
-      return existingSkip;
-    }
-    return buildSourcePressureCooldownSkip(schedule.connectorId, cooldown, schedule.connectorInstanceId);
+    const plan = planCooldownSkip(schedule, key, cooldown, cooldownDefers, existingSkip);
+    applyCooldownPlan(key, plan);
+    return plan.skip;
   }
 
-  // Effectful shell for the back-off decision: mutate the dedup maps and turn
-  // the pure decision's `transitions` into the concrete RunRecord(s) / callback.
-  // Order-dependence flows in as DATA (the `DecideBackoffDispatchValue`); this
-  // shell only performs the prescribed effects. The §10-F escalation is coupled
-  // to the `gave_up` transition, so it still fires in the SAME once-per-streak
-  // window (with its error-swallowing intact).
-  function applyBackoffDispatchDecision(
+  // Turns the pure back-off decision's `transitions` into the concrete RunRecords
+  // and says whether the §10-F escalation is due. Pure: it marks nothing and
+  // raises nothing (see `commitTick`). The escalation is coupled to the `gave_up`
+  // transition, so it still fires in the SAME once-per-streak window.
+  function buildBackoffOutputs(
     value: DecideBackoffDispatchValue,
     schedule: ConnectorSchedule,
-    key: string,
     decision: BackoffDecision,
     history: readonly RunRecord[]
-  ): { skipToEmit: RunRecord | null; eventsToEmit: RunRecord[] } {
+  ): {
+    backoffStartedEvent: RunRecord | null;
+    escalate: boolean;
+    eventsToEmit: RunRecord[];
+    gaveUpEvent: RunRecord | null;
+    skipToEmit: RunRecord | null;
+  } {
     // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
     const connectorId = schedule.connectorId;
-    // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-    const reasonClass = decision.reasonClass;
+    const key = runtimeKey(schedule);
+    let skipToEmit: RunRecord | null = null;
+    let escalate = false;
+    let backoffStartedEvent: RunRecord | null = null;
+    let gaveUpEvent: RunRecord | null = null;
+    const eventsToEmit: RunRecord[] = [];
+    for (const transition of value.transitions) {
+      if (transition.kind === "backoff_started") {
+        skipToEmit = buildBackoffSkip(connectorId, decision, schedule.connectorInstanceId);
+        backoffStartedEvent = buildBackoffStartedEvent(connectorId, decision, schedule.connectorInstanceId);
+        eventsToEmit.push(backoffStartedEvent);
+      } else {
+        gaveUpEvent = buildGaveUpEvent(
+          connectorId,
+          decision,
+          findLastSuccessAt(history, key),
+          schedule.connectorInstanceId
+        );
+        eventsToEmit.push(gaveUpEvent);
+        // §10-F: first entry into blocked state — one push escalation.
+        escalate = true;
+      }
+    }
+    return { backoffStartedEvent, escalate, eventsToEmit, gaveUpEvent, skipToEmit };
+  }
+
+  // Applies the announce-once cell mutations the pure decision prescribes.
+  function applyBackoffDedup(value: DecideBackoffDispatchValue, key: string, reasonClass: string | null | undefined) {
     if (value.announcedBackoffMutation === "set" && reasonClass) {
       runtime.announcedBackoffClass.set(key, reasonClass);
     } else if (value.announcedBackoffMutation === "delete") {
@@ -640,33 +781,122 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
     if (value.announcedBlockedMutation === "set" && reasonClass) {
       runtime.announcedBlockedClass.set(key, reasonClass);
     }
+  }
 
-    let skipToEmit: RunRecord | null = null;
-    const eventsToEmit: RunRecord[] = [];
-    for (const transition of value.transitions) {
-      if (transition.kind === "backoff_started") {
-        skipToEmit = buildBackoffSkip(connectorId, decision, schedule.connectorInstanceId);
-        eventsToEmit.push(buildBackoffStartedEvent(connectorId, decision, schedule.connectorInstanceId));
-      } else {
-        eventsToEmit.push(
-          buildGaveUpEvent(connectorId, decision, findLastSuccessAt(history, key), schedule.connectorInstanceId)
-        );
-        // §10-F: first entry into blocked state — emit one push escalation.
-        // Errors are swallowed to match the scheduler's stance on observer
-        // failures (never block dispatch).
-        Promise.resolve(
-          onHumanRequiredStateEscalation({
-            connectorId,
-            connectorInstanceId: schedule.connectorInstanceId ?? connectorId,
-            reason: "blocked",
-          })
-        ).catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          console.error(`[scheduler] §10-F escalation callback failed for ${connectorId}: ${message}`);
-        });
-      }
+  // Decide (pure) what the tick does against the CURRENT announce-once state.
+  // The pure core reads the dedup cells as inputs and returns the dispatch flags,
+  // the cell mutations and the one-shot transitions as data; nothing is marked,
+  // emitted or raised until the plan is applied (`commitTick`).
+  function planTick(tick: TickInputs): TickPlan {
+    const { cooldown, cooldownDefers, decision, history, key, markerEvidence, schedule } = tick;
+    const backoffDecision = decideBackoffDispatch({
+      announcedBackoff: runtime.announcedBackoffClass.get(key),
+      announcedBlocked: runtime.announcedBlockedClass.get(key),
+      backoffApplied: decision.backoffApplied,
+      blocked: decision.recommendedHealthState === "blocked",
+      eligible: tick.eligible,
+      persistedBackoffStarted: markerEvidence.backoffStarted,
+      persistedGaveUp: markerEvidence.gaveUp,
+      reasonClass: decision.reasonClass,
+      recoveryOnly: tick.recoveryOnly,
+    });
+    const outputs = buildBackoffOutputs(backoffDecision, schedule, decision, history);
+    const { eventsToEmit, skipToEmit: backoffSkip } = outputs;
+    // A blocked streak whose `gave_up` push was dropped is escalated again; the
+    // `gave_up` record itself is announced once.
+    const blocked = decision.recommendedHealthState === "blocked";
+    const escalate =
+      outputs.escalate ||
+      (blocked && backoffDecision.announcedBlockedMutation === "set" && ledger.isUndelivered("blocked", key));
+
+    // Source-pressure cooldown is layered on top of failure back-off. Pending
+    // pressure gaps alone do not defer forever; only a future `nextRunAt` does.
+    // `planCooldownSkip` emits at most one cooling-off skip per pressure
+    // identity while the retry is too early, but only when back-off has not
+    // already emitted its own skip this tick (back-off is the stronger signal
+    // and already explains the quiet; double-emitting would be noise).
+    // A recovery-only launch does NOT emit a cooling-off skip: the dispatch is
+    // proceeding (to drain non-pressure work), so a "skipped, cooling off"
+    // audit line would be dishonest. The cooldown skip is only for ticks that
+    // genuinely defer. Forward-walk remains deferred; the skip rationale still
+    // holds when we are NOT launching recovery.
+    const cooldownPlan = backoffDecision.recoveryOnly
+      ? null
+      : planCooldownSkip(schedule, key, cooldown, cooldownDefers, backoffSkip);
+
+    return {
+      backoffStartedEvent: outputs.backoffStartedEvent,
+      blockedNow: blocked && backoffDecision.announcedBlockedMutation === "set",
+      gaveUpEvent: outputs.gaveUpEvent,
+      applyDedup: () => {
+        applyBackoffDedup(backoffDecision, key, decision.reasonClass);
+        if (cooldownPlan) {
+          applyCooldownPlan(key, cooldownPlan);
+        }
+      },
+      eligible: backoffDecision.eligible,
+      escalate,
+      eventsToEmit,
+      recoveryOnly: backoffDecision.recoveryOnly,
+      skipToEmit: cooldownPlan ? cooldownPlan.skip : backoffSkip,
+    };
+  }
+
+  // Applies one tick: plans it against the dedup state as it is NOW, marks the
+  // plan's cells, raises its §10-F escalation and returns the records. The
+  // escalation is fire-and-forget with its errors swallowed, matching the
+  // scheduler's stance on observer failures (never block dispatch).
+  function commitTick(tick: TickInputs, signal: AbortSignal | undefined): GovernorEmission {
+    const plan = planTick(tick);
+    const { key } = tick;
+    const before = {
+      backoff: runtime.announcedBackoffClass.get(key),
+      blocked: runtime.announcedBlockedClass.get(key),
+      cooldown: runtime.notifiedCooldownIdentity.get(key),
+    };
+    plan.applyDedup();
+    const after = {
+      backoff: runtime.announcedBackoffClass.get(key),
+      blocked: runtime.announcedBlockedClass.get(key),
+      cooldown: runtime.notifiedCooldownIdentity.get(key),
+    };
+    const { connectorId } = tick.schedule;
+    if (plan.escalate) {
+      ledger.raise(
+        onHumanRequiredStateEscalation,
+        { connectorId, connectorInstanceId: tick.schedule.connectorInstanceId ?? connectorId, reason: "blocked" },
+        signal
+      );
+    } else if (!plan.blockedNow) {
+      ledger.clear("blocked", key);
     }
-    return { eventsToEmit, skipToEmit };
+    const restore = <T>(cells: Map<string, T>, was: T | undefined, set: T | undefined): void => {
+      if (cells.get(key) !== set) {
+        return;
+      }
+      if (was === undefined) {
+        cells.delete(key);
+      } else {
+        cells.set(key, was);
+      }
+    };
+    return {
+      eventsToEmit: plan.eventsToEmit,
+      release: (unemitted) => {
+        for (const record of unemitted) {
+          if (record === plan.backoffStartedEvent) {
+            restore(runtime.announcedBackoffClass, before.backoff, after.backoff);
+          }
+          if (record === plan.gaveUpEvent) {
+            restore(runtime.announcedBlockedClass, before.blocked, after.blocked);
+          }
+          if (record === plan.skipToEmit) {
+            restore(runtime.notifiedCooldownIdentity, before.cooldown, after.cooldown);
+          }
+        }
+      },
+      skipToEmit: plan.skipToEmit,
+    };
   }
 
   // Pure dispatch-gate: given the current history + lastRun for a
@@ -688,7 +918,8 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
   // `"blocked"`.
   async function evaluateBackoffDispatch(
     schedule: ConnectorSchedule,
-    now: number
+    now: number,
+    signal?: AbortSignal
   ): Promise<EvaluateBackoffDispatchResult> {
     // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
     const connectorId = schedule.connectorId;
@@ -816,9 +1047,6 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
       }
     }
 
-    // Decide (pure) then apply (effectful). The pure core reads the current
-    // dedup state as inputs and returns the dispatch flags, the dedup-map
-    // mutations, and the one-shot transitions to fire — all as data.
     const markerEvidence = await resolveSchedulerMarkers(
       hasLegacySchedulerEventMarker,
       connectorId,
@@ -828,46 +1056,26 @@ export function createDispatchGovernor(deps: DispatchGovernorDeps): DispatchGove
       currentStreakHasSchedulerEvent(history, BACKOFF_STARTED_PREFIX, decision.reasonClass ?? ""),
       currentStreakHasSchedulerEvent(history, GAVE_UP_PREFIX, decision.reasonClass ?? "")
     );
-    const backoffDecision = decideBackoffDispatch({
-      announcedBackoff: runtime.announcedBackoffClass.get(key),
-      announcedBlocked: runtime.announcedBlockedClass.get(key),
-      backoffApplied: decision.backoffApplied,
-      blocked: decision.recommendedHealthState === "blocked",
-      eligible,
-      persistedBackoffStarted: markerEvidence.backoffStarted,
-      persistedGaveUp: markerEvidence.gaveUp,
-      reasonClass: decision.reasonClass,
-      recoveryOnly,
-    });
-    // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-    eligible = backoffDecision.eligible;
-    // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-    recoveryOnly = backoffDecision.recoveryOnly;
-    const { skipToEmit: backoffSkip, eventsToEmit } = applyBackoffDispatchDecision(
-      backoffDecision,
-      schedule,
-      key,
+    const tick: TickInputs = {
+      cooldown,
+      cooldownDefers,
       decision,
-      history
-    );
-    let skipToEmit: RunRecord | null = backoffSkip;
-
-    // Source-pressure cooldown is layered on top of failure back-off. Pending
-    // pressure gaps alone do not defer forever; only a future `nextRunAt` does.
-    // `resolveCooldownSkip` emits at most one cooling-off skip per pressure
-    // identity while the retry is too early, but only when back-off has not
-    // already emitted its own skip this tick (back-off is the stronger signal
-    // and already explains the quiet; double-emitting would be noise).
-    // A recovery-only launch does NOT emit a cooling-off skip: the dispatch is
-    // proceeding (to drain non-pressure work), so a "skipped, cooling off"
-    // audit line would be dishonest. The cooldown skip is only for ticks that
-    // genuinely defer. Forward-walk remains deferred; the skip rationale still
-    // holds when we are NOT launching recovery.
-    if (!recoveryOnly) {
-      skipToEmit = resolveCooldownSkip(schedule, key, cooldown, cooldownDefers, skipToEmit);
-    }
-
-    return { decision, eligible, eventsToEmit, recoveryOnly, skipToEmit };
+      eligible,
+      history,
+      key,
+      markerEvidence,
+      recoveryOnly,
+      schedule,
+    };
+    const preview = planTick(tick);
+    return {
+      commit: () => commitTick(tick, signal),
+      decision,
+      eligible: preview.eligible,
+      eventsToEmit: preview.eventsToEmit,
+      recoveryOnly: preview.recoveryOnly,
+      skipToEmit: preview.skipToEmit,
+    };
   }
 
   return { evaluateBackoffDispatch, resolveCooldownSkip };
