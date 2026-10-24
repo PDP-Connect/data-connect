@@ -3,7 +3,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { buttonVariants, IcButton, IcInput } from "@pdpp/brand-react";
+import { buttonVariants, IcButton, IcInput, IcSelect } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -19,12 +19,17 @@ import {
 } from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
+  buildCatalogView,
+  type CatalogMaturityFilter,
+  type CatalogSort,
+  searchUrlFor,
+} from "../lib/source-catalog-view.ts";
+import {
   browserBoundWithStoredCredentials,
   sourceSetupCardAction,
   sourceSetupAvailability,
   sourceSetupContext,
   sourceSetupGuidance,
-  sourceSetupRank,
   sourceSetupRowIsUnavailable,
   sourceSetupSecondaryAction,
   sourceSetupStatus,
@@ -58,27 +63,6 @@ export interface ExistingSourceSetupLink {
    * prior always-numeric rendering below.
    */
   totalRecordsState?: RefCountState;
-}
-
-function sortSourceCatalog(catalog: readonly ConnectorCatalogEntry[]): ConnectorCatalogEntry[] {
-  return [...catalog].sort((a, b) => {
-    const rank = sourceSetupRank(a) - sourceSetupRank(b);
-    return rank === 0 ? a.displayName.localeCompare(b.displayName) : rank;
-  });
-}
-
-function filterSourceCatalog(catalog: readonly ConnectorCatalogEntry[], query: string): ConnectorCatalogEntry[] {
-  const needle = query.trim().toLowerCase();
-  const sorted = sortSourceCatalog(catalog);
-  if (!needle) {
-    return sorted;
-  }
-  return sorted.filter((entry) =>
-    [entry.displayName, entry.connectorKey, entry.disposition, entry.setupModality, entry.supportState]
-      .join(" ")
-      .toLowerCase()
-      .includes(needle)
-  );
 }
 
 function pathTone(path: ConnectorAcquisitionPath): string {
@@ -489,6 +473,14 @@ function SourceSetupCard({
         <div className="flex flex-wrap items-center gap-2">
           <ConnectorMark className="size-8 shrink-0" icon={entry.icon} name={entry.displayName} />
           <h3 className="pdpp-title text-foreground">{entry.displayName}</h3>
+          {installModel?.activationState === "update_available" ? (
+            <span
+              className="pdpp-eyebrow rounded border border-[color:var(--warning)]/30 bg-status-warning-bg px-1.5 py-0.5 text-status-warning-fg"
+              data-testid="source-update-badge"
+            >
+              Update available
+            </span>
+          ) : null}
           {/* Current support / blocked fact, kept distinct from the next action. */}
           {status.label ? (
             <span
@@ -501,7 +493,12 @@ function SourceSetupCard({
             </span>
           ) : null}
         </div>
-        <p className="pdpp-caption mt-1 text-muted-foreground">{sourceMethodLine(entry, existingSources.length)}</p>
+        <p
+          className="pdpp-caption mt-1 text-muted-foreground"
+          data-testid={isUnavailable ? "source-unavailable-reason" : undefined}
+        >
+          {sourceMethodLine(entry, existingSources.length)}
+        </p>
         <SourceSetupContext entry={entry} />
         <ExistingSourceLinks connectorKey={entry.connectorKey} icon={entry.icon} sources={existingSources} />
         <SourceSetupDetails entry={entry} />
@@ -590,16 +587,107 @@ function SourceSetupCardList({
   );
 }
 
+
+const SORT_OPTIONS = [
+  { label: "Name", value: "name" },
+  { label: "Maturity", value: "maturity" },
+] as const;
+
+const MATURITY_OPTIONS = [
+  { label: "All", value: "all" },
+  { label: "Supported", value: "supported" },
+  { label: "Preview", value: "preview" },
+  { label: "In development", value: "development" },
+] as const;
+
+const TOOLBAR_SELECT_STYLE = { width: "auto" } as const;
+
+function isCatalogSort(value: string | null): value is CatalogSort {
+  return SORT_OPTIONS.some((option) => option.value === value);
+}
+
+function isMaturityFilter(value: string | null): value is CatalogMaturityFilter {
+  return MATURITY_OPTIONS.some((option) => option.value === value);
+}
+
+function CatalogColumnHeads() {
+  return (
+    <div className="hidden grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] gap-4 px-4 sm:grid">
+      <span className="pdpp-eyebrow text-muted-foreground">Connector</span>
+      <span className="pdpp-eyebrow text-muted-foreground">Package state</span>
+      <span className="pdpp-eyebrow text-muted-foreground">Action</span>
+    </div>
+  );
+}
+
+function CatalogToolbar({
+  maturity,
+  onMaturityChange,
+  onSortChange,
+  onWorksHereOnlyChange,
+  sort,
+  worksHereOnly,
+}: {
+  maturity: CatalogMaturityFilter;
+  onMaturityChange: (value: CatalogMaturityFilter) => void;
+  onSortChange: (value: CatalogSort) => void;
+  onWorksHereOnlyChange: (value: boolean) => void;
+  sort: CatalogSort;
+  worksHereOnly: boolean;
+}) {
+  return (
+    <div
+      aria-label="Sort and filter sources"
+      className="mb-3 flex flex-wrap items-center gap-x-5 gap-y-2"
+      data-testid="source-catalog-toolbar"
+      role="group"
+    >
+      <div className="flex items-center gap-2">
+        <span className="pdpp-caption text-muted-foreground" id="source-sort-label">
+          Sort
+        </span>
+        <IcSelect
+          aria-label="Sort sources by"
+          onValueChange={(value) => isCatalogSort(value) && onSortChange(value)}
+          options={SORT_OPTIONS}
+          style={TOOLBAR_SELECT_STYLE}
+          value={sort}
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="pdpp-caption text-muted-foreground" id="source-maturity-label">
+          Maturity
+        </span>
+        <IcSelect
+          aria-label="Filter sources by maturity"
+          onValueChange={(value) => isMaturityFilter(value) && onMaturityChange(value)}
+          options={MATURITY_OPTIONS}
+          style={TOOLBAR_SELECT_STYLE}
+          value={maturity}
+        />
+      </div>
+      <label className="pdpp-caption flex cursor-pointer items-center gap-2 text-muted-foreground">
+        <input
+          checked={worksHereOnly}
+          className="size-4 accent-[var(--foreground)]"
+          data-testid="works-here-filter"
+          onChange={(event) => onWorksHereOnlyChange(event.target.checked)}
+          type="checkbox"
+        />
+        Works on this device
+      </label>
+    </div>
+  );
+}
+
 export function SourceSetupCatalog({
-  action,
   catalog,
   existingSourcesByConnector,
   installCatalogBusySnapshotId = null,
   installCatalogTransientlyUnavailable = false,
   installLifecycleByConnector = null,
-  query,
+  query: initialQuery,
 }: {
-  action: string;
   catalog: readonly ConnectorCatalogEntry[];
   /**
    * Built from `listConnectionsByConnector` (one exact `GET
@@ -613,6 +701,7 @@ export function SourceSetupCatalog({
   installCatalogTransientlyUnavailable?: boolean;
   /** Null means the install route is not available on this server. */
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
+  /** The `source_q` the page was opened with; later typing stays in the browser. */
   query: string;
 }) {
   const developerMode = useSyncExternalStore(
@@ -624,6 +713,17 @@ export function SourceSetupCatalog({
     installCatalogTransientlyUnavailable,
     installCatalogBusySnapshotId
   );
+  // Search, sort and filters run in the browser over the catalog the page
+  // already loaded. Only the query is mirrored into the URL (replaceState, so
+  // no navigation and no server work) so a copied link reopens the search.
+  const [query, setQuery] = useState(initialQuery);
+  const [sort, setSort] = useState<CatalogSort>("name");
+  const [maturity, setMaturity] = useState<CatalogMaturityFilter>("all");
+  const [worksHereOnly, setWorksHereOnly] = useState(false);
+  const updateQuery = useCallback((value: string) => {
+    setQuery(value);
+    window.history.replaceState(window.history.state, "", searchUrlFor(window.location.href, value));
+  }, []);
   // Developer mode (Settings) is the single control for development-tier
   // visibility; this surface never grows a second toggle for the same
   // concept. When it's off, the hidden count stays discoverable via the
@@ -639,7 +739,27 @@ export function SourceSetupCatalog({
       );
   const visibleCatalog = filterCatalogForDevelopmentVisibility(installableCatalog, developerMode);
   const hiddenDevelopmentCount = installableCatalog.length - visibleCatalog.length;
-  const filtered = filterSourceCatalog(visibleCatalog, query);
+  const ownedKeys = new Set(
+    visibleCatalog
+      .filter((entry) => (existingSourcesByConnector?.[entry.connectorKey]?.length ?? 0) > 0)
+      .map((entry) => entry.connectorKey)
+  );
+  const updateKeys = new Set(
+    visibleCatalog
+      .filter((entry) => {
+        const lifecycle = installLifecycleFor(entry, installLifecycleByConnector);
+        return lifecycle !== null && connectorInstallRowModel(entry, lifecycle).activationState === "update_available";
+      })
+      .map((entry) => entry.connectorKey)
+  );
+  const view = buildCatalogView(visibleCatalog, { maturity, ownedKeys, query, sort, updateKeys, worksHereOnly });
+  const updateCount = view.yours.filter((entry) => updateKeys.has(entry.connectorKey)).length;
+  const filtersActive = maturity !== "all" || worksHereOnly;
+  const nothingMatches = view.yours.length + view.addable.length + view.unavailable.length === 0;
+  const clearFilters = () => {
+    setMaturity("all");
+    setWorksHereOnly(false);
+  };
   // Every visible connector is one row. Tier, lifecycle exceptions, and
   // package activation are row properties, so Preview and In development do
   // not create nested containers or disappear from the scan path.
@@ -647,18 +767,16 @@ export function SourceSetupCatalog({
   // The one exception: a row with no click target at all (known scaffold,
   // proof-gated, unsupported, unknown -- see `sourceSetupRowIsUnavailable`)
   // carries no scannable information a working row doesn't already imply, so
-  // it never sits in the middle of the actionable list. `sourceSetupRank`
-  // already sorts these last; splitting them out here keeps that guarantee
-  // even if a future rank changes, and lets the count stay visible without
-  // N dead rows in the primary scan path.
-  const scannableEntries = filtered.filter((entry) => !sourceSetupRowIsUnavailable(entry));
-  const unavailableEntries = filtered.filter((entry) => sourceSetupRowIsUnavailable(entry));
-  const anyMatch = filtered.length > 0;
+  // it never sits in the middle of the actionable list. It sits in its own
+  // collapsed group after it, each row stating its reason.
+  const listProps = {
+    existingSourcesByConnector,
+    installCatalogRecoveryState: connectorCatalogRecovery.recoveryState,
+    installCatalogTransientlyUnavailable,
+    installLifecycleByConnector,
+  };
   return (
-    <Section
-      description="Choose a connector to add data. Supported is the default; exception labels explain preview, in-development, and setup limits."
-      title="Add data"
-    >
+    <div data-testid="source-setup-catalog">
       {hiddenDevelopmentCount > 0 ? (
         <p className="pdpp-caption mb-4 text-muted-foreground" data-testid="development-hidden-notice">
           {hiddenDevelopmentCount} {hiddenDevelopmentCount === 1 ? "connector is" : "connectors are"} hidden by{" "}
@@ -673,53 +791,112 @@ export function SourceSetupCatalog({
         recoveryState={connectorCatalogRecovery.recoveryState}
         refreshManually={connectorCatalogRecovery.refreshManually}
       />
-      <form action={action} className="mb-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+      <form className="mb-6" onSubmit={(event) => event.preventDefault()} role="search">
         <label className="sr-only" htmlFor="source_q">
           Search data sources
         </label>
-        <IcInput defaultValue={query} id="source_q" name="source_q" placeholder="Search source name or connector key" />
-        <IcButton size="sm" type="submit" variant="ghost">
-          Search
-        </IcButton>
+        <IcInput
+          autoComplete="off"
+          id="source_q"
+          name="source_q"
+          onChange={(event) => updateQuery(event.target.value)}
+          placeholder="Search source name or connector key"
+          type="search"
+          value={query}
+        />
       </form>
-      {anyMatch ? (
-        <div className="grid gap-3">
-          <div className="hidden grid-cols-[minmax(0,2fr)_minmax(10rem,1fr)_auto] gap-4 px-4 sm:grid">
-            <span className="pdpp-eyebrow text-muted-foreground">Connector</span>
-            <span className="pdpp-eyebrow text-muted-foreground">Package state</span>
-            <span className="pdpp-eyebrow text-muted-foreground">Action</span>
-          </div>
-          <SourceSetupCardList
-            entries={scannableEntries}
-            existingSourcesByConnector={existingSourcesByConnector}
-            installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
-            installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
-            installLifecycleByConnector={installLifecycleByConnector}
-          />
-          {unavailableEntries.length > 0 ? (
-            <details className="group" data-testid="unavailable-connectors-disclosure">
-              <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
-                {unavailableEntries.length}{" "}
-                {unavailableEntries.length === 1 ? "connector is" : "connectors are"} not available on this platform
-              </summary>
-              <div className="mt-3">
-                <SourceSetupCardList
-                  entries={unavailableEntries}
-                  existingSourcesByConnector={existingSourcesByConnector}
-                  installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
-                  installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
-                  installLifecycleByConnector={installLifecycleByConnector}
-                />
-              </div>
-            </details>
+      {nothingMatches ? (
+        <p
+          className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground"
+          data-testid="source-catalog-empty"
+        >
+          {query.trim() ? (
+            <>
+              No connector matched <span className="font-medium text-foreground">{query.trim()}</span>
+              {filtersActive ? " with these filters" : ""}. Try the source name or connector key.
+            </>
+          ) : (
+            "No connector matches these filters."
+          )}
+          {filtersActive ? (
+            <>
+              {" "}
+              <button className="underline underline-offset-4 hover:text-foreground" onClick={clearFilters} type="button">
+                Clear filters
+              </button>
+            </>
           ) : null}
-        </div>
-      ) : (
-        <p className="pdpp-caption rounded-md border border-border/80 border-dashed p-4 text-muted-foreground">
-          No connector matched <span className="font-medium text-foreground">{query}</span>. Try the source name or
-          connector key.
         </p>
+      ) : null}
+      {view.yours.length > 0 ? (
+        <Section
+          description={
+            updateCount > 0
+              ? `${updateCount} ${updateCount === 1 ? "needs" : "need"} an update.`
+              : "Sources already connected to this instance."
+          }
+          title="Your sources"
+        >
+          <div className="grid gap-3" data-testid="your-sources">
+            <CatalogColumnHeads />
+            <SourceSetupCardList entries={view.yours} {...listProps} />
+          </div>
+        </Section>
+      ) : null}
+      {nothingMatches ? null : (
+        <Section
+          description="Choose a connector to add data. Supported is the default; exception labels explain preview, in-development, and setup limits."
+          title="Add a source"
+        >
+          <CatalogToolbar
+            maturity={maturity}
+            onMaturityChange={setMaturity}
+            onSortChange={setSort}
+            onWorksHereOnlyChange={setWorksHereOnly}
+            sort={sort}
+            worksHereOnly={worksHereOnly}
+          />
+          <div className="grid gap-3">
+            {view.addable.length > 0 ? (
+              <>
+                <CatalogColumnHeads />
+                <SourceSetupCardList entries={view.addable} {...listProps} />
+              </>
+            ) : view.unavailable.length === 0 ? (
+              <p className="pdpp-caption text-muted-foreground" data-testid="source-catalog-no-more">
+                No other sources match.
+                {filtersActive ? (
+                  <>
+                    {" "}
+                    <button
+                      className="underline underline-offset-4 hover:text-foreground"
+                      onClick={clearFilters}
+                      type="button"
+                    >
+                      Clear filters
+                    </button>
+                  </>
+                ) : null}
+              </p>
+            ) : null}
+            {view.unavailable.length > 0 ? (
+              <details
+                className="group"
+                data-testid="unavailable-connectors-disclosure"
+                open={query.trim() ? true : undefined}
+              >
+                <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
+                  {view.unavailable.length} more {view.unavailable.length === 1 ? "source" : "sources"} cannot be added
+                  yet
+                </summary>
+                <div className="mt-3">
+                  <SourceSetupCardList entries={view.unavailable} {...listProps} />
+                </div>
+              </details>
+            ) : null}
+          </div>
+        </Section>
       )}
-    </Section>
+    </div>
   );
 }

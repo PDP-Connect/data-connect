@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ConnectorIcon } from "./connector-icon.tsx";
+import { brandTileColors, ConnectorIcon } from "./connector-icon.tsx";
 
 const MONOGRAM_CLASS = /class="pdpp-monogram pdpp-monogram--tinted"/;
 const ARIA_HIDDEN_TRUE = /aria-hidden="true"/;
@@ -64,4 +64,44 @@ test("ConnectorIcon falls back to the monogram when icon.svg is empty", () => {
     createElement(ConnectorIcon, { icon: { kind: "inline_svg", svg: "" }, name: "Slack" })
   );
   assert.match(html, MONOGRAM_CLASS);
+});
+
+const WHITE_GLYPH_SVG = '<svg role="img" viewBox="0 0 24 24" fill="#FFFFFF"><path d="M12 0z"/></svg>';
+
+test("ConnectorIcon draws a tile in the brand colour so a white glyph stays visible on a light card", () => {
+  const html = renderToStaticMarkup(
+    createElement(ConnectorIcon, {
+      icon: { background: "#FC4C02", kind: "inline_svg", svg: WHITE_GLYPH_SVG },
+      name: "Strava",
+    })
+  );
+  assert.match(html, /class="pdpp-connector-icon pdpp-connector-icon--tile"/);
+  assert.match(html, /background:#fc4c02/);
+  assert.match(html, /--pdpp-connector-glyph:#ffffff/);
+});
+
+test("ConnectorIcon switches to a dark glyph when the brand colour is light", () => {
+  const html = renderToStaticMarkup(
+    createElement(ConnectorIcon, {
+      icon: { background: "#FFFC00", kind: "inline_svg", svg: WHITE_GLYPH_SVG },
+      name: "Snapchat",
+    })
+  );
+  assert.match(html, /--pdpp-connector-glyph:#111111/);
+});
+
+test("brandTileColors accepts only plain hex colours, so a manifest value cannot inject style", () => {
+  assert.deepEqual(brandTileColors("#369"), { background: "#336699", glyph: "#ffffff" });
+  assert.equal(brandTileColors("red"), null);
+  assert.equal(brandTileColors("#fff; background:url(x)"), null);
+  assert.equal(brandTileColors("javascript:alert(1)"), null);
+  assert.equal(brandTileColors(null), null);
+  const html = renderToStaticMarkup(
+    createElement(ConnectorIcon, {
+      icon: { background: "red;position:fixed", kind: "inline_svg", svg: WHITE_GLYPH_SVG },
+      name: "Odd",
+    })
+  );
+  assert.doesNotMatch(html, /position:fixed/);
+  assert.doesNotMatch(html, /--tile/);
 });

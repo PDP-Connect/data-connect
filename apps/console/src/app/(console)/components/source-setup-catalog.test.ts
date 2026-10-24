@@ -51,7 +51,6 @@ async function render(installCatalogTransientlyUnavailable: boolean): Promise<st
   const { SourceSetupCatalog } = await catalogModule;
   return renderToStaticMarkup(
     createElement(SourceSetupCatalog, {
-      action: "/sources/add",
       catalog: [reddit],
       installCatalogTransientlyUnavailable,
       // The page builds this from the empty catalog a busy snapshot returns.

@@ -64,7 +64,10 @@ test("unavailable rows never offer an install control and sort into a collapsed 
   // Unavailable rows collapse into their own disclosure, separate from the
   // primary scannable list, so N dead rows never sit in the middle of it.
   assert.match(src, /data-testid="unavailable-connectors-disclosure"/);
-  assert.match(src, /not available on this platform/);
+  // No platform logic backs these rows (nothing here depends on the OS), so the
+  // summary must not claim one.
+  assert.match(src, /cannot be added\s+yet/);
+  assert.doesNotMatch(src, /not available on this platform/);
 });
 
 test("transient install catalog failures disable unknown package actions without hiding installed rows", async () => {

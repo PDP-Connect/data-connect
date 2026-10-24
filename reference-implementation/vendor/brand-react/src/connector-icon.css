@@ -20,3 +20,19 @@
   width: 100%;
   height: 100%;
 }
+
+/* Brand tile. Connectors ship a single-colour glyph meant to sit on a tile in
+   the connector's brand colour (inline `background`). The glyph colour is
+   chosen for contrast and overrides the SVG root's own fill, so a white
+   glyph stays legible on a light tile colour and in both themes. The hairline
+   ring keeps a near-black or near-white tile visible against the card. */
+.pdpp-connector-icon--tile {
+  box-sizing: border-box;
+  padding: 18%;
+  border-radius: 22%;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--foreground) 14%, transparent);
+}
+
+.pdpp-connector-icon--tile svg {
+  fill: var(--pdpp-connector-glyph, #fff);
+}
