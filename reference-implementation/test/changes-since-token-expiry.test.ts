@@ -1936,9 +1936,11 @@ test("postgres: the changes_floor seed heals a lagging counter but keeps floor 0
 });
 
 // The shape one production counter has: it lags the current rows, not the
-// history. The newest current row, a=4, has no history row and the counter
-// stopped at 3. The head is 4 and three history rows are fewer than that, so the
-// floor is 4.
+// history. The newest current row, a=4 (popularity 1), has no history row, only
+// a@2 (no popularity) does, and the counter stopped at 3. The head is 4 and
+// three history rows are fewer than that, so the floor is 4. The seed also writes
+// a@4's history row back. Without it `beginning` served the stale a@2, and a
+// later a@5 that reverted to a@2's projection was suppressed against it.
 async function checkLaggingCounterWithCurrentRowsAhead(
   backend: Backend,
   instanceId: string,
@@ -1953,8 +1955,26 @@ async function checkLaggingCounterWithCurrentRowsAhead(
       stream: STREAM,
     },
   ]);
-  await backend.put("c");
+  const beginning = await backend.list({ changes_since: "beginning" });
+  assert.deepEqual(ids(beginning), ["a", "b", "cold"]);
+  assert.equal(
+    (beginning.data.find((record) => record.id === "a") as unknown as { data: { popularity?: number } }).data.popularity,
+    1,
+    "beginning serves a's current payload, not the older history row"
+  );
+  assert.ok(beginning.next_changes_since, "beginning issues a token");
+
+  // A token below the floor expires instead of being answered from a history
+  // that was rebuilt.
+  await assert.rejects(backend.list({ changes_since: backend.legacyToken(3) }), { code: "cursor_expired" });
+
+  // A consumer holding a@4 sends its token after a@5 reverts to a@2's
+  // projection. The predecessor is a@4, so the change is delivered.
+  await backend.put("a");
   assert.deepEqual(await probe.counter(instanceId), { changes_floor: 4, max_version: 5 });
+  const after = await backend.list({ changes_since: beginning.next_changes_since });
+  assert.deepEqual(ids(after), ["a"], "the real change is not suppressed against a stale predecessor");
+  assert.equal((after.data[0] as unknown as { data: { popularity?: number } }).data.popularity, undefined);
 }
 
 test("sqlite: the changes_floor seed raises a counter that lags only the current rows", async () => {

@@ -6629,7 +6629,10 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   //     with floor 0, so a gapped history would lose its floor then. The row is
   //     created first, at the durable maximum.
   //  2. Every other counter is raised to its durable maximum, never lowered.
-  //  3. The floor is seeded from those counters.
+  //  3. The floor is seeded from those counters and the history as it was.
+  //  4. A current row at a version with no history row gets that row back (the
+  //     counter cannot restore it), after the floor, so the rebuilt row cannot
+  //     lower it.
   runWithSqliteBusyRetrySync(() => {
     raw.exec("BEGIN IMMEDIATE");
     try {
@@ -6674,6 +6677,24 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
                                AND rc.stream = version_counter.stream)
                            < max_version`
         ).run(getChangeHistoryLimit() > 0 ? 1 : 0);
+        // A current row can sit at a version no history row records. Raising
+        // the counter does not restore that anchor, so write the history row
+        // ingest would have written (same payload, emitted_at and deleted
+        // semantics; a tombstone keeps its pre-deletion payload). A version
+        // already taken by another key's history row is left alone. This runs
+        // after the floor is seeded: a rebuilt row is not evidence that the
+        // original history was complete, so it must not lower the floor.
+        raw.exec(
+          `INSERT OR IGNORE INTO record_changes(connector_id, connector_instance_id, stream, record_key, version, record_json, emitted_at, deleted, deleted_at)
+           SELECT r.connector_id, r.connector_instance_id, r.stream, r.record_key, r.version,
+                  r.record_json, r.emitted_at, r.deleted, r.deleted_at
+             FROM records r
+            WHERE NOT EXISTS (SELECT 1 FROM record_changes rc
+                               WHERE rc.connector_instance_id = r.connector_instance_id
+                                 AND rc.stream = r.stream
+                                 AND rc.record_key = r.record_key
+                                 AND rc.version = r.version)`
+        );
       }
       raw.exec("COMMIT");
     } catch (error) {

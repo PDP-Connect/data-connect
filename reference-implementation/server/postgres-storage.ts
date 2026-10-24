@@ -5905,6 +5905,27 @@ const RAISE_LAGGING_VERSION_COUNTERS_SQL = `
      AND vc.stream = durable.stream
      AND vc.max_version < durable.max_version`;
 
+// A current row can sit at a version no history row records (a write that
+// stopped between the two inserts, or history pruned past a live row). Raising
+// the counter does not restore that anchor: `beginning` reads history, so it
+// would serve the row's older state, and a later change could be suppressed
+// against that stale predecessor. This writes the history row ingest would have
+// written for the current state: same payload, emitted_at and deleted
+// semantics (a tombstone keeps the payload it had before deletion). A version
+// already taken by another key's history row is left alone.
+const BACKFILL_MISSING_CURRENT_ANCHORS_SQL = `
+  INSERT INTO record_changes
+    (connector_id, connector_instance_id, stream, record_key, version, record_json, emitted_at, deleted, deleted_at)
+  SELECT r.connector_id, r.connector_instance_id, r.stream, r.record_key, r.version,
+         r.record_json, r.emitted_at, r.deleted, r.deleted_at
+    FROM records r
+   WHERE NOT EXISTS (SELECT 1 FROM record_changes rc
+                      WHERE rc.connector_instance_id = r.connector_instance_id
+                        AND rc.stream = r.stream
+                        AND rc.record_key = r.record_key
+                        AND rc.version = r.version)
+  ON CONFLICT (connector_instance_id, stream, version) DO NOTHING`;
+
 // Oldest reconstructible changes_since watermark. The column and its seed
 // commit in one transaction: an interrupted seed must not leave a column that
 // makes the next startup skip it. Runs after the instance-namespace migration
@@ -5940,6 +5961,9 @@ async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
           ) < max_version`,
         [getChangeHistoryLimit() > 0]
       );
+      // After the floor: a rebuilt row is not evidence that the original
+      // history was complete, so it must not lower the floor.
+      await client.query(BACKFILL_MISSING_CURRENT_ANCHORS_SQL);
     }
     await client.query("COMMIT");
   } catch (err) {
