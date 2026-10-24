@@ -92,7 +92,7 @@ export function definitionFromProfile(profile: CollectionProfile, release: Insta
     // one remain comparable, which is what makes the migration checkable.
     entry: profile.connector_key,
     bindings: Object.freeze(bindings),
-    protocol_capabilities: Object.freeze([]),
+    protocol_capabilities: Object.freeze([...(profile.protocol_capabilities ?? [])]),
     streams: Object.freeze(streams),
   };
 

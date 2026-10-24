@@ -20,7 +20,7 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
 
 const READS_SERVER_FACT = /const connectorNotInstalled = isConnectorNotInstalled\(summary\);/;
-const STREAM_FACTS_GET_FACT = /formatStreamCollectionFacts\(entry, \{ connectorNotInstalled \}\)/;
+const STREAM_FACTS_GET_FACT = /formatStreamCollectionFacts\(entry, \{\s*connectorNotInstalled[,\s}]/;
 const PROMPT_GATED = /const installPromptShown = connectorNotInstalled && !revoked && !setupFailed;/;
 const NOTICE_RENDERED =
   /\{installPromptShown \? \(\s*<ConnectorInstallPrompt[\s\S]{0,200}variant="notice"[\s\S]{0,40}\/>\s*\) : null\}/;

@@ -55,6 +55,38 @@ test("LocalDeviceClient accepts only the exact canonical terminal receipt", asyn
   assert.equal((await client.commitTerminalRun(request)).envelope_hash, expectedHash);
 });
 
+test("LocalDeviceClient refuses a successful HTTP ingest with rejected records", async () => {
+  const client = new LocalDeviceClient({
+    baseUrl: "http://127.0.0.1:1",
+    deviceId: "device-1",
+    deviceToken: "device-token",
+    fetchImpl: () =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            accepted_record_count: 0,
+            object: "device_ingest_batch_result",
+            rejected_record_count: 1,
+            status: "accepted",
+          }),
+          { status: 201 }
+        )
+      ),
+  });
+  await assert.rejects(
+    client.ingestBatch({
+      batch_id: "batch-1",
+      batch_seq: 1,
+      body_hash: "hash-1",
+      connector_id: "codex",
+      device_id: "device-1",
+      records: [{ data: {}, emitted_at: "2026-04-30T12:00:00.000Z", record_key: "record-1", stream: "messages" }],
+      source_instance_id: "source-1",
+    }),
+    /rejected records/
+  );
+});
+
 for (const invalid of [
   {
     commit_id: "wrong",
@@ -569,6 +601,16 @@ async function startJsonServer(seen: SeenRequest[]): Promise<{ close: () => Prom
             ? { messages: { cursor: "abc" } }
             : ((body ? JSON.parse(body) : { state: {} }).state ?? {}),
         updated_at: "2026-04-30T12:00:00.000Z",
+      });
+      return;
+    }
+    if (path.endsWith("/ingest-batches")) {
+      const request = body ? (JSON.parse(body) as { records?: unknown[] }) : {};
+      sendJson(res, 200, {
+        accepted_record_count: request.records?.length ?? 0,
+        object: "device_ingest_batch_result",
+        rejected_record_count: 0,
+        status: "accepted",
       });
       return;
     }

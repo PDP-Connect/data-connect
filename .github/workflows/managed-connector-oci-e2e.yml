@@ -45,6 +45,14 @@ name: managed-connector OCI end-to-end (local registry; NOT GHCR, NOT Sigstore)
 # fetch. (There is no cross-repo-pins.json in THIS repo; see the pin file if that surprises you.)
 # The reasoning, the weakness of pinning an unmerged PR head, and why the connector stays `oura`
 # while data-connectors' publish pilot moved to `ynab` are all written down in the pin file.
+#
+# THE INSTALL-PATH JOURNEY (J2-install, the last three steps). The live-registry test above proves an
+# artifact installs and its entrypoint imports. The journey installs two releases through the shipped
+# collector's own function (ensureCollectionProfileInstalled), against pins the builder writes into the job's
+# temp directory. It runs each installed entrypoint and checks what the server and the device make of it. A
+# replaced digest stops counting until its own run proves it. It runs against this job's registry. Its signature
+# check is the same stub verifier, and its releases carry a fabricated signature bundle, so (1) and (2) above
+# apply to it, and it proves nothing about signatures or ghcr.io.
 
 on:
   pull_request:
@@ -56,6 +64,13 @@ on:
       - "packages/local-collector/src/managed/**"
       - "packages/local-collector/test/managed-connectors.test.ts"
       - "packages/local-collector/test/managed-connectors-live-registry.test.ts"
+      - "packages/local-collector/test/helpers/live-registry-client.ts"
+      # The install-path journey (J2-install) and the fixture it packages.
+      - "reference-implementation/test/local-device-coverage-journey.test.ts"
+      - "reference-implementation/test/helpers/install-path-fixture.ts"
+      - "reference-implementation/test/helpers/build-install-path-releases.ts"
+      # The shipped selection and binding the journey calls (selectedReleaseForPin, bindOptionalRunCoverageToRelease).
+      - "packages/local-collector/bin/pdpp-local-collector.ts"
       # This job's own control files: a PR that only edits the workflow or moves the producer pin
       # would otherwise not run the thing it changed. Same reasoning as consumer-drift-signal.yml's
       # "Producer workflows should include their own control files in triggers".
@@ -67,6 +82,11 @@ on:
       - "packages/local-collector/src/managed/**"
       - "packages/local-collector/test/managed-connectors.test.ts"
       - "packages/local-collector/test/managed-connectors-live-registry.test.ts"
+      - "packages/local-collector/test/helpers/live-registry-client.ts"
+      - "reference-implementation/test/local-device-coverage-journey.test.ts"
+      - "reference-implementation/test/helpers/install-path-fixture.ts"
+      - "reference-implementation/test/helpers/build-install-path-releases.ts"
+      - "packages/local-collector/bin/pdpp-local-collector.ts"
       - ".github/workflows/managed-connector-oci-e2e.yml"
       - ".github/managed-connector-e2e-pin.json"
   workflow_dispatch:
@@ -162,7 +182,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22.23.2"
+          # 24.21.0 is the version the reference-implementation job runs its tests on, and the
+          # install-path journey below is one of those tests. The producer's engines pin node 24 too.
+          node-version: "24.21.0"
 
       - name: Install this repository's dependencies
         run: npm ci --ignore-scripts
@@ -447,3 +469,59 @@ jobs:
 
           echo "OK: the consumer rejected blobs that did not hash to their pinned digests."
           rm -f proxied.txt
+
+      - name: Build the workspace packages the reference server loads
+        # The reference-implementation job builds these after `npm ci` (reference-implementation.yml). The
+        # install-path journey imports the server, which loads their dist/ output. This job runs
+        # `npm ci --ignore-scripts`, so nothing has built them yet. The root postinstall is not needed here:
+        # it fetches connector packages, and this journey runs none.
+        run: |
+          set -euo pipefail
+          npm --prefix packages/connector-protocol run build
+          npm --prefix packages/collector-runtime run build
+          npm --prefix reference-implementation/vendor/read-core run build
+          npm --prefix reference-implementation/vendor/cli run build
+          npm --prefix reference-implementation/vendor/mcp-server run build
+
+      - name: Build and push the install-path releases A and B with the producer's builder
+        # Two releases of one connector (install-path-fixture.ts): the same manifest and different code layers,
+        # so different digests. The builder is the producer's own script at the pinned revision. The packaging
+        # tree around it is the fixture's. Both releases are pushed to this job's registry, each with a signature
+        # stand-in. The pins the journey checks against are written into the work directory. The journey step
+        # reads their path from the releases file, not from the log.
+        working-directory: reference-implementation
+        env:
+          PRODUCER_GIT: ${{ github.workspace }}/data-connectors
+          PRODUCER_SHA: ${{ steps.pin.outputs.sha }}
+          RELEASES_JSON: ${{ runner.temp }}/install-path-releases.json
+        run: |
+          set -euo pipefail
+          node --import tsx test/helpers/build-install-path-releases.ts \
+            --producer-git "$PRODUCER_GIT" \
+            --producer-sha "$PRODUCER_SHA" \
+            --registry localhost:5000 \
+            --work "${RUNNER_TEMP}/install-path" \
+            --modules "$PRODUCER_GIT/node_modules" > "$RELEASES_JSON"
+
+      - name: Run the install-path journey (J2-install) through the shipped collector path
+        working-directory: reference-implementation
+        env:
+          PDPP_TEST_OCI_REGISTRY: localhost:5000
+          RELEASES_JSON: ${{ runner.temp }}/install-path-releases.json
+        run: |
+          set -euo pipefail
+          pins_path="$(node -e 'process.stdout.write(require(process.env.RELEASES_JSON).pins)')"
+          test -s "$pins_path"
+          export PDPP_TEST_INSTALL_PATH_PINS="$pins_path"
+          node --test --import tsx --test-name-pattern=J2-install test/local-device-coverage-journey.test.ts | tee result.txt
+          # The same guard as the live-registry step above: node --test exits 0 on a skipped test, so require
+          # exactly one passing test and no skips. A typo in an env var name must not turn this job green.
+          if ! grep -qE 'pass 1$' result.txt; then
+            echo "::error::the install-path journey did not report exactly one passing test" >&2
+            exit 1
+          fi
+          if ! grep -qE 'skipped 0$' result.txt; then
+            echo "::error::the install-path journey SKIPPED; its env vars did not reach it" >&2
+            exit 1
+          fi
+          rm -f result.txt

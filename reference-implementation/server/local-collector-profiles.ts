@@ -29,7 +29,29 @@ interface LocalCollectorProfilePin {
   readonly version: string;
 }
 
+export interface LocalCollectorRelease {
+  readonly artifactDigest: string;
+  readonly manifest: Record<string, unknown>;
+}
+
 const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
+const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
+
+const releaseOverrides = new Map<string, LocalCollectorRelease>();
+
+/**
+ * Test seam: serve `release` for `connectorKey` in place of its checked-in pin,
+ * or restore the pin when `release` is null. Production never calls it. The
+ * checked-in pins are the signed releases, so a test needs this to register a
+ * release that declares terminal coverage before any such pin exists.
+ */
+export function __setLocalCollectorReleaseForTest(connectorKey: string, release: LocalCollectorRelease | null): void {
+  if (release) {
+    releaseOverrides.set(connectorKey, release);
+  } else {
+    releaseOverrides.delete(connectorKey);
+  }
+}
 
 /**
  * The pinned profile for a canonical connector key, or `null` when the local
@@ -37,6 +59,39 @@ const CONNECTOR_KEY = /^[a-z0-9][a-z0-9-]*$/;
  * missing or does not hash to its pin.
  */
 export function readLocalCollectorProfile(connectorKey: string): Record<string, unknown> | null {
+  return readPinnedProfile(connectorKey)?.profile ?? null;
+}
+
+/** The server's current OCI artifact identity for a local-device connector. */
+export function readLocalCollectorArtifactDigest(connectorKey: string): string | null {
+  const override = releaseOverrides.get(connectorKey);
+  if (override) {
+    return override.artifactDigest;
+  }
+  try {
+    return readPinnedProfile(connectorKey)?.digest ?? null;
+  } catch {
+    // A missing or invalid pin cannot establish executable identity.
+    return null;
+  }
+}
+
+/** The installed execution release as one atomically read, pin-verified pair. */
+export function readLocalCollectorRelease(connectorKey: string): LocalCollectorRelease | null {
+  const override = releaseOverrides.get(connectorKey);
+  if (override) {
+    return override;
+  }
+  try {
+    const pinned = readPinnedProfile(connectorKey);
+    return pinned ? { artifactDigest: pinned.digest, manifest: pinned.profile } : null;
+  } catch {
+    // A missing or invalid pair cannot establish which release was executed.
+    return null;
+  }
+}
+
+function readPinnedProfile(connectorKey: string): { digest: string; profile: Record<string, unknown> } | null {
   if (!CONNECTOR_KEY.test(connectorKey)) {
     return null;
   }
@@ -47,10 +102,10 @@ export function readLocalCollectorProfile(connectorKey: string): Record<string, 
   const pin = JSON.parse(readFileSync(pinUrl, "utf8")) as LocalCollectorProfilePin;
   const bytes = readFileSync(new URL(`./local-collector-profiles/${connectorKey}.json`, import.meta.url));
   const actual = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-  if (pin.connector_key !== connectorKey || actual !== pin.profile_sha256) {
+  if (pin.connector_key !== connectorKey || !ARTIFACT_DIGEST.test(pin.digest) || actual !== pin.profile_sha256) {
     throw new Error(
       `local collector profile ${connectorKey}.json hashes to ${actual}, but its pin (${pin.digest}) says ${pin.profile_sha256}`
     );
   }
-  return JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+  return { digest: pin.digest, profile: JSON.parse(bytes.toString("utf8")) as Record<string, unknown> };
 }

@@ -504,6 +504,44 @@ test("source webhook route accepts schedule_run as a webhook-classified run requ
   });
 });
 
+test("source webhook refuses a local-device connection at shared run admission", async () => {
+  await withHarness(async ({ connectorInstanceId, rsUrl, secret, sourceId }) => {
+    getDb()
+      .prepare("UPDATE connector_instances SET source_kind = 'local_device' WHERE connector_instance_id = ?")
+      .run(connectorInstanceId);
+
+    const refused = await postWebhook(
+      rsUrl,
+      sourceId,
+      secret,
+      "evt_local_device_webhook_refused",
+      '{"action":"schedule_run"}'
+    );
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    const error = objectField(refused.body, "error");
+    assert.equal(error.code, "local_device_control_unsupported");
+    assert.ok(String(error.message).includes("cannot be started by the reference server"));
+    assert.equal(
+      (
+        getDb()
+          .prepare("SELECT COUNT(*) AS count FROM source_webhook_run_receipts WHERE source_id = ? AND event_id = ?")
+          .get(sourceId, "evt_local_device_webhook_refused") as { count: number }
+      ).count,
+      0,
+      "refused webhook admission creates no run receipt"
+    );
+    assert.equal(
+      (
+        getDb()
+          .prepare("SELECT COUNT(*) AS count FROM controller_active_runs WHERE connector_instance_id = ?")
+          .get(connectorInstanceId) as { count: number }
+      ).count,
+      0,
+      "refused webhook admission creates no active run"
+    );
+  });
+});
+
 test("source webhook route keeps a blocked signed schedule event generic after policy becomes allowed", async () => {
   await withHarness(async ({ connectorInstanceId, rsUrl, secret, sourceId }) => {
     await assertBlockedScheduleStaysGenericDuplicate({

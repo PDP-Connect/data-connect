@@ -155,7 +155,10 @@ import {
   stageOAuthAuthorizationCodeRequest,
   updateRegisteredClientName,
 } from "./auth.ts";
-import { autoEnrollEligibleSchedules } from "./auto-enroll-eligible-schedules.ts";
+import {
+  autoEnrollEligibleSchedules,
+  listServerRunnableConnectorInstanceIds,
+} from "./auto-enroll-eligible-schedules.ts";
 import type { CimdFetchDependencies } from "./cimd.ts";
 import { acquireDefaultDeliveryWorker, getDefaultDeliveryWorker } from "./client-event-delivery-worker.ts";
 import {
@@ -207,7 +210,11 @@ import {
 } from "./deployment-diagnostics.ts";
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import { deriveReferenceFreshness } from "./freshness.ts";
-import { readLocalCollectorProfile } from "./local-collector-profiles.ts";
+import {
+  readLocalCollectorArtifactDigest,
+  readLocalCollectorProfile,
+  readLocalCollectorRelease,
+} from "./local-collector-profiles.ts";
 import {
   encodeHostedMcpSelection,
   encodeHostedMcpStreamSelection,
@@ -7064,7 +7071,12 @@ export function buildAsApp(opts: ServerOpts = {}) {
     ensureReferenceConnectorCatalogEntry,
     generateReferenceSecret,
     generateSpineId,
+    getExpectedArtifactDigest: readLocalCollectorArtifactDigest,
     getConnectorManifest: (connectorId: string) => getConnectorManifest(connectorId),
+    // The local server executes the installed, signature-verified release.
+    // Resolve its profile and artifact digest together for the authorized
+    // connector instance so a catalog refresh cannot splice two releases.
+    getRegisteredCollectionProfileRelease: (connectorId: string) => readLocalCollectorRelease(connectorId),
     getDefaultConnectorDetailGapStore,
     getOwnerSubjectId,
     getSemanticCapabilityIdentity,
@@ -7080,6 +7092,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     prepareDeviceFinalRecords,
     putSyncState,
     readCollectorProtocolHeader,
+    // The same fenced verdict the connector summary shows, so device
+    // diagnostics never claim coverage the owner projection has retired.
+    readCurrentLocalCoverage: async (connectorInstanceId: string) => {
+      const summary = await getConnectorSummaryForRoute(connectorInstanceId, controller);
+      if (!(summary && "coverage_as_of" in summary && summary.connection_health)) {
+        return null;
+      }
+      return { asOf: summary.coverage_as_of, axis: summary.connection_health.axes.coverage };
+    },
     readReferenceLocalConnectorCatalogManifest,
     requireDeviceExporterCredential,
     requireOwnerSession: ownerAuth.requireOwnerSession,
@@ -9654,7 +9675,7 @@ export async function startServer(opts: ServerOpts = {}) {
           ownerAuthSubjectId,
           canonicalId
         );
-        return instances.map((instance) => instance.connectorInstanceId);
+        return listServerRunnableConnectorInstanceIds(instances);
       },
       listConnectors: async () => {
         const manifests = await collectValidRegisteredConnectorManifests({

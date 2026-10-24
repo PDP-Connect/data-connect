@@ -160,6 +160,16 @@ test("SQLite processing reservation acceptance is fenced by current manifest and
       VALUES('dev_attempt_context', 'owner_attempt_context', 'Attempt context', ?, ?)
     `)
       .run(NOW, NOW);
+    // Each durable record and the acceptance take the connection's next collection revision.
+    getDb()
+      .prepare(`
+      INSERT INTO connector_instances(
+        connector_instance_id, owner_subject_id, connector_id, display_name, status,
+        source_kind, source_binding_key, source_binding_json, created_at, updated_at
+      ) VALUES('cin_attempt_context', 'owner_attempt_context', 'attempt-context-test', 'Attempt context', 'active',
+        'local_device', 'cin_attempt_context', '{}', ?, ?)
+    `)
+      .run(NOW, NOW);
     await proveAttemptFences({
       advancePrefix: async (record) => advanceSqliteDeviceIngestPrefix(record, 0),
       replaceManifest: (manifest) => {
@@ -170,6 +180,15 @@ test("SQLite processing reservation acceptance is fenced by current manifest and
       },
       store: createSqliteDeviceExporterStore(),
     });
+    assert.equal(
+      (
+        getDb()
+          .prepare("SELECT collection_revision_event FROM connector_instances WHERE connector_instance_id = ?")
+          .get("cin_attempt_context") as { collection_revision_event: string | null }
+      ).collection_revision_event,
+      "batch_accepted",
+      "the acceptance took the newest collection revision"
+    );
   } finally {
     closeDb();
   }
@@ -182,6 +201,7 @@ test("dedicated Postgres processing reservation acceptance locks and fences curr
   try {
     await postgresQuery("DELETE FROM device_ingest_batch_outcomes WHERE device_id = 'dev_attempt_context'");
     await postgresQuery("DELETE FROM device_exporters WHERE device_id = 'dev_attempt_context'");
+    await postgresQuery("DELETE FROM connector_instances WHERE connector_instance_id = 'cin_attempt_context'");
     await postgresQuery("DELETE FROM connectors WHERE connector_id = 'attempt-context-test'");
     await postgresQuery("INSERT INTO connectors(connector_id, manifest, created_at) VALUES($1, $2::jsonb, $3)", [
       "attempt-context-test",
@@ -192,6 +212,15 @@ test("dedicated Postgres processing reservation acceptance locks and fences curr
       `INSERT INTO device_exporters(device_id, owner_subject_id, display_name, created_at, updated_at)
          VALUES($1, $2, $3, $4, $5)`,
       ["dev_attempt_context", "owner_attempt_context", "Attempt context", NOW, NOW]
+    );
+    // Each durable record and the acceptance take the connection's next collection revision.
+    await postgresQuery(
+      `INSERT INTO connector_instances(
+         connector_instance_id, owner_subject_id, connector_id, display_name, status,
+         source_kind, source_binding_key, source_binding_json, created_at, updated_at
+       ) VALUES('cin_attempt_context', 'owner_attempt_context', 'attempt-context-test', 'Attempt context', 'active',
+         'local_device', 'cin_attempt_context', '{}'::jsonb, $1, $1)`,
+      [NOW]
     );
     await proveAttemptFences({
       advancePrefix: async (record) =>
@@ -206,9 +235,18 @@ test("dedicated Postgres processing reservation acceptance locks and fences curr
       },
       store: createPostgresDeviceExporterStore(),
     });
+    const highWater = await postgresQuery<{ collection_revision_event: string | null }>(
+      "SELECT collection_revision_event FROM connector_instances WHERE connector_instance_id = 'cin_attempt_context'"
+    );
+    assert.equal(
+      highWater.rows[0]?.collection_revision_event,
+      "batch_accepted",
+      "the acceptance took the newest collection revision"
+    );
   } finally {
     await postgresQuery("DELETE FROM device_ingest_batch_outcomes WHERE device_id = 'dev_attempt_context'");
     await postgresQuery("DELETE FROM device_exporters WHERE device_id = 'dev_attempt_context'");
+    await postgresQuery("DELETE FROM connector_instances WHERE connector_instance_id = 'cin_attempt_context'");
     await postgresQuery("DELETE FROM connectors WHERE connector_id = 'attempt-context-test'");
     await closePostgresStorage();
   }

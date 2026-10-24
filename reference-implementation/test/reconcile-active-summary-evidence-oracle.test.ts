@@ -922,10 +922,18 @@ test("SQLite route fails terminal facts closed when bounded v3 replay contention
       assert.equal(v2Wins, 2, "the barrier made exactly its bounded two replay attempts");
       assert.equal(route.terminal_facts.state, "stale");
       assert.equal(route.terminal_facts.reason_code, "terminal_fold_contention");
+      const rawDurable = getDb()
+        .prepare("SELECT stream_latest_facts_json FROM connector_summary_evidence WHERE connector_instance_id = ?")
+        .get(INSTANCE_ID) as { stream_latest_facts_json: string | null };
       assert.match(
-        JSON.stringify((await getConnectorSummaryEvidence(INSTANCE_ID)).stream_latest_facts),
+        String(rawDurable.stream_latest_facts_json),
         TOP_LEVEL_REGEX_3,
         "the raw durable v2 row may still contain history, but the same route cannot trust it"
+      );
+      assert.equal(
+        (await getConnectorSummaryEvidence(INSTANCE_ID)).stream_latest_facts,
+        null,
+        "a read credits no stream from the version-behind durable row"
       );
     } finally {
       __testOnlySetFoldPauseHook(null);

@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { formatCoverageAxis, formatFreshnessAxis, formatOutboxAxis } from "@pdpp/display";
+import { formatStreamCollectionFacts } from "./collection-report.ts";
 import {
   deriveAutoPausedBanner,
   deriveConnectionNextStep,
@@ -2347,4 +2348,66 @@ test("formatSourceHeartbeat reports unknown when the server derived no health", 
 
   assert.equal(chip.value, "unknown");
   assert.doesNotMatch(chip.label, /starting/, "an underived status is not evidence of life");
+});
+
+// Local coverage is a fact about one run, never a present-tense claim: the
+// owner sees "complete as of <time>", and the chip names the run, release and
+// revision it describes.
+const COVERAGE_AS_OF = {
+  artifact_digest: `sha256:${"a".repeat(64)}`,
+  collection_revision: 7,
+  committed_at: "2026-10-22T10:00:00.000Z",
+  evidence: "terminal_run",
+  run_id: "run-a",
+  run_sequence: 3,
+} as const;
+
+test("coverage chip reads 'complete as of <time>' when the reference names the run it describes", () => {
+  const axes = {
+    attention: null,
+    coverage: "complete",
+    freshness: "fresh",
+    outbox: "idle",
+  } as const;
+  const [coverage] = summarizeAxisChips(axes as never, {
+    coverageAsOf: COVERAGE_AS_OF,
+    isLocalDeviceBacked: true,
+  });
+  assert.equal(coverage?.label, "Coverage · complete as of 2026-10-22 10:00:00Z");
+  assert.equal(coverage?.value, "complete as of 2026-10-22 10:00:00Z");
+  assert.match(coverage?.title ?? "", /run run-a/);
+  assert.match(coverage?.title ?? "", /sha256:a{12}/);
+  assert.match(coverage?.title ?? "", /revision 7/);
+});
+
+test("coverage chip adds no as-of to unknown coverage or when the reference sends none", () => {
+  const unknown = {
+    attention: null,
+    coverage: "unknown",
+    freshness: "fresh",
+    outbox: "idle",
+  } as const;
+  const [unknownChip] = summarizeAxisChips(unknown as never, {
+    coverageAsOf: COVERAGE_AS_OF,
+    isLocalDeviceBacked: true,
+  });
+  assert.equal(unknownChip?.label, formatCoverageAxis("unknown").label);
+  const complete = {
+    attention: null,
+    coverage: "complete",
+    freshness: "fresh",
+    outbox: "idle",
+  } as const;
+  const [plain] = summarizeAxisChips(complete as never, {
+    coverageAsOf: null,
+    isLocalDeviceBacked: true,
+  });
+  assert.equal(plain?.label, formatCoverageAxis("complete").label);
+});
+
+test("per-stream coverage reads 'complete as of <time>' with the connection's as-of", () => {
+  const facts = formatStreamCollectionFacts({ coverage_condition: "complete", stream: "messages" } as never, {
+    coverageAsOf: COVERAGE_AS_OF,
+  });
+  assert.equal(facts.coverage.label, "Coverage · complete as of 2026-10-22 10:00:00Z");
 });

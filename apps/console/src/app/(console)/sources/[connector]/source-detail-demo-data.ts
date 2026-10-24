@@ -267,6 +267,7 @@ export function buildRecoveryDemoModel(): ConnectorPageModel {
     connectorInstanceId: connectionId,
     // A local-device source: the reference reports no install state for it.
     connectorNotInstalled: false,
+    coverageAsOf: null,
     coverageHorizons: [],
     deviceLabels: ["workstation"],
     displayName: "Claude Code workstation",
