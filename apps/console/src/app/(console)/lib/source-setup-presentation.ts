@@ -200,19 +200,16 @@ export function sourceSetupRowIsUnavailable(entry: ConnectorCatalogEntry): boole
 /** The owner-facing status label + tone for first-account setup. */
 export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStatus {
   if (entry.publicTier === "development") {
-    // "Not built yet" and "In development" are deliberately different labels:
-    // a scaffold has no collection code at all (there is nothing to test),
-    // while a real Development entry has an implemented, self-testable setup
-    // path that simply has not been proven against a live account yet.
-    // Collapsing these into one badge would hide exactly the distinction the
-    // owner needs to decide whether clicking a card can do anything. "Not
-    // built yet" reads as a known roadmap gap (part of the shared "not
-    // available yet" family), never as a
-    // broken build.
+    // "Not available yet" and "In development" are deliberately different
+    // labels: a scaffold has nothing to test, while a real Development entry
+    // has a self-testable setup path that simply has not been proven against
+    // a live account yet. A scaffold is only a connector the signed catalog
+    // does not publish (see `buildOwnerConnectorCatalog`), so the label makes
+    // no claim about why: the vendored roster behind it can lag the catalog.
     return entry.isKnownScaffold
       ? {
-          description: "This connector is registered, but nobody has written its collection code yet.",
-          label: "Not built yet",
+          description: "This connector is not available to add yet.",
+          label: "Not available yet",
           tone: "border-border bg-muted/30 text-muted-foreground",
         }
       : {
@@ -414,8 +411,8 @@ function developmentFallbackGuidance(entry: ConnectorCatalogEntry): string {
   if (entry.isKnownScaffold) {
     const note = entry.listingNote;
     return note
-      ? `This connector is scaffolded, not finished, and cannot collect data yet: ${note}`
-      : "This connector is scaffolded, not finished: it can reach the provider but does not collect data yet. There is nothing to test here yet.";
+      ? `This connector is not available to add yet: ${note}`
+      : "This connector is not available to add yet. There is nothing to test here.";
   }
   // A deployment-blocked entry needs the exact missing settings named, not a
   // generic "unproven" note -- that fact is more actionable than anything

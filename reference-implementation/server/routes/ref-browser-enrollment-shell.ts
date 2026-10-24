@@ -151,6 +151,8 @@ export interface MountRefBrowserEnrollmentShellContext {
   ensureRequestId: (res: RouteResponse) => string;
   getOwnerSubjectId: (req: unknown) => string;
   handleError: (res: unknown, err: unknown) => void;
+  /** True when the verified signed catalog publishes this connector; it then outranks the vendored scaffold roster. */
+  isCatalogPublished?: (connectorId: string) => Promise<boolean>;
   now?: () => string;
   pdppError: PdppErrorFn;
   requireOwnerSession: MiddlewareHandler;
@@ -276,7 +278,9 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
         // Reject unknown connector before doing anything else (404).
         const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
 
-        const support = browserEnrollmentSupport(connectorId, manifest);
+        const support = browserEnrollmentSupport(connectorId, manifest, {
+          catalogPublished: (await ctx.isCatalogPublished?.(connectorId)) === true,
+        });
         if (!support.browserBound) {
           await emitShellAudit(ctx, req, res, {
             connectorId,

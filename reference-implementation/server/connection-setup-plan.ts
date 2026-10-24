@@ -355,6 +355,17 @@ export const SUPPORTED_BROWSER_COLLECTOR_CONNECTORS: readonly SupportedBrowserCo
 );
 
 /**
+ * Availability facts that come from the signed connector catalog rather than
+ * the vendored conformance roster. `catalogPublished` is true when the
+ * verified catalog lists the connector; it is absent or false when the
+ * catalog does not list it or could not be read, which never counts as
+ * evidence that a connector is available.
+ */
+export interface CatalogAvailabilityOptions {
+  readonly catalogPublished?: boolean;
+}
+
+/**
  * Whether this connector key names a KNOWN scaffold: manifest ships,
  * registers, and validates, but its `collect()` is an unconditional
  * `SKIP_RESULT` placeholder with no real parsing/pagination/cursor logic.
@@ -367,7 +378,16 @@ export const SUPPORTED_BROWSER_COLLECTOR_CONNECTORS: readonly SupportedBrowserCo
  * inside a Development disclosure, because clicking it can never collect
  * anything.
  */
-export function isKnownScaffoldConnector(connectorKey: string | null | undefined): boolean {
+export function isKnownScaffoldConnector(
+  connectorKey: string | null | undefined,
+  options: CatalogAvailabilityOptions = {}
+): boolean {
+  // The signed connector catalog outranks the vendored roster: a connector
+  // the verified catalog publishes is a real, installable package, whatever
+  // the roster snapshot says.
+  if (options.catalogPublished === true) {
+    return false;
+  }
   return (
     typeof connectorKey === "string" &&
     (KNOWN_SCAFFOLD_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorKey) ?? connectorKey)
@@ -627,16 +647,20 @@ export interface BrowserEnrollmentSupport {
  * A known scaffold can never collect, so it cannot add an account. The
  * scaffold list comes from the optional conformance roster; when the roster
  * did not load, no connector can add an account, because a scaffold cannot be
- * told apart from a real connector.
+ * told apart from a real connector. A connector the signed catalog publishes
+ * is never treated as a scaffold, so the roster is not consulted for it.
  */
 export function browserEnrollmentSupport(
   connectorKey: string,
-  manifest: ConnectorManifestLike | null
+  manifest: ConnectorManifestLike | null,
+  options: CatalogAvailabilityOptions = {}
 ): BrowserEnrollmentSupport {
   const browserBound = classifyConnectorIntentModality(manifest) === "browser_bound";
   return {
     browserBound,
-    canAddAccount: browserBound && CONFORMANCE_ROSTER_LOADED && !isKnownScaffoldConnector(connectorKey),
+    canAddAccount:
+      browserBound &&
+      (options.catalogPublished === true || (CONFORMANCE_ROSTER_LOADED && !isKnownScaffoldConnector(connectorKey))),
   };
 }
 
@@ -903,6 +927,7 @@ type ConnectionSetupPlanContext = Readonly<{
   manifest: ConnectorManifestLike | null;
   setupModality: ConnectorSetupModality;
   validationMode: CredentialValidationMode;
+  catalogAvailability: CatalogAvailabilityOptions;
 }>;
 
 function buildManualUploadSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
@@ -998,7 +1023,7 @@ function buildLocalCollectorSetupPlan(ctx: ConnectionSetupPlanContext): Connecti
 function buildBrowserBoundSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
   // The same rule as the console's browser-session routes and the RI's
   // enrollment-shell route. Production readiness is the tier badge, not a gate.
-  const hasManualBrowserPath = browserEnrollmentSupport(ctx.connectorKey, ctx.manifest).canAddAccount;
+  const hasManualBrowserPath = browserEnrollmentSupport(ctx.connectorKey, ctx.manifest, ctx.catalogAvailability).canAddAccount;
   return {
     catalogDisposition: hasManualBrowserPath ? "browser_collector_manual" : "browser_bound_runbook",
     connectorKey: ctx.connectorKey,
@@ -1202,7 +1227,7 @@ export function buildConnectionSetupPlan(args: {
   readonly configuredProviderAuthConnectorKeys?: readonly string[];
   readonly deploymentEnv?: DeploymentEnvLike;
   readonly manifest: ConnectorManifestLike | null;
-}): ConnectionSetupPlan {
+} & CatalogAvailabilityOptions): ConnectionSetupPlan {
   const rawConnectorKey = typeof args.connectorKey === "string" ? args.connectorKey.trim() : "";
   const connectorKey =
     (rawConnectorKey ? canonicalConnectorKey(rawConnectorKey) : null) ??
@@ -1243,6 +1268,7 @@ export function buildConnectionSetupPlan(args: {
     manifest: args.manifest,
     setupModality,
     validationMode,
+    catalogAvailability: { catalogPublished: args.catalogPublished === true },
   };
 
   if (setupModality === "manual_or_upload") {

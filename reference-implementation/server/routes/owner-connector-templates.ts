@@ -15,6 +15,7 @@
 import {
   browserEnrollmentSupport,
   buildConnectionSetupPlan,
+  type CatalogAvailabilityOptions,
   isKnownScaffoldConnector,
   staticSecretCredentialCaptureFromManifest,
 } from "../connection-setup-plan.ts";
@@ -88,6 +89,13 @@ export interface MountOwnerConnectorTemplatesContext {
   getConnectorManifest: (connectorId: string) => Promise<ConnectorManifestLike | null> | ConnectorManifestLike | null;
   getOwnerTokenSubjectId: (req: unknown) => string;
   handleError: (res: unknown, err: unknown) => void;
+  /**
+   * Canonical keys of connectors the verified signed catalog publishes. The
+   * catalog outranks the vendored roster for availability. A read failure
+   * must resolve to an empty set (never to roster-derived availability); the
+   * install service serves its last verified copy before that happens.
+   */
+  listCatalogPublishedConnectorKeys?: () => Promise<ReadonlySet<string>> | ReadonlySet<string>;
   listRegisteredConnectorIds: () => Promise<readonly string[]> | readonly string[];
   projectStorageDisplayName: (
     displayName: string | null | undefined,
@@ -198,7 +206,8 @@ export function isSupportedOwnerActionPlan(plan: ReturnType<typeof buildConnecti
  */
 export function isOwnerSessionBrowserActionPlan(
   plan: ReturnType<typeof buildConnectionSetupPlan>,
-  manifest: ConnectorManifestLike
+  manifest: ConnectorManifestLike,
+  availability: CatalogAvailabilityOptions = {}
 ): boolean {
   if (plan.connectorModality !== "browser_bound") {
     return false;
@@ -209,25 +218,27 @@ export function isOwnerSessionBrowserActionPlan(
   return (
     plan.catalogDisposition === "static_secret_connect" &&
     plan.setupModality === "static_secret" &&
-    browserEnrollmentSupport(plan.connectorKey, manifest).canAddAccount
+    browserEnrollmentSupport(plan.connectorKey, manifest, availability).canAddAccount
   );
 }
 
 function isOwnerActionablePlan(
   plan: ReturnType<typeof buildConnectionSetupPlan>,
-  manifest: ConnectorManifestLike
+  manifest: ConnectorManifestLike,
+  availability: CatalogAvailabilityOptions = {}
 ): boolean {
-  return isSupportedOwnerActionPlan(plan) || isOwnerSessionBrowserActionPlan(plan, manifest);
+  return isSupportedOwnerActionPlan(plan) || isOwnerSessionBrowserActionPlan(plan, manifest, availability);
 }
 
 function isUatExposablePlan(
   plan: ReturnType<typeof buildConnectionSetupPlan>,
   manifest: ConnectorManifestLike,
   connectorKey?: string | null,
-  allowlist?: ReadonlySet<string>
+  allowlist?: ReadonlySet<string>,
+  availability: CatalogAvailabilityOptions = {}
 ): boolean {
   const basePlan = [
-    isOwnerActionablePlan(plan, manifest),
+    isOwnerActionablePlan(plan, manifest, availability),
     plan.catalogDisposition === "static_secret_experimental",
     plan.catalogDisposition === "static_secret_connect" &&
       plan.setupModality === "static_secret" &&
@@ -260,6 +271,7 @@ function buildTemplateSupportedActions(args: {
   plan: ReturnType<typeof buildConnectionSetupPlan>;
   resource: string;
   uatExposeUnlistedConnectors?: boolean;
+  availability?: CatalogAvailabilityOptions;
 }): OwnerAgentControlAction[] {
   const rs = stripTrailingSlash(args.resource);
   const isActionable =
@@ -276,7 +288,7 @@ function buildTemplateSupportedActions(args: {
       },
     ];
   }
-  if (isActionable && isOwnerSessionBrowserActionPlan(args.plan, args.manifest)) {
+  if (isActionable && isOwnerSessionBrowserActionPlan(args.plan, args.manifest, args.availability)) {
     return [
       {
         family: "initiate_connection",
@@ -300,13 +312,14 @@ function buildTemplateSupportedActions(args: {
 
 function projectSetupPlan(
   manifest: ConnectorManifestLike,
-  plan: ReturnType<typeof buildConnectionSetupPlan>
+  plan: ReturnType<typeof buildConnectionSetupPlan>,
+  availability: CatalogAvailabilityOptions
 ): Record<string, unknown> {
   // Owner-facing actionability: manifest is listed AND plan is actionable (lifecycle authority unchanged).
   // UAT exposure via uat_expose_unlisted_connectors does not modify setup_plan; it is a separate flag
   // for the console to enable testing without claiming Supported or Preview tier.
   const isActionableManifest = isActionablePublicListing(manifest);
-  const isActionablePlan = isOwnerActionablePlan(plan, manifest);
+  const isActionablePlan = isOwnerActionablePlan(plan, manifest, availability);
   const ownerActionable = isActionableManifest && isActionablePlan;
   return {
     catalog_disposition: plan.catalogDisposition,
@@ -329,13 +342,16 @@ function projectTemplate(
   ctx: MountOwnerConnectorTemplatesContext,
   manifest: ConnectorManifestLike,
   connectionsByConnector: ReadonlyMap<string, readonly ConnectorInstanceRow[]>,
-  resource: string
+  resource: string,
+  catalogPublishedKeys: ReadonlySet<string>
 ): Record<string, unknown> | null {
   const connectorKey = connectorKeyFromManifest(ctx, manifest);
   if (!connectorKey) {
     return null;
   }
+  const availability: CatalogAvailabilityOptions = { catalogPublished: catalogPublishedKeys.has(connectorKey) };
   const plan = buildConnectionSetupPlan({
+    ...availability,
     configuredProviderAuthConnectorKeys: ctx.configuredProviderAuthConnectorKeys ?? [],
     connectorKey,
     manifest,
@@ -354,8 +370,10 @@ function projectTemplate(
 
   const uatExposeUnlistedConnectors =
     ctx.uatExposeUnlistedConnectors === true &&
-    ((isUnproven && isUatExposablePlan(plan, manifest, connectorKey, ctx.uatConnectorAllowlist)) ||
-      (isDevelopment && isAllowlisted && isUatExposablePlan(plan, manifest, connectorKey, ctx.uatConnectorAllowlist)));
+    ((isUnproven && isUatExposablePlan(plan, manifest, connectorKey, ctx.uatConnectorAllowlist, availability)) ||
+      (isDevelopment &&
+        isAllowlisted &&
+        isUatExposablePlan(plan, manifest, connectorKey, ctx.uatConnectorAllowlist, availability)));
 
   return {
     connection_count: connections.length,
@@ -370,13 +388,19 @@ function projectTemplate(
     // The console needs this to decide whether a Development-tier card may
     // ever render an add action -- a scaffold must never get one, because
     // clicking it cannot collect anything.
-    is_known_scaffold: isKnownScaffoldConnector(connectorKey),
+    is_known_scaffold: isKnownScaffoldConnector(connectorKey, availability),
     object: "owner_connector_template",
     public_listing: manifest.capabilities?.public_listing ?? null,
     registration_status: "registered",
-    setup_plan: projectSetupPlan(manifest, plan),
+    setup_plan: projectSetupPlan(manifest, plan, availability),
     stream_count: Array.isArray(manifest.streams) ? manifest.streams.length : 0,
-    supported_actions: buildTemplateSupportedActions({ manifest, plan, resource, uatExposeUnlistedConnectors }),
+    supported_actions: buildTemplateSupportedActions({
+      availability,
+      manifest,
+      plan,
+      resource,
+      uatExposeUnlistedConnectors,
+    }),
     uat_expose_unlisted_connectors: uatExposeUnlistedConnectors,
     version: manifest.version ?? null,
   };
@@ -434,9 +458,12 @@ export function mountOwnerConnectorTemplates(app: AppLike, ctx: MountOwnerConnec
       try {
         const resource = ctx.resolveResource(req);
         const ownerSubjectId = ctx.getOwnerTokenSubjectId(req);
-        const [templates, connections] = await Promise.all([
+        const [templates, connections, catalogPublishedKeys] = await Promise.all([
           collectConnectorTemplates(ctx),
           connectionsByConnectorKey(ctx, ownerSubjectId),
+          Promise.resolve(ctx.listCatalogPublishedConnectorKeys?.() ?? new Set<string>()).catch(
+            () => new Set<string>() as ReadonlySet<string>
+          ),
         ]);
         res.json({
           data: templates
@@ -445,7 +472,7 @@ export function mountOwnerConnectorTemplates(app: AppLike, ctx: MountOwnerConnec
               // template from an owner agent — same isolation as the read loop
               // in collectConnectorTemplates above.
               try {
-                return projectTemplate(ctx, manifest, connections, resource);
+                return projectTemplate(ctx, manifest, connections, resource, catalogPublishedKeys);
               } catch {
                 return null;
               }
