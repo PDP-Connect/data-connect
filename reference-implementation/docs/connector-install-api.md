@@ -31,11 +31,13 @@ digest that is present in this result.
 
 The server keeps the last verified catalog in memory and serves it from this
 endpoint for `PDPP_CONNECTOR_CATALOG_TTL_MS` (default 5 minutes). If a refresh
-fails, the server keeps serving that copy, logs the failure, and tries the
-source again after the next TTL window. A catalog that fails signature or shape
-checks is rejected and does not replace the copy. Install and update always
-fetch and verify the catalog before they choose a digest, so they never act on
-a copy older than the request.
+fails, the server keeps serving that copy and logs each failed refresh once.
+Reads try the source again after the next TTL window. A catalog that fails
+signature or shape checks is rejected and does not replace the copy. Install
+and update do not use that copy. Each one starts a catalog fetch, or joins one
+already in flight, and verifies the result before it chooses a digest. A joined
+fetch may have started before the request, so the catalog it uses can predate
+the request.
 
 `GET /v1/owner/connector-install/status` returns:
 
