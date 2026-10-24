@@ -2,21 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from "node:crypto";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
-import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { existingSourcesByConnectorCatalog } from "../../components/existing-sources-by-connector.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../components/source-setup-catalog.tsx";
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
+import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
 import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
-import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
+import { ConnectorUpdatesHeader } from "./connector-updates-header.tsx";
+import { ConnectorUpdateProvider } from "./connector-update-context.tsx";
 import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
 
 export const dynamic = "force-dynamic";
@@ -126,16 +128,18 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   const sourceQuery = typeof params.source_q === "string" ? params.source_q.trim() : "";
   return (
     <RecordroomShellWithPalette>
-      <AddSourceHeader />
-      <SourceSetupCatalog
-        action={dashboardRoutes.section.addSource}
-        catalog={catalog}
-        existingSourcesByConnector={existingSourcesByConnector}
-        installCatalogBusySnapshotId={installCatalogBusySnapshotId}
-        installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
-        installLifecycleByConnector={installLifecycleByConnector}
-        query={sourceQuery}
-      />
+      <ConnectorUpdateProvider>
+        <ConnectorUpdatesHeader enabled={!(process.env.NODE_ENV !== "production" && params.demo === "atlas")} />
+        <SourceSetupCatalog
+          action={dashboardRoutes.section.addSource}
+          catalog={catalog}
+          existingSourcesByConnector={existingSourcesByConnector}
+          installCatalogBusySnapshotId={installCatalogBusySnapshotId}
+          installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
+          installLifecycleByConnector={installLifecycleByConnector}
+          query={sourceQuery}
+        />
+      </ConnectorUpdateProvider>
       <LocalConnectorSourcesPanel connectorIcons={connectorIcons} sources={localSources} />
     </RecordroomShellWithPalette>
   );

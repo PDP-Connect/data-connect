@@ -28,6 +28,8 @@ export interface ConnectorInstallRowModel {
   readonly installedDigest: string | null;
   readonly installedDigestFull: string | null;
   readonly installedVersion: string | null;
+  /** True when the server's update plan requires owner review before this update can apply. */
+  readonly reviewRequired: boolean;
   readonly targetVersion: string | null;
   readonly tier: PublicConnectorTier;
 }
@@ -145,7 +147,8 @@ export function isUninstallableCatalogEntry(
 
 export function connectorInstallRowModel(
   entry: ConnectorCatalogEntry,
-  lifecycle: ConnectorInstallLifecycle
+  lifecycle: ConnectorInstallLifecycle,
+  options: { readonly reviewRequired?: boolean } = {}
 ): ConnectorInstallRowModel {
   const { catalog: target, installed } = lifecycle;
   const digest = targetDigest(lifecycle);
@@ -182,6 +185,7 @@ export function connectorInstallRowModel(
     installedDigest: shortConnectorDigest(installed?.digest ?? null),
     installedDigestFull: installed?.digest ?? null,
     installedVersion: installed?.version ?? null,
+    reviewRequired: options.reviewRequired === true && action?.kind === "update",
     targetVersion: target?.latest === true ? target.version : null,
     tier: tierFor(entry, lifecycle),
   };

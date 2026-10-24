@@ -9,6 +9,7 @@ import { createPdppCliCommand, getPdppCliPackageInfo, PDPP_CLI_BIN_NAME } from "
 import { readHelp, runRead } from "./read/commands.ts";
 import type { CommandIo } from "./ref/commands/call.ts";
 import { runRefCall } from "./ref/commands/call.ts";
+import { runRefConnectorUpdates } from "./ref/commands/connector-updates.ts";
 import { runRefConnectors } from "./ref/commands/connectors.ts";
 import { runRefEventSubscriptions } from "./ref/commands/event-subscriptions.ts";
 import { runRefGrant } from "./ref/commands/grant.ts";
@@ -49,6 +50,10 @@ Reference diagnostics (reference server only):
   ${PDPP_CLI_BIN_NAME} ref trace show <trace-id> --as-url <url>
   ${PDPP_CLI_BIN_NAME} ref connectors list --as-url <url>
   ${PDPP_CLI_BIN_NAME} ref connectors show <connector-id> --as-url <url>
+  ${PDPP_CLI_BIN_NAME} ref connectors updates plan --as-url <url>
+  ${PDPP_CLI_BIN_NAME} ref connectors updates review <plan-id> --connector-id <id> --target-digest <digest> --as-url <url>
+  ${PDPP_CLI_BIN_NAME} ref connectors updates apply <plan-id> [--connector-id <id,...>] [--consent-token <token>] [--idempotency-key <key>] --as-url <url>
+  ${PDPP_CLI_BIN_NAME} ref connectors updates status (--plan-id <id>|--batch-id <id>) --as-url <url>
   ${PDPP_CLI_BIN_NAME} ref event-subscriptions list --as-url <url> [--client-id <id>] [--grant-id <id>] [--status <status>]
   ${PDPP_CLI_BIN_NAME} ref event-subscriptions show <subscription-id> --as-url <url>
   ${PDPP_CLI_BIN_NAME} ref event-subscriptions disable <subscription-id> --as-url <url> [--reason <text>] [--yes]
@@ -80,7 +85,8 @@ type RefCommandHandler = (argv: string[], io: CommandIo, fetchImpl?: typeof fetc
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: command dispatcher with many top-level subcommands, splitting would scatter routing logic.
 export async function runCli(
   argv: string[],
-  io: RunCliIo = { stdout: process.stdout, stderr: process.stderr }
+  io: RunCliIo = { stderr: process.stderr, stdout: process.stdout },
+  fetchImpl?: typeof fetch
 ): Promise<number> {
   const [command, ...rest] = argv;
 
@@ -183,6 +189,16 @@ export async function runCli(
       io.stdout.write(
         `  ${PDPP_CLI_BIN_NAME} ref connectors show <connector-id> --as-url <url> [--owner-session <cookie>] [--format json|table] [--verbose]\n`
       );
+      io.stdout.write(`  ${PDPP_CLI_BIN_NAME} ref connectors updates plan --as-url <url> [--format json]\n`);
+      io.stdout.write(
+        `  ${PDPP_CLI_BIN_NAME} ref connectors updates review <plan-id> --connector-id <id> --target-digest <digest> --as-url <url>\n`
+      );
+      io.stdout.write(
+        `  ${PDPP_CLI_BIN_NAME} ref connectors updates apply <plan-id> [--connector-id <id,...>] [--consent-token <token>] [--idempotency-key <key>] --as-url <url>\n`
+      );
+      io.stdout.write(
+        `  ${PDPP_CLI_BIN_NAME} ref connectors updates status (--plan-id <id>|--batch-id <id>) --as-url <url>\n`
+      );
       io.stdout.write(
         `  ${PDPP_CLI_BIN_NAME} ref event-subscriptions list --as-url <url> [--client-id <id>] [--grant-id <id>] [--status <status>] [--owner-session <cookie>] [--format json|table]\n`
       );
@@ -205,22 +221,23 @@ export async function runCli(
     }
 
     const refDispatch: Record<string, RefCommandHandler> = {
-      login: runRefLogin,
       call: runRefCall,
-      run: runRefRun,
-      grant: runRefGrant,
-      trace: runRefTrace,
       connectors: runRefConnectors,
       "event-subscriptions": runRefEventSubscriptions,
+      grant: runRefGrant,
+      login: runRefLogin,
+      run: runRefRun,
+      trace: runRefTrace,
     };
-    const handler = refDispatch[refCommand];
+    const isConnectorUpdates = refCommand === "connectors" && refRest[0] === "updates";
+    const handler = isConnectorUpdates ? runRefConnectorUpdates : refDispatch[refCommand];
     if (!handler) {
       io.stderr.write(`Unknown ref command: ${refCommand}\n`);
       return 64;
     }
 
     try {
-      return await handler(refRest, io);
+      return await handler(isConnectorUpdates ? refRest.slice(1) : refRest, io, fetchImpl);
     } catch (error) {
       if (error instanceof PdppUsageError) {
         io.stderr.write(`${error.message}\n`);
