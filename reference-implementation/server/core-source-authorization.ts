@@ -163,7 +163,7 @@ function manifestStreams(declaration: SourceDeclaration): SourceDeclaration["str
 function requiredFields(stream: SourceDeclaration["streams"][number]): string[] {
   const required = stream.schema.required ?? [];
   if (!(Array.isArray(required) && required.every(isNonEmptyString)) || new Set(required).size !== required.length) {
-    fail(`Stream '${stream.name}' schema.required must contain unique field names`);
+    fail(`Stream '${stream.name}' schema.required must contain unique field names`, [stream.name]);
   }
   return required;
 }
@@ -181,12 +181,12 @@ function resolveFields(
   stream: SourceDeclaration["streams"][number]
 ): Pick<CoreStreamSelection, "fields" | "view"> {
   if (request.view && request.fields) {
-    fail(`Stream '${stream.name}' view and fields are mutually exclusive`);
+    fail(`Stream '${stream.name}' view and fields are mutually exclusive`, [stream.name]);
   }
   if (request.view) {
     const view = stream.views?.find((candidate) => candidate.id === request.view);
     if (!(view && isNonEmptyStringArray(view.fields))) {
-      fail(`Unknown view '${request.view}' on stream '${stream.name}'`);
+      fail(`Unknown view '${request.view}' on stream '${stream.name}'`, [stream.name]);
     }
     return { fields: includeRequiredFields(view.fields, stream), view: request.view };
   }
@@ -197,16 +197,16 @@ function resolveFields(
     // persistence backend.
     const fields = Object.keys(properties).sort();
     if (fields.length === 0) {
-      fail(`Stream '${stream.name}' snapshot has no fields to authorize`);
+      fail(`Stream '${stream.name}' snapshot has no fields to authorize`, [stream.name]);
     }
     return { fields };
   }
   if (!(stream.selection.fields && isNonEmptyStringArray(request.fields))) {
-    fail(`Stream '${stream.name}' does not support the requested field selection`);
+    fail(`Stream '${stream.name}' does not support the requested field selection`, [stream.name]);
   }
   const unknown = request.fields.filter((field) => !(field in properties));
   if (unknown.length > 0) {
-    fail(`Unknown fields on stream '${stream.name}': ${unknown.join(", ")}`);
+    fail(`Unknown fields on stream '${stream.name}': ${unknown.join(", ")}`, [stream.name]);
   }
   return { fields: includeRequiredFields(request.fields, stream) };
 }
@@ -222,7 +222,7 @@ function resolveResources(
     !(stream.selection.resources && isNonEmptyStringArray(resources)) ||
     new Set(resources).size !== resources.length
   ) {
-    fail(`Stream '${stream.name}' resources are not a supported unique non-empty selection`);
+    fail(`Stream '${stream.name}' resources are not a supported unique non-empty selection`, [stream.name]);
   }
   if (stream.primary_key.length === 1) {
     return [...resources];
@@ -232,7 +232,7 @@ function resolveResources(
     try {
       components = JSON.parse(resource);
     } catch {
-      fail(`Stream '${stream.name}' compound resource keys must be minified JSON string arrays`);
+      fail(`Stream '${stream.name}' compound resource keys must be minified JSON string arrays`, [stream.name]);
     }
     if (
       !Array.isArray(components) ||
@@ -240,7 +240,7 @@ function resolveResources(
       !components.every((component) => typeof component === "string") ||
       JSON.stringify(components) !== resource
     ) {
-      fail(`Stream '${stream.name}' compound resource key has the wrong shape`);
+      fail(`Stream '${stream.name}' compound resource key has the wrong shape`, [stream.name]);
     }
   }
   return [...resources];
@@ -254,10 +254,10 @@ function resolveTimeConstraint(
     return;
   }
   if (!stream.consent_time_field) {
-    fail(`Stream '${stream.name}' does not support time_range`);
+    fail(`Stream '${stream.name}' does not support time_range`, [stream.name]);
   }
   if (timeRange.since && timeRange.until && Date.parse(timeRange.since) > Date.parse(timeRange.until)) {
-    fail(`Stream '${stream.name}' time_range.since must not follow time_range.until`);
+    fail(`Stream '${stream.name}' time_range.since must not follow time_range.until`, [stream.name]);
   }
   return {
     field: stream.consent_time_field,
@@ -314,10 +314,18 @@ export function resolveCoreSelection(
     requests = cloneJson(preset.streams) as CoreStreamSelection[];
   }
   if (requests.length === 1 && requests[0]?.name === "*") {
-    const instanceIds = requests[0].instance_ids;
+    // Core §6 wildcard note (spec-core.md "Note on wildcards") and §5 selection rules: the requested parameters apply to every expanded
+    // stream and each expansion is validated like a concrete request, so a
+    // stream that cannot honor a constraint rejects the request instead of
+    // being silently broadened.
+    const wildcard = requests[0];
     requests = manifestStreams(declaration).map((stream) => ({
-      ...(instanceIds ? { instance_ids: [...instanceIds] } : {}),
+      ...(wildcard.fields ? { fields: [...wildcard.fields] } : {}),
+      ...(wildcard.instance_ids ? { instance_ids: [...wildcard.instance_ids] } : {}),
       name: stream.name,
+      ...(wildcard.resources ? { resources: [...wildcard.resources] } : {}),
+      ...(wildcard.time_range ? { time_range: { ...wildcard.time_range } } : {}),
+      ...(wildcard.view ? { view: wildcard.view } : {}),
     }));
   }
   return requests.map((request) => {
@@ -328,7 +336,7 @@ export function resolveCoreSelection(
     const fields = resolveFields(request, stream);
     const instanceIds = request.instance_ids ?? [];
     if (instanceIds.some((id) => !isNonEmptyString(id)) || new Set(instanceIds).size !== instanceIds.length) {
-      fail(`Stream '${stream.name}' instance_ids must be unique opaque handles`);
+      fail(`Stream '${stream.name}' instance_ids must be unique opaque handles`, [stream.name]);
     }
     const resources = resolveResources(request.resources, stream);
     const timeConstraint = resolveTimeConstraint(request.time_range, stream);
