@@ -5,6 +5,7 @@ import { buttonVariants } from "@pdpp/brand-react";
 import { PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getProviderAppConfig, type ProviderAppConfigGroup } from "../../lib/ref-client.ts";
@@ -60,7 +61,7 @@ export default async function ProviderAppConfigPage({ searchParams }: { searchPa
             Deployment overview
           </Link>
         }
-        breadcrumbs={[{ href: "/deployment", label: "Deployment" }, { label: "Provider authorization" }]}
+        breadcrumbs={breadcrumbsFor("/deployment/provider-apps", { label: "Provider authorization" })}
         description="Credentials that let this DataConnect instance start a provider's consent flow on the owner's behalf. Values are encrypted at rest and never displayed again once saved."
         title="Set up provider access"
       />

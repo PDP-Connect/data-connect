@@ -8,6 +8,7 @@ import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { ServerUnreachable } from "../../../../components/server-unreachable.tsx";
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../../../lib/owner-token.ts";
 import {
@@ -131,12 +132,12 @@ function StreamHealthReport({
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          { href: `/sources/${encodeURIComponent(connectionId)}`, label: connectionId },
+        breadcrumbs={breadcrumbsFor(
+          `${streamPath}/health`,
+          { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
           { href: streamPath, label: streamName },
-          { label: "health" },
-        ]}
+          { label: "health" }
+        )}
         count={
           <>
             sample {health.sampled.toLocaleString()} / {health.totalRecords.toLocaleString()}
@@ -295,12 +296,12 @@ function StreamHealthUnavailable({
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          { href: `/sources/${encodeURIComponent(connectionId)}`, label: connectionId },
+        breadcrumbs={breadcrumbsFor(
+          `/sources/${connectionId}/${streamName}/health`,
+          { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
           { label: streamName },
-          { label: "health" },
-        ]}
+          { label: "health" }
+        )}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
