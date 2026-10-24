@@ -21,9 +21,9 @@ const SETTING_FILE = fileURLToPath(
   new URL("./developer-mode-setting.tsx", import.meta.url)
 )
 const PAGE_FILE = fileURLToPath(new URL("./page.tsx", import.meta.url))
-const SHELL_FILE = fileURLToPath(
+const NAV_TREE_FILE = fileURLToPath(
   new URL(
-    "../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx",
+    "../../../../../../reference-implementation/vendor/brand-react/src/nav-tree.ts",
     import.meta.url
   )
 )
@@ -46,17 +46,17 @@ test("developer mode is off by default and persists with the existing local-stor
 })
 
 test("developer-only connector surfaces share one settings gate", async () => {
-  const [catalog, panel, setting, page, shell] = await Promise.all([
+  const [catalog, panel, setting, page, navTree] = await Promise.all([
     readFile(CATALOG_FILE, "utf8"),
     readFile(PANEL_FILE, "utf8"),
     readFile(SETTING_FILE, "utf8"),
     readFile(PAGE_FILE, "utf8"),
-    readFile(SHELL_FILE, "utf8"),
+    readFile(NAV_TREE_FILE, "utf8"),
   ])
 
   assert.match(catalog, /filterCatalogForDevelopmentVisibility\(installableCatalog, developerMode\)/)
   assert.match(panel, /if \(!developerMode\) \{/)
   assert.match(setting, /setDeveloperMode\(event\.currentTarget\.checked\)/)
   assert.match(page, /<DeveloperModeSetting \/>/)
-  assert.match(shell, /\{ label: "Settings", href: "\/settings" \}/)
+  assert.match(navTree, /\{ label: "Settings", href: "\/settings" \}/)
 })

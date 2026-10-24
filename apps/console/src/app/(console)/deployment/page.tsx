@@ -144,7 +144,6 @@ export default async function DeploymentPage({ searchParams }: { searchParams: P
           </>
         }
         beforeDiagnostics={<DeploymentReadinessPanel inputs={extractReadinessInputs(report)} />}
-        breadcrumbs={[{ href: "/", label: "Overview" }, { label: "Deployment" }]}
         description="Operator diagnostics for the reference retrieval surfaces. Read-only. Secret environment values are redacted before reaching this page."
         projection={projection}
         projectionActionError={params.error ?? null}

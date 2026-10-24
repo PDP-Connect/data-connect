@@ -8,6 +8,7 @@ import { notFound } from "next/navigation";
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { existingSourcesForConnector as fetchExistingSourcesForConnector } from "../../../components/existing-sources-by-connector.ts";
 import { getManualUploadSetup, RefNotFoundError } from "../../../lib/ref-client.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
@@ -123,7 +124,9 @@ export default async function ManualUploadConnectPage({
             Back to Sources
           </Link>
         }
-        breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: `Import ${setup.display_name}` }]}
+        breadcrumbs={breadcrumbsFor(`/connect/manual-upload/${rawConnectorId}`, {
+          label: `Import ${setup.display_name}`,
+        })}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={setup.display_name} />

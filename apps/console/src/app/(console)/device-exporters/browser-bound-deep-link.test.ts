@@ -84,28 +84,22 @@ test("unsupported browser-bound deep-link still renders an honest notice", async
   );
 });
 
-// ─── Add-connection landing framing ───────────────────────────────────────
+// ─── Top-level route: no breadcrumb on a deep-link ───────────────────────
 //
-// When the owner reaches this page from the Sources "Add source" catalog
-// (a validated `?connector=` deep-link), the page must frame itself as
-// finishing the connector they chose — a "Sources / Add <Connector>"
-// breadcrumb gated on the already-validated `defaultConnectorId` — rather than
-// reading purely as a "Local device exporters" diagnostics console. The bare
-// page (no deep-link) keeps its existing header, so the breadcrumb must be
-// derived from `defaultConnectorId`, not rendered unconditionally.
+// /device-exporters is a top-level nav route, so the page shows no breadcrumb:
+// the sidebar already shows where it is. A validated `?connector=` deep-link
+// from the Sources "Add source" catalog preselects the connector in the form
+// and adds no trail.
 
-const BREADCRUMB_GATED_ON_DEFAULT_CONNECTOR = /const addConnectionBreadcrumbs = defaultConnectorId/;
-const BREADCRUMB_LINKS_BACK_TO_SOURCES = /label: "Sources", href: "\/sources"/;
-const BREADCRUMB_NAMES_THE_CHOSEN_CONNECTOR = /label: `Add \$\{formatConnectorKeyForDisplay\(defaultConnectorId\)\}`/;
-const PAGE_HEADER_RENDERS_BREADCRUMB = /breadcrumbs=\{addConnectionBreadcrumbs\}/;
+const PAGE_HEADER_TAKES_BREADCRUMB = /breadcrumbs=/;
+const DEEP_LINK_TRAIL = /addConnectionBreadcrumbs/;
 
-test("a validated add-connection deep-link frames the page as 'Sources / Add <Connector>'", async () => {
+test("a validated add-connection deep-link adds no breadcrumb (top-level route)", async () => {
   const src = await read(PAGE_PATH);
-  // The breadcrumb is derived from the already-validated connector key (never an
-  // arbitrary `?connector=` value) and is only present on a deep-link landing.
-  assert.match(src, BREADCRUMB_GATED_ON_DEFAULT_CONNECTOR);
-  assert.match(src, BREADCRUMB_LINKS_BACK_TO_SOURCES);
-  assert.match(src, BREADCRUMB_NAMES_THE_CHOSEN_CONNECTOR);
-  // And the header actually renders it.
-  assert.match(src, PAGE_HEADER_RENDERS_BREADCRUMB);
+  assert.doesNotMatch(
+    src,
+    PAGE_HEADER_TAKES_BREADCRUMB,
+    "the top-level device exporters page must not pass a breadcrumb"
+  );
+  assert.doesNotMatch(src, DEEP_LINK_TRAIL, "the hard-coded deep-link trail must stay removed");
 });

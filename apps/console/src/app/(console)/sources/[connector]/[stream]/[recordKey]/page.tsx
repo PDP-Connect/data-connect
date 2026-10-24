@@ -11,6 +11,7 @@ import { notFound } from "next/navigation";
 import { RecordInspector } from "@/app/(console)/components/record-inspector.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { ServerUnreachable } from "../../../../components/server-unreachable.tsx";
 import { WarningsBanner } from "../../../../components/warnings-banner.tsx";
 import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../../../lib/owner-token.ts";
@@ -230,12 +231,12 @@ export default async function RecordDetailPage({
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
+        breadcrumbs={breadcrumbsFor(
+          `/sources/${connector}/${stream}/${recordKey}`,
           { href: connectorHref, label: sourceLabel },
           { href: streamHref, label: streamName },
-          { label: recordId },
-        ]}
+          { label: recordId }
+        )}
         description={
           <>
             <span className="mr-2 inline-flex items-center gap-2">

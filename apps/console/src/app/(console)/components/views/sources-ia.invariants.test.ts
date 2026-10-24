@@ -43,9 +43,9 @@ const ROUTES_FILE = fileURLToPath(
 // code (2026-08-07 IA audit finding 1.7/1.5: zero content-page importers,
 // verified by grep) and has been deleted. `RecordroomShell`'s NAV_GROUPS is
 // the real, rendered nav every page uses.
-const SHELL_FILE = fileURLToPath(
+const NAV_TREE_FILE = fileURLToPath(
   new URL(
-    "../../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx",
+    "../../../../../../../reference-implementation/vendor/brand-react/src/nav-tree.ts",
     import.meta.url
   )
 );
@@ -264,7 +264,7 @@ test("source setup presentation has no connector-specific copy or examples", asy
 // ── 4. "Connect apps" is a separate read-access surface ─────────────────────
 
 test("the nav names the inbound client surface 'Connect apps', distinct from Sources", async () => {
-  const src = await readFile(SHELL_FILE, "utf8");
+  const src = await readFile(NAV_TREE_FILE, "utf8");
   // The data on-ramp nav item is "Sources" (→ records).
   assert.match(src, NAV_SOURCES_RE);
   // The inbound-client nav item is unambiguously named, never bare "Connect".

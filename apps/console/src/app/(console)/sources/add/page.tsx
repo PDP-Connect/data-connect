@@ -6,6 +6,7 @@ import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { existingSourcesByConnectorCatalog } from "../../components/existing-sources-by-connector.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
@@ -29,11 +30,7 @@ interface PageParams {
 function AddSourceHeader() {
   return (
     <PageHeader
-      breadcrumbs={[
-        { href: dashboardRoutes.section.overview, label: "Overview" },
-        { href: dashboardRoutes.section.records, label: "Sources" },
-        { label: "Add source" },
-      ]}
+      breadcrumbs={breadcrumbsFor("/sources/add", { label: "Add source" })}
       description="Add sources that populate this PDPP instance. App and local-client access is configured separately under Connect apps."
       title="Add source"
     />

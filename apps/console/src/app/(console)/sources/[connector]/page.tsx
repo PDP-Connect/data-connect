@@ -23,6 +23,7 @@ import {
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import {
   formatStreamCollectionFacts,
@@ -819,7 +820,7 @@ function ConnectorPageView({
             syncIdleLabel={syncIdleLabel}
           />
         }
-        breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: displayName }]}
+        breadcrumbs={breadcrumbsFor(`/sources/${connectorId}`, { label: displayName })}
         count={
           retainedStorage === null ? (
             headerCount

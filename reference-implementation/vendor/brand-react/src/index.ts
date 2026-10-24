@@ -82,8 +82,9 @@ export { IcSelect } from "./select.tsx";
 // ─── Sheet ────────────────────────────────────────────────────────
 export { Sheet, SheetBody, SheetFoot, SheetHead, SheetSerial, SheetTitle } from "./sheet.tsx";
 // ─── Shell frame (RecordroomShell + nav data) ─────────────────────
-export type { NavGroup, NavItem } from "./shell-frame.tsx";
-export { isNavItemActive, NAV_GROUPS, NAV_ITEMS, RecordroomShell } from "./shell-frame.tsx";
+export type { NavGroup, NavItem } from "./nav-tree.ts";
+export { isNavItemActive, NAV_GROUPS, NAV_ITEMS } from "./nav-tree.ts";
+export { RecordroomShell } from "./shell-frame.tsx";
 export {
   DATACONNECT_PRODUCT_IDENTITY,
 } from "./product-identity.ts";
