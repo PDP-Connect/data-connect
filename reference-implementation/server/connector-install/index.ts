@@ -861,13 +861,27 @@ export function createConnectorInstallService(options: {
     }
   };
   // Fetches and verifies the catalog. Concurrent callers share one fetch, and a
-  // failure throws, so install and update never act on an older copy.
+  // failure throws, so install and update never act on an older copy. A failed
+  // fetch is handled once, here: it logs and moves the next retry time once,
+  // whichever caller started it. Every waiter still receives the error.
   const refreshCatalog = (): Promise<readonly ConnectorCatalogEntry[]> => {
     catalogRefresh ??= loadCatalog()
-      .then((entries) => {
-        verifiedCatalog = { entries, refreshAt: Date.now() + catalogTtlMs };
-        return entries;
-      })
+      .then(
+        (entries) => {
+          verifiedCatalog = { entries, refreshAt: Date.now() + catalogTtlMs };
+          return entries;
+        },
+        (error: unknown) => {
+          if (verifiedCatalog) {
+            verifiedCatalog = { entries: verifiedCatalog.entries, refreshAt: Date.now() + catalogTtlMs };
+            console.error(
+              "[connector-install] Connector catalog refresh failed; serving the last verified copy.",
+              error
+            );
+          }
+          throw error;
+        }
+      )
       .finally(() => {
         catalogRefresh = undefined;
       });
@@ -875,7 +889,7 @@ export function createConnectorInstallService(options: {
   };
   // Read path for GET /v1/owner/connector-install/catalog, which the console
   // requests on every render of Add a source. If a refresh fails, the last
-  // verified copy keeps being served, and the source is retried once per TTL.
+  // verified copy keeps being served. The failure is logged once, in refreshCatalog.
   const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
     if (verifiedCatalog && Date.now() < verifiedCatalog.refreshAt) {
       return verifiedCatalog.entries;
@@ -886,8 +900,6 @@ export function createConnectorInstallService(options: {
       if (!verifiedCatalog) {
         throw error;
       }
-      verifiedCatalog = { entries: verifiedCatalog.entries, refreshAt: Date.now() + catalogTtlMs };
-      console.error("[connector-install] Connector catalog refresh failed; serving the last verified copy.", error);
       return verifiedCatalog.entries;
     }
   };
