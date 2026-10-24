@@ -45,6 +45,9 @@ const OPERATOR_UI_PALETTE_DIR = fileURLToPath(
 const RECORDROOM_SHELL_FILE = fileURLToPath(
   new URL("../../../../../../reference-implementation/vendor/brand-react/src/shell-frame.tsx", import.meta.url)
 );
+const NAV_TREE_FILE = fileURLToPath(
+  new URL("../../../../../../reference-implementation/vendor/brand-react/src/nav-tree.ts", import.meta.url)
+);
 const RECORDROOM_SHELL_BRIDGE_FILE = `${HERE}recordroom-shell-with-palette.tsx`;
 const DASHBOARD_PALETTE_PROVIDER_FILE = `${HERE}dashboard-palette-provider.tsx`;
 
@@ -201,7 +204,7 @@ test("empty query returns the full mode-scoped command list (sensible default se
 // ── Owner-noun labels: Runs → Syncs, Traces → Audit ────────────────────────
 
 test("live Recordroom shell navigation uses the owner nouns (Sources, Syncs, Audit)", async () => {
-  const src = await readFile(RECORDROOM_SHELL_FILE, "utf8");
+  const src = await readFile(NAV_TREE_FILE, "utf8");
   assert.match(src, NAV_ITEM_RE("Overview", "/"));
   assert.match(src, NAV_ITEM_RE("Explore", "/explore"));
   assert.match(src, NAV_GROUP_RE("Collection", ["Sources", "Syncs", "Schedules"]));

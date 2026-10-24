@@ -176,3 +176,21 @@ test("no console page labels a breadcrumb Overview", async () => {
   const offenders = pages.filter(({ src }) => OVERVIEW_LABEL.test(src)).map(({ file }) => file);
   assert.deepEqual(offenders, [], "Overview is not a breadcrumb ancestor in the nav tree");
 });
+
+// Server components call NAV_ITEMS and isNavItemActive while they render. Imported from a
+// "use client" module, those names are client references that throw when called on the
+// server, which is how the production build failed with `d.TD.find is not a function`.
+const REPO_ROOT = new URL("../../../../../../", import.meta.url);
+const BRAND_REACT_SRC = "reference-implementation/vendor/brand-react/src/";
+const USE_CLIENT_DIRECTIVE = /^\s*["']use client["'];?\s*$/m;
+const NAV_VALUE_EXPORT = /^export (?:const|function) (?:NAV_GROUPS|NAV_ITEMS|isNavItemActive)\b/m;
+const NAV_TREE_REEXPORT = /^export \{[^}]*\bNAV_ITEMS\b[^}]*\} from "\.\/nav-tree\.ts";$/m;
+
+test("the nav tree is a plain module that server components can call", async () => {
+  const navTree = await readFile(new URL(`${BRAND_REACT_SRC}nav-tree.ts`, REPO_ROOT), "utf8");
+  assert.doesNotMatch(navTree, USE_CLIENT_DIRECTIVE, "nav-tree.ts must not be a client module");
+  const shellFrame = await readFile(new URL(`${BRAND_REACT_SRC}shell-frame.tsx`, REPO_ROOT), "utf8");
+  assert.doesNotMatch(shellFrame, NAV_VALUE_EXPORT, "shell-frame.tsx is a client module and must not export nav values");
+  const barrel = await readFile(new URL(`${BRAND_REACT_SRC}index.ts`, REPO_ROOT), "utf8");
+  assert.match(barrel, NAV_TREE_REEXPORT, "the package index must export NAV_ITEMS from nav-tree.ts");
+});
