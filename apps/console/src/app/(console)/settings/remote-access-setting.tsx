@@ -29,6 +29,7 @@ import {
 import {
   consolePortStatus,
   DEFAULT_PUBLIC_URL_OPTION_ID,
+  describeRemoteAccessFailure,
   ngrokDurableAddressState,
   offRemoteAccessConfig,
   originVerificationDisplay,
@@ -311,7 +312,9 @@ export function RemoteAccessSetting({
     // The route exists but this request could not answer it. Report the
     // failure instead of falling back to a default that looks real, and
     // clear that report (only that one) once a read succeeds again.
-    const loadError = remoteAccess.error ? String(remoteAccess.error) : null
+    const loadError = remoteAccess.error
+      ? describeRemoteAccessFailure(remoteAccess.error, "read")
+      : null
     if (loadError) {
       setError(loadError)
     } else if (loadErrorRef.current) {
@@ -379,7 +382,7 @@ export function RemoteAccessSetting({
           }
           setConfig(asConfig(result.config))
         })
-        .catch(reason => setError(String(reason)))
+        .catch(reason => setError(describeRemoteAccessFailure(reason, "save")))
         .finally(() => setBusy(false))
       return
     }
@@ -422,7 +425,7 @@ export function RemoteAccessSetting({
           }
           setConfig(asConfig(result.config))
         })
-        .catch(reason => setError(String(reason)))
+        .catch(reason => setError(describeRemoteAccessFailure(reason, "save")))
         .finally(() => setBusy(false))
       return
     }
@@ -513,7 +516,7 @@ export function RemoteAccessSetting({
         setConfig(asConfig(result.config))
         onSuccess(result)
       })
-      .catch(reason => setError(String(reason)))
+      .catch(reason => setError(describeRemoteAccessFailure(reason, "save")))
       .finally(() => setBusy(false))
   }
 
@@ -552,7 +555,7 @@ export function RemoteAccessSetting({
       }
       setError("The owner password window is still waiting. Save the password there, then try this remote access change again.")
     } catch (reason) {
-      setError(String(reason))
+      setError(describeRemoteAccessFailure(reason, "save"))
     } finally {
       // A successful config write triggers the desktop's existing config
       // watcher, which restarts the stack with the new password. If the
@@ -592,7 +595,7 @@ export function RemoteAccessSetting({
       }
       setError("The owner password window is still waiting. Save the password there, then try again.")
     } catch (reason) {
-      setError(String(reason))
+      setError(describeRemoteAccessFailure(reason, "save"))
     } finally {
       setWaitingForOwnerPassword(false)
       setBusy(false)
@@ -631,7 +634,7 @@ export function RemoteAccessSetting({
           setAuthtoken("")
         }
       })
-      .catch(reason => setError(String(reason)))
+      .catch(reason => setError(describeRemoteAccessFailure(reason, "save")))
       .finally(() => setBusy(false))
   }
 
@@ -650,7 +653,7 @@ export function RemoteAccessSetting({
       setPinnedPort(saved.console_port != null ? String(saved.console_port) : "")
       return null
     } catch (reason) {
-      return String(reason)
+      return describeRemoteAccessFailure(reason, "save")
     } finally {
       setBusy(false)
     }
