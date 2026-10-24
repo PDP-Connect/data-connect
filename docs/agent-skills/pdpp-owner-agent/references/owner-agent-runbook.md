@@ -179,7 +179,8 @@ Records come back in the same list envelope: rows under **`data`**, with `has_mo
 
 - Bootstrap a brand-new stream with `changes_since=beginning`.
 - Page with `next_cursor` while `has_more` is true; request only the fields you need and
-  apply only filters compact schema advertises for the stream.
+  apply only filters compact schema advertises for the stream. Never add `filter[...]` to a
+  `changes_since` request; the server rejects it (400 `invalid_request`).
 - Persist `next_changes_since` per `(stream, connection_id)` after each successful page.
 - Periodically re-fetch compact schema and `/v1/streams` so newly added streams and
   connections appear without guessing — that is how "future data" stays in view.
