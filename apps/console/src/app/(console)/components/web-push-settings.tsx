@@ -612,6 +612,7 @@ export function WebPushSettings({
   const unavailable = device.unavailable ?? (permission === "denied" ? "permission-denied" : null);
   const [busy, setBusy] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [enableError, setEnableError] = useState<string | null>(null);
   const [showSetup, setShowSetup] = useState(false);
 
   async function refreshSubscriptionState() {
@@ -654,19 +655,19 @@ export function WebPushSettings({
     }
     setBusy(true);
     setTestStatus(null);
+    setEnableError(null);
     try {
       const registration = await navigator.serviceWorker.register("/pdpp-dashboard-sw.js");
       dispatch({ swState: "registered", type: "swState" });
       const result = await Notification.requestPermission();
       dispatch({ permission: result, type: "permission" });
       if (result !== "granted") {
-        dispatch({
-          status:
-            result === "denied"
-              ? "Permission denied. Enable notifications in browser settings."
-              : "Permission was not granted.",
-          type: "status",
-        });
+        const message =
+          result === "denied"
+            ? "Permission denied. Enable notifications in browser settings."
+            : "Permission was not granted.";
+        dispatch({ status: message, type: "status" });
+        setEnableError(message);
         return;
       }
       const subscription =
@@ -694,7 +695,9 @@ export function WebPushSettings({
         type: "subscribed",
       });
     } catch (err) {
-      dispatch({ status: err instanceof Error ? err.message : "Failed to enable Web Push.", type: "status" });
+      const message = err instanceof Error ? err.message : "Failed to enable Web Push.";
+      dispatch({ status: message, type: "status" });
+      setEnableError(message);
     } finally {
       setBusy(false);
     }
@@ -783,6 +786,11 @@ export function WebPushSettings({
     swState,
   });
 
+  // A failed Enable is announced beside its button while the setup panel is
+  // closed. The open panel shows the same status itself, and any later action
+  // replaces the status, so the notice shows only while it is still the latest.
+  const enableNotice = !(showSetup || unavailable) && enableError === status ? enableError : null;
+
   // Whether this browser is set up and healthy, so the demoted summary line can
   // wear a calm "enabled" tone and skip pushing a setup CTA.
   const enabled = matchesThisBrowser && !unavailable;
@@ -837,6 +845,12 @@ export function WebPushSettings({
             )}
           </div>
         </div>
+
+        {enableNotice ? (
+          <p className="pdpp-caption mt-2 max-w-3xl text-destructive" role="alert">
+            {enableNotice}
+          </p>
+        ) : null}
 
         {unavailable ? (
           <p className="pdpp-caption mt-2 max-w-3xl text-muted-foreground">{currentDeviceStatus.detail}</p>
