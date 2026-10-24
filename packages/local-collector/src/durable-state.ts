@@ -871,16 +871,25 @@ function migrateLegacyStore(
     return canonicalPath;
   } catch (error) {
     source?.close();
-    rmSync(temporaryPath, { force: true });
     let restoredFence: FenceRecord | null = null;
     if (lockAcquired) {
-      if (!published) {
-        // The fence may have committed without the snapshot being published.
-        // Scoped to this attempt's id, so a fence from another attempt stays.
-        // A fence this attempt replaced whose queue is gone is put back.
-        restoredFence = giveBackOwnFence(legacyPath, sourceInstanceId, migrationId, claim.superseded);
+      try {
+        if (!published) {
+          // The fence may have committed without the snapshot being published.
+          // Scoped to this attempt's id, so a fence from another attempt stays.
+          // A fence this attempt replaced whose queue is gone is put back.
+          restoredFence = giveBackOwnFence(legacyPath, sourceInstanceId, migrationId, claim.superseded);
+        }
+      } finally {
+        releaseMigrationLock(lockPath);
       }
-      releaseMigrationLock(lockPath);
+    }
+    // Last, and best effort: the temporary snapshot holds no authority, so a
+    // failure to remove it must not skip the fence restore or the lock release.
+    try {
+      rmSync(temporaryPath, { force: true });
+    } catch {
+      // Left for a later migration attempt to ignore.
     }
     if (restoredFence) {
       // The superseded fence may stand for a publication that was delivered and

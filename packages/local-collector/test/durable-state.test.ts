@@ -2546,6 +2546,38 @@ for (const failure of [
   });
 }
 
+test("a publication failure whose temporary file cannot be removed still restores the superseded fence and releases the lock", () => {
+  withTempRoot("pdpp-durable-state-superseded-fence-cleanup-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const base = resolveInput(root, installRoot);
+    const other = { ...base, stateRoot: join(root, "other-state") };
+    const canonicalPath = canonicalCollectorQueuePath(base);
+    const otherPath = canonicalCollectorQueuePath(other);
+    seedOutbox(legacyPath, SOURCE_A, "pending-A");
+    assert.equal(resolveCollectorQueuePath(other), otherPath);
+    rmSync(otherPath);
+
+    const error = refusal(() =>
+      resolveCollectorQueuePath({
+        ...base,
+        linkFile: (existingPath: string) => {
+          // Make the temporary snapshot undeletable by a plain rmSync, then fail the link.
+          rmSync(existingPath, { force: true });
+          mkdirSync(join(existingPath, "blocker"), { recursive: true });
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        },
+      })
+    );
+    assert.ok(error instanceof Error);
+    assert.ok(error.message.includes(otherPath), `the error names the removed queue: ${error.message}`);
+    assert.ok(!error.message.includes(`--queue ${legacyPath}`), "no advice to drain the legacy copy");
+    assert.deepEqual(fenceDestinations(legacyPath), [otherPath], "the superseded fence is back in place");
+    assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+    assert.equal(existsSync(`${canonicalPath}.handoff.lock`), false, "the handoff lock is released");
+  });
+});
+
 test("migration reconciles legacy acknowledgements, leases, deletions and observed streams made after the snapshot", () => {
   withTempRoot("pdpp-durable-state-reconcile-state-", (root) => {
     const installRoot = join(root, "npx-temp-package");
