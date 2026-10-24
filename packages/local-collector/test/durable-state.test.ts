@@ -2396,3 +2396,204 @@ test("a failure after the link keeps the fence: publication is recorded before i
     assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
   });
 });
+
+// PR #581 final round.
+
+function outboxRows(path: string): Array<{ id: string; leaseHolder: string | null; status: string }> {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT id, status, lease_holder FROM local_device_outbox ORDER BY rowid")
+      .all()
+      .map((row) => ({
+        id: String(row.id),
+        leaseHolder: row.lease_holder === null ? null : String(row.lease_holder),
+        status: String(row.status),
+      }));
+  } finally {
+    db.close();
+  }
+}
+
+function observedOutboxIds(path: string): string[] {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT outbox_id FROM local_device_observed_stream ORDER BY outbox_id")
+      .all()
+      .map((row) => String(row.outbox_id));
+  } finally {
+    db.close();
+  }
+}
+
+function withLegacyDb(path: string, fn: (db: DatabaseSync) => void): void {
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+for (const [label, hookName] of [
+  ["before reconcile", "beforeMigrationReconcile"],
+  ["after the retirement fence commits", "afterRetirementFence"],
+] as const) {
+  test(`a second legacy store that gains work mid-migration (${label}) makes the appeared canonical queue ambiguous`, () => {
+    withTempRoot("pdpp-durable-state-late-second-store-", (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyA = packageLegacyPath(installRoot, "a.sqlite");
+      const legacyB = packageLegacyPath(installRoot, "b.sqlite");
+      const input = resolveInput(root, installRoot);
+      const canonicalPath = canonicalCollectorQueuePath(input);
+      seedOutbox(legacyA, SOURCE_A, "pending-in-a");
+      // b exists but holds nothing for the source when discovery runs.
+      seedOutbox(legacyB, SOURCE_B, "other-source");
+
+      const error = refusal(() =>
+        resolveCollectorQueuePath({
+          ...input,
+          [hookName]: () => {
+            seedOutbox(canonicalPath, SOURCE_A, "canonical-from-other-process");
+            seedOutbox(legacyB, SOURCE_A, "pending-in-b-late");
+          },
+        })
+      );
+
+      assert.ok(
+        error instanceof CollectorStateResolutionError && error.code === "legacy_state_ambiguous",
+        `the operator must choose between both backlogs, got ${String(error)}`
+      );
+      assert.deepEqual(outboxIds(legacyA, SOURCE_A), ["pending-in-a"]);
+      assert.deepEqual(outboxIds(legacyB, SOURCE_A), ["pending-in-b-late"]);
+      seedOutbox(legacyA, SOURCE_A, "legacy-write-after-refusal");
+      assert.deepEqual(outboxIds(legacyA, SOURCE_A), ["legacy-write-after-refusal", "pending-in-a"]);
+    });
+  });
+}
+
+for (const canonicalKind of ["empty", "other-source"] as const) {
+  test(`an ${canonicalKind} canonical queue does not make a removed publication safe to drain`, () => {
+    withTempRoot("pdpp-durable-state-lost-publication-empty-", (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+      const base = resolveInput(root, installRoot);
+      const other = { ...base, stateRoot: join(root, "other-state") };
+      const canonicalPath = canonicalCollectorQueuePath(base);
+      const otherPath = canonicalCollectorQueuePath(other);
+      seedOutbox(legacyPath, SOURCE_A, "pending-A");
+      assert.equal(resolveCollectorQueuePath(other), otherPath);
+      rmSync(otherPath);
+      if (canonicalKind === "empty") {
+        new LocalDeviceOutbox({ path: canonicalPath }).close();
+      } else {
+        seedOutbox(canonicalPath, SOURCE_B, "other-source-work");
+      }
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const message = conflictMessage(refusal(() => resolveCollectorQueuePath(base)));
+        assert.ok(message.includes(legacyPath) && message.includes(otherPath), "the error names the removed queue");
+        assert.ok(!message.includes(`--queue ${legacyPath}`), "no advice to drain the legacy copy");
+      }
+      assertFenceSurvived(legacyPath, canonicalPath, otherPath);
+    });
+  });
+}
+
+for (const failure of [
+  {
+    name: "a filesystem without hard links",
+    hooks: () => ({
+      linkFile: () => {
+        throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+      },
+    }),
+  },
+  {
+    name: "a failure after the replacement fence commits",
+    hooks: () => ({
+      afterRetirementFence: () => {
+        throw new Error("disk full");
+      },
+    }),
+  },
+]) {
+  test(`${failure.name} keeps the superseded fence of a removed publication and gives no drain advice`, () => {
+    withTempRoot("pdpp-durable-state-superseded-fence-failure-", (root) => {
+      const installRoot = join(root, "npx-temp-package");
+      const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+      const base = resolveInput(root, installRoot);
+      const other = { ...base, stateRoot: join(root, "other-state") };
+      const canonicalPath = canonicalCollectorQueuePath(base);
+      const otherPath = canonicalCollectorQueuePath(other);
+      seedOutbox(legacyPath, SOURCE_A, "pending-A");
+      assert.equal(resolveCollectorQueuePath(other), otherPath);
+      rmSync(otherPath);
+
+      const error = refusal(() => resolveCollectorQueuePath({ ...base, ...failure.hooks() }));
+      assert.ok(error instanceof Error);
+      const message = error.message;
+
+      assert.ok(message.includes(otherPath), `the error names the removed queue: ${message}`);
+      assert.ok(!message.includes(`--queue ${legacyPath}`), "no advice to drain the legacy copy");
+      assert.deepEqual(fenceDestinations(legacyPath), [otherPath], "the superseded fence is back in place");
+      assert.throws(() => seedOutbox(legacyPath, SOURCE_A, "late-legacy-write"), /retired/);
+      assert.equal(existsSync(canonicalPath), false);
+      assert.deepEqual(migrationLeftovers(canonicalPath), []);
+    });
+  });
+}
+
+test("migration reconciles legacy acknowledgements, leases, deletions and observed streams made after the snapshot", () => {
+  withTempRoot("pdpp-durable-state-reconcile-state-", (root) => {
+    const installRoot = join(root, "npx-temp-package");
+    const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
+    const input = resolveInput(root, installRoot);
+    const canonicalPath = canonicalCollectorQueuePath(input);
+    for (const id of ["r1-acked", "r2-leased", "r3-pruned", "r4-untouched"]) {
+      seedOutbox(legacyPath, SOURCE_A, id);
+    }
+    withLegacyDb(legacyPath, (db) => {
+      db.exec(
+        "INSERT INTO local_device_observed_stream (outbox_id, source_instance_id, stream) VALUES ('r3-pruned', 'dsrc_test_a', 's'), ('r4-untouched', 'dsrc_test_a', 's')"
+      );
+    });
+
+    const resolved = resolveCollectorQueuePath({
+      ...input,
+      beforeMigrationReconcile: () => {
+        const outbox = new LocalDeviceOutbox({ path: legacyPath });
+        try {
+          const [first] = outbox.claimReady({ holder: "writer", leaseMs: 60_000, limit: 1, sourceInstanceId: SOURCE_A });
+          assert.ok(first);
+          outbox.acknowledge({ holder: "writer", id: first.id, leaseEpoch: first.lease_epoch });
+          outbox.claimReady({ holder: "writer", leaseMs: 60_000, limit: 1, sourceInstanceId: SOURCE_A });
+        } finally {
+          outbox.close();
+        }
+        withLegacyDb(legacyPath, (db) => {
+          db.exec("DELETE FROM local_device_outbox WHERE id = 'r3-pruned'");
+          db.exec("DELETE FROM local_device_observed_stream WHERE outbox_id = 'r3-pruned'");
+        });
+        seedOutbox(legacyPath, SOURCE_A, "r5-late");
+      },
+    });
+
+    assert.equal(resolved, canonicalPath);
+    assert.deepEqual(outboxRows(canonicalPath), [
+      { id: "r1-acked", leaseHolder: null, status: "succeeded" },
+      { id: "r2-leased", leaseHolder: "writer", status: "leased" },
+      { id: "r4-untouched", leaseHolder: null, status: "ready" },
+      { id: "r5-late", leaseHolder: null, status: "ready" },
+    ]);
+    // Each batch row also carries a sentinel; r4 has both, and the pruned r3 has none.
+    assert.deepEqual(observedOutboxIds(canonicalPath), ["r1-acked", "r2-leased", "r4-untouched", "r4-untouched", "r5-late"]);
+    // The canonical copy matches the legacy store's final state for the source.
+    assert.deepEqual(
+      outboxRows(canonicalPath).map((row) => row.id),
+      outboxRows(legacyPath).map((row) => row.id)
+    );
+  });
+});
