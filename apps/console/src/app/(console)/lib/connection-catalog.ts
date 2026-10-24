@@ -405,7 +405,8 @@ function acquisitionPathsFromManifest(manifest: CatalogManifestLike): ConnectorA
 export function buildConnectorCatalog(
   manifests: readonly CatalogManifestLike[],
   configuredProviderAuthConnectorKeys: readonly string[] = [],
-  deploymentEnv?: Readonly<Record<string, string | undefined>>
+  deploymentEnv?: Readonly<Record<string, string | undefined>>,
+  catalogPublishedKeys: ReadonlySet<string> = new Set()
 ): ConnectorCatalogEntry[] {
   const entries: ConnectorCatalogEntry[] = [];
   for (const manifest of manifests) {
@@ -419,7 +420,9 @@ export function buildConnectorCatalog(
     // (connector_id) when connector_key is absent, the same precedence
     // buildConnectionSetupPlan itself uses internally.
     const connectorKey = connectorKeyFromManifest(manifest, manifest.connector_id) ?? "unknown";
+    const availability = { catalogPublished: catalogPublishedKeys.has(canonicalConnectorKey(connectorKey)) };
     const plan = buildConnectionSetupPlan({
+      ...availability,
       connectorKey,
       configuredProviderAuthConnectorKeys,
       manifest,
@@ -434,7 +437,7 @@ export function buildConnectorCatalog(
       disposition: plan.catalogDisposition,
       externalDocs: externalDocsFromManifest(manifest),
       icon: manifest.icon ?? null,
-      isKnownScaffold: isKnownScaffoldConnector(connectorKey),
+      isKnownScaffold: isKnownScaffoldConnector(connectorKey, availability),
       listingNote: listingNoteFromPublicListing(manifest.capabilities?.public_listing),
       modality: plan.connectorModality,
       nextStepKind: plan.nextStepKind,
@@ -573,6 +576,9 @@ export function buildOwnerConnectorCatalog(
   const manifestsByKey = new Map<string, CatalogManifestLike>();
   const runtimeCatalogManifests = latestInstallCatalogManifests(installCatalog);
   const availabilityManifests = mergeAvailabilityManifests(runtimeCatalogManifests, manifests);
+  // The signed catalog decides whether a connector can be added; the vendored
+  // roster only describes connectors the catalog does not list.
+  const catalogPublishedKeys = new Set(installCatalog.map((entry) => canonicalConnectorKey(entry.connector_key)));
   for (const manifest of availabilityManifests) {
     for (const identity of [manifest.connector_key, manifest.connector_id]) {
       const cleanIdentity = cleanManifestText(identity);
@@ -583,7 +589,7 @@ export function buildOwnerConnectorCatalog(
   }
 
   if (templates.length === 0) {
-    return buildConnectorCatalog(availabilityManifests);
+    return buildConnectorCatalog(availabilityManifests, [], undefined, catalogPublishedKeys);
   }
 
   const entries: ConnectorCatalogEntry[] = [];
@@ -650,8 +656,9 @@ export function buildOwnerConnectorCatalog(
       disposition,
       externalDocs: externalDocsFromManifest(manifestForCopy),
       icon: template.icon ?? localManifest?.icon ?? null,
-      isKnownScaffold:
-        typeof template.is_known_scaffold === "boolean"
+      isKnownScaffold: catalogPublishedKeys.has(canonicalConnectorKey(connectorKey))
+        ? false
+        : typeof template.is_known_scaffold === "boolean"
           ? template.is_known_scaffold
           : isKnownScaffoldConnector(connectorKey),
       listingNote: listingNoteFromPublicListing(template.public_listing),
@@ -690,7 +697,7 @@ export function buildOwnerConnectorCatalog(
       }
     }
   }
-  for (const manifestOnlyEntry of buildConnectorCatalog(availabilityManifests)) {
+  for (const manifestOnlyEntry of buildConnectorCatalog(availabilityManifests, [], undefined, catalogPublishedKeys)) {
     const identities = [manifestOnlyEntry.connectorKey]
       .map((identity) => cleanManifestText(identity))
       .filter((identity): identity is string => Boolean(identity))

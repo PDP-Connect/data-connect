@@ -205,7 +205,7 @@ test("preview + browser_collector_manual (Venmo) is offered on /sources/add", ()
  * false, unconditionally, for the whole tier -- see "development tier is
  * never offered" above), but it DOES get a self-test action, distinct status
  * label, and honest guidance in the Development disclosure. A KNOWN scaffold
- * gets none of those: no action, "Not built yet" status, and guidance that
+ * gets none of those: no action, "Not available yet" status, and guidance that
  * says plainly there is nothing to test yet.
  */
 
@@ -228,7 +228,7 @@ test("development + real (non-scaffold) self-testable disposition gets a self-te
   assert.equal(sourceSetupStatus(imessage).label, "In development");
 });
 
-test("development + known scaffold gets no action and a distinct 'Not built yet' status", () => {
+test("development + known scaffold gets no action and a distinct 'Not available yet' status", () => {
   const anthropic = makeEntry({
     connectorKey: "anthropic",
     disposition: "browser_bound_runbook",
@@ -241,10 +241,10 @@ test("development + known scaffold gets no action and a distinct 'Not built yet'
   });
   assert.equal(isRunnableAddOffer(anthropic), false);
   assert.equal(sourceSetupAction(anthropic), null, "a known scaffold must never render an add action");
-  assert.equal(sourceSetupStatus(anthropic).label, "Not built yet");
+  assert.equal(sourceSetupStatus(anthropic).label, "Not available yet");
   assert.match(
     sourceSetupGuidance(anthropic),
-    /scaffold/i,
+    /not available to add yet/i,
     "scaffold guidance must say plainly there is nothing to test yet"
   );
 });

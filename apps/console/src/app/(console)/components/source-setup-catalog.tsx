@@ -155,7 +155,7 @@ function SourceAcquisitionPaths({ paths }: { paths: readonly ConnectorAcquisitio
  */
 function developmentMethodLine(entry: ConnectorCatalogEntry): string {
   if (entry.isKnownScaffold) {
-    return "Not built yet: nobody has written this connector's collection code.";
+    return "Not available yet.";
   }
   return "Setup path implemented, not yet proven against a live account.";
 }
@@ -700,7 +700,7 @@ export function SourceSetupCatalog({
             <details className="group" data-testid="unavailable-connectors-disclosure">
               <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
                 {unavailableEntries.length}{" "}
-                {unavailableEntries.length === 1 ? "connector is" : "connectors are"} not available on this platform
+                {unavailableEntries.length === 1 ? "connector is" : "connectors are"} not available yet
               </summary>
               <div className="mt-3">
                 <SourceSetupCardList

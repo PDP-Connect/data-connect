@@ -36,9 +36,15 @@ function sourceKey(source: BindingSource): string {
   return canonicalConnectorKey(source.connector_key ?? source.connector_id);
 }
 
+/**
+ * `catalogPublished` is true when the verified signed catalog lists the
+ * connector. The catalog outranks the vendored scaffold roster, so a published
+ * connector is never refused as a scaffold.
+ */
 export function browserConnectSupport(
   connectorId: string | null | undefined,
-  sources: readonly BindingSource[]
+  sources: readonly BindingSource[],
+  catalogPublished = false
 ): BrowserConnectSupport {
   if (typeof connectorId !== "string" || connectorId.trim() === "") {
     return { browserBound: false, canAddAccount: false };
@@ -47,10 +53,14 @@ export function browserConnectSupport(
   const supports = sources
     .filter((source) => sourceKey(source) === key)
     .map((source) =>
-      browserEnrollmentSupport(key, {
-        connector_id: source.connector_id,
-        runtime_requirements: { bindings: source.bindings ?? null },
-      })
+      browserEnrollmentSupport(
+        key,
+        {
+          connector_id: source.connector_id,
+          runtime_requirements: { bindings: source.bindings ?? null },
+        },
+        { catalogPublished }
+      )
     );
   return {
     browserBound: supports.some((support) => support.browserBound),

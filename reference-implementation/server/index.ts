@@ -6913,6 +6913,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
     ensureRequestId,
     getOwnerSubjectId,
     handleError,
+    isCatalogPublished: async (connectorId: string) =>
+      (await listCatalogPublishedConnectorKeys(connectorInstallService)).has(connectorId),
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
     resolveRegisteredConnectorManifest,
@@ -7325,6 +7327,28 @@ export function buildAsApp(opts: ServerOpts = {}) {
 }
 
 // ─── RS App ─────────────────────────────────────────────────────────────────
+
+/**
+ * Canonical keys of the connectors the verified signed catalog publishes
+ * (latest version only). The catalog outranks the vendored conformance roster
+ * for availability. The install service serves its last verified copy when a
+ * refresh fails; if no verified copy exists yet the answer is an empty set,
+ * so a catalog outage never turns a roster entry into an available one.
+ */
+async function listCatalogPublishedConnectorKeys(
+  service: Pick<ReturnType<typeof createConnectorInstallService>, "catalog">
+): Promise<ReadonlySet<string>> {
+  try {
+    const entries = await service.catalog();
+    return new Set(
+      entries
+        .filter((entry) => entry.latest)
+        .map((entry) => canonicalConnectorKey(entry.connector_key) ?? entry.connector_key)
+    );
+  } catch {
+    return new Set();
+  }
+}
 
 // `origin` is the provider/MCP origin: it backs the `cli.run_command` connect
 // target and the `mcp.endpoint` (both of which the RS itself serves, so the RS
@@ -8434,6 +8458,44 @@ function buildRsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionIntent>[1]);
 
+  // One install service per RS app, so the templates route and the install
+  // routes read the same cached, verified connector catalog.
+  const connectorInstallService =
+    opts.connectorInstallService ??
+    createConnectorInstallService({
+      ...installedConnectorManifestRegistration,
+      removeActivation: removeConnectorActivation,
+      assertUninstallAllowed: async (connectorId) => {
+        const activeRun = isPostgresStorageBackend()
+          ? (await postgresQuery<{ run_id: string }>(
+              "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
+              [connectorId]
+            )).rows[0]
+          : getDb()
+              .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
+              .get<{ run_id: string }>(connectorId);
+        if (activeRun) {
+          throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
+            code: "connector_run_active",
+          });
+        }
+        const ids = isPostgresStorageBackend()
+          ? (await postgresQuery<{ connector_instance_id: string }>(
+              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
+              [connectorId]
+            )).rows.map((row) => row.connector_instance_id)
+          : getDb().prepare(
+              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
+            ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
+        if (ids.length) {
+          const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
+          error.code = "connector_in_use";
+          error.connection_ids = ids;
+          throw error;
+        }
+      },
+    });
+
   // GET /v1/owner/connector-templates is the bearer-authed owner-agent template
   // catalog. It separates connector implementation metadata from configured
   // connection instances, embeds related connection summaries, and reports
@@ -8447,6 +8509,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     getConnectorManifest: (connectorId: string) => getConnectorManifest(connectorId),
     getOwnerTokenSubjectId,
     handleError,
+    listCatalogPublishedConnectorKeys: () => listCatalogPublishedConnectorKeys(connectorInstallService),
     listRegisteredConnectorIds,
     projectStorageDisplayName,
     requireOwner,
@@ -8468,41 +8531,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwner,
     requireToken,
-    service:
-      opts.connectorInstallService ??
-      createConnectorInstallService({
-        ...installedConnectorManifestRegistration,
-        removeActivation: removeConnectorActivation,
-        assertUninstallAllowed: async (connectorId) => {
-          const activeRun = isPostgresStorageBackend()
-            ? (await postgresQuery<{ run_id: string }>(
-                "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
-                [connectorId]
-              )).rows[0]
-            : getDb()
-                .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
-                .get<{ run_id: string }>(connectorId);
-          if (activeRun) {
-            throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
-              code: "connector_run_active",
-            });
-          }
-          const ids = isPostgresStorageBackend()
-            ? (await postgresQuery<{ connector_instance_id: string }>(
-                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
-                [connectorId]
-              )).rows.map((row) => row.connector_instance_id)
-            : getDb().prepare(
-                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
-              ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
-          if (ids.length) {
-            const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
-            error.code = "connector_in_use";
-            error.connection_ids = ids;
-            throw error;
-          }
-        },
-      }),
+    service: connectorInstallService,
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
   // Owner-authenticated HTTP routes for both remote-access providers

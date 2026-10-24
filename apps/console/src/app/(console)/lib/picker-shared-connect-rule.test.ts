@@ -48,7 +48,7 @@ test("a known scaffold gets no Connect action", () => {
   const entry = pickerEntry("anthropic", "development");
   assert.equal(entry.disposition, "browser_bound_runbook");
   assert.equal(sourceSetupAction(entry), null);
-  assert.equal(sourceSetupStatus(entry).label, "Not built yet");
+  assert.equal(sourceSetupStatus(entry).label, "Not available yet");
 });
 
 test("a production-ready bundled browser connector still gets a Connect action", () => {
