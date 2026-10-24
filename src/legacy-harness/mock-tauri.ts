@@ -34,17 +34,11 @@ export async function invoke<T>(
       return fixture.connectorUpdates as T
     case "download_connector":
       return undefined as T
-    case "start_connector_run":
-      if (activeScenario === "home-error") {
-        throw new Error("Fixture connector failed to authorize")
-      }
-      return undefined as T
     case "start_installed_pdpp_connector_run":
       if (activeScenario === "home-error") {
         throw new Error("Fixture connector failed to authorize")
       }
       return undefined as T
-    case "stop_connector_run":
     case "stop_installed_pdpp_connector_run":
     case "submit_installed_pdpp_interaction_response":
     case "reset_installed_pdpp_browser_profile":

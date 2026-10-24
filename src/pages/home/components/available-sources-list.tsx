@@ -320,7 +320,7 @@ export function AvailableSourcesList({
         <Header
           isCheckingUpdates={isCheckingUpdates}
           onRefresh={() => {
-            void checkForUpdates(true)
+            void checkForUpdates()
           }}
         />
         {updatesError ? <UpdateError message={updatesError} /> : null}
@@ -343,7 +343,7 @@ export function AvailableSourcesList({
       <Header
         isCheckingUpdates={isCheckingUpdates}
         onRefresh={() => {
-          void checkForUpdates(true)
+          void checkForUpdates()
         }}
       />
       {pendingConnectorIds.size > 0 && hasActiveRuns ? (
