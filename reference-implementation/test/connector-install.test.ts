@@ -1064,6 +1064,51 @@ test("a failed catalog refresh keeps serving the last verified copy", async (t) 
   }
 });
 
+test("concurrent readers of one failed refresh log once and keep the verified copy", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  let loadCount = 0;
+  let unreachable = false;
+  let releaseFailure: (() => void) | undefined;
+  const failureReleased = new Promise<void>((resolve) => {
+    releaseFailure = resolve;
+  });
+  const consoleError = t.mock.method(console, "error", () => undefined);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        loadCount += 1;
+        if (!unreachable) {
+          return [entry];
+        }
+        await failureReleased;
+        throw new Error("ghcr.io is unreachable");
+      },
+      catalogTtlMs: 1000,
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    assert.deepEqual(await service.catalog(), [entry]);
+
+    unreachable = true;
+    t.mock.timers.tick(1000);
+    const readers = Array.from({ length: 5 }, () => service.catalog());
+    const updateRejected = assert.rejects(service.update("github"), { message: "ghcr.io is unreachable" });
+    releaseFailure?.();
+
+    assert.deepEqual(await Promise.all(readers), [[entry], [entry], [entry], [entry], [entry]]);
+    await updateRejected;
+    assert.equal(loadCount, 2);
+    assert.equal(consoleError.mock.callCount(), 1);
+    assert.deepEqual(await service.catalog(), [entry]);
+    assert.equal(loadCount, 2);
+  } finally {
+    t.mock.timers.reset();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
 test("a tampered catalog refresh is rejected and never replaces the verified copy", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   let tampered = false;
