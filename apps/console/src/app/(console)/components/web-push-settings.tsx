@@ -821,7 +821,7 @@ export function WebPushSettings({
             />
             <span className="min-w-0 font-medium text-foreground">{currentDeviceStatus.title}</span>
           </p>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {enabled || unavailable ? null : (
               <button
                 className={buttonVariants({ size: "sm", variant: "default" })}

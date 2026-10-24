@@ -122,7 +122,7 @@ function pause() {
   return new Promise<void>((resolve) => setTimeout(resolve, 25));
 }
 
-async function mounted(run: (container: HTMLElement) => Promise<void>) {
+async function mounted(run: (container: HTMLElement) => void | Promise<void>) {
   const { WebPushSettings, window } = await harness;
   const container = window.document.createElement("div");
   window.document.body.append(container);
@@ -201,4 +201,17 @@ test("a later Enable that succeeds clears the failure notice", async () => {
     assert.equal(alertText(container), null, "a successful attempt leaves no stale failure behind");
   });
   scenario.subscriptionResponse = refusedSubscription;
+});
+
+// jsdom has no layout engine, so this checks the classes that decide whether the
+// two summary buttons can wrap inside a narrow card. The browser render measures
+// the overflow itself.
+test("the summary buttons share a row that wraps instead of overflowing the card", async () => {
+  await mounted((container) => {
+    const row = buttonNamed(container, "Enable this device").parentElement;
+    assert.ok(row, "the summary buttons have a container");
+    assert.equal(buttonNamed(container, "Set up notifications").parentElement, row, "both buttons share the row");
+    assert.ok(row.classList.contains("flex-wrap"), "the row wraps on a narrow card");
+    assert.ok(!row.classList.contains("shrink-0"), "the row can shrink to the card instead of keeping full width");
+  });
 });
