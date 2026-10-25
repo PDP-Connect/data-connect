@@ -227,13 +227,13 @@ const VIEW_DESCRIPTION =
   "Named projection. A stream-declared view id (advertised by `GET /v1/schema` under each stream's `views`) that projects the returned records down to the view's field set. Mutually exclusive with `fields` (passing both is rejected by the RS); an unknown view id is rejected rather than silently ignored. Use `view` for a curated projection and `fields` for an ad-hoc one.";
 
 const FILTER_DESCRIPTION =
-  'Typed object filter, not a pre-encoded query string: exact `{ "user_id": "U123" }` or range `{ "created_at": { "gte": "...", "lt": "..." } }`; fields AND. The adapter encodes RS `filter[field]` / `filter[field][op]` params. Fields and operators (`gte`, `gt`, `lte`, `lt`) come from `GET /v1/schema`; unsupported values are rejected.';
+  "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.";
 
 const EXPAND_DESCRIPTION =
-  "One-hop inline expansion list. Each entry is a manifest-declared parent-to-child relation. Expandable relations and per-relation `expand_limit` caps are advertised by `GET /v1/schema` (`expand_capabilities`); unadvertised relations are rejected by the RS.";
+  "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.";
 
 const EXPAND_LIMIT_DESCRIPTION =
-  'Typed per-relation cap for has-many expansion, keyed by relation name. Pass an object such as `{ "messages": 3 }`; the adapter encodes it into the RS `expand_limit[relation]=N` query shape. The RS clamps to the per-relation `max_limit` advertised by `GET /v1/schema`.';
+  "Not supported with app (client) tokens in PDPP v0.1: the server returns 400. Owner-token reads only.";
 
 const ORDER_DESCRIPTION =
   "Legacy page order for cursor-based pagination: `asc` or `desc`. Prefer canonical `sort` when `/v1/schema` advertises sortable fields; `order` remains accepted for clients that have not migrated.";
@@ -504,7 +504,7 @@ const ConnectionIdInputShape = {
 // lives at `GET /v1/schema` and in the OpenAPI artifacts published by the
 // reference-contract package.
 const CANONICAL_SCHEMA_HINT =
-  "Use `GET /v1/schema` first for per-stream filter, sort, expand, projection, search, count, `connection_id`, and `connector_key` capabilities.";
+  "Use `GET /v1/schema` first for per-stream sort, projection, search, count, `connection_id`, and `connector_key` capabilities.";
 
 // outputSchema describes the MCP wrapper around the RS response body. We do
 // NOT bake the RS body shape into the outputSchema because the canonical
@@ -589,8 +589,8 @@ const DISCOVERY_FIELD_SUMMARY_LIMIT = 16;
 const DISCOVERY_CONNECTION_SUMMARY_LIMIT = 8;
 const FIELD_CAPABILITY_FLAG_LEGEND = {
   t: "declared type",
-  eq: "exact filter supported",
-  r: "range filter operators",
+  eq: "exact filter supported (owner tokens only; app tokens get 400)",
+  r: "range filter operators (owner tokens only; app tokens get 400)",
   lex: "lexical search field",
   sem: "semantic search field",
   a: "aggregation capabilities",
@@ -690,7 +690,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
       name: "schema",
       title: "Get PDPP schema",
       description:
-        'Return the grant-scoped PDPP schema document from `GET /v1/schema`. This is the canonical capability source: streams, canonical connector-type metadata (`connector_key`), per-field filter operators (`field_capabilities`), expandable relations (`expand_capabilities`), projection support, search modes, pagination support, count support, and granted connection identities (`connection_id`, `display_name`). Defaults to a compact, token-efficient projection (`detail: "compact"`) so the `schema -> schema(stream) -> schema(stream, connection_id) -> query_records` discovery path stays cheap. Stream names are not globally unique; add `connection_id` to narrow a shared stream to one configured source. `detail: "full"` is allowed only with `stream` and returns deduped exhaustive schema for matching stream rows, preserving raw per-field JSON Schema without duplicate stream arrays. Call this before issuing other tools to discover valid filter, sort, expand, fields, count, aggregate, stream, and connection-disambiguation arguments. Read-only.',
+        'Return the grant-scoped PDPP schema document from `GET /v1/schema`. This is the canonical capability source: streams, canonical connector-type metadata (`connector_key`), projection support, search modes, pagination support, count support, and granted connection identities (`connection_id`, `display_name`). Defaults to a compact, token-efficient projection (`detail: "compact"`) so the `schema -> schema(stream) -> schema(stream, connection_id) -> query_records` discovery path stays cheap. Stream names are not globally unique; add `connection_id` to narrow a shared stream to one configured source. `detail: "full"` is allowed only with `stream` and returns deduped exhaustive schema for matching stream rows, preserving raw per-field JSON Schema without duplicate stream arrays. Call this before issuing other tools to discover valid sort, fields, count, aggregate, stream, and connection-disambiguation arguments. App (client) tokens cannot use filter, expand, or expand_limit in PDPP v0.1. Read-only.',
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: z
         .object({
@@ -706,7 +706,7 @@ export function buildTools({ rs, providerUrl }: { rs: RsClient; providerUrl: str
       name: "query_records",
       title: "Query PDPP records",
       description:
-        "Query records in a stream via `GET /v1/streams/{stream}/records`. Default returns at most 25 records; `limit` is capped at 100 (enforced at input — a REST client that sends `limit>100` gets `limit_clamped` in `meta.warnings[]`). Page forward with `cursor`; narrow with `fields`. `structuredContent.data` carries the machine envelope; with `fields`, record payloads are narrowed to those fields plus required operational handles. `content[]` previews up to the first 5 records. Forwards all args verbatim. " +
+        "Query records in a stream via `GET /v1/streams/{stream}/records`. Default returns at most 25 records; `limit` is capped at 100 (enforced at input — a REST client that sends `limit>100` gets `limit_clamped` in `meta.warnings[]`). Page with `cursor`/`limit` within the grant's time range; use `changes_since` for incremental reads, `search` for text, and `fields` to narrow. `structuredContent.data` carries the machine envelope; with `fields`, record payloads are narrowed to those fields plus required operational handles. `content[]` previews up to the first 5 records. Forwards all args verbatim. " +
         CANONICAL_SCHEMA_HINT +
         " Read-only.",
       annotations: READ_ONLY_ANNOTATIONS,
@@ -2291,7 +2291,7 @@ function summarizeSchemaDiscovery(
   }
   const hint = withFields
     ? ""
-    : "\ncall schema(stream, connection_id?) for per-field capability flags (filter/sort/expand/fields/count/aggregate)";
+    : "\ncall schema(stream, connection_id?) for per-field capability flags (sort/fields/count/aggregate); app (client) tokens cannot use filter or expand";
   return `${label}: connectors=${connectorCount} streams=${streamRefs.length}\n${[
     ...legendLines,
     ...scopedLines,
@@ -2301,7 +2301,7 @@ function summarizeSchemaDiscovery(
 }
 
 function formatFieldCapabilityLegend(): string {
-  return "field_capability_legend t=declared_type eq=exact_filter r=range_filter_ops lex=lexical_search sem=semantic_search a=aggregation_caps g=false=not_granted";
+  return "field_capability_legend t=declared_type eq=exact_filter(owner_token_only) r=range_filter_ops(owner_token_only) lex=lexical_search sem=semantic_search a=aggregation_caps g=false=not_granted";
 }
 
 function formatSchemaStreamIndex(streamRefs: StreamRef[]): string[] {
