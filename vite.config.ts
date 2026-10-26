@@ -69,6 +69,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/npm-release-commit-analyzer.test.ts",
       "scripts/npm-release-signer-workflow.test.ts",
       "scripts/core-headed-patchright-runtime-oracle.test.ts",
+      "scripts/browser-trust-oracle.test.ts",
       "scripts/docker-core-first-boot.test.ts",
       "scripts/forced-release.test.ts",
       "scripts/release-atomicity.test.ts",
