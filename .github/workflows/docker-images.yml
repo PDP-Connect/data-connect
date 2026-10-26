@@ -47,6 +47,8 @@ on:
       - "packages/**"
       - "scripts/check-dockerfile-copy-paths.ts"
       - "scripts/core-headed-patchright-runtime-oracle.*"
+      - "scripts/browser-trust-oracle.*"
+      - "scripts/browser-trust-holds.json"
       - "scripts/docker-core-demo-smoke.sh"
       - "scripts/docker-core-demo-smoke-browser.mjs"
       - "scripts/fixtures/**"
@@ -80,6 +82,8 @@ on:
       - "packages/**"
       - "scripts/check-dockerfile-copy-paths.ts"
       - "scripts/core-headed-patchright-runtime-oracle.*"
+      - "scripts/browser-trust-oracle.*"
+      - "scripts/browser-trust-holds.json"
       - "scripts/docker-core-demo-smoke.sh"
       - "scripts/docker-core-demo-smoke-browser.mjs"
       - "scripts/fixtures/**"
@@ -219,6 +223,14 @@ jobs:
           PDPP_CORE_ORACLE_IMAGE: pdpp:ci-core-test
           PDPP_CORE_ORACLE_SKIP_BUILD: "1"
         run: bash scripts/core-headed-patchright-runtime-oracle.sh
+
+      # Offline inventory consistency is not a browser-security pass: HOLD stays explicit.
+      - name: Check browser trust HOLD inventory in the exact Core image
+        if: matrix.image == 'core'
+        env:
+          PDPP_CORE_ORACLE_IMAGE: pdpp:ci-core-test
+          PDPP_CORE_ORACLE_SKIP_BUILD: "1"
+        run: bash scripts/browser-trust-oracle.sh
 
       - name: Smoke Kahtaf's Docker Core demo path
         if: matrix.image == 'core'
