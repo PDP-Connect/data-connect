@@ -355,6 +355,7 @@ interface ResponseRecord {
   emitted_at: string;
   expanded?: Record<string, unknown>;
   id: string;
+  instance_id?: string;
   meta?: RecordResponseMeta;
   object: "record";
   // Logical byte length of this record's current `record_json` (SQLite:
@@ -4316,6 +4317,10 @@ function decorateRecordWithConnectionIdentity(record: ResponseRecord, identity: 
   if (connectionId) {
     record.connection_id = connectionId;
     record.connector_instance_id = connectionId;
+    // instance_id is the grant's handle for this source instance. Grants carry
+    // the stored connector instance id today; switch to clientVisibleInstanceId
+    // when pairwise grants are wired.
+    record.instance_id = connectionId;
   }
   const displayName = typeof identity.displayName === "string" ? identity.displayName.trim() : "";
   if (displayName) {
