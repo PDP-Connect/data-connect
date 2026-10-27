@@ -23,12 +23,8 @@ import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { closeTestServer } from "./helpers/close-test-server.ts";
 import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
-
-type TestServer = Awaited<ReturnType<typeof startServer>> & {
-  asServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-  rsServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-};
 
 type JsonObject = Record<string, unknown>;
 
@@ -40,21 +36,6 @@ interface WireRecord extends JsonObject {
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/github";
 const STREAM = "repositories";
 const OWNER_SUBJECT = "emitted_at_owner";
-
-async function closeServer(server: TestServer): Promise<void> {
-  server.abortStartupBackfill("test shutdown");
-  server.schedulerManager?.stop();
-  server.stopBrowserSurfaceLeaseSweep();
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  await Promise.allSettled([
-    new Promise((resolve) => server.asServer.close(resolve)),
-    new Promise((resolve) => server.rsServer.close(resolve)),
-    server.startupBackfillDone,
-    server.startupSummaryEvidenceSweepDone,
-    server.stopClientEventDeliveryWorker(),
-  ]);
-}
 
 async function fetchJson(url: string, opts: RequestInit = {}): Promise<{ body: JsonObject; status: number }> {
   const resp = await fetch(url, opts);
@@ -161,14 +142,14 @@ function assertNoEmittedAt(record: WireRecord, where: string): void {
 }
 
 test("client-token query and changes responses omit emitted_at; owner-token responses keep it", async () => {
-  const server = (await startServer({
+  const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
     preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
-  })) as TestServer;
+  });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
 
@@ -242,7 +223,7 @@ test("client-token query and changes responses omit emitted_at; owner-token resp
     assert.equal(typeof ownerTombstone.deleted_at, "string", "owner tombstone keeps deleted_at");
     assert.equal(typeof ownerTombstone.emitted_at, "string", "owner tombstone keeps emitted_at");
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
