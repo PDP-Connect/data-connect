@@ -5,14 +5,17 @@
  * Wire shape of a record by token kind (Core "Response records" and Section 4).
  *
  * A non-owner response (`client`, or the grant-bound `mcp_package`) MUST NOT
- * include `emitted_at`. A client tombstone is exactly
- * `{object, id, instance_id, stream, deleted: true}`. Owner responses are
- * returned unchanged. The stored RECORD envelope keeps `emitted_at`.
+ * include `emitted_at`. A non-owner tombstone keeps only the Core members
+ * `{object, id, instance_id, stream, deleted}`; `instance_id` is kept only
+ * when the stored record has one. Owner responses are returned unchanged.
+ * The stored RECORD envelope keeps `emitted_at`.
  */
 
 export interface WireShapeToken {
   readonly pdpp_token_kind?: string | null | undefined;
 }
+
+const CLIENT_TOMBSTONE_MEMBERS = new Set(["object", "id", "instance_id", "stream", "deleted"]);
 
 function shapeRecord(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -22,12 +25,10 @@ function shapeRecord(value: unknown): unknown {
   if (record.object !== "record") {
     return value;
   }
-  const isTombstone = record.deleted === true;
-  return Object.fromEntries(
-    Object.entries(record).filter(
-      ([key]) => key !== "emitted_at" && !(isTombstone && (key === "deleted_at" || key === "data"))
-    )
-  );
+  if (record.deleted === true) {
+    return Object.fromEntries(Object.entries(record).filter(([key]) => CLIENT_TOMBSTONE_MEMBERS.has(key)));
+  }
+  return Object.fromEntries(Object.entries(record).filter(([key]) => key !== "emitted_at"));
 }
 
 export function withTokenKindRecordShape(body: unknown, token: WireShapeToken): unknown {

@@ -50,6 +50,18 @@ test("client tombstone is exactly the client shape and keeps instance_id", () =>
   });
 });
 
+test("tombstone connection_id and display_name are stripped for client and kept for owner", () => {
+  const withBinding = { ...tombstone, connection_id: "conn-1", connector_instance_id: "ci-1", display_name: "GitHub" };
+  assert.deepEqual(withTokenKindRecordShape(withBinding, { pdpp_token_kind: "client" }), {
+    deleted: true,
+    id: "repo-1",
+    instance_id: "instance-a",
+    object: "record",
+    stream: "repositories",
+  });
+  assert.equal(withTokenKindRecordShape(withBinding, { pdpp_token_kind: "owner" }), withBinding);
+});
+
 test("mcp_package tokens get the same non-owner shape as client tokens", () => {
   assert.deepEqual(withTokenKindRecordShape(tombstone, { pdpp_token_kind: "mcp_package" }), {
     deleted: true,
@@ -91,7 +103,10 @@ test("client record whose application data is an array loses only emitted_at", (
 
 test("client tombstone with array data keeps the exact tombstone shape", () => {
   assert.deepEqual(
-    withTokenKindRecordShape({ ...tombstone, data: [{ emitted_at: "x", object: "record" }] }, { pdpp_token_kind: "client" }),
+    withTokenKindRecordShape(
+      { ...tombstone, data: [{ emitted_at: "x", object: "record" }] },
+      { pdpp_token_kind: "client" }
+    ),
     {
       deleted: true,
       id: "repo-1",
