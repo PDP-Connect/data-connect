@@ -82,6 +82,15 @@ COPY docker/neko/policies.json /etc/chromium/policies/managed/policies.json
 RUN install -d /etc/opt/chrome/policies/managed \
   && cp /etc/chromium/policies/managed/policies.json \
         /etc/opt/chrome/policies/managed/policies.json
+# CA distrust policy, kept separate from policies.json so it applies to every
+# browser start-chromium.sh may launch. Each branding reads its own machine
+# policy directory: Chrome for Testing (the Patchright binary)
+# /etc/opt/chrome_for_testing, google-chrome-stable /etc/opt/chrome, system
+# Chromium /etc/chromium. See docker/chrome-policy/README.md.
+RUN --mount=type=bind,source=docker/chrome-policy/distrusted-cas.json,target=/tmp/pdpp-distrusted-cas.json \
+  for dir in /etc/opt/chrome_for_testing/policies/managed /etc/opt/chrome/policies/managed /etc/chromium/policies/managed; do \
+    install -D -o root -g root -m 0644 /tmp/pdpp-distrusted-cas.json "${dir}/pdpp-distrusted-cas.json" || exit 1; \
+  done
 COPY docker/neko/chromium.conf /etc/neko/supervisord/chromium.conf
 COPY docker/neko/cdp-proxy.conf /etc/neko/supervisord/cdp-proxy.conf
 COPY docker/neko/start-chromium.sh /usr/local/bin/start-chromium.sh

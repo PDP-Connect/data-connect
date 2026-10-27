@@ -151,6 +151,16 @@ RUN PATCHRIGHT_VERSION="$(node --input-type=module -e "import { readFileSync } f
   && test -x "${PLAYWRIGHT_BROWSERS_PATH}/chromium-${EXPECTED_REVISION}/${CHROME_BIN}" \
   && rm -rf /tmp/patchright-install
 
+# Chromium reads CA distrust policy from a machine policy directory chosen by
+# its branding: Chrome for Testing (Patchright's amd64 build) reads
+# /etc/opt/chrome_for_testing, a Chromium-branded build reads /etc/chromium.
+# Install the policy in both so a branding change cannot silently drop it. See
+# docker/chrome-policy/README.md.
+RUN --mount=type=bind,source=docker/chrome-policy/distrusted-cas.json,target=/tmp/pdpp-distrusted-cas.json \
+  for dir in /etc/opt/chrome_for_testing/policies/managed /etc/chromium/policies/managed; do \
+    install -D -o root -g root -m 0644 /tmp/pdpp-distrusted-cas.json "${dir}/pdpp-distrusted-cas.json" || exit 1; \
+  done
+
 WORKDIR /app
 
 FROM browsers AS reference-browser
