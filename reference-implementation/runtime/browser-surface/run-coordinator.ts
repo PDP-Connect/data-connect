@@ -1692,12 +1692,9 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
    * failure is logged and does not skip the rest of the sweep tick.
    */
   async function sweepIdleBrowserSurfaces(): Promise<void> {
-    try {
-      await cleanupIdleBrowserSurfaces();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn?.(`[controller] browser-surface idle cleanup failed: ${message}`);
-    }
+    await runBestEffort(cleanupIdleBrowserSurfaces, (message) =>
+      log.warn?.(`[controller] browser-surface idle cleanup failed: ${message}`)
+    );
   }
 
   /** Re-attempt capacity-pressure reclaim for one still-queued lease during a sweep tick. No-op if it settled since the queued snapshot was taken. */
