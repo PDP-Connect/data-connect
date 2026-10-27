@@ -78,6 +78,35 @@ test("list envelopes keep their own fields and map each record", () => {
   });
 });
 
+test("client record whose application data is an array loses only emitted_at", () => {
+  const nested = { emitted_at: "x", object: "record" };
+  assert.deepEqual(withTokenKindRecordShape({ ...live, data: [nested] }, { pdpp_token_kind: "client" }), {
+    data: [{ emitted_at: "x", object: "record" }],
+    id: "repo-1",
+    key: "repo-1",
+    object: "record",
+    stream: "repositories",
+  });
+});
+
+test("client tombstone with array data keeps the exact tombstone shape", () => {
+  assert.deepEqual(
+    withTokenKindRecordShape({ ...tombstone, data: [{ emitted_at: "x", object: "record" }] }, { pdpp_token_kind: "client" }),
+    {
+      deleted: true,
+      id: "repo-1",
+      instance_id: "instance-a",
+      object: "record",
+      stream: "repositories",
+    }
+  );
+});
+
+test("owner-token record with array data passes through unchanged", () => {
+  const body = { ...live, data: [{ emitted_at: "x", object: "record" }] };
+  assert.equal(withTokenKindRecordShape(body, { pdpp_token_kind: "owner" }), body);
+});
+
 test("non-record objects and non-object bodies pass through", () => {
   const error = { emitted_at: "2026-02-01T00:00:00Z", error: "not_found", object: "error" };
   assert.deepEqual(withTokenKindRecordShape(error, { pdpp_token_kind: "client" }), error);

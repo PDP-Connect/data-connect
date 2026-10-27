@@ -35,8 +35,11 @@ export function withTokenKindRecordShape(body: unknown, token: WireShapeToken): 
     return body;
   }
   const payload = body as Record<string, unknown>;
+  if (payload.object === "record") {
+    return shapeRecord(payload);
+  }
   if (Array.isArray(payload.data)) {
     return { ...payload, data: payload.data.map(shapeRecord) };
   }
-  return shapeRecord(payload);
+  return payload;
 }
