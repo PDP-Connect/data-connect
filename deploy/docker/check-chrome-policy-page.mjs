@@ -8,9 +8,8 @@
 //
 // Usage: node check-chrome-policy-page.mjs <debugging-port> <expected-policy.json> <label>
 //
-// Exit codes: 0 policy loaded as expected, 1 not loaded or wrong, 2 usage,
-// 3 chrome://policy itself is blocked by the browser's managed URLBlocklist,
-// so the values cannot be read here.
+// Exit codes: 0 policy loaded as expected, 1 not loaded, wrong, unreadable or
+// timed out, 2 usage.
 
 import { readFileSync } from "node:fs";
 
@@ -21,17 +20,23 @@ if (!(port && expectedPath && label)) {
 }
 const POLICY = "CADistrustedCertificates";
 const expected = JSON.parse(readFileSync(expectedPath, "utf8"))[POLICY];
-const deadline = Date.now() + 60_000;
+// Polling for the endpoint and the policy row stops at `deadline`, which names
+// what was missing; the watchdog below catches a step that never returns.
+const TIMEOUT_MS = 60_000;
+const deadline = Date.now() + 40_000;
 
 function fail(message) {
   console.error(`${label}: ${message}`);
   process.exit(1);
 }
 
+// One watchdog bounds every step, including a DevTools reply that never comes.
+setTimeout(() => fail(`no result within ${TIMEOUT_MS / 1000} s`), TIMEOUT_MS);
+
 async function browserWebSocketUrl() {
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(2000) });
       if (response.ok) {
         return (await response.json()).webSocketDebuggerUrl;
       }
@@ -61,6 +66,10 @@ function connect(url) {
       pending.set(id, { reject, resolve });
       socket.send(JSON.stringify({ id, method, params, sessionId }));
     });
+  socket.addEventListener("close", () => {
+    for (const waiter of pending.values()) waiter.reject(new Error("DevTools connection closed"));
+    pending.clear();
+  });
   return new Promise((resolve, reject) => {
     socket.addEventListener("open", () => resolve({ close: () => socket.close(), send }));
     socket.addEventListener("error", () => reject(new Error(`cannot connect to ${url}`)));
@@ -94,9 +103,12 @@ const READ_ROW = `(() => {
   return { blocked: location.protocol === "chrome-error:", rows };
 })()`;
 
+// Every Chromium version checked (143 to 156) starts a row with the policy's
+// source, scope, level and status, e.g. "Platform Machine Mandatory OK";
+// some add labelled details after the value.
 function parseRow(rowText) {
   const flat = rowText.replace(/\s+/g, " ").trim();
-  const field = (name) => new RegExp(`\\b${name} (\\S+)`).exec(flat)?.[1];
+  const summary = / (\S+) (Machine|Current user) (Mandatory|Recommended) (\S+) /.exec(` ${flat} `);
   const valueStart = rowText.indexOf("[", rowText.search(/\bValue\b/));
   const valueEnd = rowText.indexOf("]", valueStart);
   let value;
@@ -106,10 +118,10 @@ function parseRow(rowText) {
     value = undefined;
   }
   return {
-    level: field("Level"),
-    scope: field("Applies to"),
-    source: / Platform /.test(` ${flat} `),
-    status: field("Status"),
+    level: summary?.[3],
+    scope: summary?.[2],
+    source: summary?.[1] === "Platform",
+    status: summary?.[4],
     text: flat,
     value,
   };
@@ -123,10 +135,7 @@ let row;
 while (Date.now() < deadline) {
   const { result } = await browser.send("Runtime.evaluate", { expression: READ_ROW, returnByValue: true }, sessionId);
   const { blocked, rows } = result.value;
-  if (blocked) {
-    console.log(`${label}: chrome://policy is blocked by the browser's managed URLBlocklist; values not readable`);
-    process.exit(3);
-  }
+  if (blocked) fail("chrome://policy did not load (error page)");
   if (rows.length > 1) fail(`chrome://policy shows ${rows.length} ${POLICY} rows`);
   if (rows.length === 1) {
     row = parseRow(rows[0]);
@@ -148,3 +157,4 @@ if (JSON.stringify(row.value) !== JSON.stringify(expected)) {
 }
 if (problems.length > 0) fail(`${POLICY}: ${problems.join(", ")}`);
 console.log(`${label}: ${POLICY} loaded (${expected.length} certificates, Platform, Machine, Mandatory, OK)`);
+process.exit(0);

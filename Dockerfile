@@ -189,7 +189,12 @@ ARG TARGETARCH
 # that leaves the browser behind fails the build. The server also falls back to
 # this path when a deploy env points at one without the executable (see
 # reference-implementation/runtime/browser-executable.ts).
+# PDPP_BROWSER_CHANNEL=chromium makes every Patchright launch, headed or
+# headless, use this full Chromium. Without a channel, a headless launch runs
+# Chrome Headless Shell, a separate build that ignores managed policy such as
+# the CA distrust list below, so the install also leaves that build out.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright-browsers \
+    PDPP_BROWSER_CHANNEL=chromium \
     PDPP_RUNTIME_BROWSER=1
 
 RUN apt-get update \
@@ -208,10 +213,11 @@ WORKDIR /tmp/patchright-install
 RUN PATCHRIGHT_VERSION="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; const packageJson = JSON.parse(readFileSync('/tmp/reference-implementation-package.json', 'utf8')); const version = packageJson.dependencies.patchright; if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Patchright dependency must be exact, got: ' + version); process.stdout.write(version)")" \
   && echo '{"name":"patchright-installer","private":true,"version":"0.0.0"}' > package.json \
   && npm install --no-save --ignore-scripts "patchright@${PATCHRIGHT_VERSION}" \
-  && npx patchright install --with-deps chromium \
+  && npx patchright install --with-deps --no-shell chromium \
   && EXPECTED_REVISION="$(node -e "const b = require('./node_modules/patchright-core/browsers.json').browsers.find((entry) => entry.name === 'chromium'); if (!b) process.exit(1); process.stdout.write(b.revision)")" \
   && case "$(dpkg --print-architecture)" in amd64) CHROME_BIN=chrome-linux64/chrome ;; arm64) CHROME_BIN=chrome-linux-arm64/chrome ;; *) echo "unsupported architecture for Patchright Chromium" >&2; exit 1 ;; esac \
   && test -x "${PLAYWRIGHT_BROWSERS_PATH}/chromium-${EXPECTED_REVISION}/${CHROME_BIN}" \
+  && if ls -d "${PLAYWRIGHT_BROWSERS_PATH}"/chromium_headless_shell-* 2>/dev/null; then echo "Chrome Headless Shell must not be installed" >&2; exit 1; fi \
   && rm -rf /tmp/patchright-install
 
 # Chromium reads CA distrust policy from a machine policy directory chosen by

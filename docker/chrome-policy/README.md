@@ -49,14 +49,30 @@ Chromium. `docker/neko/Dockerfile` installs it for all three, because
 `start-chromium.sh` falls back to Google Chrome and then to system Chromium. Each copy is
 `pdpp-distrusted-cas.json`, root-owned, mode 0644, next to any other policy file.
 
+## No Chrome Headless Shell
+
+Chrome Headless Shell, the separate build Patchright runs for a headless launch
+that names no channel, does not read managed policy. With this policy installed
+it still loads sites whose certificates chain to these keys. The Patchright
+images therefore install Chromium with `--no-shell`, fail the build if the
+headless shell appears, and set `PDPP_BROWSER_CHANNEL=chromium`, so headed and
+headless launches both use the full Chromium that reads this policy.
+`packages/polyfill-connectors/src/browser-launch.ts` uses the same channel when
+`PDPP_BROWSER_CHANNEL` is unset.
+
 ## Checks
 
 - `scripts/chrome-distrust-policy.test.ts` checks that every entry is a CA certificate
-  whose key is in the set above, that every key is listed once, and that each Dockerfile
-  installs the file in the directories above.
+  whose key is in the set above, that every key is listed once, that each Dockerfile
+  installs the file in the directories above, and that the Patchright images leave
+  out Chrome Headless Shell and set the Chromium channel. It is the only check on
+  `deploy/docker/Dockerfile`, which CI does not build.
 - `deploy/docker/check-chrome-distrust-policy.sh <image>` starts each browser in a built
-  image and requires `chrome://policy` to show this exact value with status OK. The
-  `docker-images` workflow runs it on the `core`, `reference-browser` and n.eko images.
+  image and requires `chrome://policy` to show this exact value with status OK. It
+  fails if the image ships Chrome Headless Shell. n.eko's `policies.json` blocks
+  `chrome://policy`, so in its throwaway container the script removes that one
+  URLBlocklist entry before reading. The `docker-images` workflow runs it on the
+  `core`, `reference-browser` and n.eko images.
 
 To change the set, edit `distrusted-cas.json`, `COMPROMISED_SPKIS` in the test, and the
 table above.

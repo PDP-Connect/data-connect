@@ -98,3 +98,18 @@ test("every browser Dockerfile installs the policy in each managed directory its
     assert.deepEqual(loopDirectories.sort(), [...directories].sort(), `${dockerfile} policy directories`);
   }
 });
+
+// Chrome Headless Shell ignores managed policy, and Patchright runs it for a
+// headless launch that names no channel. The Patchright images leave it out,
+// fail the build if it appears, and name the full Chromium channel.
+test("the Patchright images ship no Chrome Headless Shell and launch full Chromium", () => {
+  for (const dockerfile of ["Dockerfile", "deploy/docker/Dockerfile"]) {
+    const text = readFileSync(path.join(REPO_ROOT, dockerfile), "utf8");
+    assert.ok(text.includes("npx patchright install --with-deps --no-shell chromium"), `${dockerfile} --no-shell`);
+    assert.ok(
+      text.includes('if ls -d "${PLAYWRIGHT_BROWSERS_PATH}"/chromium_headless_shell-* 2>/dev/null; then'),
+      `${dockerfile} fails the build if Chrome Headless Shell is installed`
+    );
+    assert.match(text, /^\s+PDPP_BROWSER_CHANNEL=chromium\b/m, `${dockerfile} sets PDPP_BROWSER_CHANNEL`);
+  }
+});
