@@ -2893,3 +2893,173 @@ test("overlapping sweep calls: the second is a no-op while the first is in fligh
   unblockAllocator();
   await firstSweep;
 });
+
+// ─── Periodic sweep runs idle cleanup (idle non-retained surfaces stop past TTL) ─
+
+const RETAINED_MANIFEST = {
+  ...MANIFEST,
+  connector_id: "chatgpt",
+  name: "ChatGPT",
+};
+
+test("sweep stops a ready idle non-retained surface past the idle TTL and persists the stop", async (t) => {
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const allocator = createReadyAllocator();
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 1 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { controller } = setup(t, { browserSurfaceAllocator: allocator, browserSurfaceLeaseStore, manager });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_idle_first",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+
+  // Inside the TTL (600_000 ms from last use): the sweep leaves it running.
+  now = new Date("2026-05-12T12:09:59.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+  // `length` rather than deepEqual(..., []): node's deepEqual assertion
+  // narrows the array to never[] and breaks the reason/surfaceId reads below.
+  assert.equal(allocator.stopRequests.length, 0);
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  assert.deepEqual(
+    allocator.stopRequests.map((request) => ({ reason: request.reason, surfaceId: request.surfaceId })),
+    [{ reason: "idle_ttl", surfaceId: "surface_1" }]
+  );
+  assert.equal(manager.getSurface("surface_1"), undefined);
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "stopping");
+});
+
+test("sweep leaves a retained credential-boundary surface running past the idle TTL", async (t) => {
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const allocator = createReadyAllocator();
+  const manager = createDynamicManager({ managedConnectors: new Set(["chatgpt"]), now: () => now, surfaceCap: 2 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { controller } = setup(t, { browserSurfaceAllocator: allocator, browserSurfaceLeaseStore, manager });
+
+  await controller.runNow("chatgpt", {
+    manifest: RETAINED_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_retained_first",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getSurface("surface_1")?.retained, true);
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  // `length` rather than deepEqual(..., []): node's deepEqual assertion
+  // narrows the array to never[] and breaks the reason/surfaceId reads below.
+  assert.equal(allocator.stopRequests.length, 0);
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "ready");
+});
+
+test("sweep leaves a surface with an active lease running past the idle TTL", async (t) => {
+  let releaseFirst: () => void = () => undefined;
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const allocator = createReadyAllocator();
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 1 });
+  const runConnectorImpl = (opts: RuntimeRunConnectorOptions) => {
+    if (opts.runId === "run_sweep_active_first") {
+      return new Promise<RuntimeRunConnectorResult>((resolve) => {
+        releaseFirst = () =>
+          resolve({ checkpoint_summary: null, records_emitted: 0, state: null, status: "succeeded" });
+      });
+    }
+    return Promise.resolve<RuntimeRunConnectorResult>({
+      checkpoint_summary: null,
+      records_emitted: 0,
+      state: null,
+      status: "succeeded",
+    });
+  };
+  const { controller } = setup(t, { browserSurfaceAllocator: allocator, manager, runConnectorImpl });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_active_first",
+  });
+  assert.equal(manager.getLease("lease_1")?.status, "leased");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  // `length` rather than deepEqual(..., []): node's deepEqual assertion
+  // narrows the array to never[] and breaks the reason/surfaceId reads below.
+  assert.equal(allocator.stopRequests.length, 0);
+  assert.equal(manager.getLease("lease_1")?.status, "leased");
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+
+  releaseFirst();
+  await controller.drainActiveRuns(1000);
+});
+
+test("sweep idle cleanup frees capacity so a queued lease is promoted before capacity reclaim", async (t) => {
+  let releaseFirst: () => void = () => undefined;
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const allocator = createReadyAllocator();
+  const manager = createDynamicManager({ leaseWaitTimeoutMs: 1_800_000, now: () => now, surfaceCap: 1 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const runConnectorImpl = (opts: RuntimeRunConnectorOptions) => {
+    if (opts.runId === "run_sweep_queued_first") {
+      return new Promise<RuntimeRunConnectorResult>((resolve) => {
+        releaseFirst = () =>
+          resolve({ checkpoint_summary: null, records_emitted: 0, state: null, status: "succeeded" });
+      });
+    }
+    return Promise.resolve<RuntimeRunConnectorResult>({
+      checkpoint_summary: null,
+      records_emitted: 0,
+      state: null,
+      status: "succeeded",
+    });
+  };
+  const { calls, controller } = setup(t, {
+    browserSurfaceAllocator: allocator,
+    browserSurfaceLeaseStore,
+    manager,
+    runConnectorImpl,
+  });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_queued_first",
+  });
+  const queued = await controller.runNow("other-managed", {
+    manifest: DISTINCT_PROFILE_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_queued_second",
+  });
+  assert.equal(queued.status, "waiting_for_browser_surface");
+
+  releaseFirst();
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getLease("lease_2")?.status, "waiting_for_browser_surface");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  // The idle surface is stopped by the idle TTL path, not by capacity reclaim,
+  // and the queued lease starts on the freed capacity.
+  assert.deepEqual(
+    allocator.stopRequests.map((request) => ({ reason: request.reason, surfaceId: request.surfaceId })),
+    [{ reason: "idle_ttl", surfaceId: "surface_1" }]
+  );
+  await waitFor(
+    () => allocator.ensureRequests.length === 2,
+    "queued run should allocate after sweep idle cleanup frees capacity"
+  );
+  await waitFor(() => calls.runConnector === 2, "queued run should spawn after allocator readiness");
+  await controller.drainActiveRuns(1000);
+  assert.equal(calls.runConnector, 2);
+  assert.ok(listRunEventTypes("run_sweep_queued_second").includes("run.browser_surface_leased"));
+  assert.equal((await browserSurfaceLeaseStore.getLease("lease_2"))?.status, "released");
+});
