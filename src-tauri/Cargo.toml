@@ -117,7 +117,7 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
 # Must match the soup3 that webkit2gtk links against: webview_cookies.rs passes
 # a soup::Cookie into webkit2gtk's CookieManager. webkit2gtk 2.0.2 (latest, and
 # pinned above for wry) uses soup3 0.5 on glib 0.18; soup3 0.9 is on glib 0.22.
-soup3 = "0.5"
+soup3 = "0.9"
 
 # The WebKitGTK cookie test in unified.rs builds a real webview with the wry
 # that tauri already uses, with the same features.
