@@ -297,13 +297,17 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	}
 
 	async #requestNoContent(method: "DELETE", url: string): Promise<void> {
-		await this.#request(method, url);
+		// A 404 means the host no longer holds the lease (for example after a
+		// host restart), so the release already happened. Treating it as an
+		// error would leave the surface ready here and retry the DELETE forever.
+		await this.#request(method, url, undefined, { notFoundIsSuccess: true });
 	}
 
 	async #request(
 		method: "DELETE" | "POST",
 		url: string,
 		body?: string,
+		{ notFoundIsSuccess = false }: { notFoundIsSuccess?: boolean } = {},
 	): Promise<FetchResponseLike> {
 		const controller = new AbortController();
 		const timeout = setTimeout(
@@ -320,7 +324,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				method,
 				signal: controller.signal,
 			});
-			if (!response.ok) {
+			if (!response.ok && !(notFoundIsSuccess && response.status === 404)) {
 				throw await this.#buildHttpError(method, url, response);
 			}
 			return response;

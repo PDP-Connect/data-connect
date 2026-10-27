@@ -3063,3 +3063,41 @@ test("sweep idle cleanup frees capacity so a queued lease is promoted before cap
   assert.ok(listRunEventTypes("run_sweep_queued_second").includes("run.browser_surface_leased"));
   assert.equal((await browserSurfaceLeaseStore.getLease("lease_2"))?.status, "released");
 });
+
+test("sweep persists the idle stops that succeeded when another idle stop fails", async (t) => {
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const readyAllocator = createReadyAllocator();
+  const allocator: typeof readyAllocator = {
+    ...readyAllocator,
+    stopSurface: (request) =>
+      request.surfaceId === "surface_1"
+        ? Promise.reject(new Error("allocator stop failed"))
+        : readyAllocator.stopSurface(request),
+  };
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 2 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { controller } = setup(t, { browserSurfaceAllocator: allocator, browserSurfaceLeaseStore, manager });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_partial_first",
+  });
+  await controller.runNow("other-managed", {
+    manifest: DISTINCT_PROFILE_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_sweep_partial_second",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+  assert.equal(manager.getSurface("surface_2")?.health, "ready");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  await controller.sweepBrowserSurfaceLeases();
+
+  // surface_1's stop fails first; surface_2 is still stopped and persisted.
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "ready");
+  assert.equal(manager.getSurface("surface_2"), undefined);
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_2"))?.health, "stopping");
+});
