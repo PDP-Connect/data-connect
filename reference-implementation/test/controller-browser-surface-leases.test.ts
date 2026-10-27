@@ -3101,3 +3101,85 @@ test("sweep persists the idle stops that succeeded when another idle stop fails"
   assert.equal(manager.getSurface("surface_2"), undefined);
   assert.equal((await browserSurfaceLeaseStore.getSurface("surface_2"))?.health, "stopping");
 });
+
+// Covers the race where a run acquires while idle cleanup has claimed a surface
+// for stopping: the claimed surface must not be leased until its stop settles.
+test("a run acquiring during a pending idle stop does not lease the stopping surface", async (t) => {
+  let now = new Date("2026-05-12T12:00:00.000Z");
+  const readyAllocator = createReadyAllocator();
+  let releaseStop: () => void = () => undefined;
+  const stopGate = new Promise<void>((resolve) => {
+    releaseStop = resolve;
+  });
+  let signalStopStarted: () => void = () => undefined;
+  const stopStarted = new Promise<void>((resolve) => {
+    signalStopStarted = resolve;
+  });
+  const allocator: typeof readyAllocator = {
+    ...readyAllocator,
+    stopSurface: async (request) => {
+      signalStopStarted();
+      await stopGate;
+      return readyAllocator.stopSurface(request);
+    },
+  };
+  let releaseSecond: () => void = () => undefined;
+  const runConnectorImpl = (opts: RuntimeRunConnectorOptions) => {
+    if (opts.runId === "run_inflight_second") {
+      return new Promise<RuntimeRunConnectorResult>((resolve) => {
+        releaseSecond = () =>
+          resolve({ checkpoint_summary: null, records_emitted: 0, state: null, status: "succeeded" });
+      });
+    }
+    return Promise.resolve<RuntimeRunConnectorResult>({
+      checkpoint_summary: null,
+      records_emitted: 0,
+      state: null,
+      status: "succeeded",
+    });
+  };
+  const manager = createDynamicManager({ now: () => now, surfaceCap: 2 });
+  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
+  const { calls, controller } = setup(t, {
+    browserSurfaceAllocator: allocator,
+    browserSurfaceLeaseStore,
+    manager,
+    runConnectorImpl,
+  });
+
+  await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_inflight_first",
+  });
+  await controller.drainActiveRuns(1000);
+  assert.equal(manager.getSurface("surface_1")?.health, "ready");
+
+  now = new Date("2026-05-12T12:10:01.000Z");
+  const sweep = controller.sweepBrowserSurfaceLeases();
+  await stopStarted;
+
+  // Same profile key, so surface_1 is the only surface the new run could reuse.
+  // It is claimed for stopping, so the new run must get surface_2 instead.
+  const second = await controller.runNow("managed", {
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_inflight_second",
+  });
+  assert.equal(second.status, "started");
+  await waitFor(() => calls.runConnector === 2, "second run should spawn while the stop is pending");
+  assert.equal(manager.getLease("lease_2")?.surface_id, "surface_2");
+  assert.equal(manager.getSurface("surface_2")?.active_lease_id, "lease_2");
+  assert.equal(manager.getSurface("surface_1")?.active_lease_id, undefined);
+
+  releaseStop();
+  await sweep;
+  assert.equal(manager.getSurface("surface_1"), undefined);
+  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "stopping");
+  assert.equal(manager.getSurface("surface_2")?.active_lease_id, "lease_2");
+
+  releaseSecond();
+  await controller.drainActiveRuns(1000);
+  assert.equal((await browserSurfaceLeaseStore.getLease("lease_2"))?.status, "released");
+  assert.equal(manager.getSurface("surface_2")?.active_lease_id, undefined);
+});
