@@ -78,6 +78,7 @@ import {
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
+import { withTokenKindRecordShape } from "../record-wire-shape.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
@@ -449,42 +450,6 @@ function withRecordSourceIdentity(
     ...(connectionId ? { connection_id: connectionId } : {}),
     ...(record as Record<string, unknown>),
   };
-}
-
-/**
- * Core "Response records" and Section 4: the wire shape of a record depends on
- * the token kind, not on storage. A non-owner response (`client`, or the
- * grant-bound `mcp_package`) MUST NOT include `emitted_at`, and a client
- * tombstone is exactly `{object, id, stream, deleted: true}`, with no
- * `deleted_at` and no `data`. Owner responses are returned unchanged.
- *
- * Applied at the route boundary so SQLite and PostgreSQL share one rule. The
- * stored RECORD envelope keeps `emitted_at`.
- */
-function withTokenKindRecordShape(body: unknown, tokenInfo: TokenInfo): unknown {
-  if (tokenInfo.pdpp_token_kind === "owner" || !body || typeof body !== "object" || Array.isArray(body)) {
-    return body;
-  }
-  const shapeRecord = (value: unknown): unknown => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      return value;
-    }
-    const record = value as Record<string, unknown>;
-    if (record.object !== "record") {
-      return value;
-    }
-    const isTombstone = record.deleted === true;
-    return Object.fromEntries(
-      Object.entries(record).filter(
-        ([key]) => key !== "emitted_at" && !(isTombstone && (key === "deleted_at" || key === "data"))
-      )
-    );
-  };
-  const payload = body as Record<string, unknown>;
-  if (Array.isArray(payload.data)) {
-    return { ...payload, data: payload.data.map(shapeRecord) };
-  }
-  return shapeRecord(payload);
 }
 
 interface ReadScope {
