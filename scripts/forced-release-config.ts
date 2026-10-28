@@ -18,7 +18,7 @@
 //
 // What this does NOT do: invent a version number. The operator names a BUMP
 // (patch/minor/major); semantic-release still derives the actual version
-// from this repo's existing `v${version}` git tags, so a forced release
+// from this repo's existing `npm-v${version}` git tags, so a forced release
 // lands exactly where an ordinary one would and cannot collide with or
 // regress the published line.
 //
@@ -91,7 +91,7 @@ export function loadReleaseConfig(cwd: string = process.cwd()): ReleaseConfig {
  * Returns the release config with commit analysis replaced by an
  * unconditional `releaseType` bump. Every other plugin — the release-notes
  * generator, the dependency pin, both publish-ordering barriers, all three
- * @semantic-release/npm publishes, and the GitHub release — is left exactly
+ * @semantic-release/npm publishes, and the version outputs — is left exactly
  * as .releaserc.yaml defines it, so a forced release publishes the same
  * artifacts, in the same order, through the same OIDC trusted publishing as
  * an ordinary one.

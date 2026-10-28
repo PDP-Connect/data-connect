@@ -10473,6 +10473,9 @@ function createReferenceSchedulerManager({
             terminalData.connector_error_retryable !== undefined
           ) {
             connectorError = {};
+            if (typeof terminalData.connector_error_code === "string" && terminalData.connector_error_code.length > 0) {
+              connectorError.code = terminalData.connector_error_code;
+            }
             if (typeof terminalData.connector_error_message === "string") {
               connectorError.message = terminalData.connector_error_message;
             }
@@ -10480,7 +10483,14 @@ function createReferenceSchedulerManager({
               connectorError.retryable = terminalData.connector_error_retryable;
             }
           }
+          // The runtime reports the checkpoint outcome as the flat
+          // `checkpoint_commit_status`; scheduler records read `commit_status`.
+          const checkpointSummary =
+            typeof terminalData.checkpoint_commit_status === "string"
+              ? { commit_status: terminalData.checkpoint_commit_status }
+              : null;
           return {
+            checkpoint_summary: checkpointSummary,
             connector_error: connectorError,
             failure_reason: terminalData.reason || null,
             known_gaps: Array.isArray(terminalData.known_gaps) ? terminalData.known_gaps : [],

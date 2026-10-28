@@ -3,15 +3,11 @@
 import { useCallback } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { useDispatch, useSelector } from "react-redux"
-import { deleteRun, startRun, updateRunStatus, stopRun } from "../state/store"
+import { deleteRun, startRun, updateRunStatus } from "../state/store"
 import type { RootState } from "../state/store"
 import type { Platform, Run } from "../types"
 import { getPlatformRegistryEntry } from "@/lib/platform/utils"
-import {
-  trackCollectionFailed,
-  trackCollectionStarted,
-} from "@/lib/telemetry/events"
-import { durationSince } from "@/lib/telemetry/client"
+import { trackCollectionStarted } from "@/lib/telemetry/events"
 
 const DUPLICATE_ACTIVE_RUN_ERROR_CODE = "DUPLICATE_ACTIVE_RUN"
 const PDPP_NETWORK_RUNTIME = "pdpp-network"
@@ -157,6 +153,9 @@ export function useConnector() {
         return null
       }
 
+      // Only installed PDPP connectors run; no other runtime has a host.
+      if (platform.runtime !== PDPP_NETWORK_RUNTIME) return null
+
       const runId = runIdForPlatform(platform, Date.now())
 
       const newRun: Run = {
@@ -186,73 +185,27 @@ export function useConnector() {
       // `connector-status`. Its command response arrives only after the
       // subprocess finishes, so waiting here would leave /connect without a
       // run id (and therefore without live busy/progress UI).
-      if (platform.runtime === PDPP_NETWORK_RUNTIME) {
-        void startInstalledPdppConnectorRun(runId, platform, options).catch(
-          error => {
-            if (isDuplicateStartError(error)) {
-              dispatch(deleteRun(runId))
-              return
-            }
-
-            console.error(
-              "Failed to start installed PDPP connector run:",
-              error
-            )
-            // A host-side failure normally emits its own terminal event. This
-            // only closes the UI state when no event has already done so.
-            dispatch(
-              updateRunStatus({
-                runId,
-                status: "error",
-                endDate: new Date().toISOString(),
-                statusMessage: getErrorMessage(error),
-                onlyIfRunning: true,
-              })
-            )
+      void startInstalledPdppConnectorRun(runId, platform, options).catch(
+        error => {
+          if (isDuplicateStartError(error)) {
+            dispatch(deleteRun(runId))
+            return
           }
-        )
-        return runId
-      }
 
-      try {
-        const simulateNoChrome =
-          typeof window !== "undefined" &&
-          window.localStorage?.getItem?.("dataconnect_simulate_no_chrome") ===
-            "true"
-
-        await invoke("start_connector_run", {
-          runId,
-          platformId: platform.id,
-          filename: platform.filename,
-          company: platform.company,
-          name: platform.name,
-          connectUrl: platform.connectURL || "",
-          runtime: platform.runtime || null,
-          simulateNoChrome,
-        })
-      } catch (error) {
-        if (isDuplicateStartError(error)) {
-          dispatch(deleteRun(runId))
-          return null
+          console.error("Failed to start installed PDPP connector run:", error)
+          // A host-side failure normally emits its own terminal event. This
+          // only closes the UI state when no event has already done so.
+          dispatch(
+            updateRunStatus({
+              runId,
+              status: "error",
+              endDate: new Date().toISOString(),
+              statusMessage: getErrorMessage(error),
+              onlyIfRunning: true,
+            })
+          )
         }
-
-        console.error("Failed to start connector run:", error)
-        dispatch(
-          updateRunStatus({
-            runId,
-            status: "error",
-            endDate: new Date().toISOString(),
-            statusMessage: getErrorMessage(error),
-          })
-        )
-        trackCollectionFailed({
-          collectionRunId: runId,
-          source,
-          durationMs: durationSince(newRun.startDate),
-          error,
-        })
-      }
-
+      )
       return runId
     },
     [dispatch, pendingConnectorChanges]
@@ -266,9 +219,6 @@ export function useConnector() {
           await invoke("stop_installed_pdpp_connector_run", { runId })
           // The PDPP host emits STOPPED after its subprocess is actually
           // reaped. Keep the source card active until then.
-        } else {
-          dispatch(stopRun(runId))
-          await invoke("stop_connector_run", { runId })
         }
       } catch (error) {
         console.log("Stop connector run (window may be closed):", error)

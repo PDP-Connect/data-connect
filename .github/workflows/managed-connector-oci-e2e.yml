@@ -182,9 +182,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # 24.21.0 is the version the reference-implementation job runs its tests on, and the
+          # 24.22.1 is the version the reference-implementation job runs its tests on, and the
           # install-path journey below is one of those tests. The producer's engines pin node 24 too.
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Install this repository's dependencies
         run: npm ci --ignore-scripts

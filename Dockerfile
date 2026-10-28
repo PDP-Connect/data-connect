@@ -41,7 +41,7 @@
 # binary into this image would silently reverse that policy, not just port
 # pdpp's Dockerfile.
 
-ARG NODE_VERSION=24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+ARG NODE_VERSION=24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 
 FROM node:${NODE_VERSION} AS base
 
@@ -189,7 +189,12 @@ ARG TARGETARCH
 # that leaves the browser behind fails the build. The server also falls back to
 # this path when a deploy env points at one without the executable (see
 # reference-implementation/runtime/browser-executable.ts).
+# PDPP_BROWSER_CHANNEL=chromium makes every Patchright launch, headed or
+# headless, use this full Chromium. Without a channel, a headless launch runs
+# Chrome Headless Shell, a separate build that ignores managed policy such as
+# the CA distrust list below, so the install also leaves that build out.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright-browsers \
+    PDPP_BROWSER_CHANNEL=chromium \
     PDPP_RUNTIME_BROWSER=1
 
 RUN apt-get update \
@@ -208,11 +213,22 @@ WORKDIR /tmp/patchright-install
 RUN PATCHRIGHT_VERSION="$(node --input-type=module -e "import { readFileSync } from 'node:fs'; const packageJson = JSON.parse(readFileSync('/tmp/reference-implementation-package.json', 'utf8')); const version = packageJson.dependencies.patchright; if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('Patchright dependency must be exact, got: ' + version); process.stdout.write(version)")" \
   && echo '{"name":"patchright-installer","private":true,"version":"0.0.0"}' > package.json \
   && npm install --no-save --ignore-scripts "patchright@${PATCHRIGHT_VERSION}" \
-  && npx patchright install --with-deps chromium \
+  && npx patchright install --with-deps --no-shell chromium \
   && EXPECTED_REVISION="$(node -e "const b = require('./node_modules/patchright-core/browsers.json').browsers.find((entry) => entry.name === 'chromium'); if (!b) process.exit(1); process.stdout.write(b.revision)")" \
   && case "$(dpkg --print-architecture)" in amd64) CHROME_BIN=chrome-linux64/chrome ;; arm64) CHROME_BIN=chrome-linux-arm64/chrome ;; *) echo "unsupported architecture for Patchright Chromium" >&2; exit 1 ;; esac \
   && test -x "${PLAYWRIGHT_BROWSERS_PATH}/chromium-${EXPECTED_REVISION}/${CHROME_BIN}" \
+  && if ls -d "${PLAYWRIGHT_BROWSERS_PATH}"/chromium_headless_shell-* 2>/dev/null; then echo "Chrome Headless Shell must not be installed" >&2; exit 1; fi \
   && rm -rf /tmp/patchright-install
+
+# Chromium reads CA distrust policy from a machine policy directory chosen by
+# its branding: Chrome for Testing (Patchright's amd64 build) reads
+# /etc/opt/chrome_for_testing, a Chromium-branded build reads /etc/chromium.
+# Install the policy in both so a branding change cannot silently drop it. See
+# docker/chrome-policy/README.md.
+RUN --mount=type=bind,source=docker/chrome-policy/distrusted-cas.json,target=/tmp/pdpp-distrusted-cas.json \
+  for dir in /etc/opt/chrome_for_testing/policies/managed /etc/chromium/policies/managed; do \
+    install -D -o root -g root -m 0644 /tmp/pdpp-distrusted-cas.json "${dir}/pdpp-distrusted-cas.json" || exit 1; \
+  done
 
 WORKDIR /app
 

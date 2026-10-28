@@ -46,12 +46,12 @@ pub use commands::test_support;
 use commands::{
     add_developer_connector_source, check_browser_available, check_connected_platforms,
     check_connector_updates, cleanup_browser_surface_host, cleanup_installed_pdpp_connector_runs,
-    cleanup_personal_server, cleanup_playwright_processes, cleanup_reference_server,
+    cleanup_personal_server, cleanup_reference_server,
     clear_browser_session, clear_personal_server_data, close_reference_server_view,
     debug_connector_paths, delete_exported_run, download_browser, download_chromium_rust,
-    download_connector, get_app_config, get_installed_connectors, get_log_path,
+    download_connector, get_app_config, get_log_path,
     get_personal_server_data_path, get_personal_server_status, get_platforms,
-    get_reference_server_status, get_registry_url, get_run_files, get_user_data_path,
+    get_reference_server_status, get_run_files, get_user_data_path,
     handle_download, hide_reference_server_view, is_installed_pdpp_browser_setup_complete,
     list_browser_sessions, list_developer_connector_sources, load_latest_source_export_full,
     load_latest_source_export_preview, load_run_export_data, load_runs,
@@ -61,9 +61,9 @@ use commands::{
     reference_server_has_connection,
     reload_developer_connector_source, remove_developer_connector_source,
     reset_installed_pdpp_browser_profile, resize_reference_server_view,
-    select_developer_connector_source, set_app_config, start_connector_run,
+    select_developer_connector_source, set_app_config,
     start_installed_pdpp_connector_run, start_personal_server, start_reference_server,
-    stop_connector_run, stop_installed_pdpp_connector_run, stop_personal_server,
+    stop_installed_pdpp_connector_run, stop_personal_server,
     stop_reference_server, submit_installed_pdpp_interaction_response, test_nodejs,
     write_export_data, BrowserSurfaceHost,
 };
@@ -263,7 +263,6 @@ pub fn run() {
                 cleanup_personal_server();
                 cleanup_reference_server();
                 cleanup_installed_pdpp_connector_runs();
-                cleanup_playwright_processes();
             }
             _ => {}
         });
@@ -283,7 +282,6 @@ pub(crate) fn app_invoke_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 's
         reload_developer_connector_source,
         remove_developer_connector_source,
         select_developer_connector_source,
-        start_connector_run,
         start_installed_pdpp_connector_run,
         prepare_installed_pdpp_import,
         stop_installed_pdpp_connector_run,
@@ -296,7 +294,6 @@ pub(crate) fn app_invoke_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 's
         commands::pdpp_connections::remove_pdpp_connection,
         is_installed_pdpp_browser_setup_complete,
         submit_installed_pdpp_interaction_response,
-        stop_connector_run,
         check_connected_platforms,
         check_browser_available,
         download_browser,
@@ -319,8 +316,6 @@ pub(crate) fn app_invoke_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 's
         delete_exported_run,
         check_connector_updates,
         download_connector,
-        get_registry_url,
-        get_installed_connectors,
         get_app_config,
         set_app_config,
         get_log_path,

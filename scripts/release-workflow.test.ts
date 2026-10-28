@@ -300,7 +300,7 @@ describe("release workflow", () => {
       "verification_args=(--platform macos --expected-arch"
     )
     expect(workflow).toContain("npm ci")
-    expect(workflow).toContain('node-version: "24.21.0"')
+    expect(workflow).toContain('node-version: "24.22.1"')
     expect(workflow).toContain("Stage Node.js runtime sidecar")
     expect(workflow).toContain(
       'node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}"'
@@ -319,7 +319,7 @@ describe("release workflow", () => {
     expect(workflow).toContain(
       "node scripts/verify-reference-stack.mjs --profile release"
     )
-    expect(workflow).toContain("if: github.event_name == 'release'")
+    expect(workflow).toContain("if: inputs.publish_tag != '' || github.event_name == 'release'")
     expect(workflow).not.toMatch(
       /updater|latest\.json|TAURI_SIGNING_PRIVATE_KEY/i
     )
@@ -423,7 +423,7 @@ describe("release workflow", () => {
     }
   })
 
-  it("refuses a release checkout whose HEAD is not the release event commit", () => {
+  it("refuses a release checkout whose HEAD is not the selected release commit", () => {
     const workflow = readReleaseWorkflow()
     const marker = "      - name: Verify checked-out release identity\n"
     const scripts = workflow
@@ -481,13 +481,15 @@ describe("release workflow", () => {
             env: {
               ...process.env,
               GITHUB_SHA: githubSha,
+              EXPECTED_SHA: githubSha,
+              AUTOMATIC_TAG: "",
               RELEASE_TAG: "v1.2.3",
             },
           })
         const moved = run(eventSha)
         expect(moved.status).toBe(1)
         expect(moved.stdout).toContain(
-          `Checked-out commit ${movedSha} is not the release event commit ${eventSha}`
+          `Checked-out commit ${movedSha} is not the selected release commit ${eventSha}`
         )
         expect(moved.stdout).not.toContain("verify-release-ref ran")
 
@@ -603,10 +605,10 @@ describe("release workflow", () => {
 
     expect(workflow).toContain("permissions:\n  contents: read")
     expect(workflow).toContain(
-      "publish:\n    if: github.event_name == 'release'\n    needs: build"
+      "publish:\n    if: inputs.publish_tag != '' || github.event_name == 'release'\n    needs: build"
     )
     expect(workflow).toContain("permissions:\n      contents: write")
-    expect(stagedArtifacts).toContain("if: github.event_name == 'release'")
+    expect(stagedArtifacts).toContain("if: inputs.publish_tag != '' || github.event_name == 'release'")
     expect(stagedArtifacts).toContain(
       "manual-install-${{ matrix.artifact_key }}"
     )
@@ -638,7 +640,7 @@ describe("release workflow", () => {
     )
 
     expect(workflow).toContain(
-      "publish-core-image:\n    if: github.event_name == 'release'\n    needs: [build, publish]"
+      "publish-core-image:\n    if: inputs.publish_tag != '' || github.event_name == 'release'\n    needs: [build, publish]"
     )
     expect(publishCoreImage).toContain("packages: write")
     expect(publishCoreImage).not.toContain("id-token:")
@@ -654,12 +656,12 @@ describe("release workflow", () => {
     expect(buildCore).toContain("push: false")
     expect(buildCore).toContain("target: core")
     expect(buildCore).toContain("platforms: linux/amd64,linux/arm64")
-    expect(buildCore).toContain("PDPP_REFERENCE_REVISION=${{ github.sha }}")
+    expect(buildCore).toContain("PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}")
   })
 
   it("runs clean-install instead of build only on a dispatch that names a release", () => {
     const workflow = readReleaseWorkflow()
-    type Trigger = { event: string; releaseTag?: string }
+    type Trigger = { event: string; releaseTag?: string; publishTag?: string }
     // Evaluates the simple ==, !=, &&, || job gates this workflow uses.
     const runs = (job: string, trigger: Trigger) => {
       const gate = new RegExp(`\\n  ${job}:\\n(?:    #.*\\n)*    if: (.*)\\n`)
@@ -668,18 +670,25 @@ describe("release workflow", () => {
       const expression = match[1]
         .replaceAll("github.event_name", "event")
         .replaceAll("inputs.release_tag", "releaseTag")
+        .replaceAll("inputs.publish_tag", "publishTag")
+        .replaceAll("startsWith(github.ref_name, 'v')", "true")
         .replaceAll("!github.event.release.prerelease", "true")
         .replaceAll("!=", "!==")
         .replaceAll(/([^!=])==/g, "$1===")
-      return new Function("event", "releaseTag", `return ${expression}`)(
+      return new Function("event", "releaseTag", "publishTag", `return ${expression}`)(
         trigger.event,
-        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : ""
+        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : "",
+        trigger.publishTag ?? ""
       )
     }
     const scenarios: Array<[Trigger, string[]]> = [
       [{ event: "workflow_dispatch", releaseTag: "v2.4.0" }, ["clean-install"]],
       [{ event: "workflow_dispatch", releaseTag: "" }, ["build"]],
       [{ event: "pull_request" }, ["build"]],
+      [
+        { event: "workflow_run", publishTag: "v1.2.3" },
+        ["build", "publish", "publish-core-image", "promote-core-latest"],
+      ],
       [
         { event: "release" },
         ["build", "publish", "publish-core-image", "promote-core-latest"],
@@ -793,8 +802,8 @@ describe("release workflow", () => {
     )
 
     const secretArg = workflow.replace(
-      "            PDPP_REFERENCE_REVISION=${{ github.sha }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar",
-      "            PDPP_REFERENCE_REVISION=${{ github.sha }}\n            NPM_TOKEN=${{ secrets.NPM_TOKEN }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar"
+      "            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar",
+      "            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}\n            NPM_TOKEN=${{ secrets.NPM_TOKEN }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar"
     )
     expect(secretArg).not.toBe(workflow)
     expect(coreImageScanGaps(secretArg)).toContain(
@@ -1011,7 +1020,7 @@ describe("release workflow", () => {
     )
     expect(workflow.match(/concurrency:/g)).toHaveLength(1)
     expect(promoter).toContain(
-      "promote-core-latest:\n    if: github.event_name == 'release' && !github.event.release.prerelease\n    needs: publish-core-image"
+      "promote-core-latest:\n    if: inputs.publish_tag != '' || (github.event_name == 'release' && !github.event.release.prerelease)\n    needs: publish-core-image"
     )
     expect(promoter).toContain(
       "concurrency:\n      group: core-image-latest-promotion\n      cancel-in-progress: false"

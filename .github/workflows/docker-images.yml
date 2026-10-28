@@ -8,7 +8,7 @@ name: docker-images
 # that file's header comment for the pnpm->npm / packages/*->real-path
 # conversion notes). Converted here for this repo's npm workspaces (not
 # pnpm), package-lock.json (not pnpm-lock.yaml/pnpm-workspace.yaml), Node
-# Node version (24.19.0, matching this repo's package.json engines field),
+# Node version (24.22.1, matching this repo's package.json engines field),
 # and GHCR org (ghcr.io/pdp-connect/data-connect,
 # not ghcr.io/pdp-connect/pdpp).
 #
@@ -41,6 +41,7 @@ on:
       - "apps/console/**"
       - "deploy/railway/**"
       - "docker/neko/**"
+      - "docker/chrome-policy/**"
       - "docker-compose*.yml"
       - "package.json"
       - "package-lock.json"
@@ -51,6 +52,8 @@ on:
       - "scripts/docker-core-demo-smoke-browser.mjs"
       - "scripts/fixtures/**"
       - "deploy/docker/check-image-identity.sh"
+      - "deploy/docker/check-chrome-distrust-policy.sh"
+      - "deploy/docker/check-chrome-policy-page.mjs"
   pull_request:
     # PRs into the test-engineering integration branch are gated by a local
     # oracle and review; full CI runs once on the batch PR into main.
@@ -74,6 +77,7 @@ on:
       - "apps/console/**"
       - "deploy/railway/**"
       - "docker/neko/**"
+      - "docker/chrome-policy/**"
       - "docker-compose*.yml"
       - "package.json"
       - "package-lock.json"
@@ -84,6 +88,8 @@ on:
       - "scripts/docker-core-demo-smoke-browser.mjs"
       - "scripts/fixtures/**"
       - "deploy/docker/check-image-identity.sh"
+      - "deploy/docker/check-chrome-distrust-policy.sh"
+      - "deploy/docker/check-chrome-policy-page.mjs"
   workflow_dispatch:
     inputs:
       image:
@@ -213,6 +219,10 @@ jobs:
         if: matrix.image == 'core'
         run: bash deploy/docker/check-image-identity.sh --require-known pdpp:ci-core-test
 
+      - name: Prove every browser in the built image loads the CA distrust policy
+        if: matrix.image == 'core' || matrix.image == 'reference-browser'
+        run: bash deploy/docker/check-chrome-distrust-policy.sh pdpp:ci-${{ matrix.image }}
+
       - name: Prove the built Core image runs headed Patchright with durable profiles and interaction-scoped CDP
         if: matrix.image == 'core'
         env:
@@ -252,6 +262,8 @@ jobs:
           tags: pdpp-neko:ci
       - name: Prove no layer of the n.eko image carries a secret-looking file
         run: bash deploy/docker/check-image-secrets.sh image pdpp-neko:ci
+      - name: Prove every browser in the n.eko image loads the CA distrust policy
+        run: bash deploy/docker/check-chrome-distrust-policy.sh pdpp-neko:ci
 
   # A CI checkout never contains an operator's .env.docker, so scanning built
   # images cannot catch a missing ignore rule. This job plants dummy secret

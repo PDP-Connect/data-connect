@@ -5,11 +5,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager};
 
-use super::connector_store::{
-    get_active_connector_install, get_legacy_user_connectors_dir, read_active_connector_manifest,
-};
+use super::connector_store::{get_legacy_user_connectors_dir, read_active_connector_manifest};
 use super::pdpp_installed_connector::{
     pdpp_stream_to_dataconnect_scope, read_admitted_pdpp_asset_with_resource_dir,
 };
@@ -20,66 +18,6 @@ const CHROMIUM_CDN_MIRRORS: &[&str] = &[
     "https://cdn.playwright.dev",
     "https://playwright.download.prss.microsoft.com/dbazure/download/playwright",
 ];
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ConnectorScope {
-    pub scope: String,
-    pub label: Option<String>,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ConnectorMetadata {
-    /// Canonical connector_id (e.g. "instagram-playwright").
-    pub connector_id: Option<String>,
-    /// Legacy `id` field — accepted so manifests with both `connector_id`
-    /// and `id` don't fail to parse. Value is ignored; connector_id is used.
-    #[serde(default)]
-    id: Option<String>,
-    /// Canonical source_id (e.g. "instagram"). Distinct from connector_id.
-    pub source_id: Option<String>,
-    /// Version of the manifest contract itself (e.g. "1.0"). Independent of
-    /// connector version and page_api_version.
-    pub manifest_version: Option<String>,
-    /// Major version of the page API this connector targets (e.g. 1).
-    /// Independent of connector version.
-    pub page_api_version: Option<u32>,
-    pub name: String,
-    pub company: Option<String>,
-    pub description: String,
-    /// Canonical connect_url.
-    pub connect_url: Option<String>,
-    /// Legacy connectURL — accepted so manifests with both don't fail.
-    #[serde(rename = "connectURL", default)]
-    connect_url_legacy: Option<String>,
-    /// Canonical connect_selector.
-    pub connect_selector: Option<String>,
-    /// Legacy connectSelector — accepted so manifests with both don't fail.
-    #[serde(rename = "connectSelector", default)]
-    connect_selector_legacy: Option<String>,
-    #[serde(rename = "exportFrequency")]
-    pub export_frequency: Option<String>,
-    pub vectorize_config: Option<serde_json::Value>,
-    /// Runtime type: "vanilla" (default) or "network-capture" (uses network interception)
-    pub runtime: Option<String>,
-    /// Semantic version string (e.g. "1.0.0"). This is the connector version,
-    /// not the manifest version or page API version.
-    pub version: Option<String>,
-    /// Canonical icon_url.
-    pub icon_url: Option<String>,
-    /// Legacy iconURL — accepted so manifests with both don't fail.
-    #[serde(rename = "iconURL", default)]
-    icon_url_legacy: Option<String>,
-    /// Legacy icon — accepted so manifests with both don't fail.
-    #[serde(default)]
-    icon: Option<String>,
-    /// Scopes this connector can export (e.g. chatgpt.conversations, chatgpt.memories)
-    pub scopes: Option<Vec<ConnectorScope>>,
-    /// Declarative runtime constraints. Reserved for future use.
-    pub runtime_requirements: Option<serde_json::Value>,
-    /// Optional feature flags the connector needs.
-    pub capabilities: Option<Vec<String>>,
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Platform {
@@ -94,14 +32,7 @@ pub struct Platform {
     pub logo_url: String,
     #[serde(rename = "needsConnection")]
     pub needs_connection: bool,
-    #[serde(rename = "connectURL")]
-    pub connect_url: Option<String>,
-    #[serde(rename = "connectSelector")]
-    pub connect_selector: Option<String>,
-    #[serde(rename = "exportFrequency")]
-    pub export_frequency: Option<String>,
-    pub vectorize_config: Option<serde_json::Value>,
-    /// Runtime type: "vanilla" (default) or "network-capture" (uses network interception)
+    /// Runtime type. Installed PDPP connectors use "pdpp-network".
     pub runtime: Option<String>,
     /// Scopes this connector can export (just the scope strings, e.g. ["chatgpt.conversations", "chatgpt.memories"])
     pub scopes: Option<Vec<String>>,
@@ -205,393 +136,6 @@ struct ActivePdppStream {
     name: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ConnectorResultScopeSummary {
-    requested: u32,
-    produced: u32,
-    degraded: u32,
-    omitted: u32,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct ConnectorResultClassification {
-    outcome: String,
-    error_class: Option<String>,
-    record_count: Option<u32>,
-    scope_summary: ConnectorResultScopeSummary,
-    debug: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct PlaywrightRunnerResultEnvelope {
-    #[serde(default)]
-    data: Option<serde_json::Value>,
-    classification: ConnectorResultClassification,
-}
-
-/// Get the user connectors directory (~/.dataconnect/connectors/)
-fn get_user_connectors_dir() -> Option<PathBuf> {
-    let path = get_legacy_user_connectors_dir()?;
-    if path.exists() {
-        log::info!("Found user connectors at: {:?}", path);
-        Some(path)
-    } else {
-        None
-    }
-}
-
-fn active_install_path(root_path: &str, relative_path: &str) -> Option<PathBuf> {
-    let root = PathBuf::from(root_path);
-    let full_path = root.join(relative_path);
-    if full_path.exists() {
-        Some(full_path)
-    } else {
-        None
-    }
-}
-
-fn manifest_looks_like_connector(metadata: &ConnectorMetadata) -> bool {
-    metadata
-        .connector_id
-        .as_deref()
-        .or(metadata.id.as_deref())
-        .is_some()
-        && metadata
-            .scopes
-            .as_ref()
-            .is_some_and(|scopes| !scopes.is_empty())
-}
-
-fn resolve_icon_path(dir: &Path, icon_path: &str) -> Option<PathBuf> {
-    let canonical = dir.join(icon_path);
-    if canonical.exists() {
-        return Some(canonical);
-    }
-
-    let flattened = Path::new(icon_path)
-        .file_name()
-        .map(|name| dir.join(name))
-        .filter(|path| path.exists());
-    if flattened.is_some() {
-        return flattened;
-    }
-
-    None
-}
-
-/// Get the bundled connectors directory path
-fn get_connectors_dir(app: &AppHandle) -> PathBuf {
-    // In development, look in the project root directory
-    // The project root is 3 levels up from src-tauri/target/debug/
-
-    // First, try the CARGO_MANIFEST_DIR (only available during cargo run)
-    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-        let dev_path = PathBuf::from(&manifest_dir)
-            .parent()
-            .map(|p| p.join("connectors"))
-            .unwrap_or_default();
-        if dev_path.exists() {
-            log::info!("Found bundled connectors at: {:?}", dev_path);
-            return dev_path;
-        }
-    }
-
-    // Try relative to current directory (for when running from project root)
-    let cwd_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("connectors");
-    if cwd_path.exists() {
-        log::info!("Found bundled connectors at: {:?}", cwd_path);
-        return cwd_path;
-    }
-
-    // Try relative to executable location (development fallback)
-    if let Ok(exe_path) = std::env::current_exe() {
-        // In dev: exe is at src-tauri/target/debug/dataconnect
-        // Project root is 4 levels up
-        if let Some(project_root) = exe_path
-            .parent() // target/debug
-            .and_then(|p| p.parent()) // target
-            .and_then(|p| p.parent()) // src-tauri
-            .and_then(|p| p.parent())
-        // project root
-        {
-            let dev_path = project_root.join("connectors");
-            if dev_path.exists() {
-                log::info!("Found bundled connectors at: {:?}", dev_path);
-                return dev_path;
-            }
-        }
-    }
-
-    // Try resource path for bundled app (production)
-    // Tauri converts "../connectors" to "_up_/connectors" in resources
-    let resource_dir = app.path().resource_dir().unwrap_or_default();
-
-    // Check for _up_/connectors first (from "../connectors" resource path)
-    let up_path = resource_dir.join("_up_").join("connectors");
-    if up_path.exists() {
-        log::info!("Found bundled connectors at: {:?}", up_path);
-        return up_path;
-    }
-
-    // Fallback to direct connectors path
-    let resource_path = resource_dir.join("connectors");
-    log::info!(
-        "Using resource bundled connectors path: {:?}",
-        resource_path
-    );
-    resource_path
-}
-
-/// Debug connector paths - helps diagnose why connectors aren't found
-#[tauri::command]
-pub async fn debug_connector_paths(app: AppHandle) -> Result<serde_json::Value, String> {
-    let resource_dir = app.path().resource_dir().unwrap_or_default();
-    let connectors_dir = get_connectors_dir(&app);
-    let user_dir = get_user_connectors_dir();
-
-    // Check various paths
-    let mut paths_to_check = vec![
-        ("resource_dir", resource_dir.clone()),
-        ("resource_dir/connectors", resource_dir.join("connectors")),
-        (
-            "resource_dir/_up_/connectors",
-            resource_dir.join("_up_").join("connectors"),
-        ),
-        ("connectors_dir (bundled)", connectors_dir.clone()),
-    ];
-
-    // Add user directory if available
-    if let Some(ref user_path) = user_dir {
-        paths_to_check.push(("user_connectors_dir", user_path.clone()));
-    }
-
-    let mut results = serde_json::Map::new();
-
-    for (name, path) in paths_to_check {
-        let exists = path.exists();
-        let contents = if exists && path.is_dir() {
-            std::fs::read_dir(&path)
-                .map(|entries| {
-                    entries
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.file_name().to_string_lossy().to_string())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        } else {
-            vec![]
-        };
-
-        results.insert(
-            name.to_string(),
-            serde_json::json!({
-                "path": path.to_string_lossy(),
-                "exists": exists,
-                "contents": contents
-            }),
-        );
-    }
-
-    // Show the effective connectors the app actually uses (same logic as get_platforms:
-    // bundled first, user dir overrides by id).
-    let mut connectors_map: std::collections::HashMap<String, serde_json::Value> =
-        std::collections::HashMap::new();
-    let active_dirs: Vec<(&str, &PathBuf)> = [
-        Some(("bundled", &connectors_dir)),
-        user_dir.as_ref().map(|d| ("user", d)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    for (source, dir) in &active_dirs {
-        if !dir.exists() {
-            continue;
-        }
-        for entry in walkdir::WalkDir::new(dir).min_depth(2).max_depth(2) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.extension().map_or(true, |ext| ext != "json") {
-                continue;
-            }
-            let fname = path.file_stem().unwrap_or_default().to_string_lossy();
-            if fname == "connector" {
-                continue;
-            }
-            if let Ok(content) = fs::read_to_string(path) {
-                if let Ok(meta) = serde_json::from_str::<ConnectorMetadata>(&content) {
-                    let id = meta
-                        .connector_id
-                        .or(meta.id)
-                        .unwrap_or_else(|| format!("{}-001", fname));
-                    connectors_map.insert(
-                        id.clone(),
-                        serde_json::json!({
-                            "id": id,
-                            "name": meta.name,
-                            "version": meta.version.unwrap_or_else(|| "unknown".to_string()),
-                            "source": source,
-                        }),
-                    );
-                }
-            }
-        }
-    }
-    let mut connectors_info: Vec<_> = connectors_map.into_values().collect();
-    connectors_info.sort_by(|a, b| {
-        a.get("name")
-            .and_then(|v| v.as_str())
-            .cmp(&b.get("name").and_then(|v| v.as_str()))
-    });
-    results.insert("connectors".to_string(), serde_json::json!(connectors_info));
-
-    Ok(serde_json::Value::Object(results))
-}
-
-/// Load platforms from a single directory
-fn platform_from_metadata(
-    metadata: ConnectorMetadata,
-    company: String,
-    filename: String,
-    logo_url: String,
-    runtime_override: Option<String>,
-) -> Platform {
-    let scopes = metadata
-        .scopes
-        .map(|s| s.into_iter().map(|cs| cs.scope).collect());
-
-    Platform {
-        id: metadata
-            .connector_id
-            .or(metadata.id)
-            .unwrap_or_else(|| format!("{}-001", filename)),
-        company: metadata.company.unwrap_or(company),
-        name: metadata.name.clone(),
-        filename,
-        description: metadata.description,
-        is_updated: false,
-        logo_url,
-        needs_connection: true,
-        connect_url: metadata.connect_url.or(metadata.connect_url_legacy),
-        connect_selector: metadata
-            .connect_selector
-            .or(metadata.connect_selector_legacy),
-        export_frequency: metadata.export_frequency,
-        vectorize_config: metadata.vectorize_config,
-        runtime: runtime_override.or(metadata.runtime),
-        scopes,
-        setup: None,
-        source_kind: None,
-        source_id: None,
-        source_path: None,
-        active_source: None,
-        requires_browser: None,
-        connection_id: None,
-        account_label: None,
-    }
-}
-
-fn load_platforms_from_dir(dir: &PathBuf) -> Vec<Platform> {
-    let mut platforms = Vec::new();
-
-    if !dir.exists() {
-        log::warn!("Connectors directory not found: {:?}", dir);
-        return platforms;
-    }
-
-    // Walk through the connectors directory
-    for entry in walkdir::WalkDir::new(dir).min_depth(2).max_depth(2) {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let path = entry.path();
-
-        // Look for JSON metadata files
-        if path.extension().map_or(false, |ext| ext == "json") {
-            let filename = path.file_stem().unwrap_or_default().to_string_lossy();
-
-            // Skip type definition files and schema files
-            if filename == "connector" {
-                continue;
-            }
-
-            let parent_name = path
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if parent_name == "schemas" || parent_name == "types" {
-                continue;
-            }
-
-            // Read and parse the metadata
-            match fs::read_to_string(path) {
-                Ok(content) => {
-                    match serde_json::from_str::<ConnectorMetadata>(&content) {
-                        Ok(metadata) => {
-                            // Get company from parent directory
-                            let company = path
-                                .parent()
-                                .and_then(|p| p.file_name())
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "Unknown".to_string());
-
-                            // Resolve icon: read SVG from disk and convert to data URI
-                            if !manifest_looks_like_connector(&metadata) {
-                                log::debug!("Skipping non-connector manifest at {:?}", path);
-                                continue;
-                            }
-
-                            let resolved_icon = metadata
-                                .icon_url
-                                .clone()
-                                .or(metadata.icon_url_legacy.clone())
-                                .or(metadata.icon.clone());
-                            let logo_url = resolved_icon
-                                .as_ref()
-                                .and_then(|icon_path| {
-                                    let svg_path = resolve_icon_path(dir, icon_path)?;
-                                    fs::read_to_string(&svg_path).ok().map(|svg| {
-                                        use base64::{
-                                            engine::general_purpose::STANDARD, Engine as _,
-                                        };
-                                        let encoded = STANDARD.encode(svg.as_bytes());
-                                        format!("data:image/svg+xml;base64,{}", encoded)
-                                    })
-                                })
-                                .unwrap_or_else(|| filename.to_string());
-
-                            platforms.push(platform_from_metadata(
-                                metadata,
-                                company,
-                                filename.to_string(),
-                                logo_url,
-                                None,
-                            ));
-                        }
-                        Err(e) => {
-                            log::error!("Failed to parse metadata {:?}: {}", path, e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("Failed to read metadata {:?}: {}", path, e);
-                }
-            }
-        }
-    }
-
-    platforms
-}
-
 fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
     let mut installs = read_active_connector_manifest()
         .map(|manifest| manifest.connectors.into_values().collect::<Vec<_>>())
@@ -606,6 +150,7 @@ fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
     load_pdpp_platforms_with_resource_dir(installs, resource_dir.as_deref())
 }
 
+#[cfg(test)]
 pub(super) fn load_pdpp_platforms(
     installs: impl IntoIterator<Item = super::connector_store::ActiveConnectorInstall>,
 ) -> Vec<Platform> {
@@ -703,10 +248,6 @@ pub(super) fn load_pdpp_platforms_with_resource_dir(
             is_updated: false,
             logo_url,
             needs_connection: true,
-            connect_url: None,
-            connect_selector: None,
-            export_frequency: None,
-            vectorize_config: None,
             runtime: Some("pdpp-network".to_string()),
             scopes: Some(scopes),
             setup: manifest.setup,
@@ -761,46 +302,17 @@ fn pdpp_streams_to_dataconnect_scopes(
     scopes
 }
 
-/// Load all platform connectors from both user and bundled connectors directories
-/// User connectors take precedence over bundled ones
+/// Load the installed PDPP connectors, expanded to one platform per connection.
 #[tauri::command]
 pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
-    let mut platforms = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
-
-    // First, load from bundled directory
-    let bundled_dir = get_connectors_dir(&app);
-    log::info!("Loading bundled connectors from: {:?}", bundled_dir);
-    for platform in load_platforms_from_dir(&bundled_dir) {
-        seen_ids.insert(platform.id.clone());
-        platforms.push(platform);
-    }
-
-    // Then, load from user directory (overrides bundled)
-    if let Some(user_dir) = get_user_connectors_dir() {
-        log::info!("Loading user connectors from: {:?}", user_dir);
-        for platform in load_platforms_from_dir(&user_dir) {
-            if seen_ids.contains(&platform.id) {
-                // Remove the bundled version
-                platforms.retain(|p| p.id != platform.id);
-            }
-            seen_ids.insert(platform.id.clone());
-            platforms.push(platform);
-        }
-    }
-
+    let mut platforms: Vec<Platform> = Vec::new();
     for platform in load_active_pdpp_platforms(&app) {
-        if !seen_ids.contains(&platform.id) {
-            seen_ids.insert(platform.id.clone());
+        if !platforms.iter().any(|existing| existing.id == platform.id) {
             platforms.push(platform);
         }
     }
     let mut expanded = Vec::new();
     for platform in platforms {
-        if platform.runtime.as_deref() != Some("pdpp-network") {
-            expanded.push(platform);
-            continue;
-        }
         let mut accounts = super::pdpp_connections::stored_connections(&platform.id)?;
         if accounts.is_empty()
             && super::pdpp_connections::has_legacy_data(&app, &platform.id, &platform.company)
@@ -826,357 +338,168 @@ pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
     Ok(expanded)
 }
 
-/// Active connector windows
-static CONNECTOR_WINDOWS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Check if a platform is connected (has exported data)
+#[tauri::command]
+pub async fn check_connected_platforms(
+    app: AppHandle,
+    platform_ids: Vec<String>,
+    connection_ids: Option<HashMap<String, Vec<String>>>,
+) -> Result<HashMap<String, bool>, String> {
+    let mut connected = HashMap::new();
 
-#[derive(Default)]
-struct ActiveRunIndex {
-    by_platform: HashMap<String, String>,
-    by_run: HashMap<String, String>,
-}
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?
+        .join("exported_data");
 
-/// Active connector runs indexed both ways for backend dedupe.
-static ACTIVE_RUN_INDEX: std::sync::LazyLock<std::sync::Mutex<ActiveRunIndex>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(ActiveRunIndex::default()));
+    // Build a map from platform ID to company name so we can check both paths
+    let all_platforms = get_platforms(app).await.unwrap_or_default();
+    let id_to_company: HashMap<String, String> = all_platforms
+        .into_iter()
+        .map(|p| (p.id.clone(), p.company))
+        .collect();
 
-const DUPLICATE_ACTIVE_RUN_ERROR_CODE: &str = "DUPLICATE_ACTIVE_RUN";
-
-fn register_active_run(run_id: &str, platform_id: &str) -> Result<(), String> {
-    let mut index = ACTIVE_RUN_INDEX
-        .lock()
-        .map_err(|_| "Failed to lock active run index".to_string())?;
-
-    if let Some(existing_run_id) = index.by_platform.get(platform_id) {
-        log::warn!(
-            "Duplicate connector start blocked for platform {} (existing run {})",
-            platform_id,
-            existing_run_id
-        );
-        return Err(DUPLICATE_ACTIVE_RUN_ERROR_CODE.to_string());
-    }
-
-    index
-        .by_platform
-        .insert(platform_id.to_string(), run_id.to_string());
-    index
-        .by_run
-        .insert(run_id.to_string(), platform_id.to_string());
-    Ok(())
-}
-
-fn unregister_active_run(run_id: &str) {
-    let Ok(mut index) = ACTIVE_RUN_INDEX.lock() else {
-        log::warn!(
-            "Failed to lock active run index while unregistering run {}",
-            run_id
-        );
-        return;
-    };
-
-    if let Some(platform_id) = index.by_run.remove(run_id) {
-        let should_remove_platform = index
-            .by_platform
-            .get(&platform_id)
-            .map(|registered_run_id| registered_run_id == run_id)
-            .unwrap_or(false);
-        if should_remove_platform {
-            index.by_platform.remove(&platform_id);
-        }
-    }
-}
-
-/// Load connector metadata from the connectors directory (user dir first, then bundled).
-fn load_connector_metadata(
-    app: &AppHandle,
-    company: &str,
-    filename: &str,
-) -> Option<ConnectorMetadata> {
-    let company_lower = company.to_lowercase();
-    let json_name = format!("{}.json", filename);
-
-    let candidates: Vec<PathBuf> = [
-        get_active_connector_install(filename).and_then(|install| {
-            active_install_path(&install.root_path, &install.metadata_relative_path)
-        }),
-        get_user_connectors_dir().map(|d| d.join(&company_lower).join(&json_name)),
-        Some(
-            get_connectors_dir(app)
-                .join(&company_lower)
-                .join(&json_name),
-        ),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    for path in candidates {
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(meta) = serde_json::from_str::<ConnectorMetadata>(&content) {
-                return Some(meta);
-            }
-        }
-    }
-    None
-}
-
-fn is_canonical_scope_id(scope: &str) -> bool {
-    !scope.is_empty() && scope.contains('.') && !scope.starts_with('.') && !scope.ends_with('.')
-}
-
-fn resolve_execution_scopes(
-    metadata: &ConnectorMetadata,
-    requested_scopes: Option<Vec<String>>,
-) -> Result<Vec<String>, String> {
-    let manifest_scopes = metadata
-        .scopes
-        .as_ref()
-        .ok_or_else(|| "Connector manifest is missing scopes".to_string())?;
-
-    let mut canonical_manifest_scopes = Vec::new();
-    for entry in manifest_scopes {
-        if !is_canonical_scope_id(&entry.scope) {
-            return Err(format!(
-                "Connector manifest contains non-canonical scope id: {}",
-                entry.scope
-            ));
-        }
-        if !canonical_manifest_scopes.contains(&entry.scope) {
-            canonical_manifest_scopes.push(entry.scope.clone());
-        }
-    }
-
-    if canonical_manifest_scopes.is_empty() {
-        return Err("Connector manifest must declare at least one scope".to_string());
-    }
-
-    let Some(requested_scopes) = requested_scopes else {
-        return Ok(canonical_manifest_scopes);
-    };
-
-    if requested_scopes.is_empty() {
-        return Err("requestedScopes must be non-empty when provided".to_string());
-    }
-
-    let mut resolved = Vec::new();
-    for scope in requested_scopes {
-        if !is_canonical_scope_id(&scope) {
-            return Err(format!(
-                "requestedScopes contains non-canonical scope id: {}",
-                scope
-            ));
-        }
-        if !canonical_manifest_scopes.contains(&scope) {
-            return Err(format!(
-                "requestedScopes contains scope outside connector manifest: {}",
-                scope
-            ));
-        }
-        if !resolved.contains(&scope) {
-            resolved.push(scope);
-        }
-    }
-
-    if resolved.is_empty() {
-        return Err("requestedScopes must resolve to at least one scope".to_string());
-    }
-
-    Ok(resolved)
-}
-
-fn terminal_status_message(classification: &ConnectorResultClassification) -> String {
-    if let Some(debug) = &classification.debug {
-        if !debug.trim().is_empty() {
-            return debug.clone();
-        }
-    }
-
-    match classification.outcome.as_str() {
-        "success" => "Collection completed successfully".to_string(),
-        "partial" => "Collection completed with partial data".to_string(),
-        "failure" => "Collection failed".to_string(),
-        _ => "Connector returned an unknown terminal outcome".to_string(),
-    }
-}
-
-fn emit_connector_terminal_status(
-    app: &AppHandle,
-    run_id: &str,
-    classification: &ConnectorResultClassification,
-) {
-    let status_type = if classification.outcome == "success" {
-        "COMPLETE"
-    } else {
-        "ERROR"
-    };
-
-    let _ = app.emit(
-        "connector-status",
-        serde_json::json!({
-            "runId": run_id,
-            "status": {
-                "type": status_type,
-                "message": terminal_status_message(classification),
-                "outcome": classification.outcome,
-                "errorClass": classification.error_class,
-                "recordCount": classification.record_count,
-                "scopeSummary": {
-                    "requested": classification.scope_summary.requested,
-                    "produced": classification.scope_summary.produced,
-                    "degraded": classification.scope_summary.degraded,
-                    "omitted": classification.scope_summary.omitted,
-                },
-            },
-            "timestamp": chrono_timestamp()
-        }),
-    );
-}
-
-/// Load connector script from the connectors directory
-/// Checks user directory first, then bundled directory
-fn load_connector_script(app: &AppHandle, company: &str, filename: &str) -> Option<String> {
-    let company_lower = company.to_lowercase();
-
-    if let Some(install) = get_active_connector_install(filename) {
-        if let Some(script_path) =
-            active_install_path(&install.root_path, &install.script_relative_path)
+    for id in platform_ids {
+        if let Some(accounts) = connection_ids
+            .as_ref()
+            .and_then(|connections| connections.get(&id))
         {
-            log::info!(
-                "Loaded connector script from active install: {:?}",
-                script_path
-            );
-            if let Ok(content) = fs::read_to_string(&script_path) {
-                return Some(content);
+            for connection_id in accounts {
+                let key = format!("{id}:{connection_id}");
+                let legacy_connection = super::pdpp_connections::legacy_connection_id(&id);
+                let has_legacy_export = connection_id == &legacy_connection
+                    && id_to_company.get(&id).is_some_and(|company| {
+                        let sanitized_company = super::file_ops::sanitize_path_component(company);
+                        super::file_ops::legacy_export_exists(
+                            &data_dir,
+                            &sanitized_company,
+                            &id,
+                        )
+                        .unwrap_or(false)
+                    });
+                connected.insert(
+                    key,
+                    has_legacy_export || exported_connection_exists(&data_dir, connection_id)?,
+                );
             }
+            continue;
         }
+        // Check by platform ID directory or company name directory
+        let exists = data_dir.join(&id).exists()
+            || id_to_company
+                .get(&id)
+                .map(|company| data_dir.join(company).exists())
+                .unwrap_or(false);
+        connected.insert(id, exists);
     }
 
-    // First check user directory
-    if let Some(user_dir) = get_user_connectors_dir() {
-        let js_path = user_dir
-            .join(&company_lower)
-            .join(format!("{}.js", filename));
-        log::info!("Looking for connector script in user dir: {:?}", js_path);
-
-        if js_path.exists() {
-            match fs::read_to_string(&js_path) {
-                Ok(content) => {
-                    log::info!("Loaded connector script from user dir: {:?}", js_path);
-                    return Some(content);
-                }
-                Err(e) => {
-                    log::error!("Failed to read connector script {:?}: {}", js_path, e);
-                }
-            }
-        }
-    }
-
-    // Fall back to bundled directory
-    let connectors_dir = get_connectors_dir(app);
-    let js_path = connectors_dir
-        .join(&company_lower)
-        .join(format!("{}.js", filename));
-    let ts_path = connectors_dir
-        .join(&company_lower)
-        .join(format!("{}.ts", filename));
-
-    log::info!("Looking for connector script in bundled dir: {:?}", js_path);
-
-    if js_path.exists() {
-        match fs::read_to_string(&js_path) {
-            Ok(content) => {
-                log::info!("Loaded connector script from bundled dir: {:?}", js_path);
-                return Some(content);
-            }
-            Err(e) => {
-                log::error!("Failed to read connector script {:?}: {}", js_path, e);
-            }
-        }
-    } else if ts_path.exists() {
-        // TypeScript file exists but we can't run it directly
-        log::warn!(
-            "Found TypeScript connector at {:?}, but JS version is required",
-            ts_path
-        );
-    } else {
-        log::warn!("No connector script found for {}/{}", company, filename);
-    }
-
-    None
+    Ok(connected)
 }
 
-/// Load a library script from the connectors/lib directory
-/// Used for optional features like network capture
-fn load_library_script(app: &AppHandle, script_name: &str) -> Option<String> {
-    let connectors_dir = get_connectors_dir(app);
-    let lib_path = connectors_dir.join("lib").join(script_name);
-
-    log::info!("Looking for library script at: {:?}", lib_path);
-
-    if lib_path.exists() {
-        match fs::read_to_string(&lib_path) {
-            Ok(content) => {
-                log::info!("Loaded library script: {:?}", lib_path);
-                return Some(content);
-            }
-            Err(e) => {
-                log::error!("Failed to read library script {:?}: {}", lib_path, e);
+fn exported_connection_exists(
+    export_root: &std::path::Path,
+    connection_id: &str,
+) -> Result<bool, String> {
+    if !export_root.exists() {
+        return Ok(false);
+    }
+    let mut directories = vec![export_root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory)
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(&format!("--{connection_id}")))
+                {
+                    return Ok(true);
+                }
+                directories.push(path);
             }
         }
-    } else {
-        log::warn!("Library script not found: {:?}", lib_path);
     }
-
-    None
+    Ok(false)
 }
 
-/// Active Playwright processes by runId
-static PLAYWRIGHT_PROCESSES: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<String, std::process::Child>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Get the user connectors directory (~/.dataconnect/connectors/)
+fn get_user_connectors_dir() -> Option<PathBuf> {
+    let path = get_legacy_user_connectors_dir()?;
+    if path.exists() {
+        log::info!("Found user connectors at: {:?}", path);
+        Some(path)
+    } else {
+        None
+    }
+}
 
-/// Kill all active Playwright processes on app exit (sync, best-effort).
-/// Uses process group kills so spawned Chrome children are also reaped.
-pub fn cleanup_playwright_processes() {
-    if let Ok(mut guard) = PLAYWRIGHT_PROCESSES.lock() {
-        if guard.is_empty() {
-            return;
-        }
-        log::info!(
-            "Cleaning up {} Playwright process(es) on app exit...",
-            guard.len()
-        );
-        for (run_id, mut child) in guard.drain() {
-            unregister_active_run(&run_id);
-            #[cfg(unix)]
-            {
-                use crate::commands::server::kill_process_group;
-                kill_process_group(child.id(), libc::SIGTERM);
-            }
-            // Brief wait then force kill
-            let mut exited = false;
-            for _ in 0..10 {
-                if let Ok(Some(_)) = child.try_wait() {
-                    exited = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            if !exited {
-                #[cfg(unix)]
-                {
-                    use crate::commands::server::kill_process_group;
-                    kill_process_group(child.id(), libc::SIGKILL);
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = child.kill();
-                }
-                let _ = child.wait();
-            }
-            log::info!("Playwright process for run {} cleaned up", run_id);
+/// Get the bundled connectors directory path
+fn get_connectors_dir(app: &AppHandle) -> PathBuf {
+    // In development, look in the project root directory
+    // The project root is 3 levels up from src-tauri/target/debug/
+
+    // First, try the CARGO_MANIFEST_DIR (only available during cargo run)
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let dev_path = PathBuf::from(&manifest_dir)
+            .parent()
+            .map(|p| p.join("connectors"))
+            .unwrap_or_default();
+        if dev_path.exists() {
+            log::info!("Found bundled connectors at: {:?}", dev_path);
+            return dev_path;
         }
     }
+
+    // Try relative to current directory (for when running from project root)
+    let cwd_path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("connectors");
+    if cwd_path.exists() {
+        log::info!("Found bundled connectors at: {:?}", cwd_path);
+        return cwd_path;
+    }
+
+    // Try relative to executable location (development fallback)
+    if let Ok(exe_path) = std::env::current_exe() {
+        // In dev: exe is at src-tauri/target/debug/dataconnect
+        // Project root is 4 levels up
+        if let Some(project_root) = exe_path
+            .parent() // target/debug
+            .and_then(|p| p.parent()) // target
+            .and_then(|p| p.parent()) // src-tauri
+            .and_then(|p| p.parent())
+        // project root
+        {
+            let dev_path = project_root.join("connectors");
+            if dev_path.exists() {
+                log::info!("Found bundled connectors at: {:?}", dev_path);
+                return dev_path;
+            }
+        }
+    }
+
+    // Try resource path for bundled app (production)
+    // Tauri converts "../connectors" to "_up_/connectors" in resources
+    let resource_dir = app.path().resource_dir().unwrap_or_default();
+
+    // Check for _up_/connectors first (from "../connectors" resource path)
+    let up_path = resource_dir.join("_up_").join("connectors");
+    if up_path.exists() {
+        log::info!("Found bundled connectors at: {:?}", up_path);
+        return up_path;
+    }
+
+    // Fallback to direct connectors path
+    let resource_path = resource_dir.join("connectors");
+    log::info!(
+        "Using resource bundled connectors path: {:?}",
+        resource_path
+    );
+    resource_path
 }
 
 /// Get the path to the bundled Playwright runner binary (production) or None (dev)
@@ -1291,1125 +614,225 @@ fn get_bundled_playwright_runner(app: &AppHandle) -> Option<(PathBuf, Option<Pat
     None
 }
 
-/// Start a connector run using Playwright sidecar
-async fn start_playwright_run(
-    app: AppHandle,
-    run_id: String,
-    platform_id: String,
-    filename: String,
-    company: String,
-    name: String,
-    connect_url: String,
-    requested_scopes: Option<Vec<String>>,
-    simulate_no_chrome: Option<bool>,
-) -> Result<(), String> {
+/// Debug connector paths - helps diagnose why connectors aren't found
+#[tauri::command]
+pub async fn debug_connector_paths(app: AppHandle) -> Result<serde_json::Value, String> {
+    let resource_dir = app.path().resource_dir().unwrap_or_default();
+    let connectors_dir = get_connectors_dir(&app);
+    let user_dir = get_user_connectors_dir();
+
+    // Check various paths
+    let mut paths_to_check = vec![
+        ("resource_dir", resource_dir.clone()),
+        ("resource_dir/connectors", resource_dir.join("connectors")),
+        (
+            "resource_dir/_up_/connectors",
+            resource_dir.join("_up_").join("connectors"),
+        ),
+        ("connectors_dir (bundled)", connectors_dir.clone()),
+    ];
+
+    // Add user directory if available
+    if let Some(ref user_path) = user_dir {
+        paths_to_check.push(("user_connectors_dir", user_path.clone()));
+    }
+
+    let mut results = serde_json::Map::new();
+
+    for (name, path) in paths_to_check {
+        let exists = path.exists();
+        let contents = if exists && path.is_dir() {
+            std::fs::read_dir(&path)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        results.insert(
+            name.to_string(),
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "exists": exists,
+                "contents": contents
+            }),
+        );
+    }
+
+    Ok(serde_json::Value::Object(results))
+}
+
+/// Test that Node.js runtime is working
+#[tauri::command]
+pub async fn test_nodejs(app: AppHandle) -> Result<serde_json::Value, String> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
 
-    let metadata = load_connector_metadata(&app, &company, &filename)
-        .ok_or_else(|| format!("Connector metadata not found for {}/{}", company, filename))?;
-    let connector_version = metadata
-        .version
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let resolved_requested_scopes = resolve_execution_scopes(&metadata, requested_scopes)?;
-    log::info!(
-        "Starting Playwright run for {} (platform: {}, company: {}, filename: {}, connector v{})",
-        run_id,
-        platform_id,
-        company,
-        filename,
-        connector_version
-    );
-    log::info!(
-        "Resolved requested scopes for {}: {:?}",
-        run_id,
-        resolved_requested_scopes
-    );
+    // Get the playwright runner binary
+    let (binary_path, _) =
+        get_bundled_playwright_runner(&app).ok_or("Playwright runner not found")?;
 
-    // Phase 1: Check browser availability
-    let _ = app.emit(
-        "connector-status",
-        serde_json::json!({
-            "runId": run_id,
-            "status": { "type": "STARTED", "message": "Checking browser..." },
-            "timestamp": chrono_timestamp()
-        }),
-    );
+    let mut child = Command::new(&binary_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn playwright runner: {}", e))?;
 
-    let browser_status = check_browser_available(app.clone(), simulate_no_chrome).await?;
-    if !browser_status.available {
-        log::info!("No browser available, downloading Chromium...");
-        let _ = app.emit(
-            "connector-status",
-            serde_json::json!({
-                "runId": run_id,
-                "status": { "type": "STARTED", "message": "Downloading browser (~170 MB)..." },
-                "timestamp": chrono_timestamp()
-            }),
-        );
-        let _ = app.emit(
-            "connector-log",
-            serde_json::json!({
-                "runId": run_id,
-                "message": "No browser found. Downloading Chromium (~170MB)...",
-                "timestamp": chrono_timestamp()
-            }),
-        );
-
-        // Download using Rust (with progress events)
-        download_chromium_rust(app.clone()).await?;
-
-        log::info!("Chromium download complete, continuing with connector");
-        let _ = app.emit(
-            "connector-log",
-            serde_json::json!({
-                "runId": run_id,
-                "message": "Browser download complete. Starting connector...",
-                "timestamp": chrono_timestamp()
-            }),
-        );
-    }
-
-    // Phase 2: Find the connector script (check user dir first, then bundled)
-    let company_lower = company.to_lowercase();
-    let connector_path = if let Some(install) = get_active_connector_install(&filename) {
-        let active_path = PathBuf::from(install.root_path).join(install.script_relative_path);
-        log::info!("Found connector in active install: {:?}", active_path);
-        active_path
-    } else if let Some(user_dir) = get_user_connectors_dir() {
-        let user_path = user_dir
-            .join(&company_lower)
-            .join(format!("{}.js", filename));
-        if user_path.exists() {
-            log::info!("Found connector in user directory: {:?}", user_path);
-            user_path
-        } else {
-            let bundled_dir = get_connectors_dir(&app);
-            let bundled_path = bundled_dir
-                .join(&company_lower)
-                .join(format!("{}.js", filename));
-            log::info!(
-                "Looking for connector in bundled directory: {:?}",
-                bundled_path
-            );
-            bundled_path
-        }
-    } else {
-        let connectors_dir = get_connectors_dir(&app);
-        connectors_dir
-            .join(&company_lower)
-            .join(format!("{}.js", filename))
-    };
-
-    if !connector_path.exists() {
-        let err = format!("Connector script not found: {:?}", connector_path);
-        log::error!("{}", err);
-        // Emit error to UI
-        let _ = app.emit(
-            "connector-log",
-            serde_json::json!({
-                "runId": run_id,
-                "message": format!("Error: {}", err),
-                "timestamp": chrono_timestamp()
-            }),
-        );
-        return Err(err);
-    }
-
-    log::info!(
-        "Connector script found at: {:?}, looking for Playwright runner...",
-        connector_path
-    );
-
-    // Phase 3: Launch browser
-    let _ = app.emit(
-        "connector-status",
-        serde_json::json!({
-            "runId": run_id,
-            "status": { "type": "STARTED", "message": "Launching browser..." },
-            "timestamp": chrono_timestamp()
-        }),
-    );
-
-    // In debug mode, always use node directly (avoids macOS code signing issues with copied binaries)
-    // In release mode, use the bundled binary
-    #[cfg(debug_assertions)]
-    let use_bundled_binary = false;
-    #[cfg(not(debug_assertions))]
-    let use_bundled_binary = true;
-
-    let mut child = if use_bundled_binary {
-        if let Some((binary_path, browsers_path)) = get_bundled_playwright_runner(&app) {
-            log::info!("Found bundled Playwright runner at: {:?}", binary_path);
-
-            // Production mode: use bundled binary
-            let mut cmd = Command::new(&binary_path);
-            cmd.stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
-            // Create a new process group so we can kill all children (Chrome) at once
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                cmd.process_group(0);
-            }
-
-            // Set browser path if bundled
-            if let Some(ref browsers) = browsers_path {
-                log::info!("Setting PLAYWRIGHT_BROWSERS_PATH to: {:?}", browsers);
-                cmd.env("PLAYWRIGHT_BROWSERS_PATH", browsers);
-            }
-
-            // Set simulate no chrome flag for testing
-            if simulate_no_chrome.unwrap_or(false) {
-                log::info!("Setting DATACONNECT_SIMULATE_NO_CHROME=1");
-                cmd.env("DATACONNECT_SIMULATE_NO_CHROME", "1");
-            }
-
-            log::info!("Spawning Playwright runner...");
-            match cmd.spawn() {
-                Ok(child) => child,
-                Err(e) => {
-                    let err = format!("Failed to spawn bundled Playwright runner: {}", e);
-                    log::error!("{}", err);
-                    let _ = app.emit(
-                        "connector-log",
-                        serde_json::json!({
-                            "runId": run_id,
-                            "message": format!("Error: {}", err),
-                            "timestamp": chrono_timestamp()
-                        }),
-                    );
-                    return Err(err);
-                }
-            }
-        } else {
-            return Err("Bundled Playwright runner not found".to_string());
-        }
-    } else {
-        // Dev mode: use node index.cjs directly (avoids code signing issues)
-        log::info!("Dev mode: using node index.cjs directly");
-        let connectors_dir = get_connectors_dir(&app);
-        let runner_dir = connectors_dir
-            .parent()
-            .and_then(|p| Some(p.join("playwright-runner")))
-            .ok_or("Could not find playwright-runner directory")?;
-
-        if !runner_dir.exists() {
-            return Err(format!(
-                "Playwright runner not found: {:?}. Run 'npm install' in playwright-runner directory.",
-                runner_dir
-            ));
-        }
-
-        let mut cmd = Command::new("node");
-        cmd.arg("index.cjs")
-            .current_dir(&runner_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-        }
-
-        // Set simulate no chrome flag for testing
-        if simulate_no_chrome.unwrap_or(false) {
-            log::info!("Setting DATACONNECT_SIMULATE_NO_CHROME=1 (dev mode)");
-            cmd.env("DATACONNECT_SIMULATE_NO_CHROME", "1");
-        }
-
-        cmd.spawn()
-            .map_err(|e| format!("Failed to spawn Playwright runner: {}", e))?
-    };
-
-    log::info!("Playwright runner spawned successfully");
-
-    // Get handles to stdin/stdout
-    let stdin = child.stdin.take().ok_or("Failed to get stdin")?;
+    let mut stdin = child.stdin.take().ok_or("Failed to get stdin")?;
     let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
-    let stderr = child.stderr.take().ok_or("Failed to get stderr")?;
 
-    // Store process for cleanup
-    PLAYWRIGHT_PROCESSES
-        .lock()
-        .unwrap()
-        .insert(run_id.clone(), child);
+    // Send test command
+    writeln!(stdin, r#"{{"type":"test"}}"#)
+        .map_err(|e| format!("Failed to send command: {}", e))?;
 
-    // Emit that the run has started
-    app.emit(
-        "run-started",
-        serde_json::json!({
-            "runId": run_id,
-            "platformId": platform_id,
-            "company": company,
-            "name": name,
-            "runtime": "playwright"
-        }),
-    )
-    .map_err(|e| format!("Failed to emit event: {}", e))?;
-
-    // Spawn thread to read stderr (for debug logs)
-    let run_id_for_stderr = run_id.clone();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
-            log::info!("[Playwright:{}] {}", run_id_for_stderr, line);
-        }
-    });
-
-    // Spawn thread to read stdout and forward events
-    let app_clone = app.clone();
-    let run_id_for_stdout = run_id.clone();
-    let platform_id_clone = platform_id.clone();
-    let company_clone = company.clone();
-    let name_clone = name.clone();
-
-    // Build the run command JSON before moving stdin
-    let run_cmd = serde_json::json!({
-        "type": "run",
-        "runId": run_id,
-        "connectorPath": connector_path.to_string_lossy(),
-        "url": connect_url,
-        "headless": true,
-        "requestedScopes": resolved_requested_scopes,
-    });
-
-    std::thread::spawn(move || {
-        // Move stdin into this thread to keep it alive
-        let mut stdin = stdin;
-
-        // Send the run command
-        if let Err(e) = writeln!(stdin, "{}", run_cmd.to_string()) {
-            log::error!("Failed to send run command: {}", e);
-        }
-        // Flush stdin to ensure command is sent immediately
-        let _ = stdin.flush();
-
-        // Now read stdout in the same thread to keep stdin alive
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                match msg_type {
-                    "ready" => {
-                        log::info!("Playwright runner ready for {}", run_id_for_stdout);
-                        let _ = app_clone.emit(
-                            "connector-status",
-                            serde_json::json!({
-                                "runId": run_id_for_stdout,
-                                "status": { "type": "STARTED", "message": "Authorizing..." },
-                                "timestamp": chrono_timestamp()
-                            }),
-                        );
-                    }
-                    "log" => {
-                        if let Some(message) = msg.get("message").and_then(|v| v.as_str()) {
-                            let _ = app_clone.emit(
-                                "connector-log",
-                                serde_json::json!({
-                                    "runId": run_id_for_stdout,
-                                    "message": message,
-                                    "timestamp": chrono_timestamp()
-                                }),
-                            );
-                        }
-                    }
-                    "status" => {
-                        if let Some(status_str) = msg.get("status").and_then(|v| v.as_str()) {
-                            // Simple string status (e.g., "RUNNING", "COMPLETE")
-                            let _ = app_clone.emit(
-                                "connector-status",
-                                serde_json::json!({
-                                    "runId": run_id_for_stdout,
-                                    "status": { "type": status_str },
-                                    "timestamp": chrono_timestamp()
-                                }),
-                            );
-                        } else if let Some(status_obj) = msg.get("status") {
-                            // Structured status object (e.g., { type: "COLLECTING", message, phase, count })
-                            let _ = app_clone.emit(
-                                "connector-status",
-                                serde_json::json!({
-                                    "runId": run_id_for_stdout,
-                                    "status": status_obj,
-                                    "timestamp": chrono_timestamp()
-                                }),
-                            );
-                        }
-                    }
-                    "result" => {
-                        let envelope =
-                            serde_json::from_value::<PlaywrightRunnerResultEnvelope>(msg.clone());
-                        match envelope {
-                            Ok(envelope) => {
-                                let classification = envelope.classification.clone();
-                                let outcome = classification.outcome.clone();
-
-                                if outcome == "success" || outcome == "partial" {
-                                    if let Some(data) = envelope.data {
-                                        let _ = app_clone.emit(
-                                            "export-complete",
-                                            serde_json::json!({
-                                                "runId": run_id_for_stdout,
-                                                "platformId": platform_id_clone,
-                                                "company": company_clone,
-                                                "name": name_clone,
-                                                "data": data,
-                                                "outcome": outcome.clone(),
-                                                "classification": classification.clone(),
-                                                "timestamp": chrono_timestamp()
-                                            }),
-                                        );
-                                    } else {
-                                        let protocol_violation = ConnectorResultClassification {
-                                            outcome: "failure".to_string(),
-                                            error_class: Some("protocol_violation".to_string()),
-                                            record_count: None,
-                                            scope_summary: ConnectorResultScopeSummary {
-                                                requested: 0,
-                                                produced: 0,
-                                                degraded: 0,
-                                                omitted: 0,
-                                            },
-                                            debug: Some(format!(
-                                                "Runner reported {} without data payload",
-                                                outcome
-                                            )),
-                                        };
-                                        emit_connector_terminal_status(
-                                            &app_clone,
-                                            &run_id_for_stdout,
-                                            &protocol_violation,
-                                        );
-                                        continue;
-                                    }
-                                }
-
-                                if outcome == "success"
-                                    || outcome == "partial"
-                                    || outcome == "failure"
-                                {
-                                    emit_connector_terminal_status(
-                                        &app_clone,
-                                        &run_id_for_stdout,
-                                        &classification,
-                                    );
-                                } else {
-                                    let protocol_violation = ConnectorResultClassification {
-                                        outcome: "failure".to_string(),
-                                        error_class: Some("protocol_violation".to_string()),
-                                        record_count: None,
-                                        scope_summary: ConnectorResultScopeSummary {
-                                            requested: 0,
-                                            produced: 0,
-                                            degraded: 0,
-                                            omitted: 0,
-                                        },
-                                        debug: Some(format!(
-                                            "Unknown connector terminal outcome: {}",
-                                            outcome
-                                        )),
-                                    };
-                                    emit_connector_terminal_status(
-                                        &app_clone,
-                                        &run_id_for_stdout,
-                                        &protocol_violation,
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                let protocol_violation = ConnectorResultClassification {
-                                    outcome: "failure".to_string(),
-                                    error_class: Some("protocol_violation".to_string()),
-                                    record_count: None,
-                                    scope_summary: ConnectorResultScopeSummary {
-                                        requested: 0,
-                                        produced: 0,
-                                        degraded: 0,
-                                        omitted: 0,
-                                    },
-                                    debug: Some(format!(
-                                        "Malformed runner result envelope: {}",
-                                        error
-                                    )),
-                                };
-                                emit_connector_terminal_status(
-                                    &app_clone,
-                                    &run_id_for_stdout,
-                                    &protocol_violation,
-                                );
-                            }
-                        }
-                    }
-                    "error" => {
-                        if let Some(message) = msg.get("message").and_then(|v| v.as_str()) {
-                            let _ = app_clone.emit(
-                                "connector-log",
-                                serde_json::json!({
-                                    "runId": run_id_for_stdout,
-                                    "message": format!("Error: {}", message),
-                                    "timestamp": chrono_timestamp()
-                                }),
-                            );
-                        }
-                    }
-                    "data" => {
-                        // Forward connector data events to frontend
-                        let key = msg.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                        let value = msg.get("value");
-                        let _ = app_clone.emit(
-                            "connector-data",
-                            serde_json::json!({
-                                "runId": run_id_for_stdout,
-                                "key": key,
-                                "value": value,
-                                "timestamp": chrono_timestamp()
-                            }),
-                        );
-                    }
-                    _ => {}
-                }
+    // Read response
+    let reader = BufReader::new(stdout);
+    for line in reader.lines().flatten() {
+        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
+            if msg.get("type").and_then(|v| v.as_str()) == Some("test-result") {
+                let _ = child.kill();
+                return Ok(msg.get("data").cloned().unwrap_or(serde_json::Value::Null));
             }
         }
-
-        // Process ended, cleanup and notify UI
-        PLAYWRIGHT_PROCESSES
-            .lock()
-            .unwrap()
-            .remove(&run_id_for_stdout);
-        unregister_active_run(&run_id_for_stdout);
-        log::info!("Playwright runner ended for {}", run_id_for_stdout);
-
-        // Emit stopped status so UI updates (in case process exited without COMPLETE/ERROR)
-        let _ = app_clone.emit(
-            "connector-status",
-            serde_json::json!({
-                "runId": run_id_for_stdout,
-                "status": { "type": "STOPPED", "message": "Process ended" },
-                "timestamp": chrono_timestamp()
-            }),
-        );
-    });
-
-    Ok(())
-}
-
-/// Start a connector run by creating a webview window
-#[tauri::command]
-pub async fn start_connector_run(
-    app: AppHandle,
-    run_id: String,
-    platform_id: String,
-    filename: String,
-    company: String,
-    name: String,
-    connect_url: String,
-    runtime: Option<String>,
-    requested_scopes: Option<Vec<String>>,
-    simulate_no_chrome: Option<bool>,
-) -> Result<(), String> {
-    register_active_run(&run_id, &platform_id)?;
-
-    // Check if this is a Playwright runtime connector
-    if runtime.as_deref() == Some("playwright") {
-        let run_id_for_cleanup = run_id.clone();
-        let start_result = start_playwright_run(
-            app,
-            run_id,
-            platform_id,
-            filename,
-            company,
-            name,
-            connect_url,
-            requested_scopes,
-            simulate_no_chrome,
-        )
-        .await;
-        if start_result.is_err() {
-            unregister_active_run(&run_id_for_cleanup);
-        }
-        return start_result;
     }
 
-    let start_result = (|| -> Result<(), String> {
-        let connector_version = load_connector_metadata(&app, &company, &filename)
-            .and_then(|m| m.version)
-            .unwrap_or_else(|| "unknown".to_string());
-        log::info!(
-            "Starting connector run for {} (platform: {}, company: {}, filename: {}, connector v{})",
-            run_id,
-            platform_id,
-            company,
-            filename,
-            connector_version
-        );
+    Err("No response from Node.js runtime".to_string())
+}
 
-        let window_label = format!("connector-{}", run_id);
-        let use_network_capture = runtime.as_deref() == Some("network-capture");
+/// Browser session info returned to the frontend
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrowserSessionInfo {
+    #[serde(rename = "connectorId")]
+    pub connector_id: String,
+    pub path: String,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+    #[serde(rename = "lastModified")]
+    pub last_modified: String,
+}
 
-        // Load the connector script
-        let connector_script =
-            load_connector_script(&app, &company, &filename).unwrap_or_else(|| {
-                log::warn!("No connector script found, using empty script");
-                String::new()
-            });
+/// Recursively compute directory size in bytes
+fn dir_size(path: &std::path::Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
+}
 
-        // Load optional library scripts for network-capture runtime
-        // These provide network interception capabilities
-        let network_capture_script = if use_network_capture {
-            load_library_script(&app, "network-capture.js").unwrap_or_default()
-        } else {
-            String::new()
-        };
+/// List all stored browser sessions (profiles)
+#[tauri::command]
+pub async fn list_browser_sessions() -> Result<Vec<BrowserSessionInfo>, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "Could not determine home directory".to_string())?;
 
-        let page_api_script = if use_network_capture {
-            load_library_script(&app, "page-api.js").unwrap_or_default()
-        } else {
-            String::new()
-        };
+    let profiles_dir = PathBuf::from(&home)
+        .join(".dataconnect")
+        .join("browser-profiles");
 
-        if use_network_capture {
-            log::info!("Using network-capture runtime for run {}", run_id);
+    if !profiles_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+
+    let entries = fs::read_dir(&profiles_dir)
+        .map_err(|e| format!("Failed to read browser-profiles directory: {}", e))?;
+
+    for entry in entries.flatten() {
+        if !entry.path().is_dir() {
+            continue;
         }
 
-        // Build the connector API injection script
-        let api_script = format!(
-            r#"
-        // DataConnect Connector API
-        const __RUN_ID__ = "{}";
-        const __PLATFORM_ID__ = "{}";
-        const __FILENAME__ = "{}";
-        const __COMPANY__ = "{}";
-        const __NAME__ = "{}";
+        let connector_id = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        let size_bytes = dir_size(&path);
 
-        // Define log function first so other functions can reference it
-        const __dataconnectLog = function(...args) {{
-            const stringArgs = args.map(arg =>
-                typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-            );
-            console.log('[DataConnect]', ...stringArgs);
-            if (window.__TAURI__ && window.__TAURI__.event) {{
-                window.__TAURI__.event.emit('connector-log', {{
-                    runId: __RUN_ID__,
-                    message: stringArgs.join(' '),
-                    timestamp: Date.now()
-                }});
-            }}
-        }};
+        let last_modified = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                // Return as ISO-ish timestamp (milliseconds since epoch)
+                let secs = duration.as_secs();
+                // Format as ISO 8601 manually
+                let dt = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
+                dt.to_rfc3339()
+            })
+            .unwrap_or_default();
 
-        window.__DATACONNECT_API__ = {{
-            log: __dataconnectLog,
-            waitForElement: function(selector, elementName, multipleElements = false, timeout = 10000) {{
-                if (!multipleElements) {{
-                    __dataconnectLog('Waiting for ' + elementName);
-                }}
-                return new Promise((resolve) => {{
-                    const startTime = Date.now();
-                    const checkElement = () => {{
-                        const element = multipleElements
-                            ? document.querySelectorAll(selector)
-                            : document.querySelector(selector);
-                        if (element && (multipleElements ? element.length > 0 : true)) {{
-                            if (!multipleElements) {{
-                                __dataconnectLog('Found ' + elementName);
-                            }}
-                            resolve(element);
-                        }} else if (Date.now() - startTime >= timeout) {{
-                            __dataconnectLog('Timeout waiting for ' + elementName);
-                            resolve(null);
-                        }} else {{
-                            setTimeout(checkElement, 100);
-                        }}
-                    }};
-                    checkElement();
-                }});
-            }},
-            wait: function(seconds) {{
-                return new Promise(resolve => setTimeout(resolve, seconds * 1000));
-            }},
-            sendStatus: function(status) {{
-                __dataconnectLog('Status: ' + (typeof status === 'string' ? status : JSON.stringify(status)));
-                if (window.__TAURI__ && window.__TAURI__.event) {{
-                    window.__TAURI__.event.emit('connector-status', {{
-                        runId: __RUN_ID__,
-                        status: status,
-                        timestamp: Date.now()
-                    }});
-                }}
-            }},
-            navigate: function(url) {{
-                __dataconnectLog('Navigating to: ' + url);
-                window.location.assign(url);
-            }},
-            getRunId: function() {{ return __RUN_ID__; }},
-            getMetadata: function() {{
-                return {{
-                    id: __PLATFORM_ID__,
-                    name: __NAME__,
-                    company: __COMPANY__
-                }};
-            }}
-        }};
-
-        window.__DATACONNECT_RUN_ID__ = __RUN_ID__;
-        window.__DATACONNECT_PLATFORM_ID__ = __PLATFORM_ID__;
-        window.__DATACONNECT_FILENAME__ = __FILENAME__;
-        window.__DATACONNECT_COMPANY__ = __COMPANY__;
-        window.__DATACONNECT_NAME__ = __NAME__;
-
-        console.log('[DataConnect] API initialized for run:', __RUN_ID__);
-        "#,
-            run_id, platform_id, filename, company, name
-        );
-
-        // Combine the API script with the connector script
-        // The connector script runs after page loads and stores results in window.__DATACONNECT_RESULT__
-        // For playwright runtime, we also inject network capture and page API scripts
-        let full_script = format!(
-            r#"
-        {}
-
-        // Network capture library (network-capture runtime only)
-        {}
-
-        // Page API library (network-capture runtime only)
-        {}
-
-        // Run connector script after page loads
-        if (document.readyState === 'loading') {{
-            document.addEventListener('DOMContentLoaded', function() {{
-                setTimeout(function() {{
-                    try {{
-                        {}
-                    }} catch (e) {{
-                        console.error('[DataConnect] Connector error:', e);
-                        window.__DATACONNECT_STATUS__ = {{ type: 'ERROR', message: e.message }};
-                        window.__DATACONNECT_RESULT__ = {{ error: e.message }};
-                    }}
-                }}, 2000);
-            }});
-        }} else {{
-            setTimeout(function() {{
-                try {{
-                    {}
-                }} catch (e) {{
-                    console.error('[DataConnect] Connector error:', e);
-                    window.__DATACONNECT_STATUS__ = {{ type: 'ERROR', message: e.message }};
-                    window.__DATACONNECT_RESULT__ = {{ error: e.message }};
-                }}
-            }}, 2000);
-        }}
-        "#,
-            api_script, network_capture_script, page_api_script, connector_script, connector_script
-        );
-
-        // Create the webview window
-        let webview = WebviewWindowBuilder::new(
-            &app,
-            &window_label,
-            WebviewUrl::External(
-                connect_url
-                    .parse()
-                    .map_err(|e| format!("Invalid URL: {}", e))?,
-            ),
-        )
-        .title(format!("DataConnect - {}", name))
-        .inner_size(1024.0, 768.0)
-        .initialization_script(&full_script)
-        .build()
-        .map_err(|e| format!("Failed to create window: {}", e))?;
-
-        // Store the window reference
-        CONNECTOR_WINDOWS
-            .lock()
-            .unwrap()
-            .insert(run_id.clone(), window_label.clone());
-
-        // Emit that the run has started
-        app.emit(
-            "run-started",
-            serde_json::json!({
-                "runId": run_id,
-                "platformId": platform_id,
-                "company": company,
-                "name": name
-            }),
-        )
-        .map_err(|e| format!("Failed to emit event: {}", e))?;
-
-        // Start polling for results in a background task
-        let app_clone = app.clone();
-        let run_id_clone = run_id.clone();
-        let platform_id_clone = platform_id.clone();
-        let company_clone = company.clone();
-        let name_clone = name.clone();
-
-        tokio::spawn(async move {
-            poll_connector_result(
-                app_clone,
-                webview,
-                run_id_clone,
-                platform_id_clone,
-                company_clone,
-                name_clone,
-            )
-            .await;
+        sessions.push(BrowserSessionInfo {
+            connector_id,
+            path: path.to_string_lossy().to_string(),
+            size_bytes,
+            last_modified,
         });
-
-        Ok(())
-    })();
-
-    if start_result.is_err() {
-        unregister_active_run(&run_id);
     }
 
-    start_result
+    Ok(sessions)
 }
 
-/// Poll the webview for connector results using URL hash as communication channel
-async fn poll_connector_result(
-    app: AppHandle,
-    webview: tauri::WebviewWindow,
-    run_id: String,
-    platform_id: String,
-    company: String,
-    name: String,
-) {
-    let mut last_status_hash = String::new();
-    let max_polls = 300; // Poll for up to 5 minutes
-    let mut poll_count = 0;
-
-    log::info!("Starting polling for run {}", run_id);
-
-    loop {
-        poll_count += 1;
-        if poll_count > max_polls {
-            log::warn!("Polling timeout for run {}", run_id);
-            let _ = app.emit(
-                "connector-status",
-                serde_json::json!({
-                    "runId": run_id,
-                    "status": { "type": "ERROR", "message": "Polling timeout" },
-                    "timestamp": chrono_timestamp()
-                }),
-            );
-            break;
-        }
-
-        // Wait before polling
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-
-        // Check if window still exists
-        if webview.is_closable().is_err() {
-            log::info!("Webview closed for run {}", run_id);
-            break;
-        }
-
-        // Inject script to encode status/result in URL hash
-        // We use base64 encoding to handle JSON safely in URLs
-        let check_script = r#"
-            (function() {
-                try {
-                    var result = window.__DATACONNECT_RESULT__;
-                    var status = window.__DATACONNECT_STATUS__;
-
-                    if (result && !window.__DATACONNECT_HASH_SET__) {
-                        window.__DATACONNECT_HASH_SET__ = true;
-                        var encoded = btoa(unescape(encodeURIComponent(JSON.stringify({
-                            type: 'RESULT',
-                            data: result
-                        }))));
-                        window.location.hash = 'DATACONNECT_' + encoded;
-                        return;
-                    }
-
-                    if (status && status.type && !window.__DATACONNECT_HASH_SET__) {
-                        var statusKey = status.type + '_' + (status.message || '');
-                        if (window.__DATACONNECT_LAST_STATUS_KEY__ !== statusKey) {
-                            window.__DATACONNECT_LAST_STATUS_KEY__ = statusKey;
-                            var encoded = btoa(unescape(encodeURIComponent(JSON.stringify({
-                                type: 'STATUS',
-                                data: status
-                            }))));
-                            window.location.hash = 'DATACONNECT_' + encoded;
-                        }
-                    }
-                } catch(e) {
-                    console.error('[DataConnect Poll] Error:', e);
-                }
-            })();
-        "#;
-
-        let _ = webview.eval(check_script);
-
-        // Small delay for script to execute
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-        // Read the URL to check the hash
-        if let Ok(url) = webview.url() {
-            let url_str = url.to_string();
-            if let Some(hash_pos) = url_str.find("#DATACONNECT_") {
-                let hash = &url_str[hash_pos + 12..]; // Skip "#DATACONNECT_"
-
-                // Skip if we've already processed this hash
-                if hash == last_status_hash {
-                    continue;
-                }
-                last_status_hash = hash.to_string();
-
-                // Decode base64
-                if let Ok(decoded_bytes) = base64_decode(hash) {
-                    if let Ok(decoded_str) = String::from_utf8(decoded_bytes) {
-                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&decoded_str)
-                        {
-                            let msg_type =
-                                payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            let data = payload
-                                .get("data")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null);
-
-                            if msg_type == "RESULT" {
-                                log::info!("Got RESULT from webview for run {}", run_id);
-
-                                // Emit completion status
-                                let total = data
-                                    .get("totalConversations")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0);
-                                let _ = app.emit(
-                                    "connector-status",
-                                    serde_json::json!({
-                                        "runId": run_id,
-                                        "status": {
-                                            "type": "COMPLETE",
-                                            "message": format!("Exported {} conversations", total),
-                                            "data": data
-                                        },
-                                        "timestamp": chrono_timestamp()
-                                    }),
-                                );
-
-                                // Emit export complete
-                                let _ = app.emit(
-                                    "export-complete",
-                                    serde_json::json!({
-                                        "runId": run_id,
-                                        "platformId": platform_id,
-                                        "company": company,
-                                        "name": name,
-                                        "data": data,
-                                        "timestamp": chrono_timestamp()
-                                    }),
-                                );
-
-                                log::info!("Export complete for run {}, emitted events", run_id);
-
-                                // Clear the hash
-                                let _ = webview.eval("window.location.hash = '';");
-                                break;
-                            } else if msg_type == "STATUS" {
-                                let status_type =
-                                    data.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                let status_msg = data.get("message").and_then(|v| v.as_str());
-
-                                log::info!(
-                                    "Got STATUS from webview: {} - {:?}",
-                                    status_type,
-                                    status_msg
-                                );
-
-                                let _ = app.emit(
-                                    "connector-status",
-                                    serde_json::json!({
-                                        "runId": run_id,
-                                        "status": data,
-                                        "timestamp": chrono_timestamp()
-                                    }),
-                                );
-
-                                // Emit log
-                                if let Some(msg) = status_msg {
-                                    let _ = app.emit(
-                                        "connector-log",
-                                        serde_json::json!({
-                                            "runId": run_id,
-                                            "message": msg,
-                                            "timestamp": chrono_timestamp()
-                                        }),
-                                    );
-                                }
-
-                                // Clear the hash so we can detect next status
-                                let _ = webview.eval("window.location.hash = '';");
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Remove from active windows
-    CONNECTOR_WINDOWS.lock().unwrap().remove(&run_id);
-    unregister_active_run(&run_id);
-    log::info!("Polling ended for run {}", run_id);
-}
-
-/// Decode base64 string using the base64 crate
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD
-        .decode(input)
-        .map_err(|e| format!("Base64 decode error: {}", e))
-}
-
-fn chrono_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64
-}
-
-/// Stop a connector run by closing its webview or killing the browser process
+/// Clear (delete) a stored browser session for a given connector
 #[tauri::command]
-pub async fn stop_connector_run(app: AppHandle, run_id: String) -> Result<(), String> {
-    // Try to stop Playwright process first
-    if let Some(mut process) = PLAYWRIGHT_PROCESSES.lock().unwrap().remove(&run_id) {
-        log::info!("Killing Playwright process for run {}", run_id);
-        #[cfg(unix)]
-        {
-            use crate::commands::server::kill_process_group;
-            kill_process_group(process.id(), libc::SIGTERM);
-            // Brief wait for graceful shutdown, then force kill
-            for _ in 0..20 {
-                if let Ok(Some(_)) = process.try_wait() {
-                    unregister_active_run(&run_id);
-                    return Ok(());
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            kill_process_group(process.id(), libc::SIGKILL);
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = process.kill();
-        }
-        let _ = process.wait();
-        unregister_active_run(&run_id);
+pub async fn clear_browser_session(connector_id: String) -> Result<(), String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "Could not determine home directory".to_string())?;
+
+    let profiles_parent = PathBuf::from(&home)
+        .join(".dataconnect")
+        .join("browser-profiles");
+
+    clear_browser_session_from_profiles(&profiles_parent, &connector_id)
+}
+
+fn clear_browser_session_from_profiles(
+    profiles_parent: &Path,
+    connector_id: &str,
+) -> Result<(), String> {
+    if connector_id.is_empty()
+        || connector_id == "."
+        || connector_id == ".."
+        || !connector_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err("Invalid connector ID".to_string());
+    }
+
+    if !profiles_parent.exists() {
         return Ok(());
     }
 
-    // Try to get and remove the window label from the map
-    let window_label = CONNECTOR_WINDOWS.lock().unwrap().remove(&run_id);
-
-    // If we have a window label, try to close the window
-    if let Some(label) = window_label {
-        if let Some(window) = app.get_webview_window(&label) {
-            let _ = window.close(); // Ignore close errors
-        }
+    let canonical_profiles_parent = fs::canonicalize(profiles_parent)
+        .map_err(|e| format!("Failed to resolve browser-profiles directory: {e}"))?;
+    let profile_dir = profiles_parent.join(connector_id);
+    if !profile_dir.exists() {
+        return Ok(());
+    }
+    let canonical_profile_dir = fs::canonicalize(&profile_dir)
+        .map_err(|e| format!("Failed to resolve browser profile: {e}"))?;
+    if canonical_profile_dir == canonical_profiles_parent
+        || !canonical_profile_dir.starts_with(&canonical_profiles_parent)
+    {
+        return Err("Invalid connector ID".to_string());
     }
 
-    // Mirror Playwright stop behavior: release active-run dedupe immediately
-    // after issuing stop for webview-based connectors.
-    unregister_active_run(&run_id);
+    fs::remove_dir_all(&canonical_profile_dir)
+        .map_err(|e| format!("Failed to delete browser profile: {}", e))?;
 
-    // Always return Ok - the run state is handled in the frontend
+    log::info!("Cleared browser session for connector: {}", connector_id);
     Ok(())
-}
-
-/// Check if a platform is connected (has exported data)
-#[tauri::command]
-pub async fn check_connected_platforms(
-    app: AppHandle,
-    platform_ids: Vec<String>,
-    connection_ids: Option<HashMap<String, Vec<String>>>,
-) -> Result<HashMap<String, bool>, String> {
-    let mut connected = HashMap::new();
-
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?
-        .join("exported_data");
-
-    // Build a map from platform ID to company name so we can check both paths
-    let all_platforms = get_platforms(app).await.unwrap_or_default();
-    let id_to_company: HashMap<String, String> = all_platforms
-        .into_iter()
-        .map(|p| (p.id.clone(), p.company))
-        .collect();
-
-    for id in platform_ids {
-        if let Some(accounts) = connection_ids
-            .as_ref()
-            .and_then(|connections| connections.get(&id))
-        {
-            for connection_id in accounts {
-                let key = format!("{id}:{connection_id}");
-                let legacy_connection = super::pdpp_connections::legacy_connection_id(&id);
-                let has_legacy_export = connection_id == &legacy_connection
-                    && id_to_company.get(&id).is_some_and(|company| {
-                        let sanitized_company = super::file_ops::sanitize_path_component(company);
-                        super::file_ops::legacy_export_exists(
-                            &data_dir,
-                            &sanitized_company,
-                            &id,
-                        )
-                        .unwrap_or(false)
-                    });
-                connected.insert(
-                    key,
-                    has_legacy_export || exported_connection_exists(&data_dir, connection_id)?,
-                );
-            }
-            continue;
-        }
-        // Check by platform ID directory or company name directory
-        let exists = data_dir.join(&id).exists()
-            || id_to_company
-                .get(&id)
-                .map(|company| data_dir.join(company).exists())
-                .unwrap_or(false);
-        connected.insert(id, exists);
-    }
-
-    Ok(connected)
-}
-
-fn exported_connection_exists(
-    export_root: &std::path::Path,
-    connection_id: &str,
-) -> Result<bool, String> {
-    if !export_root.exists() {
-        return Ok(false);
-    }
-    let mut directories = vec![export_root.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        for entry in fs::read_dir(directory)
-            .map_err(|error| error.to_string())?
-            .flatten()
-        {
-            let path = entry.path();
-            if path.is_dir() {
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(&format!("--{connection_id}")))
-                {
-                    return Ok(true);
-                }
-                directories.push(path);
-            }
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]
@@ -2656,44 +1079,6 @@ pub async fn download_browser(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Test that Node.js runtime is working
-#[tauri::command]
-pub async fn test_nodejs(app: AppHandle) -> Result<serde_json::Value, String> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::process::{Command, Stdio};
-
-    // Get the playwright runner binary
-    let (binary_path, _) =
-        get_bundled_playwright_runner(&app).ok_or("Playwright runner not found")?;
-
-    let mut child = Command::new(&binary_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn playwright runner: {}", e))?;
-
-    let mut stdin = child.stdin.take().ok_or("Failed to get stdin")?;
-    let stdout = child.stdout.take().ok_or("Failed to get stdout")?;
-
-    // Send test command
-    writeln!(stdin, r#"{{"type":"test"}}"#)
-        .map_err(|e| format!("Failed to send command: {}", e))?;
-
-    // Read response
-    let reader = BufReader::new(stdout);
-    for line in reader.lines().flatten() {
-        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-            if msg.get("type").and_then(|v| v.as_str()) == Some("test-result") {
-                let _ = child.kill();
-                return Ok(msg.get("data").cloned().unwrap_or(serde_json::Value::Null));
-            }
-        }
-    }
-
-    Err("No response from Node.js runtime".to_string())
-}
-
 /// Get downloaded Chromium path from ~/.dataconnect/browsers
 pub(crate) fn get_downloaded_chromium_path() -> Option<PathBuf> {
     let home = std::env::var("HOME")
@@ -2835,136 +1220,6 @@ fn get_chromium_download_info() -> Option<(&'static str, &'static str)> {
     {
         None
     }
-}
-
-/// Browser session info returned to the frontend
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BrowserSessionInfo {
-    #[serde(rename = "connectorId")]
-    pub connector_id: String,
-    pub path: String,
-    #[serde(rename = "sizeBytes")]
-    pub size_bytes: u64,
-    #[serde(rename = "lastModified")]
-    pub last_modified: String,
-}
-
-/// Recursively compute directory size in bytes
-fn dir_size(path: &std::path::Path) -> u64 {
-    walkdir::WalkDir::new(path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
-        .sum()
-}
-
-/// List all stored browser sessions (profiles)
-#[tauri::command]
-pub async fn list_browser_sessions() -> Result<Vec<BrowserSessionInfo>, String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| "Could not determine home directory".to_string())?;
-
-    let profiles_dir = PathBuf::from(&home)
-        .join(".dataconnect")
-        .join("browser-profiles");
-
-    if !profiles_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut sessions = Vec::new();
-
-    let entries = fs::read_dir(&profiles_dir)
-        .map_err(|e| format!("Failed to read browser-profiles directory: {}", e))?;
-
-    for entry in entries.flatten() {
-        if !entry.path().is_dir() {
-            continue;
-        }
-
-        let connector_id = entry.file_name().to_string_lossy().to_string();
-        let path = entry.path();
-        let size_bytes = dir_size(&path);
-
-        let last_modified = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map(|t| {
-                let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-                // Return as ISO-ish timestamp (milliseconds since epoch)
-                let secs = duration.as_secs();
-                // Format as ISO 8601 manually
-                let dt = chrono::DateTime::from_timestamp(secs as i64, 0).unwrap_or_default();
-                dt.to_rfc3339()
-            })
-            .unwrap_or_default();
-
-        sessions.push(BrowserSessionInfo {
-            connector_id,
-            path: path.to_string_lossy().to_string(),
-            size_bytes,
-            last_modified,
-        });
-    }
-
-    Ok(sessions)
-}
-
-/// Clear (delete) a stored browser session for a given connector
-#[tauri::command]
-pub async fn clear_browser_session(connector_id: String) -> Result<(), String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| "Could not determine home directory".to_string())?;
-
-    let profiles_parent = PathBuf::from(&home)
-        .join(".dataconnect")
-        .join("browser-profiles");
-
-    clear_browser_session_from_profiles(&profiles_parent, &connector_id)
-}
-
-fn clear_browser_session_from_profiles(
-    profiles_parent: &Path,
-    connector_id: &str,
-) -> Result<(), String> {
-    if connector_id.is_empty()
-        || connector_id == "."
-        || connector_id == ".."
-        || !connector_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-    {
-        return Err("Invalid connector ID".to_string());
-    }
-
-    if !profiles_parent.exists() {
-        return Ok(());
-    }
-
-    let canonical_profiles_parent = fs::canonicalize(profiles_parent)
-        .map_err(|e| format!("Failed to resolve browser-profiles directory: {e}"))?;
-    let profile_dir = profiles_parent.join(connector_id);
-    if !profile_dir.exists() {
-        return Ok(());
-    }
-    let canonical_profile_dir = fs::canonicalize(&profile_dir)
-        .map_err(|e| format!("Failed to resolve browser profile: {e}"))?;
-    if canonical_profile_dir == canonical_profiles_parent
-        || !canonical_profile_dir.starts_with(&canonical_profiles_parent)
-    {
-        return Err("Invalid connector ID".to_string());
-    }
-
-    fs::remove_dir_all(&canonical_profile_dir)
-        .map_err(|e| format!("Failed to delete browser profile: {}", e))?;
-
-    log::info!("Cleared browser session for connector: {}", connector_id);
-    Ok(())
 }
 
 /// Download Chromium browser using Rust (production-ready)
@@ -3175,10 +1430,9 @@ pub async fn download_chromium_rust(app: AppHandle) -> Result<String, String> {
 mod tests {
     use super::{
         clear_browser_session_from_profiles, get_bundled_chromium_path_for_platform,
-        get_downloaded_chromium_path_in_home, manifest_looks_like_connector,
-        pdpp_streams_to_dataconnect_scopes, resolve_automation_browser_path_from,
-        resolve_browser_status, resolve_icon_path, ActivePdppPlatformManifest, ActivePdppStream,
-        ConnectorMetadata,
+        get_downloaded_chromium_path_in_home, pdpp_streams_to_dataconnect_scopes,
+        resolve_automation_browser_path_from, resolve_browser_status, ActivePdppPlatformManifest,
+        ActivePdppStream,
     };
     use serde_json::json;
     use std::path::{Path, PathBuf};
@@ -3210,37 +1464,6 @@ mod tests {
                 .expect("create profile symlink");
             assert!(clear_browser_session_from_profiles(&profiles, "outside-link").is_err());
             assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "fixture");
-        }
-    }
-
-    fn connector_metadata() -> ConnectorMetadata {
-        ConnectorMetadata {
-            connector_id: Some("github-playwright".to_string()),
-            id: Some("github-playwright".to_string()),
-            source_id: Some("github".to_string()),
-            manifest_version: Some("1.0".to_string()),
-            page_api_version: Some(1),
-            name: "GitHub".to_string(),
-            company: Some("github".to_string()),
-            description: "Exports GitHub data".to_string(),
-            connect_url: None,
-            connect_url_legacy: None,
-            connect_selector: None,
-            connect_selector_legacy: None,
-            export_frequency: None,
-            vectorize_config: None,
-            runtime: None,
-            version: Some("1.0.0".to_string()),
-            icon_url: None,
-            icon_url_legacy: None,
-            icon: Some("icons/github.svg".to_string()),
-            scopes: Some(vec![super::ConnectorScope {
-                scope: "github.profile".to_string(),
-                label: Some("Profile".to_string()),
-                description: Some("GitHub profile".to_string()),
-            }]),
-            runtime_requirements: None,
-            capabilities: None,
         }
     }
 
@@ -3359,35 +1582,6 @@ mod tests {
                 expected.split_whitespace().collect::<Vec<_>>()
             );
         }
-    }
-
-    #[test]
-    fn manifest_filter_accepts_real_connector_manifest() {
-        assert!(manifest_looks_like_connector(&connector_metadata()));
-    }
-
-    #[test]
-    fn manifest_filter_rejects_scope_schema_shape() {
-        let mut metadata = connector_metadata();
-        metadata.connector_id = None;
-        metadata.id = None;
-        metadata.scopes = None;
-        metadata.name = "LinkedIn Education".to_string();
-        metadata.description = "Schema file".to_string();
-
-        assert!(!manifest_looks_like_connector(&metadata));
-    }
-
-    #[test]
-    fn resolve_icon_path_falls_back_to_flattened_filename() {
-        let temp = tempdir().expect("tempdir");
-        let flattened = temp.path().join("github.svg");
-        std::fs::write(&flattened, "<svg />").expect("write icon");
-
-        let resolved =
-            resolve_icon_path(temp.path(), "icons/github.svg").expect("resolved flattened icon");
-
-        assert_eq!(resolved, flattened);
     }
 
     #[test]

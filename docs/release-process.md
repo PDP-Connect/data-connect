@@ -1,125 +1,86 @@
-# GitHub release process (deterministic)
+# Desktop and npm releases
 
-## Just do this
+## Automatic desktop releases
 
-```bash
-# Replace <version> with the version you are releasing (example: 0.8.1)
-git checkout main
-git pull --ff-only origin main
-npm run release:github -- --version <version>
-```
+A merge to `main` runs `client-tests.yml` (client typecheck and client/console tests) and `reference-implementation.yml` (the server tests). When either push run finishes, `desktop-release.yml` checks that both have a successful push run for that exact SHA. If one is missing, it exits without releasing; the later of the two completions does the release. It then checks out the SHA, confirms it is still the current `main` head, and computes a version. Pull-request, fork, failed and cancelled CI runs cannot publish. Other CI workflows are not part of the gate.
 
-That is the full release flow for normal releases.
+The version script reads all commit messages since the highest reachable, stable, published `vX.Y.Z` release that has all five desktop installers. Empty historical npm releases, drafts, prereleases and tags outside the selected history cannot become the baseline. It refuses to guess if no complete desktop release exists.
 
-## What this command does automatically
+| Commit | Bump |
+| --- | --- |
+| `fix:` or `perf:` (with optional scope) | Patch |
+| `feat:` (with optional scope) | Minor |
+| Conventional header with `!`, or `BREAKING CHANGE:` / `BREAKING-CHANGE:` footer | Minor while the major version is 0 ([SemVer item 4](https://semver.org/spec/v2.0.0.html#spec-item-4)); major from 1.0.0 on |
+| `test:`, `docs:`, `ci:`, `chore:`, `style:`, `refactor:`, `build:`, `revert:` without a breaking marker | None |
 
-`npm run release:github -- --version <version>` performs all of this in order:
+The highest bump in the range wins. Merge commits are ignored unless their messages follow the convention; ordinary merge histories still include the component commits. With squash merges, the squash commit's title/body must preserve the release intent. An explicit breaking marker overrides an otherwise ignored type.
 
-1. Validate `git` and `gh`, and `gh` auth
-2. Require clean working tree
-3. Require current branch equals target branch (`main` by default)
-4. `git pull --ff-only origin <target>`
-5. Bump `src-tauri/tauri.conf.json` version
-6. `git add src-tauri/tauri.conf.json`
-7. `git commit -m "release: vX.Y.Z"`
-8. `git push origin <target>` (unless `--no-push`)
-9. `gh release create vX.Y.Z --target <target> ...`
+The coordinator reserves `vX.Y.Z` at the tested commit through the GitHub API and creates a draft release. It never changes an existing tag. Tag reservations are read from origin, so unrelated tags in a shared local checkout do not affect version selection. If a historical npm tag or abandoned draft already occupies the computed version, it advances the patch until it finds an unused version. A retry at the same SHA reuses its draft. Failed/cancelled drafts remain visible to maintainers; a later merge computes from the last published desktop release, so it includes changes from unfinished releases too.
 
-Creating the GitHub release triggers `.github/workflows/release.yml` (`on: release: created`) to:
+The coordinator calls `release.yml` as a reusable workflow. That workflow still owns the four desktop build legs, five installer uploads, DMG attestations, Core multi-platform build, secret scans and digest-preserving publication. Automatic builds set `src-tauri/tauri.conf.json` to the selected tag version in each checkout before verifying the tag/commit/version identity. This is a build-time change: `main` receives no bot commit. `Cargo.toml`'s `0.1.0` is the crate version and root `package.json` is a private workspace; neither is the desktop product version. Tauri reads the product version from `tauri.conf.json`.
 
-1. Build and upload the desktop manual-install artifacts.
-2. After the desktop artifacts upload, build and publish the public Core image to GHCR as `ghcr.io/pdp-connect/data-connect/core:<version>`. Every release publishes its version tag, prereleases included.
-3. For stable releases only, a serialized job (`core-image-latest-promotion` concurrency group) moves `core:latest` to this release's exact image digest if its version is strictly newer (SemVer) than the `org.opencontainers.image.version` label on the current `core:latest`. If `core:latest` does not exist yet, the job creates it. If the current version cannot be read, the job fails and leaves `latest` unchanged.
+After desktop upload and Core publication/promotion succeed, the coordinator publishes the draft as a normal release with `--latest`. The Core image is `ghcr.io/pdp-connect/data-connect/core:<version>` for linux/amd64 and linux/arm64. Its existing serialized promoter moves `core:latest` only forward by SemVer. GitHub Latest and `core:latest` are separate pointers.
 
-For example, `v1.5.1` publishes `core:1.5.1` and moves `core:latest` only if `latest` is older than 1.5.1. Re-running an older release publishes its version tag again but does not move `latest` back. GitHub keeps at most one pending job in the concurrency group, so a newer pending promoter can replace an older one and the replaced job shows as cancelled. Re-run a cancelled promoter if needed; re-running is safe.
+The `desktop-release-main` concurrency group cancels older builds when a newer successful current-head run arrives. A late old CI completion does not cancel the current build. GitHub retains at most one pending run; queued intermediate merges can be replaced. Every eventual release includes qualifying commits since the last complete desktop release.
 
-## Clean-install acceptance (manual)
-
-`release.yml` can also install an existing release on fresh macOS 15 (arm64 and Intel) and Windows VMs and check the installed app. Run it with a release tag; this skips the build and runs only the `clean-install` job:
+## Read-only version plan
 
 ```bash
-gh workflow run release.yml --ref <branch> -f release_tag=<tag>
+node scripts/desktop-release.mjs plan
+# Inspect another locally available commit/ref:
+node scripts/desktop-release.mjs plan <ref>
 ```
 
-The job downloads that release's `.dmg` or `-setup.exe` assets, so the release must already have them. For a rehearsal, create a **published prerelease**, not a draft:
+The default target is local `origin/main`. The command pins that ref to a SHA, prints the desktop baseline, commit count and selected version (or skip reason), and uses the same version and remote-tag collision rules as the coordinator. It reads Git history, origin's tags and the GitHub releases API. It does not fetch, write files, create tags/releases or trigger workflows. Use a checkout with current main history and release tags; check the printed SHA against GitHub before relying on the result. `GITHUB_REPOSITORY` defaults to `PDP-Connect/data-connect` for this command. The plan predicts version selection, not whether the CI gate has passed.
 
-- GitHub does not start workflows for the `created` event of a draft release, so a draft never gets built assets.
-- A prerelease still runs the build and publishes its versioned Core image, but `promote-core-latest` skips prereleases, so `core:latest` does not move.
+At the 2026-10-21 inspection, main `79ac35bfb1e4757b8e5ee4baaea1d8fe884ea66c` had baseline `v0.7.54`, 827 commits since it, and selected `v0.8.0`. Newer complete desktop releases through `v0.7.63` are prereleases and remain excluded. Published Apple Silicon installer names use `_aarch64.dmg`; the script accepts that and `_arm64.dmg`. Historical breaking commits bump minor because the major version is 0.
 
-The job checks that the VM is fresh, that the app reached the owner-password-not-yet-set state, and that the bundled sidecars serve HTTP. It does not open or check the owner setup UI, which is behind owner sign-in. Logs upload as `clean-install-<platform>` artifacts.
+Automation never selects 1.0.0 from a 0.x baseline; going to 1.0.0 is an owner decision. To start at a chosen version instead, add a reviewed bootstrap record with the exact history cutoff SHA and first version (for example `0.7.64`, after checking availability). Both plan and prepare should consume that record until the first complete automated release is published, then use the ordinary release baseline. This is a proposed follow-up; no version override or historical-baseline change is enabled here.
 
-## Direct answers (branch + tag confusion)
+## npm publishing
 
-- **Do I create a new branch first?**  
-  **No** for normal releases. Run this from `main`. The script enforces that.
-- **Do I commit the version bump manually?**  
-  **No** if you use `npm run release:github`; it commits for you.
-- **When is the GitHub release tag created?**  
-  At the end of that same command via `gh release create ...`.
-- **Is there another npm release command after push?**  
-  **No.** `npm run release:github` already does push + release creation.
+`npm-release.yml` continues to publish `@pdpp/connector-protocol`, `@pdpp/collector-runtime` and `@pdpp/local-collector` in lockstep, with the existing scope rules, quality checks, OIDC trusted publishing, dependency pin and registry/provenance verification. Its tags are now `npm-vX.Y.Z`. The GitHub release plugin is removed, so npm no longer creates empty releases or competes for Latest. Desktop uses `v*` from this change onward; historical tags and releases remain untouched.
 
-## Normal release (recommended)
+On the first npm run with no reachable `npm-v*` tag, `npm-release-tags.mjs` reads the three registry `latest` versions, chooses the highest (including partial lockstep publication), requires a reachable legacy `v<version>` tag, and creates the matching `npm-v<version>` alias at the same commit. It fetches the alias before semantic-release computes the next version. Subsequent runs skip migration. Unknown registry state or a missing legacy tag fails rather than restarting npm at 1.0.0. The npm workflow's existing serialization protects migration against another npm run.
 
-Use the exact `Just do this` block above.
+## Manual runs and recovery
 
-## Safe preview before releasing
+Re-run the failed automatic workflow in Actions, or dispatch `desktop-release.yml` on `main`. Dispatch requires successful `client-tests` and `reference-implementation` push runs for the exact commit too. A draft at that SHA can be rebuilt and published without moving its tag. A newer main head supersedes old automatic work; dispatch releases the current head only.
+
+Existing manual commands remain available:
 
 ```bash
 npm run release:github -- --version <version> --dry-run
-```
-
-## Preflight helpers
-
-Show current/suggested versions:
-
-```bash
+npm run release:github -- --version <version>
 npm run release:versions
-```
-
-Validate version ordering only:
-
-```bash
 npm run release:github -- --version <version> --check-version
 ```
 
-## If you insist on release branch + PR first
+`release:github` requires a clean target branch (default `main`), bumps and commits `tauri.conf.json`, pushes it, and creates the release. Human-created releases still trigger `release.yml` through `release: created`. Unlike the automatic path, that manual command publishes the release before assets finish. Manual release and automatic release creation should not run concurrently; they can reserve the same version.
 
-This is manual and **not** what the default script flow expects.
-
-1. On feature branch, bump `src-tauri/tauri.conf.json`, commit, open PR, merge to `main`.
-2. After merge, run release command from `main`:
+The original desktop dispatch modes remain:
 
 ```bash
-git checkout main
-git pull --ff-only origin main
-npm run release:github -- --version <version>
+# Build a ref without publishing a release
+gh workflow run release.yml -f ref=<ref>
+# Install an existing release on fresh macOS/Windows VMs, without building
+gh workflow run release.yml -f release_tag=vX.Y.Z
+# Force the existing npm release path (reason required)
+gh workflow run npm-release.yml -f release_type=patch -f reason='<reason>'
 ```
 
-Do **not** run `npm run release:github` on a non-target branch unless you intentionally set `--target` to that branch.
+A manual published prerelease builds desktop and its versioned Core image but does not promote `core:latest`. Draft release creation does not start a release-event build. The automatic path explicitly calls the reusable workflow, so it does not depend on events produced with `GITHUB_TOKEN` triggering another workflow.
 
-## Options
+## Repository settings and first-run checks
 
-- `--version X.Y.Z` (required unless using helper flags only)
-- `--target main` (default `main`; current branch must match)
-- `--title "DataConnect vX.Y.Z"` (optional)
-- `--notes "Release vX.Y.Z"` (optional)
-- `--dry-run` (print planned actions only)
-- `--no-push` (commit locally, skip push, still attempts release create if you continue)
-- `--show-versions` (print local + latest remote version)
-- `--suggest-version` (print next valid patch version)
-- `--check-version` (validate ordering and exit)
+- Actions must be enabled, including reusable workflows and the pinned actions. Allow `GITHUB_TOKEN` the job-requested `contents: write`, `actions: read`, `packages: write`, `id-token: write` and `attestations: write` permissions. The coordinator needs no PAT or new secret. Existing builders use `GITHUB_TOKEN`; macOS installers remain unsigned and notarization remains downstream.
+- Tag rulesets/protection must permit the Actions identity to create `v*` and `npm-v*` tags. Branch protection on `main` needs no bypass: automatic releases never push commits to it. Protect workflow edits with the repository's normal review policy because `workflow_run` jobs have write privileges.
+- GHCR must permit this repository's Actions token to publish the existing Core package. Retain npm trusted-publisher bindings for all three packages to `npm-release.yml` on GitHub-hosted runners. No `NPM_TOKEN` is added.
+- Before enabling, inspect the last complete desktop release and its reachable tag. The first automatic run can contain many historical conventional commits; at 0.x the largest possible bump is minor. Missing old installer assets cause a closed failure or selection of an older complete baseline. Check the run's printed baseline/version and the npm migration's legacy tag.
+- Cancellation can leave reserved tags, drafts, uploaded installers or a versioned Core image; those are retained and never silently deleted. Core promotion occurs before draft publication, so cancellation in that short window can leave `core:latest` ahead of GitHub Latest. Retry the same SHA. Automatic DMG attestations originate from the main workflow context rather than a release-event tag context; downstream signer policies must allow the reusable workflow through this coordinator. Hosted installers, GHCR, npm and signer integration must be verified in the first live run.
 
-## Version rules enforced by script
+## Prior art used
 
-- New version must be greater than `src-tauri/tauri.conf.json` version
-- New version must be greater than latest remote `v*` semver tag
-- Tag must not already exist locally/remotely
+[release-please](https://github.com/googleapis/release-please) parses conventional commits and maintains release PRs. Its additional merge step does not meet the request to release each qualifying main merge. [semantic-release](https://semantic-release.org/usage/configuration/) directly automates release versions and supports separate tag formats; npm keeps that established implementation here. [tauri-action](https://github.com/tauri-apps/tauri-action) supports branch-triggered native builds and draft releases. This implementation uses that branch-driven pattern after CI, retaining this repository's existing bundle finalization and publication checks instead of adding a second Tauri build matrix.
 
-## Common failure cases
-
-- Dirty git tree -> commit/stash first.
-- Not on target branch -> checkout target branch (usually `main`).
-- Tag already exists -> choose a new version.
-- `gh` unauthenticated -> run `gh auth login`.
-- Missing CI secrets -> release workflow fails after release is created.
+Local validation: `node --test scripts/desktop-release.test.mjs scripts/npm-release-tags.test.mjs` and `actionlint -shellcheck=''` on the changed workflows. The new tests also run in client CI.

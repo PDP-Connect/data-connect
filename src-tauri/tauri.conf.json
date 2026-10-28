@@ -51,16 +51,6 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../connectors/github/**/*": "connectors/github/",
-      "../connectors/linkedin/**/*": "connectors/linkedin/",
-      "../connectors/meta/**/*": "connectors/meta/",
-      "../connectors/openai/**/*": "connectors/openai/",
-      "../connectors/google/**/*": "connectors/google/",
-      "../connectors/heb/**/*": "connectors/heb/",
-      "../connectors/spotify/**/*": "connectors/spotify/",
-      "../connectors/oura/**/*": "connectors/oura/",
-      "../connectors/shopify/**/*": "connectors/shopify/",
-      "../connectors/wholefoods/**/*": "connectors/wholefoods/",
       "../connectors/collection-profiles/": "connectors/collection-profiles/",
       "../connectors/lock.json": "connectors/lock.json",
       "../playwright-runner/dist/": "playwright-runner/dist/",

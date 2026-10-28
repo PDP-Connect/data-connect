@@ -161,6 +161,84 @@ function readConnectorReason(error: RunRecord["connectorError"]): string | null 
   return null;
 }
 
+// ─── Certified stream-scoped failure ───────────────────────────────────────
+
+/**
+ * The connector-declared `DONE.error.code` of a certified stream-scoped failure
+ * (Collection Profile: DONE failed + this code + an in-scope SKIP_RESULT naming
+ * each failed stream).
+ */
+const STREAM_COLLECTION_FAILED_CODE = "stream_collection_failed";
+
+/** The run facts the predicate reads; a `RunRecord`, or any projection that keeps these fields. */
+export type CertifiedStreamFailureEvidence = Pick<RunRecord, "status"> &
+  Partial<Pick<RunRecord, "checkpointSummary" | "connectorError">>;
+
+/**
+ * True for a failed run that certified its failure as stream-scoped AND whose
+ * sibling streams committed (`checkpointSummary.commit_status` is `committed`
+ * or `partially_committed`; the runtime reports `not_committed` when nothing
+ * moved and `disabled` when state is not persisted).
+ *
+ * Trust boundary: this predicate does not verify a certificate. It relies on
+ * the runtime having done so. The runtime commits sibling cursors of a failed
+ * DONE only when the DONE carries the code AND an in-scope SKIP_RESULT names a
+ * failed stream (`runtime/index.ts`, `handleDoneClose`), so `commit_status` of
+ * `committed` or `partially_committed` on a failed run is runtime evidence. The
+ * code alone is only a connector-authored claim and is not enough: without the
+ * commit status the run keeps counting as a failure. Callers must pass facts
+ * taken from the runtime's run record, never from connector output.
+ * `commit_status` is a durability fact (state was written); it does not prove
+ * the source was fully collected or that any cursor moved.
+ *
+ * Such a run is partial progress, not a repeat of a whole-run failure: the
+ * connector ran, reached the source and committed data; only the named
+ * streams' cursors were withheld. Every DONE-failed run shares the streak
+ * class `terminal:connector_reported_failed`, so without this check a stream
+ * that fails on every run would back the source off from the 3rd run and, at
+ * `BLOCKED_PROMOTION_THRESHOLD`, stop automatic dispatch of the whole source
+ * while its siblings commit on every run.
+ *
+ * Known limits of this policy (deliberate, kept small):
+ * - It reads the scheduler's own run history. A MANUAL run (`controller.runNow`)
+ *   is not in that history, so a manual certified run cannot clear an already
+ *   blocked streak. A manual genuine success still does, through the existing
+ *   `lastSuccessAtMs` anchor. A durable, connection-scoped recovery projection
+ *   shared by the counter, the dispatch governor and the transition dedup is
+ *   the follow-up.
+ * - Visibility does not depend on this streak. Every such run stays `failed`
+ *   and reports the failed stream's SKIP_RESULT gap. `checkpoint_stalled`
+ *   (after `CHECKPOINT_STALL_RUNS` withheld runs) fires only when the failed
+ *   stream had staged a cursor that was then withheld. A failed stream that
+ *   never stages a STATE has nothing to withhold, so no stall warning fires
+ *   for it: the owner-visible signal is the failed run plus the per-run
+ *   skip_result gap. A persistent warning for that shape belongs to a
+ *   per-stream collection-health projection, not to the commit gate or to
+ *   this back-off.
+ */
+export function isCertifiedStreamFailureWithCommittedSiblings(record: CertifiedStreamFailureEvidence): boolean {
+  if (record.status !== "failed") {
+    return false;
+  }
+  if ((record.connectorError as { code?: unknown } | null | undefined)?.code !== STREAM_COLLECTION_FAILED_CODE) {
+    return false;
+  }
+  const commitStatus = record.checkpointSummary?.commit_status;
+  return commitStatus === "committed" || commitStatus === "partially_committed";
+}
+
+/**
+ * True for a record that ends a failure streak: a genuine success, or a failed
+ * run the runtime certified as partial progress. The back-off counter, the
+ * announce-once dedup cells and the persisted transition-marker lookups must
+ * all use this one boundary, so the notion of "the current streak" is the same
+ * everywhere. Neither kind of record is a failure that counts toward a streak;
+ * only the first is a success (`isCounterResetStatus`).
+ */
+export function endsFailureStreak(record: CertifiedStreamFailureEvidence): boolean {
+  return record.status === "succeeded" || isCertifiedStreamFailureWithCommittedSiblings(record);
+}
+
 // ─── Core helper ────────────────────────────────────────────────────────────
 
 /**
@@ -319,6 +397,20 @@ function countConsecutiveSameClassFailures(history: readonly RunRecord[]): {
       // reset nor extend the streak. Skip past them.
       continue;
     }
+    if (isCertifiedStreamFailureWithCommittedSiblings(record)) {
+      // Not counted, and it ends the streak (it is not transparent like a
+      // `skipped` record). The runtime certified that this run reached the
+      // source and committed sibling streams. That is progress, and progress
+      // warrants resetting a connection-wide streak: with a transparent record
+      // the stale streak stays live for as long as the failed stream keeps
+      // failing. It does not prove that every older root cause is gone; a
+      // genuine failure after it starts a new streak at 1.
+      // This is a streak reset only. It is NOT a success: `status` stays
+      // `failed`, `last_success_at` and health `CollectionSucceeded` are
+      // untouched, and `isCounterResetStatus` is unchanged. The dedup of
+      // `back_off.started` / `gave_up` uses the same boundary (`endsFailureStreak`).
+      break;
+    }
     const candidate = reasonClassOf(record);
     if (candidate === null) {
       // Defensive: a failed record with no class shouldn't happen, but if
@@ -378,3 +470,4 @@ function normalizeOptionalEpochMs(value: number | null | undefined): number | nu
 export function isCounterResetStatus(status: RunStatus): boolean {
   return status === "succeeded";
 }
+

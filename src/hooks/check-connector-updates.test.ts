@@ -36,12 +36,10 @@ describe("checkConnectorUpdates", () => {
     ]
     mockInvoke.mockResolvedValue(updates)
 
-    const result = await checkConnectorUpdates(dispatch, { force: true })
+    const result = await checkConnectorUpdates(dispatch)
 
     expect(result).toEqual(updates)
-    expect(mockInvoke).toHaveBeenCalledWith("check_connector_updates", {
-      force: true,
-    })
+    expect(mockInvoke).toHaveBeenCalledWith("check_connector_updates")
     expect(dispatch).toHaveBeenNthCalledWith(1, setIsCheckingUpdates(true))
     expect(dispatch).toHaveBeenNthCalledWith(2, setConnectorUpdates(updates))
     expect(dispatch).toHaveBeenNthCalledWith(3, setIsCheckingUpdates(false))

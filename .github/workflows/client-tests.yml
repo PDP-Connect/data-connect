@@ -6,7 +6,7 @@ name: client-tests
 # nothing ran `vitest` over src/, src-tauri/, scripts/ or playwright-runner/, so the
 # 88 client test files in vite.config.ts's `test.include` were only ever run locally.
 #
-# Node is pinned to 24.21.0 to match every other workflow in this directory and to
+# Node is pinned to 24.22.1 to match every other workflow in this directory and to
 # stay inside the root package.json `engines` range (>=24.15.0).
 #
 # Two jobs, not one: the root `npm test` script is `npm run typecheck && vitest run`,
@@ -35,6 +35,8 @@ env:
   ONNXRUNTIME_NODE_INSTALL: "skip"
 
 on:
+  push:
+    branches: [main]
   pull_request:
     # PRs into the test-engineering integration branch are gated by a local
     # oracle and review; full CI runs once on the batch PR into main.
@@ -63,7 +65,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -85,7 +87,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Check vendored build serialization
@@ -93,6 +95,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Test desktop release version rules
+        run: node --test scripts/desktop-release.test.mjs scripts/npm-release-tags.test.mjs
 
       - name: Typecheck console
         run: npm run types:check --workspace=apps/console
