@@ -17,6 +17,12 @@
 -- store method directly). Payload-shaped fields stay JSON so the store
 -- surface can remain semantic and avoid leaking table columns to the
 -- runtime scheduler.
+-- `actor_type` is the run's provenance (read by the coverage selector,
+-- server/ref-control.ts isDeviceTerminalRun). A row written here is a server
+-- run by construction: this path is the scheduler's own append, and a device
+-- terminal commit records its run through a spine event, never through here.
+-- On conflict the row's existing value (the spine terminal event's actor) is
+-- kept; only a NULL is filled.
 INSERT INTO run_history(
   connector_instance_id,
   connector_id,
@@ -35,8 +41,9 @@ INSERT INTO run_history(
   completed_at,
   error,
   attempt,
-  scheduler_managed
-) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+  scheduler_managed,
+  actor_type
+) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'runtime')
 ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO UPDATE SET
   source_json = excluded.source_json,
   status = excluded.status,
@@ -51,4 +58,5 @@ ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO UPDATE SE
   completed_at = excluded.completed_at,
   error = excluded.error,
   attempt = excluded.attempt,
-  scheduler_managed = 1
+  scheduler_managed = 1,
+  actor_type = COALESCE(run_history.actor_type, 'runtime')

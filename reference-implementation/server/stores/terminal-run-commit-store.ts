@@ -6,6 +6,7 @@ import { getOneOn, referenceQueries } from "../../lib/db.ts";
 import { appendPostgresSpineEventInTransaction, type PostgresSpineEventInput } from "../../lib/postgres-spine.ts";
 import { appendSqliteSpineEventInTransaction, type SpineDatabase, type SpineEventInput } from "../../lib/spine.ts";
 import { getDb } from "../db.ts";
+import { LOCAL_DEVICE_ACTOR_TYPE } from "../connector-instance-placement.ts";
 import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
 import {
   requirePostgresCollectionObservationInTransaction,
@@ -133,7 +134,7 @@ function eventInputFor(
 ): SpineEventInput & PostgresSpineEventInput {
   return {
     actor_id: input.deviceId,
-    actor_type: "local_device",
+    actor_type: LOCAL_DEVICE_ACTOR_TYPE,
     data: {
       collection_facts: {
         collection_scope: input.collectionBoundary,

@@ -242,6 +242,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/postgres-template-eligibility-migration-mutation-control.test.ts",
   "test/records-instance-stream-id-keyset-index.test.ts",
   "test/rs-opaque-cursors.test.ts",
+  // Drops the actor_type column and re-runs the bootstrap migration.
+  "test/run-history-actor-provenance.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
   "test/run-history-device-run-provenance-migration.test.ts",
   // Exercises bounded boot retries and cursor recovery after run_history lock timeouts.

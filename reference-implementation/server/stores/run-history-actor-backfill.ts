@@ -1,0 +1,282 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// Bounded backfill of `run_history.actor_type` for rows written before the
+// column existed.
+//
+// The live writer (server/stores/run-history-writer.ts) copies the terminal
+// spine event's actor_type onto the row it finalizes. A row finalized earlier
+// has none. This walk fills it:
+// - A run with terminal spine events takes the actor_type of its EARLIEST
+//   terminal event by event_seq across all five terminal types, the event the
+//   live writer finalizes a row from (a later duplicate terminal no-ops there).
+// - A run with NO spine event at all takes 'runtime'. A device run always
+//   produces spine events (its run_history row is written from them), and a
+//   row with none can only come from the scheduler's own append path
+//   (scheduler-store appendRunHistory: skipped and pre-start failed runs),
+//   which records a server run by construction. So the absence of any event is
+//   itself the proof of server origin. `scheduler_managed` is NOT that proof:
+//   its column default is true, so device rows carry it too.
+// - A row with run_id IS NULL can only come from that legacy scheduler append
+//   path: the spine writer requires both run_id and connector_instance_id.
+//   Legacy scheduler skips therefore take 'runtime', including rows copied
+//   from scheduler_run_history during the rename/merge migration.
+// Identity is the pair (run_id, connector_instance_id), never run_id alone.
+// Older spine rows can have a NULL connector_instance_id column while retaining
+// their identity in data_json; use both representations. An event with neither
+// identity blocks the 'runtime' rule (fail closed) rather than being ignored.
+//
+// Shape (why it is safe on a large table):
+// - The walk keys on run_history's own primary key, in ascending id order, one
+//   batch per round. run_history holds one row per run, so a pass is
+//   O(run_history), not O(spine_events). Each row costs one probe of
+//   spine_events by (run_id, event_type) through its terminal partial index,
+//   so millions of spine events add index depth, not scan work.
+// - Each round is ONE short autocommit statement over at most `batchSize`
+//   rows. It never holds a transaction between rounds, and it locks only the
+//   rows it updates (a Postgres UPDATE takes row locks, no table lock).
+// - It only touches rows that are terminal (`status <> 'running'`) with
+//   actor_type NULL, and re-checks `actor_type IS NULL` in the UPDATE. A live
+//   finalize needs `status = 'running'`, so the two writers never touch the
+//   same row, and a backfill can never overwrite a live value.
+// - Idempotent: a filled row drops out of the candidate set, and the UPDATE
+//   joins only rows that found an actor, so a repeated boot adds no dead
+//   tuples. After a pass every terminal row is filled except one whose run has
+//   spine events but none terminal; that case is not guessed (no sentinel) and
+//   is re-probed on the next boot, until the round cap.
+// - No durable cursor. A pass re-reads from id 0 each boot; filled rows are
+//   skipped by the `actor_type IS NULL` filter.
+//
+// PostgreSQL has a run-specific actor-provenance index over the same five
+// terminal types, including `run.browser_surface_failed`, so each run costs
+// one bounded probe there too.
+
+import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged } from "../../lib/db.ts";
+import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
+
+const DEFAULT_BATCH_SIZE = 200;
+const DEFAULT_MAX_ROUNDS = 1000;
+
+export interface RunHistoryActorBackfillRound {
+  /** Rows that had no actor_type, were terminal, and were examined this round. */
+  readonly examined: number;
+  /** Rows this round filled. */
+  readonly filled: number;
+  /** The highest run_history id examined; the next round starts after it. null when nothing was left. */
+  readonly lastId: number | null;
+}
+
+export interface RunHistoryActorBackfillSummary {
+  /** True when a round found fewer candidates than the batch size: the pass reached the end of run_history. */
+  readonly complete: boolean;
+  readonly examined: number;
+  readonly filled: number;
+  readonly rounds: number;
+}
+
+// The SQLite terminal partial index (idx_spine_events_run_terminal) covers all
+// five terminal types; the Postgres one (idx_pg_spine_events_run_terminal)
+// covers the first four. An IN list must stay literal and identical to the
+// index predicate for the planner to use the partial index.
+const SERVER_RUN_ACTOR_TYPE = "runtime";
+const SQLITE_TERMINAL_TYPES = `'run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned'`;
+const POSTGRES_TERMINAL_TYPES = `'run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned'`;
+
+function toFiniteId(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Fill the batch `[lo, hi]` of run_history ids on SQLite. Exported so a test can
+ * read its query plan.
+ *
+ * The leading `+` on `se.connector_instance_id` stops SQLite from choosing
+ * idx_spine_events_instance_seq, which would scan every event of the whole
+ * connection for each row. With it the planner probes the terminal partial
+ * index by (run_id, event_type). Measured on 1M events over 50k runs:
+ * 110 s without it, 0.4 s with it.
+ */
+export const SQLITE_FILL_ACTOR_SQL = `UPDATE run_history
+     SET actor_type = found.actor_type
+     FROM (
+       SELECT rh.id AS id,
+              COALESCE(
+                CASE WHEN rh.run_id IS NULL THEN '${SERVER_RUN_ACTOR_TYPE}' END,
+                (SELECT se.actor_type FROM spine_events se
+                  WHERE se.run_id = rh.run_id
+                    AND +COALESCE(
+                      NULLIF(se.connector_instance_id, ''),
+                      NULLIF(json_extract(se.data_json, '$.connector_instance_id'), ''),
+                      NULLIF(json_extract(se.data_json, '$.connection_id'), '')
+                    ) = rh.connector_instance_id
+                    AND se.event_type IN (${SQLITE_TERMINAL_TYPES})
+                  ORDER BY se.event_seq ASC
+                  LIMIT 1),
+                CASE WHEN NOT EXISTS (
+                  SELECT 1 FROM spine_events se
+                  WHERE se.run_id = rh.run_id
+                    AND (
+                      COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(json_extract(se.data_json, '$.connector_instance_id'), ''),
+                        NULLIF(json_extract(se.data_json, '$.connection_id'), '')
+                      ) = rh.connector_instance_id
+                      OR COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(json_extract(se.data_json, '$.connector_instance_id'), ''),
+                        NULLIF(json_extract(se.data_json, '$.connection_id'), '')
+                      ) IS NULL
+                    )
+                ) THEN '${SERVER_RUN_ACTOR_TYPE}' END
+              ) AS actor_type
+       FROM run_history rh
+       WHERE rh.id BETWEEN ? AND ?
+         AND rh.actor_type IS NULL AND rh.status <> 'running'
+     ) AS found
+     WHERE run_history.id = found.id
+       AND found.actor_type IS NOT NULL
+       AND run_history.actor_type IS NULL`;
+
+function sqliteRound(afterId: number, batchSize: number): RunHistoryActorBackfillRound {
+  // REVIEWED-DYNAMIC: fixed SQL, placeholders only; bounded by LIMIT ? and an
+  // id range. A registered query cannot express the one-shot range update.
+  const [bounds] = [
+    ...iterateDynamicSqlAcknowledged<{ examined: number; hi: number | null; lo: number | null }>(
+      `SELECT COUNT(*) AS examined, MIN(id) AS lo, MAX(id) AS hi
+       FROM (
+         SELECT id FROM run_history
+         WHERE id > ? AND actor_type IS NULL AND status <> 'running'
+         ORDER BY id
+         LIMIT ?
+       )`,
+      [afterId, batchSize]
+    ),
+  ];
+  const lo = toFiniteId(bounds?.lo);
+  const hi = toFiniteId(bounds?.hi);
+  if (!bounds || lo === null || hi === null) {
+    return { examined: 0, filled: 0, lastId: null };
+  }
+  // REVIEWED-DYNAMIC: fixed SQL, placeholders only; bounded by the id range
+  // [lo, hi] the select above produced from at most `batchSize` candidates.
+  const result = execDynamicSqlAcknowledged(SQLITE_FILL_ACTOR_SQL, [lo, hi]);
+  return { examined: Number(bounds.examined), filled: result.changes, lastId: hi };
+}
+
+async function postgresRound(afterId: number, batchSize: number): Promise<RunHistoryActorBackfillRound> {
+  const bounds = await postgresQuery<{ examined: string; hi: string | null; lo: string | null }>(
+    `SELECT COUNT(*)::text AS examined, MIN(id)::text AS lo, MAX(id)::text AS hi
+     FROM (
+       SELECT id FROM run_history
+       WHERE id > $1::bigint AND actor_type IS NULL AND status <> 'running'
+       ORDER BY id
+       LIMIT $2
+     ) batch`,
+    [afterId, batchSize]
+  );
+  const [row] = bounds.rows;
+  const lo = toFiniteId(row?.lo);
+  const hi = toFiniteId(row?.hi);
+  if (!row || lo === null || hi === null) {
+    return { examined: 0, filled: 0, lastId: null };
+  }
+  const result = await postgresQuery(
+    `UPDATE run_history
+     SET actor_type = found.actor_type
+     FROM (
+       SELECT rh.id,
+              CASE
+                WHEN rh.run_id IS NULL THEN '${SERVER_RUN_ACTOR_TYPE}'
+                WHEN terminal.actor_type IS NOT NULL THEN terminal.actor_type
+                WHEN NOT EXISTS (
+                  SELECT 1 FROM spine_events se
+                  WHERE se.run_id = rh.run_id
+                    AND (
+                      COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(se.data_json->>'connector_instance_id', ''),
+                        NULLIF(se.data_json->>'connection_id', '')
+                      ) = rh.connector_instance_id
+                      OR COALESCE(
+                        NULLIF(se.connector_instance_id, ''),
+                        NULLIF(se.data_json->>'connector_instance_id', ''),
+                        NULLIF(se.data_json->>'connection_id', '')
+                      ) IS NULL
+                    )
+                ) THEN '${SERVER_RUN_ACTOR_TYPE}'
+              END AS actor_type
+       FROM run_history rh
+       LEFT JOIN LATERAL (
+         SELECT se.actor_type, se.event_seq FROM spine_events se
+         WHERE se.run_id = rh.run_id
+           AND COALESCE(
+             NULLIF(se.connector_instance_id, ''),
+             NULLIF(se.data_json->>'connector_instance_id', ''),
+             NULLIF(se.data_json->>'connection_id', '')
+           ) = rh.connector_instance_id
+           AND se.event_type IN (${POSTGRES_TERMINAL_TYPES})
+         ORDER BY se.event_seq ASC
+         LIMIT 1
+       ) terminal ON true
+       WHERE rh.id BETWEEN $1::bigint AND $2::bigint
+         AND rh.actor_type IS NULL AND rh.status <> 'running'
+     ) found
+     WHERE run_history.id = found.id
+       AND found.actor_type IS NOT NULL
+       AND run_history.actor_type IS NULL`,
+    [lo, hi]
+  );
+  return { examined: Number(row.examined), filled: result.rowCount ?? 0, lastId: hi };
+}
+
+/**
+ * One bounded round: the next `batchSize` terminal rows after `afterId` that
+ * have no actor_type, filled from their run's earliest terminal spine event, or
+ * 'runtime' when the run has no spine event at all.
+ */
+export function runRunHistoryActorBackfillRound(options: {
+  readonly afterId: number;
+  readonly batchSize?: number;
+}): Promise<RunHistoryActorBackfillRound> {
+  const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
+  return isPostgresStorageBackend()
+    ? postgresRound(options.afterId, batchSize)
+    : Promise.resolve(sqliteRound(options.afterId, batchSize));
+}
+
+/**
+ * Walk run_history once, from the start, in bounded rounds. Yields to the event
+ * loop between rounds. Stops at the end of the table or after `maxRounds`; the
+ * next boot continues, because filled rows no longer match.
+ */
+export async function runStartupRunHistoryActorBackfillToCompletion(
+  options: {
+    readonly batchSize?: number;
+    readonly maxRounds?: number;
+    readonly onRound?: (round: RunHistoryActorBackfillRound, index: number) => void;
+  } = {}
+): Promise<RunHistoryActorBackfillSummary> {
+  const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
+  const maxRounds = options.maxRounds ?? DEFAULT_MAX_ROUNDS;
+  let afterId = 0;
+  let examined = 0;
+  let filled = 0;
+  let rounds = 0;
+  let complete = false;
+  while (rounds < maxRounds) {
+    // biome-ignore lint/performance/noAwaitInLoops: each round starts after the previous round's last id.
+    const round = await runRunHistoryActorBackfillRound({ afterId, batchSize });
+    rounds += 1;
+    examined += round.examined;
+    filled += round.filled;
+    options.onRound?.(round, rounds);
+    if (round.lastId === null || round.examined < batchSize) {
+      complete = true;
+      break;
+    }
+    afterId = round.lastId;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  return { complete, examined, filled, rounds };
+}

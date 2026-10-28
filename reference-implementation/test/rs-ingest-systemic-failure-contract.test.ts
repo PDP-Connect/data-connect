@@ -83,6 +83,7 @@ function seedActiveConnection(connectorId: string, connectorInstanceId: string):
 
 function startRun(runId: string, connectorId: string, connectorInstanceId: string): void {
   writeSqliteRunHistoryForSpineEvent({
+    actorType: "runtime",
     connectorId,
     connectorInstanceId,
     data: {},
@@ -95,6 +96,7 @@ function startRun(runId: string, connectorId: string, connectorInstanceId: strin
 
 function cancelRun(runId: string, connectorId: string, connectorInstanceId: string): void {
   writeSqliteRunHistoryForSpineEvent({
+    actorType: "runtime",
     connectorId,
     connectorInstanceId,
     data: { reason: "owner_cancelled" },

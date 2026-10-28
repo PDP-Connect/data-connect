@@ -3160,7 +3160,12 @@ async function bootstrapPostgresSchemaOnce({
         -- (server/stores/run-history-writer.ts) sets this false. Scheduler
         -- cadence/backoff readers filter on this column — see
         -- terminal-read-architecture-fable-0730.md R7.5.
-        scheduler_managed BOOLEAN NOT NULL DEFAULT false
+        scheduler_managed BOOLEAN NOT NULL DEFAULT false,
+        -- Run provenance: the actor_type of the run's terminal spine event, or
+        -- 'runtime' for a scheduler append. NULL = not known (still running,
+        -- predates the column and not yet backfilled, or spine events but no
+        -- terminal one). See the SQLite twin in db.ts.
+        actor_type TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_pg_run_history_connector_completed
@@ -3313,6 +3318,14 @@ async function bootstrapPostgresSchemaOnce({
         ON spine_events(run_id, event_type, event_seq DESC)
         WHERE run_id IS NOT NULL
           AND event_type IN ('run.completed', 'run.failed', 'run.cancelled', 'run.abandoned');
+      -- Run-history provenance backfill probes all five terminal types by
+      -- run_id and event_seq. The existing index above omits browser-surface
+      -- failures, so this narrower purpose-built index keeps that lookup off
+      -- the general run index too.
+      CREATE INDEX IF NOT EXISTS idx_pg_spine_events_run_actor_terminal
+        ON spine_events(run_id, event_seq DESC)
+        WHERE run_id IS NOT NULL
+          AND event_type IN ('run.completed', 'run.failed', 'run.browser_surface_failed', 'run.cancelled', 'run.abandoned');
       -- Boot-epoch reconciliation idempotency: at most one run.abandoned
       -- per orphan run.started.event_id. The constraint name
       -- spine_run_abandoned_cause_unique is referenced by the runtime
@@ -3970,6 +3983,22 @@ async function bootstrapPostgresSchemaOnce({
     await ensurePostgresMigrationLedger(client);
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
     await migratePostgresRunHistoryDeviceRunProvenance(client, { log });
+    // After the rename/rebuild migrations and the scheduler_managed repairs
+    // above (the rename/rebuild can swap run_history for the legacy table). A nullable ADD COLUMN with no default is
+    // catalog-only (no table rewrite), but it still needs a momentary
+    // ACCESS EXCLUSIVE lock, so it gets the same bounded lock wait as the
+    // scheduler_managed repairs, which run first so a contended run_history
+    // fails boot through their own typed, resumable error paths.
+    await client.query("BEGIN");
+    try {
+      await client.query("SET LOCAL lock_timeout = '5s'");
+      await client.query("SET LOCAL statement_timeout = '30s'");
+      await client.query("ALTER TABLE run_history ADD COLUMN IF NOT EXISTS actor_type TEXT");
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
     await migratePostgresLegacyConnectorInstancesToDefaultAccount(client);
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
     await migratePostgresConnectorSummaryEvidenceRepairChunkPageSize(client);

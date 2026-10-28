@@ -4,7 +4,11 @@
 import { createHash } from "node:crypto";
 import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
-import { isLocalDeviceConnection, NON_LOCAL_DEVICE_COVERAGE_REASON } from "../server/connector-instance-placement.ts";
+import {
+  isLocalDeviceConnection,
+  LOCAL_DEVICE_ACTOR_TYPE,
+  NON_LOCAL_DEVICE_COVERAGE_REASON,
+} from "../server/connector-instance-placement.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import { type IssuedRunSequence, RunStartConflictError } from "../server/stores/collection-revision-store.ts";
@@ -397,7 +401,7 @@ export async function handleLocalDeviceTerminalCollection(input: {
     const coverage = terminalCoverageEligibilityForSource(streams, authorized.connectorInstance);
     const event = {
       actor_id: deviceId,
-      actor_type: "local_device",
+      actor_type: LOCAL_DEVICE_ACTOR_TYPE,
       data: {
         collection_facts: {
           // The boundary this evidence was measured against travels WITH it, so

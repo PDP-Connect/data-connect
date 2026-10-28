@@ -1665,7 +1665,16 @@ CREATE TABLE IF NOT EXISTS run_history (
   -- influencing scheduler backoff math — see terminal-read-architecture-
   -- fable-0730.md R7.5 and openspec/changes/
   -- generalize-run-history-write-authority.
-  scheduler_managed          INTEGER NOT NULL DEFAULT 0
+  scheduler_managed          INTEGER NOT NULL DEFAULT 0,
+  -- Run provenance: the actor_type of the run's terminal spine event
+  -- (server/stores/run-history-writer.ts), e.g. 'local_device' for a run a
+  -- device terminal commit recorded; 'runtime' for a row the scheduler's own
+  -- append wrote (a server run by construction). NULL = not known: the row is
+  -- still running, predates this column and is not yet backfilled
+  -- (server/stores/run-history-actor-backfill.ts), or its run has spine events
+  -- but no terminal one. Coverage reads it (server/ref-control.ts
+  -- isDeviceTerminalRun); NULL on a terminal row never counts as server.
+  actor_type                 TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_history_connector_completed
@@ -6832,6 +6841,10 @@ CREATE INDEX IF NOT EXISTS idx_blob_bindings_record ON blob_bindings(connector_i
   runWithSqliteBusyRetrySync(() => migrateSchedulerInstanceColumns(raw));
   runWithSqliteBusyRetrySync(() => migrateRunHistoryRename(raw));
   runWithSqliteBusyRetrySync(() => migrateRunHistoryCompletedAtNullable(raw));
+  // After both run_history rebuilds above: they copy an explicit column list
+  // and would drop a column added earlier. Additive and nullable; rows that
+  // predate it read NULL until the startup actor backfill reaches them.
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "run_history", "actor_type", "TEXT"));
   runWithSqliteBusyRetrySync(() => migrateConnectorMaintenanceCursorNameCheck(raw));
   runWithSqliteBusyRetrySync(() => migrateLegacyConnectorInstancesToDefaultAccount(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorInstancesSourceKindCheck(raw, opts));
