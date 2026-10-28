@@ -656,6 +656,25 @@ test("persists and retains allocator profile-path provenance across surface heal
   }
 });
 
+test("fills container name and window-settle endpoint from allocator metadata alone", async () => {
+  const store = setup();
+  try {
+    const allocated = surface({
+      allocator_metadata: {
+        container_name: "pdpp-neko-chatgpt-abc",
+        window_settle_endpoint: "http://pdpp-neko-chatgpt-abc:9223/pdpp/window-settle",
+      },
+      surface_id: "surface_allocator_metadata_only",
+    });
+    await store.upsertSurface(allocated);
+    const persisted = await store.getSurface(allocated.surface_id);
+    assert.equal(persisted?.container_name, "pdpp-neko-chatgpt-abc");
+    assert.equal(persisted?.window_settle_endpoint, "http://pdpp-neko-chatgpt-abc:9223/pdpp/window-settle");
+  } finally {
+    teardown();
+  }
+});
+
 test("SQLite clears stale profile provenance on a profile-key change and accepts an explicit replacement", async () => {
   const store = setup();
   try {
