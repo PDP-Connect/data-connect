@@ -115,6 +115,6 @@
     "ultracite": "^8.0.1"
   },
   "optionalDependencies": {
-    "@opendatalabs/remote-surface": "^1.5.2"
+    "@opendatalabs/remote-surface": "^1.5.3"
   }
 }

@@ -1637,6 +1637,10 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
       return [];
     }
     const cleanupResult = await browserSurfaceLeaseManager.cleanupIdleSurfaces(replacementAwareAllocator);
+    for (const failure of cleanupResult.failed) {
+      const message = failure.error instanceof Error ? failure.error.message : String(failure.error);
+      log.warn?.(`[controller] browser-surface idle stop failed for ${failure.surface_id}: ${message}`);
+    }
     if (browserSurfaceLeaseStore && cleanupResult.stopped.length > 0) {
       await browserSurfaceLeaseStore.withLeaseTransaction(async (store) => {
         for (const surface of cleanupResult.stopped) {
@@ -1682,18 +1686,17 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
   }
 
   /**
-   * Independent periodic sweep. Composes three already-correct operations
-   * that previously only ran boot-once (allocator reconcile) or as a lazy
-   * side effect of an unrelated run's acquire (expiry) — see the 2026-07-10
-   * capacity incident: a queued lease sat 5+ minutes past its own
-   * expires_at because nothing revisited it on a wall clock, and a stale
-   * ready surface over an exited container kept inflating the capacity
-   * count between restarts. This function is the sole periodic caller of
-   * all three; reentrancy-guarded so an overlapping tick is a no-op, and it
-   * never touches an active leased run (none of the composed operations
-   * mutate a leased lease unless the allocator itself reports the surface
-   * gone/unhealthy).
+   * Stop idle, non-retained surfaces past the idle TTL. Routed through
+   * cleanupIdleBrowserSurfaces so the stop is persisted and queued leases are
+   * promoted by the same code path as the public controller method. A
+   * failure is logged and does not skip the rest of the sweep tick.
    */
+  async function sweepIdleBrowserSurfaces(): Promise<void> {
+    await runBestEffort(cleanupIdleBrowserSurfaces, (message) =>
+      log.warn?.(`[controller] browser-surface idle cleanup failed: ${message}`)
+    );
+  }
+
   /** Re-attempt capacity-pressure reclaim for one still-queued lease during a sweep tick. No-op if it settled since the queued snapshot was taken. */
   async function sweepReclaimStillQueuedLease(
     leaseManager: BrowserSurfaceLeaseManager,
@@ -1724,6 +1727,29 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     }
   }
 
+  /**
+   * Independent periodic sweep. Composes already-correct operations that
+   * previously only ran boot-once (allocator reconcile), as a lazy side
+   * effect of an unrelated run's acquire (expiry), or not at all (idle TTL
+   * stop) — see the 2026-07-10 capacity incident: a queued lease sat 5+
+   * minutes past its own expires_at because nothing revisited it on a wall
+   * clock, and a stale ready surface over an exited container kept inflating
+   * the capacity count between restarts.
+   *
+   * Order, and why:
+   *   1. allocator reconcile: drop surfaces whose container is gone, so idle
+   *      cleanup never issues a stop for a surface that no longer exists.
+   *   2. expire waits: a waiter past its deadline is deferred before idle
+   *      cleanup can pump the queue, so the wait timeout stays strict.
+   *   3. idle cleanup: stop idle surfaces past the TTL and promote waiters on
+   *      the freed capacity, before capacity reclaim is attempted.
+   *   4. reclaim retry: only for waiters still queued after idle cleanup.
+   *
+   * Reentrancy-guarded so an overlapping tick is a no-op. It never stops an
+   * active leased surface or a retained surface (the lease manager excludes
+   * both), except when the allocator itself reports the surface gone or
+   * unhealthy.
+   */
   async function sweepBrowserSurfaceLeases(): Promise<void> {
     if (!browserSurfaceLeaseManager || browserSurfaceSweepInFlight) {
       return;
@@ -1732,6 +1758,7 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     try {
       await reconcileBrowserSurfacesWithAllocatorAtBoot();
       await expireBrowserSurfaceWaits();
+      await sweepIdleBrowserSurfaces();
       await sweepReclaimStillQueuedLeases(browserSurfaceLeaseManager);
     } finally {
       browserSurfaceSweepInFlight = false;
