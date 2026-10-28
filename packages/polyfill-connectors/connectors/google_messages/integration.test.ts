@@ -87,8 +87,8 @@ function runGoogleMessages(
 	});
 }
 
-test("healthy run emits messages + coverage_diagnostics=collected", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+test("healthy run emits messages and detail coverage", async () => {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: FAKE_GMCLI,
 		FAKE_GMCLI_MODE: "healthy",
 	});
@@ -101,12 +101,6 @@ test("healthy run emits messages + coverage_diagnostics=collected", async () => 
 			parsed.success ? "" : JSON.stringify(parsed.error.issues),
 		);
 	}
-	const coverage = records(result.messages, "coverage_diagnostics");
-	assert.equal(coverage.length, 1);
-	assert.equal(coverage[0]?.store, "gmcli_archive");
-	assert.equal(coverage[0]?.stream, "messages");
-	assert.equal(coverage[0]?.status, "collected");
-
 	// `messages` is the connector's only required stream — it must prove its
 	// own coverage on a normal successful run, or it can never reach
 	// `complete` regardless of how much real data it collected.
@@ -116,15 +110,12 @@ test("healthy run emits messages + coverage_diagnostics=collected", async () => 
 	assert.equal(messagesCoverage.covered, 2);
 });
 
-test("empty archive: zero messages, coverage still collected", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+test("empty archive: zero messages with measured detail coverage", async () => {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: FAKE_GMCLI,
 		FAKE_GMCLI_MODE: "empty",
 	});
 	assert.equal(records(result.messages, "messages").length, 0);
-	const coverage = records(result.messages, "coverage_diagnostics");
-	assert.equal(coverage[0]?.status, "collected");
-
 	// A genuine zero-message archive is still a measured zero, not silence.
 	const messagesCoverage = detailCoverage(result.messages, "messages");
 	assert.ok(
@@ -135,8 +126,8 @@ test("empty archive: zero messages, coverage still collected", async () => {
 	assert.equal(messagesCoverage.covered, 0);
 });
 
-test("missing gmcli binary: SKIP_RESULT reason gmcli_not_installed, coverage=missing, zero records, clean run", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+test("missing gmcli binary: SKIP_RESULT reason gmcli_not_installed, zero records, clean run", async () => {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: join(
 			PACKAGE_ROOT,
 			"connectors",
@@ -149,15 +140,12 @@ test("missing gmcli binary: SKIP_RESULT reason gmcli_not_installed, coverage=mis
 	assert.equal(skip?.reason, "gmcli_not_installed");
 	assert.match(skip?.message ?? "", /gmcli binary not found/);
 	assert.equal(records(result.messages, "messages").length, 0);
-	const coverage = records(result.messages, "coverage_diagnostics");
-	assert.equal(coverage.length, 1);
-	assert.equal(coverage[0]?.status, "missing");
 	const done = result.messages.findLast((m) => m.type === "DONE");
 	assert.equal(done?.status, "succeeded");
 });
 
 test("not paired: SKIP_RESULT reason gmcli_not_paired tells the user to run gmcli auth manually", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: FAKE_GMCLI,
 		FAKE_GMCLI_MODE: "not_paired",
 	});
@@ -165,12 +153,10 @@ test("not paired: SKIP_RESULT reason gmcli_not_paired tells the user to run gmcl
 	assert.ok(skip, "expected a messages SKIP_RESULT");
 	assert.equal(skip?.reason, "gmcli_not_paired");
 	assert.match(skip?.message ?? "", /gmcli auth/);
-	const coverage = records(result.messages, "coverage_diagnostics");
-	assert.equal(coverage[0]?.status, "excluded");
 });
 
 test("schema drift: malformed chats output produces a typed error, not a silent wrong-shape emit", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: FAKE_GMCLI,
 		FAKE_GMCLI_MODE: "malformed_chats",
 	});
@@ -181,12 +167,10 @@ test("schema drift: malformed chats output produces a typed error, not a silent 
 	);
 	assert.equal(skip?.reason, "gmcli_schema_drift");
 	assert.equal(records(result.messages, "messages").length, 0);
-	const coverage = records(result.messages, "coverage_diagnostics");
-	assert.equal(coverage[0]?.status, "unsupported");
 });
 
 test("schema drift: malformed messages output produces a typed error, not a silent wrong-shape emit", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: FAKE_GMCLI,
 		FAKE_GMCLI_MODE: "malformed_messages",
 	});
@@ -197,12 +181,10 @@ test("schema drift: malformed messages output produces a typed error, not a sile
 	);
 	assert.equal(skip?.reason, "gmcli_query_failed");
 	assert.equal(records(result.messages, "messages").length, 0);
-	const coverage = records(result.messages, "coverage_diagnostics");
-	assert.equal(coverage[0]?.status, "unsupported");
 });
 
 test("per-chat limit reached: SKIP_RESULT reason gmcli_per_chat_limit_reached, records still emitted", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: FAKE_GMCLI,
 		FAKE_GMCLI_MODE: "full_page",
 		GMCLI_MESSAGES_PER_CHAT_LIMIT: "10",
@@ -214,25 +196,14 @@ test("per-chat limit reached: SKIP_RESULT reason gmcli_per_chat_limit_reached, r
 	);
 	assert.ok(skip, "expected a gmcli_per_chat_limit_reached SKIP_RESULT");
 	assert.match(skip?.message ?? "", /per-chat message limit/);
-	const coverage = records(result.messages, "coverage_diagnostics");
-	assert.equal(coverage[0]?.status, "collected");
-	assert.match(String(coverage[0]?.reason), /hit the per-chat limit/);
 });
 
 test("non-JSON gmcli output produces a typed error", async () => {
-	const result = await runGoogleMessages(["messages", "coverage_diagnostics"], {
+	const result = await runGoogleMessages(["messages"], {
 		GMCLI_BIN: FAKE_GMCLI,
 		FAKE_GMCLI_MODE: "not_json",
 	});
 	const skip = skips(result.messages).find((s) => s.stream === "messages");
 	assert.ok(skip, "expected a messages SKIP_RESULT for non-JSON gmcli output");
 	assert.equal(skip?.reason, "gmcli_schema_drift");
-});
-
-test("coverage_diagnostics is not emitted when not requested", async () => {
-	const result = await runGoogleMessages(["messages"], {
-		GMCLI_BIN: FAKE_GMCLI,
-		FAKE_GMCLI_MODE: "healthy",
-	});
-	assert.equal(records(result.messages, "coverage_diagnostics").length, 0);
 });

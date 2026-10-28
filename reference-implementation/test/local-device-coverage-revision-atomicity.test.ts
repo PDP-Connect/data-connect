@@ -36,12 +36,21 @@ import {
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
 import { startServer } from "../server/index.ts";
-import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../server/local-collection-scope.ts";
+import {
+  buildStoredCollectionScope,
+  COLLECTION_SCOPE_STATE_KEY,
+  readStoredCollectionScope,
+} from "../server/local-collection-scope.ts";
 import { __setLocalCollectorReleaseForTest } from "../server/local-collector-profiles.ts";
 import { __setPostgresAdmissionLockedPhaseHookForTest } from "../server/postgres-records.ts";
 import { bootstrapPostgresSchema, closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
-import { putSyncState, readCommittedLocalCoverageDiagnostics } from "../server/records.ts";
-import { getConnectorDetail, getOwnerConnectionDiagnostics, listConnectorSummaries } from "../server/ref-control.ts";
+import { getSyncState, putSyncState } from "../server/records.ts";
+import {
+  getConnectorDetail,
+  getConnectorSummaryForRoute,
+  getOwnerConnectionDiagnostics,
+  listConnectorSummaries,
+} from "../server/ref-control.ts";
 import { __setDeviceIngestPhaseFaultHookForTest } from "../server/routes/ref-device-exporters.ts";
 import {
   __setLocalCoverageFenceReadHookForTest,
@@ -222,7 +231,13 @@ async function enroll(asUrl: string, cookie: string): Promise<Enrolled> {
 }
 
 /** Narrow the enrolled catalog manifest to the release's two streams, as a catalog update does. */
-async function registerFixtureManifest(lane: Lane): Promise<void> {
+async function registerFixtureManifest(
+  lane: Lane,
+  options: {
+    readonly inventoryOnly?: readonly string[];
+    readonly nonRequired?: readonly string[];
+  } = {}
+): Promise<void> {
   const [row] = await sql(
     lane,
     "SELECT manifest FROM connectors WHERE connector_id = ?",
@@ -238,6 +253,8 @@ async function registerFixtureManifest(lane: Lane): Promise<void> {
       ...declared,
       coverage_stores: release.coverage_stores,
       coverage_strategy: release.coverage_strategy,
+      ...(options.nonRequired?.includes(release.name) ? { required: false } : {}),
+      ...(options.inventoryOnly?.includes(release.name) ? { coverage_policy: "inventory_only" } : {}),
     };
   });
   await sql(
@@ -480,13 +497,16 @@ async function buildProof(
     stream: name,
   });
   // The proof measures the collection boundary the connection declares (enrolment sets a window).
-  const diagnostics = await readCommittedLocalCoverageDiagnostics({
-    connector_id: CONNECTOR_ID,
-    connector_instance_id: connectorInstanceId,
+  const scopeProjection = await getSyncState(
+    { connector_id: CONNECTOR_ID, connector_instance_id: connectorInstanceId },
+    { allowedStreams: new Set([COLLECTION_SCOPE_STATE_KEY]), grantId: null }
+  );
+  const declaredScope = readStoredCollectionScope({
+    [COLLECTION_SCOPE_STATE_KEY]: scopeProjection.state[COLLECTION_SCOPE_STATE_KEY] ?? null,
   });
-  assert.ok("declaredCollectionScope" in diagnostics, "the connection declares its collection boundary");
+  assert.ok(declaredScope.fingerprint, "the connection declares its collection boundary");
   const commit: TerminalCommit = {
-    collectionBoundary: diagnostics.declaredCollectionScope,
+    collectionBoundary: declaredScope.fingerprint,
     commitId: `commit_${runId}`,
     connectorId: CONNECTOR_ID,
     connectorInstanceId,
@@ -507,6 +527,21 @@ async function projection(lane: Lane): Promise<Projection> {
     (row) => row.connector_instance_id === lane.enrolled.connector_instance_id
   );
   assert.ok(summary, "the lane's connection is projected");
+  return {
+    asOf: (summary.coverage_as_of as Record<string, unknown> | null) ?? null,
+    axis: summary.connection_health.axes.coverage,
+  };
+}
+
+/**
+ * The same projection through the connection-detail path, which reads the
+ * declared scope before it reads the revision fence (the page path batches the
+ * fence first). The boundary guard decides the result on this path.
+ */
+async function detailProjection(lane: Lane): Promise<Projection> {
+  await reconcileDirtyConnectorSummaryEvidence(null);
+  const summary = await getConnectorSummaryForRoute(lane.enrolled.connector_instance_id);
+  assert.ok(summary && "connection_health" in summary, "the lane's connection is projected by route");
   return {
     asOf: (summary.coverage_as_of as Record<string, unknown> | null) ?? null,
     axis: summary.connection_health.axes.coverage,
@@ -1122,75 +1157,16 @@ laneTest(
   }
 );
 
-/** Raw `coverage_diagnostics` records, as an old collector left them: no run, release or revision behind them. */
-async function seedRawCoverageRows(lane: Lane): Promise<void> {
-  for (const [store, stream] of [
-    ["projects", "sessions"],
-    ["derived_messages", "messages"],
-  ] as const) {
-    const json = JSON.stringify({ id: `coverage:${store}`, status: "collected", store, stream });
-    await sql(
-      lane,
-      `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted)
-       VALUES (?, ?, 'coverage_diagnostics', ?, ?, ?, 1, 0)`,
-      `INSERT INTO records(connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, version, deleted,
-                           primary_key_text)
-       VALUES ($1, $2, 'coverage_diagnostics', $3, $4::jsonb, $5, 1, FALSE, $3)`,
-      [CONNECTOR_ID, lane.enrolled.connector_instance_id, `coverage:${store}`, json, EMITTED_AT]
-    );
-  }
-}
-
-async function deviceCoverage(lane: Lane, cookie: string): Promise<Record<string, unknown>> {
-  const diagnostics = await requestJson(`${lane.asUrl}/_ref/device-exporters/diagnostics`, {
-    headers: { Cookie: cookie },
-  });
-  assert.equal(diagnostics.status, 200, JSON.stringify(diagnostics.body));
-  const devices = (diagnostics.body?.data ?? []) as Array<{ source_instances: Array<Record<string, unknown>> }>;
-  const source = devices
-    .flatMap((device) => device.source_instances)
-    .find((row) => row.source_instance_id === lane.enrolled.source_instance_id);
-  assert.ok(source, "the lane's source instance is listed");
-  return source.local_collector_coverage as Record<string, unknown>;
-}
-
-laneTest("device diagnostics show no coverage positive the owner projection has retired", async (lane) => {
-  const cookie = await ownerSessionCookie(lane.asUrl);
-  await seedRawCoverageRows(lane);
-  await commitProof(lane, "run-a");
-  await assertCovered(lane, "run-a", "run A's proof is current");
-  const current = await deviceCoverage(lane, cookie);
-
-  const refused = await postBatch(lane, {
-    ...batchBody(lane, "batch-refused", sessionRecords("s-1")),
-    body_hash: "0".repeat(64),
-  });
-  assert.equal(refused.status, 400, JSON.stringify(refused.body));
-  await assertRetired(lane, "the refused batch retires run A's proof");
-  const retired = await deviceCoverage(lane, cookie);
-
-  const view = (coverage: Record<string, unknown>) => ({
-    asOfRun: (coverage.coverage_as_of as Record<string, unknown> | null | undefined)?.run_id ?? null,
-    fullyAccounted: coverage.fully_accounted,
-    inventory: coverage.by_store,
-  });
-  const inventory = { derived_messages: "collected", projects: "collected" };
-  assert.deepEqual(
-    [view(current), view(retired)],
-    [
-      { asOfRun: "run-a", fullyAccounted: true, inventory },
-      { asOfRun: null, fullyAccounted: false, inventory },
-    ],
-    "the positive follows the owner projection; the raw inventory stays as history"
-  );
-});
-
 /**
  * Change the boundary between the projection's own boundary reads and its
  * fence read: a proof commits against the boundary the projection already
  * read, then the boundary changes. Runs once.
  */
-function changeBoundaryMidProjection(lane: Lane, change: () => Promise<void>): { readonly fired: () => boolean } {
+function changeBoundaryMidProjection(
+  lane: Lane,
+  change: () => Promise<void>,
+  beforeProof: () => Promise<void> = () => Promise.resolve()
+): { readonly fired: () => boolean } {
   let fired = false;
   __setLocalCoverageFenceReadHookForTest(async (ids) => {
     if (fired || !ids.includes(lane.enrolled.connector_instance_id)) {
@@ -1198,6 +1174,7 @@ function changeBoundaryMidProjection(lane: Lane, change: () => Promise<void>): {
     }
     fired = true;
     __setLocalCoverageFenceReadHookForTest(null);
+    await beforeProof();
     await commitProof(lane, "run-b");
     await change();
   });
@@ -1236,6 +1213,108 @@ laneTest("a manifest change between the projection's reads composes no positive 
   }
   await assertRetired(lane, "run B's proof is bound to the replaced generation");
 });
+
+laneTest(
+  "detail path: a scope change between the projection's reads composes no positive from two moments",
+  async (lane) => {
+    await commitProof(lane, "run-a");
+    assert.equal((await detailProjection(lane)).asOf?.run_id, "run-a", "run A's proof is current on the detail path");
+    const hook = changeBoundaryMidProjection(lane, async () => {
+      await putSyncState(
+        {
+          connector_id: CONNECTOR_ID,
+          connector_instance_id: lane.enrolled.connector_instance_id,
+        },
+        {
+          [COLLECTION_SCOPE_STATE_KEY]: buildStoredCollectionScope(null, new Date().toISOString()),
+        }
+      );
+    });
+    try {
+      const during = await detailProjection(lane);
+      assert.ok(hook.fired(), "the boundary changed mid-projection");
+      assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof measured the scope that was replaced");
+    } finally {
+      __setLocalCoverageFenceReadHookForTest(null);
+    }
+    await assertRetired(lane, "run B's proof does not measure the current scope");
+  }
+);
+
+laneTest(
+  "detail path: a manifest change between the projection's reads composes no positive from two moments",
+  async (lane) => {
+    await commitProof(lane, "run-a");
+    assert.equal((await detailProjection(lane)).asOf?.run_id, "run-a", "run A's proof is current on the detail path");
+    const hook = changeBoundaryMidProjection(lane, () => registerFixtureManifest(lane));
+    try {
+      const during = await detailProjection(lane);
+      assert.ok(hook.fired(), "the manifest generation changed mid-projection");
+      assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof is bound to the replaced generation");
+    } finally {
+      __setLocalCoverageFenceReadHookForTest(null);
+    }
+    await assertRetired(lane, "run B's proof is bound to the replaced generation");
+  }
+);
+
+/** Bump only the manifest generation: the manifest the proof carries is unchanged. */
+async function bumpManifestGenerationOnly(lane: Lane): Promise<void> {
+  await sql(
+    lane,
+    "UPDATE connector_instances SET manifest_generation = manifest_generation + 1 WHERE connector_instance_id = ?",
+    "UPDATE connector_instances SET manifest_generation = manifest_generation + 1 WHERE connector_instance_id = $1",
+    [lane.enrolled.connector_instance_id]
+  );
+}
+
+/** Change only the catalog manifest: the manifest generation is unchanged. */
+async function changeManifestOnly(lane: Lane): Promise<void> {
+  const [row] = await sql(
+    lane,
+    "SELECT manifest FROM connectors WHERE connector_id = ?",
+    "SELECT manifest::text AS manifest FROM connectors WHERE connector_id = $1",
+    [CONNECTOR_ID]
+  );
+  assert.ok(row, "enrolment registers the catalog manifest");
+  const catalog = JSON.parse(String(row.manifest)) as Record<string, unknown>;
+  await sql(
+    lane,
+    "UPDATE connectors SET manifest = ? WHERE connector_id = ?",
+    "UPDATE connectors SET manifest = $1::jsonb WHERE connector_id = $2",
+    [
+      JSON.stringify({
+        ...catalog,
+        display_name: `${String(catalog.display_name)} (renamed)`,
+      }),
+      CONNECTOR_ID,
+    ]
+  );
+}
+
+for (const [label, change] of [
+  ["only the manifest generation", bumpManifestGenerationOnly],
+  ["only the manifest content", changeManifestOnly],
+] as const) {
+  laneTest(`detail path: a change to ${label} between the projection's reads composes no positive`, async (lane) => {
+    await commitProof(lane, "run-a");
+    assert.equal((await detailProjection(lane)).asOf?.run_id, "run-a", "run A's proof is current on the detail path");
+    // The generation changes first, so run B's proof is bound to the new generation and
+    // only the comparison with the projection's evidence generation can reject it.
+    const hook = changeBoundaryMidProjection(
+      lane,
+      () => Promise.resolve(),
+      () => change(lane)
+    );
+    try {
+      const during = await detailProjection(lane);
+      assert.ok(hook.fired(), "the boundary changed mid-projection");
+      assert.deepEqual(during, { asOf: null, axis: "unknown" }, "the proof is not composed with the other moment");
+    } finally {
+      __setLocalCoverageFenceReadHookForTest(null);
+    }
+  });
+}
 
 laneTest("a batch whose acceptance cannot be recorded keeps its records and retries to acceptance", async (lane) => {
   await commitProof(lane, "run-a");
@@ -1353,26 +1432,29 @@ async function terminalWireBody(
   stateDelta: Record<string, unknown> = {},
   coverageForScope?: (collectionScope: string) => ProducerRunCoverageVerdict
 ): Promise<Record<string, unknown>> {
-  const diagnostics = await readCommittedLocalCoverageDiagnostics({
-    connector_id: CONNECTOR_ID,
-    connector_instance_id: lane.enrolled.connector_instance_id,
-  });
-  assert.ok("declaredCollectionScope" in diagnostics, "the connection declares its collection boundary");
+  const scopeProjection = await getSyncState(
+    { connector_id: CONNECTOR_ID, connector_instance_id: lane.enrolled.connector_instance_id },
+    { allowedStreams: new Set([COLLECTION_SCOPE_STATE_KEY]), grantId: null }
+  );
+  const declaredCollectionScope = readStoredCollectionScope({
+    [COLLECTION_SCOPE_STATE_KEY]: scopeProjection.state[COLLECTION_SCOPE_STATE_KEY] ?? null,
+  }).fingerprint;
+  assert.ok(declaredCollectionScope, "the connection declares its collection boundary");
   const [instance] = await sql(
     lane,
     "SELECT manifest_generation FROM connector_instances WHERE connector_instance_id = ?",
     "SELECT manifest_generation::integer AS manifest_generation FROM connector_instances WHERE connector_instance_id = $1",
     [lane.enrolled.connector_instance_id]
   );
-  const coverage = coverageForScope?.(diagnostics.declaredCollectionScope) ?? {
-    collection_scope: diagnostics.declaredCollectionScope,
+  const coverage = coverageForScope?.(declaredCollectionScope) ?? {
+    collection_scope: declaredCollectionScope,
     streams: [
       { scoped: true, stores: [{ status: "collected", store: "derived_messages" }], stream: "messages" },
       { scoped: true, stores: [{ status: "collected", store: "projects" }], stream: "sessions" },
     ],
     version: 1,
   } satisfies ProducerRunCoverageVerdict;
-  assert.equal(coverage.collection_scope, diagnostics.declaredCollectionScope);
+  assert.equal(coverage.collection_scope, declaredCollectionScope);
   const fact = (stream: ProducerRunCoverageVerdict["streams"][number]) => ({
     artifact_digest: ARTIFACT_DIGEST,
     binding_generation: Number(instance?.manifest_generation),
@@ -1390,7 +1472,7 @@ async function terminalWireBody(
     stream: stream.stream,
   });
   return {
-    collection_boundary: diagnostics.declaredCollectionScope,
+    collection_boundary: declaredCollectionScope,
     commit_id: `wire_commit_${runId}`,
     connector_id: CONNECTOR_ID,
     connector_instance_id: lane.enrolled.connector_instance_id,
@@ -1522,6 +1604,29 @@ laneTest(
   }
 );
 
+laneTest("run order: each stream's evidence_as_of dates the proof, not a late older run's terminal", async (lane) => {
+  await issueRun(lane, "run-old");
+  await issueRun(lane, "run-new");
+  await commitIssuedProof(lane, "run-new");
+  // The old terminal must postdate the proof by more than the clock's resolution.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await commitIssuedProof(lane, "run-old");
+  await reconcileDirtyConnectorSummaryEvidence(null);
+  const summary = (await listConnectorSummaries()).find(
+    (row) => row.connector_instance_id === lane.enrolled.connector_instance_id
+  );
+  assert.ok(summary?.coverage_as_of, "run B's proof stays current");
+  assert.equal(summary.coverage_as_of.run_id, "run-new");
+  const committedAt = summary.coverage_as_of.committed_at;
+  assert.ok(committedAt, "the proof is dated");
+  const dated = summary.collection_report.map((entry) => [entry.stream, entry.evidence_as_of]);
+  assert.deepEqual(
+    dated,
+    summary.collection_report.map((entry) => [entry.stream, committedAt]),
+    "every stream is dated by the proof run, not the later-arriving older terminal"
+  );
+});
+
 laneTest("run order: an unregistered attempt retires prior coverage and cannot establish a proof", async (lane) => {
   await commitProof(lane, "run-covered");
   await assertCovered(lane, "run-covered", "the registered run's proof is current");
@@ -1540,6 +1645,92 @@ laneTest("run order: an unregistered attempt retires prior coverage and cannot e
 
   await commitProof(lane, "run-registered");
   await assertCovered(lane, "run-registered", "a registered run's proof is current");
+});
+
+/** A proof for a run registered at its start, narrowed or altered by `shape`. */
+async function commitShapedProof(
+  lane: Lane,
+  runId: string,
+  shape: (facts: TerminalCommit["normalizedFacts"]) => TerminalCommit["normalizedFacts"]
+): Promise<void> {
+  await issueRun(lane, runId);
+  const commit = await buildProof(lane, runId);
+  const result = await commitTerminalRun({
+    ...commit,
+    normalizedFacts: shape(commit.normalizedFacts),
+  });
+  assert.equal(result.replayed, false, `run ${runId} commits a new terminal proof`);
+}
+
+/** A "complete" claim names the proof run that dates it; otherwise the connection is not complete. */
+function assertCompleteIsDated(projected: Projection, runId: string, message: string): void {
+  if (projected.axis === "complete") {
+    assert.equal(projected.asOf?.run_id, runId, `${message}: a complete connection names its proof run`);
+  } else {
+    assert.equal(projected.asOf, null, `${message}: a connection that is not complete carries no as-of`);
+  }
+}
+
+async function streamAsOf(lane: Lane): Promise<Record<string, unknown>> {
+  await reconcileDirtyConnectorSummaryEvidence(null);
+  const summary = await getConnectorSummaryForRoute(lane.enrolled.connector_instance_id);
+  assert.ok(summary && "collection_report" in summary);
+  return Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition]));
+}
+
+laneTest("as-of: a proof covering only some streams dates the complete it supports", async (lane) => {
+  await registerFixtureManifest(lane, { nonRequired: ["messages"] });
+  await commitShapedProof(lane, "run-subset", (facts) => facts.filter((fact) => fact.stream === "sessions"));
+  const projected = await projection(lane);
+  assert.equal((await streamAsOf(lane)).sessions, "complete", "the covered stream shows complete");
+  assert.equal(projected.axis, "complete", "every required stream is complete");
+  assertCompleteIsDated(projected, "run-subset", "a subset proof");
+  assert.equal(projected.asOf?.run_id, "run-subset", "the Complete chip is dated by the proof run");
+  assert.deepEqual(await detailProjection(lane), projected, "the detail path agrees");
+});
+
+laneTest(
+  "as-of: a bounded proof that lost one stream's scope assertion dates the complete it supports",
+  async (lane) => {
+    await registerFixtureManifest(lane, { nonRequired: ["messages"] });
+    await commitShapedProof(lane, "run-lost-scope", (facts) =>
+      facts.map((fact) => (fact.stream === "messages" ? { ...fact, scoped: false } : fact))
+    );
+    const projected = await projection(lane);
+    const conditions = await streamAsOf(lane);
+    assert.equal(conditions.sessions, "complete");
+    assert.notEqual(conditions.messages, "complete", "a stream without its scope assertion is not complete");
+    assertCompleteIsDated(projected, "run-lost-scope", "a bounded scoped:false stream");
+    assert.equal(projected.asOf?.run_id, "run-lost-scope");
+  }
+);
+
+laneTest("as-of: a bounded inventory_only stream without scope assertion is unknown", async (lane) => {
+  await registerFixtureManifest(lane, {
+    inventoryOnly: ["messages"],
+    nonRequired: ["messages"],
+  });
+  await commitShapedProof(lane, "run-inventory-scoped", (facts) => facts);
+  assert.equal((await streamAsOf(lane)).messages, "inventory_only", "a scoped inventory-only stream is inventory_only");
+  await commitShapedProof(lane, "run-inventory-lost-scope", (facts) =>
+    facts.map((fact) => (fact.stream === "messages" ? { ...fact, scoped: false } : fact))
+  );
+  const conditions = await streamAsOf(lane);
+  assert.equal(conditions.sessions, "complete", "the bounded proof is otherwise admitted");
+  assert.equal(conditions.messages, "unknown", "inventory_only without a scope assertion is not evidence");
+});
+
+laneTest("as-of: a proof that supports no stream names no run and the connection is not complete", async (lane) => {
+  await commitShapedProof(lane, "run-unknown", (facts) =>
+    facts.map((fact) => ({
+      ...fact,
+      coverage_statuses: ["unknown"],
+      stores: (fact.stores as readonly { readonly store: string }[]).map((store) => ({ ...store, status: "unknown" })),
+    }))
+  );
+  const projected = await projection(lane);
+  assert.notEqual(projected.axis, "complete");
+  assert.equal(projected.asOf, null);
 });
 
 laneTest("run start alone leaves earlier coverage and its as-of standing", async (lane) => {

@@ -37,14 +37,13 @@ name: managed-connector OCI end-to-end (local registry; NOT GHCR, NOT Sigstore)
 # The job name repeats (1) and (2) so that a reader scanning a checks list sees the gap without
 # opening this file. Do not rename it to something reassuring.
 #
-# WHERE THE PRODUCER HALF COMES FROM. data-connectors is a separate repository and the builder is
-# NOT on its default branch — it arrives with PDP-Connect/data-connectors#97, still open. The
-# revision is therefore pinned by SHA in .github/managed-connector-e2e-pin.json. That follows the
-# cross-repo SHA pinning already established BETWEEN these repos in the other direction —
-# data-connectors' own .github/cross-repo-pins.json, which consumer-drift-signal.yml reads by raw
-# fetch. (There is no cross-repo-pins.json in THIS repo; see the pin file if that surprises you.)
-# The reasoning, the weakness of pinning an unmerged PR head, and why the connector stays `oura`
-# while data-connectors' publish pilot moved to `ynab` are all written down in the pin file.
+# WHERE THE PRODUCER HALF COMES FROM. data-connectors is a separate repository. Its builder is on that
+# repository's default branch (PDP-Connect/data-connectors#97 merged it), and the revision is pinned by SHA in
+# .github/managed-connector-e2e-pin.json. That follows the cross-repo SHA pinning already established BETWEEN
+# these repos in the other direction — data-connectors' own .github/cross-repo-pins.json, which
+# consumer-drift-signal.yml reads by raw fetch. (There is no cross-repo-pins.json in THIS repo; see the pin
+# file if that surprises you.) The reasoning for the revision, the connector and the version, and why the
+# connector stays `oura` while data-connectors' publish pilot is `ynab`, are all written down in the pin file.
 #
 # THE INSTALL-PATH JOURNEY (J2-install, the last three steps). The live-registry test above proves an
 # artifact installs and its entrypoint imports. The journey installs two releases through the shipped
@@ -172,8 +171,8 @@ jobs:
           git fetch --no-tags origin "$PINNED_SHA" 2>/dev/null || true
           if ! git cat-file -e "${PINNED_SHA}^{commit}" 2>/dev/null; then
             echo "::error::data-connectors commit $PINNED_SHA is not fetchable." >&2
-            echo "::error::It is pinned in .github/managed-connector-e2e-pin.json as an UNMERGED pull-request head," >&2
-            echo "::error::so a force-push to that branch can make it unreachable. Re-pin to a live commit." >&2
+            echo "::error::It is pinned in .github/managed-connector-e2e-pin.json, and the commit is no longer in the repository." >&2
+            echo "::error::Re-pin to a commit that exists on data-connectors' default branch." >&2
             exit 1
           fi
           git checkout --detach "$PINNED_SHA"
@@ -191,18 +190,18 @@ jobs:
 
       - name: Install the producer's dependencies
         working-directory: data-connectors
-        # BOTH trees, matching data-connectors' own publish workflow: the root `workspaces` list
-        # does not name packages/polyfill-connectors, so a root `npm ci` never creates that
-        # package's node_modules — and that tree is what the connector bundle's externals resolve
-        # against. --ignore-scripts skips patchright's browser download, which the bundle does not
-        # need.
+        # The root workspace install only, as data-connectors' own publish workflow does. The root
+        # `workspaces` list names packages/polyfill-connectors, so this one install supplies the connector
+        # runtime and the dependencies the connector bundle leaves external. The steps below resolve those
+        # from this root node_modules. packages/polyfill-connectors is NOT installed on its own: its
+        # package-lock.json does not match its package.json at the pinned revision, so `npm ci` there
+        # refuses. --ignore-scripts skips patchright's browser download, which the bundle does not need.
         env:
           PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           set -euo pipefail
           npm ci --ignore-scripts
-          npm ci --ignore-scripts --prefix packages/polyfill-connectors
 
       - name: Build the connector artifact with the producer's own builder
         working-directory: data-connectors
@@ -268,11 +267,11 @@ jobs:
           PDPP_TEST_OCI_REGISTRY: localhost:5000
           PDPP_TEST_OCI_DIGEST: ${{ steps.push.outputs.digest }}
           PDPP_TEST_OCI_REPOSITORY: pdp-connect/connector/${{ steps.pin.outputs.connector }}
-          # The installed bundle leaves packages/polyfill-connectors' own dependencies external, so
-          # a host has to make the connector runtime resolvable from the install root. That is a
-          # real, undecided consumer obligation recorded in OCI-CONSUMER-0911.md, and the test
-          # symlinks this tree rather than pretending the artifact is self-contained.
-          PDPP_TEST_CONNECTOR_RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+          # The installed bundle leaves the connector runtime's own dependencies external, so a host
+          # has to make the connector runtime resolvable from the install root. That is a real,
+          # undecided consumer obligation recorded in OCI-CONSUMER-0911.md, and the test symlinks the
+          # producer's root node_modules rather than pretending the artifact is self-contained.
+          PDPP_TEST_CONNECTOR_RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/node_modules
         run: node --test --import tsx test/managed-connectors-live-registry.test.ts
 
       - name: Assert the test actually ran rather than skipping
@@ -286,7 +285,7 @@ jobs:
           PDPP_TEST_OCI_REGISTRY: localhost:5000
           PDPP_TEST_OCI_DIGEST: ${{ steps.push.outputs.digest }}
           PDPP_TEST_OCI_REPOSITORY: pdp-connect/connector/${{ steps.pin.outputs.connector }}
-          PDPP_TEST_CONNECTOR_RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+          PDPP_TEST_CONNECTOR_RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/node_modules
         run: |
           set -euo pipefail
           node --test --import tsx test/managed-connectors-live-registry.test.ts | tee result.txt
@@ -324,7 +323,7 @@ jobs:
         # the digest check separately, because two integrity gates deserve two probes.
         env:
           CONNECTOR: ${{ steps.pin.outputs.connector }}
-          RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+          RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/node_modules
         run: |
           set -euo pipefail
 
@@ -397,7 +396,7 @@ jobs:
         # notice. Verified locally 2026-09-12: rejected in registry-client.ts's verifyPinnedArtifact
         # with "digest mismatch" — a different file and a different failure from the step above.
         env:
-          RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/packages/polyfill-connectors/node_modules
+          RUNTIME_MODULES: ${{ github.workspace }}/data-connectors/node_modules
           HONEST_DIGEST: ${{ steps.push.outputs.digest }}
           REPOSITORY: pdp-connect/connector/${{ steps.pin.outputs.connector }}
         run: |
@@ -487,7 +486,8 @@ jobs:
         # Two releases of one connector (install-path-fixture.ts): the same manifest and different code layers,
         # so different digests. The builder is the producer's own script at the pinned revision. The packaging
         # tree around it is the fixture's. Both releases are pushed to this job's registry, each with a signature
-        # stand-in. The pins the journey checks against are written into the work directory. The journey step
+        # stand-in and a source declaration referrer, which is signed too. The pins the journey checks against are
+        # written into the work directory. The journey step
         # reads their path from the releases file, not from the log.
         working-directory: reference-implementation
         env:

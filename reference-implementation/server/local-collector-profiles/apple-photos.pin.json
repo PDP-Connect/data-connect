@@ -1,6 +1,6 @@
 {
   "connector_key": "apple-photos",
-  "version": "0.1.0",
-  "digest": "sha256:0952cef101b05b5416d0ea0620ee12c857f493bae547ce71119a243131741415",
-  "profile_sha256": "sha256:1d941bd3fc02831618fcd29b899b091ed2ce51f25535f35f58c5a2aaa37ce596"
+  "version": "0.1.22",
+  "digest": "sha256:bea3370c4a97078c6af499e1712d100a739f81ac5b027352697c4bf8aa22ce93",
+  "profile_sha256": "sha256:863c066c759496544b70d74e20f7dd46b98b329f1dd6d7b3366820c48dae165b"
 }
