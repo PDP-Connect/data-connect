@@ -213,6 +213,9 @@ export async function runMultiParentScenario<Store>({
       1,
       "the proven activity cursor commits while the incomplete holdings cursor remains retryable"
     );
+    // The scheduler persists `result.state` after a succeeded run, so it must
+    // carry only committed cursors, never the withheld holdings cursor.
+    assert.deepEqual(result.state, { activity: { page: "activity-1" } });
 
     const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
       headers: { Authorization: `Bearer ${ownerToken}` },
