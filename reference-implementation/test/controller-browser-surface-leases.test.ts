@@ -2894,13 +2894,7 @@ test("overlapping sweep calls: the second is a no-op while the first is in fligh
   await firstSweep;
 });
 
-// ─── Periodic sweep runs idle cleanup (idle non-retained surfaces stop past TTL) ─
-
-const RETAINED_MANIFEST = {
-  ...MANIFEST,
-  connector_id: "chatgpt",
-  name: "ChatGPT",
-};
+// ─── Periodic sweep runs idle cleanup (idle surfaces stop past TTL) ─
 
 test("sweep stops a ready idle non-retained surface past the idle TTL and persists the stop", async (t) => {
   let now = new Date("2026-05-12T12:00:00.000Z");
@@ -2933,31 +2927,6 @@ test("sweep stops a ready idle non-retained surface past the idle TTL and persis
   );
   assert.equal(manager.getSurface("surface_1"), undefined);
   assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "stopping");
-});
-
-test("sweep leaves a retained credential-boundary surface running past the idle TTL", async (t) => {
-  let now = new Date("2026-05-12T12:00:00.000Z");
-  const allocator = createReadyAllocator();
-  const manager = createDynamicManager({ managedConnectors: new Set(["chatgpt"]), now: () => now, surfaceCap: 2 });
-  const browserSurfaceLeaseStore = createMemoryBrowserSurfaceLeaseStore();
-  const { controller } = setup(t, { browserSurfaceAllocator: allocator, browserSurfaceLeaseStore, manager });
-
-  await controller.runNow("chatgpt", {
-    manifest: RETAINED_MANIFEST,
-    ownerToken: "owner-token",
-    runId: "run_sweep_retained_first",
-  });
-  await controller.drainActiveRuns(1000);
-  assert.equal(manager.getSurface("surface_1")?.retained, true);
-
-  now = new Date("2026-05-12T12:10:01.000Z");
-  await controller.sweepBrowserSurfaceLeases();
-
-  // `length` rather than deepEqual(..., []): node's deepEqual assertion
-  // narrows the array to never[] and breaks the reason/surfaceId reads below.
-  assert.equal(allocator.stopRequests.length, 0);
-  assert.equal(manager.getSurface("surface_1")?.health, "ready");
-  assert.equal((await browserSurfaceLeaseStore.getSurface("surface_1"))?.health, "ready");
 });
 
 test("sweep leaves a surface with an active lease running past the idle TTL", async (t) => {

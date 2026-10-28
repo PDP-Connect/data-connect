@@ -321,67 +321,6 @@ test("concurrent final-slot acquisition cannot exceed cap", async () => {
   assert.equal(leases.listSurfaces().length, 1);
 });
 
-test("retained browser surface survives routine reap but remains explicitly invalidatable", async () => {
-  const ctx = manager({
-    config: { staticProfileKey: undefined, surfaceCap: 1, surfaceMode: "dynamic" },
-    initialSurfaces: [
-      {
-        backend: "neko",
-        cdp_url: "http://chatgpt-retained:9222",
-        connector_id: "chatgpt",
-        created_at: "2026-05-12T11:00:00.000Z",
-        health: "ready",
-        last_used_at: "2026-05-12T11:00:00.000Z",
-        profile_key: "chatgpt",
-        retained: true,
-        stream_base_url: "http://chatgpt-retained:8080",
-        surface_id: "chatgpt-retained",
-      },
-    ],
-  });
-  const { manager: leases } = ctx;
-  const allocator = new FakeBrowserSurfaceAllocator();
-
-  ctx.advance(10 * 60 * 1000);
-  const idleCleanup = await leases.cleanupIdleSurfaces(allocator);
-  assert.deepEqual(idleCleanup.stopped, []);
-  assert.equal(leases.getSurface("chatgpt-retained")?.health, "ready");
-
-  const queued = leases.acquire({ connectorId: "gmail", profileKey: "gmail", runId: "run_gmail" });
-  assert.equal(queued.lease.status, "waiting_for_browser_surface");
-  assert.equal(queued.lease.wait_reason, "capacity_full");
-  assert.equal(leases.planCapacityPressureReclaim(queued.lease.lease_id), undefined);
-  assert.equal(leases.getSurface("chatgpt-retained")?.retained, true);
-
-  const invalidated = leases.invalidateSurface("chatgpt-retained", { reason: "surface_unhealthy" });
-  assert.equal(invalidated.surface?.surface_id, "chatgpt-retained");
-  assert.equal(leases.getSurface("chatgpt-retained"), undefined);
-});
-
-test("retained browser surface cannot be reclaimed after a stale capacity-pressure plan", () => {
-  const { manager: leases } = manager({
-    config: { staticProfileKey: undefined, surfaceCap: 1, surfaceMode: "dynamic" },
-    initialSurfaces: [
-      {
-        backend: "neko",
-        cdp_url: "http://chatgpt-retained:9222",
-        connector_id: "chatgpt",
-        created_at: "2026-05-12T11:00:00.000Z",
-        health: "ready",
-        last_used_at: "2026-05-12T11:00:00.000Z",
-        profile_key: "chatgpt",
-        retained: true,
-        stream_base_url: "http://chatgpt-retained:8080",
-        surface_id: "chatgpt-retained",
-      },
-    ],
-  });
-
-  assert.deepEqual(leases.completeCapacityPressureReclaim("chatgpt-retained"), {});
-  assert.equal(leases.getSurface("chatgpt-retained")?.health, "ready");
-  assert.equal(leases.getSurface("chatgpt-retained")?.retained, true);
-});
-
 // The three tests below replace a single 0.3.0-era "priority then FIFO
 // determines release pump ordering" test that asserted release-time
 // promotion across three *different* `accountKey`s on one static surface.

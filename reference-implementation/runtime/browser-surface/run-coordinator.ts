@@ -38,7 +38,6 @@ import {
 import type { ConnectorManifest, RunNowOptions, RunNowResult } from "../run-contracts.ts";
 import { readBrowserSurfaceProfileKey } from "./profile-key.ts";
 import { createReplacementLifecycleHooks } from "./replacement-lifecycle-hooks.ts";
-import { connectorRetainsSurfaceProcess } from "./retained-surface-connectors.ts";
 import { createWindowSettleReconciliation } from "./window-settle-reconciliation.ts";
 
 // ─── Internal types ──────────────────────────────────────────────────────────
@@ -1508,7 +1507,6 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
       runId,
       ...(surfaceSubjectId ? { surfaceSubjectId } : {}),
       priorityClass,
-      retainSurfaceProcess: connectorRetainsSurfaceProcess(connectorId),
     });
     await persistBrowserSurfaceLeaseMutation(leaseResult.lease, leaseResult.surface);
     if (leaseResult.duplicateOf && leaseResult.lease.run_id !== runId) {
