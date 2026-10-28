@@ -3167,7 +3167,6 @@ test("boot and periodic ready refresh survive durable reload before dispatch", a
         stream_base_url: "http://prior:8080/neko",
         window_settle_endpoint: "http://prior:8080/window-settle",
         allocator_metadata: { container_name: "prior", host_port: "31001" },
-        retained: true,
         created_at: "2026-05-12T12:00:00.000Z",
         last_used_at: "2026-05-12T12:00:00.000Z",
       };
@@ -3242,7 +3241,6 @@ test("boot and periodic ready refresh survive durable reload before dispatch", a
         (bound as BrowserSurfaceWithPersistenceMetadata | undefined)?.window_settle_endpoint,
         replacement.window_settle_endpoint
       );
-      assert.equal(bound?.retained, true);
       assert.equal(bound?.created_at, initial.created_at);
       assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, replacement.cdp_url);
       assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_STREAM_BASE_URL, replacement.stream_base_url);
@@ -3252,7 +3250,9 @@ test("boot and periodic ready refresh survive durable reload before dispatch", a
   }
 });
 
-test("SQLite surface runtime metadata and retention survive database reopen", async (t) => {
+test("a surface persisted as retained reloads without the flag and idle cleanup stops it", async (t) => {
+  // Builds that loaded the old ChatGPT retention rule wrote retained = 1.
+  // Restoring that flag would keep the surface running past the idle TTL forever.
   closeDb();
   const path = tempDbPath();
   initDb(path);
@@ -3275,13 +3275,16 @@ test("SQLite surface runtime metadata and retention survive database reopen", as
   closeDb();
   initDb(path);
   const reloaded = await createSqliteBrowserSurfaceLeaseStore().getSurface(surface.surface_id);
-  assert.deepEqual(reloaded, { ...surface, container_name: "replacement" });
+  const { retained: _retained, ...unretained } = surface;
+  assert.deepEqual(reloaded, { ...unretained, container_name: "replacement" });
   assert.ok(reloaded);
   const manager = createDynamicManager({ initialSurfaces: [reloaded], now: () => new Date("2026-05-13T12:00:00Z") });
   const allocator = createReadyAllocator();
-  assert.deepEqual((await manager.cleanupIdleSurfaces(allocator)).stopped, []);
-  assert.equal(allocator.stopRequests.length, 0);
-  assert.equal(manager.getSurface(surface.surface_id)?.retained, true);
+  await manager.cleanupIdleSurfaces(allocator);
+  assert.deepEqual(
+    allocator.stopRequests.map((request) => ({ reason: request.reason, surfaceId: request.surfaceId })),
+    [{ reason: "idle_ttl", surfaceId: surface.surface_id }]
+  );
 });
 
 function createReadyRefreshFixture() {

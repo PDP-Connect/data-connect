@@ -296,7 +296,8 @@ function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrows
   const managedConnectors =
     manifestManagedConnectors ?? new Set(configuredConnectorIds.flatMap(managedConnectorAliases));
   const managesConnectors = manifestManagedConnectors !== undefined || managedConnectors.size > 0;
-  const defaultSurfaceCap = managesConnectors ? 1 : 0;
+  // Two browser runs at once: the desktop app's long-standing host default.
+  const defaultSurfaceCap = managesConnectors ? 2 : 0;
   const surfaceCap = parseIntegerEnv(env.PDPP_NEKO_SURFACE_CAP, "PDPP_NEKO_SURFACE_CAP", defaultSurfaceCap);
   if (managesConnectors && surfaceCap < 1) {
     throw new Error("PDPP_NEKO_SURFACE_CAP must be an integer >= 1 when browser host mode manages connectors");

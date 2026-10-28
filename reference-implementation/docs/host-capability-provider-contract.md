@@ -10,7 +10,7 @@ PDPP_BROWSER_SURFACE_HOST_ENDPOINT=http://127.0.0.1:<port>
 PDPP_BROWSER_SURFACE_HOST_TOKEN=<shared-secret>
 ```
 
-`PDPP_BROWSER_HEADLESS=1` sets `headless: true`; any other value sets `false`. If `PDPP_NEKO_MANAGED_CONNECTORS` is set, it remains the managed connector list. Otherwise host mode manages the generated browser-bound connector set. The surface cap defaults to 1 and can be overridden with `PDPP_NEKO_SURFACE_CAP`.
+`PDPP_BROWSER_HEADLESS=1` sets `headless: true`; any other value sets `false`. If `PDPP_NEKO_MANAGED_CONNECTORS` is set, it remains the managed connector list. Otherwise host mode manages the generated browser-bound connector set. The surface cap defaults to 2 and can be overridden with `PDPP_NEKO_SURFACE_CAP`.
 
 ### Acquire
 

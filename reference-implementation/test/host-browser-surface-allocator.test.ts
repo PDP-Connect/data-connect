@@ -102,7 +102,7 @@ test("host mode manages connectors by manifest browser binding with a safe dynam
 
 	assert.equal(config.host?.headless, true);
 	assert.equal(config.leaseConfig.surfaceMode, "dynamic");
-	assert.equal(config.leaseConfig.surfaceCap, 1);
+	assert.equal(config.leaseConfig.surfaceCap, 2);
 	assert.equal(config.leaseConfig.managedConnectors, config.manifestManagedConnectors);
 	assert.equal(config.leaseConfig.managedConnectors.has("chase"), false);
 	config.manifestManagedConnectors?.observe("chase", {
