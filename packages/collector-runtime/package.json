@@ -52,10 +52,10 @@
     "@pdpp/connector-protocol": "0.0.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.15",
+    "@biomejs/biome": "2.6.3",
     "@types/node": "^26.6.4",
     "tsx": "^4.23.15",
-    "ultracite": "^8.0.1"
+    "ultracite": "^8.0.2"
   },
   "engines": {
     "node": ">=22.14.0"

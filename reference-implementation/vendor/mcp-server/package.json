@@ -32,7 +32,7 @@
     "pack:dry-run": "pnpm build && npm pack --dry-run --ignore-scripts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@pdpp/cli": "*",
     "@pdpp/read-core": "*",
     "zod": "^4.6.7"
