@@ -3416,8 +3416,10 @@ test("acquire joins a pending allocator observation before selecting its runtime
   const acquired = await acquire;
   assert.equal(acquired.kind, "ready");
   if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
-  assert.equal(f.leaseManager.getSurface(acquired.lease.surface_id)?.container_id, f.replacement.container_id);
-  assert.equal(f.store.surfaces.get(acquired.lease.surface_id)?.container_id, f.replacement.container_id);
+  const surfaceId = acquired.lease.surface_id;
+  assert.ok(surfaceId);
+  assert.equal(f.leaseManager.getSurface(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(f.store.surfaces.get(surfaceId)?.container_id, f.replacement.container_id);
   assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
 });
 
@@ -3435,9 +3437,11 @@ test("a transient refresh-only write failure recovers through acquisition's own 
   const acquired = await f.acquire("store-recovered");
   assert.equal(acquired.kind, "ready");
   if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  const surfaceId = acquired.lease.surface_id;
+  assert.ok(surfaceId);
   assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
-  assert.equal(f.store.surfaces.get(acquired.lease.surface_id)?.container_id, f.replacement.container_id);
-  assert.equal(f.store.surfaces.get(acquired.lease.surface_id)?.active_lease_id, acquired.lease.lease_id);
+  assert.equal(f.store.surfaces.get(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(f.store.surfaces.get(surfaceId)?.active_lease_id, acquired.lease.lease_id);
 });
 
 test("refresh queued behind a release persists current authority with asynchronous transactions", async () => {
