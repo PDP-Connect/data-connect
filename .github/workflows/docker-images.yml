@@ -8,7 +8,7 @@ name: docker-images
 # that file's header comment for the pnpm->npm / packages/*->real-path
 # conversion notes). Converted here for this repo's npm workspaces (not
 # pnpm), package-lock.json (not pnpm-lock.yaml/pnpm-workspace.yaml), Node
-# Node version (24.19.0, matching this repo's package.json engines field),
+# Node version (24.22.1, matching this repo's package.json engines field),
 # and GHCR org (ghcr.io/pdp-connect/data-connect,
 # not ghcr.io/pdp-connect/pdpp).
 #

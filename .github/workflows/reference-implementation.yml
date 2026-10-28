@@ -151,7 +151,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       # npm's download cache is already restored above, yet `npm ci` still takes
@@ -167,7 +167,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -221,7 +221,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       # npm's download cache is already restored above, yet `npm ci` still takes
@@ -237,7 +237,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.21.0-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -316,7 +316,7 @@ jobs:
         if: needs.test-reference-shard.result == 'success'
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Download shard accounting receipts
         if: needs.test-reference-shard.result == 'success'
@@ -364,7 +364,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Check vendored connector-manifests tarball matches its pin
         run: node scripts/check-polyfill-connectors-tarball-freshness.mjs

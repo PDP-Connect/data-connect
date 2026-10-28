@@ -10,7 +10,7 @@
 # translation (npm workspaces here, not pnpm; reference-implementation/vendor/*
 # instead of packages/*).
 
-ARG NODE_VERSION=24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+ARG NODE_VERSION=24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 
 FROM node:${NODE_VERSION} AS base
 

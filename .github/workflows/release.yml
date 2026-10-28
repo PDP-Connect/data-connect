@@ -90,8 +90,8 @@ jobs:
           # run-script hardcodes its own bundled node-gyp for automatic native rebuilds
           # during `npm ci`, ignoring that config (npm/cli#2839).
           #
-          # That blocker is gone. This workflow runs Node 24.21.0, which bundles npm
-          # 11.19.0 and node-gyp 12.4.0 — past the node-gyp 12.1.0 that added VS2026
+          # That blocker is gone. This workflow runs Node 24.22.1, which bundles npm
+          # 11.19.1 and node-gyp 12.4.0 — past the node-gyp 12.1.0 that added VS2026
           # detection. (The old note here said to wait for Node 22 LTS to bundle
           # npm>=11.6.3; that will not happen, because a Node line does not take a major
           # npm bump mid-life and npm 11 shipped with Node 24.) The runner is therefore
@@ -144,7 +144,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Setup Rust
@@ -348,7 +348,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Download branch-built Windows installer
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -732,7 +732,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Download release installer
         shell: bash
