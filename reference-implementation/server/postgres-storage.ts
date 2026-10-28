@@ -3086,7 +3086,9 @@ async function bootstrapPostgresSchemaOnce({
         ADD COLUMN IF NOT EXISTS profile_volume TEXT;
 
       ALTER TABLE browser_surfaces
-        ADD COLUMN IF NOT EXISTS browser_generation_hash TEXT;
+        ADD COLUMN IF NOT EXISTS browser_generation_hash TEXT,
+        ADD COLUMN IF NOT EXISTS allocator_metadata_json TEXT,
+        ADD COLUMN IF NOT EXISTS retained INTEGER CHECK (retained IS NULL OR retained IN (0, 1));
 
       -- Kind-neutral, run-grain durable projection. Historically
       -- scheduler-only (scheduler_run_history); generalized so the

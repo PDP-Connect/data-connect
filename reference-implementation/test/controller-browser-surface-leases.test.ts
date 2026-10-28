@@ -3183,3 +3183,296 @@ test("a run acquiring during a pending idle stop does not lease the stopping sur
   assert.equal((await browserSurfaceLeaseStore.getLease("lease_2"))?.status, "released");
   assert.equal(manager.getSurface("surface_2")?.active_lease_id, undefined);
 });
+
+test("boot and periodic ready refresh survive durable reload before dispatch", async () => {
+  for (const health of ["ready", "unhealthy"] as const) {
+    for (const phase of ["boot", "periodic"] as const) {
+      const initial: BrowserSurfaceWithPersistenceMetadata = {
+        surface_id: "refresh-surface",
+        backend: "neko",
+        connector_id: "managed",
+        profile_key: "managed-profile",
+        health,
+        container_id: "prior-container",
+        cdp_url: "http://prior:9223/",
+        stream_base_url: "http://prior:8080/neko",
+        window_settle_endpoint: "http://prior:8080/window-settle",
+        allocator_metadata: { container_name: "prior", host_port: "31001" },
+        retained: true,
+        created_at: "2026-05-12T12:00:00.000Z",
+        last_used_at: "2026-05-12T12:00:00.000Z",
+      };
+      const replacement: BrowserSurfaceWithPersistenceMetadata = {
+        ...initial,
+        health: "ready",
+        container_id: "replacement-container",
+        cdp_url: "http://replacement:9223/",
+        stream_base_url: "http://replacement:8080/neko",
+        window_settle_endpoint: "http://replacement:8080/window-settle",
+        allocator_metadata: { container_name: "replacement", host_port: "31002" },
+      };
+      const store = createMemoryBrowserSurfaceLeaseStore({ surfaces: [initial] });
+      const manager = createManager({ initialSurfaces: [initial], staticProfileKey: undefined });
+      let statusCalls = 0;
+      const create = (leaseManager: BrowserSurfaceLeaseManager) =>
+        createBrowserSurfaceManager({
+          activeRunInteractions: new Map(),
+          browserSurfaceAllocator: {
+            ensureSurface: async () => {
+              throw new Error("unexpected allocation");
+            },
+            getSurfaceStatus: async () => {
+              statusCalls += 1;
+              return replacement;
+            },
+            listSurfaces: async () => [replacement],
+            stopSurface: async () => null,
+          },
+          browserSurfaceLeaseManager: leaseManager,
+          browserSurfaceLeaseStore: store,
+          browserSurfaceMidWaitPollIntervalMs: 0,
+          browserSurfaceReadinessProbe: null,
+          browserSurfaceReadinessTimeoutMs: undefined,
+          browserSurfaceReplacementReceiptStore: null,
+          listPersistedActiveRuns: async () => [],
+          log: { warn: () => undefined },
+          pendingBrowserSurfaceLaunches: new Map(),
+          scheduleRun: () => undefined,
+          startupControllerRunReconciliation: Promise.resolve(),
+        });
+      const controller = create(manager);
+      if (phase === "boot") {
+        await controller.reconcileBrowserSurfaceLeasesAfterBoot();
+      } else {
+        await controller.sweepBrowserSurfaceLeases();
+      }
+      const rows = await store.listSurfaces();
+      assert.equal(rows[0]?.container_id, replacement.container_id);
+      assert.deepEqual(rows[0]?.allocator_metadata, replacement.allocator_metadata);
+      const reloaded = createManager({ initialSurfaces: rows, staticProfileKey: undefined });
+      const refreshed = create(reloaded);
+      const observedCalls = statusCalls;
+      const acquired = await refreshed.acquireManagedBrowserSurfaceForRun({
+        automationMetadata: { automation_mode: "manual_only", automation_summary: "", trigger_kind: "retry" },
+        connectorId: "managed",
+        connectorInstanceId: "managed",
+        manifest: MANIFEST,
+        options: {},
+        runId: "refresh-run",
+        traceContext: createTraceContext(),
+      });
+      assert.equal(acquired.kind, "ready");
+      if (acquired.kind !== "ready" || !acquired.lease) {
+        throw new Error("missing ready lease");
+      }
+      assert.equal(acquired.lease.surface_id, initial.surface_id);
+      assert.ok(acquired.lease.surface_id);
+      const bound = reloaded.getSurface(acquired.lease.surface_id);
+      assert.equal(bound?.container_id, replacement.container_id);
+      assert.equal(
+        (bound as BrowserSurfaceWithPersistenceMetadata | undefined)?.window_settle_endpoint,
+        replacement.window_settle_endpoint
+      );
+      assert.equal(bound?.retained, true);
+      assert.equal(bound?.created_at, initial.created_at);
+      assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, replacement.cdp_url);
+      assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_STREAM_BASE_URL, replacement.stream_base_url);
+      assert.equal(store.surfaces.get(acquired.lease.surface_id)?.active_lease_id, acquired.lease.lease_id);
+      assert.equal(statusCalls, observedCalls);
+    }
+  }
+});
+
+test("SQLite surface runtime metadata and retention survive database reopen", async (t) => {
+  closeDb();
+  const path = tempDbPath();
+  initDb(path);
+  t.after(() => closeDb());
+  const surface: BrowserSurfaceWithPersistenceMetadata = {
+    surface_id: "persisted-refresh",
+    backend: "neko",
+    connector_id: "managed",
+    profile_key: "managed-profile",
+    health: "ready",
+    cdp_url: "http://replacement:9223/",
+    stream_base_url: "http://replacement:8080/neko",
+    window_settle_endpoint: "http://replacement:8080/window-settle",
+    allocator_metadata: { container_name: "replacement", host_port: "31002" },
+    retained: true,
+    created_at: "2026-05-12T12:00:00.000Z",
+    last_used_at: "2026-05-12T12:00:00.000Z",
+  };
+  await createSqliteBrowserSurfaceLeaseStore().upsertSurface(surface);
+  closeDb();
+  initDb(path);
+  const reloaded = await createSqliteBrowserSurfaceLeaseStore().getSurface(surface.surface_id);
+  assert.deepEqual(reloaded, surface);
+  assert.ok(reloaded);
+  const manager = createDynamicManager({ initialSurfaces: [reloaded], now: () => new Date("2026-05-13T12:00:00Z") });
+  const allocator = createReadyAllocator();
+  assert.deepEqual((await manager.cleanupIdleSurfaces(allocator)).stopped, []);
+  assert.equal(allocator.stopRequests.length, 0);
+  assert.equal(manager.getSurface(surface.surface_id)?.retained, true);
+});
+
+function createReadyRefreshFixture() {
+  const initial: BrowserSurfaceWithPersistenceMetadata = {
+    surface_id: "refresh-race-surface",
+    backend: "neko",
+    connector_id: "managed",
+    profile_key: "managed-profile",
+    health: "ready",
+    container_id: "old-container",
+    cdp_url: "http://old:9223/",
+    stream_base_url: "http://old:8080/neko",
+    created_at: "2026-05-12T12:00:00.000Z",
+    last_used_at: "2026-05-12T12:00:00.000Z",
+  };
+  const replacement: BrowserSurfaceWithPersistenceMetadata = {
+    ...initial,
+    container_id: "new-container",
+    cdp_url: "http://new:9223/",
+    stream_base_url: "http://new:8080/neko",
+  };
+  const store = createMemoryBrowserSurfaceLeaseStore({ surfaces: [initial] });
+  const leaseManager = createDynamicManager({ initialSurfaces: [initial] });
+  const activeRunIds = new Set<string>();
+  const allocator: BrowserSurfaceAllocator = {
+    ensureSurface: async () => { throw new Error("unexpected allocation"); },
+    getSurfaceStatus: async () => replacement,
+    listSurfaces: async () => [replacement],
+    stopSurface: async () => null,
+  };
+  const manager = createBrowserSurfaceManager({
+    activeRunInteractions: new Map(),
+    browserSurfaceAllocator: allocator,
+    browserSurfaceLeaseManager: leaseManager,
+    browserSurfaceLeaseStore: store,
+    browserSurfaceMidWaitPollIntervalMs: 0,
+    browserSurfaceReadinessProbe: null,
+    browserSurfaceReadinessTimeoutMs: undefined,
+    browserSurfaceReplacementReceiptStore: null,
+    listPersistedActiveRuns: async () => [...activeRunIds].map((run_id) => ({ run_id })),
+    log: { warn: () => undefined },
+    pendingBrowserSurfaceLaunches: new Map(),
+    scheduleRun: () => undefined,
+    startupControllerRunReconciliation: Promise.resolve(),
+  });
+  const acquire = (runId: string) => manager.acquireManagedBrowserSurfaceForRun({
+    automationMetadata: { automation_mode: "manual_only", automation_summary: "", trigger_kind: "retry" },
+    connectorId: "managed",
+    connectorInstanceId: "managed",
+    manifest: MANIFEST,
+    options: {},
+    runId,
+    traceContext: createTraceContext(),
+  });
+  return { acquire, activeRunIds, allocator, initial, leaseManager, manager, replacement, store };
+}
+
+test("boot refreshes a surface after releasing its dead-run lease before the first acquire", async () => {
+  const f = createReadyRefreshFixture();
+  const prior = await f.acquire("dead-run");
+  assert.equal(prior.kind, "ready");
+  if (prior.kind !== "ready" || !prior.lease) throw new Error("expected prior lease");
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.active_lease_id, prior.lease.lease_id);
+  await f.manager.reconcileBrowserSurfaceLeasesAfterBoot();
+  assert.equal(f.store.leases.get(prior.lease.lease_id)?.status, "released");
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.container_id, f.replacement.container_id);
+  const acquired = await f.acquire("after-boot");
+  assert.equal(acquired.kind, "ready");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  assert.equal(acquired.lease.surface_id, f.initial.surface_id);
+  assert.ok(acquired.lease.fencing_token > prior.lease.fencing_token);
+  assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
+  assert.equal(f.store.surfaces.get(acquired.lease.surface_id)?.active_lease_id, acquired.lease.lease_id);
+});
+
+test("boot does not retarget a retained active run or change its lease fencing", async () => {
+  const f = createReadyRefreshFixture();
+  const acquired = await f.acquire("live-run");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  f.activeRunIds.add("live-run");
+  const prior = structuredClone(f.leaseManager.getLease(acquired.lease.lease_id));
+  await f.manager.reconcileBrowserSurfaceLeasesAfterBoot();
+  assert.deepEqual(f.leaseManager.getLease(acquired.lease.lease_id), prior);
+  assert.equal(f.leaseManager.getSurface(f.initial.surface_id)?.container_id, f.initial.container_id);
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.container_id, f.initial.container_id);
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.active_lease_id, acquired.lease.lease_id);
+});
+
+test("acquire joins a pending allocator observation before selecting its runtime", async () => {
+  const f = createReadyRefreshFixture();
+  let enter: () => void = () => undefined;
+  let resume: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { resume = resolve; });
+  f.allocator.getSurfaceStatus = async () => { enter(); await gate; return f.replacement; };
+  const sweep = f.manager.sweepBrowserSurfaceLeases();
+  await entered;
+  const acquire = f.acquire("joined-run");
+  resume();
+  await sweep;
+  const acquired = await acquire;
+  assert.equal(acquired.kind, "ready");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  const surfaceId = acquired.lease.surface_id;
+  assert.ok(surfaceId);
+  assert.equal(f.leaseManager.getSurface(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(f.store.surfaces.get(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
+});
+
+test("a transient refresh-only write failure recovers through acquisition's own durable write", async () => {
+  const f = createReadyRefreshFixture();
+  const upsert = f.store.upsertSurface.bind(f.store);
+  let failed = false;
+  f.store.upsertSurface = (surface) => {
+    if (!failed) { failed = true; return Promise.reject(new Error("transient refresh write failure")); }
+    return upsert(surface);
+  };
+  await f.manager.sweepBrowserSurfaceLeases();
+  assert.equal(failed, true);
+  assert.equal(f.store.surfaces.get(f.initial.surface_id)?.container_id, f.initial.container_id);
+  const acquired = await f.acquire("store-recovered");
+  assert.equal(acquired.kind, "ready");
+  if (acquired.kind !== "ready" || !acquired.lease) throw new Error("expected ready lease");
+  const surfaceId = acquired.lease.surface_id;
+  assert.ok(surfaceId);
+  assert.equal(acquired.env?.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, f.replacement.cdp_url);
+  assert.equal(f.store.surfaces.get(surfaceId)?.container_id, f.replacement.container_id);
+  assert.equal(f.store.surfaces.get(surfaceId)?.active_lease_id, acquired.lease.lease_id);
+});
+
+test("refresh queued behind a release persists current authority with asynchronous transactions", async () => {
+  const f = createReadyRefreshFixture();
+  const first = await f.acquire("first-run");
+  if (first.kind !== "ready" || !first.lease) throw new Error("expected ready lease");
+  let enter: () => void = () => undefined;
+  let resume: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => { enter = resolve; });
+  const gate = new Promise<void>((resolve) => { resume = resolve; });
+  const upsert = f.store.upsertSurface.bind(f.store);
+  let once = true;
+  f.store.upsertSurface = async (surface) => {
+    if (once && !surface.active_lease_id) { once = false; enter(); await gate; }
+    return upsert(surface);
+  };
+  // The fake store deliberately does not serialize transactions itself.
+  const release = f.manager.releaseLease(first.lease, "managed", "first-run", createTraceContext());
+  await entered;
+  const sweep = f.manager.sweepBrowserSurfaceLeases();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(f.leaseManager.getSurface(f.initial.surface_id)?.container_id, f.replacement.container_id);
+  const newer = f.leaseManager.acquire({
+    connectorId: "managed", profileKey: f.initial.profile_key, runId: "concurrent-lease",
+  });
+  assert.equal(newer.lease.status, "leased");
+  resume();
+  await Promise.all([release, sweep]);
+  const row = f.store.surfaces.get(f.initial.surface_id);
+  assert.equal(row?.container_id, f.replacement.container_id);
+  assert.equal(row?.active_lease_id, newer.lease.lease_id);
+  assert.ok(newer.lease.fencing_token > first.lease.fencing_token);
+  assert.equal(f.store.leases.get(first.lease.lease_id)?.status, "released");
+});

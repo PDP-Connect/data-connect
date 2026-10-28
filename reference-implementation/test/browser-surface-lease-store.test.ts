@@ -1306,6 +1306,7 @@ test("Postgres store maps dynamic surface metadata with the same persistence sha
   const dynamicSurfaceRow = {
     account_key: dynamicSurface.account_key ?? null,
     active_lease_id: dynamicSurface.active_lease_id ?? null,
+    allocator_metadata_json: null,
     backend: dynamicSurface.backend,
     browser_generation_hash: dynamicSurface.browser_generation_hash ?? null,
     cdp_url: dynamicSurface.cdp_url,
@@ -1318,6 +1319,7 @@ test("Postgres store maps dynamic surface metadata with the same persistence sha
     profile_dir: dynamicSurface.profile_dir ?? null,
     profile_key: dynamicSurface.profile_key,
     profile_volume: dynamicSurface.profile_volume ?? null,
+    retained: null,
     stream_base_url: dynamicSurface.stream_base_url,
     stream_origin: dynamicSurface.stream_origin ?? null,
     surface_id: dynamicSurface.surface_id,
@@ -1362,6 +1364,8 @@ test("Postgres store maps dynamic surface metadata with the same persistence sha
     "lease_pg",
     "2026-05-12T12:00:00.000Z",
     "2026-05-12T12:00:00.000Z",
+    null,
+    null,
   ]);
   assert.deepEqual(await store.getSurface("surface_dynamic_pg"), dynamicSurface);
 });

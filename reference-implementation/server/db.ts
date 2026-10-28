@@ -1453,6 +1453,8 @@ CREATE TABLE IF NOT EXISTS browser_surfaces (
   profile_dir      TEXT,
   profile_volume   TEXT,
   browser_generation_hash TEXT,
+  allocator_metadata_json TEXT,
+  retained INTEGER CHECK (retained IS NULL OR retained IN (0, 1)),
   active_lease_id  TEXT,
   created_at       TEXT NOT NULL,
   last_used_at     TEXT NOT NULL,
@@ -6501,6 +6503,10 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_dir", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_volume", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "browser_generation_hash", "TEXT"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "allocator_metadata_json", "TEXT"));
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "browser_surfaces", "retained", "INTEGER CHECK (retained IS NULL OR retained IN (0, 1))")
+  );
   // Dataset summary projection fencing: a `generation` column lets rebuild
   // and reconcile writers guard their final summary write against
   // concurrent record/blob delta writers. Pre-existing rows seed with 0;
