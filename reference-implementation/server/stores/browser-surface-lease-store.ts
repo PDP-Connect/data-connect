@@ -29,6 +29,7 @@ interface Queryable {
 interface BrowserSurfaceRow {
   account_key: string | null;
   active_lease_id: string | null;
+  allocator_metadata_json: string | null;
   backend: BrowserSurface["backend"];
   browser_generation_hash: string | null;
   cdp_url: string;
@@ -41,6 +42,7 @@ interface BrowserSurfaceRow {
   profile_dir: string | null;
   profile_key: string;
   profile_volume: string | null;
+  retained: number | null;
   stream_base_url: string;
   stream_origin: string | null;
   surface_id: string;
@@ -175,7 +177,9 @@ function mapSurface(row: BrowserSurfaceRow | null | undefined): BrowserSurfaceWi
   if (!row) {
     return null;
   }
-  const surface = {
+  const surface: BrowserSurfaceWithPersistenceMetadata = {
+    ...(row.allocator_metadata_json ? { allocator_metadata: JSON.parse(row.allocator_metadata_json) } : {}),
+    ...(row.retained == null ? {} : { retained: row.retained === 1 }),
     backend: row.backend,
     cdp_url: row.cdp_url,
     connector_id: row.connector_id,
@@ -270,6 +274,8 @@ function sqliteSurfaceParams(surface: BrowserSurfaceWithPersistenceMetadata): Bi
     surface.active_lease_id ?? null,
     surface.created_at,
     surface.last_used_at,
+    surface.allocator_metadata == null ? null : JSON.stringify(surface.allocator_metadata),
+    surface.retained == null ? null : Number(surface.retained),
   ];
 }
 
@@ -406,9 +412,9 @@ class SqliteBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
       `INSERT INTO browser_surfaces(
         surface_id, backend, profile_key, connector_id, surface_subject_id, account_key, surface_mode, surface_source,
         cdp_url, stream_base_url, stream_origin, window_settle_endpoint, health, container_id, container_name,
-        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at
+        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json, retained
       )
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(surface_id) DO UPDATE SET
         backend = excluded.backend,
         profile_key = excluded.profile_key,
@@ -445,7 +451,9 @@ class SqliteBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
         END,
         active_lease_id = excluded.active_lease_id,
         created_at = excluded.created_at,
-        last_used_at = excluded.last_used_at`,
+        last_used_at = excluded.last_used_at,
+        allocator_metadata_json = excluded.allocator_metadata_json,
+        retained = excluded.retained`,
       sqliteSurfaceParams(surface)
     );
     return Promise.resolve(surface);
@@ -662,9 +670,9 @@ class PostgresBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
       `INSERT INTO browser_surfaces(
         surface_id, backend, profile_key, connector_id, surface_subject_id, account_key, surface_mode, surface_source,
         cdp_url, stream_base_url, stream_origin, window_settle_endpoint, health, container_id, container_name,
-        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at
+        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json, retained
       )
-      VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
       ON CONFLICT(surface_id) DO UPDATE SET
         backend = EXCLUDED.backend,
         profile_key = EXCLUDED.profile_key,
@@ -701,7 +709,9 @@ class PostgresBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
         END,
         active_lease_id = EXCLUDED.active_lease_id,
         created_at = EXCLUDED.created_at,
-        last_used_at = EXCLUDED.last_used_at`,
+        last_used_at = EXCLUDED.last_used_at,
+        allocator_metadata_json = EXCLUDED.allocator_metadata_json,
+        retained = EXCLUDED.retained`,
       sqliteSurfaceParams(surface)
     );
     return surface;
