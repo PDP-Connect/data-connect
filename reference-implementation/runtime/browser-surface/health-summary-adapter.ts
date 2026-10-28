@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // biome-ignore lint/correctness/noUnresolvedImports: remote-surface 1.5.1 exports ./leases; Biome 2.5.5 fails to resolve this package export.
-import type { BrowserSurface, BrowserSurfaceLease } from "@opendatalabs/remote-surface/leases";
+import type { BrowserSurfaceLease } from "@opendatalabs/remote-surface/leases";
 
 import { listSpineEventsPage, type SpineEventRecord } from "../../lib/spine.ts";
 import type { ConnectionRemoteSurfaceEvidence } from "../connection-health.ts";
@@ -29,7 +29,6 @@ const RUNTIME_RECEIPT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface BrowserSurfaceHealthSummaryReader {
   listLeases: () => Promise<readonly BrowserSurfaceLease[]>;
-  listSurfaces: () => Promise<readonly BrowserSurface[]>;
 }
 
 interface LastSuccessfulRunLike {
@@ -219,43 +218,6 @@ async function readRuntimeReceiptForRun(
   ).receipt;
 }
 
-export interface ConnectorRuntimeReceiptEvidence {
-  readonly execution: RuntimeLeaseFacts;
-  readonly lastSuccessfulRuntimeReceipt: LastSuccessfulRuntimeReceipt | null;
-}
-
-/**
- * The only bounded-history join used by the connector summary. It owns
- * receipt eligibility so ref-control cannot accidentally query a dormant
- * scale-to-zero connection.
- */
-export async function readConnectorRuntimeReceiptEvidence(input: {
-  readonly activeRun: unknown | null;
-  readonly connectionId: string;
-  readonly connectorId: string;
-  readonly inventory: BrowserSurfaceRuntimeInventorySnapshot | null;
-  readonly lastSuccessfulRun: LastSuccessfulRunLike | null;
-  readonly management: BrowserSurfaceRuntimeManagement | null;
-  readonly now: string;
-  readonly profileKey: string;
-  readonly reader: BrowserSurfaceHealthSummaryReader;
-  readonly remoteSurface: ConnectionRemoteSurfaceEvidence | null;
-}): Promise<ConnectorRuntimeReceiptEvidence> {
-  const execution = currentRuntimeLease({ activeRun: input.activeRun, remoteSurface: input.remoteSurface });
-  if (!input.management?.managed) {
-    return noCurrentReceiptEvidence(execution);
-  }
-  const lastSuccessfulRuntimeReceipt = await readLastSuccessfulRuntimeReceipt({
-    connectionId: input.connectionId,
-    connectorId: input.connectorId,
-    lastSuccessfulRun: input.lastSuccessfulRun,
-    now: input.now,
-    profileKey: input.profileKey,
-    reader: input.reader,
-  });
-  return { execution, lastSuccessfulRuntimeReceipt };
-}
-
 /** One full-refresh inventory read; failure becomes absent runtime evidence, never a thrown list request. */
 export function readBrowserSurfaceRuntimeInventory(
   controller: BrowserSurfaceRuntimeManagementReader | null | undefined
@@ -278,13 +240,6 @@ export function readBrowserSurfaceRuntimeSurfaces(
     return Promise.resolve(null);
   }
   return controller.observeBrowserSurfaceRuntimeSurfaces(surfaceIds).catch(() => null);
-}
-
-function noCurrentReceiptEvidence(execution: RuntimeLeaseFacts): ConnectorRuntimeReceiptEvidence {
-  return {
-    execution,
-    lastSuccessfulRuntimeReceipt: null,
-  };
 }
 
 function runtimeDemand(
@@ -395,9 +350,9 @@ export function projectConnectorEphemeralBrowserRuntime(input: {
 
 /**
  * Complete summary adapter boundary: it reads the current management mode,
- * joins only eligible bounded receipt evidence, and assembles the health
- * projection. Callers only
- * supply request-scoped facts; they do not reinterpret lifecycle history.
+ * reads the last-successful-run receipt for a managed runtime, and assembles
+ * the health projection. Callers only supply request-scoped facts; they do not
+ * reinterpret lifecycle history.
  */
 export async function projectConnectorHealthSummaryRuntime(input: {
   readonly activeRun: unknown | null;
@@ -414,18 +369,16 @@ export async function projectConnectorHealthSummaryRuntime(input: {
   readonly browserSessionBound: boolean;
 }): Promise<EphemeralBrowserRuntimeProjection | null> {
   const management = input.controller?.getBrowserSurfaceRuntimeManagement?.(input.connectorId) ?? null;
-  const receipts = await readConnectorRuntimeReceiptEvidence({
-    activeRun: input.activeRun,
-    connectionId: input.connectionId,
-    connectorId: input.connectorId,
-    inventory: input.inventory,
-    lastSuccessfulRun: input.lastSuccessfulRun,
-    management,
-    now: input.now,
-    profileKey: input.profileKey,
-    reader: input.reader,
-    remoteSurface: input.remoteSurface,
-  });
+  const lastSuccessfulRuntimeReceipt = management?.managed
+    ? await readLastSuccessfulRuntimeReceipt({
+        connectionId: input.connectionId,
+        connectorId: input.connectorId,
+        lastSuccessfulRun: input.lastSuccessfulRun,
+        now: input.now,
+        profileKey: input.profileKey,
+        reader: input.reader,
+      })
+    : null;
   return projectConnectorEphemeralBrowserRuntime({
     activeRun: input.activeRun,
     browserSessionBound: input.browserSessionBound,
@@ -433,7 +386,7 @@ export async function projectConnectorHealthSummaryRuntime(input: {
     connectorId: input.connectorId,
     instance: input.instance,
     inventory: input.inventory,
-    lastSuccessfulRuntimeReceipt: receipts.lastSuccessfulRuntimeReceipt,
+    lastSuccessfulRuntimeReceipt,
     management,
     now: input.now,
     profileKey: input.profileKey,
