@@ -48,6 +48,19 @@ test("a declared scope round-trips through the durable envelope", () => {
   assert.equal(read.fingerprint, `since=${SINCE}`);
 });
 
+test("saving a legacy since without an offset rewrites it to the instant the runtime reads it as", () => {
+  // Owner routes now reject these forms; older rows can still hold them, and
+  // the device enroll path re-saves the effective scope.
+  assert.deepEqual(buildStoredCollectionScope({ since: "2026-09-05T08:30:00" }, DECLARED_AT).scope, {
+    since: "2026-09-05T08:30:00+14:00",
+  });
+  assert.deepEqual(buildStoredCollectionScope({ since: "2026-09-05" }, DECLARED_AT).scope, {
+    since: "2026-09-05T00:00:00+14:00",
+  });
+  // An offset-bearing value is stored exactly as declared.
+  assert.deepEqual(buildStoredCollectionScope({ since: SINCE }, DECLARED_AT).scope, { since: SINCE });
+});
+
 test("the fingerprint is recomputed on read, so a tampered row cannot assert a boundary its bounds do not describe", () => {
   const read = readStoredCollectionScope({
     [COLLECTION_SCOPE_STATE_KEY]: {
