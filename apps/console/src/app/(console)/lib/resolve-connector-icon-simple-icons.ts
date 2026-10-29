@@ -34,12 +34,13 @@ const INSTALLED_PACKAGE_ROOT_CANDIDATES = [
 ];
 
 interface SimpleIconEntry {
+  hex?: string;
   slug: string;
   title: string;
 }
 
 let cachedPackageRoot: string | null | undefined;
-let cachedSlugs: Set<string> | null | undefined;
+let cachedBrandColors: Map<string, string | null> | undefined;
 
 function resolvePackageRoot(): string | null {
   if (cachedPackageRoot !== undefined) {
@@ -55,19 +56,19 @@ function resolvePackageRoot(): string | null {
   return null;
 }
 
-/** The set of every valid simple-icons slug, loaded once and cached. */
-function loadKnownSlugs(packageRoot: string): Set<string> {
-  if (cachedSlugs !== undefined && cachedSlugs !== null) {
-    return cachedSlugs;
+/** Every valid simple-icons slug mapped to its brand hex (null when absent), loaded once and cached. */
+function loadBrandColors(packageRoot: string): Map<string, string | null> {
+  if (cachedBrandColors !== undefined) {
+    return cachedBrandColors;
   }
   try {
     const raw = readFileSync(join(packageRoot, "data", "simple-icons.json"), "utf8");
     const entries = JSON.parse(raw) as SimpleIconEntry[];
-    cachedSlugs = new Set(entries.map((entry) => entry.slug));
+    cachedBrandColors = new Map(entries.map((entry) => [entry.slug, entry.hex ? `#${entry.hex}` : null]));
   } catch {
-    cachedSlugs = new Set();
+    cachedBrandColors = new Map();
   }
-  return cachedSlugs;
+  return cachedBrandColors;
 }
 
 /**
@@ -97,7 +98,8 @@ export async function resolveConnectorIconFromSimpleIcons(connectorKey: string):
     return null;
   }
   const slug = slugFromConnectorKey(connectorKey);
-  if (!slug || !loadKnownSlugs(packageRoot).has(slug)) {
+  const brandColors = loadBrandColors(packageRoot);
+  if (!(slug && brandColors.has(slug))) {
     return null;
   }
   let raw: string;
@@ -110,5 +112,9 @@ export async function resolveConnectorIconFromSimpleIcons(connectorKey: string):
   if (!svg) {
     return null;
   }
-  return { kind: "inline_svg", svg };
+  // simple-icons glyphs have no fill (they render black), so like the
+  // connectors' own white glyphs they need a tile; its brand colour is the
+  // one the corpus publishes for the same mark.
+  const background = brandColors.get(slug);
+  return background ? { background, kind: "inline_svg", svg } : { kind: "inline_svg", svg };
 }

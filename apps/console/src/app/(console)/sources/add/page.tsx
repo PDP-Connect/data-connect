@@ -128,7 +128,6 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
     <RecordroomShellWithPalette>
       <AddSourceHeader />
       <SourceSetupCatalog
-        action={dashboardRoutes.section.addSource}
         catalog={catalog}
         existingSourcesByConnector={existingSourcesByConnector}
         installCatalogBusySnapshotId={installCatalogBusySnapshotId}

@@ -20,7 +20,7 @@ export { buttonVariants, IcButton } from "./button.tsx";
 export { Carbon, Copyline } from "./carbon.tsx";
 // ─── ConnectorIcon (manifest-declared brand mark or Monogram fallback) ───
 export type { ConnectorIconLike } from "./connector-icon.tsx";
-export { ConnectorIcon } from "./connector-icon.tsx";
+export { brandTileColors, ConnectorIcon } from "./connector-icon.tsx";
 // ─── CopyMono (click-to-copy protocol id) ─────────────────────────
 export { CopyMono } from "./copy-mono.tsx";
 // ─── DataRow + Monogram ───────────────────────────────────────────

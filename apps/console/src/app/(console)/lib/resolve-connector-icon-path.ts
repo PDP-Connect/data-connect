@@ -31,11 +31,13 @@ import { sanitizeSvg } from "./sanitize-svg.ts";
  * that directory, then requires the file content pass sanitizeSvg. Returns
  * null (never throws) for a missing file, a traversal attempt, or invalid
  * content, so a bad icon degrades to the Monogram fallback instead of
- * breaking the catalog.
+ * breaking the catalog. `backgroundColor` is passed through untouched;
+ * ConnectorIcon accepts only a plain hex colour and ignores anything else.
  */
 export async function resolveConnectorIconFromManifestPath(
   manifestsDir: string,
-  iconPath: string
+  iconPath: string,
+  backgroundColor?: string | null
 ): Promise<ConnectorIconLike | null> {
   if (typeof iconPath !== "string" || iconPath.trim().length === 0) {
     return null;
@@ -55,5 +57,7 @@ export async function resolveConnectorIconFromManifestPath(
   if (!svg) {
     return null;
   }
-  return { kind: "inline_svg", svg };
+  // The shipped glyph is white and meant for a tile in the manifest's
+  // `brand.background_color`; carry the colour so the icon can draw that tile.
+  return backgroundColor ? { background: backgroundColor, kind: "inline_svg", svg } : { kind: "inline_svg", svg };
 }

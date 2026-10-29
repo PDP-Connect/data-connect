@@ -172,6 +172,7 @@ export interface ConnectorManifest {
   display_name?: string;
   /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
   icon?: {
+    background?: string | null;
     color?: string | null;
     kind?: string | null;
     svg?: string | null;
@@ -184,6 +185,8 @@ export interface ConnectorManifest {
    * single `icon` (inline_svg) shape.
    */
   brand?: {
+    /** Brand colour for the tile the (white) shipped glyph is drawn on. */
+    background_color?: string | null;
     icon?: string | null;
   } | null;
   name?: string;
@@ -827,7 +830,11 @@ export async function listConnectorManifests(): Promise<ConnectorManifest[]> {
         //   3. Deterministic Monogram — @pdpp/brand-react's ConnectorIcon
         //      fallback when `icon` is left unset here.
         if (!manifest.icon && manifest.brand?.icon) {
-          manifest.icon = await resolveConnectorIconFromManifestPath(dir, manifest.brand.icon);
+          manifest.icon = await resolveConnectorIconFromManifestPath(
+            dir,
+            manifest.brand.icon,
+            manifest.brand.background_color
+          );
         }
         if (!manifest.icon && manifest.connector_key) {
           manifest.icon = await resolveConnectorIconFromSimpleIcons(manifest.connector_key);

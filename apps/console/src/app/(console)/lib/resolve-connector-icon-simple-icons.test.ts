@@ -28,3 +28,8 @@ test("returns null for an empty or blank connector key", async () => {
   assert.equal(await resolveConnectorIconFromSimpleIcons(""), null);
   assert.equal(await resolveConnectorIconFromSimpleIcons("   "), null);
 });
+
+test("carries the corpus brand colour so its black glyph gets a tile", async () => {
+  const icon = await resolveConnectorIconFromSimpleIcons("github");
+  assert.match(icon?.background ?? "", /^#[0-9A-Fa-f]{6}$/);
+});

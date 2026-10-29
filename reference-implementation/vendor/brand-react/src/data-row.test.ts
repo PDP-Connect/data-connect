@@ -20,3 +20,11 @@ test("Monogram renders decorative initials without polluting accessible labels",
   assert.match(html, CLAUDE_INITIALS_DATA);
   assert.doesNotMatch(html, CLAUDE_INITIALS_TEXT);
 });
+
+test("Monogram initials skip punctuation and parenthetical qualifiers", () => {
+  const initials = (name: string) => renderToStaticMarkup(createElement(Monogram, { name })).match(/data-initials="([^"]*)"/)?.[1];
+  assert.equal(initials("Strava (Browser Sign-In)"), "ST");
+  assert.equal(initials("Google Takeout"), "GT");
+  assert.equal(initials("  (x) Foo"), "FO");
+  assert.equal(initials("Claude"), "CL");
+});
