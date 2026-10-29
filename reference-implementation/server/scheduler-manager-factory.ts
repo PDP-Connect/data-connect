@@ -460,15 +460,16 @@ function projectManagedControllerTerminalRun(
 }
 
 export function createRunManagedConnectorViaController(
-  controller: Controller
+  controller: Controller,
+  { routeAllConnectors = false }: { readonly routeAllConnectors?: boolean } = {}
 ): SchedulerOptions["runManagedConnectorViaController"] {
   const leaseManager = controller.browserSurfaceLeaseManager;
-  if (!leaseManager) {
+  if (!routeAllConnectors && !leaseManager) {
     return null;
   }
 
   return async (connectorId, opts) => {
-    if (!leaseManager.isManagedConnector(connectorId)) {
+    if (!routeAllConnectors && !leaseManager?.isManagedConnector(connectorId)) {
       // Not a managed connector — signal launchRun to use the direct
       // runConnector path (no lease needed).
       return null;
@@ -619,7 +620,7 @@ export function createReferenceSchedulerManager({
     if (stopped || connectors.length === 0) {
       return;
     }
-    const managedRunner = createRunManagedConnectorViaController(controller);
+    const scheduledRunner = createRunManagedConnectorViaController(controller, { routeAllConnectors: true });
     const schedulerReferenceBaseUrl =
       "selfCallReferenceBaseUrl" in runtimeContext
         ? runtimeContext.selfCallReferenceBaseUrl
@@ -653,13 +654,10 @@ export function createReferenceSchedulerManager({
       resolveStaticSecretRunEnv: resolveScheduledConnectionScopedRunEnv,
       ...(schedulerRsUrl ? { rsUrl: schedulerRsUrl } : {}),
       schedulerStore,
-      // Route managed-connector scheduled runs through controller.runNow so
-      // they acquire the neko browser-surface lease (warm persistent profile,
-      // cf_clearance cookie present) instead of launching a fresh headless
-      // Chromium with an empty profile that Cloudflare challenges 100%.
-      //
-      // The callback returns null for non-managed connectors so launchRun
-      // falls through to the existing runConnector path unchanged.
+      // Route every scheduled run through controller.runNow so it resolves
+      // the installed manifest and connector path at dispatch time, under the
+      // controller's lifecycle lock. Managed connectors still acquire their
+      // browser-surface lease through runNow when required.
       //
       // Lease release is inherited via runNow's own .finally() →
       // finalizeRunCleanup → releaseBrowserSurfaceLeaseAfterRun chain.
@@ -669,7 +667,7 @@ export function createReferenceSchedulerManager({
       // throws run_already_active when a run is already in-flight; the
       // scheduler's own runtime.activeRuns guard prevents double-dispatch
       // from within the scheduler.
-      ...(managedRunner === undefined ? {} : { runManagedConnectorViaController: managedRunner }),
+      ...(scheduledRunner === undefined ? {} : { runManagedConnectorViaController: scheduledRunner }),
       getForwardEvidenceDebt: async (connectorId, connectorInstanceId, scheduleIntervalMs) => {
         // Forward-evidence-debt bound for recovery-first selection
         // (fix-pre-provenance-terminal-generation-semantics): bounds the

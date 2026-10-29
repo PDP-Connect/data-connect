@@ -24,9 +24,29 @@ function lifecycleMarkerPath(dataDir: string, connectorId: string): string {
 }
 
 export function assertConnectorLifecycleAvailable(dataDir: string, connectorId: string): void {
+  assertConnectorLifecycleRecovered(dataDir, connectorId);
   if (existsSync(lifecycleMarkerPath(dataDir, connectorId))) {
     throw new Error("Connector is not installed.");
   }
+}
+
+export function assertConnectorLifecycleRecovered(dataDir: string, connectorId: string): void {
+  if (existsSync(`${lifecycleMarkerPath(dataDir, connectorId)}.recovery-required`)) {
+    throw Object.assign(new Error("Connector publication requires recovery before dispatch."), {
+      code: "recovery_required",
+    });
+  }
+}
+
+/** Written before publication. A crash or uncertain registration leaves dispatch fenced. */
+export function markConnectorLifecycleRecoveryRequired(dataDir: string, connectorId: string): void {
+  const marker = `${lifecycleMarkerPath(dataDir, connectorId)}.recovery-required`;
+  mkdirSync(join(marker, ".."), { recursive: true });
+  writeFileSync(marker, "recovery_required", { mode: 0o600 });
+}
+
+export function clearConnectorLifecycleRecoveryRequired(dataDir: string, connectorId: string): void {
+  rmSync(`${lifecycleMarkerPath(dataDir, connectorId)}.recovery-required`, { force: true });
 }
 
 export function markConnectorLifecycleUninstalled(dataDir: string, connectorId: string): void {

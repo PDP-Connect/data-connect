@@ -19,7 +19,15 @@ function activationTone(state: ConnectorInstallRowModel["activationState"]): str
   return "text-muted-foreground";
 }
 
-export function ConnectorInstallRow({ compact = false, model }: { compact?: boolean; model: ConnectorInstallRowModel }) {
+export function ConnectorInstallRow({
+  compact = false,
+  model,
+  updatePlanState = "ready",
+}: {
+  compact?: boolean;
+  model: ConnectorInstallRowModel;
+  updatePlanState?: "checking" | "ready" | "failed";
+}) {
   const { action, connectorId, connectorKey } = model;
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -65,6 +73,9 @@ export function ConnectorInstallRow({ compact = false, model }: { compact?: bool
 
   const idleLabel = action?.kind === "install" ? "Install" : "Update";
   let buttonLabel = idleLabel;
+  if (action?.kind === "update" && updatePlanState !== "ready") {
+    buttonLabel = updatePlanState === "checking" ? "Checking updates…" : "Update check unavailable";
+  }
   if (isPending) {
     buttonLabel = action?.kind === "install" ? "Installing…" : "Updating…";
   }
@@ -114,8 +125,23 @@ export function ConnectorInstallRow({ compact = false, model }: { compact?: bool
       ) : null}
       {action || model.installedDigest ? (
         <div className="flex flex-wrap items-center gap-2">
-          {action ? (
-            <IcButton disabled={isPending} onClick={submit} size="sm" type="button">
+          {action && model.reviewRequired ? (
+            <button
+              className="pdpp-caption text-status-warning-fg underline underline-offset-4"
+              onClick={() => {
+                const review = document.getElementById("connector-update-review");
+                if (review instanceof HTMLDetailsElement) {
+                  review.open = true;
+                  review.querySelector("summary")?.focus();
+                }
+              }}
+              type="button"
+            >
+              Review changes
+            </button>
+          ) : null}
+          {action && !model.reviewRequired ? (
+            <IcButton disabled={isPending || (action.kind === "update" && updatePlanState !== "ready")} onClick={submit} size="sm" type="button">
               {buttonLabel}
             </IcButton>
           ) : null}

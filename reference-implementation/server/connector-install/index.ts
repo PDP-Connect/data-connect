@@ -26,7 +26,10 @@ import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import {
   assertConnectorLifecycleAvailable,
+  assertConnectorLifecycleRecovered,
+  clearConnectorLifecycleRecoveryRequired,
   clearConnectorLifecycleUninstalled,
+  markConnectorLifecycleRecoveryRequired,
   markConnectorLifecycleUninstalled,
   withConnectorLifecycleLock,
 } from "../connector-lifecycle-lock.ts";
@@ -37,12 +40,15 @@ import {
   writeConnectorUninstallJournal,
   type ConnectorUninstallRootMove,
 } from "../connector-uninstall-journal.ts";
+import { getDb } from "../db.ts";
+import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
 import { acquireDirectoryLock, type DirectoryLock } from "./directory-lock.ts";
 import {
   createFileLocalConnectorSourceStore,
   type LocalConnectorSourceRecord,
   type LocalConnectorSourceStore,
 } from "./local-source.ts";
+import { createConnectorUpdateService, type ConnectorUpdateService } from "./update-service.ts";
 
 const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -498,6 +504,7 @@ export async function inspectActiveConnector(
 ): Promise<ActiveConnectorInspection> {
   let active: ConnectorInstallRecord | null;
   try {
+    if (store.dataDir) assertConnectorLifecycleRecovered(store.dataDir, connectorId);
     active = await store.getActive(connectorId);
   } catch (error) {
     return {
@@ -760,6 +767,7 @@ async function installStagedEntry(options: {
 }
 
 export interface ConnectorInstallService {
+  readonly updates?: ConnectorUpdateService;
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
   resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
@@ -793,6 +801,8 @@ export function createConnectorInstallService(options: {
   readonly installTimeoutMs?: number;
   readonly assertUninstallAllowed?: (connectorId: string) => Promise<void>;
   readonly removeActivation?: (connectorId: string) => Promise<void>;
+  readonly updateRunBoundaryTimeoutMs?: number;
+  readonly updateNow?: () => number;
 }): ConnectorInstallService {
   const dataDir =
     options.dataDir ||
@@ -1146,7 +1156,155 @@ export function createConnectorInstallService(options: {
     }
     return manifest;
   };
+  // Preflight publishes only immutable bytes. It never changes the active pointer
+  // and does not hold the lifecycle lock while downloading.
+  const prepareUpdate = async (entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
+    assertCatalogEntry(entry, entry.connector_id, entry.digest);
+    const lock = acquireInstallLock(dataDir);
+    const deadline = new AbortController();
+    const timer = setTimeout(
+      () => deadline.abort(new ConnectorInstallTimeoutError(entry.connector_id, installTimeoutMs)),
+      installTimeoutMs
+    );
+    let transaction: string | undefined;
+    try {
+      const root = join(dataDir, "connectors", entry.connector_id, entry.digest);
+      assertNoSymlinkComponents(dirname(root));
+      mkdirSync(dirname(root), { recursive: true });
+      transaction = mkdtempSync(join(dirname(root), ".update-preflight-"));
+      const staged = join(transaction, "next");
+      const configDigest = await (options.installArtifact ?? installPinnedArtifact)(staged, entry, deadline.signal);
+      deadline.signal.throwIfAborted();
+      const verifiedEntry = configDigest ? { ...entry, config_digest: configDigest } : entry;
+      const prepared = readVerifiedRecord(staged, verifiedEntry);
+      if (prepared.manifest.version !== prepared.version)
+        throw new Error("Verified manifest version differs from the catalog target.");
+      // A retained root is not proof of verification. Compare it with the
+      // freshly verified artifact instead of trusting hashes recomputed from it.
+      if (!existsSync(root)) renameSync(staged, root);
+      return verifyStoredRecord(root, { ...prepared, root }, dataDir);
+    } finally {
+      clearTimeout(timer);
+      if (transaction) rmSync(transaction, { force: true, recursive: true });
+      lock.release();
+    }
+  };
+  // The pre-plan update path. `/update` keeps it for a connector that has no
+  // verified install record: a registration carried over from the pre-OCI
+  // bundle has a manifest to replace but no installed tuple for a plan item.
+  const updateDirect = async (connectorId: string): Promise<ConnectorInstallRecord> => {
+    const entries = await catalog();
+    const candidates = entries.filter((entry) => entry.connector_id === connectorId);
+    const candidate = candidates.find((entry) => entry.latest === true);
+    if (!candidate) {
+      throw new Error("Connector has no verified update target.");
+    }
+    assertCatalogEntry(candidate, connectorId, candidate.digest);
+    return await installEntry(connectorId, candidate);
+  };
+  let updateService: ConnectorUpdateService | undefined;
+  const getUpdates = (): ConnectorUpdateService =>
+    (updateService ??= createConnectorUpdateService({
+      dataDir,
+      catalog,
+      catalogGeneration: () => store.getCatalogHighWater(),
+      directUpdate: updateDirect,
+      installed: async () => {
+        return (await listVerifiedActiveConnectors(store)).verified;
+      },
+      selectedLocalIds: async () =>
+        (await localSourceStore.list()).filter((record) => record.selected).map((record) => record.connectorKey),
+      prepare: prepareUpdate,
+      activate: async (prepared) => {
+        // File-backed preload stores share one record file. Keep the existing
+        // installer fence across publication; never wait for it while holding
+        // the lifecycle lock (an install may be waiting for that same lock).
+        let publicationLock: DirectoryLock;
+        try {
+          publicationLock = acquireInstallLock(dataDir);
+        } catch (error) {
+          throw Object.assign(new Error("Connector installer is busy; retry after it finishes."), {
+            code: "connector_install_busy",
+            cause: error,
+          });
+        }
+        try {
+          // No deadline may return success or release dispatch while publication is
+          // uncertain. A durable fence precedes the first activation/registration write.
+          let verified: ConnectorInstallRecord;
+          try {
+            verified = verifyStoredRecord(prepared.root, prepared, dataDir);
+          } catch (error) {
+            throw Object.assign(new Error("Prepared connector bytes failed verification before publication."), {
+              code: "verification_failed",
+              cause: error,
+            });
+          }
+          assertConnectorLifecycleAvailable(dataDir, prepared.connectorId);
+          const previous = await store.getActive(prepared.connectorId);
+          markConnectorLifecycleRecoveryRequired(dataDir, prepared.connectorId);
+          try {
+            const active = { ...verified, activatedAt: new Date().toISOString() };
+            await store.activate(active);
+            await options.registerManifest(active.manifest);
+            clearConnectorLifecycleUninstalled(dataDir, active.connectorId);
+            return active;
+          } catch (error) {
+            // Pointer restoration alone cannot prove that registration's generations,
+            // declarations and derived queues were restored. Keep dispatch fenced.
+            try {
+              if (previous) await store.activate(previous);
+              else await store.deactivate(prepared.connectorId);
+            } catch {
+              /* The durable fence remains authoritative. */
+            }
+            throw Object.assign(
+              new Error(
+                `Connector publication requires recovery: ${error instanceof Error ? error.message : String(error)}`
+              ),
+              { code: "recovery_required", cause: error }
+            );
+          }
+        } finally {
+          publicationLock.release();
+        }
+      },
+      completePublication: (connectorId) => clearConnectorLifecycleRecoveryRequired(dataDir, connectorId),
+      afterActivate: scheduleDerivedRepair,
+      hasActiveRuns: async (connectorId) => {
+        if (isPostgresStorageBackend())
+          return Boolean(
+            (await postgresQuery("SELECT 1 FROM controller_active_runs WHERE connector_id=$1 LIMIT 1", [connectorId]))
+              .rows.length
+          );
+        return Boolean(
+          getDb().prepare("SELECT 1 FROM controller_active_runs WHERE connector_id=? LIMIT 1").get(connectorId)
+        );
+      },
+      affectedInstances: async (connectorId) => {
+        if (isPostgresStorageBackend())
+          return Number(
+            (
+              await postgresQuery<{ count: string }>("SELECT count(*) FROM connector_instances WHERE connector_id=$1", [
+                connectorId,
+              ])
+            ).rows[0]?.count ?? 0
+          );
+        return Number(
+          getDb()
+            .prepare("SELECT count(*) AS n FROM connector_instances WHERE connector_id=?")
+            .get<{ n: number }>(connectorId)?.n ?? 0
+        );
+      },
+      ...(options.updateRunBoundaryTimeoutMs === undefined
+        ? {}
+        : { runBoundaryTimeoutMs: options.updateRunBoundaryTimeoutMs }),
+      ...(options.updateNow === undefined ? {} : { now: options.updateNow }),
+    }));
   return {
+    get updates() {
+      return getUpdates();
+    },
     addLocalSource: (sourcePath) => localSourceStore.add(sourcePath),
     catalog,
     install,
@@ -1157,16 +1315,7 @@ export function createConnectorInstallService(options: {
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
-    async update(connectorId) {
-      const entries = await catalog();
-      const candidates = entries.filter((entry) => entry.connector_id === connectorId);
-      const candidate = candidates.find((entry) => entry.latest === true);
-      if (!candidate) {
-        throw new Error("Connector has no verified update target.");
-      }
-      assertCatalogEntry(candidate, connectorId, candidate.digest);
-      return await installEntry(connectorId, candidate);
-    },
+    update: updateDirect,
   };
 }
 

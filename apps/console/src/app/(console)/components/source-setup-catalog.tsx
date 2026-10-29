@@ -37,6 +37,7 @@ import {
   filterCatalogForDevelopmentVisibility,
 } from "../lib/source-setup-development.ts";
 import { ConnectorInstallRow } from "../sources/add/connector-install-row.tsx";
+import { useConnectorUpdateContext } from "../sources/add/connector-update-context.tsx";
 
 const TRANSIENT_CATALOG_RETRY_DELAY_MS = 5000;
 let transientCatalogRetryAttempted = false;
@@ -455,12 +456,16 @@ function SourceSetupCard({
   installCatalogRecoveryState,
   installCatalogTransientlyUnavailable,
   installLifecycle,
+  updatePlanState,
+  reviewRequired,
 }: {
   entry: ConnectorCatalogEntry;
   existingSources: readonly ExistingSourceSetupLink[];
   installCatalogRecoveryState: ConnectorCatalogRecoveryState;
   installCatalogTransientlyUnavailable: boolean;
   installLifecycle: ConnectorInstallLifecycle | null;
+  updatePlanState: "checking" | "ready" | "failed";
+  reviewRequired: boolean;
 }) {
   const status = sourceSetupStatus(entry);
   // A row with no click target at all must never offer an install control
@@ -470,7 +475,7 @@ function SourceSetupCard({
   // owner rejected -- a package state fact is still shown, just without a
   // button that can never do anything.
   const isUnavailable = sourceSetupRowIsUnavailable(entry);
-  const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle) : null;
+  const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle, { reviewRequired }) : null;
   const packageAvailabilityUnknown = installCatalogTransientlyUnavailable && !installLifecycle?.installed;
   const packageNeedsInstall = !isUnavailable && installModel?.activationState === "not_installed";
   const action = sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
@@ -522,7 +527,7 @@ function SourceSetupCard({
           </span>
         ) : installModel ? (
           <>
-            <ConnectorInstallRow compact model={installModel} />
+            <ConnectorInstallRow compact model={installModel} updatePlanState={updatePlanState} />
             {installCatalogTransientlyUnavailable ? (
               <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-catalog-transient">
                 {installCatalogRecoveryState === "scheduled"
@@ -567,12 +572,16 @@ function SourceSetupCardList({
   installCatalogRecoveryState,
   installCatalogTransientlyUnavailable,
   installLifecycleByConnector,
+  updatePlanState,
+  reviewRequiredIds,
 }: {
   entries: readonly ConnectorCatalogEntry[];
   existingSourcesByConnector?: Readonly<Record<string, readonly ExistingSourceSetupLink[]>>;
   installCatalogRecoveryState: ConnectorCatalogRecoveryState;
   installCatalogTransientlyUnavailable: boolean;
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
+  updatePlanState: "checking" | "ready" | "failed";
+  reviewRequiredIds: ReadonlySet<string>;
 }) {
   return (
     <ul className="grid gap-3" data-testid="source-setup-list">
@@ -583,6 +592,8 @@ function SourceSetupCardList({
           installCatalogRecoveryState={installCatalogRecoveryState}
           installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
           installLifecycle={installLifecycleFor(entry, installLifecycleByConnector)}
+          updatePlanState={updatePlanState}
+          reviewRequired={reviewRequiredIds.has(connectorLookupKey(entry.connectorKey))}
           key={entry.connectorKey}
         />
       ))}
@@ -615,6 +626,7 @@ export function SourceSetupCatalog({
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
   query: string;
 }) {
+  const { planState: updatePlanState, reviewRequiredIds } = useConnectorUpdateContext();
   const developerMode = useSyncExternalStore(
     subscribeToDeveloperMode,
     getDeveloperModeSnapshot,
@@ -695,6 +707,8 @@ export function SourceSetupCatalog({
             installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
             installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
             installLifecycleByConnector={installLifecycleByConnector}
+            updatePlanState={updatePlanState}
+            reviewRequiredIds={reviewRequiredIds}
           />
           {unavailableEntries.length > 0 ? (
             <details className="group" data-testid="unavailable-connectors-disclosure">
@@ -709,6 +723,8 @@ export function SourceSetupCatalog({
                   installCatalogRecoveryState={connectorCatalogRecovery.recoveryState}
                   installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
                   installLifecycleByConnector={installLifecycleByConnector}
+                  updatePlanState={updatePlanState}
+                  reviewRequiredIds={reviewRequiredIds}
                 />
               </div>
             </details>

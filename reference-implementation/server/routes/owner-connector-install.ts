@@ -8,6 +8,7 @@ import type {
 } from "../connector-install/index.ts";
 import type { LocalConnectorSourceRecord } from "../connector-install/local-source.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
+import { mountOwnerConnectorUpdates } from "./owner-connector-updates.ts";
 
 interface Request {
   readonly body?: Record<string, unknown>;
@@ -98,6 +99,10 @@ export function mountOwnerConnectorInstall(
   const implementationChanged = (): void => {
     options.onImplementationChanged?.();
   };
+  if (options.service.updates) {
+    options.service.updates.onImplementationChanged(implementationChanged);
+    mountOwnerConnectorUpdates(app, { ...options, service: options.service.updates });
+  }
   const catalogHandler: Handler = async (_req, res) => {
     try {
       res.json({
@@ -141,11 +146,15 @@ export function mountOwnerConnectorInstall(
         options.pdppError(res, 400, "invalid_request", "connector_id is required", "connector_id");
         return;
       }
-      const updated = await options.service.update(connectorId);
+      const updated = options.service.updates
+        ? await options.service.updates.updateOne(connectorId)
+        : await options.service.update(connectorId);
       implementationChanged();
       res.json({ data: projectStatus(updated), object: "connector_install" });
     } catch (error) {
-      options.handleError(res, error);
+      const known = error as { statusCode?: number; code?: string; message?: string };
+      if (known.statusCode && known.code) options.pdppError(res, known.statusCode, known.code, known.message ?? known.code);
+      else options.handleError(res, error);
     }
   };
   const uninstallHandler: Handler = async (req, res) => {
