@@ -189,7 +189,6 @@ function mapSurface(row: BrowserSurfaceRow | null | undefined): BrowserSurfaceWi
   }
   const surface: BrowserSurfaceWithPersistenceMetadata = {
     ...(row.allocator_metadata_json ? { allocator_metadata: JSON.parse(row.allocator_metadata_json) } : {}),
-    ...(row.retained == null ? {} : { retained: row.retained === 1 }),
     backend: row.backend,
     cdp_url: row.cdp_url,
     connector_id: row.connector_id,

@@ -3,9 +3,7 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { type TestContext, test } from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
-import type { BrowserSurface, BrowserSurfaceAllocator } from "@opendatalabs/remote-surface/leases";
+import test from "node:test";
 
 const REGEXP_1 = /run\.stream_session_opened/;
 const REGEXP_2 = /run\.stream_session_resolved/;
@@ -23,52 +21,8 @@ const REGEXP_16 = /\/_ref\/run-interaction-streams\/:token\/events/;
 const REGEXP_17 = /object: ["']run_interaction_stream_session["']/;
 const REGEXP_18 = /run\.stream_session_requested/;
 
-type LeasesModule = typeof import("@opendatalabs/remote-surface/leases");
-
 function read(path: string) {
   return readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
-}
-
-function retainedIdleSurface(overrides: Partial<BrowserSurface> = {}): BrowserSurface {
-  return {
-    backend: "neko",
-    cdp_url: "http://neko:9222",
-    connector_id: "retained-connector",
-    created_at: "2026-07-22T12:00:00.000Z",
-    health: "ready",
-    last_used_at: "2026-07-22T12:00:00.000Z",
-    profile_key: "retained-profile",
-    retained: true,
-    stream_base_url: "http://neko:8080",
-    surface_id: "retained_surface",
-    ...overrides,
-  };
-}
-
-async function loadLeaseManager(t: TestContext): Promise<LeasesModule | null> {
-  try {
-    // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
-    return await import("@opendatalabs/remote-surface/leases");
-  } catch {
-    t.skip("@opendatalabs/remote-surface not installed; skipping installed-package retention assertion");
-    return null;
-  }
-}
-
-function createRetainedSurfaceManager(leases: LeasesModule) {
-  return new leases.BrowserSurfaceLeaseManager({
-    config: {
-      defaultPriorityClass: "background",
-      idleTtlMs: 60_000,
-      leaseWaitTimeoutMs: 60_000,
-      managedConnectors: new Set(["retained-connector", "background-connector"]),
-      priorityRanks: leases.DEFAULT_NEKO_PRIORITY_RANKS,
-      surfaceCap: 1,
-      surfaceMode: "dynamic",
-    },
-    initialSurfaces: [retainedIdleSurface()],
-    now: () => new Date("2026-07-22T12:10:00.000Z"),
-  });
 }
 
 test("reference streaming routes adapt package session APIs while owning the PDPP wire shape and preserving _ref ownership", () => {
@@ -136,56 +90,3 @@ test("run-target registry and connector handoff remain reference-owned host orch
 // question, not something to invent here). Removed the compose-file
 // assertion; the lease-store/`@opendatalabs/remote-surface` consumer
 // assertion in this file's other tests is unaffected and stays.
-
-test("installed remote-surface excludes retained surfaces from idle-TTL reap", async (t) => {
-  const leases = await loadLeaseManager(t);
-  if (!leases) {
-    return;
-  }
-
-  const manager = createRetainedSurfaceManager(leases);
-  const stopped: unknown[] = [];
-  const allocator: BrowserSurfaceAllocator = {
-    ensureSurface() {
-      throw new Error("not exercised by this test");
-    },
-    getSurfaceStatus() {
-      throw new Error("not exercised by this test");
-    },
-    listSurfaces() {
-      throw new Error("not exercised by this test");
-    },
-    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
-    async stopSurface(request) {
-      stopped.push(request);
-      return retainedIdleSurface({ health: "stopping" });
-    },
-  };
-
-  const idleResult = await manager.cleanupIdleSurfaces(allocator);
-  assert.deepEqual(idleResult.stopped, [], "retained surface must not be idle-TTL reaped");
-  assert.deepEqual(stopped, [], "idle-TTL must not call the allocator for a retained surface");
-});
-
-test("installed remote-surface excludes retained surfaces from capacity-pressure reap", async (t) => {
-  const leases = await loadLeaseManager(t);
-  if (!leases) {
-    return;
-  }
-
-  const manager = createRetainedSurfaceManager(leases);
-
-  const waiting = manager.acquire({
-    connectorId: "background-connector",
-    priorityClass: "background",
-    profileKey: "background-profile",
-    runId: "background_run",
-  });
-  assert.equal(waiting.lease.status, "waiting_for_browser_surface");
-  assert.equal(waiting.lease.wait_reason, "capacity_full");
-  assert.equal(
-    manager.planCapacityPressureReclaim(waiting.lease.lease_id),
-    undefined,
-    "capacity pressure must leave a retained idle surface alone"
-  );
-});

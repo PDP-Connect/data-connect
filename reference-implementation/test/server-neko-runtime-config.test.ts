@@ -7,7 +7,6 @@ import type { BrowserSurfaceReadinessWebSocketLike } from "../runtime/browser-su
 import { resolveNekoBrowserSurfaceControllerOptions as resolveNekoBrowserSurfaceControllerOptionsUntyped } from "../server/index.ts";
 
 const REGEXP_1 = /PDPP_NEKO_ALLOCATOR_URL is required in dynamic n\.eko surface mode/;
-const REGEXP_2 = /must exceed the number of retained credential-boundary managed connectors/;
 
 // `server/index.js` is plain JS: `resolveNekoBrowserSurfaceControllerOptions`'s
 // destructured-default params (getBrowserSurfaceLeaseStore/createBrowserSurfaceAllocator)
@@ -404,123 +403,6 @@ test("n.eko explicit dynamic runtime config fails fast without allocator setting
     REGEXP_1
   );
 });
-
-test("fair-slot invariant: a retained connector (ChatGPT) with cap=1 fails config closed", async () => {
-  await assert.rejects(
-    resolveNekoBrowserSurfaceControllerOptions({
-      createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
-      env: {
-        PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
-        PDPP_NEKO_MANAGED_CONNECTORS: "https://registry.pdpp.dev/connectors/chatgpt",
-        PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
-        PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
-        PDPP_NEKO_SURFACE_CAP: "1",
-        PDPP_NEKO_SURFACE_MODE: "dynamic",
-      },
-      getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
-    }),
-    REGEXP_2
-  );
-});
-
-test("fair-slot invariant: cap=3 with ChatGPT + four other connectors passes (one fair transient slot)", async () => {
-  const store = createEmptyLeaseStore();
-  const options = await resolveNekoBrowserSurfaceControllerOptions({
-    createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
-    env: {
-      PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
-      PDPP_NEKO_MANAGED_CONNECTORS:
-        "https://registry.pdpp.dev/connectors/chatgpt,https://registry.pdpp.dev/connectors/chase,https://registry.pdpp.dev/connectors/usaa,https://registry.pdpp.dev/connectors/amazon,https://registry.pdpp.dev/connectors/reddit",
-      PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
-      PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
-      PDPP_NEKO_SURFACE_CAP: "3",
-      PDPP_NEKO_SURFACE_MODE: "dynamic",
-    },
-    getBrowserSurfaceLeaseStore: () => store,
-  });
-  assert.ok(options.browserSurfaceLeaseManager);
-});
-
-test("boot re-derives retained on a rehydrated NONTERMINAL LEASE that has no surface yet, not only on surfaces", async () => {
-  // Regression: a queued (waiting_for_browser_surface) ChatGPT lease that was
-  // persisted before a restart has no surface row for rederiveRetainedSurfaces
-  // to mark. Before this fix, only listSurfaces() was re-derived, so this
-  // lease would rehydrate non-retained; once it later materializes a surface
-  // (queue promotion), that surface would be created WITHOUT the retained
-  // flag and become evictable by routine idle-TTL / capacity-pressure reap —
-  // reproducing the exact steady-state auth-loss bug this whole change fixes.
-  const persistedLease = {
-    connector_id: "https://registry.pdpp.dev/connectors/chatgpt",
-    expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-    fencing_token: 1,
-    lease_id: "lease_queued_chatgpt",
-    priority_class: "background",
-    profile_key: "chatgpt:acct-a",
-    requested_at: new Date().toISOString(),
-    run_id: "run_queued",
-    status: "waiting_for_browser_surface",
-    surface_subject_id: "acct-a",
-    wait_reason: "capacity_full",
-    // No `retained` field persisted — this is the pre-fix rehydrated shape.
-  };
-  const store = {
-    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
-    async listNonTerminalLeases() {
-      return [persistedLease];
-    },
-    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
-    async listSurfaces() {
-      return [];
-    },
-    async repairStaleSurfaceActiveLeases() {
-      /* intentionally empty */
-    },
-  };
-
-  const options = await resolveNekoBrowserSurfaceControllerOptions({
-    createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
-    env: {
-      PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
-      PDPP_NEKO_MANAGED_CONNECTORS: "https://registry.pdpp.dev/connectors/chatgpt",
-      PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
-      PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
-      PDPP_NEKO_SURFACE_CAP: "3",
-      PDPP_NEKO_SURFACE_MODE: "dynamic",
-    },
-    getBrowserSurfaceLeaseStore: () => store,
-  });
-
-  const manager = options.browserSurfaceLeaseManager;
-  assert.ok(manager);
-  assert.equal(
-    manager.getLease("lease_queued_chatgpt")?.retained,
-    true,
-    "rehydrated queued lease must be re-derived retained"
-  );
-
-  // Prove it stays retained through materialization: promote the queued lease
-  // into a surface and confirm that surface is created retained too.
-  const promoted = manager.pumpQueuedLeases();
-  assert.equal(promoted.length, 1);
-  assert.equal(promoted[0]?.lease_id, "lease_queued_chatgpt");
-  assert.equal(promoted[0]?.status, "starting_surface");
-  const surfaceId = promoted[0]?.surface_id;
-  assert.ok(surfaceId);
-  assert.equal(
-    manager.getSurface(surfaceId)?.retained,
-    true,
-    "surface materialized from a rehydrated queued retained lease must be retained"
-  );
-});
-
-// Note: the PER-CONNECTION fair-slot invariant (two retained ChatGPT surfaces +
-// cap=3 = one transient slot; a third retained connection is refused) is enforced
-// at retained-surface CREATION time in the lease manager, not by counting observed
-// surfaces at boot. See `browser-surface-leases.test.ts` →
-// "creating a retained surface that would consume the fair-slot reserve is
-// terminally deferred". Counting rehydrated surfaces here would be fail-open: a
-// configured retained connection that never acquired a surface is absent from the
-// store, so it must be caught when its demand materializes, not at boot.
 
 function createEmptyLeaseStore() {
   return {

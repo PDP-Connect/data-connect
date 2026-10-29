@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // biome-ignore lint/correctness/noUnresolvedImports: remote-surface 1.5.1 exports ./leases; Biome 2.5.5 fails to resolve this package export.
-import type { BrowserSurface, BrowserSurfaceLease } from "@opendatalabs/remote-surface/leases";
+import type { BrowserSurfaceLease } from "@opendatalabs/remote-surface/leases";
 
 import { listSpineEventsPage, type SpineEventRecord } from "../../lib/spine.ts";
 import type { ConnectionRemoteSurfaceEvidence } from "../connection-health.ts";
@@ -13,25 +13,11 @@ import type {
 } from "../controller.ts";
 import {
   type ActiveLeaseExecution,
-  type CredentialContinuity,
-  type CurrentReplacementReceipt,
   type EphemeralBrowserConnectionKind,
   type EphemeralBrowserRuntimeProjection,
   type LastSuccessfulRuntimeReceipt,
   projectEphemeralBrowserSurfaceHealth,
 } from "./ephemeral-health-projection.ts";
-import {
-  currentSurfaceIdsForReplacementReceipt,
-  selectCurrentBrowserGenerationHash,
-  shouldJoinCurrentReplacementReceipt,
-} from "./replacement-generation-currentness.ts";
-import {
-  type CurrentReplacementReceiptRead,
-  loadDefaultCurrentReplacementReceiptReaderFactory,
-  readCurrentReplacementReceipt,
-  readSystemActionableReplacementReceipt,
-} from "./replacement-receipt-reader.ts";
-import { connectorRetainsSurfaceProcess } from "./retained-surface-connectors.ts";
 import {
   buildLastSuccessfulRuntimeReceipt,
   isSucceededRunCompletionEvent,
@@ -43,7 +29,6 @@ const RUNTIME_RECEIPT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export interface BrowserSurfaceHealthSummaryReader {
   listLeases: () => Promise<readonly BrowserSurfaceLease[]>;
-  listSurfaces: () => Promise<readonly BrowserSurface[]>;
 }
 
 interface LastSuccessfulRunLike {
@@ -233,84 +218,6 @@ async function readRuntimeReceiptForRun(
   ).receipt;
 }
 
-function replacementReceiptSelectionInput(input: {
-  readonly connectionId: string;
-  readonly connectorId: string;
-  readonly currentGenerationHash: string | null;
-}) {
-  const surfaceSubjectId = surfaceSubjectIdForConnection(input.connectionId, input.connectorId);
-  return {
-    connection_id: input.connectionId,
-    ...(surfaceSubjectId ? { surface_subject_id: surfaceSubjectId } : {}),
-    ...(input.currentGenerationHash ? { current_generation_hash: input.currentGenerationHash } : {}),
-  };
-}
-
-/**
- * A dormant dynamic scale-to-zero connection does not query current-process
- * history, but it does read a failed scoped successor as durable system
- * evidence. A store failure is explicitly returned as unavailable so the
- * caller can fail closed only for the managed process-bound runtime it is
- * projecting.
- */
-export async function readProcessBoundCurrentReplacementReceipt(input: {
-  readonly connectionId: string;
-  readonly connectorId: string;
-  readonly demand: "active" | "none";
-  readonly inventory: BrowserSurfaceRuntimeInventorySnapshot | null;
-  readonly profileKey: string;
-  readonly reader: BrowserSurfaceHealthSummaryReader;
-  readonly remoteSurface: ConnectionRemoteSurfaceEvidence | null;
-  readonly surfaceMode: "dynamic-managed" | "static-managed";
-}): Promise<CurrentReplacementReceiptRead> {
-  try {
-    return await selectProcessBoundCurrentReplacementReceipt(input);
-  } catch {
-    return { receipt: null, state: "unavailable" };
-  }
-}
-
-export interface ConnectorRuntimeReceiptEvidence {
-  readonly currentReplacementRead: CurrentReplacementReceiptRead;
-  readonly execution: RuntimeLeaseFacts;
-  readonly lastSuccessfulRuntimeReceipt: LastSuccessfulRuntimeReceipt | null;
-}
-
-/**
- * The only bounded-history/Luna join used by the connector summary. It owns
- * receipt eligibility so ref-control cannot accidentally query a dormant
- * scale-to-zero connection or turn a ledger outage into green evidence.
- */
-export async function readConnectorRuntimeReceiptEvidence(input: {
-  readonly activeRun: unknown | null;
-  readonly connectionId: string;
-  readonly connectorId: string;
-  readonly inventory: BrowserSurfaceRuntimeInventorySnapshot | null;
-  readonly lastSuccessfulRun: LastSuccessfulRunLike | null;
-  readonly management: BrowserSurfaceRuntimeManagement | null;
-  readonly now: string;
-  readonly profileKey: string;
-  readonly reader: BrowserSurfaceHealthSummaryReader;
-  readonly remoteSurface: ConnectionRemoteSurfaceEvidence | null;
-}): Promise<ConnectorRuntimeReceiptEvidence> {
-  const execution = currentRuntimeLease({ activeRun: input.activeRun, remoteSurface: input.remoteSurface });
-  if (!input.management?.managed) {
-    return noCurrentReceiptEvidence(execution);
-  }
-  const [lastSuccessfulRuntimeReceipt, currentReplacementRead] = await Promise.all([
-    readLastSuccessfulRuntimeReceipt({
-      connectionId: input.connectionId,
-      connectorId: input.connectorId,
-      lastSuccessfulRun: input.lastSuccessfulRun,
-      now: input.now,
-      profileKey: input.profileKey,
-      reader: input.reader,
-    }),
-    readCurrentProcessReceipt(input, execution),
-  ]);
-  return { currentReplacementRead, execution, lastSuccessfulRuntimeReceipt };
-}
-
 /** One full-refresh inventory read; failure becomes absent runtime evidence, never a thrown list request. */
 export function readBrowserSurfaceRuntimeInventory(
   controller: BrowserSurfaceRuntimeManagementReader | null | undefined
@@ -333,84 +240,6 @@ export function readBrowserSurfaceRuntimeSurfaces(
     return Promise.resolve(null);
   }
   return controller.observeBrowserSurfaceRuntimeSurfaces(surfaceIds).catch(() => null);
-}
-
-function noCurrentReceiptEvidence(execution: RuntimeLeaseFacts): ConnectorRuntimeReceiptEvidence {
-  return {
-    currentReplacementRead: { receipt: null, state: "available" },
-    execution,
-    lastSuccessfulRuntimeReceipt: null,
-  };
-}
-
-function readCurrentProcessReceipt(
-  input: Parameters<typeof readConnectorRuntimeReceiptEvidence>[0],
-  execution: RuntimeLeaseFacts
-): Promise<CurrentReplacementReceiptRead> {
-  if (!connectorRetainsSurfaceProcess(input.connectorId)) {
-    return Promise.resolve({ receipt: null, state: "available" });
-  }
-  return readProcessBoundCurrentReplacementReceipt({
-    connectionId: input.connectionId,
-    connectorId: input.connectorId,
-    demand: execution.demand,
-    inventory: input.inventory,
-    profileKey: input.profileKey,
-    reader: input.reader,
-    remoteSurface: input.remoteSurface,
-    surfaceMode: input.management?.surface_mode === "static-managed" ? "static-managed" : "dynamic-managed",
-  });
-}
-
-async function selectProcessBoundCurrentReplacementReceipt(
-  input: Parameters<typeof readProcessBoundCurrentReplacementReceipt>[0]
-): Promise<CurrentReplacementReceiptRead> {
-  const surfaces = await input.reader.listSurfaces();
-  const currentSurfaceIds = currentSurfaceIdsForReplacementReceipt({
-    connection_id: input.connectionId,
-    connector_id: input.connectorId,
-    inventory_surfaces: input.inventory?.surfaces ?? [],
-    persisted_surfaces: surfaces,
-    profile_key: input.profileKey,
-    remote_surface_id: input.remoteSurface?.surfaceId ?? null,
-  });
-  const factory = await loadDefaultCurrentReplacementReceiptReaderFactory();
-  const replacementReader = factory?.() ?? null;
-  if (
-    !shouldJoinCurrentReplacementReceipt({
-      current_surface_ids: currentSurfaceIds,
-      demand: input.demand,
-      surface_mode: input.surfaceMode,
-    })
-  ) {
-    // A scale-to-zero dynamic runtime must not revive a normal pending
-    // replacement, but a failed successor remains durable runtime evidence
-    // until the system observes a subsequent successful generation.
-    return await readSystemActionableReplacementReceipt({
-      ...replacementReceiptSelectionInput({
-        connectionId: input.connectionId,
-        connectorId: input.connectorId,
-        currentGenerationHash: null,
-      }),
-      profile_key: input.profileKey,
-      reader: replacementReader,
-    });
-  }
-  const currentGenerationHash = selectCurrentBrowserGenerationHash({
-    connection_id: input.connectionId,
-    connector_id: input.connectorId,
-    current_surface_ids: currentSurfaceIds,
-    profile_key: input.profileKey,
-    surfaces,
-  });
-  return await readCurrentReplacementReceipt({
-    ...replacementReceiptSelectionInput({
-      connectionId: input.connectionId,
-      connectorId: input.connectorId,
-      currentGenerationHash,
-    }),
-    reader: replacementReader,
-  });
 }
 
 function runtimeDemand(
@@ -465,12 +294,6 @@ function staticSurfaceStatus(remoteSurface: ConnectionRemoteSurfaceEvidence | nu
   return remoteSurface?.surfaceHealth === "ready" ? "ready" : "absent";
 }
 
-function continuationInput(
-  continuity: CredentialContinuity | undefined
-): Pick<Parameters<typeof projectEphemeralBrowserSurfaceHealth>[0], "credential_continuity"> {
-  return continuity ? { credential_continuity: continuity } : {};
-}
-
 function compatibleIdleSurfaceCount(
   inventory: BrowserSurfaceRuntimeInventorySnapshot | null,
   connectorId: string,
@@ -503,8 +326,6 @@ export function projectConnectorEphemeralBrowserRuntime(input: {
   readonly activeRun: unknown | null;
   readonly connectionId: string;
   readonly connectorId: string;
-  readonly credentialContinuity: CredentialContinuity | undefined;
-  readonly currentReplacementReceipt: CurrentReplacementReceipt | null;
   readonly instance: RuntimeSummaryInstance;
   readonly inventory: BrowserSurfaceRuntimeInventorySnapshot | null;
   readonly lastSuccessfulRuntimeReceipt: LastSuccessfulRuntimeReceipt | null;
@@ -529,9 +350,9 @@ export function projectConnectorEphemeralBrowserRuntime(input: {
 
 /**
  * Complete summary adapter boundary: it reads the current management mode,
- * joins only eligible bounded receipt evidence, fails closed on a managed
- * process-ledger outage, and assembles the health projection. Callers only
- * supply request-scoped facts; they do not reinterpret lifecycle history.
+ * reads the last-successful-run receipt for a managed runtime, and assembles
+ * the health projection. Callers only supply request-scoped facts; they do not
+ * reinterpret lifecycle history.
  */
 export async function projectConnectorHealthSummaryRuntime(input: {
   readonly activeRun: unknown | null;
@@ -548,28 +369,24 @@ export async function projectConnectorHealthSummaryRuntime(input: {
   readonly browserSessionBound: boolean;
 }): Promise<EphemeralBrowserRuntimeProjection | null> {
   const management = input.controller?.getBrowserSurfaceRuntimeManagement?.(input.connectorId) ?? null;
-  const receipts = await readConnectorRuntimeReceiptEvidence({
-    activeRun: input.activeRun,
-    connectionId: input.connectionId,
-    connectorId: input.connectorId,
-    inventory: input.inventory,
-    lastSuccessfulRun: input.lastSuccessfulRun,
-    management,
-    now: input.now,
-    profileKey: input.profileKey,
-    reader: input.reader,
-    remoteSurface: input.remoteSurface,
-  });
+  const lastSuccessfulRuntimeReceipt = management?.managed
+    ? await readLastSuccessfulRuntimeReceipt({
+        connectionId: input.connectionId,
+        connectorId: input.connectorId,
+        lastSuccessfulRun: input.lastSuccessfulRun,
+        now: input.now,
+        profileKey: input.profileKey,
+        reader: input.reader,
+      })
+    : null;
   return projectConnectorEphemeralBrowserRuntime({
     activeRun: input.activeRun,
     browserSessionBound: input.browserSessionBound,
     connectionId: input.connectionId,
     connectorId: input.connectorId,
-    credentialContinuity: receipts.currentReplacementRead.state === "unavailable" ? "indeterminate" : undefined,
-    currentReplacementReceipt: receipts.currentReplacementRead.receipt,
     instance: input.instance,
     inventory: input.inventory,
-    lastSuccessfulRuntimeReceipt: receipts.lastSuccessfulRuntimeReceipt,
+    lastSuccessfulRuntimeReceipt,
     management,
     now: input.now,
     profileKey: input.profileKey,
@@ -628,8 +445,6 @@ function staticRuntimeProjection(
     connection_kind: "browser-runtime",
     demand: execution.demand,
     surface_mode: "static-managed",
-    ...continuationInput(input.credentialContinuity),
-    current_replacement_receipt: input.currentReplacementReceipt,
     last_successful_runtime_receipt: input.lastSuccessfulRuntimeReceipt,
     static_surface: {
       readable: input.remoteSurface?.axis !== "unknown",
@@ -650,8 +465,6 @@ function dynamicRuntimeProjection(
     current_compatible_idle_surfaces: compatibleIdleSurfaceCount(input.inventory, input.connectorId, input.profileKey),
     demand: execution.demand,
     surface_mode: "dynamic-managed",
-    ...continuationInput(input.credentialContinuity),
-    current_replacement_receipt: input.currentReplacementReceipt,
     last_successful_runtime_receipt: input.lastSuccessfulRuntimeReceipt,
     now: input.now,
   });
