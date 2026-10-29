@@ -10,7 +10,7 @@ import test from "node:test";
 // biome-ignore lint/correctness/noUnresolvedImports: the test runner resolves this runtime fixture import outside Biome static resolution.
 import type { BrowserSurfaceLease } from "@opendatalabs/remote-surface/leases";
 import Database from "./helpers/sqlite-driver.ts";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import {
@@ -1796,10 +1796,11 @@ test("Postgres surface persistence does not require the obsolete retained column
   skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is required",
 }, async () => {
   const postgresUrl = mustExist(POSTGRES_URL ?? null, "PDPP_TEST_POSTGRES_URL is set (test is skipped otherwise)");
-  await initPostgresStorage({ backend: "postgres", databaseUrl: postgresUrl });
   const pool = new Pool({ connectionString: postgresUrl, max: 1 });
-  const client = await pool.connect();
+  let client: PoolClient | undefined;
   try {
+    await initPostgresStorage({ backend: "postgres", databaseUrl: postgresUrl });
+    client = await pool.connect();
     await client.query("CREATE TEMP TABLE browser_surfaces (LIKE public.browser_surfaces INCLUDING ALL)");
     await client.query("ALTER TABLE pg_temp.browser_surfaces DROP COLUMN retained");
     const store = createPostgresBrowserSurfaceLeaseStore(client);
@@ -1815,9 +1816,12 @@ test("Postgres surface persistence does not require the obsolete retained column
     });
     assert.deepEqual(await store.getSurface(value.surface_id), value);
   } finally {
-    client.release();
-    await pool.end();
-    await closePostgresStorage();
+    client?.release();
+    try {
+      await pool.end();
+    } finally {
+      await closePostgresStorage();
+    }
   }
 });
 
