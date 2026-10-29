@@ -96,12 +96,7 @@ export default async function DeviceExportersPage({
           breadcrumbs={addConnectionBreadcrumbs}
           count={`${devices.length}`}
           description="Connect a supported local collector to send data from the machine where it is stored. The collector controls when it runs; this server manages enrollment, data receipt, and connection health."
-          meta={
-            <>
-              <MetaPill label="surface" tone="protocol" value="reference-experimental" />
-              <MetaPill label="source instances" value={sourceInstances.data.length} />
-            </>
-          }
+          meta={<MetaPill label="source instances" value={sourceInstances.data.length} />}
           title="Local device exporters"
         />
 
