@@ -632,6 +632,17 @@ export interface RefConnectorImplementation {
   state: "built_in" | "installed" | "local_source" | "not_installed" | "unknown";
 }
 
+/** See {@link RefConnectorSummary.coverage_as_of}. */
+export interface RefCoverageAsOf {
+  readonly artifact_digest: string;
+  readonly collection_revision: number;
+  readonly committed_at: string | null;
+  readonly evidence: "terminal_run";
+  readonly run_id: string;
+  /** The sequence the server issued to the run at its start; it decides which proof can be current. */
+  readonly run_sequence: number;
+}
+
 export interface RefConnectorSummary {
   /**
    * Owner/control-plane acquisition provenance for manual imports, device
@@ -669,6 +680,13 @@ export interface RefConnectorSummary {
    * renders no horizons rather than inventing a state. Pass-through from
    * `server/ref-control.ts#projectConnectorSummaryConnectionHealth`.
    */
+  /**
+   * What the local coverage on this row is a fact about (`LocalCoverageAsOf`
+   * in reference `server/ref-control.ts`): the run, its release digest, and the
+   * collection revision and time it was committed at. `null` or absent when no
+   * current local proof backs the coverage shown.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   coverage_horizons?: readonly RefCoverageHorizon[];
   display_name: string;
   freshness: Record<string, unknown>;
@@ -1314,6 +1332,12 @@ export interface RefConnectionHealthSnapshot {
    */
   collection_rate?: RefCollectionRateSnapshot | null;
   conditions?: readonly RefConnectionHealthCondition[];
+  /**
+   * What `axes.coverage` is a fact about: the same value as the summary's
+   * top-level `coverage_as_of`. Optional on the mirror because a reference
+   * predating the field omits it.
+   */
+  coverage_as_of?: RefCoverageAsOf | null;
   /**
    * Additive, nullable source-pressure detail-gap backlog rollup
    * ({@link RefDetailGapBacklog}). `null` when no backlog evidence was supplied

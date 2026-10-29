@@ -196,7 +196,7 @@ async function main(): Promise<void> {
     assert.match(advertised.collector_protocol_version, /^\d+$/);
     // biome-ignore lint/performance/useTopLevelRegex: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
     assert.match(advertised.protocol_version, /^\d+\.\d+\.\d+$/);
-    assert.deepEqual([...advertised.protocol_capabilities].sort(), []);
+    assert.deepEqual([...advertised.protocol_capabilities].sort(), ["RUN_COVERAGE_V1"]);
 
     if (await pathExists(path.join(cliPackageRoot, "package.json"))) {
       log("Installing packed @pdpp/cli alongside the collector and checking shim advertise output...");

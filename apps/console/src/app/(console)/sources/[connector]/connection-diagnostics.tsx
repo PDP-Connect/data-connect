@@ -28,6 +28,7 @@ import type {
   DeviceSourceInstance,
   RefActionRemediation,
   RefConnectionHealthSnapshot,
+  RefCoverageAsOf,
   RefLocalDeviceProgress,
   RefRenderedVerdict,
   RefSchedule,
@@ -71,6 +72,8 @@ export interface ConnectionDiagnosticsProps {
    * coverage-derived value, matching the per-stream lines.
    */
   connectorNotInstalled?: boolean;
+  /** The run the local coverage describes; the coverage chip reads "as of" its commit time. */
+  coverageAsOf?: RefCoverageAsOf | null;
   /**
    * Connection-summary local-device progress, including the count-backed
    * `outbox_counts` rollup. Used to show the scale of stuck work in the
@@ -105,6 +108,7 @@ export function ConnectionDiagnostics({
   connectionId,
   connectorId,
   connectorNotInstalled = false,
+  coverageAsOf = null,
   localDeviceProgress,
   now,
   providerOrigin,
@@ -163,6 +167,7 @@ export function ConnectionDiagnostics({
               connectionId={connectionId}
               connectorId={connectorId}
               connectorNotInstalled={connectorNotInstalled}
+              coverageAsOf={coverageAsOf}
               localDeviceProgress={localDeviceProgress}
               providerOrigin={providerOrigin}
               renderedVerdict={renderedVerdict}
@@ -455,6 +460,7 @@ function ProjectedStateDiagnostics({
   connectionId,
   connectorId,
   connectorNotInstalled,
+  coverageAsOf,
   localDeviceProgress,
   providerOrigin,
   renderedVerdict,
@@ -464,6 +470,7 @@ function ProjectedStateDiagnostics({
   connectionId: string | null;
   connectorId: string | null;
   connectorNotInstalled: boolean;
+  coverageAsOf: RefCoverageAsOf | null;
   localDeviceProgress: RefLocalDeviceProgress | null;
   providerOrigin: string | null;
   renderedVerdict: RefRenderedVerdict | null;
@@ -487,6 +494,7 @@ function ProjectedStateDiagnostics({
   // The diagnostics block already receives the connection's local-device
   // progress, so reuse it as the local-backing signal.
   const axisChips = summarizeAxisChips(connectionHealth.axes, {
+    coverageAsOf,
     isLocalDeviceBacked: Boolean(localDeviceProgress),
   });
   const outboxRemediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress);

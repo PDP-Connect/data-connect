@@ -16,6 +16,7 @@ import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   type ConnectorProtocolCapability,
+  collectionProfileDeclarationError,
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
@@ -2618,7 +2619,7 @@ const SPAWN_TOLERATED_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapabilit
  * absent `protocol_capabilities` declares none. A malformed list or an unknown
  * name fails closed, and so does a required capability this runtime does not
  * implement, except BLOB (see SPAWN_TOLERATED_PROTOCOL_CAPABILITIES). An
- * advisory capability never blocks the run.
+ * elective capability never blocks the run.
  */
 function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
   const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;
@@ -2633,6 +2634,22 @@ function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void
     throw new Error(
       `Connector requires protocol capabilities this runtime does not support: ${unsupported.join(", ")}`
     );
+  }
+}
+
+/** Reject unsupported base profiles and incomplete store-evidence declarations before spawn. */
+function validateCollectionProfileDeclaration(manifest: ConnectorManifest): void {
+  const streams = Array.isArray(manifest.streams) ? manifest.streams : [];
+  const coverageStoresDeclared = streams.some(
+    (stream) => stream !== null && typeof stream === "object" && !Array.isArray(stream) && Object.hasOwn(stream, "coverage_stores")
+  );
+  const error = collectionProfileDeclarationError(
+    manifest.protocol_version === undefined ? "0.1.0" : manifest.protocol_version,
+    manifest.protocol_capabilities,
+    coverageStoresDeclared
+  );
+  if (error !== null) {
+    throw new Error(`Invalid Collection Profile declaration: ${error}`);
   }
 }
 
@@ -3058,6 +3075,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const availableBindings = buildAvailableBindings(onInteraction);
 
   validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  validateCollectionProfileDeclaration(manifest);
   validateRequiredProtocolCapabilities(manifest);
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);

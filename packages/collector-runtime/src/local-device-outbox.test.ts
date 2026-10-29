@@ -43,6 +43,58 @@ test("LocalDeviceOutbox persists ready work and reopens from disk", async (t) =>
   }
 });
 
+test("acknowledged v2 terminal coverage survives outbox pruning and reopen", async (t) => {
+  const path = await tempOutboxPath(t);
+  const payload = {
+    collection_boundary: "scope-1",
+    terminal_facts: [{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }],
+    version: 2,
+  };
+  const outbox = new LocalDeviceOutbox({ path });
+  outbox.enqueue({ id: "coverage-1", kind: "terminal_run_commit", payload, sourceInstanceId: "source-1" });
+  const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000 });
+  assert.ok(claimed);
+  outbox.acknowledge({
+    holder: "worker",
+    id: claimed.id,
+    leaseEpoch: claimed.lease_epoch,
+    terminalAck: { collectionRevision: 7, runId: "run-1", runSequence: 1, storageEpoch: 1 },
+  });
+  outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "source-1" });
+  outbox.close();
+
+  const reopened = new LocalDeviceOutbox({ path });
+  try {
+    assert.equal(reopened.get("coverage-1"), null);
+    const receipt = reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" });
+    assert.ok(receipt?.asOf, "the receipt names its as-of");
+    assert.deepEqual(receipt, {
+      asOf: {
+        acknowledgedAt: receipt.asOf.acknowledgedAt,
+        collectionRevision: 7,
+        runId: "run-1",
+        runSequence: 1,
+        storageEpoch: 1,
+      },
+      collectionBoundary: "scope-1",
+      terminalFacts: payload.terminal_facts,
+    });
+    assert.equal(reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-2" }), null);
+    reopened.enqueue({
+      id: "legacy-2",
+      kind: "terminal_run_commit",
+      payload: { collection_boundary: "scope-2", terminal_facts: [], version: 1 },
+      sourceInstanceId: "source-1",
+    });
+    const [legacy] = reopened.claimReady({ holder: "worker", leaseMs: 60_000 });
+    assert.ok(legacy);
+    reopened.acknowledge({ holder: "worker", id: legacy.id, leaseEpoch: legacy.lease_epoch });
+    assert.equal(reopened.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" }), null);
+  } finally {
+    reopened.close();
+  }
+});
+
 test("LocalDeviceOutbox supports deterministic ids and idempotent enqueue", () => {
   const outbox = new LocalDeviceOutbox({ path: ":memory:" });
   try {
@@ -157,7 +209,7 @@ test("schema v3/v4 migration preserves pending v2 work and accepts terminal run 
     const version = migrated.prepare("PRAGMA user_version").get() as {
       user_version: number;
     };
-    assert.equal(version.user_version, 4);
+    assert.equal(version.user_version, 6);
   } finally {
     migrated.close();
   }
@@ -185,12 +237,120 @@ test("an old v2 binary uses the production version fence to refuse a v3 outbox",
   }
 });
 
-test("current binary refuses a future v5 outbox before applying schema", async (t) => {
+test("current binary refuses a future v7 outbox before applying schema", async (t) => {
   const path = await tempOutboxPath(t);
   const db = new DatabaseSync(path);
-  db.exec("PRAGMA user_version = 5");
+  db.exec("PRAGMA user_version = 7");
   db.close();
-  assert.throws(() => new LocalDeviceOutbox({ path }), /newer than supported version 4/);
+  assert.throws(() => new LocalDeviceOutbox({ path }), /newer than supported version 6/);
+});
+
+/** Enqueue and acknowledge one v2 terminal record whose single store reads `status`. */
+function acknowledgeTerminal(
+  outbox: LocalDeviceOutbox,
+  runId: string,
+  ack: { runSequence: number | null; storageEpoch: number | null; collectionRevision: number | null } | null,
+  status = "collected"
+): void {
+  outbox.enqueue({
+    id: `terminal-${runId}`,
+    kind: "terminal_run_commit",
+    payload: {
+      collection_boundary: "scope-1",
+      run_id: runId,
+      terminal_facts: [{ scoped: true, stores: [{ status, store: runId }], stream: "messages" }],
+      version: 2,
+    },
+    sourceInstanceId: "source-1",
+  });
+  const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000, sourceInstanceId: "source-1" });
+  assert.ok(claimed);
+  outbox.acknowledge({
+    holder: "worker",
+    id: claimed.id,
+    leaseEpoch: claimed.lease_epoch,
+    ...(ack ? { terminalAck: { ...ack, runId } } : {}),
+  });
+}
+
+function receiptRun(outbox: LocalDeviceOutbox): string | null {
+  const receipt = outbox.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" });
+  return receipt ? (receipt.terminalFacts[0]?.stores[0]?.store ?? null) : null;
+}
+
+test("an older run's late ACK does not replace a newer run's receipt", async (t) => {
+  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  try {
+    acknowledgeTerminal(outbox, "run-b", { collectionRevision: 10, runSequence: 2, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), "run-b");
+    // Run A started first, but its terminal record was acknowledged later.
+    acknowledgeTerminal(outbox, "run-a", { collectionRevision: 11, runSequence: 1, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), "run-b", "run B's receipt stays");
+    assert.equal(outbox.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" })?.asOf?.runSequence, 2);
+    // A newer epoch orders after every sequence of the old one.
+    acknowledgeTerminal(outbox, "run-c", { collectionRevision: 3, runSequence: 1, storageEpoch: 2 });
+    assert.equal(receiptRun(outbox), "run-c", "a run issued after a restore step is later");
+  } finally {
+    outbox.close();
+  }
+});
+
+test("an ACK without a run sequence clears the evidence and keeps the stored order", async (t) => {
+  const outbox = new LocalDeviceOutbox({ path: await tempOutboxPath(t) });
+  try {
+    acknowledgeTerminal(outbox, "run-b", { collectionRevision: 10, runSequence: 2, storageEpoch: 1 });
+    acknowledgeTerminal(outbox, "run-unsequenced", null);
+    assert.equal(receiptRun(outbox), null, "an unordered run leaves no evidence");
+    acknowledgeTerminal(outbox, "run-a", { collectionRevision: 12, runSequence: 1, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), null, "an older run's late ACK does not restore evidence");
+    acknowledgeTerminal(outbox, "run-d", { collectionRevision: 13, runSequence: 3, storageEpoch: 1 });
+    assert.equal(receiptRun(outbox), "run-d");
+  } finally {
+    outbox.close();
+  }
+});
+
+test("a v5 outbox upgrades to v6 and keeps its receipt readable without an as-of", async (t) => {
+  const path = await tempOutboxPath(t);
+  const current = new LocalDeviceOutbox({ path });
+  current.close();
+  const raw = new DatabaseSync(path);
+  try {
+    for (const column of ["run_id", "run_sequence", "storage_epoch", "collection_revision"]) {
+      raw.exec(`ALTER TABLE local_device_terminal_coverage_receipts DROP COLUMN ${column}`);
+    }
+    raw
+      .prepare(
+        `INSERT INTO local_device_terminal_coverage_receipts
+           (source_instance_id, collection_boundary, terminal_facts_json, acknowledged_at) VALUES (?, ?, ?, ?)`
+      )
+      .run(
+        "source-1",
+        "scope-1",
+        JSON.stringify([{ scoped: true, stores: [{ status: "collected", store: "messages" }], stream: "messages" }]),
+        "2026-10-01T00:00:00.000Z"
+      );
+    raw.exec("PRAGMA user_version = 5");
+  } finally {
+    raw.close();
+  }
+  const upgraded = new LocalDeviceOutbox({ path });
+  try {
+    const receipt = upgraded.latestTerminalCoverageReceipt({ sourceInstanceId: "source-1" });
+    assert.equal(receipt?.collectionBoundary, "scope-1", "the v5 receipt stays readable");
+    assert.equal(receipt?.asOf, null, "a v5 receipt names no as-of");
+    // The first sequenced ACK replaces a receipt that has no sequence.
+    acknowledgeTerminal(upgraded, "run-a", { collectionRevision: 4, runSequence: 1, storageEpoch: 1 });
+    assert.equal(receiptRun(upgraded), "run-a");
+  } finally {
+    upgraded.close();
+  }
+  const version = new DatabaseSync(path, { readOnly: true });
+  try {
+    assert.equal((version.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 6);
+  } finally {
+    version.close();
+  }
 });
 
 test("schema v3 migration failure rolls back, closes, and reopens with v2 bytes and metadata intact", async (t) => {
@@ -664,6 +824,45 @@ test("LocalDeviceOutbox requeues dead letters by redacted error class", () => {
     assert.equal(outbox.get("src-1:record_batch:timeout")?.status, "ready");
     assert.equal(outbox.get("src-1:record_batch:400")?.status, "dead_letter");
     assert.equal(outbox.summary({ sourceInstanceId }).deadLetter, 1);
+  } finally {
+    outbox.close();
+  }
+});
+
+test("LocalDeviceOutbox reopens only a succeeded row, as ready, and leaves other rows alone", () => {
+  const outbox = new LocalDeviceOutbox({ path: ":memory:" });
+  try {
+    outbox.enqueue({
+      id: "src-1:gap:first",
+      kind: "gap",
+      payload: { reason: "connector_child_failure" },
+      sourceInstanceId: "src-1",
+    });
+    outbox.enqueue({
+      id: "src-1:gap:second",
+      kind: "gap",
+      payload: { reason: "connector_child_failure" },
+      sourceInstanceId: "src-1",
+    });
+    const [claim] = outbox.claimReady({
+      holder: "worker-a",
+      leaseMs: 60_000,
+      limit: 1,
+      sourceInstanceId: "src-1",
+    });
+    assert.ok(claim);
+    outbox.acknowledge({
+      holder: "worker-a",
+      id: claim.id,
+      leaseEpoch: claim.lease_epoch,
+    });
+    const otherId = claim.id === "src-1:gap:first" ? "src-1:gap:second" : "src-1:gap:first";
+
+    assert.equal(outbox.reopenSucceeded(otherId), false, "a ready row is not reopened");
+    assert.equal(outbox.get(otherId)?.status, "ready");
+    assert.equal(outbox.reopenSucceeded(claim.id), true);
+    assert.equal(outbox.get(claim.id)?.status, "ready");
+    assert.equal(outbox.summary({ sourceInstanceId: "src-1" }).ready, 2);
   } finally {
     outbox.close();
   }
@@ -1930,6 +2129,47 @@ function seedSucceededRows(path: string, sourceInstanceId: string, count: number
     db.close();
   }
 }
+
+test("pruneSent keeps a delivered failure gap until recovery deletes it", async (t) => {
+  // Delivery marks a gap succeeded; only recovery removes it. Pruning the
+  // acknowledged tail must not close a barrier the server still holds open.
+  const path = await tempOutboxPath(t);
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    outbox.enqueue({
+      id: "gap-1",
+      kind: "gap",
+      payload: {
+        connectorId: "connector-1",
+        firstSeenAt: "2026-10-22T11:00:00.000Z",
+        nextAttemptBackoffMs: 60_000,
+        reason: "connector_child_failure",
+        retryable: true,
+        sourceInstanceId: "source-1",
+      },
+      sourceInstanceId: "source-1",
+    });
+    outbox.enqueue({
+      id: "batch-1",
+      kind: "record_batch",
+      payload: { batchSeq: 1, records: [{ key: "m-1" }] },
+      sourceInstanceId: "source-1",
+    });
+    for (let claims = 0; claims < 2; claims += 1) {
+      const [claimed] = outbox.claimReady({ holder: "worker", leaseMs: 60_000, sourceInstanceId: "source-1" });
+      assert.ok(claimed);
+      outbox.acknowledge({ holder: "worker", id: claimed.id, leaseEpoch: claimed.lease_epoch });
+    }
+    assert.equal(outbox.get("gap-1")?.status, "succeeded");
+
+    const result = outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "source-1" });
+    assert.equal(result.pruned, 1, "only the acknowledged record batch is prunable");
+    assert.equal(outbox.get("gap-1")?.status, "succeeded", "a delivered gap survives pruning");
+    assert.equal(outbox.countOpenGaps({ sourceInstanceId: "source-1" }), 1);
+  } finally {
+    outbox.close();
+  }
+});
 
 test("pruneSent deletes a backlog larger than SQLite's per-statement variable limit", async (t) => {
   // The live incident shape: ~170k succeeded rows. A single

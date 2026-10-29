@@ -617,7 +617,10 @@ export function toSourceInstanceView(
   const collectionFactsByStream = new Map(
     [...indexCollectionReportByStream(summary.collection_report)].map(([stream, entry]) => [
       stream,
-      formatStreamCollectionFacts(entry, { connectorNotInstalled }),
+      formatStreamCollectionFacts(entry, {
+        connectorNotInstalled,
+        coverageAsOf: summary.coverage_as_of ?? null,
+      }),
     ])
   );
   const streamRecordsByStream = new Map((summary.stream_records ?? []).map((entry) => [entry.stream, entry]));

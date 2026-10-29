@@ -142,6 +142,10 @@ import {
   resolveStorageConnectorInstanceId,
 } from "./storage-utils.ts";
 import {
+  type LocalCoverageRevisionFence,
+  readLocalCoverageRevisionFences,
+} from "./stores/collection-revision-store.ts";
+import {
   ConnectorInstanceResolutionError,
   makeDefaultAccountConnectorInstanceId,
 } from "./stores/connector-instance-store.ts";
@@ -4879,6 +4883,7 @@ export async function readCommittedLocalCoverageDiagnostics(storageTarget: Recor
       hasCommittedSnapshot: false,
       malformed: false,
       missingStores: [],
+      revisionFence: null,
       rows: [],
       state: null,
       unexpectedStores: [],
@@ -4927,6 +4932,7 @@ export async function readCommittedLocalCoverageDiagnostics(storageTarget: Recor
     ...parseCoverageDiagnosticsStateSnapshot(connectorId, state),
     declaredCollectionScope,
     manifestGeneration: currentGeneration === null ? null : Number(currentGeneration),
+    revisionFence: (await readLocalCoverageRevisionFences([connectorInstanceId])).get(connectorInstanceId) ?? null,
     state,
     stateManifestGeneration: stateGeneration === null ? null : Number(stateGeneration),
     updatedAt: stateProjection.updated_at ?? null,
@@ -4945,6 +4951,7 @@ export async function readCommittedLocalCoverageDiagnosticsByConnectionIds(conne
     ReturnType<typeof parseCoverageDiagnosticsStateSnapshot> & {
       declaredCollectionScope: string;
       manifestGeneration: number | null;
+      revisionFence: LocalCoverageRevisionFence | null;
       state: unknown;
       stateManifestGeneration: number | null;
       updatedAt: string | null;
@@ -4992,6 +4999,7 @@ export async function readCommittedLocalCoverageDiagnosticsByConnectionIds(conne
       );
     }
   }
+  const revisionFences = await readLocalCoverageRevisionFences(ids);
   for (const row of rows) {
     // `row.state_json` is already the `coverage_diagnostics` stream's own
     // payload — the JOIN's `ON` clause already narrows `cs.stream =
@@ -5009,6 +5017,7 @@ export async function readCommittedLocalCoverageDiagnosticsByConnectionIds(conne
       ...parseCoverageDiagnosticsStateSnapshot(row.connector_id, parsedState),
       declaredCollectionScope: declaredCollectionScopeFingerprint(row.scope_state_json ?? null),
       manifestGeneration: row.current_generation === null ? null : Number(row.current_generation),
+      revisionFence: revisionFences.get(row.connector_instance_id) ?? null,
       state: parsedState,
       stateManifestGeneration: row.state_generation === null ? null : Number(row.state_generation),
       updatedAt: row.updated_at ?? null,
