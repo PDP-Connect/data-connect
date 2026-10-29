@@ -42,7 +42,6 @@ interface BrowserSurfaceRow {
   profile_dir: string | null;
   profile_key: string;
   profile_volume: string | null;
-  retained: number | null;
   stream_base_url: string;
   stream_origin: string | null;
   surface_id: string;
@@ -284,7 +283,6 @@ function sqliteSurfaceParams(surface: BrowserSurfaceWithPersistenceMetadata): Bi
     surface.created_at,
     surface.last_used_at,
     surface.allocator_metadata == null ? null : JSON.stringify(surface.allocator_metadata),
-    surface.retained == null ? null : Number(surface.retained),
   ];
 }
 
@@ -421,9 +419,9 @@ class SqliteBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
       `INSERT INTO browser_surfaces(
         surface_id, backend, profile_key, connector_id, surface_subject_id, account_key, surface_mode, surface_source,
         cdp_url, stream_base_url, stream_origin, window_settle_endpoint, health, container_id, container_name,
-        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json, retained
+        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json
       )
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(surface_id) DO UPDATE SET
         backend = excluded.backend,
         profile_key = excluded.profile_key,
@@ -461,8 +459,7 @@ class SqliteBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
         active_lease_id = excluded.active_lease_id,
         created_at = excluded.created_at,
         last_used_at = excluded.last_used_at,
-        allocator_metadata_json = excluded.allocator_metadata_json,
-        retained = excluded.retained`,
+        allocator_metadata_json = excluded.allocator_metadata_json`,
       sqliteSurfaceParams(surface)
     );
     return Promise.resolve(surface);
@@ -679,9 +676,9 @@ class PostgresBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
       `INSERT INTO browser_surfaces(
         surface_id, backend, profile_key, connector_id, surface_subject_id, account_key, surface_mode, surface_source,
         cdp_url, stream_base_url, stream_origin, window_settle_endpoint, health, container_id, container_name,
-        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json, retained
+        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json
       )
-      VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+      VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       ON CONFLICT(surface_id) DO UPDATE SET
         backend = EXCLUDED.backend,
         profile_key = EXCLUDED.profile_key,
@@ -719,8 +716,7 @@ class PostgresBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
         active_lease_id = EXCLUDED.active_lease_id,
         created_at = EXCLUDED.created_at,
         last_used_at = EXCLUDED.last_used_at,
-        allocator_metadata_json = EXCLUDED.allocator_metadata_json,
-        retained = EXCLUDED.retained`,
+        allocator_metadata_json = EXCLUDED.allocator_metadata_json`,
       sqliteSurfaceParams(surface)
     );
     return surface;
