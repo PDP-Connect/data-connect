@@ -1731,7 +1731,7 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
   }
 
   /**
-   * Stop idle, non-retained surfaces past the idle TTL. Routed through
+   * Stop idle surfaces past the idle TTL. Routed through
    * cleanupIdleBrowserSurfaces so the stop is persisted and queued leases are
    * promoted by the same code path as the public controller method. A
    * failure is logged and does not skip the rest of the sweep tick.
@@ -1791,9 +1791,8 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
    *   4. reclaim retry: only for waiters still queued after idle cleanup.
    *
    * Reentrancy-guarded so an overlapping tick is a no-op. It never stops an
-   * active leased surface or a retained surface (the lease manager excludes
-   * both), except when the allocator itself reports the surface gone or
-   * unhealthy.
+   * active leased surface (the lease manager excludes it), except when the
+   * allocator itself reports the surface gone or unhealthy.
    */
   async function sweepBrowserSurfaceLeases(): Promise<void> {
     if (!browserSurfaceLeaseManager || browserSurfaceSweepInFlight) {

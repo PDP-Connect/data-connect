@@ -2896,7 +2896,7 @@ test("overlapping sweep calls: the second is a no-op while the first is in fligh
 
 // ─── Periodic sweep runs idle cleanup (idle surfaces stop past TTL) ─
 
-test("sweep stops a ready idle non-retained surface past the idle TTL and persists the stop", async (t) => {
+test("sweep stops a ready idle surface past the idle TTL and persists the stop", async (t) => {
   let now = new Date("2026-05-12T12:00:00.000Z");
   const allocator = createReadyAllocator();
   const manager = createDynamicManager({ now: () => now, surfaceCap: 1 });
