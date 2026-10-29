@@ -3272,6 +3272,7 @@ test("a surface persisted as retained reloads without the flag and idle cleanup 
     last_used_at: "2026-05-12T12:00:00.000Z",
   };
   await createSqliteBrowserSurfaceLeaseStore().upsertSurface(surface);
+  getDb().prepare("UPDATE browser_surfaces SET retained = 1 WHERE surface_id = ?").run(surface.surface_id);
   closeDb();
   initDb(path);
   const reloaded = await createSqliteBrowserSurfaceLeaseStore().getSurface(surface.surface_id);
