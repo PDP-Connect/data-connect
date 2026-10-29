@@ -164,13 +164,23 @@ function optionalString(value: string | null | undefined): string | undefined {
   return value || undefined;
 }
 
+// The allocator client keeps only the SDK surface fields and allocator_metadata,
+// so these columns fall back to the allocator's metadata keys.
+const ALLOCATOR_METADATA_FALLBACKS = [
+  ["container_name", "container_name"],
+  ["profile_dir", "profile_path"],
+  ["window_settle_endpoint", "window_settle_endpoint"],
+] as const;
+
 function surfaceMetadata(surface: BrowserSurfaceWithPersistenceMetadata): BrowserSurfacePersistenceMetadata {
-  const metadata = surface as BrowserSurfacePersistenceMetadata;
-  const allocatorProfilePath = surface.allocator_metadata?.profile_path;
-  if (metadata.profile_dir || typeof allocatorProfilePath !== "string" || allocatorProfilePath.length === 0) {
-    return metadata;
+  let metadata: BrowserSurfacePersistenceMetadata = surface;
+  for (const [column, allocatorKey] of ALLOCATOR_METADATA_FALLBACKS) {
+    const value = surface.allocator_metadata?.[allocatorKey];
+    if (!metadata[column] && typeof value === "string" && value.length > 0) {
+      metadata = { ...metadata, [column]: value };
+    }
   }
-  return { ...metadata, profile_dir: allocatorProfilePath };
+  return metadata;
 }
 
 function mapSurface(row: BrowserSurfaceRow | null | undefined): BrowserSurfaceWithPersistenceMetadata | null {

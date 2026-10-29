@@ -3306,7 +3306,7 @@ test("SQLite surface runtime metadata and retention survive database reopen", as
   closeDb();
   initDb(path);
   const reloaded = await createSqliteBrowserSurfaceLeaseStore().getSurface(surface.surface_id);
-  assert.deepEqual(reloaded, surface);
+  assert.deepEqual(reloaded, { ...surface, container_name: "replacement" });
   assert.ok(reloaded);
   const manager = createDynamicManager({ initialSurfaces: [reloaded], now: () => new Date("2026-05-13T12:00:00Z") });
   const allocator = createReadyAllocator();
