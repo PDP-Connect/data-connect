@@ -384,7 +384,8 @@ test("pruning preserves a cold-key anchor while a hot key advances the stream pa
 
     // Bounded-pruning is NOT sacrificed: the cold key keeps exactly its 1
     // anchor row (not unbounded), and the hot key's history is still bounded at
-    // the retention limit (anchor + at most limit-1 older retained rows).
+    // the retention limit (the in-window rows, which include the anchor, plus
+    // the single baseline row kept at the horizon for changes_since).
     const counts = getDb()
       .prepare(
         `SELECT record_key, COUNT(*) AS n
@@ -398,7 +399,7 @@ test("pruning preserves a cold-key anchor while a hot key advances the stream pa
     const hotCount = byKey.hot;
     // biome-ignore lint/suspicious/noUnnecessaryConditions: the runtime fixture deliberately exercises an absent or nullable boundary value.
     assert.ok(hotCount !== undefined);
-    assert.ok(hotCount <= 2, `hot key history stays bounded (got ${hotCount})`);
+    assert.ok(hotCount <= 3, `hot key history stays bounded (got ${hotCount})`);
   } finally {
     teardown();
   }
@@ -466,13 +467,14 @@ test("many cold keys all keep their anchors when one hot key advances the stream
       "no cold-key anchor may be stranded by the hot key"
     );
     // Every cold key keeps exactly one anchor row; total history is bounded
-    // (40 cold anchors + a bounded hot tail), not the full 70-version log.
+    // (40 cold anchors + a bounded hot tail and its horizon baseline), not the
+    // full 70-version log.
     const total = requireRow<{ n: number }>(
       getDb()
         .prepare("SELECT COUNT(*) AS n FROM record_changes WHERE connector_instance_id = ? AND stream = ?")
         .get(cin, STREAM)
     );
-    assert.ok(Number(total.n) <= 40 + 3, `history stays bounded (got ${total.n})`);
+    assert.ok(Number(total.n) <= 40 + 3 + 1, `history stays bounded (got ${total.n})`);
   } finally {
     teardown();
   }

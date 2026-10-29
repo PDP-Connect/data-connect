@@ -42,6 +42,7 @@ import {
   iterate,
   iterateDynamicSqlAcknowledged,
   referenceQueries,
+  transaction,
   writeTransaction,
 } from "../lib/db.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
@@ -393,6 +394,12 @@ interface RecordSnapshot {
   version: number;
 }
 interface ChangesSinceCursor {
+  /**
+   * `connector_instances.record_reset_generation` (decimal text) when the
+   * token was issued. Absent on `beginning` and on tokens issued before the
+   * epoch was added; an absent epoch is generation "0".
+   */
+  epoch?: string;
   kind?: "changes_since";
   version: number;
 }
@@ -415,6 +422,7 @@ interface ChangeGroupRow {
   record_key: string;
 }
 interface VersionCounterRow {
+  changes_floor: number;
   max_version: number;
 }
 interface MinVersionRow {
@@ -641,6 +649,7 @@ type PageOrder = "ASC" | "DESC";
 interface PaginationCursor {
   after_version?: number;
   cursor_value?: unknown;
+  epoch?: unknown;
   order?: unknown;
   primary_key?: unknown;
   session?: unknown;
@@ -1384,11 +1393,12 @@ function writeRecordChange({
 }
 
 // The retained-size delta accounting MUST count/sum exactly the rows the prune
-// DELETE will remove. Both helpers therefore carry the SAME anchor-preserving
-// `NOT EXISTS` clause as `recordsIngestPruneRecordChanges` (see
-// queries/records/ingest/prune-record-changes.sql). If these predicates ever
-// diverge, the retained-size read model would over-report pruned bytes/rows
-// for keys whose anchor we now keep. Kept in lockstep on purpose.
+// DELETE will remove. Both helpers therefore carry the SAME anchor- and
+// baseline-preserving clauses as `recordsIngestPruneRecordChanges` (see
+// queries/records/ingest/prune-record-changes.sql); each takes the horizon
+// twice. If these predicates ever diverge, the retained-size read model would
+// over-report pruned bytes/rows for keys whose anchor or baseline we keep.
+// Kept in lockstep on purpose.
 const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
   AND NOT EXISTS (
     SELECT 1
@@ -1397,6 +1407,14 @@ const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
        AND r.stream = record_changes.stream
        AND r.record_key = record_changes.record_key
        AND r.version = record_changes.version
+  )
+  AND EXISTS (
+    SELECT 1 FROM record_changes n
+     WHERE n.connector_instance_id = record_changes.connector_instance_id
+       AND n.stream = record_changes.stream
+       AND n.record_key = record_changes.record_key
+       AND n.version > record_changes.version
+       AND n.version <= ?
   )`;
 
 function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: string, versionBefore: number): number {
@@ -1408,7 +1426,7 @@ function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: str
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.bytes || 0);
 }
 
@@ -1421,7 +1439,7 @@ function getPrunedRecordChangeCount(connectorInstanceId: string, stream: string,
           AND stream = ?
           AND version <= ?${PRUNE_ANCHOR_PRESERVE_CLAUSE}`
     )
-    .get(connectorInstanceId, stream, versionBefore);
+    .get(connectorInstanceId, stream, versionBefore, versionBefore);
   return Number(row?.count || 0);
 }
 
@@ -1521,6 +1539,24 @@ export function __setAdmissionPreCheckPhaseHookForTest(hook: unknown): void {
 
 async function maybeAfterAdmissionPreCheckPhase(point: string, context: HookContext): Promise<void> {
   await admissionPreCheckPhaseHook?.(point, context);
+}
+
+let sqliteChangesSinceReadHook: FaultHook | null = null;
+
+/**
+ * Test-only seam between the statements of one SQLite changes-feed read, so a
+ * test can commit a write from a second connection at exactly that point.
+ * Fires with `{ connectorInstanceId, stream }` at point `"after-floor-read"`
+ * (epoch, counter, floor and minimum version read and checked) and at point
+ * `"after-change-groups"` (a batch of change groups listed, their predecessor
+ * and current snapshots not yet read). The hook is synchronous: the read is.
+ */
+export function __setSqliteChangesSinceReadHookForTest(hook: unknown): void {
+  sqliteChangesSinceReadHook = isFaultHook(hook) ? hook : null;
+}
+
+function maybeChangesSinceReadHook(point: string, context: HookContext): void {
+  sqliteChangesSinceReadHook?.(point, context);
 }
 
 async function maybeSqliteRecordSortBackfillPhaseForTest(point: string, context: HookContext): Promise<void> {
@@ -2245,7 +2281,20 @@ function pruneRecordChangeHistory(
   const cutoff = nextVersion - changeHistoryLimit;
   const prunedBytesForDelta = getPrunedRecordChangeJsonBytes(connectorInstanceId, stream, cutoff);
   const prunedRowsForDelta = getPrunedRecordChangeCount(connectorInstanceId, stream, cutoff);
-  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff]);
+  // Pruning keeps an anchor per live key plus each key's newest row at or below
+  // the horizon, so every cursor at or above the horizon can still be
+  // reconstructed. MIN(version) in record_changes cannot say that (a cold
+  // anchor pins it near 1), so record the horizon durably, in the transaction
+  // that removes the rows. Cursors below it return cursor_expired.
+  if (cutoff > 0) {
+    getDb()
+      .prepare(
+        `UPDATE version_counter SET changes_floor = MAX(changes_floor, ?)
+          WHERE connector_instance_id = ? AND stream = ?`
+      )
+      .run(cutoff, connectorInstanceId, stream);
+  }
+  exec(referenceQueries.recordsIngestPruneRecordChanges, [connectorInstanceId, stream, cutoff, cutoff]);
   return { prunedBytesForDelta, prunedRowsForDelta };
 }
 
@@ -4653,7 +4702,12 @@ function parseChangesSinceCursor(str: string): ChangesSinceCursor | null {
   if (decoded.kind !== "changes_since" || typeof decoded.version !== "number" || !Number.isInteger(decoded.version)) {
     return null;
   }
-  return { kind: "changes_since", version: decoded.version };
+  if (decoded.epoch === undefined) {
+    return { kind: "changes_since", version: decoded.version };
+  }
+  return typeof decoded.epoch === "string"
+    ? { epoch: decoded.epoch, kind: "changes_since", version: decoded.version }
+    : null;
 }
 
 // Self-teaching error message: when a caller passes something other than the
@@ -4689,13 +4743,16 @@ function encodeChangesPageCursor({
   sinceVersion,
   afterVersion,
   sessionMaxVersion,
+  epoch,
 }: {
   afterVersion: number;
+  epoch: string;
   sessionMaxVersion: number;
   sinceVersion: number;
 }): string {
   return encodeCursor({
     after_version: afterVersion,
+    epoch,
     kind: "page",
     session: "changes",
     session_max_version: sessionMaxVersion,
@@ -4703,8 +4760,8 @@ function encodeChangesPageCursor({
   });
 }
 
-function encodeChangesSinceCursor(version: number): string {
-  return encodeCursor({ kind: "changes_since", version });
+function encodeChangesSinceCursor(version: number, epoch: string): string {
+  return encodeCursor({ epoch, kind: "changes_since", version });
 }
 
 function getSnapshotAtVersion(
@@ -5094,8 +5151,17 @@ export async function recordCurrentGenerationUndeclaredWrite(
   });
 }
 
+/** Decimal text so values beyond 2^53-1 survive; a missing connection reads as "0". */
+function readRecordResetGeneration(connectorInstanceId: string): string {
+  const row = getOne<{ reset_generation: string }>(referenceQueries.recordsDeleteGetRecordResetGeneration, [
+    connectorInstanceId,
+  ]);
+  return String(row?.reset_generation ?? "0");
+}
+
 interface ValidatedChangeVersions {
   effectiveSessionMaxVersion: number;
+  epoch: string;
   verifiedAfterVersion: number;
   verifiedSinceVersion: number;
 }
@@ -5120,6 +5186,22 @@ function validateChangesSinceVersions(
     throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
   }
 
+  // A bulk reset deletes the stream's records, history and version counter in
+  // one transaction and advances the connection's reset generation in that
+  // same transaction, so versions can be reissued afterwards. A token (or page
+  // cursor) minted under an earlier generation names versions from a space
+  // that no longer exists and must not be replayed against the new one.
+  // `beginning` and version-0 tokens hold no consumer state and stay valid.
+  const epoch = readRecordResetGeneration(connectorInstanceId);
+  const tokenEpoch = changesSince === null ? changesCursor?.epoch : changesSince.epoch;
+  if (tokenEpoch !== undefined && typeof tokenEpoch !== "string") {
+    throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
+  }
+  const tokenHoldsNoState = changesSince !== null && changesSince.version === 0;
+  if (!tokenHoldsNoState && (tokenEpoch ?? "0") !== epoch) {
+    throw codedError("changes_since cursor predates a stream reset; full re-sync required", "cursor_expired");
+  }
+
   const vcRow = getOne<VersionCounterRow>(referenceQueries.recordsIngestGetVersionCounter, [
     connectorInstanceId,
     stream,
@@ -5135,11 +5217,29 @@ function validateChangesSinceVersions(
     stream,
   ]);
   const minVersion = minChangeRow?.min_version ?? null;
-  if (minVersion !== null && sinceVersion < minVersion - 1) {
+  // `beginning` holds no consumer state, so it needs no history below it and
+  // must stay usable as the recovery request after a 410.
+  if (sinceVersion > 0 && minVersion !== null && sinceVersion < minVersion - 1) {
     throw codedError("changes_since cursor is too old; full re-sync required", "cursor_expired");
   }
+  // The minimum above is only a lower bound: pruning keeps a sparse anchor per
+  // live key, so it stays at a cold key's first version while other keys'
+  // history below the retention horizon is gone. `changes_floor` is that
+  // horizon: a cursor at or above it can resolve every key's snapshot, one
+  // below it would get its deletions silently suppressed. A `beginning` request
+  // needs no predecessor and stays valid. A continued page of a session is
+  // read at `session_max_version`; once pruning moves the horizon past that
+  // snapshot, unseen keys' rows at it may be gone, so the session expires
+  // rather than serve an incomplete page.
+  const changesFloor = vcRow?.changes_floor ?? 0;
+  const belowFloor = sinceVersion > 0 && sinceVersion < changesFloor;
+  const sessionSnapshotPruned = changesSince === null && effectiveSessionMaxVersion < changesFloor;
+  if (belowFloor || sessionSnapshotPruned) {
+    throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
+  }
+  maybeChangesSinceReadHook("after-floor-read", { connectorInstanceId, stream });
 
-  return { effectiveSessionMaxVersion, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
+  return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
 }
 
 function fetchChangeGroupBatch(
@@ -5187,6 +5287,7 @@ function collectVisibleChanges(
       effectiveSessionMaxVersion,
       batchSize
     );
+    maybeChangesSinceReadHook("after-change-groups", { connectorInstanceId, stream });
 
     if (!changeGroups.length) {
       break;
@@ -5289,7 +5390,25 @@ interface QueryRecordsChangesSinceArgs {
   stream: string;
 }
 
-function queryRecordsChangesSince({
+/**
+ * Answer one changes request from a single SQLite read snapshot.
+ *
+ * The request reads the reset epoch, the counter and floor, the change groups
+ * and, per group, a predecessor and a current snapshot, each as its own
+ * statement. Synchronous JavaScript keeps this connection's own writers out
+ * between them, but another connection or process can commit in between: a
+ * prune that raises `changes_floor` and removes a key's baseline would leave the
+ * reader a tombstone with no visible predecessor. It would drop the deletion yet
+ * return a token at the new floor, which stays valid, so the deletion is lost
+ * for good. A deferred transaction takes its WAL snapshot at the first read and
+ * holds it to the end, so every statement sees the state the floor check saw.
+ * Throwing (`cursor_expired`) rolls the read-only transaction back unchanged.
+ */
+function queryRecordsChangesSince(args: QueryRecordsChangesSinceArgs): ListResponse {
+  return transaction(() => readChangesSinceSnapshot(args));
+}
+
+function readChangesSinceSnapshot({
   changesSince,
   compiledFilters,
   connectorInstanceId,
@@ -5300,12 +5419,8 @@ function queryRecordsChangesSince({
   requestWarnings,
   stream,
 }: QueryRecordsChangesSinceArgs): ListResponse {
-  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion } = validateChangesSinceVersions(
-    changesSince,
-    paginationCursor,
-    connectorInstanceId,
-    stream
-  );
+  const { verifiedSinceVersion, verifiedAfterVersion, effectiveSessionMaxVersion, epoch } =
+    validateChangesSinceVersions(changesSince, paginationCursor, connectorInstanceId, stream);
 
   const visibleChanges = collectVisibleChanges(
     connectorInstanceId,
@@ -5335,12 +5450,13 @@ function queryRecordsChangesSince({
     }
     response.next_cursor = encodeChangesPageCursor({
       afterVersion: lastGroup.latestVersion,
+      epoch,
       sessionMaxVersion: effectiveSessionMaxVersion,
       sinceVersion: verifiedSinceVersion,
     });
   }
 
-  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion);
+  response.next_changes_since = encodeChangesSinceCursor(effectiveSessionMaxVersion, epoch);
   attachRequestWarningsToResponse(response, requestWarnings);
   return response;
 }

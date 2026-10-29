@@ -162,6 +162,65 @@ it under Settings > Owner password. `POST /owner/logout` is listed under
 - `/v1/streams/...`
 - owner and client queries under the current reference contract
 
+### Change-history retention and `changes_since`
+
+`PDPP_CHANGE_HISTORY_LIMIT` (default `0`, unbounded) bounds each stream's
+`record_changes` history. With a limit `L`, a write at version `V` prunes rows
+at or below the horizon `V - L`, keeping each live key's current row and its
+newest row at or below the horizon. Every `changes_since` token at or above the
+horizon can therefore still be answered exactly, deletions included.
+
+The horizon is stored per stream as `version_counter.changes_floor`. A
+`changes_since` token below it, or a changes page cursor whose session snapshot
+is below it, returns `410 cursor_expired`; the client restarts from `beginning`,
+which is always accepted. A bulk stream reset also expires earlier nonzero
+tokens: they carry the connection's `record_reset_generation`.
+
+A request reads the counter, the floor, the change groups and each key's
+snapshots from one database snapshot: a single read transaction on SQLite, one
+`REPEATABLE READ` transaction on PostgreSQL. A prune that another connection or
+process commits during the request cannot remove a baseline the request still
+has to read.
+
+Rules for the floor:
+
+- The column is created at startup, and the seed runs only then; later startups
+  keep the stored floor. The seed first sets each stream's `version_counter` row
+  to the stream's highest durable version, the larger of its newest
+  `record_changes` and newest `records` version. That is the head the allocator
+  continues from; a counter that lags is raised, never lowered. A current row
+  whose version has no `record_changes` row first gets that row written back
+  from its current state, so `beginning` and the change predecessor lookup see
+  the current payload. A stream's floor
+  then starts at that head when `PDPP_CHANGE_HISTORY_LIMIT > 0` at that boot, or
+  when its history has a gap: fewer retained rows than versions means rows were
+  pruned or compacted earlier. A complete history starts at `0` only with
+  retention off.
+- A stream that has history or current rows but no `version_counter` row (a
+  lost counter) gets the row the allocator would create, at the same head, and
+  then the same rule applies. Otherwise its next write would recreate the row
+  with floor `0`.
+- Tokens that expire on the first start after the upgrade: a nonzero token
+  strictly below the seeded floor, so only on streams whose floor was seeded
+  above `0` (retention on at that boot, or a gapped history). A token equal to
+  the floor stays valid, and so do `beginning` and version-`0` tokens. The floor
+  expires nothing on a complete history with retention off. Separately, a token
+  issued before epochs existed has no epoch and reads as generation `0`: a
+  nonzero one expires on every stream of a connection whose `record_reset_generation` is
+  already above `0`, whatever the floor.
+- On PostgreSQL the seed takes an `ACCESS EXCLUSIVE` lock on `version_counter`
+  and waits for it at most 30 s (`PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS`).
+  If a long-running transaction holds the table, startup fails with an error
+  that names it, instead of queuing every ingest and read behind the lock. Start
+  again once that transaction ends.
+- `scripts/compact-record-history.ts` raises the floor, in the same transaction
+  as its deletes, to the newest version that superseded any row it removes. It
+  takes the connection's write lock first, so it cannot interleave with an
+  ingest or a stream reset. It refuses a plan ("stale compaction plan") when the
+  connection was reset since the plan was made, when a named row no longer
+  matches the digest taken at plan time, or when a named row is now the key's
+  current row. Re-run the plan.
+
 ### Expandable records
 
 `GET /v1/streams/:stream/records` and
