@@ -1,0 +1,345 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+// A stopped or replaced scheduler must not launch a new automatic run.
+//
+// `createReferenceSchedulerManager.restart` stops the old scheduler on every
+// schedule mutation, but a tick already awaiting the dispatch governor's
+// source-pressure probe survived the stop and went on to launch its captured
+// schedule, so a schedule the owner had just disabled still ran once.
+//
+// These tests pause the automatic-dispatch path at each await gap (governor
+// probe, readiness preflight, credential resolution, state load), stop the
+// scheduler while paused, release the gap, and assert nothing is launched and
+// no run record is created. They also pin the second defence: final admission
+// re-reads the schedule's CURRENT enabled flag from the store, so a disable is
+// honoured even when a stale scheduler instance is not stopped.
+//
+// Every test awaits a deferred that the code under test must resolve, so each
+// carries HANG_GUARD: a regression fails the test instead of hanging the file.
+// Cleanup is registered with `t.after`, not `finally`: a timed-out test body
+// never resumes, so a `finally` would not run.
+
+import assert from "node:assert/strict";
+import test, { mock } from "node:test";
+
+import { createScheduler } from "../runtime/scheduler.ts";
+import type { RunManagedConnectorViaController, RunRecord } from "../runtime/scheduler-domain-types.ts";
+import { closeDb, initDb } from "../server/db.ts";
+import { createRunManagedConnectorViaController } from "../server/scheduler-manager-factory.ts";
+import {
+  BACKGROUND_SAFE_MANIFEST,
+  buildStore,
+  CONNECTOR_ID,
+  deferred,
+  drain,
+  HANG_GUARD,
+  INSTANCE_ID,
+  OWNER,
+  type ScheduleRow,
+} from "./helpers/scheduler-stop-harness.ts";
+
+type Stage = "governor" | "preflight" | "credentials" | "state";
+
+interface Harness {
+  completed: RunRecord[];
+  controllerCalls: string[];
+  entered: Promise<void>;
+  launched: Promise<void>;
+  release: () => void;
+  scheduler: ReturnType<typeof createScheduler>;
+}
+
+// Builds a scheduler whose automatic dispatch parks at `stage` until `release`.
+function buildHarness(stage: Stage | null, store: ReturnType<typeof buildStore>): Harness {
+  const entered = deferred<void>();
+  const gate = deferred<void>();
+  const launched = deferred<void>();
+  const completed: RunRecord[] = [];
+  const controllerCalls: string[] = [];
+
+  const park = async (at: Stage): Promise<void> => {
+    if (at !== stage) {
+      return;
+    }
+    entered.resolve();
+    await gate.promise;
+  };
+
+  const runManagedConnectorViaController: RunManagedConnectorViaController = (id) => {
+    controllerCalls.push(id);
+    launched.resolve();
+    return { run_id: "run_stop_epoch_1", status: "succeeded", trace_id: "trace-stop-epoch" };
+  };
+
+  const scheduler = createScheduler({
+    admitRunConnection: ({ connectorId, connectorInstanceId, ownerSubjectId }) =>
+      Promise.resolve({
+        connectorId,
+        connectorInstanceId: connectorInstanceId ?? connectorId,
+        ownerSubjectId: ownerSubjectId ?? OWNER,
+      }),
+    connectors: [
+      {
+        connectorId: CONNECTOR_ID,
+        connectorInstanceId: INSTANCE_ID,
+        connectorPath: "/nonexistent/connector.mjs",
+        intervalMs: 60_000,
+        manifest: BACKGROUND_SAFE_MANIFEST,
+        maxRetries: 0,
+        ownerSubjectId: OWNER,
+        ownerToken: "owner-token",
+      },
+    ],
+    getSourcePressureGaps: async () => {
+      await park("governor");
+      return [];
+    },
+    getState: async () => {
+      await park("state");
+      return null;
+    },
+    isManagedConnector: () => true,
+    onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+    onRunComplete: (record) => completed.push(record),
+    readinessChecker: async () => {
+      await park("preflight");
+      return { ready: true };
+    },
+    resolveStaticSecretRunEnv: async () => {
+      await park("credentials");
+      return null;
+    },
+    rsUrl: "http://localhost.invalid",
+    runManagedConnectorViaController,
+    schedulerStore: store,
+  });
+
+  return {
+    completed,
+    controllerCalls,
+    entered: entered.promise,
+    launched: launched.promise,
+    release: () => gate.resolve(),
+    scheduler,
+  };
+}
+
+for (const stage of ["governor", "preflight", "credentials", "state"] as const) {
+  test(`stop() while the dispatch is parked at ${stage} launches nothing`, HANG_GUARD, async (t) => {
+    const h = buildHarness(stage, buildStore());
+    t.after(() => h.scheduler.stop());
+
+    h.scheduler.start();
+    await h.entered;
+    assert.deepEqual(h.controllerCalls, [], "no run existed before stop");
+
+    h.scheduler.stop();
+    h.release();
+    await drain();
+
+    assert.deepEqual(h.controllerCalls, [], "a stopped scheduler must not call the controller");
+    assert.deepEqual(h.completed, [], "a dropped dispatch must not record a run, skip or retry");
+  });
+}
+
+test("disable during a pending governor probe on a replaced scheduler launches nothing", HANG_GUARD, async (t) => {
+  let row: ScheduleRow = { enabled: true };
+  const h = buildHarness(
+    "governor",
+    buildStore(() => row)
+  );
+  t.after(() => h.scheduler.stop());
+
+  h.scheduler.start();
+  await h.entered;
+
+  // The owner disables the schedule; the manager's restart() stops the old
+  // scheduler and builds a replacement that no longer contains the schedule.
+  row = { enabled: false };
+  h.scheduler.stop();
+  h.release();
+  await drain();
+
+  assert.deepEqual(h.controllerCalls, []);
+  assert.deepEqual(h.completed, []);
+});
+
+test("final admission refuses a schedule disabled in the store even if the scheduler was never stopped", HANG_GUARD, async (t) => {
+  let row: ScheduleRow = { enabled: true };
+  const h = buildHarness(
+    "governor",
+    buildStore(() => row)
+  );
+  t.after(() => h.scheduler.stop());
+
+  h.scheduler.start();
+  await h.entered;
+
+  row = { enabled: false };
+  h.release();
+  await drain();
+
+  assert.deepEqual(h.controllerCalls, [], "a stale instance must honour the current disabled flag");
+  assert.deepEqual(h.completed, []);
+});
+
+test("final admission refuses a schedule deleted from the store", HANG_GUARD, async (t) => {
+  let row: ScheduleRow = { enabled: true };
+  const h = buildHarness(
+    "governor",
+    buildStore(() => row)
+  );
+  t.after(() => h.scheduler.stop());
+
+  h.scheduler.start();
+  await h.entered;
+
+  row = null;
+  h.release();
+  await drain();
+
+  assert.deepEqual(h.controllerCalls, []);
+  assert.deepEqual(h.completed, []);
+});
+
+test("a still-enabled schedule on a live scheduler still dispatches", HANG_GUARD, async (t) => {
+  const h = buildHarness(
+    "governor",
+    buildStore(() => ({ enabled: true }))
+  );
+  t.after(() => h.scheduler.stop());
+
+  h.scheduler.start();
+  await h.entered;
+  h.release();
+  await h.launched;
+
+  assert.deepEqual(h.controllerCalls, [CONNECTOR_ID]);
+});
+
+test("a stop then start dispatches on the new epoch but never on the stale one", HANG_GUARD, async (t) => {
+  const h = buildHarness(
+    "governor",
+    buildStore(() => ({ enabled: true }))
+  );
+  t.after(() => h.scheduler.stop());
+
+  h.scheduler.start();
+  await h.entered;
+  h.scheduler.stop();
+  h.release();
+  await drain();
+  assert.deepEqual(h.controllerCalls, [], "the pre-stop tick is dropped");
+
+  h.scheduler.start();
+  await h.launched;
+  assert.deepEqual(h.controllerCalls, [CONNECTOR_ID], "the post-restart tick dispatches");
+});
+
+type ManagedController = Parameters<typeof createRunManagedConnectorViaController>[0];
+
+// ── Production managed-run adapter ─────────────────────────────────────────
+//
+// The tests above inject a bare callback. The production route is
+// `createRunManagedConnectorViaController(controller)`, which ends in
+// `controller.runNow`; these drive that adapter with a stub controller so the
+// assertion is on `controller.runNow` itself.
+
+function managedControllerStub(onRunNow: (call: number) => void, awaitRun: () => Promise<string>): ManagedController {
+  let calls = 0;
+  return {
+    awaitRun,
+    browserSurfaceLeaseManager: { isManagedConnector: () => true },
+    runNow: async () => {
+      calls += 1;
+      onRunNow(calls);
+      return { run_id: `run_stop_epoch_managed_${calls}`, status: "started", trace_id: "trace-stop-epoch" };
+    },
+  } as unknown as ManagedController;
+}
+
+function buildManagedScheduler(controller: ManagedController, gate?: { entered: () => void; released: Promise<void> }) {
+  return createScheduler({
+    connectors: [
+      {
+        connectorId: CONNECTOR_ID,
+        connectorInstanceId: INSTANCE_ID,
+        connectorPath: "/nonexistent/connector.mjs",
+        intervalMs: 60_000,
+        manifest: BACKGROUND_SAFE_MANIFEST,
+        maxRetries: 2,
+        ownerSubjectId: OWNER,
+        ownerToken: "owner-token",
+      },
+    ],
+    getSourcePressureGaps: async () => {
+      gate?.entered();
+      await gate?.released;
+      return [];
+    },
+    onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+    readinessChecker: async () => ({ ready: true }),
+    rsUrl: "http://localhost.invalid",
+    runManagedConnectorViaController: createRunManagedConnectorViaController(controller) ?? null,
+    schedulerStore: buildStore(),
+  });
+}
+
+test("production managed adapter: stop() while the governor probe is pending never reaches controller.runNow", HANG_GUARD, async (t) => {
+  const entered = deferred<void>();
+  const gate = deferred<void>();
+  const runNowCalls: number[] = [];
+  const scheduler = buildManagedScheduler(
+    managedControllerStub(
+      (call) => runNowCalls.push(call),
+      async () => "succeeded"
+    ),
+    { entered: () => entered.resolve(), released: gate.promise }
+  );
+  t.after(() => scheduler.stop());
+
+  scheduler.start();
+  await entered.promise;
+  assert.deepEqual(runNowCalls, [], "no run existed before stop");
+
+  scheduler.stop();
+  gate.resolve();
+  await drain();
+
+  assert.deepEqual(runNowCalls, [], "controller.runNow must not be called after stop");
+});
+
+test("production managed adapter: a retry after the scheduler is stopped never reaches controller.runNow", HANG_GUARD, async (t) => {
+  initDb(":memory:");
+  // The retry back-off is a real 1 s timer; fake only setTimeout so the test
+  // advances it without waiting.
+  mock.timers.enable({ apis: ["setTimeout"] });
+  t.after(() => mock.timers.reset());
+
+  const firstAttemptSettled = deferred<void>();
+  const runNowCalls: number[] = [];
+  // biome-ignore lint/style/useConst: assigned after the controller stub that closes over it
+  let scheduler!: ReturnType<typeof createScheduler>;
+  scheduler = buildManagedScheduler(
+    managedControllerStub(
+      (call) => runNowCalls.push(call),
+      async () => {
+        // The first attempt fails retryably while the owner disables the schedule.
+        scheduler.stop();
+        firstAttemptSettled.resolve();
+        return "failed";
+      }
+    )
+  );
+  t.after(() => scheduler.stop());
+  t.after(() => closeDb());
+
+  scheduler.start();
+  await firstAttemptSettled.promise;
+  await drain();
+  mock.timers.tick(5000);
+  await drain();
+
+  assert.deepEqual(runNowCalls, [1], "the stopped scheduler must not start a retry run");
+});
