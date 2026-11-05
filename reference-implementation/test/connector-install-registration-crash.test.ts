@@ -463,3 +463,21 @@ test("a retried install after a kill between pointer and registry also restores 
     assert.equal((await agreement()).agree, true);
   });
 });
+
+test("killed after the root is published and before the pointer write: a retried install adopts the root", async () => {
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    const env = { PDPP_DATA_DIR: dataDir };
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env,
+    });
+    await initDb(dbPath);
+    assert.equal(existsSync(rootOf(dataDir, GMAIL_INSTALL_DIGEST)), true, "the crash left a published root");
+    assert.equal(await activeRecord(), null, "no pointer was written");
+
+    const adopted = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
+
+    assert.equal(adopted.digest, GMAIL_INSTALL_DIGEST);
+    assert.equal((await agreement()).agree, true, "the adopted root is active and registered");
+  });
+});

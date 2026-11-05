@@ -852,6 +852,7 @@ async function installStagedEntry(options: {
     const record = readVerifiedRecord(staged, verifiedEntry, installed.sourceDeclarationSha256);
     renameSync(staged, options.root);
     published = true;
+    crashPoint("connector-install:after-publish");
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
@@ -1012,18 +1013,17 @@ export function createConnectorInstallService(options: {
           );
         } else {
           // A crash can leave the published directory between rename and the
-          // active-record commit. Do not delete a valid retained root only
-          // because its active record is missing.
+          // active-record commit. A root that still verifies against the catalog
+          // entry is adopted: activate and register it as an install would.
+          // Anything else is an invalid leftover and is removed.
+          let adoptable = true;
           try {
             readVerifiedRecord(root, entry);
-            throw new Error("Connector digest root already exists without a matching active record.");
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message === "Connector digest root already exists without a matching active record."
-            ) {
-              throw error;
-            }
+          } catch {
+            adoptable = false;
+          }
+          if (adoptable) {
+            return await reuseExistingInstall(root, entry, null, null, dataDir, options.registerManifest, store, signal);
           }
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
