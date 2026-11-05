@@ -15,12 +15,18 @@ import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../ser
 import { createAlreadyAdmittedTestDatabaseChildAttachment } from "../server/postgres-test-database-guard.ts";
 import { ingestRecord } from "../server/records.ts";
 import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
-import { computeSemanticEntries, makeStubBackend } from "../server/search-semantic.ts";
+import { resolveLexicalBackfillConnectorInstanceIds } from "../server/search.ts";
+import {
+  computeSemanticEntries,
+  makeStubBackend,
+  resolveSemanticBackfillConnectorInstanceIds,
+} from "../server/search-semantic.ts";
 import { queueStartupSearchIndexRetry } from "../server/startup-search-index-retry.ts";
 import { bumpStorageGeneration, currentStorageGeneration } from "../server/storage-generation.ts";
 import {
   clearSearchIndexDirty,
   listDirtySearchIndexScopes,
+  listStartupSearchIndexInstances,
   markStartupSearchIndexFailure,
 } from "../server/stores/search-index-dirty-store.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
@@ -423,7 +429,12 @@ test("one instance that cannot be queued does not leave its siblings without a r
     }
     await assert.rejects(
       queueStartupSearchIndexRetry(manifest as never, currentStorageGeneration()),
-      (error) => error instanceof AggregateError && error.errors.length === 1
+      (error) =>
+        error instanceof AggregateError &&
+        error.errors.length === 1 &&
+        error.errors[0] instanceof Error &&
+        error.errors[0].message.includes(poisoned) &&
+        error.errors[0].cause instanceof Error
     );
     assert.deepEqual(
       (await listDirtySearchIndexScopes(25))
@@ -448,7 +459,7 @@ const FAULT = "startup_retry_test_fault";
 
 /**
  * Restart over one retained record and no tickets, then let the real startup
- * backfill run. `fault` makes the first ticket write fail on either backend.
+ * backfill run. `fault` makes the first ("once") or every ("always") ticket write fail on either backend.
  * SQLite cannot keep a counter across a rolled-back statement, so there the
  * fault trigger is dropped when the server logs the failed queue write.
  */
@@ -459,7 +470,7 @@ async function startOverRetainedRecord({
   source = manifest,
 }: {
   backend: unknown;
-  fault?: boolean;
+  fault?: false | "once" | "always";
   semanticRetrievalSupported?: boolean;
   source?: typeof manifest;
 }) {
@@ -491,7 +502,7 @@ async function startOverRetainedRecord({
       await postgresQuery(`CREATE SEQUENCE IF NOT EXISTS ${FAULT}_seq`);
       await postgresQuery(`SELECT setval('${FAULT}_seq', 1, false)`);
       await postgresQuery(
-        `CREATE OR REPLACE FUNCTION ${FAULT}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('${FAULT}_seq') = 1 THEN RAISE EXCEPTION 'transient fault'; END IF; RETURN NEW; END $$`
+        `CREATE OR REPLACE FUNCTION ${FAULT}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF ${fault === "always" ? "true" : `nextval('${FAULT}_seq') = 1`} THEN RAISE EXCEPTION 'transient fault'; END IF; RETURN NEW; END $$`
       );
       await postgresQuery(
         `CREATE TRIGGER ${FAULT} BEFORE INSERT OR UPDATE ON search_index_dirty FOR EACH ROW EXECUTE FUNCTION ${FAULT}()`
@@ -513,7 +524,7 @@ async function startOverRetainedRecord({
       write(line: string) {
         const message = String(JSON.parse(line).msg);
         warnings.push(message);
-        if (!pg && fault && message.includes("retry queue write failed")) {
+        if (!pg && fault === "once" && message.includes("retry queue write failed")) {
           getDb().exec(`DROP TRIGGER IF EXISTS ${FAULT}`);
         }
       },
@@ -570,7 +581,7 @@ async function retainedTickets(connectorId: string = manifest.connector_id) {
 }
 
 test("a failed ticket write at startup is retried once so the failed backfill is not left without a ticket", async () => {
-  const run = await startOverRetainedRecord({ backend: failingEmbeddingBackend(), fault: true });
+  const run = await startOverRetainedRecord({ backend: failingEmbeddingBackend(), fault: "once" });
   try {
     await run.server.startupBackfillDone;
     assert.equal(
@@ -617,5 +628,76 @@ test("no ticket is queued when no semantic backend is configured or the connecto
     assert.equal((await retainedTickets(lexicalOnly.connector_id)).length, 0, "no semantic_fields declared");
   } finally {
     await noFields.finish();
+  }
+});
+
+test("an instance that has only records is queued through the semantic resolver, not the orphan lookup", async () => {
+  const pg = Boolean(process.env.PDPP_TEST_POSTGRES_URL);
+  if (pg) {
+    await initPostgresStorage({ backend: "postgres", databaseUrl: process.env.PDPP_TEST_POSTGRES_URL || "" });
+  } else {
+    initDb(":memory:");
+  }
+  const unbound = "cin_records_only";
+  try {
+    await registerConnector(manifest, { backfillRetrievalIndexes: false });
+    await ingestRecord(
+      { connector_id: manifest.connector_id, connector_instance_id: unbound },
+      {
+        data: { id: "k1", subject: "synthetic records only" },
+        emitted_at: "2026-07-16T00:00:00.000Z",
+        key: "k1",
+        stream: "items",
+      },
+      { deferIndexes: true }
+    );
+    if (pg) {
+      await postgresQuery("DELETE FROM search_index_dirty");
+    } else {
+      getDb().prepare("DELETE FROM search_index_dirty").run();
+    }
+    const backfilled = await resolveLexicalBackfillConnectorInstanceIds({
+      connectorId: manifest.connector_id,
+      manifest: manifest as never,
+    });
+    assert.ok(!backfilled.includes(unbound), "the lexical resolver does not return it");
+    assert.deepEqual(await listStartupSearchIndexInstances(manifest.connector_id), [], "no index state exists for it");
+    assert.ok(
+      (
+        await resolveSemanticBackfillConnectorInstanceIds({
+          connectorId: manifest.connector_id,
+          manifest: manifest as never,
+        })
+      ).includes(unbound),
+      "the semantic resolver lists every instance with records for a manifest stream"
+    );
+    await queueStartupSearchIndexRetry(manifest as never, currentStorageGeneration());
+    assert.ok(
+      (await listDirtySearchIndexScopes(25)).some((t) => t.connectorInstanceId === unbound),
+      "so a failed startup backfill still queues it, and the orphan lookup needs no `records` branch"
+    );
+  } finally {
+    if (pg) {
+      await clearRetainedPgState();
+      await closePostgresStorage();
+    } else {
+      closeDb();
+    }
+  }
+});
+
+test("a ticket write that keeps failing does not fail startup", async () => {
+  const run = await startOverRetainedRecord({ backend: failingEmbeddingBackend(), fault: "always" });
+  try {
+    await run.server.startupBackfillDone;
+    assert.ok(
+      run.warnings.some((m) => m.includes("ticket write failed again after retry")),
+      `the retry also failed and was logged: ${JSON.stringify(run.warnings)}`
+    );
+    assert.equal((await retainedTickets()).length, 0, "no ticket could be written");
+    const response = await fetch(`http://localhost:${run.server.asPort}/.well-known/oauth-authorization-server`);
+    assert.ok(response.status < 500, "the server still answers");
+  } finally {
+    await run.finish();
   }
 });

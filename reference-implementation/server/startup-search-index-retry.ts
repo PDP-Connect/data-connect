@@ -49,7 +49,11 @@ export async function queueStartupSearchIndexRetry(manifest: Manifest, generatio
         generation,
       });
     } catch (error) {
-      failures.push(error);
+      failures.push(
+        new Error(`startup search-index retry could not be queued for instance ${connectorInstanceId}`, {
+          cause: error,
+        })
+      );
     }
   }
   if (failures.length > 0) {
