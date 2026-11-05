@@ -250,3 +250,41 @@ test("older consent models without connector provenance keep the genuine fallbac
   assert.ok(view.container.querySelector(".pdpp-connector-icon .pdpp-monogram"));
   assert.equal(view.container.querySelector(".pdpp-connector-icon svg"), null, "do not infer a brand from a source ID or account name");
 });
+
+test("a white-glyph connector mark keeps its declared brand background on the consent screen", async () => {
+  const brandBackground = "#1DB954";
+  const whiteGlyph = '<svg viewBox="0 0 24 24"><path fill="#ffffff" d="M3 3h18v18H3z"/></svg>';
+  const whiteGlyphManifest = {
+    ...manifest,
+    brand: { background_color: brandBackground },
+    icon: { kind: "inline_svg", svg: whiteGlyph },
+  };
+  const whiteGlyphModel = await buildHostedMcpConsentChallengeModel(
+    "challenge",
+    "owner",
+    {
+      canonicalConnectorKey: () => "spotify",
+      encodeHostedMcpSelection: () => "source",
+      encodeHostedMcpStreamSelection: ({ streamName }) => streamName,
+      getConnectorManifest: async () => whiteGlyphManifest,
+      hostedMcpSourceKey: () => "spotify:account",
+      isInternalConnectorId: () => false,
+      listActiveBindingsForGrant: async () => [{ connectorInstanceId: "account" }],
+      listRegisteredConnectorIds: async () => [manifest.connector_id],
+      listStreamsWithRecords: async () => [],
+      projectBindingForWire: () => ({ display_name: "Spotify - owner", connection_id: "account" }),
+    },
+    {},
+    null,
+  );
+  const view = render(createElement(ConsentScreen, {
+    connectorIndex: {}, model: whiteGlyphModel, acceptAction: async () => "", rejectAction: async () => "",
+  }));
+  const tile = view.container.querySelector(".pdpp-connector-icon");
+  assert.ok(tile?.querySelector("svg"), "the manifest glyph renders");
+  assert.equal(
+    dom.window.getComputedStyle(tile).backgroundColor,
+    "rgb(29, 185, 84)",
+    "a white glyph needs the connector's declared brand background to be visible",
+  );
+});

@@ -761,7 +761,13 @@ export interface HostedMcpConsentChallengeModel {
     /** Display provenance only; grant selection still uses the opaque values below. */
     readonly connectorId: string;
     /** Manifest-declared brand glyph, passed straight to ConnectorIcon; null renders its Monogram. */
-    readonly icon: { readonly color: string | null; readonly kind: string | null; readonly svg: string | null } | null;
+    readonly icon: {
+      /** The connector's declared brand background (`brand.background_color`); a light glyph needs it to be visible. */
+      readonly backgroundColor: string | null;
+      readonly color: string | null;
+      readonly kind: string | null;
+      readonly svg: string | null;
+    } | null;
     readonly id: string;
     readonly name: string;
     readonly selectionValue: string;
@@ -847,10 +853,21 @@ export async function buildHostedMcpConsentChallengeModel(
       continue;
     }
     const manifest = await caps.getConnectorManifest(row.connectorId);
-    const icon = (manifest as { icon?: { color?: string | null; kind?: string | null; svg?: string | null } | null })?.icon;
+    const declared = manifest as {
+      brand?: { background_color?: string | null } | null;
+      icon?: { color?: string | null; kind?: string | null; svg?: string | null } | null;
+    } | null;
+    const icon = declared?.icon;
     icons.set(
       row.connectorId,
-      icon?.svg ? { color: icon.color ?? null, kind: icon.kind ?? null, svg: icon.svg } : null
+      icon?.svg
+        ? {
+            backgroundColor: declared?.brand?.background_color ?? null,
+            color: icon.color ?? null,
+            kind: icon.kind ?? null,
+            svg: icon.svg,
+          }
+        : null
     );
   }
   return {
