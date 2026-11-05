@@ -1059,6 +1059,7 @@ test("a failed catalog refresh keeps serving the last verified copy", async (t) 
     // One failed fetch per TTL window, not one per render.
     assert.equal(loadCount, 2);
     assert.equal(consoleError.mock.callCount(), 1);
+    assert.match(String(consoleError.mock.calls[0]?.arguments[0]), /catalog refresh failed; serving the last verified copy/);
   } finally {
     t.mock.timers.reset();
     rmSync(dataDir, { force: true, recursive: true });
@@ -1177,6 +1178,150 @@ test("install resolves its digest from a fresh catalog, not the cached copy", as
     current = published;
     const installed = await service.install("github", published.digest);
     assert.equal(installed.digest, published.digest);
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("the default catalog TTL holds until the full window passes", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  let loadCount = 0;
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        loadCount += 1;
+        return [entry];
+      },
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    await service.catalog();
+    t.mock.timers.tick(DEFAULT_CATALOG_TTL_MS - 1);
+    await service.catalog();
+    assert.equal(loadCount, 1);
+    t.mock.timers.tick(1);
+    await service.catalog();
+    assert.equal(loadCount, 2);
+  } finally {
+    t.mock.timers.reset();
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("a positive PDPP_CONNECTOR_CATALOG_TTL_MS replaces the default window", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const previous = process.env.PDPP_CONNECTOR_CATALOG_TTL_MS;
+  let loadCount = 0;
+  process.env.PDPP_CONNECTOR_CATALOG_TTL_MS = "1000";
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => {
+        loadCount += 1;
+        return [entry];
+      },
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    await service.catalog();
+    t.mock.timers.tick(1000);
+    await service.catalog();
+    assert.equal(loadCount, 2);
+  } finally {
+    t.mock.timers.reset();
+    if (previous === undefined) {
+      delete process.env.PDPP_CONNECTOR_CATALOG_TTL_MS;
+    } else {
+      process.env.PDPP_CONNECTOR_CATALOG_TTL_MS = previous;
+    }
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("an unusable PDPP_CONNECTOR_CATALOG_TTL_MS falls back to the default window", async (t) => {
+  const previous = process.env.PDPP_CONNECTOR_CATALOG_TTL_MS;
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    for (const unusable of ["0", "-5", "abc", "Infinity", ""]) {
+      const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+      let loadCount = 0;
+      process.env.PDPP_CONNECTOR_CATALOG_TTL_MS = unusable;
+      try {
+        const service = createConnectorInstallService({
+          catalogLoader: async () => {
+            loadCount += 1;
+            return [entry];
+          },
+          dataDir,
+          registerManifest: () => Promise.resolve(),
+          store: createFileConnectorInstallStore(dataDir),
+        });
+        await service.catalog();
+        t.mock.timers.tick(DEFAULT_CATALOG_TTL_MS - 1);
+        await service.catalog();
+        assert.equal(loadCount, 1, `TTL ${JSON.stringify(unusable)} must keep the default window`);
+        t.mock.timers.tick(1);
+        await service.catalog();
+        assert.equal(loadCount, 2, `TTL ${JSON.stringify(unusable)} must still expire at the default window`);
+      } finally {
+        rmSync(dataDir, { force: true, recursive: true });
+      }
+    }
+  } finally {
+    t.mock.timers.reset();
+    if (previous === undefined) {
+      delete process.env.PDPP_CONNECTOR_CATALOG_TTL_MS;
+    } else {
+      process.env.PDPP_CONNECTOR_CATALOG_TTL_MS = previous;
+    }
+  }
+});
+
+test("install takes only the entry that names both the connector and the digest", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const otherDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const other = { ...entry, connector_id: "gitlab", connector_key: "gitlab", digest: otherDigest };
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry, other],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    // Right connector, a digest only another connector publishes.
+    await assert.rejects(service.install("github", otherDigest), {
+      message: "Connector digest is not present in the verified catalog.",
+    });
+    // Right digest, a connector that does not publish it.
+    await assert.rejects(service.install("gitlab", digest), {
+      message: "Connector digest is not present in the verified catalog.",
+    });
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+test("update and manifest resolution ignore other connectors' latest entries", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  const otherDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  try {
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [
+        { ...entry, latest: false },
+        { ...entry, connector_id: "gitlab", connector_key: "gitlab", digest: otherDigest, latest: true },
+      ],
+      dataDir,
+      registerManifest: () => Promise.resolve(),
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    await assert.rejects(service.update("github"), { message: "Connector has no verified update target." });
+    assert.equal(await service.resolveManifestFromCatalog?.("github"), null);
   } finally {
     rmSync(dataDir, { force: true, recursive: true });
   }
