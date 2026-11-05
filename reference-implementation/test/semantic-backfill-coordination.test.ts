@@ -18,6 +18,7 @@ import {
   makeStubBackend,
   semanticIndexBackfillForManifest as semanticIndexBackfillForManifestUntyped,
 } from "../server/search-semantic.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 async function withCoordinatorEnvironment<T>(
   values: Record<string, string | number>,
@@ -84,48 +85,54 @@ function record(stream: string, key: string, subject: string) {
   };
 }
 
-const baseManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: "semantic-fence",
-  display_name: "Semantic fence test",
-  manifest_uri: "https://sources.example/semantic-fence",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "first",
-      primary_key: ["id"],
-      query: { search: {} },
-      schema: {
-        properties: { id: { type: "string" }, subject: { type: "string" } },
-        required: ["id", "subject"],
-        type: "object",
+const baseManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: "semantic-fence",
+    display_name: "Semantic fence test",
+    manifest_uri: "https://sources.example/semantic-fence",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "first",
+        primary_key: ["id"],
+        query: { search: {} },
+        schema: {
+          properties: { id: { type: "string" }, subject: { type: "string" } },
+          required: ["id", "subject"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-    {
-      name: "later",
-      primary_key: ["id"],
-      query: { search: {} },
-      schema: {
-        properties: { id: { type: "string" }, subject: { type: "string" } },
-        required: ["id", "subject"],
-        type: "object",
+      {
+        name: "later",
+        primary_key: ["id"],
+        query: { search: {} },
+        schema: {
+          properties: { id: { type: "string" }, subject: { type: "string" } },
+          required: ["id", "subject"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/semantic-fence" }
+);
 
-const semanticManifest = {
-  ...baseManifest,
-  streams: baseManifest.streams.map((stream) => ({
-    ...stream,
-    query: { search: { semantic_fields: ["subject"] } },
-  })),
-};
+const semanticManifest = withFixtureSourceDeclaration(
+  {
+    ...baseManifest,
+    streams: baseManifest.streams.map((stream) => ({
+      ...stream,
+      query: { search: { semantic_fields: ["subject"] } },
+    })),
+  },
+  { sourceId: baseManifest.manifest_uri }
+);
 
 test("semantic backfill does NOT hold one instance fence through the whole rebuild — a same-instance write proceeds while an embed is in flight, and both a different instance's write and the eventual backfill converge correctly", async () => {
   // This pins the FIX for the UAT startup-backfill-vs-live-ingest incident:

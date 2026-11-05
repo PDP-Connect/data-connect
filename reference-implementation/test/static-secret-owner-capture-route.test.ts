@@ -4,12 +4,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
-
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceCredentialStore } from "../server/stores/connector-instance-credential-store.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const OWNER_PASSWORD = "static-secret-capture-owner-password";
 const OWNER_SUBJECT_ID = "owner_local";
@@ -209,7 +209,7 @@ async function registerOptionalSingleSecretConnector(asUrl: string, connectorKey
   const setup = manifest.setup as { credential_capture: { required?: boolean } };
   setup.credential_capture.required = false;
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(manifest),
+    body: JSON.stringify(withFixtureSourceDeclaration(manifest)),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
@@ -243,7 +243,7 @@ async function registerOptionalBundleConnector(asUrl: string, connectorKey: stri
   const setup = manifest.setup as { credential_capture: { required?: boolean } };
   setup.credential_capture.required = false;
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(manifest),
+    body: JSON.stringify(withFixtureSourceDeclaration(manifest)),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
@@ -263,7 +263,7 @@ async function registerRequiredOnePathBundleConnector(asUrl: string, connectorKe
   );
   setup.credential_capture.required = true;
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(manifest),
+    body: JSON.stringify(withFixtureSourceDeclaration(manifest)),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });

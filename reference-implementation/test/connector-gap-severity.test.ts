@@ -6,11 +6,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-
 import { runConnector } from "../runtime/index.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Real ingest resolves the acting owner subject from the request's bearer
 // token (`getOwnerTokenSubjectId` in server/index.ts), independent of
@@ -107,43 +107,47 @@ async function issueOwnerToken(asUrl: string, subjectId = "owner_local"): Promis
   return token.access_token;
 }
 
-function makeManifest(connectorId = "https://registry.pdpp.test/connectors/gap-severity") {
-  return {
-    connector_id: connectorId,
-    display_name: "Gap severity fixture",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" } },
-          required: ["id"],
-          type: "object",
+function makeManifest(connectorId = "gap-severity") {
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Gap severity fixture",
+      manifest_uri: "https://registry.pdpp.test/connectors/gap-severity",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" } },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-      {
-        availability: {
-          future_modes: ["api"],
-          mode: "slackdump_archive",
-          reason: "archive mode does not expose stars",
-          state: "unsupported_in_mode",
+        {
+          availability: {
+            future_modes: ["api"],
+            mode: "slackdump_archive",
+            reason: "archive mode does not expose stars",
+            state: "unsupported_in_mode",
+          },
+          name: "stars",
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" } },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        name: "stars",
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" } },
-          required: ["id"],
-          type: "object",
-        },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: "https://registry.pdpp.test/connectors/gap-severity" }
+  );
 }
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];

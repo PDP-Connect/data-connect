@@ -59,6 +59,7 @@
  */
 
 import assert from "node:assert/strict";
+import { withFixtureSourceDeclaration } from "./fixture-source-declaration.ts";
 
 export interface ReadRecord {
   data?: Record<string, unknown>;
@@ -131,62 +132,65 @@ export const CONFORMANCE_NULLABLE_CURSOR_STREAM = "budgets";
  *   - grant-scoped projection of `secret` (a field most tests narrow out of
  *     the grant to prove projection does not leak).
  */
-export const CONFORMANCE_MANIFEST = {
-  connector_id: CONFORMANCE_CONNECTOR_ID,
-  display_name: "Record Read Conformance",
-  // `connector_id` is the private storage key.  SourceDeclaration requires
-  // the public authorization identity to be an absolute URI.
-  manifest_uri: `https://sources.example/${CONFORMANCE_CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  runtime_requirements: { bindings: { network: { required: true } } },
-  streams: [
-    {
-      cursor_field: "created_at",
-      name: CONFORMANCE_STREAM,
-      primary_key: ["id"],
-      query: {
-        range_filters: {
-          score: ["gte", "gt", "lte", "lt"],
-          updated_at: ["gte", "lt"],
-        },
-      },
-      schema: {
-        properties: {
-          created_at: { format: "date-time", type: "string" },
-          id: { type: "string" },
-          label: { type: ["string", "null"] },
-          score: { type: ["integer", "null"] },
-          secret: { type: ["string", "null"] },
-          updated_at: { format: "date-time", type: ["string", "null"] },
-        },
-        required: ["id", "created_at"],
-        type: "object",
-      },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-    {
-      cursor_field: "last_modified_on",
-      name: CONFORMANCE_NULLABLE_CURSOR_STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          id: { type: "string" },
-          last_modified_on: {
-            format: "date-time",
-            type: ["string", "null"],
+export const CONFORMANCE_MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: CONFORMANCE_CONNECTOR_ID,
+    display_name: "Record Read Conformance",
+    // `connector_id` is the private storage key.  SourceDeclaration requires
+    // the public authorization identity to be an absolute URI.
+    manifest_uri: `https://sources.example/${CONFORMANCE_CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    runtime_requirements: { bindings: { network: { required: true } } },
+    streams: [
+      {
+        cursor_field: "created_at",
+        name: CONFORMANCE_STREAM,
+        primary_key: ["id"],
+        query: {
+          range_filters: {
+            score: ["gte", "gt", "lte", "lt"],
+            updated_at: ["gte", "lt"],
           },
-          name: { type: "string" },
         },
-        required: ["id", "name"],
-        type: "object",
+        schema: {
+          properties: {
+            created_at: { format: "date-time", type: "string" },
+            id: { type: "string" },
+            label: { type: ["string", "null"] },
+            score: { type: ["integer", "null"] },
+            secret: { type: ["string", "null"] },
+            updated_at: { format: "date-time", type: ["string", "null"] },
+          },
+          required: ["id", "created_at"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+      {
+        cursor_field: "last_modified_on",
+        name: CONFORMANCE_NULLABLE_CURSOR_STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            id: { type: "string" },
+            last_modified_on: {
+              format: "date-time",
+              type: ["string", "null"],
+            },
+            name: { type: "string" },
+          },
+          required: ["id", "name"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONFORMANCE_CONNECTOR_ID}` }
+);
 
 /**
  * Five rows that exercise pagination ordering (created_at asc), exact/range
