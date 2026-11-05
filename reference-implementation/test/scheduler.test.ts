@@ -2000,7 +2000,11 @@ rl.on('line', (line) => {
     assert.ok(knownGap, "expected a known gap entry");
     assert.equal(knownGap.kind, "skip_result");
     assert.equal(knownGap.severity, "transient");
-    assert.equal(knownGap.recovery_hint?.action, "retry_by_runtime");
+    // Section 5.5: an absent SKIP_RESULT.recovery_hint is not turned into an action
+    // from the connector's `http_429` reason text. The runtime has no structured
+    // transport evidence for this skip, so the gated action is `unknown`
+    // (Section 5.11). Oracle: the spec clause, not the previous text-inferred value.
+    assert.equal(knownGap.recovery_hint?.action, "unknown");
     assert.deepEqual(knownGap.scope?.resource_ids, ["item_1"]);
 
     const stats = scheduler.getStats();
@@ -2261,7 +2265,13 @@ rl.on('line', (line) => {
   }
 });
 
-test("scheduler retries connector-declared retryable failures and records the succeeding attempt", async () => {
+// A connector's DONE.error.retryable is a claim, not retry authority (Collection
+// Profile Sections 5.8 and 5.11). The runtime must not start an automatic attempt
+// from it. Oracle: the spec clause. The positive control for a runtime-owned
+// transport retry is the `scheduler retries runtime ...` tests below, which stay
+// unchanged. Plausible defect caught: a connector's `retryable: true` restarts a
+// doomed run. Required backend: memory profile (in-memory SQLite, child process).
+test("scheduler does not auto-retry a connector-declared retryable failure (Section 5.11)", async () => {
   const manifest = withFixtureSourceDeclaration(
     {
       connector_id: "scheduler-retryable-terminal-error",
@@ -2381,15 +2391,15 @@ rl.on('line', (line) => {
 
     const [record] = completedRuns;
     assert.ok(record, "expected a completed run record");
-    assert.equal(record.status, "succeeded");
-    assert.equal(record.attempt, 2);
-    assert.equal(record.failureReason, null);
-    assert.equal(record.terminalReason, null);
-    assert.equal(record.connectorError, null);
-    assert.equal(record.recordsEmitted, 1);
+    assert.equal(record.status, "failed");
+    assert.equal(record.attempt, 1, "a connector's retryable claim must not start a second attempt");
+    assert.equal(record.recordsEmitted, 0);
+    // The connector's own report stays visible; its retryable flag is not authority.
+    assert.equal(record.connectorError?.message, "Rate limited, retry later");
+    assert.equal(record.connectorError?.retryable, true);
 
     const attempts = readFileSync(attemptsPath, "utf8").trim().split("\n").filter(Boolean);
-    assert.equal(attempts.length, 2, "retryable terminal failures should be retried once before succeeding");
+    assert.equal(attempts.length, 1, "a connector-declared retryable failure must not be retried automatically");
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);

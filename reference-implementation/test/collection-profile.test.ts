@@ -1824,78 +1824,86 @@ test("Collection Profile conformance", async (t) => {
     }
   });
 
-  await t.test("pre-progress ChatGPT failure persists actionable known gap metadata", async () => {
-    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-    const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort, {
-      ...MINIMAL_MANIFEST,
-      connector_id: "chatgpt",
-    });
-
-    const { connectorPath, cleanup } = createTestConnector([
-      {
-        error: {
-          code: "credential_rejected",
-          message:
-            "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: apiFetch got 401 on GET /conversation/abc (auth - not retryable)",
-          recovery_hint: "refresh_credentials",
-          retryable: false,
-        },
-        records_emitted: 0,
-        status: "failed",
-        type: "DONE",
-      },
-    ]);
-
-    try {
-      const result = await runTestConnector({
-        collectionMode: "full_refresh",
-        connectorId,
-        connectorPath,
-        manifest: MINIMAL_MANIFEST,
-        onInteraction: async () => ({}),
-        ownerToken,
-        persistState: true,
-        rsUrl: `http://localhost:${rsPort}`,
-        state: null,
+  // Oracle: Collection Profile Section 5.11. The DONE.error.recovery_hint is a
+  // connector claim. `refresh_credentials` never holds in this version, so the gap's
+  // action is `unknown`. The connector's own message stays visible (Section 5.11,
+  // last paragraph). Plausible defect caught: a connector hint becomes an owner
+  // prompt or runtime action. Backend: memory profile, child process.
+  await t.test(
+    "pre-progress ChatGPT failure keeps the connector message and gates its refresh_credentials hint to unknown",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, {
+        ...MINIMAL_MANIFEST,
+        connector_id: "chatgpt",
       });
 
-      assert.equal(result.status, "failed");
-      assert.equal(result.records_emitted, 0);
-      assert.notDeepEqual(result.known_gaps, [], "pre-progress failure must not persist empty known_gaps");
-      assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
-      const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
-      assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
-      assert.equal(runFailedGap.reason, "connector_reported_failed");
-      assert.equal(runFailedGap.recovery_hint?.action, "refresh_credentials");
-      // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-      assert.match(runFailedGap.message ?? "", /chatgpt_preprogress_failure: refresh_credentials:/);
+      const { connectorPath, cleanup } = createTestConnector([
+        {
+          error: {
+            code: "credential_rejected",
+            message:
+              "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: apiFetch got 401 on GET /conversation/abc (auth - not retryable)",
+            recovery_hint: "refresh_credentials",
+            retryable: false,
+          },
+          records_emitted: 0,
+          status: "failed",
+          type: "DONE",
+        },
+      ]);
 
-      const asUrl = `http://localhost:${asPort}`;
-      const { body: runTimeline } = await fetchJson<TimelineBody>(
-        `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
-      );
-      const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-      assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
-      assert.equal(failedEvent.data.reason, "connector_reported_failed");
-      const failedKnownGaps = knownGapsOf(failedEvent);
-      assert.notDeepEqual(failedKnownGaps, [], "terminal timeline must include durable known gaps");
-      assert.equal(failedKnownGaps[0]?.recovery_hint?.action, "refresh_credentials");
-    } finally {
-      cleanup();
-      await closeServer(server);
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: MINIMAL_MANIFEST,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: null,
+        });
+
+        assert.equal(result.status, "failed");
+        assert.equal(result.records_emitted, 0);
+        assert.notDeepEqual(result.known_gaps, [], "pre-progress failure must not persist empty known_gaps");
+        assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
+        const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
+        assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
+        assert.equal(runFailedGap.reason, "connector_reported_failed");
+        assert.equal(runFailedGap.recovery_hint?.action, "unknown");
+        // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
+        assert.match(runFailedGap.message ?? "", /chatgpt_preprogress_failure: refresh_credentials:/);
+
+        const asUrl = `http://localhost:${asPort}`;
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
+        assert.equal(failedEvent.data.reason, "connector_reported_failed");
+        const failedKnownGaps = knownGapsOf(failedEvent);
+        assert.notDeepEqual(failedKnownGaps, [], "terminal timeline must include durable known gaps");
+        assert.equal(failedKnownGaps[0]?.recovery_hint?.action, "unknown");
+      } finally {
+        cleanup();
+        await closeServer(server);
+      }
     }
-  });
+  );
 
   await t.test(
-    "recovery_hint is a provider-neutral channel: an arbitrary connector id gets the same hint",
+    "recovery_hint is a provider-neutral channel: an arbitrary connector id is gated identically (manual_action_required -> unknown)",
     async () => {
-      // Proves the RI derives its recovery hint from the typed, manifest-neutral
-      // DONE.error.recovery_hint field alone — never from a connector's private
-      // `code`/message format. A connector id ChatGPT's normalizer has never
-      // seen ("acme-crm") gets the identical `manual_action_required` hint by
-      // declaring the same recovery_hint, with a `code` and message sharing
-      // nothing with ChatGPT's.
+      // Oracle: Section 5.11. `manual_action_required` never holds in this version,
+      // so the gate yields `unknown` for any connector id. Provider neutrality is
+      // still the property under test: a connector id ChatGPT's normalizer has never
+      // seen ("acme-crm"), with a `code` and message sharing nothing with ChatGPT's,
+      // must get the same gated result as ChatGPT's identical hint. Plausible defect
+      // caught: a provider-specific allowlist letting one connector's hint through.
       const server = await startServer({
         asPort: 0,
         dbPath: ":memory:",
@@ -1939,7 +1947,7 @@ test("Collection Profile conformance", async (t) => {
         assert.equal(result.status, "failed");
         const runFailedGap = result.known_gaps?.find((gap) => gap.kind === "run_failed");
         assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
-        assert.equal(runFailedGap.recovery_hint?.action, "manual_action_required");
+        assert.equal(runFailedGap.recovery_hint?.action, "unknown");
       } finally {
         cleanup();
         await closeServer(server);
@@ -2101,115 +2109,125 @@ test("Collection Profile conformance", async (t) => {
     );
   });
 
-  await t.test("pre-progress browser profile attach race remains runtime-retryable", async () => {
-    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-    const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort, {
-      ...MINIMAL_MANIFEST,
-      connector_id: "chatgpt",
-    });
-
-    const { connectorPath, cleanup } = createTestConnector([
-      {
-        error: {
-          message:
-            "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.",
-          retryable: false,
-        },
-        records_emitted: 0,
-        status: "failed",
-        type: "DONE",
-      },
-    ]);
-
-    try {
-      const result = await runTestConnector({
-        collectionMode: "full_refresh",
-        connectorId,
-        connectorPath,
-        manifest: MINIMAL_MANIFEST,
-        onInteraction: async () => ({}),
-        ownerToken,
-        persistState: true,
-        rsUrl: `http://localhost:${rsPort}`,
-        state: null,
+  // Oracle: Section 5.5 forbids inferring a connector-requested action from message
+  // text, and Section 5.11 says a connector's retryable claim is not runtime retry
+  // authority. This DONE.error is connector text ("Protocol error ... session
+  // closed") with no runtime record behind it, so the runtime must not retry from it.
+  // The runtime's own retry policy is covered by the structured-transport tests in
+  // scheduler.test.ts (`scheduler retries runtime ...`). Plausible defect caught: a
+  // substring match on connector text starting an automatic retry.
+  await t.test(
+    "pre-progress browser profile attach race in connector text is not a runtime retry (Section 5.5, 5.11)",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, {
+        ...MINIMAL_MANIFEST,
+        connector_id: "chatgpt",
       });
 
-      assert.equal(result.status, "failed");
-      assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
-      const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
-      assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
-      assert.equal(runFailedGap.reason, "connector_reported_failed");
-      assert.equal(runFailedGap.recovery_hint?.action, "retry_by_runtime");
-      assert.equal(runFailedGap.recovery_hint?.retryable, true);
+      const { connectorPath, cleanup } = createTestConnector([
+        {
+          error: {
+            message:
+              "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.",
+            retryable: false,
+          },
+          records_emitted: 0,
+          status: "failed",
+          type: "DONE",
+        },
+      ]);
 
-      const asUrl = `http://localhost:${asPort}`;
-      const { body: runTimeline } = await fetchJson<TimelineBody>(
-        `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
-      );
-      const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-      assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
-      const retryableKnownGaps = knownGapsOf(failedEvent);
-      assert.equal(retryableKnownGaps[0]?.recovery_hint?.action, "retry_by_runtime");
-      assert.equal(retryableKnownGaps[0]?.recovery_hint?.retryable, true);
-    } finally {
-      cleanup();
-      await closeServer(server);
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: MINIMAL_MANIFEST,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: null,
+        });
+
+        assert.equal(result.status, "failed");
+        assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
+        const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
+        assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
+        assert.equal(runFailedGap.reason, "connector_reported_failed");
+        assert.equal(runFailedGap.recovery_hint?.action, "unknown");
+        assert.equal(runFailedGap.recovery_hint?.retryable, false);
+
+        const asUrl = `http://localhost:${asPort}`;
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
+        const retryableKnownGaps = knownGapsOf(failedEvent);
+        assert.equal(retryableKnownGaps[0]?.recovery_hint?.action, "unknown");
+        assert.equal(retryableKnownGaps[0]?.recovery_hint?.retryable, false);
+      } finally {
+        cleanup();
+        await closeServer(server);
+      }
     }
-  });
+  );
 
-  // Precedence matrix for DONE.error.recovery_hint vs. the runtime's
-  // CDP/browser-infrastructure text fallback (isRuntimeRetryableBrowserProfileError):
-  // a present, valid hint is authoritative and MUST win outright, even over
-  // message text that would otherwise match the runtime's own infrastructure
-  // heuristic. That heuristic is a fallback for an ABSENT hint only — see
-  // recoveryHintFromTerminalConnectorError in runtime/index.ts.
+  // Gate matrix for DONE.error.recovery_hint (Collection Profile Section 5.11). Oracle:
+  // the spec's predicate table. In this version only `not_retriable` and `unknown`
+  // hold, so every other hint, present or absent, gates to `unknown`. A connector's
+  // `retryable` flag and its message text never authorize an action or a retry.
+  // Plausible defects caught: (a) an explicit connector hint winning over the gate,
+  // (b) connector CDP/session text restoring an infrastructure retry, (c) a connector
+  // retryable flag starting an automatic retry. The runtime's own retry policy for
+  // runtime-observed failures is tested elsewhere (scheduler.test.ts). Backend:
+  // memory profile, child process per case.
   const SESSION_CLOSED_MESSAGE =
     "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.";
 
   const RECOVERY_HINT_PRECEDENCE_CASES = [
     {
       connectorErrorOverrides: { recovery_hint: "manual_action_required" },
-      expectedAction: "manual_action_required",
+      expectedAction: "unknown",
       expectedRetryable: false,
       message: "acme_crm_login_expired: session revoked",
-      name: "explicit manual_action_required hint wins over benign message text",
+      name: "explicit manual_action_required hint is an unapproved suggestion and gates to unknown over benign message text",
     },
     {
       connectorErrorOverrides: { recovery_hint: "refresh_credentials" },
-      expectedAction: "refresh_credentials",
+      expectedAction: "unknown",
       expectedRetryable: false,
       message: SESSION_CLOSED_MESSAGE,
-      name: "explicit refresh_credentials hint wins even when the message matches the runtime's CDP/session-closed infrastructure text",
+      name: "explicit refresh_credentials hint is not authorized and gates to unknown even when the message matches the runtime's CDP/session-closed infrastructure text",
     },
     {
       connectorErrorOverrides: { recovery_hint: "manual_action_required" },
-      expectedAction: "manual_action_required",
+      expectedAction: "unknown",
       expectedRetryable: false,
       message: SESSION_CLOSED_MESSAGE,
-      name: "explicit manual_action_required hint wins even when the message matches the runtime's CDP/session-closed infrastructure text",
+      name: "explicit manual_action_required hint is an unapproved suggestion and gates to unknown even when the message matches the runtime's CDP/session-closed infrastructure text",
     },
     {
       connectorErrorOverrides: {},
-      expectedAction: "retry_by_runtime",
-      expectedRetryable: true,
+      expectedAction: "unknown",
+      expectedRetryable: false,
       message: SESSION_CLOSED_MESSAGE,
-      name: "absent hint with the same CDP/session-closed text falls through to the runtime's retryable infrastructure default",
+      name: "absent hint with the same CDP/session-closed text gates to unknown: connector text never restores a runtime retry",
     },
     {
       connectorErrorOverrides: {},
-      expectedAction: "retry_by_runtime",
-      expectedRetryable: true,
+      expectedAction: "unknown",
+      expectedRetryable: false,
       message: "acme_crm_unexpected_shutdown: worker process exited",
-      name: "absent hint with an unrelated retryable failure still falls through to the runtime-retryable default",
+      name: "absent hint with a connector retryable:true claim gates to unknown: the claim never starts a retry",
       retryableFlag: true,
     },
     {
-      // Absent hint, retryable:false, and a message that matches neither the
-      // runtime's infrastructure text nor any of normalizeRecoveryHint's
-      // generic inference vocabulary: recoveryHintFromTerminalConnectorError
-      // returns null and buildKnownGap's own fail-closed inference yields the
-      // non-retryable `unknown` action — never a fabricated retry.
+      // Absent hint, retryable:false, and a message that matches no infrastructure
+      // text. The gate yields the non-retryable `unknown` action, never a retry.
       connectorErrorOverrides: {},
       expectedAction: "unknown",
       expectedRetryable: false,
@@ -2220,7 +2238,7 @@ test("Collection Profile conformance", async (t) => {
 
   for (const testCase of RECOVERY_HINT_PRECEDENCE_CASES) {
     // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-    await t.test(`recovery_hint precedence: ${testCase.name}`, async () => {
+    await t.test(`recovery_hint gate: ${testCase.name}`, async () => {
       const server = await startServer({
         asPort: 0,
         dbPath: ":memory:",
@@ -3728,7 +3746,10 @@ rl.on('line', (line) => {
       assert.equal(skippedEvent.data.message, "Platform returned 429");
       const skippedKnownGap = knownGapOf(skippedEvent);
       assert.equal(skippedKnownGap.kind, "skip_result");
-      assert.equal(skippedKnownGap.recovery_hint?.action, "retry_by_runtime");
+      // Section 5.5: an absent SKIP_RESULT.recovery_hint is not inferred from the
+      // connector's `rate_limited` reason or its message. Gated action: `unknown`
+      // (Section 5.11). The skip fact, message and reason are still recorded below.
+      assert.equal(skippedKnownGap.recovery_hint?.action, "unknown");
 
       const completedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.completed");
       assert.ok(completedEvent, "expected run.completed event");
@@ -4908,7 +4929,10 @@ rl.on('line', (line) => {
       assert.ok(itemsEntry.skipped, "skip fact recorded on the entry");
       const itemsSkipped = asRecord(itemsEntry.skipped);
       assert.equal(itemsSkipped.reason, "partial_export", "skip reason carried verbatim");
-      assert.equal(itemsSkipped.recovery_action, "retry_by_runtime", "normalized recovery action carried");
+      // The connector's `retry_by_runtime` hint is a suggestion. That action never
+      // holds in this version (Section 5.11 predicate table), so the carried action is
+      // `unknown`. The connector's hint is not an authorized runtime retry.
+      assert.equal(itemsSkipped.recovery_action, "unknown", "gated recovery action carried");
       // No coverage verdict: the runtime states the skip, the projection decides.
       assert.equal("coverage" in itemsEntry, false, "no coverage condition on a skipped entry");
       assert.equal("forward_disposition" in itemsEntry, false, "no forward_disposition on a skipped entry");

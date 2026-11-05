@@ -106,7 +106,7 @@ import {
 } from "./done-validators.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
-import { createObservationRun, type ObservationSnapshot, type WireParse } from "./observations.ts";
+import { createObservationRun, type ObservationSnapshot, type RecoveryHintOrigin, type WireParse } from "./observations.ts";
 import {
   buildHttpFailure,
   buildIngestEnvelopeContractViolationFailure,
@@ -253,8 +253,8 @@ interface RuntimeRunError extends Error {
  * opaque to the RI. `recovery_hint` is the separate, closed-vocabulary
  * ACTION channel (same shape/vocabulary as `SKIP_RESULT.recovery_hint` —
  * see `RECOVERY_ACTIONS` / `isValidRecoveryHintShape` in
- * connector-gap-bounding.ts) — the only field `recoveryHintFromTerminalConnectorError`
- * reads to decide the owner-facing recovery action.
+ * connector-gap-bounding.ts). The runtime gates it (Collection Profile Section
+ * 5.11) before it reaches a known gap.
  */
 interface ConnectorDoneError {
   code?: string;
@@ -1455,15 +1455,6 @@ function buildConnectorDiagnosticLinesData(
     truncated: collected.truncated,
     visibility: "owner_local",
   };
-}
-
-function isRuntimeRetryableBrowserProfileError(message: unknown): boolean {
-  const text = typeof message === "string" ? message.toLowerCase() : "";
-  return (
-    (text.includes("network.setcachedisabled") && text.includes("session closed")) ||
-    (text.includes("target.attachtotarget") && text.includes("session closed")) ||
-    text.includes("internal server error, session closed")
-  );
 }
 
 function streamUnsupportedInDefaultScope(stream: ManifestStream | null | undefined): boolean {
@@ -2697,18 +2688,6 @@ function buildManifestParentForeignKeysMap(
   return foreignKeysByStream;
 }
 
-/**
- * Whether the connector's manifest declares DETAIL_COVERAGE_KEY_SETS in its
- * `protocol_capabilities`. Only such a connector gets evidence-based crediting
- * of `hydrated_keys` (see `CoverageReport.hydratedKeysNeedEvidence`). The
- * capability is the connector's own declaration; the runtime never decides it
- * per source. A missing or malformed declaration reads as not declared.
- */
-function manifestDeclaresDetailCoverageKeySets(manifest: ConnectorManifest): boolean {
-  const capabilities = manifest.protocol_capabilities;
-  return Array.isArray(capabilities) && capabilities.includes(DETAIL_COVERAGE_KEY_SETS_CAPABILITY);
-}
-
 function openRuntimeTraceFile(traceDir: string | undefined, connectorId: string, runId: string): string | null {
   if (!traceDir) {
     return null;
@@ -3088,7 +3067,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const manifestStateStreamByStream = buildManifestStateStreamMap(manifest);
   const manifestDetailParentStreamsByStream = buildManifestDetailParentStreamsMap(manifest);
   const manifestParentForeignKeysByStream = buildManifestParentForeignKeysMap(manifest);
-  const hydratedKeysNeedEvidence = manifestDeclaresDetailCoverageKeySets(manifest);
+  // This package extension keys its stronger proof rule on the connector's
+  // declaration. Omitting START advertisement does not waive that obligation.
+  const hydratedKeysNeedEvidence =
+    Array.isArray(manifest.protocol_capabilities) &&
+    manifest.protocol_capabilities.includes(DETAIL_COVERAGE_KEY_SETS_CAPABILITY);
   // `getDefaultConnectorDetailGapStore()` is declared `unknown` at its own
   // module boundary (that store has not been migrated yet), so the runtime
   // states the surface it actually drives here.
@@ -3740,7 +3723,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // server/stores/stream-evidence-run-registry-store.ts), claimed
   // atomically in `trackStreamEvidence`. Kept fully separate from
   // `detailCoverageByStateStream`: STREAM_EVIDENCE never reaches the coverage
-  // checks of `decideCheckpointCommits`; only its unaccounted count does.
+  // checks of `decideCheckpointCommits`, and its counts never gate a commit.
   const streamEvidenceByStream = new Map<string, StreamEvidenceOutcomes & { considered: number }>();
   // Latest `collection_rate` progress payload seen this run. Updated on each
   // rate-change PROGRESS event so the terminal event can carry the final
@@ -3791,43 +3774,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     return "committed";
   }
 
+  // The gated Section 5.11 action of the DONE.error hint. Set when a failed DONE is
+  // validated; `unknown` for a run that failed without one.
+  let doneRecoveryHint = "unknown";
+
   function appendKnownGap(gap: Record<string, unknown>): void {
     knownGaps.push(gap);
   }
 
-  /**
-   * A connector requests a recovery action only via `connector_error.recovery_hint`
-   * — the same closed vocabulary/shape as `SKIP_RESULT.recovery_hint`
-   * (validated on ingest by `validateDoneError`, so an invalid shape can never
-   * reach here). `code`/`message` are cause identity and free-form text; the
-   * RI never inspects either to choose an action.
-   *
-   * A present, validated hint is authoritative and wins outright — including
-   * over the runtime's own CDP/browser-infrastructure text match below. The
-   * text match exists only to give runtime infrastructure failures (a dead
-   * browser process, not connector logic) a sane default action when the
-   * connector declared no hint at all; it is a fallback for an ABSENT hint,
-   * never an override for a PRESENT one. `buildKnownGap` (via
-   * `normalizeRecoveryHint`) already fails closed on a missing/unrecognized
-   * hint by falling back to its own generic, vocabulary-based inference —
-   * this function does not need to duplicate that.
-   */
-  function recoveryHintFromTerminalConnectorError(
-    connectorError: ConnectorDoneError | null | undefined
-  ): string | { action?: string; retryable?: boolean } | null {
-    if (connectorError?.recovery_hint) {
-      return connectorError.recovery_hint;
-    }
-    const message = typeof connectorError?.message === "string" ? connectorError.message : "";
-    if (isRuntimeRetryableBrowserProfileError(message)) {
-      return "retry_by_runtime";
-    }
-    if (connectorError?.retryable === true) {
-      return "retry_by_runtime";
-    }
-    return null;
-  }
-
+  // Only a gated action reaches the generic gap builder. An explicit unknown
+  // prevents legacy message/code inference from authorizing connector advice.
   function buildKnownGapsForTerminal(
     reason: string | null = null,
     connectorError: ConnectorDoneError | null = null
@@ -3839,7 +3795,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           kind: "run_failed",
           message: connectorError?.message || null,
           reason: reason || "run_failed",
-          recoveryHint: recoveryHintFromTerminalConnectorError(connectorError),
+          recoveryHint: doneRecoveryHint,
         })
       );
     }
@@ -4241,8 +4197,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // is folded into RuntimeCollectionFact.considered/covered at terminal
   // collection-fact assembly (buildCollectionFacts) and never into
   // detailCoverageByStateStream, so it can never reach
-  // the coverage checks of decideCheckpointCommits. Its `unaccounted` count
-  // reaches that decision separately, as a reported omission.
+  // the coverage checks of decideCheckpointCommits. Its counts never gate
+  // checkpoint commits (Collection Profile Section 5.7).
   //
   // This is the single acceptance point for the cross-invocation half of
   // rule 5 ("at most one accepted STREAM_EVIDENCE per stream per run_id"):
@@ -4301,17 +4257,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     return claimResult.claim;
   }
 
-  // Omissions this run reported without a durable work item, in the shape
-  // decideCheckpointCommits takes. Gapped STREAM_EVIDENCE keys are durable
-  // DETAIL_GAPs, which START serves independently of cursors, so only
-  // unaccounted keys count.
+  // Only explicit SKIP_RESULT omissions gate commits. STREAM_EVIDENCE stays
+  // diagnostic even when its unaccounted count is nonzero (Section 5.7).
   function collectReportedOmissions(): ReportedOmission[] {
-    return [
-      ...skipOmissions,
-      ...[...streamEvidenceByStream]
-        .filter(([, evidence]) => evidence.unaccounted > 0)
-        .map(([stream]) => ({ source: "unaccounted_evidence" as const, stream })),
-    ];
+    return [...skipOmissions];
   }
 
   // A DETAIL_COVERAGE shortfall is a coverage GAP, not a protocol violation.
@@ -5492,6 +5441,21 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const claim = await trackStreamEvidence(msg, claimPayload, existingClaim);
       const persistedEvidencePayload = JSON.parse(claim.normalizedPayloadJson) as Record<string, unknown>;
       const persistedOutcomes = persistedEvidencePayload.outcomes as StreamEvidenceOutcomes;
+      // Unaccounted keys never gate a checkpoint (Section 5.7), so the cursor can move
+      // past them and nothing replays them. The message carries counts, no keys, so the
+      // loss is recorded as one stream-level known gap instead of per-key work items.
+      if (persistedOutcomes.unaccounted > 0) {
+        appendKnownGap(
+          buildKnownGap({
+            diagnostics: { considered: persistedEvidencePayload.considered, unaccounted: persistedOutcomes.unaccounted },
+            kind: "detail_coverage",
+            message: `STREAM_EVIDENCE for stream=${evidenceStream} left ${persistedOutcomes.unaccounted} of ${persistedEvidencePayload.considered} considered keys unaccounted`,
+            reason: "stream_evidence_unaccounted",
+            recoveryHint: "unknown",
+            stream: evidenceStream,
+          })
+        );
+      }
       // Test-only crash injection. This is deliberately the exact boundary:
       // the uniqueness row (including payload + digest) is durable, while the
       // terminal evidence event has not yet been attempted. Restart/replay
@@ -5619,6 +5583,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
       const normalizedDoneError = validatedDoneError === null ? null : withoutDoneBasis(validatedDoneError);
       doneBasis = validatedDoneError?.basis ?? [];
+      doneRecoveryHint = gatedRecoveryHint(validatedDoneError?.recovery_hint ?? null, "done_error");
       finalStatus = doneStatus;
       doneMessage = {
         error: normalizedDoneError as ConnectorDoneError | null,
@@ -6119,18 +6084,19 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         kind: "skip_result",
         message: (msg.message as string | undefined) || null,
         reason: (msg.reason as string | undefined) || null,
-        recoveryHint: msg.recovery_hint || null,
+        recoveryHint: gatedRecoveryHint(msg.recovery_hint ?? null, "skip_result"),
         scope: normalizeGapScope(msg),
         stream: skipStream,
         unsupportedInDefaultScope: streamUnsupportedInDefaultScope(skippedManifestStream),
       });
-      // A continuation is replayed by the committed cursor itself (the next
-      // slice starts at slice_end), so only a continuation-free omission
-      // withholds the checkpoint. A skip without a stream still omitted rows
-      // that some cursor owns; decideCheckpointCommits withholds them all.
+      // A continuation replays the omitted slice. Without one, retaining the
+      // cursor is a data-loss guard, independent of authorizing recovery: the
+      // connector's retryable flag, hint and prose do not decide this guard.
+      // Informational skips (for example an out-of-scope optional stream) do
+      // not claim an omission from the requested collection.
       if (msg.reason === "stream_collection_failed") {
         skipOmissions.push({ source: "stream_collection_failed", stream: skipStream });
-      } else if (continuation === null && (gap.recovery_hint as { retryable: boolean }).retryable) {
+      } else if (continuation === null && gap.severity !== "informational") {
         skipOmissions.push({ source: "retryable_skip", stream: skipStream });
       }
       appendKnownGap(gap);
@@ -6500,6 +6466,19 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       STREAM_EVIDENCE: handleStreamEvidenceMessage,
     };
 
+    /**
+     * Section 5.11 gate for a connector hint. Only an authorized action reaches
+     * buildKnownGap. Every other hint becomes an explicit `unknown`, so no text
+     * inference runs. The connector's retryable flag and code never authorize.
+     */
+    function gatedRecoveryHint(hint: unknown, origin: RecoveryHintOrigin): string {
+      const action = typeof hint === "string" ? hint : (hint as { action?: unknown } | null)?.action;
+      if (typeof action !== "string") {
+        return "unknown";
+      }
+      return observationRun.gateRecoveryHint(action, origin).result === "authorized" ? action : "unknown";
+    }
+
     function withoutDoneBasis(error: DoneError): DoneError {
       const rest: DoneError = { ...error };
       delete rest.basis;
@@ -6538,13 +6517,15 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // it from here on.
       ownerCancelSealed = true;
       if (observationDiagnosisWrite === null) {
-        // A run that sent no OBSERVATION and has no defect has nothing to
-        // record. Writing an empty row would delay every terminal result on
+        // A run that sent no OBSERVATION, has no defect and has no connector
+        // suggestion has nothing to record. Writing an empty row would delay every terminal result on
         // PostgreSQL and would share the per-connector cap with the rows that
         // explain a failure.
         const snapshot = observationRun.snapshot();
         observationDiagnosisWrite =
-          snapshot.facts.length === 0 && snapshot.defects.length === 0
+          snapshot.facts.length === 0 &&
+          snapshot.defects.length === 0 &&
+          (snapshot.connector_suggestions ?? []).length === 0
             ? Promise.resolve()
             : writeObservationRecord(snapshot);
       }
