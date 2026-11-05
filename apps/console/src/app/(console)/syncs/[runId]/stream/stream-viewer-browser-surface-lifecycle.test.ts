@@ -35,10 +35,16 @@ function makeHarness() {
   const mountedViewers: unknown[] = [];
   const transportRef: { current: PdppRemoteSurfaceTransport | null } = { current: null };
   const fetches: string[] = [];
-  const createViewer = ((_options: unknown) => {
+  const logs: string[] = [];
+  const transports: PdppRemoteSurfaceTransport[] = [];
+  // The stream, not any viewer, owns attachment readiness; every mount shares it.
+  const presentationAttachmentReadyRef = { current: true };
+  const mounts: { mount: () => Promise<void> } = { mount: () => Promise.resolve() };
+  const createViewer = ((transport: PdppRemoteSurfaceTransport) => {
+    transports.push(transport);
     const viewer: FakeViewer = {
       id: viewers.length + 1,
-      mount: () => Promise.resolve(),
+      mount: () => mounts.mount(),
       unmount() {
         viewer.unmounts += 1;
       },
@@ -51,7 +57,9 @@ function makeHarness() {
     clipboardUrlRef: { current: "/clipboard" },
     createViewer,
     inputUrlRef: { current: "/input" },
-    logDebug: () => undefined,
+    logDebug: (event) => {
+      logs.push(event);
+    },
     node: dom.window.document.createElement("div"),
     onTransportMounted: (transport) => {
       mountedTransports.push(transport);
@@ -59,12 +67,24 @@ function makeHarness() {
     onViewerMounted: (viewer) => {
       mountedViewers.push(viewer);
     },
-    presentationAttachmentReadyRef: { current: true },
+    presentationAttachmentReadyRef,
     transportRef,
     viewportUrlRef: { current: "/viewport" },
     ...overrides,
   });
-  return { createViewer, fetches, mountedTransports, mountedViewers, options, transportRef, viewers };
+  return {
+    createViewer,
+    fetches,
+    logs,
+    mountedTransports,
+    mountedViewers,
+    mounts,
+    options,
+    presentationAttachmentReadyRef,
+    transportRef,
+    transports,
+    viewers,
+  };
 }
 
 async function withFetchLog<T>(fetches: string[], work: () => Promise<T>): Promise<T> {
@@ -86,6 +106,115 @@ function postsInput(transport: PdppRemoteSurfaceTransport | null, fetches: strin
   transport.send({ text: "x", type: "text" });
   return fetches.length > before;
 }
+
+function deferredMount() {
+  let reject: (error: Error) => void = () => undefined;
+  const promise = new Promise<void>((_resolve, rejectPromise) => {
+    reject = rejectPromise;
+  });
+  return { promise, reject };
+}
+
+/** Sends a viewport and returns whether it was posted, plus the applied ack. */
+function sendViewport(transport: PdppRemoteSurfaceTransport | null, fetches: string[]) {
+  assert.ok(transport, "expected a transport");
+  const ack = new Promise<Record<string, unknown>>((resolve) => {
+    transport.subscribe((message) => resolve(message));
+  });
+  const before = fetches.length;
+  transport.send({ height: 600, requestId: 7, type: "viewport", width: 800 });
+  return { ack, posted: fetches.length > before };
+}
+
+test("a replaced viewer keeps the stream's presentation attachment ready, so the new viewer posts viewports", async () => {
+  const h = makeHarness();
+  await withFetchLog(h.fetches, async () => {
+    const cleanupOld = mountBrowserSurfaceViewer(h.options());
+    cleanupOld();
+    assert.equal(h.presentationAttachmentReadyRef.current, true, "cleanup of a viewer must not detach the stream");
+    mountBrowserSurfaceViewer(h.options());
+    const { ack, posted } = sendViewport(h.transports[1] ?? null, h.fetches);
+    assert.equal(posted, true, "the replacement viewer posts its viewport instead of queueing it");
+    assert.deepEqual(await ack, { requestId: 7, type: "viewport-applied" });
+  });
+});
+
+test("cleaning up an older viewer does not stop the current viewer from posting viewports", async () => {
+  const h = makeHarness();
+  await withFetchLog(h.fetches, async () => {
+    const cleanupOld = mountBrowserSurfaceViewer(h.options());
+    mountBrowserSurfaceViewer(h.options());
+    cleanupOld();
+    const { ack, posted } = sendViewport(h.transports[1] ?? null, h.fetches);
+    assert.equal(posted, true, "the current viewer posts its viewport");
+    assert.deepEqual(await ack, { requestId: 7, type: "viewport-applied" });
+  });
+});
+
+test("a mount failure that arrives after cleanup is not logged to the host", async () => {
+  const h = makeHarness();
+  const { promise, reject } = deferredMount();
+  h.mounts.mount = () => promise;
+  const cleanup = mountBrowserSurfaceViewer(h.options());
+  cleanup();
+  reject(new Error("late mount failure"));
+  // Registered after the lifecycle's handler, so it settles after it.
+  await promise.catch(() => undefined);
+  assert.deepEqual(h.logs, []);
+});
+
+test("a mount failure on a live mount is logged to the host", async () => {
+  const h = makeHarness();
+  const { promise, reject } = deferredMount();
+  h.mounts.mount = () => promise;
+  mountBrowserSurfaceViewer(h.options());
+  reject(new Error("mount failure"));
+  await promise.catch(() => undefined);
+  assert.deepEqual(h.logs, ["surface.cdp-frame.viewer_mount_error"]);
+});
+
+test("a throwing mount notification during initialization retires the mount and handles its pending mount failure", async () => {
+  const h = makeHarness();
+  const { promise, reject } = deferredMount();
+  h.mounts.mount = () => promise;
+  await withFetchLog(h.fetches, async () => {
+    const cleanup = mountBrowserSurfaceViewer(
+      h.options({
+        onViewerMounted: (viewer) => {
+          if (viewer) {
+            throw new Error("init callback failed");
+          }
+        },
+      })
+    );
+    assert.equal(h.viewers[0]?.unmounts, 1, "the partially mounted viewer is unmounted");
+    assert.equal(postsInput(h.transports[0] ?? null, h.fetches), false, "its transport is disposed");
+    assert.equal(h.transportRef.current, null);
+    assert.deepEqual(h.mountedTransports, [h.transports[0], null], "the host is told the mount is gone");
+    assert.deepEqual(h.logs, ["surface.cdp-frame.viewer_mount_error"]);
+    reject(new Error("late mount failure"));
+    await promise.catch(() => undefined);
+    assert.deepEqual(h.logs, ["surface.cdp-frame.viewer_mount_error"], "the late failure is not logged");
+    cleanup();
+    assert.equal(h.viewers[0]?.unmounts, 1, "release is idempotent");
+  });
+});
+
+test("a failed initialization whose release also throws still retires the mount without throwing", async () => {
+  const h = makeHarness();
+  await withFetchLog(h.fetches, async () => {
+    mountBrowserSurfaceViewer(
+      h.options({
+        onTransportMounted: () => {
+          throw new Error("callback failed");
+        },
+      })
+    );
+    assert.equal(h.viewers[0]?.unmounts, 1);
+    assert.equal(postsInput(h.transports[0] ?? null, h.fetches), false);
+    assert.deepEqual(h.logs, ["surface.cdp-frame.viewer_mount_error", "surface.cdp-frame.viewer_mount_error"]);
+  });
+});
 
 test("a throwing mount notification during cleanup still unmounts the viewer and disposes the transport", async () => {
   const h = makeHarness();

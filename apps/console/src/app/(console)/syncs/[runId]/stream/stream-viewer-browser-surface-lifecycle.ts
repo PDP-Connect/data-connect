@@ -19,9 +19,14 @@ export interface MountBrowserSurfaceViewerOptions extends TransportOptions {
 
 /**
  * Mounts one Remote Surface viewer over one PDPP transport and returns its
- * cleanup. Each mount owns its transport: cleanup always retires it, even when
- * a mount notification or the viewer's own unmount throws, so a retired
+ * cleanup. Each mount owns its transport and retires it through one idempotent
+ * release, used both for normal cleanup and for a failed initialization, even
+ * when a mount notification or the viewer's own unmount throws, so a retired
  * viewer cannot keep posting input to the stream.
+ *
+ * Presentation-attachment readiness belongs to the stream, not to a viewer:
+ * a mount never writes it, so replacing a viewer cannot mark a still-attached
+ * stream as detached.
  */
 export function mountBrowserSurfaceViewer({
   createViewer,
@@ -31,31 +36,20 @@ export function mountBrowserSurfaceViewer({
   transportRef,
   ...transportOptions
 }: MountBrowserSurfaceViewerOptions): () => void {
-  let disposed = false;
   const transport = createPdppRemoteSurfaceTransport(transportOptions);
   const viewer = createViewer(transport);
   transportRef.current = transport;
-  transport.setPresentationAttachmentReady(transportOptions.presentationAttachmentReadyRef.current);
-  try {
-    const mountPromise = viewer.mount(node);
-    if (!disposed) {
-      onTransportMounted(transport);
-      onViewerMounted(viewer);
-    }
-    mountPromise.catch((error) => {
-      transportOptions.logDebug("surface.cdp-frame.viewer_mount_error", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-  } catch (error) {
+  let released = false;
+  const logMountError = (error: unknown) =>
     transportOptions.logDebug("surface.cdp-frame.viewer_mount_error", {
       error: error instanceof Error ? error.message : String(error),
     });
-  }
-  return () => {
-    disposed = true;
+  const release = () => {
+    if (released) {
+      return;
+    }
+    released = true;
     try {
-      transport.setPresentationAttachmentReady(false);
       if (transportRef.current === transport) {
         transportRef.current = null;
         onTransportMounted(null);
@@ -70,4 +64,22 @@ export function mountBrowserSurfaceViewer({
       }
     }
   };
+  try {
+    viewer.mount(node).catch((error) => {
+      // A retired mount's late failure is not an event of the live stream.
+      if (!released) {
+        logMountError(error);
+      }
+    });
+    onTransportMounted(transport);
+    onViewerMounted(viewer);
+  } catch (error) {
+    logMountError(error);
+    try {
+      release();
+    } catch (releaseError) {
+      logMountError(releaseError);
+    }
+  }
+  return release;
 }
