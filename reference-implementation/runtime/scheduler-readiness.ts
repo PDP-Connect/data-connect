@@ -205,8 +205,13 @@ async function checkFirstPartyLocalSourceReadiness(manifest: SchedulerManifest):
   return `required local source path(s) are missing or unreadable: ${missing.join(", ")}`;
 }
 
-export async function defaultReadinessChecker(schedule: ConnectorSchedule): Promise<SchedulerReadinessResult> {
-  const requirements = getRuntimeRequirements(schedule.manifest);
+/**
+ * Whether this host can run a connector with these declared requirements.
+ * The scheduler asks before an automatic run; the owner-facing readiness
+ * projection asks with the same function, so there is one set of host rules.
+ */
+export async function checkManifestHostReadiness(manifest: SchedulerManifest): Promise<SchedulerReadinessResult> {
+  const requirements = getRuntimeRequirements(manifest);
   for (const tool of requirements.external_tools || []) {
     // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
     if (!(await runDetectCommand(tool))) {
@@ -214,17 +219,21 @@ export async function defaultReadinessChecker(schedule: ConnectorSchedule): Prom
     }
   }
 
-  if (requiredBindingEnabled(schedule.manifest, "browser") && !browserSurfaceConfigured()) {
+  if (requiredBindingEnabled(manifest, "browser") && !browserSurfaceConfigured()) {
     return {
       ready: false,
       reason: "required browser runtime is not configured for unattended scheduled runs",
     };
   }
 
-  const localSourceReason = await checkFirstPartyLocalSourceReadiness(schedule.manifest);
+  const localSourceReason = await checkFirstPartyLocalSourceReadiness(manifest);
   if (localSourceReason) {
     return { ready: false, reason: localSourceReason };
   }
 
   return { ready: true };
+}
+
+export function defaultReadinessChecker(schedule: ConnectorSchedule): Promise<SchedulerReadinessResult> {
+  return checkManifestHostReadiness(schedule.manifest);
 }

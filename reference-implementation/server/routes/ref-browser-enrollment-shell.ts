@@ -28,20 +28,18 @@
 //   - No provider secret, browser session cookie, or credential accepted/returned.
 //   - Only browser-bound connectors accepted; static-secret/local-collector
 //     connectors are refused with a typed 409.
-//   - Browser-bound comes from the registered manifest's bindings
-//     (`browserEnrollmentSupport`, shared with the console). A known scaffold,
-//     or any connector when the conformance roster did not load, is refused
-//     with a typed 409.
+//   - Whether a shell may be created is the server-owned readiness
+//     projection (`connector-readiness.ts`), computed at request time: the
+//     selected artifact must verify and the host must meet its requirements.
+//     The console's picker reads the same projection. A connector that is not
+//     runnable is refused with a typed 409 that names the reason.
 //   - Shells are invisible to every list/count/owner-console surface until enrollment
 //     captures source identity and flips the shell to `active`.
 
 import { randomBytes } from "node:crypto";
 
-import {
-  browserEnrollmentSupport,
-  type ConnectorManifestLike,
-  displayNameForConnector,
-} from "../connection-setup-plan.ts";
+import { type ConnectorManifestLike, displayNameForConnector } from "../connection-setup-plan.ts";
+import type { BrowserEnrollmentReadinessResolver } from "../connector-readiness.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
@@ -153,6 +151,7 @@ export interface MountRefBrowserEnrollmentShellContext {
   handleError: (res: unknown, err: unknown) => void;
   now?: () => string;
   pdppError: PdppErrorFn;
+  readinessResolver: BrowserEnrollmentReadinessResolver;
   requireOwnerSession: MiddlewareHandler;
   resolveRegisteredConnectorManifest: (connectorId: string) => Promise<ConnectorManifestLike>;
   setReferenceTraceId: (res: RouteResponse, traceId: string) => void;
@@ -276,8 +275,8 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
         // Reject unknown connector before doing anything else (404).
         const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
 
-        const support = browserEnrollmentSupport(connectorId, manifest);
-        if (!support.browserBound) {
+        const readiness = await ctx.readinessResolver.resolve(connectorId);
+        if (!readiness.browser_bound) {
           await emitShellAudit(ctx, req, res, {
             connectorId,
             error: { code: "connector_not_browser_bound" },
@@ -293,7 +292,7 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
           );
           return;
         }
-        if (!support.canAddAccount) {
+        if (readiness.action !== "connect") {
           await emitShellAudit(ctx, req, res, {
             connectorId,
             error: { code: "connector_browser_setup_unavailable" },
@@ -305,7 +304,7 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
             res,
             409,
             "connector_browser_setup_unavailable",
-            `Connector '${connectorId}' cannot add an account through browser setup: it is a known scaffold, or this server cannot load the connector conformance roster.`
+            `Connector '${connectorId}' cannot add an account through browser setup now: ${readiness.reason}${readiness.detail ? ` (${readiness.detail})` : ""}. Next action: ${readiness.action}.`
           );
           return;
         }

@@ -16,9 +16,12 @@ import test from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import { createConnectorInstallService } from "../server/connector-install/index.ts";
+import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const NOW = "2026-06-01T00:00:00.000Z";
@@ -74,8 +77,17 @@ async function withServer(
   fn: (ctx: { asUrl: string; rsUrl: string }) => Promise<void>,
   options: { configuredProviderAuthConnectorKeys?: readonly string[] } = {}
 ): Promise<void> {
+  // Registration alone is not code availability: browser-bound connectors get a
+  // verified developer-local artifact (see `registerConnector`) and the host
+  // looks browser-capable. The signed catalog is stubbed empty; no network.
+  fixtures = createBrowserArtifactFixtures();
+  const restoreHost = setBrowserHostCapability(true);
   const server = await startServer({
     asPort: 0,
+    connectorInstallService: createConnectorInstallService({
+      ...installedConnectorManifestRegistration,
+      catalogLoader: async () => [],
+    }),
     ...(options.configuredProviderAuthConnectorKeys === undefined
       ? {}
       : { configuredProviderAuthConnectorKeys: options.configuredProviderAuthConnectorKeys }),
@@ -91,6 +103,9 @@ async function withServer(
     await fn({ asUrl, rsUrl });
   } finally {
     await closeServer(server);
+    restoreHost();
+    fixtures?.close();
+    fixtures = null;
   }
 }
 
@@ -191,15 +206,22 @@ function loadManifest(name: string): Record<string, unknown> {
   return entry.manifest as Record<string, unknown>;
 }
 
-async function registerConnector(asUrl: string, manifest: Record<string, unknown>): Promise<Record<string, unknown>> {
+let fixtures: ReturnType<typeof createBrowserArtifactFixtures> | null = null;
+
+async function registerConnector(
+  asUrl: string,
+  manifest: Record<string, unknown>,
+  options: { publish?: boolean } = {}
+): Promise<Record<string, unknown>> {
+  const registered = options.publish === false ? manifest : ((await fixtures?.publish(manifest)) ?? manifest);
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(manifest),
+    body: JSON.stringify(registered),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
   const responseBody = await resp.text();
   assert.equal(resp.status, 201, `register ${manifest.connector_id} failed: ${resp.status} ${responseBody}`);
-  return manifest;
+  return registered;
 }
 
 interface SeedInstanceInput {
@@ -252,7 +274,8 @@ test("owner-agent bearer lists connector templates with related connection summa
       ...asRecord(listedUnprovenManifest.capabilities),
       public_listing: { tier: "preview" },
     };
-    await registerConnector(asUrl, listedUnprovenManifest);
+    // Registered only: no artifact is installed, so no browser setup is runnable.
+    await registerConnector(asUrl, listedUnprovenManifest, { publish: false });
     const amazonKey = canonicalConnectorKey(amazonManifest.connector_id);
     assert.ok(amazonKey, "amazon manifest must resolve a canonical connector key");
     await seedInstance({
@@ -331,7 +354,7 @@ test("owner-template projection separates browser owner-session setup from owner
       ...asRecord(browserRunbookManifest.capabilities),
       public_listing: { tier: "supported" },
     };
-    await registerConnector(asUrl, browserRunbookManifest);
+    await registerConnector(asUrl, browserRunbookManifest, { publish: false });
 
     const ownerToken = await issueOwnerToken(asUrl);
     const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
@@ -771,7 +794,7 @@ test("unproven with recognized modality but non-actionable plan is not UAT-expos
         ...asRecord(doorDashManifest.capabilities),
         public_listing: { tier: "development" },
       };
-      await registerConnector(asUrl, doorDashManifest);
+      await registerConnector(asUrl, doorDashManifest, { publish: false });
 
       const ownerToken = await issueOwnerToken(asUrl);
       const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
@@ -885,7 +908,7 @@ test("UAT allowlist: development connector exposed only when flag+key+valid-setu
         if (scenario.connectorKey === "doordash") {
           const m = loadManifest("doordash");
           m.capabilities = { ...asRecord(m.capabilities), public_listing: { tier: "development" } };
-          await registerConnector(asUrl, m);
+          await registerConnector(asUrl, m, { publish: false });
         }
         if (scenario.connectorKey === "steam") {
           await registerConnector(asUrl, loadManifest("steam"));

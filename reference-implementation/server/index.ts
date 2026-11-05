@@ -95,6 +95,7 @@ import {
   withConnectorLifecycleLock,
 } from "./connector-lifecycle-lock.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
+import { createBrowserEnrollmentReadinessResolver } from "./connector-readiness.ts";
 import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
 import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
@@ -6913,6 +6914,11 @@ export function buildAsApp(opts: ServerOpts = {}) {
     getOwnerSubjectId,
     handleError,
     pdppError,
+    readinessResolver: createBrowserEnrollmentReadinessResolver({
+      installService: connectorInstallService,
+      registeredManifest: async (connectorKey) =>
+        resolveRegisteredConnectorManifest(connectorKey) as Promise<Record<string, unknown> | null>,
+    }),
     requireOwnerSession: ownerAuth.requireOwnerSession,
     resolveRegisteredConnectorManifest,
     setReferenceTraceId,
@@ -8433,6 +8439,48 @@ function buildRsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountOwnerConnectionIntent>[1]);
 
+  const ownerConnectorInstallService =
+    opts.connectorInstallService ??
+    createConnectorInstallService({
+      ...installedConnectorManifestRegistration,
+      removeActivation: removeConnectorActivation,
+      assertUninstallAllowed: async (connectorId) => {
+        const activeRun = isPostgresStorageBackend()
+          ? (await postgresQuery<{ run_id: string }>(
+              "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
+              [connectorId]
+            )).rows[0]
+          : getDb()
+              .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
+              .get<{ run_id: string }>(connectorId);
+        if (activeRun) {
+          throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
+            code: "connector_run_active",
+          });
+        }
+        const ids = isPostgresStorageBackend()
+          ? (await postgresQuery<{ connector_instance_id: string }>(
+              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
+              [connectorId]
+            )).rows.map((row) => row.connector_instance_id)
+          : getDb().prepare(
+              "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
+            ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
+        if (ids.length) {
+          const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
+          error.code = "connector_in_use";
+          error.connection_ids = ids;
+          throw error;
+        }
+      },
+    });
+
+  const ownerConnectorReadinessResolver = createBrowserEnrollmentReadinessResolver({
+    installService: ownerConnectorInstallService,
+    registeredManifest: async (connectorKey) =>
+      (await getConnectorManifest(connectorKey)) as Record<string, unknown> | null,
+  });
+
   // GET /v1/owner/connector-templates is the bearer-authed owner-agent template
   // catalog. It separates connector implementation metadata from configured
   // connection instances, embeds related connection summaries, and reports
@@ -8448,6 +8496,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     handleError,
     listRegisteredConnectorIds,
     projectStorageDisplayName,
+    readinessResolver: ownerConnectorReadinessResolver,
     requireOwner,
     requireToken,
     resolveResource: (req: unknown) =>
@@ -8465,43 +8514,10 @@ function buildRsApp(opts: ServerOpts = {}) {
     // `connector_implementation`; drop the cached list so the next read shows it.
     onImplementationChanged: invalidateConnectorSummariesCache,
     pdppError,
+    readinessResolver: ownerConnectorReadinessResolver,
     requireOwner,
     requireToken,
-    service:
-      opts.connectorInstallService ??
-      createConnectorInstallService({
-        ...installedConnectorManifestRegistration,
-        removeActivation: removeConnectorActivation,
-        assertUninstallAllowed: async (connectorId) => {
-          const activeRun = isPostgresStorageBackend()
-            ? (await postgresQuery<{ run_id: string }>(
-                "SELECT run_id FROM controller_active_runs WHERE connector_id=$1 ORDER BY started_at LIMIT 1",
-                [connectorId]
-              )).rows[0]
-            : getDb()
-                .prepare("SELECT run_id FROM controller_active_runs WHERE connector_id=? ORDER BY started_at LIMIT 1")
-                .get<{ run_id: string }>(connectorId);
-          if (activeRun) {
-            throw Object.assign(new Error(`Cannot uninstall ${connectorId} while run ${activeRun.run_id} is active.`), {
-              code: "connector_run_active",
-            });
-          }
-          const ids = isPostgresStorageBackend()
-            ? (await postgresQuery<{ connector_instance_id: string }>(
-                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=$1 ORDER BY connector_instance_id",
-                [connectorId]
-              )).rows.map((row) => row.connector_instance_id)
-            : getDb().prepare(
-                "SELECT connector_instance_id FROM connector_instances WHERE connector_id=? ORDER BY connector_instance_id"
-              ).all<{ connector_instance_id: string }>(connectorId).map((row) => row.connector_instance_id);
-          if (ids.length) {
-            const error = new Error(`Cannot uninstall ${connectorId}: ${ids.length} source${ids.length === 1 ? "" : "s"} still use this connector.`) as Error & { code: string; connection_ids: string[] };
-            error.code = "connector_in_use";
-            error.connection_ids = ids;
-            throw error;
-          }
-        },
-      }),
+    service: ownerConnectorInstallService,
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
   // Owner-authenticated HTTP routes for both remote-access providers

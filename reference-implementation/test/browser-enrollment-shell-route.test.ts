@@ -12,7 +12,10 @@ import {
   retireExpiredBrowserEnrollmentShells,
 } from "../server/browser-enrollment-shell-retirement.ts";
 import { getDb } from "../server/db.ts";
+import { createConnectorInstallService } from "../server/connector-install/index.ts";
+import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { startServer } from "../server/index.ts";
+import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 import { BROWSER_ENROLLMENT_SHELL_TTL_MS } from "../server/routes/ref-browser-enrollment-shell.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 
@@ -35,9 +38,38 @@ function loadManifest(name: string): unknown {
   return entry.manifest;
 }
 
-async function registerConnector(asUrl: string, name: string): Promise<void> {
+// Registration alone is not code availability. Each server below runs with a
+// browser-capable host and a verified developer-local artifact for every
+// connector `registerConnector` publishes, unless a test opts out.
+let fixtures: ReturnType<typeof createBrowserArtifactFixtures> | null = null;
+let restoreHost: (() => void) | null = null;
+
+// The readiness projection reads the signed catalog when nothing is installed;
+// a test must not reach the network for it.
+function emptyCatalogInstallService() {
+  return createConnectorInstallService({
+    ...installedConnectorManifestRegistration,
+    catalogLoader: async () => [],
+  });
+}
+
+function openFixtures(): void {
+  fixtures = createBrowserArtifactFixtures();
+  restoreHost = setBrowserHostCapability(true);
+}
+
+function closeFixtures(): void {
+  restoreHost?.();
+  fixtures?.close();
+  fixtures = null;
+  restoreHost = null;
+}
+
+async function registerConnector(asUrl: string, name: string, options: { publish?: boolean } = {}): Promise<void> {
+  const manifest = loadManifest(name) as Record<string, unknown>;
+  const registered = options.publish === false ? manifest : await fixtures?.publish(manifest);
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(loadManifest(name)),
+    body: JSON.stringify(registered),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
@@ -91,9 +123,11 @@ async function closeServer(server: TestServer): Promise<void> {
 }
 
 async function withServer(fn: (urls: { asUrl: string; rsUrl: string }) => Promise<void>): Promise<void> {
+  openFixtures();
   const server = await startServer({
     asPort: 0,
     autoEnrollEligibleSchedules: false,
+    connectorInstallService: emptyCatalogInstallService(),
     dbPath: ":memory:",
     ownerAuthPassword: OWNER_PASSWORD,
     ownerAuthSubjectId: OWNER_SUBJECT_ID,
@@ -106,6 +140,7 @@ async function withServer(fn: (urls: { asUrl: string; rsUrl: string }) => Promis
     await fn({ asUrl, rsUrl });
   } finally {
     await closeServer(server);
+    closeFixtures();
   }
 }
 
@@ -117,9 +152,11 @@ async function withServer(fn: (urls: { asUrl: string; rsUrl: string }) => Promis
 // cookie — same pattern as static-secret-draft-connection-route.test.ts's
 // `withOpenServer`.
 async function withOpenServer(fn: (urls: { asUrl: string; rsUrl: string }) => Promise<void>): Promise<void> {
+  openFixtures();
   const server = await startServer({
     asPort: 0,
     autoEnrollEligibleSchedules: false,
+    connectorInstallService: emptyCatalogInstallService(),
     dbPath: ":memory:",
     ownerAuthPassword: "",
     ownerAuthSubjectId: OWNER_SUBJECT_ID,
@@ -132,6 +169,7 @@ async function withOpenServer(fn: (urls: { asUrl: string; rsUrl: string }) => Pr
     await fn({ asUrl, rsUrl });
   } finally {
     await closeServer(server);
+    closeFixtures();
   }
 }
 
@@ -316,7 +354,7 @@ test("browser-enrollment shell: creates draft for a browser-bound connector outs
       display_name: "Acme Shop",
     };
     const registered = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(manifest),
+      body: JSON.stringify(await fixtures?.publish(manifest)),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });
@@ -331,17 +369,55 @@ test("browser-enrollment shell: creates draft for a browser-bound connector outs
   });
 });
 
-test("browser-enrollment shell: rejects a known scaffold (409)", async () => {
+test("browser-enrollment shell: refuses a registered connector that has no runnable artifact (409)", async () => {
   await withServer(async ({ asUrl }) => {
-    await registerConnector(asUrl, "anthropic");
+    // Registered, but nothing installed or developer-local selected: the
+    // manifest is a description, not code the host can run.
+    await registerConnector(asUrl, "anthropic", { publish: false });
     const cookie = await ownerLogin(asUrl);
     const res = await fetch(`${asUrl}/_ref/connectors/anthropic/browser-enrollment-shell`, {
       headers: { cookie },
       method: "POST",
     });
     assert.equal(res.status, 409);
-    const body = await jsonBody(res);
-    assert.equal(asRecord(body.error).code, "connector_browser_setup_unavailable");
+    const error = asRecord((await jsonBody(res)).error);
+    assert.equal(error.code, "connector_browser_setup_unavailable");
+    assert.match(asString(error.message), /not_published/);
+    assert.match(asString(error.message), /Next action: unavailable/);
+  });
+});
+
+test("browser-enrollment shell: refuses when the selected artifact no longer verifies (409)", async () => {
+  await withServer(async ({ asUrl }) => {
+    await registerConnector(asUrl, "chase");
+    fixtures?.corrupt("chase");
+    const cookie = await ownerLogin(asUrl);
+    const res = await fetch(`${asUrl}/_ref/connectors/chase/browser-enrollment-shell`, {
+      headers: { cookie },
+      method: "POST",
+    });
+    assert.equal(res.status, 409);
+    const error = asRecord((await jsonBody(res)).error);
+    assert.equal(error.code, "connector_browser_setup_unavailable");
+    assert.match(asString(error.message), /artifact_invalid/);
+    assert.match(asString(error.message), /Next action: repair/);
+  });
+});
+
+test("browser-enrollment shell: refuses when this host has no browser surface (409)", async () => {
+  await withServer(async ({ asUrl }) => {
+    await registerConnector(asUrl, "chase");
+    setBrowserHostCapability(false);
+    const cookie = await ownerLogin(asUrl);
+    const res = await fetch(`${asUrl}/_ref/connectors/chase/browser-enrollment-shell`, {
+      headers: { cookie },
+      method: "POST",
+    });
+    assert.equal(res.status, 409);
+    const error = asRecord((await jsonBody(res)).error);
+    assert.equal(error.code, "connector_browser_setup_unavailable");
+    assert.match(asString(error.message), /host_requirement_unmet/);
+    assert.match(asString(error.message), /Next action: configure/);
   });
 });
 

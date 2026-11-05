@@ -87,6 +87,7 @@ function mountAndCaptureHandler(manifests: Record<string, unknown>[]): CapturedR
     },
     listRegisteredConnectorIds: async () => Array.from(byId.keys()),
     projectStorageDisplayName: (displayName) => displayName ?? null,
+    readinessResolver: { resolve: async () => assert.fail("unexpected readiness read"), resolveMany: async () => [] },
     requireOwner: (...args: unknown[]) => (args[2] as () => void)(),
     requireToken: (...args: unknown[]) => (args[2] as () => void)(),
     resolveResource: () => "http://localhost",
