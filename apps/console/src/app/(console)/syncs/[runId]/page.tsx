@@ -14,6 +14,7 @@ import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/own
 import {
   getRunStatus,
   getRunTimeline,
+  listRunRecordRejectionReceipts,
   getStaticSecretSetup,
   type RunStatusEnvelope,
   type SpineEvent,
@@ -37,8 +38,10 @@ import {
   type SkippedStreamSummary,
   summarizeSkippedStreams,
 } from "../../lib/run-gaps.ts";
+import { summarizeRunRejections } from "../../lib/run-rejections.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
+import { RejectedRecordsSection } from "./rejected-records-section.tsx";
 import { projectCredentialInteraction } from "./credential-interaction.ts";
 import {
   describeAssistanceOwnerAction,
@@ -140,6 +143,13 @@ export default async function RunDetailPage({
       ? await getStaticSecretSetup(connectorId).catch(() => null)
       : null;
   const latestProgress = getLatestProgress(events);
+  const rejections = summarizeRunRejections(events);
+  // Receipts are read only when this run rejected something. A failed read
+  // leaves the count, which comes from the run's own events.
+  const rejectionReceipts =
+    rejections.rejectedRecords > 0 && connectionId
+      ? await listRunRecordRejectionReceipts(connectionId, runId).catch(() => null)
+      : null;
   const failure = events.find((e) => e.event_type === "run.failed");
   const terminalKnownGaps = extractTerminalKnownGaps(events);
   const gapClassification = classifyKnownGaps(terminalKnownGaps.gaps);
@@ -207,6 +217,7 @@ export default async function RunDetailPage({
         skipped={summarizeSkippedStreams(events)}
         summary={terminalKnownGaps.summary ?? gapClassification.summary}
       />
+      <RejectedRecordsSection receipts={rejectionReceipts} summary={rejections} />
       <ViolationDiagnosis failure={failure} />
       <ConnectorStderrTailSection failure={failure} />
       <ConnectorDiagnosticLinesSection

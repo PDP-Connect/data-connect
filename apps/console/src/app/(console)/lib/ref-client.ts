@@ -13,6 +13,7 @@ import { isOwnerSessionRequiredBody } from "./auth-errors.ts";
 import { describeErrorText } from "./describe-error.ts";
 import { redirectToOwnerLogin } from "./login-redirect.ts";
 import { getAsInternalUrl, ReferenceServerUnreachableError, withOwnerSessionCookie } from "./owner-token.ts";
+import { type RejectedRecordReceipt, receiptsForRun } from "./run-rejections.ts";
 import { isCredentialRefusal, refErrorCode } from "./static-secret-refusal.ts";
 import { verifyDashboardSession } from "./verify-session.ts";
 
@@ -2639,6 +2640,30 @@ export interface ConnectionSetupStatus {
 }
 
 export type StaticSecretSetupStatus = ConnectionSetupStatus;
+
+// A connection's record-rejection receipts are listed oldest first with no run
+// filter, so one run's receipts can sit behind other runs' pages. The page cap
+// bounds the read; a run with more than that many pages of receipts shows the
+// ones found.
+const RECORD_REJECTION_RECEIPT_MAX_PAGES = 10;
+
+export async function listRunRecordRejectionReceipts(
+  connectionId: string,
+  runId: string
+): Promise<RejectedRecordReceipt[]> {
+  const receipts: RejectedRecordReceipt[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < RECORD_REJECTION_RECEIPT_MAX_PAGES; page += 1) {
+    const body = await refFetch(`/_ref/connections/${encodeURIComponent(connectionId)}/record-rejections`, { cursor });
+    const result = receiptsForRun(body, runId);
+    receipts.push(...result.receipts);
+    if (!result.nextCursor) {
+      break;
+    }
+    cursor = result.nextCursor;
+  }
+  return receipts;
+}
 
 export async function getConnectionSetupStatus(
   connectionId: string,
