@@ -139,7 +139,9 @@ jobs:
     name: typecheck reference implementation
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
-    runs-on: ubuntu-latest
+    # Pinned to the same image as the test shards: both save the node_modules cache
+    # under one key, so a different image here would write a tree the shards restore.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -167,7 +169,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-ubuntu-24.04-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -205,7 +207,11 @@ jobs:
     name: test reference implementation shard ${{ matrix.shard }}
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: latest moved to 26.04, for which Patchright publishes
+    # no Chromium build, so the browser tests cannot run. Lift the pin once Patchright
+    # supports the new image (its install step then stops printing "Skipping the
+    # optional browser download").
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -237,7 +243,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-ubuntu-24.04-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -255,6 +261,14 @@ jobs:
           npm --prefix reference-implementation/vendor/read-core run build
           npm --prefix reference-implementation/vendor/mcp-server run build
           npm --prefix reference-implementation/vendor/cli run build
+
+      # The reference tests drive a real Chromium. Install it explicitly instead of
+      # relying on the cache above to carry it: the cache is shared with jobs that
+      # never use a browser, and a cold cache on an image Patchright does not
+      # support silently produced a tree without one. This is a no-op when the
+      # browser is already present.
+      - name: Install Chromium for browser tests
+        run: npx patchright install chromium
 
       - name: Build workspace packages
         # The root tsconfig.json's project references only cover the app

@@ -44,7 +44,11 @@ permissions:
 jobs:
   test-postgres:
     name: test reference implementation (postgres)
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: latest moved to 26.04, for which Patchright publishes
+    # no Chromium build, so the browser tests cannot run. Lift the pin once Patchright
+    # supports the new image (its install step then stops printing "Skipping the
+    # optional browser download").
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - name: Checkout
@@ -72,6 +76,11 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # The reference tests drive a real Chromium; install it explicitly rather
+      # than relying on the dependency postinstall to have fetched one.
+      - name: Install Chromium for browser tests
+        run: npx patchright install chromium
 
       - name: Build workspace packages
         run: |
