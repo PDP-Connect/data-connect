@@ -36,7 +36,7 @@ const reddit: ConnectorCatalogEntry = {
   displayName: "Reddit",
   disposition: "browser_collector_manual",
   externalDocs: [],
-  isKnownScaffold: false,
+  readiness: null,
   listingNote: null,
   modality: "browser_bound",
   nextStepKind: "enroll_browser_collector",
@@ -87,7 +87,6 @@ const UNAVAILABLE_TRUE = /data-row-unavailable="true"/;
 const UNAVAILABLE_DISCLOSURE = /data-testid="unavailable-connectors-disclosure"/;
 const BROWSER_SETUP_LINK = /href="\/connect\/browser-session\//;
 const INSTALL_OR_BROWSER_SETUP = />Install<\/button>|href="\/connect\/browser-session\//;
-const INSTALL_DISABLED = /data-testid="connector-install-disabled"/;
 const HOST_BLOCK = /Host blocked: Browser unavailable here\./;
 const CANNOT_ADD_HERE = /1 connector cannot be added here/;
 const PLATFORM_COPY = /not available on this platform/;
@@ -131,19 +130,50 @@ test("an unregistered browser connector offers Install before account setup exis
   assert.doesNotMatch(html, BROWSER_SETUP_LINK, "installation must not invent a working setup route");
 });
 
-test("known scaffolds still offer neither Install nor account setup", async () => {
+const verdict = (
+  reason: NonNullable<ConnectorCatalogEntry["readiness"]>["reason"],
+  action: NonNullable<ConnectorCatalogEntry["readiness"]>["action"],
+  detail: string | null = null
+): NonNullable<ConnectorCatalogEntry["readiness"]> => ({
+  action,
+  browserBound: true,
+  connectorKey: "new-browser",
+  detail,
+  reason,
+});
+const READINESS_NOTE = /data-testid="connector-readiness-note"/;
+const NOT_BUILT_YET = /Not built yet/;
+
+test("a published, uninstalled browser connector offers Install and is never 'Not built yet'", async () => {
+  // The defect this replaces: LinkedIn and Goodreads are published and
+  // installable, but a vendored roster made them read "Not built yet".
+  const html = await render(
+    false,
+    { ...unregisteredBrowser, readiness: verdict("not_installed", "install") },
+    browserPackage
+  );
+  assert.match(html, INSTALL_BUTTON);
+  assert.doesNotMatch(html, NOT_BUILT_YET);
+  assert.doesNotMatch(html, READINESS_NOTE);
+  assert.match(html, UNAVAILABLE_FALSE);
+});
+
+test("a verdict that blocks setup shows its reason and offers no account setup", async () => {
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.ok(browserPackage.catalog);
   const html = await render(
     false,
     {
       ...unregisteredBrowser,
-      disposition: "browser_collector_manual",
-      isKnownScaffold: true,
-      ownerActionable: true,
+      readiness: verdict("host_requirement_unmet", "configure", "No browser surface is configured."),
     },
-    browserPackage
+    { catalog: { ...browserPackage.catalog, digest: installed.digest }, installed: { ...installed, connector_id: "new-browser" } }
   );
-  assert.match(html, INSTALL_DISABLED);
-  assert.doesNotMatch(html, INSTALL_OR_BROWSER_SETUP);
+  assert.match(html, READINESS_NOTE);
+  assert.match(html, /No browser surface is configured\./);
+  assert.doesNotMatch(html, BROWSER_SETUP_LINK);
+  assert.doesNotMatch(html, NOT_BUILT_YET);
 });
 
 // Installing a package registers a connector but cannot create a setup path:

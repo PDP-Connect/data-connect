@@ -198,26 +198,13 @@ export function sourceSetupRowIsUnavailable(entry: ConnectorCatalogEntry): boole
 /** The owner-facing status label + tone for first-account setup. */
 export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStatus {
   if (entry.publicTier === "development") {
-    // "Not built yet" and "In development" are deliberately different labels:
-    // a scaffold has no collection code at all (there is nothing to test),
-    // while a real Development entry has an implemented, self-testable setup
-    // path that simply has not been proven against a live account yet.
-    // Collapsing these into one badge would hide exactly the distinction the
-    // owner needs to decide whether clicking a card can do anything. "Not
-    // built yet" reads as a known roadmap gap (part of the shared "not
-    // available yet" family), never as a
-    // broken build.
-    return entry.isKnownScaffold
-      ? {
-          description: "This connector is registered, but nobody has written its collection code yet.",
-          label: "Not built yet",
-          tone: "border-border bg-muted/30 text-muted-foreground",
-        }
-      : {
-          description: "This connector has a setup path, but it has not completed live-account validation.",
-          label: publicTierLabel(entry.publicTier),
-          tone: "border-border bg-muted/30 text-muted-foreground",
-        };
+    // The tier says how much live-account proof exists. Whether the owner can
+    // act now is the server's readiness verdict, shown separately.
+    return {
+      description: "This connector has a setup path, but it has not completed live-account validation.",
+      label: publicTierLabel(entry.publicTier),
+      tone: "border-border bg-muted/30 text-muted-foreground",
+    };
   }
   if (entry.publicTier === "preview") {
     return {
@@ -409,12 +396,6 @@ function isDevelopmentSelfTestDisposition(disposition: ConnectorCatalogEntry["di
  * unproven or unimplemented -- so this names that honestly instead.
  */
 function developmentFallbackGuidance(entry: ConnectorCatalogEntry): string {
-  if (entry.isKnownScaffold) {
-    const note = entry.listingNote;
-    return note
-      ? `This connector is scaffolded, not finished, and cannot collect data yet: ${note}`
-      : "This connector is scaffolded, not finished: it can reach the provider but does not collect data yet. There is nothing to test here yet.";
-  }
   // A deployment-blocked entry needs the exact missing settings named, not a
   // generic "unproven" note -- that fact is more actionable than anything
   // else this branch could say, and it holds regardless of tier.
@@ -492,14 +473,11 @@ export function sourceSetupGuidance(entry: ConnectorCatalogEntry): string {
 /** The primary next action for first-account setup, or null when none exists. */
 export function sourceSetupAction(entry: ConnectorCatalogEntry): SourceSetupAction | null {
   if (entry.publicTier === "development") {
-    // A KNOWN scaffold (unconditional SKIP_RESULT, no real collection) must
-    // never render an action: clicking it can never collect anything, and an
-    // add button on a stub is a worse experience than the stub staying
-    // invisible. A real-but-unproven Development entry falls through to the
-    // same disposition switch below, so it gets the exact action a Preview
-    // entry with the same disposition would get -- the only difference is the
-    // Development disclosure's own copy naming it unproven.
-    if (entry.isKnownScaffold || !isDevelopmentSelfTestDisposition(entry.disposition)) {
+    // A Development entry falls through to the same disposition switch below,
+    // so it gets the exact action a Preview entry with the same disposition
+    // would get. The server decides the disposition from readiness: a connector
+    // it cannot run never arrives with a connect disposition.
+    if (!isDevelopmentSelfTestDisposition(entry.disposition)) {
       return null;
     }
   } else if (!(isOwnerActionableEntry(entry) || isExperimentalEntry(entry) || hasDashboardSetupPath(entry))) {
@@ -599,14 +577,12 @@ export function sourceSetupCardModel(
   const noSetupPath = sourceSetupRowIsUnavailable(entry);
   const installModel = lifecycle && !noSetupPath ? connectorInstallRowModel(entry, lifecycle) : null;
   const packageAvailabilityUnknown = catalogTransientlyUnavailable && !lifecycle?.installed && !noSetupPath;
-  const setupAction = entry.isKnownScaffold
-    ? null
-    : sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
-  const packageActionAvailable = !(entry.isKnownScaffold || packageAvailabilityUnknown) && Boolean(installModel?.action);
+  const setupAction = sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
+  const packageActionAvailable = !packageAvailabilityUnknown && Boolean(installModel?.action);
   const packageInstalled =
     installModel?.activationState === "active" || installModel?.activationState === "update_available";
   const registrationPending =
-    !(entry.isKnownScaffold || packageAvailabilityUnknown || setupAction) &&
+    !(packageAvailabilityUnknown || setupAction) &&
     packageInstalled &&
     entry.registrationStatus !== "registered";
   return {
@@ -616,9 +592,7 @@ export function sourceSetupCardModel(
     packageNeedsInstall: packageActionAvailable && installModel?.activationState === "not_installed",
     registrationPending,
     setupAction,
-    unavailable:
-      entry.isKnownScaffold ||
-      !(setupAction || packageActionAvailable || packageAvailabilityUnknown || registrationPending),
+    unavailable: !(setupAction || packageActionAvailable || packageAvailabilityUnknown || registrationPending),
   };
 }
 

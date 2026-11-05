@@ -1,30 +1,23 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { isBrowserBoundConnector } from "pdpp-reference-implementation/connection-setup-plan";
-import { type BindingSource, type BrowserConnectSupport, browserConnectSupport } from "./browser-connect-support.ts";
-import { listConnectorInstallStatus } from "./connector-install-client.ts";
-import { listConnectorManifests } from "./rs-client.ts";
+import { type BrowserConnectSupport, browserConnectSupportFromReadiness } from "./browser-connect-readiness.ts";
+import { getConnectorReadiness } from "./connector-install-client.ts";
+import { ResourceServerHttpError } from "./owner-token.ts";
 
 /**
  * Browser-session support for the routes under `/connect/browser-session`.
- * Binding sources are installed packages and local manifests. A connector whose
- * bundled manifest is browser-bound keeps the routes for repair of an existing
- * connection, even when no package or manifest is readable.
+ * Whether an account can be added is the server's verdict
+ * (`/v1/owner/connector-install/readiness`), the same one the enrollment route
+ * enforces. The console computes nothing from bindings, tiers or key lists. If
+ * the verdict cannot be fetched, no new account can be added. A 404 means the
+ * server predates the endpoint; that server enforces on its own.
  */
 export async function loadBrowserConnectSupport(connectorId: string): Promise<BrowserConnectSupport> {
-  const [installed, manifests] = await Promise.all([
-    listConnectorInstallStatus().catch(() => []),
-    listConnectorManifests().catch(() => []),
-  ]);
-  const sources: BindingSource[] = [
-    ...installed.map((entry) => ({ bindings: entry.bindings, connector_id: entry.connector_id })),
-    ...manifests.map((manifest) => ({
-      bindings: manifest.runtime_requirements?.bindings,
-      connector_id: manifest.connector_id,
-      connector_key: manifest.connector_key,
-    })),
-  ];
-  const support = browserConnectSupport(connectorId, sources);
-  return { ...support, browserBound: support.browserBound || isBrowserBoundConnector(connectorId) };
+  let serverPredatesReadiness = false;
+  const readiness = await getConnectorReadiness(connectorId).catch((error: unknown) => {
+    serverPredatesReadiness = error instanceof ResourceServerHttpError && error.status === 404;
+    return null;
+  });
+  return browserConnectSupportFromReadiness(connectorId, readiness, serverPredatesReadiness);
 }

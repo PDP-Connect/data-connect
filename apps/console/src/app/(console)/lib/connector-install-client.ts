@@ -20,6 +20,7 @@ import {
   parseConnectorLocalSourcesResponse,
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
+import { type ConnectorReadiness, parseConnectorReadinessResponse } from "./connector-readiness-contract.ts";
 import { describeErrorText } from "./describe-error.ts";
 import {
   isConnectorInstallRouteUnavailableError,
@@ -103,6 +104,14 @@ export async function listConnectorInstallStatus(): Promise<ConnectorInstallStat
 export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[]> {
   const payload = await connectorInstallFetch("/v1/owner/connector-install/local-sources");
   return [...parseConnectorLocalSourcesResponse(payload)];
+}
+
+/** The server's browser-setup verdict for one connector, or null when the server returns none. */
+export async function getConnectorReadiness(connectorId: string): Promise<ConnectorReadiness | null> {
+  const payload = await connectorInstallFetch(
+    `/v1/owner/connector-install/readiness?connector_id=${encodeURIComponent(connectorId)}`
+  );
+  return parseConnectorReadinessResponse(payload)[0] ?? null;
 }
 
 /**
