@@ -31,6 +31,7 @@ type FieldKind = "string" | "number" | "boolean" | "string-list";
 interface FieldSpec {
   readonly kind: FieldKind;
   readonly enum?: ReadonlySet<string>;
+  readonly integer?: boolean;
   readonly max?: number;
   readonly maxItems?: number;
   readonly maxLength?: number;
@@ -96,7 +97,7 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
       key: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
       // The soft-keyboard bridge sends special keys (Backspace, Enter) as X11
       // keysyms with no `key`.
-      keysym: { kind: "number", max: MAX_KEYSYM, min: 0 },
+      keysym: { integer: true, kind: "number", max: MAX_KEYSYM, min: 0 },
       location: { kind: "number", max: 3, min: 0 },
       modifiers: MODIFIERS,
       repeat: { kind: "boolean" },
@@ -234,6 +235,9 @@ function validateField(key: string, value: unknown, spec: FieldSpec): void {
   }
   // kind === "number"
   if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw invalidInput();
+  }
+  if (spec.integer && !Number.isInteger(value)) {
     throw invalidInput();
   }
   if (spec.min !== undefined && value < spec.min) {

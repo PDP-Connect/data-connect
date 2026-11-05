@@ -3335,7 +3335,7 @@ function makeAutoAnsweringCdpSocket(): { calls: RecordedCdpCall[]; ctor: typeof 
   return { calls, ctor: AutoAnsweringSocket as unknown as typeof WebSocket };
 }
 
-// Bodies the console viewer (`@opendatalabs/remote-surface` 1.5.2 client)
+// Bodies the console viewer (`@opendatalabs/remote-surface` client)
 // was observed sending from a desktop browser and from the phone soft
 // keyboard bridge. Each must reach CDP through `/input`.
 const DESKTOP_VIEWER_INPUT_BODIES = [

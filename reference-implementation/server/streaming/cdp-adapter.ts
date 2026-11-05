@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// biome-ignore-all lint/correctness/noUnresolvedImports: remote-surface 1.5.1 is installed in the reference implementation workspace; the repository-root checker does not resolve that local package.
+// biome-ignore-all lint/correctness/noUnresolvedImports: remote-surface is installed in the reference implementation workspace; the repository-root checker does not resolve that local package.
 import {
   type CdpBackendLifecycle,
   type CdpCommandParams,
@@ -30,7 +30,7 @@ import {
  * entry points (`PDPP_RUN_INTERACTION_CDP_WS_URL`,
  * `PDPP_RUN_INTERACTION_CDP_HTTP_URL`) remain removed.
  *
- * Surface mechanics are delegated to Remote Surface 1.5.1's assembled CDP
+ * Surface mechanics are delegated to Remote Surface's assembled CDP
  * backend. The small adapter below only translates that backend's lifecycle
  * messages to the existing PDPP companion wire and preserves the target
  * router's URL/popup events.

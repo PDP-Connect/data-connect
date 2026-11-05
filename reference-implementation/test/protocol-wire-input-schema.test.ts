@@ -195,6 +195,7 @@ test("keyboard accepts a keysym-only special key and requires one of key, code, 
 	assertRejected({ action: "keydown", type: "keyboard" });
 	assertRejected({ action: "keydown", keysym: -1, type: "keyboard" });
 	assertRejected({ action: "keydown", keysym: 0x2000_0000, type: "keyboard" });
+	assertRejected({ action: "keydown", keysym: 65_288.5, type: "keyboard" });
 });
 
 test("accepts the neko viewer's bare remote-copy request and nothing else on it", () => {
