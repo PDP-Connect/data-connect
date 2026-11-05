@@ -216,6 +216,64 @@ test("a failed initialization whose release also throws still retires the mount 
   });
 });
 
+const throwingLogger = () => {
+  throw new Error("logger failed");
+};
+
+test("a throwing host logger cannot skip releasing a mount whose initialization failed", async () => {
+  const h = makeHarness();
+  await withFetchLog(h.fetches, async () => {
+    mountBrowserSurfaceViewer(
+      h.options({
+        logDebug: throwingLogger,
+        onViewerMounted: (viewer) => {
+          if (viewer) {
+            throw new Error("init callback failed");
+          }
+        },
+      })
+    );
+    assert.equal(h.viewers[0]?.unmounts, 1, "the viewer is unmounted");
+    assert.equal(postsInput(h.transports[0] ?? null, h.fetches), false, "the transport is disposed");
+    assert.equal(h.transportRef.current, null);
+  });
+});
+
+test("a throwing host logger does not turn a live mount failure into an unhandled rejection", async () => {
+  const h = makeHarness();
+  const { promise, reject } = deferredMount();
+  h.mounts.mount = () => promise;
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    mountBrowserSurfaceViewer(h.options({ logDebug: throwingLogger }));
+    reject(new Error("mount failure"));
+    await promise.catch(() => undefined);
+    // Node reports unhandled rejections once the microtask queue drains.
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+  assert.deepEqual(unhandled, []);
+});
+
+test("a throwing transport notification during cleanup still notifies the viewer's release", () => {
+  const h = makeHarness();
+  const cleanup = mountBrowserSurfaceViewer(
+    h.options({
+      onTransportMounted: (transport) => {
+        if (!transport) {
+          throw new Error("callback failed");
+        }
+      },
+    })
+  );
+  assert.throws(cleanup, /callback failed/);
+  assert.deepEqual(h.mountedViewers.at(-1), null, "the viewer notification still runs");
+  assert.equal(h.viewers[0]?.unmounts, 1);
+});
+
 test("a throwing mount notification during cleanup still unmounts the viewer and disposes the transport", async () => {
   const h = makeHarness();
   let failNotifications = false;

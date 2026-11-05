@@ -40,10 +40,17 @@ export function mountBrowserSurfaceViewer({
   const viewer = createViewer(transport);
   transportRef.current = transport;
   let released = false;
-  const logMountError = (error: unknown) =>
-    transportOptions.logDebug("surface.cdp-frame.viewer_mount_error", {
-      error: error instanceof Error ? error.message : String(error),
-    });
+  // Diagnostics only: a throwing host logger must neither skip release nor
+  // escape from the mount-rejection handler as an unhandled rejection.
+  const logMountError = (error: unknown) => {
+    try {
+      transportOptions.logDebug("surface.cdp-frame.viewer_mount_error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } catch {
+      // Nothing left to report to.
+    }
+  };
   const release = () => {
     if (released) {
       return;
@@ -52,8 +59,11 @@ export function mountBrowserSurfaceViewer({
     try {
       if (transportRef.current === transport) {
         transportRef.current = null;
-        onTransportMounted(null);
-        onViewerMounted(null);
+        try {
+          onTransportMounted(null);
+        } finally {
+          onViewerMounted(null);
+        }
       }
     } finally {
       try {
