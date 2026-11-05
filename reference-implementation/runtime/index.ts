@@ -4304,10 +4304,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // Omissions this run reported without a durable work item, in the shape
   // decideCheckpointCommits takes. Gapped STREAM_EVIDENCE keys are durable
   // DETAIL_GAPs, which START serves independently of cursors, so only
-  // unaccounted keys count.
+  // unaccounted keys count. A stream whose batch was dropped for transient
+  // manifest drift omitted records the same way a retryable SKIP_RESULT does.
   function collectReportedOmissions(): ReportedOmission[] {
     return [
       ...skipOmissions,
+      ...[...driftSkippedStreams].map((stream) => ({ source: "retryable_skip" as const, stream })),
       ...[...streamEvidenceByStream]
         .filter(([, evidence]) => evidence.unaccounted > 0)
         .map(([stream]) => ({ source: "unaccounted_evidence" as const, stream })),
@@ -5556,8 +5558,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // Proven a non-empty, in-scope stream name by the validator above.
       const stateStream = msg.stream as string;
 
-      // Flush records for this stream before persisting state
-      await flushBatch(stateStream);
+      // Flush every buffered record before staging state: a cursor may pass
+      // only records the store already holds. Streams that map to this state
+      // stream buffer separately, and a failed DONE does not flush them, so
+      // flushing only `stateStream` would let a later commit outrun them.
+      await flushAll();
       // Transient manifest drift: this stream's batch was rejected as
       // not_found for a manifest-declared stream and recorded as a per-stream
       // gap. Do NOT stage its cursor — leaving it uncommitted makes the next

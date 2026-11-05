@@ -1093,3 +1093,83 @@ test("a certified failure whose failed stream stages no cursor reports the failu
     await closeServer(server);
   }
 });
+
+test("runConnector stores a child's buffered records before it commits the parent checkpoint of a certified failure", async () => {
+  // child_c maps to parent_a, and the connector stages parent_a's cursor while
+  // child_c's records are still buffered in the runtime (far under the batch
+  // size). A failed DONE does not flush, so a STATE that flushed only its own
+  // stream would let the certified-failure commit move parent_a past records
+  // that never reached the store: the next run starts after them and nothing
+  // replays them.
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = completeManifest("runtime-stream-isolation-child-flush-before-parent-commit-test", [
+    {
+      name: "parent_a",
+      primary_key: ["id"],
+      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+    },
+    {
+      coverage_strategy: "checkpoint_window",
+      name: "child_c",
+      primary_key: ["id"],
+      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+      state_stream: "parent_a",
+    },
+    {
+      name: "sibling_b",
+      primary_key: ["id"],
+      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+    },
+  ]);
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-child-flush-before-parent-commit-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'child_c', key: 'c-1', data: { id: 'c-1' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'parent_a', cursor: { cursor: 'parent_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'stream_collection_failed', message: 'upstream 500' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
+  rl.close();
+  process.exit(1);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+    assert.equal(result.status, "failed");
+    assert.equal(result.checkpoint_summary?.state_streams_committed, 1, "parent_a is unaffected by sibling_b");
+
+    const recordsResp = await fetch(
+      `${rsUrl}/v1/streams/child_c/records?connector_id=${encodeURIComponent(manifest.connector_id)}`,
+      { headers: { Authorization: `Bearer ${ownerToken}` } }
+    );
+    const records = (await recordsResp.json()) as { data?: { id?: string }[] };
+    assert.deepEqual(
+      (records.data ?? []).map((record) => record.id),
+      ["c-1"],
+      "the child's record is stored before the parent cursor that passes it commits"
+    );
+
+    const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
+      `${asUrl}/_ref/runs/${encodeURIComponent(result.run_id ?? "")}/timeline`
+    );
+    const eventTypes = (runTimeline.data || []).map((event) => `${event.event_type}:${event.stream_id ?? ""}`);
+    const ingested = eventTypes.indexOf("run.batch_ingested:child_c");
+    const advanced = eventTypes.indexOf("run.state_advanced:parent_a");
+    assert.ok(ingested >= 0, "the child's batch was ingested");
+    assert.ok(advanced > ingested, "the child's batch is ingested before the parent cursor advances");
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});

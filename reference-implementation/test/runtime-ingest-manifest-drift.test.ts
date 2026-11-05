@@ -310,6 +310,77 @@ test("transient manifest drift: scope-stream ingest not_found degrades to a per-
     }
   });
 
+  await t.test("a drift-dropped child batch withholds the parent checkpoint it maps to", async () => {
+    // `drift_child` maps to `items` through state_stream, and the RS lacks the
+    // child, so its batch is dropped. The run still succeeds, but `items`
+    // staged a cursor that passes the dropped record: committing it would move
+    // the next run's start past a record that was never stored, with only a
+    // stream-level gap to remember it.
+    const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+    const { asPort, rsPort } = server;
+    const asUrl = `http://localhost:${asPort}`;
+    const connectorId = "drift-child";
+    await registerManifest(asUrl, rsRegisteredManifest(connectorId)); // RS lacks drift_child
+    const ownerToken = await issueOwnerToken(asUrl);
+    const driftChildManifest = {
+      ...rsRegisteredManifest(connectorId),
+      streams: [
+        ...rsRegisteredManifest(connectorId).streams,
+        {
+          coverage_strategy: "checkpoint_window",
+          name: "drift_child",
+          primary_key: ["id"],
+          schema: streamSchema(),
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+          state_stream: "items",
+        },
+      ],
+    };
+
+    const { connectorPath, cleanup } = createTestConnector([
+      { data: { id: "d1" }, emitted_at: nowIso(), key: "d1", stream: "drift_child", type: "RECORD" },
+      { cursor: { cursor: "items_must_not_commit" }, stream: "items", type: "STATE" },
+      { records_emitted: 1, status: "succeeded", type: "DONE" },
+    ]);
+
+    try {
+      const result = await runConnector({
+        admitRunConnection: fakeAdmitRunConnection(),
+        collectionMode: "full_refresh",
+        connectorId,
+        connectorPath,
+        manifest: runtimeCompatibleManifest(driftChildManifest),
+        onInteraction: async () => ({}),
+        ownerToken,
+        persistState: true,
+        rsUrl: `http://localhost:${rsPort}`,
+        scope: { streams: [{ name: "items" }, { name: "drift_child" }] },
+        state: null,
+      });
+      assert.equal(result.status, "succeeded");
+
+      const state = (await loadSyncState(connectorId, ownerToken, { rsUrl: `http://localhost:${rsPort}` })) as Record<
+        string,
+        { cursor?: string } | undefined
+      > | null;
+      assert.notEqual(
+        state?.items?.cursor,
+        "items_must_not_commit",
+        "the parent cursor must not pass a record the run dropped"
+      );
+
+      const gaps = (result.known_gaps || []) as { kind?: string; stream?: string }[];
+      assert.ok(
+        gaps.some((g) => g.kind === "checkpoint_withheld" && g.stream === "items"),
+        "the withheld parent cursor is reported as a known gap"
+      );
+    } finally {
+      cleanup();
+      await closeServer(server);
+    }
+  });
+
   await t.test("a genuinely unknown-to-runtime stream still fails terminally (guard)", async () => {
     // Here the drift stream is NOT in the runtime manifest/scope either, so a
     // RECORD for it is an undeclared-stream protocol violation — the runtime must
