@@ -998,6 +998,9 @@ test("concurrent catalog reads share one in-flight refresh", async () => {
   }
 });
 
+// The service default. Tests move the mocked clock past it instead of overriding it.
+const DEFAULT_CATALOG_TTL_MS = 5 * 60 * 1000;
+
 test("catalog reads share one fetch and keep the verified copy until the TTL passes", async (t) => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
   let loadCount = 0;
@@ -1008,7 +1011,6 @@ test("catalog reads share one fetch and keep the verified copy until the TTL pas
         loadCount += 1;
         return [entry];
       },
-      catalogTtlMs: 1000,
       dataDir,
       registerManifest: () => Promise.resolve(),
       store: createFileConnectorInstallStore(dataDir),
@@ -1020,7 +1022,7 @@ test("catalog reads share one fetch and keep the verified copy until the TTL pas
     assert.deepEqual(await service.catalog(), [entry]);
     assert.equal(loadCount, 1);
 
-    t.mock.timers.tick(1000);
+    t.mock.timers.tick(DEFAULT_CATALOG_TTL_MS);
     assert.deepEqual(await service.catalog(), [entry]);
     assert.equal(loadCount, 2);
   } finally {
@@ -1044,7 +1046,6 @@ test("a failed catalog refresh keeps serving the last verified copy", async (t) 
         }
         return [entry];
       },
-      catalogTtlMs: 1000,
       dataDir,
       registerManifest: () => Promise.resolve(),
       store: createFileConnectorInstallStore(dataDir),
@@ -1052,7 +1053,7 @@ test("a failed catalog refresh keeps serving the last verified copy", async (t) 
     assert.deepEqual(await service.catalog(), [entry]);
 
     unreachable = true;
-    t.mock.timers.tick(1000);
+    t.mock.timers.tick(DEFAULT_CATALOG_TTL_MS);
     assert.deepEqual(await service.catalog(), [entry]);
     assert.deepEqual(await service.catalog(), [entry]);
     // One failed fetch per TTL window, not one per render.
@@ -1084,7 +1085,6 @@ test("concurrent readers of one failed refresh log once and keep the verified co
         await failureReleased;
         throw new Error("ghcr.io is unreachable");
       },
-      catalogTtlMs: 1000,
       dataDir,
       registerManifest: () => Promise.resolve(),
       store: createFileConnectorInstallStore(dataDir),
@@ -1092,7 +1092,7 @@ test("concurrent readers of one failed refresh log once and keep the verified co
     assert.deepEqual(await service.catalog(), [entry]);
 
     unreachable = true;
-    t.mock.timers.tick(1000);
+    t.mock.timers.tick(DEFAULT_CATALOG_TTL_MS);
     const readers = Array.from({ length: 5 }, () => service.catalog());
     const updateRejected = assert.rejects(service.update("github"), { message: "ghcr.io is unreachable" });
     releaseFailure?.();
@@ -1117,7 +1117,6 @@ test("a tampered catalog refresh is rejected and never replaces the verified cop
   try {
     const service = createConnectorInstallService({
       catalogLoader: async () => (tampered ? [{ ...entry, connector_key: "impostor" }] : [entry]),
-      catalogTtlMs: 1000,
       dataDir,
       registerManifest: () => Promise.resolve(),
       store: createFileConnectorInstallStore(dataDir),
@@ -1125,7 +1124,7 @@ test("a tampered catalog refresh is rejected and never replaces the verified cop
     assert.deepEqual(await service.catalog(), [entry]);
 
     tampered = true;
-    t.mock.timers.tick(1000);
+    t.mock.timers.tick(DEFAULT_CATALOG_TTL_MS);
     assert.deepEqual(await service.catalog(), [entry]);
     assert.deepEqual(await service.catalog(), [entry]);
   } finally {
@@ -1166,7 +1165,6 @@ test("install resolves its digest from a fresh catalog, not the cached copy", as
   try {
     const service = createConnectorInstallService({
       catalogLoader: async () => [current],
-      catalogTtlMs: 60_000,
       dataDir,
       installArtifact: (root) => {
         writeFixture(root);

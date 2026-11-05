@@ -92,12 +92,6 @@ export interface ConnectorCatalogSnapshot {
   readonly generatedAt?: string;
 }
 
-interface VerifiedCatalog {
-  readonly entries: readonly ConnectorCatalogEntry[];
-  /** Epoch milliseconds after which catalog() fetches again. */
-  readonly refreshAt: number;
-}
-
 interface InstallerCore {
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY: string;
   fetchCatalog?: (options: Record<string, unknown>) => Promise<unknown>;
@@ -797,11 +791,6 @@ export function createConnectorInstallService(options: {
   readonly onDerivedRepairError?: (connectorId: string, error: unknown) => void;
   /** Wall-clock bound for one install or update, lock waits included. */
   readonly installTimeoutMs?: number;
-  /**
-   * How long catalog() serves a verified copy before it fetches again.
-   * Defaults to PDPP_CONNECTOR_CATALOG_TTL_MS, else 5 minutes.
-   */
-  readonly catalogTtlMs?: number;
   readonly assertUninstallAllowed?: (connectorId: string) => Promise<void>;
   readonly removeActivation?: (connectorId: string) => Promise<void>;
 }): ConnectorInstallService {
@@ -816,11 +805,9 @@ export function createConnectorInstallService(options: {
   // Local sources are owner state, read by the run path from PDPP_DATA_DIR, not
   // preloaded install state: do not follow PDPP_CONNECTOR_PRELOAD_DIR here.
   const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(options.dataDir);
-  // The last catalog loadCatalog verified. Only its output is stored here, so a
-  // catalog that fails verification never replaces the copy being served.
-  let verifiedCatalog: VerifiedCatalog | undefined;
+  let verifiedCatalog: { entries: readonly ConnectorCatalogEntry[]; refreshAt: number } | undefined;
   let catalogRefresh: Promise<readonly ConnectorCatalogEntry[]> | undefined;
-  const catalogTtlMs = options.catalogTtlMs ?? connectorCatalogTtlMs();
+  const catalogTtlMs = connectorCatalogTtlMs();
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
     const release = acquireCatalogStateLock(dataDir);
     try {
@@ -860,11 +847,11 @@ export function createConnectorInstallService(options: {
       release();
     }
   };
-  // Fetches and verifies the catalog. Concurrent callers share one fetch, and a
-  // failure throws, so install and update never act on an older copy. A failed
-  // fetch is handled once, here: it logs and moves the next retry time once,
-  // whichever caller started it. Every waiter still receives the error.
   const refreshCatalog = (): Promise<readonly ConnectorCatalogEntry[]> => {
+    // Concurrent callers share one fetch. Only verified output reaches
+    // verifiedCatalog (refreshAt: epoch ms when catalog() fetches again). A
+    // failure throws, so install and update never act on an older copy; it is
+    // logged and moves refreshAt once, whoever started the fetch.
     catalogRefresh ??= loadCatalog()
       .then(
         (entries) => {
@@ -887,10 +874,10 @@ export function createConnectorInstallService(options: {
       });
     return catalogRefresh;
   };
-  // Read path for GET /v1/owner/connector-install/catalog, which the console
-  // requests on every render of Add a source. If a refresh fails, the last
-  // verified copy keeps being served. The failure is logged once, in refreshCatalog.
   const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
+    // Read path for GET /v1/owner/connector-install/catalog, which the console
+    // requests on every render of Add a source. If a refresh fails, the last
+    // verified copy keeps being served. The failure is logged once, in refreshCatalog.
     if (verifiedCatalog && Date.now() < verifiedCatalog.refreshAt) {
       return verifiedCatalog.entries;
     }
