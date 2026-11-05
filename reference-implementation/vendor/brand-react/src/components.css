@@ -2378,10 +2378,18 @@
   color: var(--foreground);
 }
 .rr-x-facet__name {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   font-size: 12.5px;
   white-space: nowrap;
+}
+.rr-x-facet__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .rr-x-facet__name--mono {
   font-family: var(--font-mono);
@@ -2445,22 +2453,19 @@
   cursor: pointer;
   background: none;
   border: 0;
-  opacity: 0.45;
-  transition:
-    opacity var(--duration-state) var(--ease-standard),
-    color var(--duration-state) var(--ease-standard);
+  transition: color var(--duration-state) var(--ease-standard);
 }
 .rr-x-facet-not::before {
   position: absolute;
   inset: -12px;
   content: "";
 }
-.rr-x-facet-row:hover .rr-x-facet-not {
-  opacity: 0.8;
+.rr-x-facet-not:hover,
+.rr-x-facet-not:focus-visible {
+  color: var(--foreground);
 }
 .rr-x-facet-not.is-on {
   color: var(--warning);
-  opacity: 1;
 }
 /* An excluded row strikes through the name so "everything except X" is legible. */
 .rr-x-facet-row.is-excluded .rr-x-facet__name {

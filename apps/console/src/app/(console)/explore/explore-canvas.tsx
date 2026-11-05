@@ -1658,7 +1658,7 @@ function FacetRow({
           title={label}
         >
           {leading}
-          {label}
+          <span className="rr-x-facet__label">{label}</span>
         </span>
         <span className="rr-x-facet__flag" />
         {/* Exact-or-"in view"-or-hidden. count===null OR 0 → hidden (item #8). */}
