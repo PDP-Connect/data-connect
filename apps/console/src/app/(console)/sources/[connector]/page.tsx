@@ -846,7 +846,7 @@ function ConnectorPageView({
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={manifest.icon} name={displayName} />
+            <ConnectorMark connectorId={connectorId} icon={manifest.icon} name={displayName} />
             {displayName}
             <RenameConnection
               connectionId={renameSelector}

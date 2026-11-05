@@ -716,13 +716,13 @@ export default async function ConnectionSetupStatusPage({
         breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: "Setup status" }]}
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <ConnectorMark connectorId={status.connector_id} icon={connectorIcon} name={displayName} />
             <span>Durable status for the account or import you just submitted. Bookmark it and come back any time.</span>
           </span>
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={displayName} />
+            <ConnectorMark connectorId={status.connector_id} icon={connectorIcon} name={displayName} />
             {title}
           </span>
         }

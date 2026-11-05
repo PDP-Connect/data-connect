@@ -156,7 +156,7 @@ function BrowserBoundEnrollmentNotice({ connectorIcon, connectorId }: { connecto
       surface="human"
       title={
         <span className="inline-flex items-center gap-2">
-          <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={formatConnectorKeyForDisplay(connectorId)} />
+          <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={formatConnectorKeyForDisplay(connectorId)} />
           Browser setup not available yet
         </span>
       }
@@ -308,7 +308,7 @@ function SourceInstanceCard({
       <div className="flex min-w-0 items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="pdpp-body truncate font-medium text-foreground">
-            <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcon} name={sourceLabel(source)} />
+            <ConnectorMark spacing="after" connectorId={source.connector_id} icon={connectorIcon} name={sourceLabel(source)} />
             {sourceLabel(source)}
           </h3>
           <p className="pdpp-caption truncate text-muted-foreground">

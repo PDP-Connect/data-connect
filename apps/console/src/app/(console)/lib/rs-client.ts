@@ -176,6 +176,8 @@ export interface ConnectorManifest {
     kind?: string | null;
     svg?: string | null;
   } | null;
+  /** Server-side enrichment provenance; never read from or written to a manifest. */
+  resolvedIconSource?: "manifest" | "simple-icons";
   /**
    * Shipped manifests declare their brand glyph here as a relative path
    * under the connector-manifests directory (e.g. "icons/amazon.svg"), not
@@ -184,6 +186,7 @@ export interface ConnectorManifest {
    * single `icon` (inline_svg) shape.
    */
   brand?: {
+    background_color?: string | null;
     icon?: string | null;
   } | null;
   name?: string;
@@ -817,6 +820,7 @@ export async function listConnectorManifests(): Promise<ConnectorManifest[]> {
       try {
         const raw = await readFile(join(dir, file), "utf8");
         const manifest = JSON.parse(raw) as ConnectorManifest;
+        let resolvedIconSource: ConnectorManifest["resolvedIconSource"] = manifest.icon ? "manifest" : undefined;
         // Three-layer icon resolution (first hit wins), so every reader
         // downstream keeps consuming the single `icon` (inline_svg) shape it
         // already knows:
@@ -828,10 +832,17 @@ export async function listConnectorManifests(): Promise<ConnectorManifest[]> {
         //      fallback when `icon` is left unset here.
         if (!manifest.icon && manifest.brand?.icon) {
           manifest.icon = await resolveConnectorIconFromManifestPath(dir, manifest.brand.icon);
+          if (manifest.icon) {
+            resolvedIconSource = "manifest";
+          }
         }
         if (!manifest.icon && manifest.connector_key) {
           manifest.icon = await resolveConnectorIconFromSimpleIcons(manifest.connector_key);
+          if (manifest.icon) {
+            resolvedIconSource = "simple-icons";
+          }
         }
+        manifest.resolvedIconSource = resolvedIconSource;
         return manifest;
       } catch {
         return null;

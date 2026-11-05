@@ -39,7 +39,7 @@ export function PendingApprovalRow({
           <StatusBadge status={approval.kind} />
         </div>
         <div className="pdpp-caption mt-1 break-words text-muted-foreground">
-          {connectorId ? <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[connectorId]} name={connectorId} /> : null}
+          {connectorId ? <ConnectorMark spacing="after" {...(approval.grant_preview?.source?.connector_id ? { connectorId: approval.grant_preview.source.connector_id } : { sourceId: approval.grant_preview?.source?.id ?? "" })} icon={connectorIcons[connectorId]} name={connectorId} /> : null}
           {technicalClientCaption(approval.client_id) ?? "client —"}
           {approval.grant_preview?.source ? ` · source ${formatSourceForDisplay(approval.grant_preview.source)}` : ""}
           {previewStreams.length ? ` · streams ${previewStreams.join(", ")}` : ""}

@@ -28,6 +28,7 @@
  */
 
 import type { FusedSourceStatus, StreamManifestEntry } from "@pdpp/display";
+import type { ConnectorIconLike } from "@pdpp/brand-react";
 import {
   deriveSourceDisplayNameFallback,
   formatConnectorNameForDisplay,
@@ -593,7 +594,11 @@ function sourceScopeForSummary(summary: RefConnectorSummary, revoked: boolean): 
 
 export function toSourceInstanceView(
   summary: RefConnectorSummary,
-  options: { fallbackDisambiguator?: string | null; manifests?: readonly SourceManifestLike[] } = {}
+  options: {
+    connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
+    fallbackDisambiguator?: string | null;
+    manifests?: readonly SourceManifestLike[];
+  } = {}
 ): SourceInstanceView {
   const connectorId = summary.connector_id;
   const connectionId = summary.connection_id;
@@ -727,7 +732,7 @@ export function toSourceInstanceView(
     connectorNotInstalled,
     detailHref: sourceDetailHrefFor(routeId, summary),
     displayName,
-    icon: manifest?.icon ?? null,
+    icon: options.connectorIcons?.[connectorId] ?? manifest?.icon ?? null,
     id: routeId,
     sourceScope,
     isLocalDevicePush,
@@ -874,7 +879,10 @@ export function collapseSetupFailedSources(instances: readonly SourceInstanceVie
  */
 export function toSourcesView(
   summaries: RefConnectorSummary[],
-  options: { manifests?: readonly SourceManifestLike[] } = {}
+  options: {
+    connectorIcons?: Readonly<Record<string, ConnectorIconLike | null | undefined>>;
+    manifests?: readonly SourceManifestLike[];
+  } = {}
 ): SourceInstanceView[] {
   const visibleSummaries = summaries;
   const fallbackCountByConnector = new Map<string, number>();

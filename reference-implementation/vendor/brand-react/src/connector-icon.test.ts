@@ -65,3 +65,15 @@ test("ConnectorIcon falls back to the monogram when icon.svg is empty", () => {
   );
   assert.match(html, MONOGRAM_CLASS);
 });
+
+// Amazon's pinned manifest pairs its white glyph with this background.
+test("ConnectorIcon preserves a declared background behind a white glyph", () => {
+  const icon = {
+    backgroundColor: "#FF9900",
+    kind: "inline_svg",
+    svg: '<svg viewBox="0 0 24 24" fill="#FFFFFF"><path d="M12 0z"/></svg>',
+  };
+  const html = renderToStaticMarkup(createElement(ConnectorIcon, { icon, name: "Amazon" }));
+  assert.ok(html.includes("background-color:#FF9900"), "the white mark needs its declared background");
+  assert.ok(html.includes('fill="#FFFFFF"'), "the upstream glyph must retain its declared color");
+});

@@ -163,13 +163,13 @@ export default async function StaticSecretConnectPage({
         breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: pageTitle }]}
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={setup.display_name} />
+            <ConnectorMark connectorId={setup.connector_id} icon={connectorIcon} name={setup.display_name} />
             <span>{pageDescription}</span>
           </span>
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={setup.display_name} />
+            <ConnectorMark connectorId={setup.connector_id} icon={connectorIcon} name={setup.display_name} />
             {pageTitle}
           </span>
         }

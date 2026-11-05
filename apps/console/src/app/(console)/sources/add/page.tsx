@@ -13,8 +13,9 @@ import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../componen
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
 import type { ConnectorInstallSnapshot } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
-import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
+import { buildConnectorInstallLifecycleByConnector, connectorLookupKey } from "../../lib/connector-install-presentation.ts";
 import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
+import { buildConnectorIconMap } from "../../lib/connector-icon-map.ts";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
@@ -64,13 +65,11 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         listOwnerConnectorTemplates(),
         getConnectorInstallSnapshot(),
       ]);
-      connectorIcons = Object.fromEntries(
-        manifests.flatMap((manifest) => [
-          [manifest.connector_id, manifest.icon] as const,
-          ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
-        ])
-      );
-      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []);
+      connectorIcons = await buildConnectorIconMap(manifests, templates);
+      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []).map((entry) => ({
+        ...entry,
+        icon: connectorIcons[connectorLookupKey(entry.connectorKey)] ?? null,
+      }));
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
         : null;

@@ -75,10 +75,6 @@ a.rr-s-item {
   min-width: 0;
 }
 
-.rr-s-item__icon {
-  flex-shrink: 0;
-}
-
 .rr-s-item__name {
   /* The bold human name is the clear primary identity on row 1. */
   overflow: hidden;
@@ -161,7 +157,7 @@ a.rr-s-item {
 }
 
 .rr-s-status[data-tone="destructive"] {
-  color: var(--destructive-foreground, var(--destructive));
+  color: var(--destructive);
 }
 
 @keyframes rr-s-status-pulse {
