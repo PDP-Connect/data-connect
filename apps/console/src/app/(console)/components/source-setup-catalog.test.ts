@@ -90,6 +90,7 @@ const HOST_BLOCK = /Host blocked: Browser unavailable here\./;
 const MORE_CONNECTORS = /More connectors \(1\)/;
 const PLATFORM_COPY = /not available on this platform/;
 const UNKNOWN_PACKAGE = /data-testid="connector-install-catalog-transient"/;
+const INSTALL_FIRST = /Install package first/;
 const NEW_BROWSER_SETUP = /href="\/connect\/browser-session\/new-browser"/;
 
 const unregisteredBrowser: ConnectorCatalogEntry = {
@@ -153,6 +154,7 @@ test("a package without a latest digest does not gain an Install control", async
   });
   assert.doesNotMatch(html, INSTALL_BUTTON);
   assert.match(html, UNAVAILABLE_TRUE);
+  assert.match(html, UNAVAILABLE_DISCLOSURE);
   assert.match(html, MORE_CONNECTORS);
   assert.doesNotMatch(html, PLATFORM_COPY);
 });
@@ -189,4 +191,32 @@ test("after installation account setup appears only when the setup planner suppo
   assert.match(ready, NEW_BROWSER_SETUP);
   assert.match(ready, UNAVAILABLE_FALSE);
   assert.doesNotMatch(ready, INSTALL_BUTTON);
+});
+
+// A connector whose account setup is fully supported once it is registered.
+// Before its package is installed the setup route would answer 404, so the
+// card must lead with Install and only link to setup afterwards.
+const setupCapable: ConnectorCatalogEntry = {
+  ...unregisteredBrowser,
+  disposition: "browser_collector_manual",
+  ownerActionable: true,
+};
+
+test("a setup-capable connector offers Install first and links to account setup only once installed", async () => {
+  const beforeInstall = await render(false, setupCapable, browserPackage);
+  assert.match(beforeInstall, INSTALL_BUTTON);
+  assert.match(beforeInstall, INSTALL_FIRST);
+  assert.doesNotMatch(beforeInstall, BROWSER_SETUP_LINK, "setup must not be linked before the package is installed");
+  assert.match(beforeInstall, UNAVAILABLE_FALSE);
+
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.ok(browserPackage.catalog);
+  const afterInstall = await render(false, { ...setupCapable, registrationStatus: "registered" }, {
+    catalog: { ...browserPackage.catalog, digest: installed.digest },
+    installed: { ...installed, connector_id: "new-browser" },
+  });
+  assert.match(afterInstall, NEW_BROWSER_SETUP);
+  assert.doesNotMatch(afterInstall, INSTALL_BUTTON);
+  assert.doesNotMatch(afterInstall, INSTALL_FIRST);
 });

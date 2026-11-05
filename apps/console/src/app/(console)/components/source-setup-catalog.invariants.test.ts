@@ -48,28 +48,9 @@ test("source-setup-catalog renders external documentation links with new-tab for
   );
 });
 
-test("source: package controls and catalog grouping share the card decision, with a separate scaffold block", async () => {
-  const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
-  assert.match(src, /sourceSetupCardModel/, "package and account setup decisions must stay together");
-  // A known scaffold still has no collection code, even if a package exists.
-  // Other unavailable setup paths must not suppress a real package control.
-  assert.match(src, /data-testid="connector-install-disabled"/);
-  assert.match(src, /entry\.isKnownScaffold[\s\S]{0,80}\?[\s\S]{0,200}data-testid="connector-install-disabled"/);
-  assert.match(
-    src,
-    /sourceSetupCardModel\(entry, installLifecycle, installCatalogTransientlyUnavailable\)/
-  );
-  // Unavailable rows collapse into their own disclosure, separate from the
-  // primary scannable list, so N dead rows never sit in the middle of it.
-  assert.match(src, /data-testid="unavailable-connectors-disclosure"/);
-  assert.match(src, /More connectors/);
-  assert.doesNotMatch(src, /not available on this platform/);
-});
-
 test("transient install catalog failures disable unknown package actions without hiding installed rows", async () => {
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
   assert.match(src, /installCatalogTransientlyUnavailable = false/);
-  assert.match(src, /sourceSetupCardModel\(entry, installLifecycle, installCatalogTransientlyUnavailable\)/);
   assert.match(src, /data-testid="connector-install-catalog-transient"/);
   assert.match(src, /Package availability is unknown while the catalog is busy; this page will retry once shortly\./);
   assert.match(src, /Package availability is unknown while the catalog is busy; use Retry to check again\./);
