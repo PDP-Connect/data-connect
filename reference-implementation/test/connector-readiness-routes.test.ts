@@ -23,7 +23,6 @@ import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpe
 
 const CATALOG_DIGEST = `sha256:${"a".repeat(64)}`;
 
-type TestServer = Awaited<ReturnType<typeof startServer>>;
 
 function asRecord(value: unknown): Record<string, unknown> {
   assert.ok(value !== null && typeof value === "object" && !Array.isArray(value), "expected a JSON object");
