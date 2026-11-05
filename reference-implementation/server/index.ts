@@ -7,7 +7,7 @@
  * Combined AS + RS implementing PDPP v0.1.0 core spec.
  * Starts on port 7662 (AS/introspection) and 7663 (RS query API).
  */
-import { queueStartupSearchIndexRetry } from "./startup-search-index-retry.ts";
+import { manifestDeclaresSemanticFields, queueStartupSearchIndexRetry } from "./startup-search-index-retry.ts";
 import { currentStorageGeneration } from "./storage-generation.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
@@ -1307,6 +1307,23 @@ async function runRetrievalStartupBackfill({
   const startedAt = Date.now();
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill started");
 
+  // A failed queue write (for example a transient read or write fault while
+  // finding the scopes to mark) must not leave a failed backfill without a
+  // ticket. Those manifests get one more attempt after the loop, so the
+  // retry costs no new state: only a local list for this run.
+  const queueWriteFailed: ConnectorManifest[] = [];
+  const queueRetry = async (manifest: ConnectorManifest, err: unknown) => {
+    try {
+      await queueStartupSearchIndexRetry(manifest as never, generation);
+    } catch (queueError) {
+      logger.warn(
+        { connectorId: manifest.connector_id, err, queueError },
+        "retrieval startup backfill retry queue write failed"
+      );
+      queueWriteFailed.push(manifest);
+    }
+  };
+
   for (const manifest of manifests) {
     if (signal?.aborted) {
       logger.info({ reason: "shutdown" }, "retrieval startup backfill aborted between connectors");
@@ -1330,6 +1347,13 @@ async function runRetrievalStartupBackfill({
           manifest: manifest as never,
           signal,
         });
+      } else if (semanticBackend && manifestDeclaresSemanticFields(manifest)) {
+        // Configured but not available (for example still warming): the semantic
+        // half is unproven, so leave a ticket. With no backend configured at all
+        // nothing is queued, or every boot would dirty every semantic connector.
+        logger.warn({ connectorId }, "retrieval startup backfill skipped semantic pass: backend unavailable");
+        await queueRetry(manifest, new Error("semantic backend unavailable at startup"));
+        continue;
       }
       logger.info({ connectorId }, "retrieval startup backfill connector completed");
     } catch (err) {
@@ -1340,11 +1364,22 @@ async function runRetrievalStartupBackfill({
         return;
       }
       logger.warn({ connectorId, err }, "retrieval startup backfill failed for connector");
-      try {
-        await queueStartupSearchIndexRetry(manifest as never, generation);
-      } catch (queueError) {
-        logger.warn({ connectorId, err, queueError }, "retrieval startup backfill retry queue write failed");
-      }
+      await queueRetry(manifest, err);
+    }
+  }
+
+  for (const manifest of queueWriteFailed) {
+    if (signal?.aborted) {
+      return;
+    }
+    try {
+      // biome-ignore lint/performance/noAwaitInLoops: Never hold more than one instance deletion fence.
+      await queueStartupSearchIndexRetry(manifest as never, generation);
+    } catch (queueError) {
+      logger.warn(
+        { connectorId: manifest.connector_id, queueError },
+        "retrieval startup backfill ticket write failed again after retry; the next startup repeats the backfill"
+      );
     }
   }
 

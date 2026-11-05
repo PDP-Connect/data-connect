@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import pino from "pino";
 import { registerConnector } from "../server/auth.ts";
 import { withConnectorInstanceControlPlaneWrite } from "../server/connector-instance-write-coordinator.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
@@ -23,6 +24,24 @@ import {
   markStartupSearchIndexFailure,
 } from "../server/stores/search-index-dirty-store.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
+
+const RETAINED_PG_TABLES = [
+  "semantic_search_blob",
+  "semantic_search_meta",
+  "semantic_search_backfill_progress",
+  "lexical_search_index",
+  "lexical_search_meta",
+  "search_index_dirty",
+  "records",
+];
+
+/** Rows a finished test leaves in the shared database would make the next restart a no-op. */
+async function clearRetainedPgState() {
+  for (const table of RETAINED_PG_TABLES) {
+    // biome-ignore lint/performance/noAwaitInLoops: Cleanup order is fixed and tiny.
+    await postgresQuery(`DELETE FROM ${table}`);
+  }
+}
 
 const STALE_GENERATION = /storage generation changed/;
 
@@ -159,8 +178,7 @@ test("actual startup timeout queues retained work and maintenance converges with
   } finally {
     await closeTestServer(server);
     if (pg) {
-      await postgresQuery("DELETE FROM records");
-      await postgresQuery("DELETE FROM search_index_dirty");
+      await clearRetainedPgState();
       await closePostgresStorage();
     } else {
       closeDb();
@@ -423,5 +441,181 @@ test("one instance that cannot be queued does not leave its siblings without a r
     } else {
       closeDb();
     }
+  }
+});
+
+const FAULT = "startup_retry_test_fault";
+
+/**
+ * Restart over one retained record and no tickets, then let the real startup
+ * backfill run. `fault` makes the first ticket write fail on either backend.
+ * SQLite cannot keep a counter across a rolled-back statement, so there the
+ * fault trigger is dropped when the server logs the failed queue write.
+ */
+async function startOverRetainedRecord({
+  backend,
+  fault = false,
+  semanticRetrievalSupported,
+  source = manifest,
+}: {
+  backend: unknown;
+  fault?: boolean;
+  semanticRetrievalSupported?: boolean;
+  source?: typeof manifest;
+}) {
+  const dir = mkdtempSync(join(tmpdir(), "startup-retry-"));
+  const dbPath = join(dir, "db.sqlite");
+  const pg = Boolean(process.env.PDPP_TEST_POSTGRES_URL);
+  if (pg) {
+    await initPostgresStorage({ backend: "postgres", databaseUrl: process.env.PDPP_TEST_POSTGRES_URL || "" });
+  } else {
+    initDb(dbPath);
+  }
+  const attachment = pg
+    ? await createAlreadyAdmittedTestDatabaseChildAttachment(process.env.PDPP_TEST_POSTGRES_URL || "")
+    : undefined;
+  await registerConnector(source, { backfillRetrievalIndexes: false });
+  await ingestRecord(
+    { connector_id: source.connector_id, connector_instance_id: "cin_startup_retry" },
+    {
+      data: { id: "k1", subject: "retained synthetic subject" },
+      emitted_at: "2026-07-16T00:00:00.000Z",
+      key: "k1",
+      stream: "items",
+    },
+    { deferIndexes: true }
+  );
+  if (pg) {
+    await postgresQuery("DELETE FROM search_index_dirty");
+    if (fault) {
+      await postgresQuery(`CREATE SEQUENCE IF NOT EXISTS ${FAULT}_seq`);
+      await postgresQuery(`SELECT setval('${FAULT}_seq', 1, false)`);
+      await postgresQuery(
+        `CREATE OR REPLACE FUNCTION ${FAULT}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('${FAULT}_seq') = 1 THEN RAISE EXCEPTION 'transient fault'; END IF; RETURN NEW; END $$`
+      );
+      await postgresQuery(
+        `CREATE TRIGGER ${FAULT} BEFORE INSERT OR UPDATE ON search_index_dirty FOR EACH ROW EXECUTE FUNCTION ${FAULT}()`
+      );
+    }
+  } else {
+    getDb().prepare("DELETE FROM search_index_dirty").run();
+    if (fault) {
+      getDb().exec(
+        `CREATE TRIGGER ${FAULT} BEFORE INSERT ON search_index_dirty BEGIN SELECT RAISE(ABORT, 'transient fault'); END`
+      );
+    }
+    closeDb();
+  }
+  const warnings: string[] = [];
+  const logger = pino(
+    { level: "warn" },
+    {
+      write(line: string) {
+        const message = String(JSON.parse(line).msg);
+        warnings.push(message);
+        if (!pg && fault && message.includes("retry queue write failed")) {
+          getDb().exec(`DROP TRIGGER IF EXISTS ${FAULT}`);
+        }
+      },
+    }
+  );
+  const server = await startServer({
+    asPort: 0,
+    dbPath,
+    logger,
+    rsPort: 0,
+    storageBackend: pg ? "postgres" : "sqlite",
+    ...(pg
+      ? {
+          databaseUrl: process.env.PDPP_TEST_POSTGRES_URL || "",
+          testOnlyAlreadyAdmittedPostgresChildAttachment: attachment || "",
+        }
+      : {}),
+    quiet: true,
+    reconcilePolyfillManifests: false,
+    ...(semanticRetrievalSupported === undefined ? {} : { semanticRetrievalSupported }),
+    semanticRetrievalBackend: backend,
+  });
+  return {
+    server,
+    warnings,
+    async finish() {
+      await closeTestServer(server);
+      if (pg) {
+        await postgresQuery(`DROP TRIGGER IF EXISTS ${FAULT} ON search_index_dirty`);
+        await postgresQuery(`DROP FUNCTION IF EXISTS ${FAULT}()`);
+        await postgresQuery(`DROP SEQUENCE IF EXISTS ${FAULT}_seq`);
+        await clearRetainedPgState();
+        await closePostgresStorage();
+      } else {
+        closeDb();
+      }
+      rmSync(dir, { force: true, recursive: true });
+    },
+  };
+}
+
+function failingEmbeddingBackend() {
+  const stub = makeStubBackend();
+  return {
+    ...stub,
+    embedDocument: async () => {
+      throw new LocalTransformerExecutorError("transformer_deadline");
+    },
+  };
+}
+
+async function retainedTickets(connectorId: string = manifest.connector_id) {
+  return await listDirtySearchIndexScopes(25, { connectorId });
+}
+
+test("a failed ticket write at startup is retried once so the failed backfill is not left without a ticket", async () => {
+  const run = await startOverRetainedRecord({ backend: failingEmbeddingBackend(), fault: true });
+  try {
+    await run.server.startupBackfillDone;
+    assert.equal(
+      run.warnings.filter((m) => m.includes("retry queue write failed")).length,
+      1,
+      `the first ticket write failed once: ${JSON.stringify(run.warnings)}`
+    );
+    assert.equal((await retainedTickets()).length, 1, "the retry after the loop wrote the ticket");
+  } finally {
+    await run.finish();
+  }
+});
+
+test("a semantic backend that is configured but unavailable at startup queues a ticket", async () => {
+  const run = await startOverRetainedRecord({ backend: { ...makeStubBackend(), available: () => false } });
+  try {
+    await run.server.startupBackfillDone;
+    assert.equal((await retainedTickets()).length, 1);
+  } finally {
+    await run.finish();
+  }
+});
+
+test("no ticket is queued when no semantic backend is configured or the connector declares no semantic fields", async () => {
+  const unconfigured = await startOverRetainedRecord({ backend: undefined, semanticRetrievalSupported: false });
+  try {
+    await unconfigured.server.startupBackfillDone;
+    assert.equal((await retainedTickets()).length, 0, "no backend configured");
+  } finally {
+    await unconfigured.finish();
+  }
+  const lexicalOnly = {
+    ...manifest,
+    connector_id: "startup-retry-lexical-only",
+    manifest_uri: "https://example.test/startup-retry-lexical-only",
+    streams: manifest.streams.map(({ query: _query, ...stream }) => ({ ...stream, query: { search: {} } })),
+  };
+  const noFields = await startOverRetainedRecord({
+    backend: { ...makeStubBackend(), available: () => false },
+    source: lexicalOnly as never,
+  });
+  try {
+    await noFields.server.startupBackfillDone;
+    assert.equal((await retainedTickets(lexicalOnly.connector_id)).length, 0, "no semantic_fields declared");
+  } finally {
+    await noFields.finish();
   }
 });

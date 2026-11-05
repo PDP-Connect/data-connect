@@ -8,6 +8,18 @@ import { listStartupSearchIndexInstances, markStartupSearchIndexFailure } from "
 type Manifest = Parameters<typeof resolveLexicalBackfillConnectorInstanceIds>[0]["manifest"] &
   Parameters<typeof resolveSemanticBackfillConnectorInstanceIds>[0]["manifest"];
 
+/** True when any stream declares semantic fields, so a semantic pass is owed. */
+export function manifestDeclaresSemanticFields(manifest: { streams?: unknown }): boolean {
+  if (!Array.isArray(manifest.streams)) {
+    return false;
+  }
+  return manifest.streams.some((stream) => {
+    const fields = (stream as { query?: { search?: { semantic_fields?: unknown } } } | null)?.query?.search
+      ?.semantic_fields;
+    return Array.isArray(fields) && fields.length > 0;
+  });
+}
+
 /** Startup-only caller effect: reconcile failures own their revision/backoff. */
 export async function queueStartupSearchIndexRetry(manifest: Manifest, generation: number): Promise<void> {
   assertCurrentStorageGeneration(generation);
