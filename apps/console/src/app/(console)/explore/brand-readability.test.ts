@@ -2,20 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Readability of selected text and of the Explore facet rail, judged on the
- * effective style under the CSS the console ships (see
- * `compiled-console-css.harness.ts`), not on how the CSS is written. A later
- * rule that brings a bug back fails these tests; a harmless rewrite does not.
+ * Readability of selected text and of the Explore facet rail, judged in a real
+ * browser under the CSS the console ships (see `compiled-console-css.harness.ts`).
+ * The browser resolves the cascade, so a later rule that brings a bug back
+ * fails these tests and a harmless rewrite of the CSS does not.
  */
 
 import assert from "node:assert/strict";
-import { mock, test } from "node:test";
+import { after, before, mock, test } from "node:test";
+import type { Browser, Page } from "playwright-core";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
-	mountUnderShippedCss,
-	type ProbeState,
-	type StyleProbe,
+	launchBrowser,
+	openShippedPage,
+	type PageOptions,
+	resolveColor,
+	type Rgba,
 } from "./compiled-console-css.harness.ts";
 
 // The canvas module's import graph reaches `server-only`, which throws
@@ -24,6 +27,29 @@ mock.module("server-only", { namedExports: {} });
 const canvasModule = import("./explore-canvas.tsx");
 
 const LONG_LABEL = `connection-${"very-long-name-".repeat(12)}example.com`;
+/** The Explore facet rail is 230px wide. */
+const RAIL_WIDTH = 230;
+
+let browser: Browser;
+before(async () => {
+	browser = await launchBrowser();
+});
+after(async () => {
+	await browser.close();
+});
+
+async function withPage<T>(
+	html: string,
+	options: PageOptions,
+	run: (page: Page) => Promise<T>,
+): Promise<T> {
+	const page = await openShippedPage(browser, html, options);
+	try {
+		return await run(page);
+	} finally {
+		await page.close();
+	}
+}
 
 async function facetRowHtml(excluded: boolean): Promise<string> {
 	const { FacetRow } = await canvasModule;
@@ -32,6 +58,10 @@ async function facetRowHtml(excluded: boolean): Promise<string> {
 			count: 12,
 			excluded,
 			label: LONG_LABEL,
+			leading: createElement("span", {
+				className: "size-5 shrink-0",
+				"data-leading": "",
+			}),
 			on: false,
 			onToggle() {},
 			onToggleExclude() {},
@@ -39,201 +69,264 @@ async function facetRowHtml(excluded: boolean): Promise<string> {
 	);
 }
 
-// ── selection contrast, from the final compiled colors ────────────
+// ── selected text ─────────────────────────────────────────────────
 
-function toLinearRgb(
-	l: number,
-	c: number,
-	hDeg: number,
-): [number, number, number] {
-	const h = (hDeg * Math.PI) / 180;
-	const a = c * Math.cos(h);
-	const b = c * Math.sin(h);
-	const l_ = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3;
-	const m_ = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3;
-	const s_ = (l - 0.0894841775 * a - 1.291485548 * b) ** 3;
-	const clamp = (v: number) => Math.min(1, Math.max(0, v));
-	return [
-		clamp(4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_),
-		clamp(-1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_),
-		clamp(-0.0041960863 * l_ - 0.7034186147 * m_ + 1.707614701 * s_),
-	];
+function relativeLuminance({ r, g, b }: Rgba): number {
+	const channel = (value: number) => {
+		const unit = value / 255;
+		return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+	};
+	return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
 }
 
-const VAR_REFERENCE = /^var\((--[\w-]+)\)$/;
-const PLAIN_OKLCH = /^oklch\(([\d.]+) ([\d.]+) ([\d.]+)\)$/;
-
-/** Resolves a computed color to an opaque oklch triple, or fails loudly. */
-function opaqueColor(
-	declaration: CSSStyleDeclaration,
-	property: string,
-): [number, number, number] {
-	let value = declaration.getPropertyValue(property).trim();
-	for (let hops = 0; hops < 5; hops += 1) {
-		const reference = VAR_REFERENCE.exec(value);
-		if (!reference?.[1]) {
-			break;
+/** Why the text the user selects in a paragraph is hard to read, if it is. */
+async function selectionProblems(
+	options: PageOptions,
+): Promise<string[]> {
+	return await withPage("<p>selected</p>", options, async (page) => {
+		const { background, color, selected } = await page.evaluate(() => {
+			const paragraph = document.querySelector("p");
+			if (!paragraph) {
+				throw new Error("no paragraph");
+			}
+			getSelection()?.selectAllChildren(paragraph);
+			const style = getComputedStyle(paragraph, "::selection");
+			return {
+				background: style.backgroundColor,
+				color: style.color,
+				selected: String(getSelection()),
+			};
+		});
+		assert.equal(selected, "selected", "the text is really selected");
+		const text = await resolveColor(page, color);
+		const fill = await resolveColor(page, background);
+		const problems: string[] = [];
+		if (fill.a < 1) {
+			problems.push(`selection background is translucent (alpha ${fill.a.toFixed(2)})`);
 		}
-		value = declaration.getPropertyValue(reference[1]).trim();
-	}
-	const match = PLAIN_OKLCH.exec(value);
-	assert.ok(
-		match,
-		`selection ${property} is "${value}", not a plain opaque oklch() color`,
-	);
-	return toLinearRgb(Number(match[1]), Number(match[2]), Number(match[3]));
-}
-
-function luminance([r, g, b]: [number, number, number]): number {
-	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-
-function selectionContrast(probe: StyleProbe): number {
-	const selection = probe.selectionStyle("p");
-	const text = luminance(opaqueColor(selection, "color"));
-	const background = luminance(opaqueColor(selection, "background-color"));
-	return (
-		(Math.max(text, background) + 0.05) / (Math.min(text, background) + 0.05)
-	);
-}
-
-for (const theme of ["light", "dark"] as const) {
-	test(`selected text meets 7:1 contrast in the ${theme} theme`, async () => {
-		const probe = await mountUnderShippedCss("<p>selected</p>", theme);
-		const ratio = selectionContrast(probe);
-		assert.ok(
-			ratio >= 7,
-			`${theme} selection contrast ${ratio.toFixed(2)} < 7`,
-		);
+		const [lighter = 0, darker = 0] = [
+			relativeLuminance(text),
+			relativeLuminance(fill),
+		].sort((a, b) => b - a);
+		const ratio = (lighter + 0.05) / (darker + 0.05);
+		if (ratio < 7) {
+			problems.push(`selection contrast ${ratio.toFixed(2)}:1 is below 7:1`);
+		}
+		return problems;
 	});
 }
 
-test("a translucent selection background is rejected, not measured", async () => {
-	const probe = await mountUnderShippedCss(
-		"<p>selected</p>",
-		"light",
-		".__selection__ { background-color: color-mix(in oklab, var(--accent) 70%, transparent); }",
-	);
-	assert.throws(() => selectionContrast(probe), /not a plain opaque oklch/);
+for (const theme of ["light", "dark"] as const) {
+	test(`selected text is opaque and meets 7:1 contrast in the ${theme} theme`, async () => {
+		assert.deepEqual(await selectionProblems({ theme }), []);
+	});
+}
+
+test("a later element-qualified selection rule that hides selected text is detected", async () => {
+	const problems = await selectionProblems({
+		extraCss:
+			"p::selection { color: oklch(0 0 0); background-color: oklch(0 0 0); }",
+	});
+	assert.match(problems.join("; "), /contrast 1\.00:1 is below 7:1/);
+});
+
+test("a translucent selection background is detected", async () => {
+	const problems = await selectionProblems({
+		extraCss:
+			"::selection { background-color: color-mix(in oklab, var(--accent) 70%, transparent); }",
+	});
+	assert.match(problems.join("; "), /translucent/);
 });
 
 // ── facet rows ────────────────────────────────────────────────────
 
-const LABEL = ".rr-x-facet__label";
-const NAME = ".rr-x-facet__name";
-const EXCLUDE = ".rr-x-facet-not";
-const EXCLUDE_STATES: readonly (readonly ProbeState[])[] = [
-	[],
-	["hover"],
-	["focus"],
-	["focus-visible"],
-	["active"],
-	["hover", "focus-visible", "active"],
+type ControlState = "rest" | "hover" | "focus" | "focus-visible" | "active";
+
+/** The pseudo-classes that must hold for each state, so a state is isolated. */
+const EXPECTED_PSEUDO: Record<ControlState, Partial<Record<string, boolean>>> = {
+	active: { ":active": true, ":hover": true },
+	focus: { ":focus": true, ":focus-visible": false, ":hover": false },
+	"focus-visible": { ":focus": true, ":focus-visible": true, ":hover": false },
+	hover: { ":active": false, ":focus": false, ":hover": true },
+	rest: { ":active": false, ":focus": false, ":hover": false },
+};
+const PSEUDO_CLASSES = [":hover", ":focus", ":focus-visible", ":active"];
+
+/** The exclude control's opacity in one real, isolated interaction state. */
+async function excludeOpacity(
+	excluded: boolean,
+	state: ControlState,
+	extraCss: string,
+): Promise<string> {
+	return await withPage(
+		await facetRowHtml(excluded),
+		{ extraCss, width: RAIL_WIDTH },
+		async (page) => {
+			const control = page.locator(".rr-x-facet-not");
+			if (state === "hover") {
+				await control.hover();
+			} else if (state === "focus") {
+				await control.click();
+				await page.mouse.move(0, 0);
+			} else if (state === "focus-visible") {
+				await page.keyboard.press("Tab");
+				await page.keyboard.press("Tab");
+			} else if (state === "active") {
+				await control.hover();
+				await page.mouse.down();
+			}
+			const { opacity, pseudo } = await control.evaluate(
+				(element, classes) => ({
+					opacity: getComputedStyle(element).opacity,
+					pseudo: Object.fromEntries(
+						classes.map((name) => [name, element.matches(name)]),
+					),
+				}),
+				PSEUDO_CLASSES,
+			);
+			for (const [name, expected] of Object.entries(EXPECTED_PSEUDO[state])) {
+				assert.equal(pseudo[name], expected, `${state}: ${name} should be ${expected}`);
+			}
+			return opacity;
+		},
+	);
+}
+
+const CONTROL_STATES: readonly ControlState[] = [
+	"rest",
+	"hover",
+	"focus",
+	"focus-visible",
+	"active",
 ];
 
-/** What keeps a long label on one line inside the rail, as reasons it does not. */
-function facetLabelProblems(probe: StyleProbe): string[] {
-	const name = probe.style(NAME);
-	const label = probe.style(LABEL);
-	const problems: string[] = [];
-	// jsdom does not inherit white-space; the label inherits it from the name.
-	const whiteSpace =
-		label.whiteSpace === "normal" ? name.whiteSpace : label.whiteSpace;
-	if (whiteSpace !== "nowrap") {
-		problems.push(`label wraps (white-space: ${whiteSpace})`);
-	}
-	if (label.overflow !== "hidden") {
-		problems.push(`label overflow is ${label.overflow}, not hidden`);
-	}
-	if (label.textOverflow !== "ellipsis") {
-		problems.push(`label text-overflow is ${label.textOverflow}, not ellipsis`);
-	}
-	if (label.minWidth !== "0px") {
-		problems.push(
-			`label min-width is ${label.minWidth}, so it cannot shrink below its text`,
-		);
-	}
-	if (
-		name.display !== "flex" ||
-		name.minWidth !== "0px" ||
-		name.overflow !== "hidden"
-	) {
-		problems.push(
-			`name does not contain the label (display ${name.display}, min-width ${name.minWidth}, overflow ${name.overflow})`,
-		);
-	}
-	return problems;
-}
-
-/** Every state of the exclude control, with the states where it is faded. */
-async function fadedExcludeStates(
-	html: (excluded: boolean) => Promise<string>,
-	extraCss = "",
-): Promise<string[]> {
-	{
-		const faded: string[] = [];
-		for (const excluded of [false, true]) {
-			const probe = await mountUnderShippedCss(
-				await html(excluded),
-				"light",
-				extraCss,
-			);
-			for (const states of EXCLUDE_STATES) {
-				const opacity = probe.style(EXCLUDE, states).opacity;
-				if (opacity !== "1") {
-					faded.push(
-						`${excluded ? "excluded" : "not excluded"} [${states.join("+") || "rest"}]: opacity ${opacity}`,
-					);
-				}
+/** Every state of the exclude control in which it is faded. */
+async function fadedExcludeStates(extraCss = ""): Promise<string[]> {
+	const faded: string[] = [];
+	for (const excluded of [false, true]) {
+		for (const state of CONTROL_STATES) {
+			const opacity = await excludeOpacity(excluded, state, extraCss);
+			if (opacity !== "1") {
+				faded.push(`${excluded ? "excluded" : "not excluded"} [${state}]: opacity ${opacity}`);
 			}
 		}
-		return faded;
 	}
+	return faded;
 }
 
-test("a long facet label is contained and ellipsized", async () => {
-	const probe = await mountUnderShippedCss(await facetRowHtml(false), "light");
-	assert.deepEqual(facetLabelProblems(probe), []);
+/** Why a long label does not stay on one line inside the rail, if it does not. */
+async function facetLabelProblems(extraCss = ""): Promise<string[]> {
+	return await withPage(
+		await facetRowHtml(false),
+		{ extraCss, width: RAIL_WIDTH },
+		async (page) => {
+			// No nested helper functions in here: the transpiler would reference a
+			// helper that does not exist in the page.
+			const box = await page.evaluate(() => {
+				const row = document.querySelector(".rr-x-facet-row");
+				const exclude = document.querySelector(".rr-x-facet-not");
+				// The label is whichever element directly holds the text.
+				const leading = document.querySelector("[data-leading]");
+				let text: Node | null = null;
+				for (const element of document.querySelectorAll("#mount *")) {
+					for (const child of element.childNodes) {
+						if (child.nodeType === 3 && child.textContent?.includes("example.com")) {
+							text = child;
+						}
+					}
+				}
+				const label = text?.parentElement;
+				if (!(row && label && leading && text && exclude)) {
+					throw new Error("the facet row did not render");
+				}
+				const textRange = document.createRange();
+				textRange.selectNodeContents(text);
+				const rowBox = row.getBoundingClientRect();
+				const excludeBox = exclude.getBoundingClientRect();
+				const style = getComputedStyle(label);
+				return {
+					// text-overflow paints an ellipsis only on a clipping block container.
+					ellipsis:
+						style.textOverflow === "ellipsis" &&
+						style.overflowX !== "visible" &&
+						(style.display === "block" || style.display === "flow-root" || style.display === "inline-block"),
+					excludeLeft: excludeBox.left,
+					excludeRight: excludeBox.right,
+					leadingRight: leading.getBoundingClientRect().right,
+					labelHeight: label.getBoundingClientRect().height,
+					lineHeight: Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.5,
+					rowLeft: rowBox.left,
+					rowRight: rowBox.right,
+					labelRight: label.getBoundingClientRect().right,
+					textLeft: textRange.getBoundingClientRect().left,
+					truncated: label.scrollWidth > label.clientWidth,
+				};
+			});
+			const problems: string[] = [];
+			if (box.labelHeight > box.lineHeight * 1.2) {
+				problems.push(`label wraps onto ${Math.round(box.labelHeight / box.lineHeight)} lines`);
+			}
+			if (box.labelRight > box.rowRight) {
+				problems.push("the label extends past the row");
+			}
+			if (box.excludeRight > box.rowRight || box.excludeLeft < box.rowLeft) {
+				problems.push("the exclude control is pushed outside the row");
+			}
+			if (box.textLeft - box.leadingRight < 8) {
+				problems.push(
+					`the label starts ${Math.round(box.textLeft - box.leadingRight)}px after the icon, less than 8px`,
+				);
+			}
+			if (!box.truncated) {
+				problems.push("the long label is not truncated");
+			}
+			if (!box.ellipsis) {
+				problems.push("the truncated label has no ellipsis");
+			}
+			return problems;
+		},
+	);
+}
+
+test("a long facet label stays on one line, truncated, inside the rail", async () => {
+	assert.deepEqual(await facetLabelProblems(), []);
 });
 
-test("the exclude control is never faded, in any state", async () => {
-	assert.deepEqual(await fadedExcludeStates(facetRowHtml), []);
+test("the exclude control is never faded, in any isolated state", async () => {
+	assert.deepEqual(await fadedExcludeStates(), []);
 });
 
 // ── a later override must bring the bug back as a failure ─────────
 
+test("a later rule that lets the label wrap is detected, even when it says white-space: normal", async () => {
+	const problems = await facetLabelProblems(
+		".rr-x-facet__label { white-space: normal; }",
+	);
+	assert.match(problems.join("; "), /label wraps onto/);
+});
+
 test("a later rule that stops the label truncating is detected", async () => {
-	const probe = await mountUnderShippedCss(
-		await facetRowHtml(false),
-		"light",
-		`${LABEL} { overflow: visible; text-overflow: clip; }`,
+	const problems = await facetLabelProblems(
+		".rr-x-facet__label { overflow: visible; text-overflow: clip; }",
 	);
-	assert.deepEqual(facetLabelProblems(probe), [
-		"label overflow is visible, not hidden",
-		"label text-overflow is clip, not ellipsis",
-	]);
+	assert.deepEqual(problems, ["the truncated label has no ellipsis"]);
 });
 
-test("a later rule that fades the exclude control again is detected", async () => {
-	const faded = await fadedExcludeStates(
-		facetRowHtml,
-		`${EXCLUDE} { opacity: 0.45; }`,
-	);
-	assert.equal(faded.length, EXCLUDE_STATES.length * 2);
-	assert.match(faded[0] ?? "", /opacity 0\.45/);
+test("a later rule that fades the exclude control again is detected in every state", async () => {
+	const faded = await fadedExcludeStates(".rr-x-facet-not { opacity: 0.45; }");
+	assert.equal(faded.length, CONTROL_STATES.length * 2);
 });
 
-test("a later rule in the same layer that fades the exclude control again is detected", async () => {
+test("a focus-only fade is detected even when a hover rule follows it", async () => {
 	const faded = await fadedExcludeStates(
-		facetRowHtml,
-		`@layer components { ${EXCLUDE} { opacity: 0.45; } }`,
+		".rr-x-facet-not:focus { opacity: 0.45; } .rr-x-facet-not:hover { opacity: 1; }",
 	);
-	assert.equal(faded.length, EXCLUDE_STATES.length * 2);
+	assert.ok(faded.some((entry) => entry.includes("[focus]")));
+	assert.ok(!faded.some((entry) => entry.includes("[hover]")));
 });
 
-test("a hover-only fade of the exclude control is detected", async () => {
+test("a hover-only fade is detected without disturbing the other states", async () => {
 	const faded = await fadedExcludeStates(
-		facetRowHtml,
 		".rr-x-facet-row:hover .rr-x-facet-not { opacity: 0.8; }",
 	);
 	assert.ok(faded.some((entry) => entry.includes("[hover]")));
