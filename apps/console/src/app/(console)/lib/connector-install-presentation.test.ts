@@ -177,6 +177,28 @@ test("explicit unavailable binding blocks Install and surfaces its server reason
   assert.equal(signal.action, null);
 });
 
+test("every explicitly blocked binding is reported, not only the first", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const signal = catalog.find((candidate) => candidate.connector_id === "signal");
+  assert.ok(signal);
+  const blocked = connectorInstallRowModel(entry("signal", "preview"), {
+    catalog: {
+      ...signal,
+      bindings: {
+        filesystem: { available: false, reason: "Install the local collector on this host." },
+        network: { available: false, reason: "Outbound network is disabled." },
+        display: { available: true },
+      },
+    },
+    installed: null,
+  });
+  assert.equal(
+    blocked.hostBlockReason,
+    "Install the local collector on this host. Outbound network is disabled."
+  );
+  assert.equal(blocked.action, null);
+});
+
 test("a catalog row without latest=true does not invent an install target", () => {
   const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
   const historical = connectorInstallRowModel(entry("github"), {

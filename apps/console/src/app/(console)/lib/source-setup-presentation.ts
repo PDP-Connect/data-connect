@@ -46,6 +46,9 @@ export interface SourceSetupAction {
 }
 
 export function publicTierLabel(tier: ConnectorCatalogEntry["publicTier"]): string {
+  if (tier === "unknown") {
+    return "Tier not declared";
+  }
   return tier === "development" ? "In development" : tier.charAt(0).toUpperCase() + tier.slice(1);
 }
 
@@ -558,7 +561,10 @@ export function sourceSetupCardAction(
   if (sourceSetupRowIsUnavailable(entry) || packageAvailabilityUnknown || packageState === "not_installed") {
     return null;
   }
-  if (packageState === "not_listed" && entry.registrationStatus !== "registered") {
+  // A package-catalog connector gets its setup routes only once the reference
+  // has registered it. Right after install it is not registered yet, and its
+  // setup page still answers 404.
+  if (packageState !== null && entry.registrationStatus !== "registered") {
     return null;
   }
   return sourceSetupAction(entry);
@@ -568,6 +574,8 @@ export interface SourceSetupCardModel {
   installModel: ConnectorInstallRowModel | null;
   packageAvailabilityUnknown: boolean;
   packageNeedsInstall: boolean;
+  /** Package installed, setup path exists, but the reference has not registered the connector yet. */
+  registrationPending: boolean;
   setupAction: SourceSetupAction | null;
   unavailable: boolean;
 }
@@ -584,12 +592,22 @@ export function sourceSetupCardModel(
     ? null
     : sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
   const packageActionAvailable = !(entry.isKnownScaffold || packageAvailabilityUnknown) && Boolean(installModel?.action);
+  const packageInstalled =
+    installModel?.activationState === "active" || installModel?.activationState === "update_available";
+  const registrationPending =
+    !(entry.isKnownScaffold || packageAvailabilityUnknown || setupAction) &&
+    packageInstalled &&
+    entry.registrationStatus !== "registered" &&
+    !sourceSetupRowIsUnavailable(entry);
   return {
     installModel,
     packageAvailabilityUnknown,
     packageNeedsInstall: packageActionAvailable && installModel?.activationState === "not_installed",
+    registrationPending,
     setupAction,
-    unavailable: entry.isKnownScaffold || !(setupAction || packageActionAvailable || packageAvailabilityUnknown),
+    unavailable:
+      entry.isKnownScaffold ||
+      !(setupAction || packageActionAvailable || packageAvailabilityUnknown || registrationPending),
   };
 }
 

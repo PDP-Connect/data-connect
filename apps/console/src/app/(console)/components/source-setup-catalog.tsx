@@ -38,9 +38,6 @@ import {
 import { ConnectorInstallRow } from "../sources/add/connector-install-row.tsx";
 
 const TRANSIENT_CATALOG_RETRY_DELAY_MS = 5000;
-let transientCatalogRetryAttempted = false;
-let transientCatalogRefreshInFlight = false;
-let transientCatalogPendingSnapshotId: string | null = null;
 
 type ConnectorCatalogRecoveryState = "exhausted" | "refreshing" | "scheduled";
 
@@ -325,10 +322,14 @@ function SourceSetupDetails({ entry }: { entry: ConnectorCatalogEntry }) {
   );
 }
 
-function resetTransientCatalogRetry(): void {
-  transientCatalogRetryAttempted = false;
-  transientCatalogRefreshInFlight = false;
-  transientCatalogPendingSnapshotId = null;
+interface TransientCatalogRetryState {
+  attempted: boolean;
+  inFlight: boolean;
+  pendingSnapshotId: string | null;
+}
+
+function freshTransientCatalogRetryState(): TransientCatalogRetryState {
+  return { attempted: false, inFlight: false, pendingSnapshotId: null };
 }
 
 function useConnectorCatalogRecovery(enabled: boolean, busySnapshotId: string | null): {
@@ -338,6 +339,9 @@ function useConnectorCatalogRecovery(enabled: boolean, busySnapshotId: string | 
   const router = useRouter();
   const [recoveryState, setRecoveryState] = useState<ConnectorCatalogRecoveryState>("exhausted");
   const retryTimerRef = useRef<number | null>(null);
+  // Retry bookkeeping belongs to this mounted catalog, not to the module, so a
+  // second catalog on the page keeps its own once-per-snapshot retry.
+  const retryStateRef = useRef<TransientCatalogRetryState>(freshTransientCatalogRetryState());
 
   const clearRetryTimer = useCallback(() => {
     if (retryTimerRef.current) {
@@ -347,51 +351,51 @@ function useConnectorCatalogRecovery(enabled: boolean, busySnapshotId: string | 
   }, []);
 
   const refreshCatalog = useCallback(() => {
-    if (transientCatalogRefreshInFlight || !busySnapshotId) {
+    if (retryStateRef.current.inFlight || !busySnapshotId) {
       return;
     }
-    transientCatalogRefreshInFlight = true;
-    transientCatalogPendingSnapshotId = busySnapshotId;
+    retryStateRef.current.inFlight = true;
+    retryStateRef.current.pendingSnapshotId = busySnapshotId;
     setRecoveryState("refreshing");
     try {
       router.refresh();
     } catch {
-      transientCatalogRefreshInFlight = false;
-      transientCatalogPendingSnapshotId = null;
+      retryStateRef.current.inFlight = false;
+      retryStateRef.current.pendingSnapshotId = null;
       setRecoveryState("exhausted");
     }
   }, [busySnapshotId, router]);
 
   const refreshManually = useCallback(() => {
-    transientCatalogRetryAttempted = true;
+    retryStateRef.current.attempted = true;
     clearRetryTimer();
     refreshCatalog();
   }, [clearRetryTimer, refreshCatalog]);
 
   useEffect(() => {
     if (!enabled) {
-      resetTransientCatalogRetry();
+      retryStateRef.current = freshTransientCatalogRetryState();
       clearRetryTimer();
       setRecoveryState("exhausted");
       return;
     }
-    if (transientCatalogRefreshInFlight && transientCatalogPendingSnapshotId !== busySnapshotId) {
-      transientCatalogRefreshInFlight = false;
-      transientCatalogPendingSnapshotId = null;
+    if (retryStateRef.current.inFlight && retryStateRef.current.pendingSnapshotId !== busySnapshotId) {
+      retryStateRef.current.inFlight = false;
+      retryStateRef.current.pendingSnapshotId = null;
       setRecoveryState("exhausted");
       return;
     }
-    if (transientCatalogRefreshInFlight) {
+    if (retryStateRef.current.inFlight) {
       setRecoveryState("refreshing");
       return;
     }
-    if (transientCatalogRetryAttempted) {
+    if (retryStateRef.current.attempted) {
       setRecoveryState("exhausted");
       return clearRetryTimer;
     }
     setRecoveryState("scheduled");
     retryTimerRef.current = window.setTimeout(() => {
-      transientCatalogRetryAttempted = true;
+      retryStateRef.current.attempted = true;
       retryTimerRef.current = null;
       refreshCatalog();
     }, TRANSIENT_CATALOG_RETRY_DELAY_MS);
@@ -466,6 +470,7 @@ function SourceSetupCard({
     installModel,
     packageAvailabilityUnknown,
     packageNeedsInstall,
+    registrationPending,
     setupAction: action,
     unavailable: isUnavailable,
   } = sourceSetupCardModel(entry, installLifecycle, installCatalogTransientlyUnavailable);
@@ -536,6 +541,10 @@ function SourceSetupCard({
         {packageNeedsInstall && installModel?.action ? (
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">
             Install package first
+          </span>
+        ) : registrationPending ? (
+          <span className="pdpp-caption text-muted-foreground" data-testid="connector-registration-pending">
+            Registration pending. Account setup appears once the server registers this connector.
           </span>
         ) : action ? (
           <>

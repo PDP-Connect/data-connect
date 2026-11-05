@@ -60,14 +60,32 @@ async function connectorInstallFetch(path: string, init: RequestInit = {}): Prom
   return response.json();
 }
 
-export async function listConnectorInstallCatalog(): Promise<ConnectorInstallCatalogEntry[]> {
+function warnSkipped(kind: "catalog" | "status", skipped: number): void {
+  if (skipped > 0) {
+    console.warn(`connector install ${kind}: skipped ${skipped} malformed entr${skipped === 1 ? "y" : "ies"}`);
+  }
+}
+
+async function fetchInstallCatalog(): Promise<{ entries: ConnectorInstallCatalogEntry[]; skipped: number }> {
   const payload = await connectorInstallFetch("/v1/owner/connector-install/catalog");
-  return [...parseConnectorInstallCatalogResponse(payload).data];
+  const parsed = parseConnectorInstallCatalogResponse(payload);
+  warnSkipped("catalog", parsed.skipped);
+  return { entries: [...parsed.data], skipped: parsed.skipped };
+}
+
+async function fetchInstallStatus(): Promise<{ entries: ConnectorInstallStatus[]; skipped: number }> {
+  const payload = await connectorInstallFetch("/v1/owner/connector-install/status");
+  const parsed = parseConnectorInstallStatusResponse(payload);
+  warnSkipped("status", parsed.skipped);
+  return { entries: [...parsed.data], skipped: parsed.skipped };
+}
+
+export async function listConnectorInstallCatalog(): Promise<ConnectorInstallCatalogEntry[]> {
+  return (await fetchInstallCatalog()).entries;
 }
 
 export async function listConnectorInstallStatus(): Promise<ConnectorInstallStatus[]> {
-  const payload = await connectorInstallFetch("/v1/owner/connector-install/status");
-  return [...parseConnectorInstallStatusResponse(payload).data];
+  return (await fetchInstallStatus()).entries;
 }
 
 export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[]> {
@@ -78,17 +96,24 @@ export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[
 export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot> {
   let catalogUnavailableReason: ConnectorInstallSnapshot["catalogUnavailableReason"];
   const [catalog, status, localSources] = await Promise.all([
-    listConnectorInstallCatalog().catch((err: unknown) => {
+    fetchInstallCatalog().catch((err: unknown) => {
       if (isTransientConnectorInstallCatalogError(err)) {
         catalogUnavailableReason = "transient_busy";
-        return [];
+        return { entries: [], skipped: 0 };
       }
       return Promise.reject(err);
     }),
-    listConnectorInstallStatus(),
+    fetchInstallStatus(),
     listConnectorLocalSources(),
   ]);
-  return { catalog, ...(catalogUnavailableReason ? { catalogUnavailableReason } : {}), localSources, status };
+  const skippedEntries = catalog.skipped + status.skipped;
+  return {
+    catalog: catalog.entries,
+    ...(catalogUnavailableReason ? { catalogUnavailableReason } : {}),
+    localSources,
+    ...(skippedEntries > 0 ? { skippedEntries } : {}),
+    status: status.entries,
+  };
 }
 
 export interface InstallConnectorInput {

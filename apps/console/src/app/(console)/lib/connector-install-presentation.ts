@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { canonicalConnectorKey } from "pdpp-reference-implementation/connection-setup-plan";
-import type { ConnectorCatalogEntry, PublicConnectorTier } from "./connection-catalog.ts";
+import type { CatalogPublicTier, ConnectorCatalogEntry } from "./connection-catalog.ts";
 import type { ConnectorInstallCatalogEntry, ConnectorInstallStatus } from "./connector-install-contract.ts";
 
 export interface ConnectorInstallLifecycle {
@@ -29,7 +29,7 @@ export interface ConnectorInstallRowModel {
   readonly installedDigestFull: string | null;
   readonly installedVersion: string | null;
   readonly targetVersion: string | null;
-  readonly tier: PublicConnectorTier;
+  readonly tier: CatalogPublicTier;
 }
 
 /**
@@ -54,9 +54,11 @@ function displayBindingName(binding: string): string {
 }
 
 function explicitBindingBlockReason(bindings: Readonly<Record<string, unknown>>): string | null {
+  const reasons: string[] = [];
   for (const [binding, value] of Object.entries(bindings)) {
     if (value === false) {
-      return `${displayBindingName(binding)} is unavailable on this host.`;
+      reasons.push(`${displayBindingName(binding)} is unavailable on this host.`);
+      continue;
     }
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       continue;
@@ -65,12 +67,13 @@ function explicitBindingBlockReason(bindings: Readonly<Record<string, unknown>>)
     if (availability.available !== false) {
       continue;
     }
-    if (typeof availability.reason === "string" && availability.reason.trim()) {
-      return availability.reason.trim();
-    }
-    return `${displayBindingName(binding)} is unavailable on this host.`;
+    reasons.push(
+      typeof availability.reason === "string" && availability.reason.trim()
+        ? availability.reason.trim()
+        : `${displayBindingName(binding)} is unavailable on this host.`
+    );
   }
-  return null;
+  return reasons.length > 0 ? reasons.join(" ") : null;
 }
 
 function targetDigest(lifecycle: ConnectorInstallLifecycle): string | null {
@@ -78,7 +81,7 @@ function targetDigest(lifecycle: ConnectorInstallLifecycle): string | null {
   return candidate?.latest === true ? candidate.digest : null;
 }
 
-function tierFor(entry: ConnectorCatalogEntry, lifecycle: ConnectorInstallLifecycle): PublicConnectorTier {
+function tierFor(entry: ConnectorCatalogEntry, lifecycle: ConnectorInstallLifecycle): CatalogPublicTier {
   return lifecycle.catalog?.tier ?? lifecycle.installed?.tier ?? entry.publicTier;
 }
 
@@ -187,6 +190,9 @@ export function connectorInstallRowModel(
   };
 }
 
-export function connectorInstallTierLabel(tier: PublicConnectorTier): string {
+export function connectorInstallTierLabel(tier: CatalogPublicTier): string {
+  if (tier === "unknown") {
+    return "Tier not declared";
+  }
   return tier.charAt(0).toUpperCase() + tier.slice(1);
 }

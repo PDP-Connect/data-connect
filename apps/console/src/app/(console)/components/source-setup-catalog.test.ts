@@ -220,3 +220,22 @@ test("a setup-capable connector offers Install first and links to account setup 
   assert.doesNotMatch(afterInstall, INSTALL_BUTTON);
   assert.doesNotMatch(afterInstall, INSTALL_FIRST);
 });
+
+test("an installed connector that the reference has not registered shows registration pending, not a setup link", async () => {
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.ok(browserPackage.catalog);
+  const lifecycle: ConnectorInstallLifecycle = {
+    catalog: { ...browserPackage.catalog, digest: installed.digest },
+    installed: { ...installed, connector_id: "new-browser" },
+  };
+  const pending = await render(false, setupCapable, lifecycle);
+  assert.match(pending, /Registration pending/);
+  assert.doesNotMatch(pending, BROWSER_SETUP_LINK, "the setup route answers 404 until the connector is registered");
+  assert.doesNotMatch(pending, INSTALL_BUTTON);
+  assert.match(pending, UNAVAILABLE_FALSE);
+
+  const registered = await render(false, { ...setupCapable, registrationStatus: "registered" }, lifecycle);
+  assert.doesNotMatch(registered, /Registration pending/);
+  assert.match(registered, NEW_BROWSER_SETUP);
+});

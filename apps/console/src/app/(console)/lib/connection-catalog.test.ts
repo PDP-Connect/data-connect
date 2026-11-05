@@ -44,6 +44,7 @@ import {
   connectorInstallRowModel,
   connectorLookupKey,
 } from "./connector-install-presentation.ts";
+import { filterCatalogForDevelopmentVisibility } from "./source-setup-development.ts";
 import {
   browserBoundWithStoredCredentials,
   isRunnableAddOffer,
@@ -1577,4 +1578,17 @@ test("console catalog uses the manifest tier as its sole listing authority", () 
   assert.equal(entry.isKnownScaffold, true);
   assert.equal(isRunnableAddOffer(entry), false, "a scaffold is never a runnable add offer");
   assert.equal(sourceSetupAction(entry), null, "a scaffold never gets a self-test action");
+});
+
+test("an install-catalog entry published without a tier carries an unknown tier, not development", () => {
+  const [published] = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  assert.ok(published);
+  const { tier: _declared, ...withoutTier } = published;
+  const catalog = buildOwnerConnectorCatalog([], [], [withoutTier]);
+  const entry = catalog.find((candidate) => candidate.connectorKey === published.connector_key);
+  assert.ok(entry);
+  assert.equal(entry.publicTier, "unknown");
+  assert.notEqual(sourceSetupStatus(entry).label, "In development");
+  assert.notEqual(publicTierLabel(entry.publicTier), "In development");
+  assert.equal(filterCatalogForDevelopmentVisibility([entry], false).length, 1, "unknown is not hidden as development");
 });
