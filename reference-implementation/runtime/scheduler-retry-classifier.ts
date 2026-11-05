@@ -36,28 +36,6 @@ function isRetryableHttpStatus(status: unknown): boolean {
   return true;
 }
 
-function hasRetryableRunFailureKnownGap(gaps: readonly Record<string, unknown>[] | null | undefined): boolean {
-  for (const gap of gaps ?? []) {
-    if (!gap || typeof gap !== "object" || Array.isArray(gap)) {
-      continue;
-    }
-    if (gap.kind !== "run_failed") {
-      continue;
-    }
-    const recoveryHint = gap.recovery_hint;
-    if (!recoveryHint || typeof recoveryHint !== "object" || Array.isArray(recoveryHint)) {
-      continue;
-    }
-    if (
-      (recoveryHint as { action?: unknown }).action === "retry_by_runtime" &&
-      (recoveryHint as { retryable?: unknown }).retryable === true
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 const NON_RETRYABLE_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "authentication_error",
   "connector_protocol_violation",
@@ -114,12 +92,11 @@ function hasRetryableRunFailureContext(err: RunConnectorError | null | undefined
   return Boolean(err) && !runRequiresOwnerAuthRepair(err);
 }
 
+// Only a runtime-authored recovery action counts. Connector hints are gated
+// (Collection Profile Section 5.11) and reach a gap only as an authorized action
+// or `unknown`. Gap message and reason text are connector claims and never count.
 function knownGapRequiresOwnerAuthRepair(gap: Record<string, unknown>): boolean {
-  const recoveryHint = plainObject(gap.recovery_hint);
-  if (recoveryHint) {
-    return isOwnerAuthAction(stringField(recoveryHint, "action"));
-  }
-  return isOwnerAuthAction(stringField(gap, "reason")) || matchesOwnerAuthMessage(stringField(gap, "message"));
+  return isOwnerAuthAction(stringField(plainObject(gap.recovery_hint), "action"));
 }
 
 function runRequiresOwnerAuthRepair(err: RunConnectorError | null | undefined): boolean {
@@ -133,19 +110,9 @@ function runRequiresOwnerAuthRepair(err: RunConnectorError | null | undefined): 
   if (gapHit) {
     return true;
   }
-  // A connector that explicitly declared this failure retryable (via its
-  // `retryablePattern`, e.g. USAA's `source_unavailable`) has already made a
-  // connector-neutral, source-specific determination that this is not an
-  // auth failure. The session-establishment wrapper's message prefix (e.g.
-  // `usaa_session_failed: source_unavailable: ...`) still contains
-  // "session_failed" for EVERY session-establishment failure, retryable or
-  // not, so the message-text heuristic below cannot distinguish a proven
-  // provider outage from a real auth failure by substring alone. Trust the
-  // connector's explicit signal over the heuristic when both are present.
-  if (err.connector_error?.retryable === true) {
-    return false;
-  }
-  return matchesOwnerAuthMessage(err.connector_error?.message) || matchesOwnerAuthMessage(err.failure_reason);
+  // The connector's message and retryable flag are claims, so they never decide
+  // auth. Only the runtime-classified failure reason is read as text.
+  return matchesOwnerAuthMessage(err.failure_reason);
 }
 
 function shouldRetryRunFailure(err: RunConnectorError | null | undefined): boolean {
@@ -161,27 +128,21 @@ function shouldRetryRunFailure(err: RunConnectorError | null | undefined): boole
   if (err.terminal_reason && NON_RETRYABLE_TERMINAL_REASONS.has(err.terminal_reason)) {
     return false;
   }
-  // A connector-declared non-retryable error remains authoritative even if a
-  // future adapter accidentally also supplies a runtime transport hint.
-  if (err.connector_error?.retryable === false) {
+  // A connector-reported terminal error (`DONE.error`) is a connector claim
+  // about retry. Its `retryable` flag, its `recovery_hint` and any `run_failed`
+  // known gap derived from them never start a retry (Section 5.11). Only a
+  // failure without that claim is eligible below. Some adapters also use
+  // this error envelope; presence is a conservative stop, not proof of origin.
+  if (err.connector_error) {
     return false;
   }
   if (!hasRetryableRunFailureContext(err)) {
     return false;
   }
-  // A connector's affirmative verdict is only safe after the owner-auth gate
-  // above: a manual-action gap must never restart the same doomed run.
-  if (err.connector_error?.retryable === true) {
-    return true;
-  }
-  // This is a runtime-derived verdict from a safe, structured Node/undici
-  // cause code. It is more precise than the message/gap heuristics below and
-  // is set only when a connector DID NOT report its own terminal error.
+  // A runtime-derived verdict from a safe, structured Node/undici cause code.
+  // It is set only when no connector terminal error exists.
   if (typeof err.runtime_retryable === "boolean") {
     return err.runtime_retryable;
-  }
-  if (hasRetryableRunFailureKnownGap(err.known_gaps)) {
-    return true;
   }
   return true;
 }
@@ -199,7 +160,6 @@ function isTerminalGrantFailure(reason: string | null | undefined): reason is Te
 
 export type { RunConnectorError };
 export {
-  hasRetryableRunFailureKnownGap,
   isRetryableHttpStatus,
   isTerminalGrantFailure,
   NON_RETRYABLE_FAILURE_REASONS,

@@ -795,6 +795,41 @@ test("a DONE that cites an id the connector never emitted is rejected with no ch
   }
 });
 
+test("an unsupported hint on a failed DONE stays a suggestion and triggers no runtime retry", async () => {
+  const original = "Upstream failed";
+  const stub = makeStub(
+    [
+      {
+        error: { message: original, recovery_hint: { action: "retry_by_runtime", retryable: true }, retryable: true },
+        records_emitted: 0,
+        status: "failed",
+        type: "DONE",
+      },
+    ],
+    1
+  );
+  try {
+    const outcome = await runStub(stub, "run_c020_hint", manifest());
+    assert.equal(outcome.ok, true, `unsupported hints are not invalid: ${outcome.ok ? "" : outcome.message}`);
+    if (!outcome.ok) {
+      return;
+    }
+    assert.equal((outcome.result.connector_error as { message?: string } | null)?.message, original);
+    const record = await persistedRecord("run_c020_hint");
+    assert.ok(record, "the diagnostic record must be persisted");
+    assert.ok(
+      record.snapshot.defects.some((defect) => defect.class === "hint_unsupported"),
+      "an unsupported hint from a declarer must be recorded as hint_unsupported"
+    );
+    assert.ok(
+      (record.snapshot.connector_suggestions ?? []).some((s) => s.action === "retry_by_runtime"),
+      "the connector's hint must survive as an attributed suggestion"
+    );
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
 test("a malformed DONE recovery hint fails the run and keeps the connector message", async () => {
   const original = "Provider unavailable";
   const stub = makeStub(
@@ -895,6 +930,50 @@ test("a run with no OBSERVATION and no defects writes no row, so it cannot evict
     await persistedRecord(informativeId),
     "the informative row is still there after more silent runs than the cap holds"
   );
+});
+
+test("a SKIP_RESULT refresh_credentials hint is a suggestion, not an authorized credential prompt", async () => {
+  const stub = makeStub(
+    [
+      {
+        message: "Upstream answered 401",
+        reason: "upstream_error",
+        recovery_hint: { action: "refresh_credentials", retryable: true },
+        stream: "items",
+        type: "SKIP_RESULT",
+      },
+      { records_emitted: 0, status: "succeeded", type: "DONE" },
+    ],
+    0
+  );
+  try {
+    const outcome = await runStub(stub, "run_c020_skip_hint", manifest());
+    assert.equal(
+      outcome.ok,
+      true,
+      `a skip with an unsupported hint must not abort the run: ${outcome.ok ? "" : outcome.message}`
+    );
+    if (!outcome.ok) {
+      return;
+    }
+    const knownGaps = (outcome.result.known_gaps ?? []) as { recovery_hint?: { action?: string } }[];
+    assert.ok(knownGaps.length > 0, "the skip is recorded as a known gap");
+    assert.equal(
+      knownGaps.some((gap) => gap.recovery_hint?.action === "refresh_credentials"),
+      false,
+      "the runtime never acts on an unauthorized connector hint"
+    );
+    const record = await persistedRecord("run_c020_skip_hint");
+    assert.ok(record, "the diagnostic record must be persisted");
+    assert.ok(
+      (record.snapshot.connector_suggestions ?? []).some(
+        (suggestion) => suggestion.origin === "skip_result" && suggestion.action === "refresh_credentials"
+      ),
+      "the hint is attributed to the connector as a suggestion"
+    );
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
 });
 
 function existsMarker(path: string): boolean {
