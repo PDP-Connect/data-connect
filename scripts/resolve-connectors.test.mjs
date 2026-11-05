@@ -24,9 +24,9 @@ import {
   authorOciProfile,
   checkInstalledLock,
   installConnectorsAtomically,
-  installLockedConnectors,
   ociCertificateIdentityResolver,
   LOCKED_ARTIFACT_SOURCE,
+  PRE_DECLARATION_OCI_CONNECTORS,
   resolveIndexUrl,
   recoverInterruptedInstall,
 } from "./resolve-connectors.js"
@@ -328,19 +328,18 @@ describe("resolved connector-installer archive acceptance", () => {
 // Reproduce PR A's OCI wire fixture. The core still parses manifests, checks
 // digests, extracts archives and assembles the cosign bundle. Only registry I/O
 // and Fulcio/Rekor are replaced; the test verifier checks a real EC signature.
-function fixture(root) {
-  const key = "ynab",
-    connectorId = `${key}-pdpp`,
+function fixture(root, { key = "ynab", withDeclaration = true } = {}) {
+  const connectorId = `${key}-pdpp`,
     version = "0.3.0"
   const profile = json({
     connector_key: key,
     connector_id: `https://github.com/PDP-Connect/data-connectors/connector/${key}`,
     version,
     protocol_version: "1.0",
-    display_name: "YNAB",
+    display_name: key,
     source: {
-      id: "https://registry.pdpp.dev/sources/ynab",
-      display: { name: "YNAB" },
+      id: `https://registry.pdpp.dev/sources/${key}`,
+      display: { name: key },
     },
     streams: [
       {
@@ -370,7 +369,7 @@ function fixture(root) {
   const entry = {
     connectorId,
     connectorKey: key,
-    company: "YNAB",
+    company: key,
     version,
     resolvedFrom: version,
     artifactKind: "pdpp-collection-profile",
@@ -391,7 +390,9 @@ function fixture(root) {
     ...JSON.parse(profile),
     config_version: "1.0",
     profile_digest: digest(profile),
-    source_declaration_digest: digest(declaration),
+    ...(withDeclaration
+      ? { source_declaration_digest: digest(declaration) }
+      : {}),
     entrypoint: "code/collection-profile.mjs",
   })
   const manifest = json({
@@ -409,10 +410,14 @@ function fixture(root) {
         "application/vnd.pdpp.connector.licenses.v1.tar+gzip"
       ),
       layer(provenance, "application/vnd.pdpp.connector.provenance.v1+json"),
-      layer(
-        declaration,
-        "application/vnd.pdpp.connector.source-declaration.v1+json"
-      ),
+      ...(withDeclaration
+        ? [
+            layer(
+              declaration,
+              "application/vnd.pdpp.connector.source-declaration.v1+json"
+            ),
+          ]
+        : []),
     ],
   })
   const manifestDigest = digest(manifest)
@@ -847,6 +852,160 @@ describe("OCI consumer acceptance", () => {
           ociCertificateIdentityResolver({ registry: "ghcr.io", repository })
         ).toBeNull()
       }
+    }))
+
+  it("B-T9 a mixed lock installs through the default install: tarball by the earlier core, declaration-bearing OCI by the current core, declaration-less listed OCI by the earlier core; an unlisted declaration-less OCI is refused", async () =>
+    temporary(async root => {
+      // `ynab` stands for a lock-delivered connector that has no generated
+      // local-collector pin: it must install and resolve the same way.
+      const pins = readFileSync(
+        "packages/local-collector/src/generated/collection-profile-pins.generated.ts",
+        "utf8"
+      )
+      expect(pins).not.toContain('"connectorKey": "ynab"')
+      const signed = fixture(join(root, "signed"), { key: "ynab" })
+      const listed = fixture(join(root, "listed"), {
+        key: "github",
+        withDeclaration: false,
+      })
+      expect(PRE_DECLARATION_OCI_CONNECTORS.has(listed.oci.connectorId)).toBe(
+        true
+      )
+
+      const tarballUrl = legacyArtifacts[0].artifactUrl
+      const bundleUrl = `${tarballUrl}.sigstore.json`
+      const manifest = json({
+        connector_id: "acme-tarball",
+        version: "1.0.0",
+        name: "Acme",
+      })
+      const script = Buffer.from("export const run = () => {};\n")
+      const tar = archive(join(root, "tarball"), "legacy", {
+        "manifest.json": manifest,
+        "script.js": script,
+      })
+      const tarballEntry = {
+        connectorId: "acme-tarball",
+        company: "acme",
+        version: "1.0.0",
+        resolvedFrom: "1.0.0",
+        sourceFiles: {
+          metadata: "acme/acme-tarball.json",
+          script: "acme/acme-tarball.js",
+        },
+        artifactUrl: tarballUrl,
+        artifactSha256: digest(tar),
+        artifactSignature: {
+          type: "sigstoreBundle",
+          bundlePath: "acme-tarball.tgz.sigstore.json",
+          bundleUrl,
+        },
+        manifestSha256: digest(manifest),
+        scriptSha256: digest(script),
+      }
+
+      const verified = []
+      const options = {
+        fetchImpl: async url => {
+          if (url === tarballUrl)
+            return new Response(tar, { status: 200 })
+          if (url === bundleUrl)
+            return new Response(JSON.stringify({ bundle: "legacy" }), {
+              status: 200,
+            })
+          const repository = new URL(url).pathname
+          const owner = [signed, listed].find(f =>
+            repository.startsWith(`/v2/${f.oci.oci.repository}/`)
+          )
+          if (!owner) throw new Error(`Unexpected request: ${url}`)
+          return owner.options.fetchImpl(url)
+        },
+        sigstoreVerifier: async (bundle, bytes, policy) => {
+          if (bundle.bundle === "legacy") {
+            expect(bytes).toEqual(tar)
+            verified.push("tarball")
+            return
+          }
+          let failure
+          for (const f of [signed, listed]) {
+            try {
+              await f.options.sigstoreVerifier(bundle, bytes, policy)
+              verified.push(f.oci.connectorId)
+              return
+            } catch (error) {
+              failure = error
+            }
+          }
+          throw failure
+        },
+      }
+      const lock = {
+        lockVersion: "2.0",
+        dependencies: {
+          "acme-tarball": "1.0.0",
+          [signed.oci.connectorId]: "0.3.0",
+          [listed.oci.connectorId]: "0.3.0",
+        },
+        connectors: [tarballEntry, signed.oci, listed.oci],
+      }
+      const installRoot = join(root, "installed")
+
+      const result = await installConnectorsAtomically({
+        lock,
+        installRoot,
+        ...options,
+      })
+
+      // Summed across both cores: 3 connectors, 2 tarball files + 4 files for
+      // the declaration-less release + 5 for the signed one.
+      expect(result.connectorCount).toBe(3)
+      const paths = tree(installRoot).map(([path]) => path)
+      expect(paths).toEqual([
+        "acme/acme-tarball.js",
+        "acme/acme-tarball.json",
+        "collection-profiles/github-pdpp/dist/collection-profile.mjs",
+        "collection-profiles/github-pdpp/licenses/LICENSE",
+        "collection-profiles/github-pdpp/profile/collection-profile.json",
+        "collection-profiles/github-pdpp/provenance.json",
+        "collection-profiles/ynab-pdpp/dist/collection-profile.mjs",
+        "collection-profiles/ynab-pdpp/licenses/LICENSE",
+        "collection-profiles/ynab-pdpp/profile/collection-profile.json",
+        "collection-profiles/ynab-pdpp/provenance.json",
+        // Only the signed release carries a source declaration.
+        "collection-profiles/ynab-pdpp/source-declaration.json",
+        "lock.json",
+      ])
+      expect(result.filesWritten).toBe(11)
+      expect(verified.sort()).toEqual(
+        ["github-pdpp", "tarball", "ynab-pdpp"].sort()
+      )
+      expect(
+        checkInstalledLock({
+          lock,
+          dependencies: { connectors: lock.dependencies },
+          installRoot,
+        }).ok
+      ).toBe(true)
+
+      // The same declaration-less release under an id the stopgap does not
+      // list is refused by the current core, and nothing is published.
+      const unlisted = fixture(join(root, "unlisted"), {
+        key: "gitlab",
+        withDeclaration: false,
+      })
+      const before = tree(installRoot)
+      await expect(
+        installConnectorsAtomically({
+          lock: {
+            lockVersion: "2.0",
+            dependencies: { [unlisted.oci.connectorId]: "0.3.0" },
+            connectors: [unlisted.oci],
+          },
+          installRoot,
+          ...unlisted.options,
+        })
+      ).rejects.toThrow(/no signed source declaration layer or referrer/)
+      expect(tree(installRoot)).toEqual(before)
     }))
 
   it("B-T8 generate-platform-registry output is unchanged by a mixed v2 lock", async () =>

@@ -25,8 +25,8 @@ import {
   verifyInstalled,
 } from "@opendatalabs/data-connectors-tools/installer-core"
 // STOPGAP, removed when the legacy tarball connectors move to Collection
-// Profiles. The current installer core installs only signed OCI Collection
-// Profiles that carry a signed source declaration. The bundled tarball
+// Profiles (tracked in #633). The current installer core installs only signed
+// OCI Collection Profiles that carry a signed source declaration. The bundled tarball
 // connectors, and the one OCI release published before source declarations
 // existed (see PRE_DECLARATION_OCI_CONNECTORS), still need the earlier core,
 // which is pinned under its own name so it cannot be mistaken for the current
@@ -76,7 +76,8 @@ export const LOCKED_ARTIFACT_SOURCE = Object.freeze({
 // STOPGAP. OCI connectors whose pinned release has no signed source
 // declaration, so the current installer core refuses it. They install and
 // author through the earlier core, like the tarball connectors. Delete an id
-// here once its connector is re-pinned to a release that carries a declaration.
+// here once its connector is re-pinned to a release that carries a declaration
+// (tracked in #634).
 export const PRE_DECLARATION_OCI_CONNECTORS = Object.freeze(
   new Set(["github-pdpp"])
 )
