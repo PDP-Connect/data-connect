@@ -27,13 +27,10 @@ export async function buildConnectorIconMap(
       })
     );
   }
+  // Manifest marks are already normalized (resolveManifestDisplayMark), so the
+  // map only indexes them; it never decides a backdrop or a precedence.
   for (const manifest of manifests) {
-    const identities = [manifest.connector_id, manifest.connector_key];
-    // A generic fallback must not displace the connector's declared asset.
-    if (manifest.resolvedIconSource === "simple-icons" && hasConnectorIcon(icons, identities)) {
-      continue;
-    }
-    indexConnectorIcon(icons, identities, validatedConnectorIcon(manifest.icon, manifest.brand?.background_color));
+    indexConnectorIcon(icons, [manifest.connector_id, manifest.connector_key], validatedConnectorIcon(manifest.icon));
   }
   for (const template of templates) {
     const identities = [template.connector_id, template.connector_key];
