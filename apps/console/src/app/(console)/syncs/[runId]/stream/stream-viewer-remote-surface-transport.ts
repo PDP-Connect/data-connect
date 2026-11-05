@@ -7,6 +7,7 @@ type RemoteSurfaceMessage = Record<string, unknown>;
 type TransportLogger = (event: string, payload?: Record<string, unknown>) => void;
 
 export interface PdppRemoteSurfaceTransport extends RemoteSurfaceTransport {
+  dispose: () => void;
   receiveSseMessage: (name: string, payload: Record<string, unknown>) => void;
   sendClipboardText: (text: string) => Promise<boolean>;
   setPresentationAttachmentReady: (ready: boolean) => void;
@@ -49,10 +50,14 @@ export function createPdppRemoteSurfaceTransport({
   viewportUrlRef,
 }: CreatePdppRemoteSurfaceTransportOptions): PdppRemoteSurfaceTransport {
   const handlers = new Set<(message: RemoteSurfaceMessage) => void>();
+  let disposed = false;
   let frameSequence = 0;
   let queuedViewport: RemoteSurfaceMessage | null = null;
 
   const emit = (message: RemoteSurfaceMessage): void => {
+    if (disposed) {
+      return;
+    }
     for (const handler of handlers) {
       handler(message);
     }
@@ -163,13 +168,16 @@ export function createPdppRemoteSurfaceTransport({
   };
 
   const sendClipboardText = async (text: string): Promise<boolean> => {
+    if (disposed) {
+      return false;
+    }
     try {
       const response = await postClipboard({ action: "local_to_remote", text, type: "clipboard" });
       const body = await readResponseBody(response);
       if (!response.ok) {
         throw new Error(responseMessage(body, `Clipboard rejected by server: ${response.status}`));
       }
-      return true;
+      return !disposed;
     } catch (error) {
       logDebug("stream.remote_surface.clipboard.error", {
         error: error instanceof Error ? error.message : String(error),
@@ -180,6 +188,9 @@ export function createPdppRemoteSurfaceTransport({
   };
 
   const receiveSseMessage = (name: string, payload: Record<string, unknown>): void => {
+    if (disposed) {
+      return;
+    }
     if (name === "frame") {
       frameSequence += 1;
       emit({
@@ -200,8 +211,16 @@ export function createPdppRemoteSurfaceTransport({
   };
 
   return {
+    dispose() {
+      disposed = true;
+      queuedViewport = null;
+      handlers.clear();
+    },
     receiveSseMessage,
     send(message) {
+      if (disposed) {
+        return;
+      }
       if (message.type === "viewport") {
         sendViewport(message);
         return;
@@ -220,6 +239,9 @@ export function createPdppRemoteSurfaceTransport({
     },
     sendClipboardText,
     setPresentationAttachmentReady(ready) {
+      if (disposed) {
+        return;
+      }
       presentationAttachmentReadyRef.current = ready;
       if (!(ready && queuedViewport)) {
         return;
@@ -229,7 +251,9 @@ export function createPdppRemoteSurfaceTransport({
       sendViewport(next);
     },
     subscribe(handler) {
-      handlers.add(handler);
+      if (!disposed) {
+        handlers.add(handler);
+      }
       return () => handlers.delete(handler);
     },
   };

@@ -4855,7 +4855,12 @@ function BrowserSurface({
         onTransportMountedRef.current(null);
         onViewerMountedRef.current(null);
       }
-      viewer.unmount();
+      try {
+        // Permit synchronous SDK cleanup before retiring its transport.
+        viewer.unmount();
+      } finally {
+        transport.dispose();
+      }
     };
   }, [
     clipboardUrlRef,
