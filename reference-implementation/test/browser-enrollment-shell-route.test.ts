@@ -15,6 +15,7 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { BROWSER_ENROLLMENT_SHELL_TTL_MS } from "../server/routes/ref-browser-enrollment-shell.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Integration coverage for the browser-enrollment shell routes:
 //   POST /_ref/connectors/:connectorId/browser-enrollment-shell  (on AS)
@@ -309,12 +310,12 @@ test("browser-enrollment shell: creates draft for a browser-bound connector outs
   await withServer(async ({ asUrl }) => {
     // A connector installed from the runtime catalog: its registered manifest
     // declares a browser binding, and no generated key list names it.
-    const manifest = {
+    const manifest = withFixtureSourceDeclaration({
       ...(loadManifest("amazon") as Record<string, unknown>),
       connector_id: "acme-shop",
       connector_key: "acme-shop",
       display_name: "Acme Shop",
-    };
+    });
     const registered = await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(manifest),
       headers: { "Content-Type": "application/json" },

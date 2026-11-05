@@ -69,6 +69,7 @@ import {
   type BrowserSurfaceReadinessProbe,
   createDefaultBrowserSurfaceReadinessProbe,
 } from "../runtime/browser-surface-readiness.ts";
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import {
   type ConnectorEnvironmentPolicy,
   parseConnectorEnvironmentPolicy,
@@ -5954,6 +5955,14 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
   } as unknown as Parameters<typeof mountRefRunStatus>[1]);
+  // Owner-only statement of the Collection Profile this runtime implements, with what is outstanding.
+  app.get(
+    "/_ref/collection-profile",
+    ownerAuth.requireOwnerSession,
+    (_req: unknown, res: { json: (body: unknown) => unknown }) => {
+      res.json({ object: "collection_profile_support", ...REFERENCE_COLLECTION_PROFILE_SUPPORT });
+    }
+  );
   // Owner-only diagnostic read of a run's OBSERVATION record (Collection Profile 0.2.0 Section 5.10).
   mountRefRunObservations(app, {
     createRequestConnectorInstanceStore,

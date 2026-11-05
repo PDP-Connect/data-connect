@@ -69,6 +69,7 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { seedableConnectorsFromManifests } from "../cli/commands/seed.ts";
 import { SUPPORTED_SEED_CONNECTOR_KEYS } from "../connectors/seed/index.ts";
+import { validateLegacySourceBindings } from "../scripts/legacy-source-binding-validation.ts";
 import type { ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import {
   buildConnectionSetupPlan,
@@ -79,12 +80,19 @@ import { canonicalConnectorKey, isConnectorKey } from "../server/connector-key.t
 import {
   BROWSER_BOUND_KEYS,
   FIRST_PARTY_CONNECTOR_KEYS,
+  LEGACY_FIRST_PARTY_SOURCE_ENTRIES,
   LEGACY_LOCAL_ALIASES,
   LOCAL_COLLECTOR_PROVEN_KEYS,
   NATIVE_CONNECTOR_KEYS,
   PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS,
   STATIC_SECRET_LIVE_PROVEN_KEYS,
 } from "../server/generated/connector-registry.generated.ts";
+
+const GENERATED_BINDINGS_LINE = /^export const LEGACY_FIRST_PARTY_SOURCE_ENTRIES:[^\n]*$/m;
+const MAPPING_CHANGED = /Pinned historical source mapping changed/;
+const DUPLICATE_BINDINGS = /duplicate keys or source IDs/;
+const INVALID_BINDING_KEY = /Invalid pinned connector_key/;
+const INVALID_BINDING_SOURCE = /Invalid pinned legacy connector_id/;
 
 const trackedRegistry = {
   BROWSER_BOUND_KEYS,
@@ -171,6 +179,98 @@ test("the generator throws (does not silently drop the claim) when a manifest de
   } finally {
     rmSync(scratchDir, { force: true, recursive: true });
   }
+});
+
+test("historical source bindings stay pinned to real package identities, independent of fixture overrides", () => {
+  const scratchDir = mkdtempSync(join(tmpdir(), "connector-registry-binding-pin-"));
+  try {
+    for (const { file, manifest } of readPolyfillManifests()) {
+      writeFileSync(
+        join(scratchDir, file),
+        JSON.stringify({ ...(manifest as Record<string, unknown>), manifest_uri: "https://provenance.example/changed" })
+      );
+    }
+    const scratchPath = join(scratchDir, "generated.ts");
+    execFileSync("node", ["--experimental-strip-types", generatorScript, scratchPath], {
+      cwd: riRoot,
+      env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir },
+      stdio: "pipe",
+    });
+    assert.equal(readFileSync(scratchPath, "utf8"), readFileSync(trackedRegistryPath, "utf8"));
+
+    const firstManifestFile = readdirSync(scratchDir).find((file) => file.endsWith(".json"));
+    assert.ok(firstManifestFile, "the override fixture contains a manifest");
+    const firstManifestPath = join(scratchDir, firstManifestFile);
+    const changed = JSON.parse(readFileSync(firstManifestPath, "utf8")) as Record<string, unknown>;
+    changed.connector_id = "https://registry.pdpp.dev/connectors/repointed";
+    writeFileSync(firstManifestPath, JSON.stringify(changed));
+    execFileSync("node", ["--experimental-strip-types", generatorScript, scratchPath], {
+      cwd: riRoot,
+      env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir },
+      stdio: "pipe",
+    });
+    const overridden = readFileSync(scratchPath, "utf8");
+    const generatedBindings = (source: string): string => {
+      const match = source.match(GENERATED_BINDINGS_LINE);
+      assert.ok(match, "the generator emits historical binding data");
+      return match[0];
+    };
+    assert.equal(generatedBindings(overridden), generatedBindings(readFileSync(trackedRegistryPath, "utf8")));
+
+    const overrideKey = "fixture-override-probe";
+    writeFileSync(
+      join(scratchDir, `${overrideKey}.json`),
+      JSON.stringify({
+        connector_id: "https://fixture.example/connectors/fixture-override-probe",
+        connector_key: overrideKey,
+        manifest_uri: "https://provenance.example/override-probe",
+        runtime_requirements: { bindings: { browser: { required: true } } },
+      })
+    );
+    execFileSync("node", ["--experimental-strip-types", generatorScript, scratchPath], {
+      cwd: riRoot,
+      env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir },
+      stdio: "pipe",
+    });
+    const withOverrideProbe = readFileSync(scratchPath, "utf8");
+    assert.match(withOverrideProbe, new RegExp(`BROWSER_BOUND_KEYS:[^\\n]*${overrideKey}`));
+    assert.equal(generatedBindings(withOverrideProbe), generatedBindings(readFileSync(trackedRegistryPath, "utf8")));
+  } finally {
+    rmSync(scratchDir, { force: true, recursive: true });
+  }
+});
+
+test("historical binding validation rejects reassignment, additions, duplicates, and malformed identities", () => {
+  const approved = LEGACY_FIRST_PARTY_SOURCE_ENTRIES;
+  const [first] = approved;
+  const last = approved.at(-1);
+  assert.ok(first);
+  assert.ok(last);
+  const replaceFirst = (entry: readonly [string, string]): readonly (readonly [string, string])[] => [
+    entry,
+    ...approved.slice(1),
+  ];
+  assert.throws(
+    () => validateLegacySourceBindings(replaceFirst(["amazon", "https://other.example/source"])),
+    MAPPING_CHANGED
+  );
+  assert.throws(
+    () => validateLegacySourceBindings([...approved, ["new-connector", "https://other.example/source"] as const]),
+    MAPPING_CHANGED
+  );
+  assert.throws(() => validateLegacySourceBindings([...approved, first]), DUPLICATE_BINDINGS);
+  assert.throws(
+    () => validateLegacySourceBindings([...approved, ["other-key", first[1]] as const]),
+    DUPLICATE_BINDINGS
+  );
+  assert.throws(
+    () => validateLegacySourceBindings([...approved.slice(0, -1), ["bad/key", last[1]] as const]),
+    INVALID_BINDING_KEY
+  );
+  assert.throws(
+    () => validateLegacySourceBindings([...approved.slice(0, -1), [last[0], "https://"] as const]),
+    INVALID_BINDING_SOURCE
+  );
 });
 
 test("every generated registry entry is a real, non-empty connector key with no duplicates", () => {

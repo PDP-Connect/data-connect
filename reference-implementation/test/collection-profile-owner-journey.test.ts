@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Real HTTP/session + durable store boundary, beyond the route's fake adapter.
-// Collection Profile 5.12: keep diagnostic records on the owner surface,
-// uncached and namespace-scoped.
+// Collection Profile 3.4 and 5.12: advertise support before any run, and keep
+// diagnostic records on the owner surface, uncached and namespace-scoped.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { closeDb, getDb } from "../server/db.ts";
@@ -24,7 +24,7 @@ import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 const OWNER_PASSWORD = "collection-profile-owner-fixture-password";
 
-test("owner can read diagnostics through the real session gate", async () => {
+test("owner can discover profile support and read diagnostics through the real session gate", async () => {
   if (POSTGRES_URL) {
     await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
   }
@@ -53,6 +53,20 @@ test("owner can read diagnostics through the real session gate", async () => {
       ?.split(";")[0];
     assert.ok(cookie, "runtime-owned sign-in must issue a real owner session");
     const headers = { Accept: "application/json", Cookie: cookie };
+
+    const supportResponse = await fetch(`${origin}/_ref/collection-profile`, { headers });
+    assert.equal(supportResponse.status, 200);
+    assert.deepEqual(
+      await supportResponse.json(),
+      {
+        compatible_protocol_versions: ["0.1.0", "0.2.0"],
+        conformance: { outstanding: ["binding_authority"], status: "partial" },
+        object: "collection_profile_support",
+        protocol_capabilities: ["OBSERVATION", "STREAM_EVIDENCE"],
+        protocol_version: "0.2.0",
+      },
+      "profile support is discoverable before a connector starts"
+    );
 
     const connectorId = "owner-observations-fixture";
     if (POSTGRES_URL) {
