@@ -136,7 +136,8 @@ async function runStub(
   stub: Stub,
   runId: string,
   manifestValue: Record<string, unknown>,
-  extraEnv: Record<string, string> = {}
+  extraEnv: Record<string, string> = {},
+  runOptions: Record<string, unknown> = {}
 ): Promise<RunOutcome> {
   const savedEnv: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(extraEnv)) {
@@ -177,6 +178,7 @@ async function runStub(
       persistState: false,
       runId,
       scope: { streams: [{ name: "items" }] },
+      ...runOptions,
     } as never);
     return { ok: true, result: result as unknown as Record<string, unknown> };
   } catch (caught) {
@@ -541,6 +543,36 @@ test("the diagnostic record is stored before the terminal event of a protocol vi
   const stub = makeStub([PROVIDER_REJECTED("o2"), done, EXPECTATION("o3")], 0);
   try {
     assert.equal(await terminalEventSeenAtStoreWrite(stub, "run_c020_order_violation"), false);
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
+test("a cancelled run stores no cause, even when its failed DONE cited an auth fact", async () => {
+  const stub = makeStub(
+    [
+      PROVIDER_REJECTED("x1"),
+      {
+        error: { basis: ["x1"], code: "credential_rejected", message: "refused", retryable: false },
+        records_emitted: 0,
+        status: "failed",
+        type: "DONE",
+      },
+    ],
+    1
+  );
+  const abort = new AbortController();
+  try {
+    // The owner's cancel lands after DONE was read and before the run closes.
+    await runStub(stub, "run_c020_cancelled", manifest(), {}, {
+      cancelSignal: abort.signal,
+      testOnlyTerminalProcessingFaultInjector: () => abort.abort(),
+    });
+    const record = await persistedRecord("run_c020_cancelled");
+    assert.ok(record, "the diagnostic record must be persisted");
+    assert.equal(record.diagnosis.category, "unknown");
+    assert.equal(record.diagnosis.attribution, "none");
+    assert.deepEqual(record.diagnosis.basis, []);
   } finally {
     rmSync(stub.dir, { force: true, recursive: true });
   }
