@@ -7,7 +7,7 @@ import type {
   ConnectorInstallService,
 } from "../connector-install/index.ts";
 import type { LocalConnectorSourceRecord } from "../connector-install/local-source.ts";
-import type { BrowserEnrollmentReadinessResolver } from "../connector-readiness.ts";
+import { type BrowserEnrollmentReadinessResolver, toReadinessWire } from "../connector-readiness.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 interface Request {
@@ -81,17 +81,22 @@ function queryList(req: Request, key: string): string[] {
   return items.flatMap((item) => (typeof item === "string" && item.trim() ? [item.trim()] : []));
 }
 
+/** Most connectors one readiness request may name; each costs a hash and a host probe. */
+const MAX_READINESS_CONNECTORS = 50;
+
 /** Every connector an owner could be offered browser setup for: published, installed or developer-local. */
 async function readinessCandidateKeys(service: ConnectorInstallService): Promise<string[]> {
   const [catalog, installed, local] = await Promise.all([
     service.catalog().catch(() => []),
-    service.status().catch(() => []),
+    (service.installedConnectorIds?.() ?? service.status().then((records) => records.map((r) => r.connectorId))).catch(
+      () => []
+    ),
     (service.listLocalSources?.() ?? Promise.resolve([])).catch(() => []),
   ]);
   return [
     ...new Set([
       ...catalog.map((entry) => entry.connector_id),
-      ...installed.map((record) => record.connectorId),
+      ...installed,
       ...local.map((record) => record.connectorKey),
     ]),
   ].sort();
@@ -275,9 +280,19 @@ export function mountOwnerConnectorInstall(
   const readinessHandler: Handler = async (req, res) => {
     try {
       const requested = queryList(req, "connector_id");
+      if (requested.length > MAX_READINESS_CONNECTORS) {
+        options.pdppError(
+          res,
+          400,
+          "invalid_request",
+          `at most ${MAX_READINESS_CONNECTORS} connector_id values per request`,
+          "connector_id"
+        );
+        return;
+      }
       const keys = requested.length > 0 ? requested : await readinessCandidateKeys(options.service);
       res.json({
-        data: await options.readinessResolver.resolveMany(keys),
+        data: (await options.readinessResolver.resolveMany(keys)).map(toReadinessWire),
         object: "connector_browser_enrollment_readiness",
       });
     } catch (error) {

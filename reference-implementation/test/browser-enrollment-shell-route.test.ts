@@ -404,10 +404,31 @@ test("browser-enrollment shell: refuses when the selected artifact no longer ver
   });
 });
 
-test("browser-enrollment shell: refuses when this host has no browser surface (409)", async () => {
+test("browser-enrollment shell: refuses when this host lacks a tool the connector declares (409)", async () => {
   await withServer(async ({ asUrl }) => {
-    await registerConnector(asUrl, "chase");
-    setBrowserHostCapability(false);
+    const manifest = loadManifest("chase") as Record<string, unknown>;
+    const requirements = (manifest.runtime_requirements ?? {}) as Record<string, unknown>;
+    const withTool = {
+      ...manifest,
+      runtime_requirements: {
+        ...requirements,
+        external_tools: [
+          {
+            detect: { args: ["--version"], executable: "pdpp-tool-that-is-not-installed" },
+            license: "test-only",
+            purpose: "fixture",
+            name: "fixture-tool",
+          },
+        ],
+      },
+    };
+    const registered = await fixtures?.publish(withTool);
+    const resp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(registered),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(resp.status, 201, await resp.text());
     const cookie = await ownerLogin(asUrl);
     const res = await fetch(`${asUrl}/_ref/connectors/chase/browser-enrollment-shell`, {
       headers: { cookie },
@@ -418,6 +439,7 @@ test("browser-enrollment shell: refuses when this host has no browser surface (4
     assert.equal(error.code, "connector_browser_setup_unavailable");
     assert.match(asString(error.message), /host_requirement_unmet/);
     assert.match(asString(error.message), /Next action: configure/);
+    assert.doesNotMatch(asString(error.message), /fixture-tool|pdpp-tool-that-is-not-installed/, "detail is a diagnostic");
   });
 });
 

@@ -39,7 +39,7 @@
 import { randomBytes } from "node:crypto";
 
 import { type ConnectorManifestLike, displayNameForConnector } from "../connection-setup-plan.ts";
-import type { BrowserEnrollmentReadinessResolver } from "../connector-readiness.ts";
+import { type BrowserEnrollmentReadinessResolver, readinessReasonMessage } from "../connector-readiness.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
@@ -275,7 +275,7 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
         // Reject unknown connector before doing anything else (404).
         const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
 
-        const readiness = await ctx.readinessResolver.resolve(connectorId);
+        const readiness = await ctx.readinessResolver.resolve(connectorId, manifest);
         if (!readiness.browser_bound) {
           await emitShellAudit(ctx, req, res, {
             connectorId,
@@ -304,7 +304,7 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
             res,
             409,
             "connector_browser_setup_unavailable",
-            `Connector '${connectorId}' cannot add an account through browser setup now: ${readiness.reason}${readiness.detail ? ` (${readiness.detail})` : ""}. Next action: ${readiness.action}.`
+            `Connector '${connectorId}' cannot add an account through browser setup now (${readiness.reason}): ${readinessReasonMessage(readiness.reason)}. Next action: ${readiness.action}.`
           );
           return;
         }

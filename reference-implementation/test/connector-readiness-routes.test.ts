@@ -219,15 +219,39 @@ test("with no named connector the endpoint lists every published, installed or d
   });
 });
 
-test("a host with no browser surface: every enrollment is refused with configure", async () => {
+test("a bare host with no browser variables still enrolls: attended setup needs no scheduler browser surface", async () => {
   await withStates({ browserHost: false }, async ({ asUrl, fixtures, rsUrl, token }) => {
     await register(asUrl, (await fixtures.publish(browserManifest("acme-connect"))) as Record<string, unknown>);
     const readiness = await readinessEndpoint(rsUrl, token, "acme-connect");
-    assert.equal(readiness.action, "configure");
+    assert.equal(readiness.action, "connect");
+    assert.equal(readiness.reason, "runnable");
     assert.deepEqual(await templateReadiness(rsUrl, token, "acme-connect"), readiness);
     const shell = await createShell(asUrl, "acme-connect");
-    assert.equal(shell.status, 409);
-    assert.match(String(asRecord(shell.body.error).message), /host_requirement_unmet/);
+    assert.equal(shell.status, 201);
+  });
+});
+
+test("the wire verdict is the five fields the console reads, and the refusal message never carries the diagnostic detail", async () => {
+  await withStates({ browserHost: true }, async ({ asUrl, fixtures, rsUrl, token }) => {
+    await register(asUrl, (await fixtures.publish(browserManifest("acme-broken"))) as Record<string, unknown>);
+    fixtures.corrupt("acme-broken");
+    const verdict = await readinessEndpoint(rsUrl, token, "acme-broken");
+    assert.deepEqual(Object.keys(verdict).sort(), ["action", "browser_bound", "connector_key", "detail", "reason"]);
+    assert.ok(verdict.detail, "the diagnostic detail is on the verdict");
+    const shell = await createShell(asUrl, "acme-broken");
+    const message = String(asRecord(shell.body.error).message);
+    assert.match(message, /failed verification/);
+    assert.ok(!message.includes(String(verdict.detail)), "detail stays a diagnostic");
+  });
+});
+
+test("one readiness request may name at most 50 connectors", async () => {
+  await withStates({ browserHost: true }, async ({ rsUrl, token }) => {
+    const ids = Array.from({ length: 51 }, (_, index) => `connector_id=acme-${index}`).join("&");
+    const { status } = await fetchJson(`${rsUrl}/v1/owner/connector-install/readiness?${ids}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    assert.equal(status, 400);
   });
 });
 

@@ -26,6 +26,8 @@ import {
   type BrowserEnrollmentReadiness,
   createBrowserEnrollmentReadinessResolver,
   projectBrowserEnrollmentReadiness,
+  READINESS_ACTIONS,
+  READINESS_REASONS,
 } from "../server/connector-readiness.ts";
 import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 
@@ -240,19 +242,96 @@ test("an installed artifact whose bytes changed: repair, never connect", async (
   });
 });
 
-test("an installed artifact on a host with no browser surface: configure, with the host's reason", async () => {
+test("an installed artifact on a bare host with no browser variables: connect, attended setup needs no scheduler surface", async () => {
   await withHarness(
     async (h) => {
       h.setCatalog([catalogEntry("acme-shop", DIGEST_V1, "1.0.0")]);
       await h.install("acme-shop", DIGEST_V1);
       const readiness = await h.resolve("acme-shop");
-      assert.equal(readiness.action, "configure");
-      assert.equal(readiness.reason, "host_requirement_unmet");
-      assert.equal(readiness.host, "blocked");
-      assert.match(String(readiness.detail), /browser runtime is not configured/);
+      assert.equal(readiness.action, "connect");
+      assert.equal(readiness.host, "ready");
     },
     { browserHost: false }
   );
+});
+
+// ─── Host result: blocked, throwing, reused ─────────────────────────────────
+
+function activeArtifact(runtimeRequirements: unknown = { bindings: BROWSER_BINDINGS }) {
+  return {
+    digest: DIGEST_V1,
+    manifest: { connector_id: "acme-shop", runtime_requirements: runtimeRequirements },
+    source: "installed" as const,
+    status: "active" as const,
+    version: "1.0.0",
+  };
+}
+
+test("a host that cannot run the connector: configure, with the host's reason as detail only", async () => {
+  const resolver = createBrowserEnrollmentReadinessResolver({
+    checkHost: async () => ({ ready: false, reason: "required tool 'ffmpeg' was not found" }),
+    installService: { catalog: async () => [], inspectSelected: async () => activeArtifact() },
+  });
+  const readiness = await resolver.resolve("acme-shop");
+  assert.equal(readiness.action, "configure");
+  assert.equal(readiness.reason, "host_requirement_unmet");
+  assert.equal(readiness.host, "blocked");
+  assert.equal(readiness.detail, "required tool 'ffmpeg' was not found");
+});
+
+test("one connector's malformed requirements or throwing host probe is that connector's retry, never a failed list", async () => {
+  const service = {
+    catalog: async () => [],
+    inspectSelected: async (key: string) =>
+      key === "acme-bad" ? activeArtifact({ bindings: BROWSER_BINDINGS, external_tools: 5 }) : activeArtifact(),
+  };
+  // The real host rules: a non-iterable `external_tools` throws inside them.
+  const resolver = createBrowserEnrollmentReadinessResolver({ installService: service });
+  const [bad, good] = await resolver.resolveMany(["acme-bad", "acme-shop"]);
+  assert.ok(bad);
+  assert.ok(good);
+  assert.equal(bad.action, "retry");
+  assert.equal(bad.reason, "inspection_unavailable");
+  assert.equal(good.action, "connect");
+
+  const throwing = createBrowserEnrollmentReadinessResolver({
+    checkHost: async () => {
+      throw new Error("spawn EAGAIN");
+    },
+    installService: service,
+  });
+  assert.equal((await throwing.resolve("acme-shop")).reason, "inspection_unavailable");
+});
+
+test("a list reuses a host result for a short time; a single read asks the host afresh", async () => {
+  let clock = 0;
+  let probes = 0;
+  const resolver = createBrowserEnrollmentReadinessResolver({
+    checkHost: async () => {
+      probes += 1;
+      return { ready: true };
+    },
+    installService: { catalog: async () => [], inspectSelected: async () => activeArtifact() },
+    now: () => clock,
+  });
+  await resolver.resolveMany(["acme-shop"]);
+  await resolver.resolveMany(["acme-shop"]);
+  assert.equal(probes, 1, "the second list read reuses the result");
+  await resolver.resolve("acme-shop");
+  assert.equal(probes, 2, "the action-time read always asks the host");
+  clock += 31_000;
+  await resolver.resolveMany(["acme-shop"]);
+  assert.equal(probes, 3, "an expired result is asked for again");
+});
+
+test("a catalog that never answers is retry, within the bound", async () => {
+  const resolver = createBrowserEnrollmentReadinessResolver({
+    catalogTimeoutMs: 20,
+    installService: { catalog: () => new Promise(() => undefined), inspectSelected: async () => ({ status: "none" as const }) },
+  });
+  const readiness = await resolver.resolve("acme-shop");
+  assert.equal(readiness.action, "retry");
+  assert.equal(readiness.reason, "catalog_unavailable");
 });
 
 test("an installed artifact that does not use a browser: unavailable for browser setup", async () => {
@@ -317,6 +396,8 @@ test("a corrupted artifact is still reported browser-bound from the registered m
   const without = createBrowserEnrollmentReadinessResolver({ installService: service });
   assert.equal((await withManifest.resolve("acme-shop")).browser_bound, true);
   assert.equal((await without.resolve("acme-shop")).browser_bound, false);
+  // A manifest the caller already holds replaces the hook's lookup.
+  assert.equal((await without.resolve("acme-shop", browserManifest("acme-shop"))).browser_bound, true);
   // resolveMany answers exactly what resolve answers.
   assert.deepEqual(await withManifest.resolveMany(["acme-shop"]), [await withManifest.resolve("acme-shop")]);
 });
@@ -351,16 +432,27 @@ test("projection rows are evaluated top to bottom: an invalid artifact beats the
   assert.equal(projected.host, "not_evaluated");
 });
 
-test("a registered manifest alone is not an artifact: with no catalog read it is not installed", () => {
+test("a registered manifest alone is not an artifact: it names the connector browser-bound but is never runnable", () => {
   const projected = projectBrowserEnrollmentReadiness({
     artifact: { status: "none" },
-    catalog: "not_consulted",
+    catalog: "not_offered",
     catalogBrowserBound: null,
     connectorKey: "acme-shop",
     hintBrowserBound: true,
     host: null,
   });
   assert.equal(projected.action, "unavailable");
-  assert.equal(projected.reason, "not_installed");
+  assert.equal(projected.reason, "not_published");
   assert.equal(projected.browser_bound, true);
+});
+
+test("the console's readiness vocabulary matches the server's", async () => {
+  // The console cannot import the server module (it pulls in the install
+  // service), so it keeps its own copy of the vocabulary. This test is the
+  // single check that the two copies agree.
+  const consoleContract = await import(
+    "../../apps/console/src/app/(console)/lib/connector-readiness-contract.ts"
+  );
+  assert.deepEqual([...consoleContract.READINESS_ACTIONS], [...READINESS_ACTIONS]);
+  assert.deepEqual([...consoleContract.READINESS_REASONS], [...READINESS_REASONS]);
 });

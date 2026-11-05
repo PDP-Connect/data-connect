@@ -9,7 +9,8 @@
  *     source, else the installed version), re-verified against its recorded
  *     bytes;
  *   - host readiness: the artifact's declared requirements against this host,
- *     by the same rules the scheduler applies;
+ *     for an attended run (the scheduler's rules minus the unattended browser
+ *     surface, which account setup does not need);
  *   - the signed catalog: discovery only. It decides between "install" and
  *     "not published" when no artifact is selected. It never makes anything
  *     runnable.
@@ -18,22 +19,25 @@
  * disagree.
  */
 
-import { checkManifestHostReadiness } from "../runtime/scheduler-readiness.ts";
+import { checkAttendedEnrollmentHostReadiness } from "../runtime/scheduler-readiness.ts";
 import { classifyConnectorIntentModality, type ConnectorManifestLike } from "./connection-setup-plan.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
 import type { ConnectorCatalogEntry, ConnectorInstallService, SelectedConnectorArtifact } from "./connector-install/index.ts";
 
-export type ReadinessAction = "connect" | "install" | "repair" | "configure" | "retry" | "unavailable";
+export const READINESS_ACTIONS = ["connect", "install", "repair", "configure", "retry", "unavailable"] as const;
+export type ReadinessAction = (typeof READINESS_ACTIONS)[number];
 
-export type ReadinessReason =
-  | "runnable"
-  | "not_installed"
-  | "not_published"
-  | "catalog_unavailable"
-  | "artifact_invalid"
-  | "inspection_unavailable"
-  | "not_browser_bound"
-  | "host_requirement_unmet";
+export const READINESS_REASONS = [
+  "runnable",
+  "not_installed",
+  "not_published",
+  "catalog_unavailable",
+  "artifact_invalid",
+  "inspection_unavailable",
+  "not_browser_bound",
+  "host_requirement_unmet",
+] as const;
+export type ReadinessReason = (typeof READINESS_REASONS)[number];
 
 export type CatalogFact = "offered" | "not_offered" | "unavailable" | "not_consulted";
 
@@ -54,6 +58,28 @@ export interface BrowserEnrollmentReadiness {
   readonly reason: ReadinessReason;
 }
 
+/**
+ * What the owner console reads: the verdict, not the evidence behind it. The
+ * artifact, catalog and host echoes stay server-side (tests and diagnostics).
+ */
+export interface BrowserEnrollmentReadinessWire {
+  readonly action: ReadinessAction;
+  readonly browser_bound: boolean;
+  readonly connector_key: string;
+  readonly detail: string | null;
+  readonly reason: ReadinessReason;
+}
+
+export function toReadinessWire(readiness: BrowserEnrollmentReadiness): BrowserEnrollmentReadinessWire {
+  return {
+    action: readiness.action,
+    browser_bound: readiness.browser_bound,
+    connector_key: readiness.connector_key,
+    detail: readiness.detail,
+    reason: readiness.reason,
+  };
+}
+
 export type ArtifactFact = SelectedConnectorArtifact | { readonly status: "inspection_failed"; readonly reason: string };
 
 export interface ReadinessFacts {
@@ -68,7 +94,7 @@ export interface ReadinessFacts {
   readonly hintBrowserBound: boolean;
 }
 
-function isBrowserBound(manifest: Record<string, unknown> | null): boolean {
+function isBrowserBound(manifest: object | null): boolean {
   return classifyConnectorIntentModality(manifest as ConnectorManifestLike | null) === "browser_bound";
 }
 
@@ -96,6 +122,9 @@ function artifactSummary(artifact: ArtifactFact): BrowserEnrollmentReadiness["ar
  *   no artifact, catalog offers it                  -> install    not_installed
  *   no artifact, catalog unreachable                -> retry      catalog_unavailable
  *   no artifact, catalog does not offer it          -> unavailable not_published
+ *
+ * With no artifact the catalog is always consulted, so `not_consulted` only
+ * accompanies a selected artifact.
  *
  * A selected artifact is runnable whatever the catalog says: an older
  * installed version and an unpublished developer-local source both connect.
@@ -140,11 +169,45 @@ export function projectBrowserEnrollmentReadiness(facts: ReadinessFacts): Browse
   if (facts.catalog === "unavailable") {
     return result("retry", "catalog_unavailable");
   }
-  return result("unavailable", facts.catalog === "not_offered" ? "not_published" : "not_installed");
+  return result("unavailable", "not_published");
+}
+
+/**
+ * One sentence per reason, safe to show an owner or put in an error. The
+ * verdict's `detail` (store errors, host paths) is a diagnostic and is never
+ * part of this text.
+ */
+export function readinessReasonMessage(reason: ReadinessReason): string {
+  switch (reason) {
+    case "not_installed":
+      return "its package is not installed yet";
+    case "not_published":
+      return "it is not published, and no local source or installed package provides it";
+    case "catalog_unavailable":
+      return "the connector catalog could not be reached";
+    case "artifact_invalid":
+      return "its installed package failed verification";
+    case "inspection_unavailable":
+      return "its installed package could not be checked just now";
+    case "not_browser_bound":
+      return "it does not use browser setup";
+    case "host_requirement_unmet":
+      return "this server is not set up to run it yet";
+    case "runnable":
+      return "it can run";
+  }
 }
 
 export interface BrowserEnrollmentReadinessResolver {
-  resolve: (connectorKey: string) => Promise<BrowserEnrollmentReadiness>;
+  /**
+   * The verdict for one connector, asking the host afresh (the action-time
+   * check). `registeredManifest`, when the caller already holds it, replaces the
+   * resolver's own lookup of the registered manifest.
+   */
+  resolve: (
+    connectorKey: string,
+    registeredManifest?: object | null
+  ) => Promise<BrowserEnrollmentReadiness>;
   /** One catalog read for the whole list. */
   resolveMany: (connectorKeys: readonly string[]) => Promise<readonly BrowserEnrollmentReadiness[]>;
 }
@@ -169,11 +232,32 @@ function catalogFactFor(connectorKey: string, entries: readonly ConnectorCatalog
     return { browserBound: null, fact: "not_offered" as const };
   }
   return {
-    browserBound: offered.bindings
-      ? isBrowserBound({ runtime_requirements: { bindings: offered.bindings } })
-      : null,
+    // A catalog entry that declares no bindings says nothing about browser use.
+    browserBound:
+      offered.bindings && Object.keys(offered.bindings).length > 0
+        ? isBrowserBound({ runtime_requirements: { bindings: offered.bindings } })
+        : null,
     fact: "offered" as const,
   };
+}
+
+const HOST_CHECK_TTL_MS = 30_000;
+const CATALOG_READ_TIMEOUT_MS = 5000;
+
+/** Resolves to `null` if `work` has not settled within `ms`. */
+async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function createBrowserEnrollmentReadinessResolver(deps: {
@@ -184,27 +268,48 @@ export function createBrowserEnrollmentReadinessResolver(deps: {
    * same answer for the same connector. It never makes anything runnable.
    */
   readonly registeredManifest?: (connectorKey: string) => Promise<Record<string, unknown> | null>;
-  /** Test seam; production uses the scheduler's host rules. */
-  readonly checkHost?: typeof checkManifestHostReadiness;
+  /** Test seams; production uses the attended-enrollment host rules, the wall clock and the defaults above. */
+  readonly checkHost?: typeof checkAttendedEnrollmentHostReadiness;
+  readonly now?: () => number;
+  readonly catalogTimeoutMs?: number;
 }): BrowserEnrollmentReadinessResolver {
-  const checkHost = deps.checkHost ?? checkManifestHostReadiness;
+  const checkHost = deps.checkHost ?? checkAttendedEnrollmentHostReadiness;
+  const now = deps.now ?? Date.now;
+  const catalogTimeoutMs = deps.catalogTimeoutMs ?? CATALOG_READ_TIMEOUT_MS;
 
-  const resolveWith = async (
-    rawKey: string,
-    readCatalog: CatalogRead
+  // Host detection spawns the manifest's detect commands. A list read reuses a
+  // result for the same declared requirements for a short time; a single read at action time
+  // (`resolve`) always asks the host.
+  const hostResults = new Map<string, { at: number; result: Promise<{ ready: boolean; reason?: string }> }>();
+  const hostFor = (
+    connectorKey: string,
+    artifact: Extract<ArtifactFact, { status: "active" }>,
+    reuse: boolean
+  ): Promise<{ ready: boolean; reason?: string }> => {
+    const key = `${connectorKey}\u0000${JSON.stringify(artifact.manifest.runtime_requirements ?? null)}`;
+    const cached = hostResults.get(key);
+    if (reuse && cached && now() - cached.at < HOST_CHECK_TTL_MS) {
+      return cached.result;
+    }
+    const result = checkHost(artifact.manifest);
+    hostResults.set(key, { at: now(), result });
+    result.catch(() => hostResults.delete(key));
+    return result;
+  };
+
+  const resolveUnchecked = async (
+    connectorKey: string,
+    readCatalog: CatalogRead,
+    reuseHostResult: boolean,
+    heldManifest: object | null | undefined
   ): Promise<BrowserEnrollmentReadiness> => {
-    const connectorKey = canonicalConnectorKey(rawKey) ?? rawKey;
-    let artifact: ArtifactFact;
-    try {
-      artifact = await deps.installService.inspectSelected(connectorKey);
-    } catch (error) {
-      artifact = { reason: messageOf(error), status: "inspection_failed" };
-    }
-    let host: ReadinessFacts["host"] = null;
-    if (artifact.status === "active" && isBrowserBound(artifact.manifest)) {
-      host = await checkHost(artifact.manifest);
-    }
-    const hint = await deps.registeredManifest?.(connectorKey).catch(() => null);
+    const artifact = await deps.installService.inspectSelected(connectorKey);
+    const host =
+      artifact.status === "active" && isBrowserBound(artifact.manifest)
+        ? await hostFor(connectorKey, artifact, reuseHostResult)
+        : null;
+    const hint =
+      heldManifest === undefined ? await deps.registeredManifest?.(connectorKey).catch(() => null) : heldManifest;
     const catalog =
       artifact.status === "none"
         ? catalogFactFor(connectorKey, await readCatalog())
@@ -219,19 +324,46 @@ export function createBrowserEnrollmentReadinessResolver(deps: {
     });
   };
 
+  // Total: one connector's failure (a store error, a malformed manifest, a host
+  // probe that throws) is that connector's `retry` verdict, never a failed list.
+  const resolveWith = async (
+    rawKey: string,
+    readCatalog: CatalogRead,
+    reuseHostResult: boolean,
+    heldManifest?: object | null
+  ): Promise<BrowserEnrollmentReadiness> => {
+    const connectorKey = canonicalConnectorKey(rawKey) ?? rawKey;
+    try {
+      return await resolveUnchecked(connectorKey, readCatalog, reuseHostResult, heldManifest);
+    } catch (error) {
+      return projectBrowserEnrollmentReadiness({
+        artifact: { reason: messageOf(error), status: "inspection_failed" },
+        catalog: "not_consulted",
+        catalogBrowserBound: null,
+        connectorKey,
+        hintBrowserBound: false,
+        host: null,
+      });
+    }
+  };
+
   const catalogReader = (): CatalogRead => {
     let pending: Promise<readonly ConnectorCatalogEntry[] | null> | undefined;
     return () => {
-      pending ??= deps.installService.catalog().catch(() => null);
+      pending ??= withTimeout(
+        deps.installService.catalog().catch(() => null),
+        catalogTimeoutMs
+      );
       return pending;
     };
   };
 
   return {
-    resolve: (connectorKey) => resolveWith(connectorKey, catalogReader()),
+    resolve: (connectorKey, registeredManifest) =>
+      resolveWith(connectorKey, catalogReader(), false, registeredManifest),
     resolveMany: (connectorKeys) => {
       const readCatalog = catalogReader();
-      return Promise.all(connectorKeys.map((connectorKey) => resolveWith(connectorKey, readCatalog)));
+      return Promise.all(connectorKeys.map((connectorKey) => resolveWith(connectorKey, readCatalog, true)));
     },
   };
 }

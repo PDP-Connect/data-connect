@@ -557,11 +557,13 @@ export async function listVerifiedActiveConnectors(store: ConnectorInstallStore)
 }
 
 /**
- * The artifact a run would execute for this connector, chosen the way the run
- * path chooses it: a selected developer-local source first (an invalid one
- * blocks, there is no fallback), then the installed active version. Both are
- * re-verified against their recorded bytes. A store that throws is not handled
- * here: the caller decides what "could not inspect" means.
+ * The artifact a run would execute for this connector: a selected
+ * developer-local source first (an invalid one blocks, there is no fallback),
+ * then the installed active version, as the run path chooses between those two.
+ * The run path has a third fallback, the built-in seed connectors; they are not
+ * browser-bound connectors, so this inspection does not consider them. Both
+ * kinds are re-verified against their recorded bytes. A store that throws is
+ * not handled here: the caller decides what "could not inspect" means.
  */
 export type SelectedConnectorArtifact =
   | { readonly status: "none" }
@@ -817,6 +819,8 @@ export interface ConnectorInstallService {
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
   resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
   inspectSelected: (connectorId: string) => Promise<SelectedConnectorArtifact>;
+  /** Ids of active installs, read from the store without verifying their bytes. */
+  installedConnectorIds?: () => Promise<readonly string[]>;
   addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
@@ -1210,6 +1214,7 @@ export function createConnectorInstallService(options: {
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
     inspectSelected: (connectorId) => inspectSelectedConnectorArtifact(store, localSourceStore, connectorId),
+    installedConnectorIds: async () => (await store.listActive()).map((record) => record.connectorId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
     async update(connectorId) {

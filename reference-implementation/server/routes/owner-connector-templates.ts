@@ -17,7 +17,11 @@ import {
   classifyConnectorIntentModality,
   staticSecretCredentialCaptureFromManifest,
 } from "../connection-setup-plan.ts";
-import type { BrowserEnrollmentReadiness, BrowserEnrollmentReadinessResolver } from "../connector-readiness.ts";
+import {
+  type BrowserEnrollmentReadiness,
+  type BrowserEnrollmentReadinessResolver,
+  toReadinessWire,
+} from "../connector-readiness.ts";
 import type { OwnerAgentControlAction } from "../metadata.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
@@ -370,7 +374,7 @@ function projectTemplate(
     connector_modality: modality,
     // The server-owned browser-setup verdict (connector-readiness.ts). Null for
     // a template that is not browser-bound.
-    connector_readiness: readiness,
+    connector_readiness: readiness ? toReadinessWire(readiness) : null,
     display_name: displayNameForTemplate(connectorKey, manifest),
     icon: manifest.icon ?? null,
     object: "owner_connector_template",

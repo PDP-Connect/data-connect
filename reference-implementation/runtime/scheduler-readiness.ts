@@ -205,12 +205,10 @@ async function checkFirstPartyLocalSourceReadiness(manifest: SchedulerManifest):
   return `required local source path(s) are missing or unreadable: ${missing.join(", ")}`;
 }
 
-/**
- * Whether this host can run a connector with these declared requirements.
- * The scheduler asks before an automatic run; the owner-facing readiness
- * projection asks with the same function, so there is one set of host rules.
- */
-export async function checkManifestHostReadiness(manifest: SchedulerManifest): Promise<SchedulerReadinessResult> {
+async function checkHostRequirements(
+  manifest: SchedulerManifest,
+  options: { readonly unattendedBrowser: boolean }
+): Promise<SchedulerReadinessResult> {
   const requirements = getRuntimeRequirements(manifest);
   for (const tool of requirements.external_tools || []) {
     // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
@@ -219,7 +217,7 @@ export async function checkManifestHostReadiness(manifest: SchedulerManifest): P
     }
   }
 
-  if (requiredBindingEnabled(manifest, "browser") && !browserSurfaceConfigured()) {
+  if (options.unattendedBrowser && requiredBindingEnabled(manifest, "browser") && !browserSurfaceConfigured()) {
     return {
       ready: false,
       reason: "required browser runtime is not configured for unattended scheduled runs",
@@ -232,6 +230,25 @@ export async function checkManifestHostReadiness(manifest: SchedulerManifest): P
   }
 
   return { ready: true };
+}
+
+/**
+ * Whether this host can run a connector unattended, on a schedule: external
+ * tools, a configured browser surface, and local source paths. The scheduler
+ * asks this before an automatic run.
+ */
+export function checkManifestHostReadiness(manifest: SchedulerManifest): Promise<SchedulerReadinessResult> {
+  return checkHostRequirements(manifest, { unattendedBrowser: true });
+}
+
+/**
+ * Whether this host can run a connector the owner is watching, as in account
+ * setup: external tools and local source paths. It does not require the
+ * unattended browser surface; the launcher opens a local headed browser for an
+ * attended run outside a container.
+ */
+export function checkAttendedEnrollmentHostReadiness(manifest: SchedulerManifest): Promise<SchedulerReadinessResult> {
+  return checkHostRequirements(manifest, { unattendedBrowser: false });
 }
 
 export function defaultReadinessChecker(schedule: ConnectorSchedule): Promise<SchedulerReadinessResult> {
