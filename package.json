@@ -97,7 +97,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#6c71697a1523926fe8d475cd243a8219ea21aa5b",
+    "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#708a6cc17d6821fad222a652084f2bc270c40052",
     "@semantic-release/exec": "^7.1.0",
     "@stryker-mutator/core": "10.0.0",
     "@stryker-mutator/vitest-runner": "10.0.0",
@@ -111,6 +111,7 @@
     "@vitejs/plugin-react": "^6.1.2",
     "autoprefixer": "^10.6.1",
     "conventional-changelog-conventionalcommits": "^10.4.1",
+    "data-connectors-legacy-installer": "github:PDP-Connect/data-connectors#e1e497f3bca842c0489c472c1ca286630eef5078",
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react-hooks": "^7.1.1",

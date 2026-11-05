@@ -175,7 +175,7 @@ test("a fresh install lands the pinned files under the digest directory and pass
   const call = core.calls[0] as {
     lock: { connectors: { oci: unknown; version: string; artifactKind: string }[] };
     ociCertificateIdentityResolver: (input: { registry: string; repository: string }) => string | null;
-    artifactCertificateIdentityResolver: () => unknown;
+    source: unknown;
   };
   assert.deepEqual(call.lock.connectors[0]?.oci, {
     digest: fakePin().digest,
@@ -190,7 +190,7 @@ test("a fresh install lands the pinned files under the digest directory and pass
   );
   assert.equal(call.ociCertificateIdentityResolver({ registry: "ghcr.io", repository: "pdp-connect/connector/other" }), null);
   assert.equal(call.ociCertificateIdentityResolver({ registry: "docker.io", repository: "pdp-connect/connector/fake-connector" }), null);
-  assert.equal(call.artifactCertificateIdentityResolver(), null);
+  assert.equal(call.source, null);
 });
 
 test("a cached release that matches its pin is used without the network", async () => {

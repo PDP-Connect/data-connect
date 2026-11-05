@@ -11,10 +11,10 @@
  *
  * **Why these are injected rather than implemented here.** The decision's
  * phrase is "registry-neutral", and the shape neutrality actually takes in
- * this codebase is already established: the incumbent installer takes
- * `artifactCertificateIdentityResolver` as a caller callback rather than
+ * this codebase is already established: the installer core takes
+ * `ociCertificateIdentityResolver` as a caller callback rather than
  * hardcoding a signer, and data-connect supplies it from
- * `scripts/resolve-connectors.js`. Signer policy is the consumer's to decide.
+ * `collection-profiles.ts`. Signer policy is the consumer's to decide.
  * This module keeps that arrangement and extends it to blob transport, so a
  * different publisher serving a different registry is a different injected
  * client, not a patch to this file.

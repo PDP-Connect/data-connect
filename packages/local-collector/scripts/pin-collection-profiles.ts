@@ -25,9 +25,12 @@
  * Usage (network required):
  *
  *   npm run pin:collection-profiles --workspace @pdpp/local-collector
+ *   npm run pin:collection-profiles --workspace @pdpp/local-collector -- --version claude-code=0.3.6
  *
  * Re-running it moves every pin to the catalog's latest release. Review the
- * diff as a connector upgrade.
+ * diff as a connector upgrade. `--version <connector-key>=<version>` (repeatable)
+ * pins that connector to a named catalog release instead of the latest, for a
+ * connector whose latest release drops a stream this collector still needs.
  */
 
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -59,9 +62,15 @@ const REFERENCE_PROFILE_DIR = path.resolve(
   "local-collector-profiles"
 );
 
+interface CatalogRelease {
+  readonly digest: string;
+  readonly version: string;
+}
+
 interface CatalogConnector {
   readonly connector_key: string;
-  readonly latest?: { readonly digest: string; readonly version: string };
+  readonly latest?: CatalogRelease;
+  readonly versions?: readonly CatalogRelease[];
 }
 
 interface ResolvedArtifact {
@@ -75,7 +84,24 @@ function connectorKeyFor(connectorId: string): string {
   return connectorId.replaceAll("_", "-");
 }
 
+/** `--version <connector-key>=<version>` arguments, as a key → version map. */
+function requestedVersions(args: readonly string[]): Map<string, string> {
+  const requested = new Map<string, string>();
+  args.forEach((arg, index) => {
+    if (arg !== "--version") {
+      return;
+    }
+    const [key, version] = (args[index + 1] ?? "").split("=");
+    if (!key || !version) {
+      throw new Error("--version takes <connector-key>=<version>");
+    }
+    requested.set(key, version);
+  });
+  return requested;
+}
+
 async function main(): Promise<void> {
+  const versions = requestedVersions(process.argv.slice(2));
   const catalogResult = (await fetchCatalog({})) as { catalog: { connectors: readonly CatalogConnector[] } };
   const catalog = new Map(catalogResult.catalog.connectors.map((entry) => [entry.connector_key, entry]));
 
@@ -83,14 +109,18 @@ async function main(): Promise<void> {
   const profiles = new Map<string, Buffer>();
   for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
     const connectorKey = connectorKeyFor(definition.connector_id);
-    const latest = catalog.get(connectorKey)?.latest;
+    const listed = catalog.get(connectorKey);
+    const wanted = versions.get(connectorKey);
+    const latest = wanted ? listed?.versions?.find((release) => release.version === wanted) : listed?.latest;
     if (!latest) {
-      process.stdout.write(`unpinned ${definition.connector_id}: the signed catalog lists no ${connectorKey}\n`);
+      process.stdout.write(
+        `unpinned ${definition.connector_id}: the signed catalog lists no ${connectorKey}${wanted ? ` ${wanted}` : ""}\n`
+      );
       continue;
     }
     const repository = collectionProfileRepository({ connectorKey });
     const resolved = (await fetchResolvedArtifact(
-      { doc: {}, mode: "locked" },
+      null,
       {
         artifactKind: "pdpp-collection-profile",
         connectorId: definition.connector_id,

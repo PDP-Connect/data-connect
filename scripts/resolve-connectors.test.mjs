@@ -17,13 +17,14 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { describe, expect, it } from "vitest"
-import { installFromLock } from "@opendatalabs/data-connectors-tools/installer-core"
+import { installFromLock as legacyInstallFromLock } from "data-connectors-legacy-installer/installer-core"
 import {
   artifactCertificateIdentityResolver,
   authorOciLock,
   authorOciProfile,
   checkInstalledLock,
   installConnectorsAtomically,
+  installLockedConnectors,
   ociCertificateIdentityResolver,
   LOCKED_ARTIFACT_SOURCE,
   resolveIndexUrl,
@@ -36,6 +37,9 @@ const installerCorePath =
 const { readTarGzEntries } = await import(
   pathToFileURL(join(dirname(installerCorePath), "tar-stream.mjs")).href
 )
+const { buildSourceDeclaration, serializeSourceDeclaration } = await import(
+  pathToFileURL(join(dirname(installerCorePath), "source-declaration.mjs")).href
+)
 
 const lock = JSON.parse(readFileSync("connectors/lock.json", "utf8"))
 const npmPackage = JSON.parse(readFileSync("package.json", "utf8"))
@@ -47,7 +51,11 @@ const legacyArtifacts = lock.connectors.filter(connector =>
 // This is the reviewed data-connectors main commit containing the duplicate
 // normalized-member guard. Keep the ancestry check local and deterministic;
 // acceptance must not turn into a live git or network lookup.
-const DATA_CONNECTORS_MAIN_ANCESTOR = "6c71697a1523926fe8d475cd243a8219ea21aa5b"
+const DATA_CONNECTORS_MAIN_ANCESTOR = "708a6cc17d6821fad222a652084f2bc270c40052"
+// Last commit whose installer core still reads the 12 retired tarball entries
+// and the one OCI release that predates signed source declarations.
+const EARLIER_INSTALLER_CORE_ANCESTOR =
+  "e1e497f3bca842c0489c472c1ca286630eef5078"
 
 describe("connector artifact signer identities", () => {
   it("trusts only the six exact legacy artifact URLs retained by the lock", () => {
@@ -203,6 +211,32 @@ describe("resolved connector-installer archive acceptance", () => {
     expect(lockCommit).toBe(DATA_CONNECTORS_MAIN_ANCESTOR)
   })
 
+  it("pins the earlier installer core to one commit in package.json and the lockfile", () => {
+    const dependency = "data-connectors-legacy-installer"
+    const packageCommit =
+      npmPackage.devDependencies[dependency]?.match(/#([0-9a-f]{40})$/)?.[1]
+    const lockCommit = npmLock.packages[`node_modules/${dependency}`]?.resolved?.match(
+      /#([0-9a-f]{40})$/
+    )?.[1]
+    expect(packageCommit).toBe(EARLIER_INSTALLER_CORE_ANCESTOR)
+    expect(lockCommit).toBe(EARLIER_INSTALLER_CORE_ANCESTOR)
+  })
+
+  it("keeps one current-core pin across the root, reference implementation and collector packages", () => {
+    const dependency = "@opendatalabs/data-connectors-tools"
+    const read = path => JSON.parse(readFileSync(path, "utf8"))
+    const specs = [
+      npmPackage.devDependencies[dependency],
+      read("reference-implementation/package.json").dependencies?.[dependency] ??
+        read("reference-implementation/package.json").devDependencies?.[dependency],
+      read("packages/local-collector/package.json").dependencies?.[dependency] ??
+        read("packages/local-collector/package.json").devDependencies?.[dependency],
+    ]
+    for (const spec of specs) {
+      expect(spec).toMatch(new RegExp(`#${DATA_CONNECTORS_MAIN_ANCESTOR}$`))
+    }
+  })
+
   it("refuses two differing collection-profile.mjs archive members through the resolved reader", async () => {
     await temporary(async root => {
       const archive = archiveMembers(root, "duplicate-entrypoint", [
@@ -262,7 +296,7 @@ describe("resolved connector-installer archive acceptance", () => {
       }
       const installRoot = join(root, "installed")
 
-      await installFromLock({
+      await legacyInstallFromLock({
         lock: { connectors: [entry] },
         source: { mode: "local", rootDir: root, doc: {} },
         installRoot,
@@ -304,7 +338,27 @@ function fixture(root) {
     version,
     protocol_version: "1.0",
     display_name: "YNAB",
+    source: {
+      id: "https://registry.pdpp.dev/sources/ynab",
+      display: { name: "YNAB" },
+    },
+    streams: [
+      {
+        name: "budgets",
+        primary_key: ["id"],
+        semantics: "mutable_state",
+        selection: { fields: true, resources: true },
+        schema: {
+          type: "object",
+          properties: { id: { type: "string" } },
+          required: ["id"],
+        },
+      },
+    ],
   })
+  const declaration = serializeSourceDeclaration(
+    buildSourceDeclaration([JSON.parse(profile)])
+  )
   const code = Buffer.from("export const collect = () => {};\n")
   const provenance = json({ connector_key: key, version })
   const files = {
@@ -337,6 +391,7 @@ function fixture(root) {
     ...JSON.parse(profile),
     config_version: "1.0",
     profile_digest: digest(profile),
+    source_declaration_digest: digest(declaration),
     entrypoint: "code/collection-profile.mjs",
   })
   const manifest = json({
@@ -354,6 +409,10 @@ function fixture(root) {
         "application/vnd.pdpp.connector.licenses.v1.tar+gzip"
       ),
       layer(provenance, "application/vnd.pdpp.connector.provenance.v1+json"),
+      layer(
+        declaration,
+        "application/vnd.pdpp.connector.source-declaration.v1+json"
+      ),
     ],
   })
   const manifestDigest = digest(manifest)
