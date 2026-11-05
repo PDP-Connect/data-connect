@@ -25,15 +25,23 @@
  * Usage (network required):
  *
  *   npm run pin:collection-profiles --workspace @pdpp/local-collector
- *   npm run pin:collection-profiles --workspace @pdpp/local-collector -- --version claude-code=0.3.6
+ *   npm run pin:collection-profiles --workspace @pdpp/local-collector -- --latest
+ *   npm run pin:collection-profiles --workspace @pdpp/local-collector -- --version claude-code=0.3.4
  *
- * Re-running it moves every pin to the catalog's latest release. Review the
- * diff as a connector upgrade. `--version <connector-key>=<version>` (repeatable)
- * pins that connector to a named catalog release instead of the latest, for a
- * connector whose latest release drops a stream this collector still needs.
+ * With no flag the current pins stay where they are: the files are rewritten
+ * from the same releases, and a connector with no pin yet takes the catalog's
+ * latest. `--latest` moves every connector without a hold to the latest
+ * release; review the diff as a connector upgrade. `--version
+ * <connector-key>=<version>` (repeatable) pins that connector to a named
+ * catalog release and beats a hold. Any other argument, an unknown connector
+ * key, or a malformed `--version` is an error.
+ *
+ * A hold keeps a pin below the latest release, with the reason, in
+ * `collection-profile-holds.json`. Holds apply under `--latest`; change a hold
+ * in that file in the same change that moves the pin.
  */
 
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +51,7 @@ import {
   fetchResolvedArtifact,
 } from "@opendatalabs/data-connectors-tools/installer-core";
 
+import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
 import {
   COLLECTION_PROFILE_ENTRYPOINT,
@@ -50,9 +59,11 @@ import {
   type CollectionProfilePin,
   collectionProfileRepository,
 } from "../src/managed/collection-profiles.ts";
+import { choosePin, parseHolds, parsePinArguments } from "./pin-selection.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pinsModule = path.join(packageRoot, "src", "generated", "collection-profile-pins.generated.ts");
+const holdsFile = path.join(packageRoot, "collection-profile-holds.json");
 const REFERENCE_PROFILE_DIR = path.resolve(
   packageRoot,
   "..",
@@ -84,24 +95,11 @@ function connectorKeyFor(connectorId: string): string {
   return connectorId.replaceAll("_", "-");
 }
 
-/** `--version <connector-key>=<version>` arguments, as a key → version map. */
-function requestedVersions(args: readonly string[]): Map<string, string> {
-  const requested = new Map<string, string>();
-  args.forEach((arg, index) => {
-    if (arg !== "--version") {
-      return;
-    }
-    const [key, version] = (args[index + 1] ?? "").split("=");
-    if (!key || !version) {
-      throw new Error("--version takes <connector-key>=<version>");
-    }
-    requested.set(key, version);
-  });
-  return requested;
-}
-
 async function main(): Promise<void> {
-  const versions = requestedVersions(process.argv.slice(2));
+  const knownKeys = new Set(LOCAL_COLLECTOR_DEFINITIONS.map((definition) => connectorKeyFor(definition.connector_id)));
+  const args = parsePinArguments(process.argv.slice(2), knownKeys);
+  const holds = parseHolds(JSON.parse(readFileSync(holdsFile, "utf8")));
+  const currentVersions = new Map(COLLECTION_PROFILE_PINS.map((pin) => [pin.connectorKey, pin.version]));
   const catalogResult = (await fetchCatalog({})) as { catalog: { connectors: readonly CatalogConnector[] } };
   const catalog = new Map(catalogResult.catalog.connectors.map((entry) => [entry.connector_key, entry]));
 
@@ -110,11 +108,17 @@ async function main(): Promise<void> {
   for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
     const connectorKey = connectorKeyFor(definition.connector_id);
     const listed = catalog.get(connectorKey);
-    const wanted = versions.get(connectorKey);
-    const latest = wanted ? listed?.versions?.find((release) => release.version === wanted) : listed?.latest;
+    const choice = choosePin({
+      connectorKey,
+      args,
+      hold: holds.get(connectorKey),
+      currentVersion: currentVersions.get(connectorKey),
+    });
+    const latest =
+      choice.kind === "latest" ? listed?.latest : listed?.versions?.find((release) => release.version === choice.version);
     if (!latest) {
       process.stdout.write(
-        `unpinned ${definition.connector_id}: the signed catalog lists no ${connectorKey}${wanted ? ` ${wanted}` : ""}\n`
+        `unpinned ${definition.connector_id}: the signed catalog lists no ${connectorKey}${choice.kind === "version" ? ` ${choice.version}` : ""}\n`
       );
       continue;
     }
@@ -145,7 +149,7 @@ async function main(): Promise<void> {
       entrypointSha256: resolved.checksums.entrypoint,
     });
     profiles.set(connectorKey, resolved.manifestBuffer);
-    process.stdout.write(`pinned ${definition.connector_id} ${latest.version} ${resolved.oci.digest}\n`);
+    process.stdout.write(`pinned ${definition.connector_id} ${latest.version} ${resolved.oci.digest} (${choice.why})\n`);
   }
 
   writeFileSync(pinsModule, renderPinsModule(pins));
