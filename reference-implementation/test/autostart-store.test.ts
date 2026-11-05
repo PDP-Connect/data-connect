@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createAutostartStore } from "../server/autostart-store.ts";
+import { createAutostartStore, isCommandFileName } from "../server/autostart-store.ts";
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "autostart-store-"));
@@ -18,8 +18,8 @@ async function commands(dir: string): Promise<Array<{ commandId: string; desired
   const path = join(dir, "autostart-commands");
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const names = await readdir(path).catch(() => []);
-    if (names.filter(name => name.endsWith(".json")).length >= 2) {
-      return Promise.all(names.filter(name => name.endsWith(".json"))
+    if (names.filter(isCommandFileName).length >= 2) {
+      return Promise.all(names.filter(isCommandFileName)
         .map(async name => JSON.parse(await readFile(join(path, name), "utf8"))));
     }
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -88,8 +88,10 @@ test("failed native result is rejected for that command", async () => {
     // runner before the test gets to write the result.
     const store = createAutostartStore(dir, published, { pollIntervalMs: 5, timeoutMs: 60_000 });
     const request = store.requestChange(true);
-    await wasPublished;
-    const files = (await readdir(join(dir, "autostart-commands"))).filter(name => /^ast_[A-Za-z0-9_-]{22}\.json$/.test(name));
+    // If publishing fails, onWrite never fires; the request's own rejection then
+    // fails the test here instead of leaving it hanging.
+    await Promise.race([wasPublished, request]);
+    const files = (await readdir(join(dir, "autostart-commands"))).filter(isCommandFileName);
     assert.equal(files.length, 1);
     await answer(dir, files[0]!.replace(".json", ""), true, false, "permission denied");
     await assert.rejects(request, /permission denied/);
