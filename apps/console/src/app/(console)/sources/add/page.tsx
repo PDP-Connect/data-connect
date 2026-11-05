@@ -44,6 +44,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   const params = await searchParams;
   let catalog: ConnectorCatalogEntry[] = [];
   let existingSourcesByConnector: Record<string, readonly ExistingSourceSetupLink[]> = {};
+  let existingSourcesTruncated = false;
   let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
   let installCatalogBusySnapshotId: string | null = null;
   let installCatalogTransientlyUnavailable = false;
@@ -87,8 +88,9 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
       // fleet size). Replaces the rejected one-arbitrary-fleet-page
       // `complete`/`existingSourcesIncomplete` stopgap entirely: each
       // connector's existing-sources list is exact by construction, so
-      // there is no incompleteness signal left to surface.
-      existingSourcesByConnector = await existingSourcesByConnectorCatalog(catalog.map((entry) => entry.connectorKey));
+      // the only incompleteness is a refused continuation page, `truncated`.
+      ({ byConnector: existingSourcesByConnector, truncated: existingSourcesTruncated } =
+        await existingSourcesByConnectorCatalog(catalog.map((entry) => entry.connectorKey)));
     } catch (err) {
       if (err instanceof ReferenceServerUnreachableError) {
         return (
@@ -127,6 +129,14 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   return (
     <RecordroomShellWithPalette>
       <AddSourceHeader />
+      {existingSourcesTruncated ? (
+        <div className="rr-s-toast" data-tone="warning" role="status" style={{ marginBottom: 12 }}>
+          <p>
+            Some existing sources could not be loaded, so this list may be missing some of them. Check Sources before
+            adding another copy.
+          </p>
+        </div>
+      ) : null}
       <SourceSetupCatalog
         action={dashboardRoutes.section.addSource}
         catalog={catalog}

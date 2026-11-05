@@ -16,6 +16,15 @@ export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
 export const CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX = 100;
 const CONNECTOR_SUMMARY_CURSOR_VERSION = 1;
 const CONNECTOR_SUMMARY_CURSOR_PREFIX = "rcs1.";
+/**
+ * Upper bound on an issued cursor, in characters. A cursor is the prefix plus
+ * base64url, so every character is ASCII and unreserved: its wire size in a
+ * query string equals its length. Real cursors are about 300 characters (a
+ * connector id, an instance id, a timestamp and a 43-character digest, sealed
+ * with a 28-byte nonce and tag). The bound leaves room for connector and
+ * instance ids of about 300 bytes each.
+ */
+export const CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH = 1024;
 const CURSOR_IV_BYTES = 12;
 const CURSOR_TAG_BYTES = 16;
 const CURSOR_KEY_DOMAIN = "pdpp.ref-connectors-page.cursor.v1";
@@ -72,11 +81,19 @@ export interface ConnectorSummaryPageRequest {
   readonly sourcesVisibility: boolean;
 }
 
+export type ConnectorSummaryPageRequestParam =
+  | "connector_id"
+  | "cursor"
+  | "include_fleet_health"
+  | "limit"
+  | "profile"
+  | "sources_visibility";
+
 export class ConnectorSummaryPageRequestError extends Error {
   readonly code = "invalid_request";
-  readonly param: "cursor" | "include_fleet_health" | "limit" | "profile" | "sources_visibility";
+  readonly param: ConnectorSummaryPageRequestParam;
 
-  constructor(param: "cursor" | "include_fleet_health" | "limit" | "profile" | "sources_visibility", message: string) {
+  constructor(param: ConnectorSummaryPageRequestParam, message: string) {
     super(message);
     this.name = "ConnectorSummaryPageRequestError";
     this.param = param;
@@ -246,13 +263,13 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
     return rawConnectorId;
   }
   if (!Array.isArray(rawConnectorId)) {
-    throw new ConnectorSummaryPageRequestError("limit", "connector_id must be a non-empty string");
+    throw new ConnectorSummaryPageRequestError("connector_id", "connector_id must be a non-empty string");
   }
   if (rawConnectorId.length === 0) {
-    throw new ConnectorSummaryPageRequestError("limit", "connector_id must not be an empty set");
+    throw new ConnectorSummaryPageRequestError("connector_id", "connector_id must not be an empty set");
   }
   if (!rawConnectorId.every(isNonEmptyString)) {
-    throw new ConnectorSummaryPageRequestError("limit", "every connector_id in the set must be a non-empty string");
+    throw new ConnectorSummaryPageRequestError("connector_id", "every connector_id in the set must be a non-empty string");
   }
   if (rawConnectorId.length === 1) {
     // A single-element repeated form is the single-id filter, byte-identical
@@ -261,7 +278,7 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
   }
   if (rawConnectorId.length > CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX) {
     throw new ConnectorSummaryPageRequestError(
-      "limit",
+      "connector_id",
       `connector_id set must contain at most ${CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} distinct canonical ids`
     );
   }
@@ -269,7 +286,7 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
   const distinct = new Set(canonical);
   if (distinct.size !== canonical.length) {
     throw new ConnectorSummaryPageRequestError(
-      "limit",
+      "connector_id",
       "connector_id set must not contain duplicate ids after canonicalization"
     );
   }
@@ -372,7 +389,13 @@ export function encodeConnectorSummaryPageCursor(
   const iv = randomBytes(CURSOR_IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", cursorEncryptionKey(keyMaterial), iv);
   const ciphertext = Buffer.concat([cipher.update(payload), cipher.final()]);
-  return `${CONNECTOR_SUMMARY_CURSOR_PREFIX}${Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString("base64url")}`;
+  const cursor = `${CONNECTOR_SUMMARY_CURSOR_PREFIX}${Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString("base64url")}`;
+  if (cursor.length > CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH) {
+    // The route reserves this many bytes before it reads a page. Failing here
+    // is a server error: row ids are not request input.
+    throw new Error(`connector summary cursor is ${cursor.length} characters; the limit is ${CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH}`);
+  }
+  return cursor;
 }
 
 /**

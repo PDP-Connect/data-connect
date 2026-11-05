@@ -23,6 +23,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CONTINUATION_HEADER_SLACK_BYTES, measureContinuation } from "../server/continuation-budget.ts";
 import { createApp } from "../server/transport.ts";
 
 interface ExpressShimResponse {
@@ -123,4 +124,46 @@ test("query parser preserves nested Core guards and oversized HTTP requests fail
     message: "Exceeded maximum allowed HTTP header size",
     statusCode: 431,
   });
+});
+
+// Continuation budget: a paged route reserves the next request's size before it reads a page.
+const MEASURED_REQUEST = {
+  httpVersion: "1.1",
+  method: "GET",
+  rawHeaders: ["Host", "127.0.0.1", "Cookie", "a=b"],
+  url: "/_ref/connectors?limit=1",
+};
+
+test("continuation budget measures the request as received and removes the current cursor", () => {
+  const first = measureContinuation({ cursorMaxLength: 1024, request: MEASURED_REQUEST });
+  const encodedCursorName = "%63%75%72%73%6f%72";
+  const later = measureContinuation({
+    cursorMaxLength: 1024,
+    request: { ...MEASURED_REQUEST, url: `${MEASURED_REQUEST.url}&${encodedCursorName}=%72%63%73%31${"%41".repeat(300)}` },
+  });
+  assert.equal(first.fits, true);
+  assert.equal(first.headerBytes, "Host: 127.0.0.1\r\nCookie: a=b\r\n".length);
+  assert.deepEqual(later, first, "page 1 and a later page, however the client encodes the cursor, get the same answer");
+  assert.equal(first.reserveBytes, 1 + 18 + 1 + 3 * 1024, "the reserve is the worst-case encoded cursor parameter");
+});
+
+test("continuation budget refuses when the request plus the reserve passes the server's own header limit", () => {
+  const tight = { ...MEASURED_REQUEST, socket: { server: { maxHeaderSize: 3000 } } };
+  assert.equal(measureContinuation({ cursorMaxLength: 1024, request: tight }).fits, false);
+  assert.equal(measureContinuation({ cursorMaxLength: 1024, request: tight }).limit, 3000);
+  const roomy = { ...MEASURED_REQUEST, socket: { server: { maxHeaderSize: 4096 } } };
+  assert.equal(measureContinuation({ cursorMaxLength: 1024, request: roomy }).fits, true);
+  const cookie = `a=${"x".repeat(16_384 - CONTINUATION_HEADER_SLACK_BYTES - 3 * 1024)}`;
+  assert.equal(
+    measureContinuation({ cursorMaxLength: 1024, request: { ...MEASURED_REQUEST, rawHeaders: ["Cookie", cookie] } }).fits,
+    false
+  );
+});
+
+test("continuation budget fails closed when the request cannot be measured", () => {
+  assert.throws(() => measureContinuation({ cursorMaxLength: 1024, request: undefined }), /raw request is unavailable/);
+  assert.throws(
+    () => measureContinuation({ cursorMaxLength: 1024, request: { ...MEASURED_REQUEST, httpVersion: "2.0" } }),
+    /HTTP 2\.0/
+  );
 });

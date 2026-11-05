@@ -42,11 +42,12 @@ import {
 import {
   type ConnectorSummaryPageProfile,
   type ConnectorSummaryPageRequest,
+  CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH,
   ConnectorSummaryPageRequestError,
   parseConnectorSummaryPageRequest,
 } from "../../operations/ref-connectors-list/pagination.ts";
 import type { RunAdmission } from "../../runtime/controller.ts";
-import { continuationFits } from "../continuation-budget.ts";
+import { measureContinuation, type WireRequest } from "../continuation-budget.ts";
 import type { FleetHealthVerdict } from "../fleet-health.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
@@ -61,7 +62,7 @@ interface RouteRequest {
   readonly params: Readonly<Record<string, string>>;
   readonly query: Readonly<Record<string, unknown>>;
   /** The request as received on the wire; absent when a handler is called without a transport. */
-  readonly raw?: { readonly method?: string; readonly rawHeaders?: readonly string[]; readonly url?: string };
+  readonly raw?: WireRequest;
 }
 
 interface RouteResponse {
@@ -508,27 +509,22 @@ export function mountRefConnectorsList(app: AppLike, ctx: MountRefConnectorsCont
         if (!listConnectorSummaryPage) {
           throw new Error("Connector summary page capability is not configured.");
         }
+        // Refuse before reading a page when the next request could not be sent
+        // back: the client repeats this whole request plus a cursor. An
+        // unmeasurable request throws, so no cursor is ever issued unchecked.
+        const budget = measureContinuation({ cursorMaxLength: CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH, request: req.raw });
+        if (!budget.fits) {
+          throw new ConnectorSummaryPageRequestError(
+            "cursor",
+            `this request is too large to page: its target takes ${budget.targetBytes} bytes and its headers ${budget.headerBytes} bytes, and the next page needs up to ${budget.reserveBytes} more for the cursor, against a header limit of ${budget.limit} bytes. Shorten the connector_id list or the request headers (cookies, for example), or omit connector_id and filter the full list.`
+          );
+        }
         const envelope = await executeRefConnectorsList({
           getRuntimeStatus: ctx.getRuntimeStatus,
           listConnectorSummaries: () => [],
           listConnectorSummariesPage: () =>
             listConnectorSummaryPage(ownerSubjectId, pageRequest) as unknown as RefConnectorsListPage,
         });
-        const nextCursor = (envelope as { next_cursor?: string | null }).next_cursor;
-        if (
-          req.raw &&
-          nextCursor &&
-          !continuationFits({
-            currentCursor: typeof req.query.cursor === "string" ? req.query.cursor : undefined,
-            nextCursor,
-            request: req.raw,
-          })
-        ) {
-          throw new ConnectorSummaryPageRequestError(
-            "cursor",
-            "this request is too large to continue: the next page request would exceed the HTTP header limit. Send fewer or shorter connector_id values, or omit connector_id and filter the full list."
-          );
-        }
         res.json(envelope);
       } catch (err) {
         ctx.handleError(res, err);

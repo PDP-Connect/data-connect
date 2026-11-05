@@ -115,7 +115,8 @@ test("Add catalog helper and real ref-client exhaust the real HTTP owner feed be
   });
   const { existingSourcesByConnectorCatalog } = await import("./existing-sources-by-connector.ts");
   const catalog = [...catalogIds, "goodreads", "goodreads"];
-  const result = await existingSourcesByConnectorCatalog(catalog);
+  const { byConnector: result, truncated } = await existingSourcesByConnectorCatalog(catalog);
+  assert.equal(truncated, false);
   assert.deepEqual(Object.keys(result), ["goodreads"]);
   assert.deepEqual(
     result.goodreads?.map((source) => [source.connectionId, source.displayName, source.totalRecords]),
@@ -192,7 +193,8 @@ test("scoped connector summaries sent by the real client always continue or fail
   // `~` is one byte in an id and three on the wire (URLSearchParams escapes it),
   // so the padding moves the scope from "fits" to "cannot continue".
   assert.deepEqual((await walk(scope(1))).sort(), ["walk-1", "walk-2", "walk-3"]);
+  assert.deepEqual((await walk(scope(35))).sort(), ["walk-1", "walk-2", "walk-3"], "a large scope that was admitted walks to the end");
   requests.length = 0;
-  await assert.rejects(walk(scope(49)), /too large to continue/);
+  await assert.rejects(walk(scope(49)), /too large to page/);
   assert.equal(requests.length, 1, "the refusal comes from page 1, before any continuation is sent");
 });

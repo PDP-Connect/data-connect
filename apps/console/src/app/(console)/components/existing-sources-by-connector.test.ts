@@ -87,7 +87,8 @@ test("catalog lookup traverses the unfiltered feed and selects unique live catal
           next_cursor: "second",
         };
   const ids = Array.from({ length: 1001 }, (_, index) => `connector-${index}`);
-  const result = await existingSourcesByConnectorCatalog([...ids, "goodreads", "goodreads"]);
+  const { byConnector: result, truncated } = await existingSourcesByConnectorCatalog([...ids, "goodreads", "goodreads"]);
+  assert.equal(truncated, false);
   assert.deepEqual(Object.keys(result), ["goodreads"]);
   assert.deepEqual(
     result.goodreads?.map((source) => source.connectionId),
@@ -103,6 +104,41 @@ test("catalog lookup rejects page failures and missing continuation", async () =
   await assert.rejects(existingSourcesByConnectorCatalog(["goodreads"]), MISSING_CURSOR);
   fetchPage = () => Promise.reject(new Error("page unavailable"));
   await assert.rejects(existingSourcesByConnectorCatalog(["goodreads"]), PAGE_UNAVAILABLE);
+});
+
+function refusal(status: number, message: string) {
+  return Object.assign(new Error(message), { status });
+}
+
+test("catalog lookup keeps the pages already read when a continuation is refused", async () => {
+  const { existingSourcesByConnectorCatalog, existingSourcesForConnector } = await moduleApi;
+  for (const failure of [
+    refusal(431, "Request Header Fields Too Large"),
+    refusal(400, "this request is too large to page: its target takes 9 bytes"),
+  ]) {
+    fetchPage = async (request) => {
+      if (request.cursor) {
+        throw failure;
+      }
+      return { data: [row("kept", "goodreads")], has_more: true, next_cursor: "second" };
+    };
+    const { byConnector, truncated } = await existingSourcesByConnectorCatalog(["goodreads"]);
+    assert.equal(truncated, true);
+    assert.deepEqual(
+      byConnector.goodreads?.map((source) => source.connectionId),
+      ["kept"]
+    );
+    // A single-connector lookup has no use for a partial answer: it still throws.
+    await assert.rejects(existingSourcesForConnector("goodreads"), (err) => err === failure);
+  }
+});
+
+test("catalog lookup still throws for other failures, including a refusal-shaped status that is not one", async () => {
+  const { existingSourcesByConnectorCatalog } = await moduleApi;
+  for (const failure of [refusal(400, "limit must be a positive integer"), refusal(500, "too large to page"), refusal(401, "no")]) {
+    fetchPage = () => Promise.reject(failure);
+    await assert.rejects(existingSourcesByConnectorCatalog(["goodreads"]), (err) => err === failure);
+  }
 });
 
 test("source: exact results do not expose a complete or incompleteness field", async () => {

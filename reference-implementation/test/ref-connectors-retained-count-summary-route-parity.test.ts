@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH } from "../operations/ref-connectors-list/pagination.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
@@ -46,7 +47,7 @@ interface RetainedCountRouteItem {
 
 interface RouteEnvelope {
   readonly data?: readonly RetainedCountRouteItem[];
-  readonly error?: { code?: string; message?: string };
+  readonly error?: { code?: string; message?: string; param?: string };
   readonly has_more?: boolean;
   readonly next_cursor?: string | null;
   readonly object?: string;
@@ -302,7 +303,8 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
 
   async function walk(
     query: string,
-    headers?: Record<string, string>
+    headers?: Record<string, string>,
+    cursorParam: (cursor: string) => string = (cursor) => `cursor=${encodeURIComponent(cursor)}`
   ): Promise<{ failed: { status: number; body: RouteEnvelope } | null; seen: string[] }> {
     const seen: string[] = [];
     let page = await getEnvelope(asUrl, query, headers);
@@ -315,9 +317,9 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
         return { failed: null, seen };
       }
       const cursor = page.body.next_cursor as string;
-      assert.ok(cursor.length < 1024, "cursor must not grow with the scope");
+      assert.ok(cursor.length <= CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH, "cursor must not grow with the scope");
       // biome-ignore lint/performance/noAwaitInLoops: each page needs the previous page's cursor.
-      page = await getEnvelope(asUrl, `${query}&cursor=${encodeURIComponent(cursor)}`, headers);
+      page = await getEnvelope(asUrl, `${query}&${cursorParam(cursor)}`, headers);
     }
     throw new Error("scope did not terminate");
   }
@@ -326,23 +328,29 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
   const tooMany = await getEnvelope(asUrl, clientQuery(scope(408, "f"), 1));
   assert.equal(tooMany.status, 400, JSON.stringify(tooMany.body).slice(0, 200));
   assert.equal(tooMany.body.error?.code, "invalid_request");
+  assert.equal(tooMany.body.error?.param, "connector_id", "a connector_id error names connector_id, not limit");
 
-  const variants: Array<{ name: string; steps: number[]; request: (step: number) => [string, Record<string, string>?] }> =
-    [
+  const variants: Array<{
+    cursorParam?: (cursor: string) => string;
+    name: string;
+    request: (step: number) => [string, Record<string, string>?];
+    steps: number[];
+  }> = [
       {
         name: "URLSearchParams, tilde-padded ids",
         request: (tildes) => [clientQuery(scope(98, "~".repeat(tildes)), 1)],
-        steps: [0, 10, 30, 40, 44, 46, 47, 48, 49, 50, 52, 60],
+        steps: [0, 10, 30, 35, 36, 37, 38, 39, 40, 45, 50, 60],
       },
       {
-        name: "percent-encoded names and values",
+        cursorParam: (cursor) => `${allPercentEncoded("cursor")}=${allPercentEncoded(cursor)}`,
+        name: "percent-encoded names, values and cursor",
         request: (tildes) => [encodedKeyQuery(scope(98, "~".repeat(tildes)), 1)],
-        steps: [0, 10, 20, 28, 29, 30, 31, 32, 33, 34, 36, 40],
+        steps: [0, 10, 20, 25, 26, 27, 28, 29, 30, 35, 40, 44],
       },
       {
         name: "large cookie header",
         request: (cookieBytes) => [clientQuery(scope(8, "f"), 1), { cookie: `pad=${"x".repeat(cookieBytes)}` }],
-        steps: [0, 2000, 8000, 14000, 15000, 15400, 15600, 15800, 16000, 16200, 17000],
+        steps: [0, 2000, 8000, 12000, 12100, 12200, 12300, 12400, 12500, 14000, 15800, 16200, 17000],
       },
     ];
   for (const variant of variants) {
@@ -351,7 +359,7 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
     for (const step of variant.steps) {
       const [query, headers] = variant.request(step);
       // biome-ignore lint/performance/noAwaitInLoops: each size is a separate HTTP boundary assertion.
-      const result = await walk(query, headers);
+      const result = await walk(query, headers, variant.cursorParam);
       const label = `${variant.name} ${step}`;
       if (result.failed === null) {
         assert.deepEqual(result.seen.sort(), expected, `${label}: every matching row must be reachable`);
@@ -360,7 +368,7 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
       }
       assert.equal(result.seen.length, 0, `${label}: a refusal must come from page 1, before any cursor is issued`);
       if (result.failed.status === 400) {
-        assert.match(result.failed.body.error?.message ?? "", /too large to continue/, label);
+        assert.match(result.failed.body.error?.message ?? "", /too large to page: its target takes \d+ bytes and its headers \d+ bytes/, label);
         guardRefused += 1;
       } else {
         // Past Node's limit the transport itself refuses page 1; nothing is stranded.
@@ -368,7 +376,7 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
       }
     }
     assert.ok(walked >= 2, `${variant.name}: sizes that fit must walk`);
-    assert.ok(guardRefused >= 1, `${variant.name}: a size that fits page 1 but cannot continue must be refused on page 1`);
+    assert.ok(guardRefused >= 1, `${variant.name}: a size that could not continue must be refused on page 1`);
   }
 }
 
