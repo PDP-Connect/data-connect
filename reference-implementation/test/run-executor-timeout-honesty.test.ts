@@ -17,12 +17,14 @@
 // 91,202 reactions + 81,857 message_attachments + 19,936 files, and still
 // recorded records_emitted: 0, known_gaps_json: [].
 //
-// This suite drives a REAL timeout: a connector that durably emits records
-// through a real in-memory ingest server, then hangs forever (never sends
-// DONE), with maxRunWallClockMs set low enough that the watchdog's real
-// setTimeout fires and kills it. This is not a mock of the timeout path —
-// it is the actual watchdog, the actual child-process kill, and the actual
-// ingest round-trip that production hit.
+// This suite runs the real executor, a real child process, a real in-memory
+// ingest server and the real kill path against a connector that durably emits
+// records and then hangs forever (never sends DONE). The watchdog's timers are
+// injected (`WatchdogTimers`), so each test fires the timeout at a chosen point
+// rather than racing a wall-clock budget against process startup. What it
+// proves: the timed-out result carries the durable counts and gaps. What it
+// does not prove: that a real timer elapses. The production default timer path
+// is covered only by the single real-timer test at the end of this file.
 
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -189,18 +191,13 @@ function manualWatchdogTimers(): ManualWatchdogTimers {
       timer.callback();
     },
     timers: {
-      clearTimeout: (handle) => {
-        armed.delete((handle as unknown as { id: number }).id);
-      },
       setTimeout: (callback, ms) => {
         nextId += 1;
-        armed.set(nextId, { callback, ms });
-        return {
-          id: nextId,
-          unref() {
-            return this;
-          },
-        } as unknown as NodeJS.Timeout;
+        const id = nextId;
+        armed.set(id, { callback, ms });
+        return () => {
+          armed.delete(id);
+        };
       },
     },
   };
@@ -672,6 +669,25 @@ test(
       }
     }
     const record = await pending;
+
+    assert.equal(record.status, "failed");
+    assert.equal(record.terminalReason, "run_timed_out");
+  })
+);
+
+test(
+  "the production default timers arm a real timer that kills a hanging connector with run_timed_out",
+  withServerAndTmpDir(async (ctx) => {
+    // No injected timers: this exercises GLOBAL_WATCHDOG_TIMERS. The budget is
+    // tiny, and the assertion waits on the run's own terminal event, so it does
+    // not depend on how long startup takes. Only the classification is asserted
+    // (the record count depends on how far the connector got before the kill).
+    const launchRun = makeHarness(freshRuntime(), ctx.rsUrl, 20);
+    const record = await launchRun(
+      schedule(writeConnector(ctx.tmpDir, 0, true), ctx.ownerToken),
+      false,
+      SCHEDULED_POLICY
+    );
 
     assert.equal(record.status, "failed");
     assert.equal(record.terminalReason, "run_timed_out");

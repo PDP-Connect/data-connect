@@ -363,14 +363,23 @@ async function invokeRunConnector(call: RunConnectorCall): Promise<RunConnectorR
 
 // ─── Attempt watchdog ─────────────────────────────────────────────────────────
 
+/**
+ * The watchdog's only timer need: run `callback` after `ms`, and be able to
+ * cancel it. `setTimeout` returns the canceller, so the seam owns no handle
+ * type and an implementation is never forced to fabricate a Node timer.
+ */
 export interface WatchdogTimers {
-  clearTimeout: (timer: NodeJS.Timeout) => void;
-  setTimeout: (callback: () => void, ms: number) => NodeJS.Timeout;
+  setTimeout: (callback: () => void, ms: number) => () => void;
 }
 
+// The production default. `unref` keeps a pending watchdog from holding the
+// process open on its own.
 const GLOBAL_WATCHDOG_TIMERS: WatchdogTimers = {
-  clearTimeout: (timer) => clearTimeout(timer),
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  setTimeout: (callback, ms) => {
+    const handle = setTimeout(callback, ms);
+    handle.unref();
+    return () => clearTimeout(handle);
+  },
 };
 
 interface AttemptWatchdog {
@@ -406,7 +415,7 @@ export function createAttemptWatchdog(
 ): AttemptWatchdog {
   const cancellation = new AbortController();
   let timedOut = false;
-  let timer: NodeJS.Timeout | null = null;
+  let cancelTimer: (() => void) | null = null;
   // Local-only work no longer has provider progress to reset the primary
   // watchdog. Keep the exemption bounded: four primary budgets is long enough
   // for the existing local materialization path while still guaranteeing that
@@ -428,14 +437,11 @@ export function createAttemptWatchdog(
     if (!isBoundedWallClock(maxRunWallClockMs) || timedOut || localOnlyPhase || cancellation.signal.aborted) {
       return;
     }
-    if (timer) {
-      timers.clearTimeout(timer);
-    }
-    timer = timers.setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
     }, maxRunWallClockMs);
-    timer.unref?.();
   };
 
   const armLocalOnlyPhaseCeiling = () => {
@@ -446,14 +452,11 @@ export function createAttemptWatchdog(
     ) {
       return;
     }
-    if (timer) {
-      timers.clearTimeout(timer);
-    }
-    timer = timers.setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
     }, localOnlyPhaseMaxRunWallClockMs);
-    timer.unref?.();
   };
 
   if (isBoundedWallClock(maxRunWallClockMs)) {
@@ -467,17 +470,13 @@ export function createAttemptWatchdog(
       }
     },
     clear() {
-      if (timer) {
-        timers.clearTimeout(timer);
-        timer = null;
-      }
+      cancelTimer?.();
+      cancelTimer = null;
     },
     markProgress(extra) {
       if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase) {
         localOnlyPhase = true;
-        if (timer) {
-          timers.clearTimeout(timer);
-        }
+        cancelTimer?.();
         armLocalOnlyPhaseCeiling();
         // TRUE only on the latching call — the caller emits the durable trace.
         return true;
