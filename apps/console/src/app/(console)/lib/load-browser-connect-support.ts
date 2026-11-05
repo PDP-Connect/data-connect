@@ -16,8 +16,11 @@ import { ResourceServerHttpError } from "./owner-token.ts";
 export async function loadBrowserConnectSupport(connectorId: string): Promise<BrowserConnectSupport> {
   let serverPredatesReadiness = false;
   const readiness = await getConnectorReadiness(connectorId).catch((error: unknown) => {
-    serverPredatesReadiness = error instanceof ResourceServerHttpError && error.status === 404;
-    return null;
+    if (error instanceof ResourceServerHttpError && error.status === 404) {
+      serverPredatesReadiness = true;
+      return null;
+    }
+    throw error;
   });
   return browserConnectSupportFromReadiness(connectorId, readiness, serverPredatesReadiness);
 }

@@ -12,11 +12,15 @@ export interface BrowserConnectSupport {
 }
 
 /**
- * Pure mapping from the server's verdict. A missing verdict permits no new
- * account, except from a server that predates the readiness endpoint (an older
- * server next to a newer console): that server applies its own rule when the
- * enrollment route is called, so the console defers to it instead of blocking
- * every browser connector.
+ * Pure mapping from the server's verdict. The verdict decides both fields.
+ *
+ * Stopgap for mixed versions only: a server that predates the readiness
+ * endpoint (an older server next to a newer console) returns no verdict. That
+ * server applies its own rule when the enrollment route is called, so the
+ * console defers to it, and uses the bundled manifest to keep the routes
+ * reachable for connectors it marks browser-bound. Remove this branch, and the
+ * `isBrowserBoundConnector` import, once no supported server predates the
+ * endpoint.
  */
 export function browserConnectSupportFromReadiness(
   connectorId: string,
@@ -24,9 +28,7 @@ export function browserConnectSupportFromReadiness(
   serverPredatesReadiness = false
 ): BrowserConnectSupport {
   return {
-    // A connector the bundled manifest marks browser-bound keeps the routes for
-    // repair of an existing connection, even when the verdict is unavailable.
-    browserBound: readiness?.browserBound === true || isBrowserBoundConnector(connectorId),
+    browserBound: readiness ? readiness.browserBound : serverPredatesReadiness && isBrowserBoundConnector(connectorId),
     canAddAccount: readiness ? readiness.action === "connect" : serverPredatesReadiness,
   };
 }

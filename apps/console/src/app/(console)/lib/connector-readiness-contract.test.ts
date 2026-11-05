@@ -102,8 +102,27 @@ test("the routes stay reachable for a browser-bound connector so an existing con
   );
 });
 
-test("blocking reasons have owner copy that carries the server's detail; others have none", () => {
-  assert.match(readinessBlockNote(readiness("configure", "host_requirement_unmet", "No display."))!, /not set up to run this connector yet\. No display\./);
+test("the verdict alone decides browserBound; the bundled manifest is consulted only for a server that predates the endpoint", () => {
+  // `linkedin` is browser-bound in the bundled manifest.
+  assert.equal(
+    browserConnectSupportFromReadiness("linkedin", { ...readiness("unavailable", "not_browser_bound"), browserBound: false })
+      .browserBound,
+    false,
+    "the server's verdict is not overridden by the bundled manifest"
+  );
+  assert.equal(
+    browserConnectSupportFromReadiness("linkedin", null, false).browserBound,
+    false,
+    "no verdict and no 404 gives no guess from the bundled manifest"
+  );
+  assert.equal(browserConnectSupportFromReadiness("linkedin", null, true).browserBound, true);
+  assert.equal(browserConnectSupportFromReadiness("some-new-connector", null, true).browserBound, false);
+});
+
+test("blocking reasons have fixed owner copy that never carries the server's detail; others have none", () => {
+  const configure = readinessBlockNote(readiness("configure", "host_requirement_unmet", "No display at /srv/run."))!;
+  assert.match(configure, /not set up to run this connector yet\./);
+  assert.doesNotMatch(configure, /No display|\/srv/);
   assert.match(readinessBlockNote(readiness("repair", "artifact_invalid"))!, /failed verification/);
   assert.match(readinessBlockNote(readiness("retry", "inspection_unavailable"))!, /Retry/);
   assert.match(readinessBlockNote(readiness("retry", "catalog_unavailable"))!, /catalog could not be reached/);

@@ -464,6 +464,7 @@ function SourceSetupCard({
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
+  const readinessNote = readinessBlockNote(entry.readiness);
   const {
     installModel,
     noSetupPath,
@@ -507,9 +508,9 @@ function SourceSetupCard({
       </div>
       <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
         <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
-        {readinessBlockNote(entry.readiness) ? (
+        {readinessNote ? (
           <span className="pdpp-caption mb-2 block text-muted-foreground" data-testid="connector-readiness-note">
-            {readinessBlockNote(entry.readiness)}
+            {readinessNote}
           </span>
         ) : null}
         {noSetupPath ? (

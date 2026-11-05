@@ -171,7 +171,8 @@ test("a verdict that blocks setup shows its reason and offers no account setup",
     { catalog: { ...browserPackage.catalog, digest: installed.digest }, installed: { ...installed, connector_id: "new-browser" } }
   );
   assert.match(html, READINESS_NOTE);
-  assert.match(html, /No browser surface is configured\./);
+  assert.match(html, /This server is not set up to run this connector yet\./);
+  assert.doesNotMatch(html, /No browser surface is configured/, "the server's diagnostic detail is not shown");
   assert.doesNotMatch(html, BROWSER_SETUP_LINK);
   assert.doesNotMatch(html, NOT_BUILT_YET);
 });
@@ -232,7 +233,8 @@ test("a ready verdict offers account setup with no readiness note; a failed-veri
     lifecycle
   );
   assert.match(needsRepair, READINESS_NOTE);
-  assert.match(needsRepair, /failed verification\. Reinstall it to repair it\. Digest mismatch\./);
+  assert.match(needsRepair, /failed verification\. Reinstall it to repair it\./);
+  assert.doesNotMatch(needsRepair, /Digest mismatch/, "the server's diagnostic detail is not shown");
   assert.doesNotMatch(needsRepair, BROWSER_SETUP_LINK);
 });
 
