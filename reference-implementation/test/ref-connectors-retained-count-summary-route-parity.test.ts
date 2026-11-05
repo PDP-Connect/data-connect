@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CONNECTOR_SUMMARY_SCOPE_MAX_BYTES } from "../operations/ref-connectors-list/pagination.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
@@ -227,7 +228,8 @@ async function assertRouteSetScopeParity(asUrl: string): Promise<void> {
 
   // Flat sets are bounded by request bytes, not connector count. Keep profile
   // and limit AFTER the IDs to detect qs's default parameterLimit truncation.
-  for (const count of [64, 65, 101, 150, 1001]) {
+  // A larger scope is rejected before page 1; see assertLargeScopeContinues.
+  for (const count of [64, 65, 101, 150]) {
     const filterIds = [CONNECTOR_A, ...Array.from({ length: count - 1 }, (_, i) => i.toString(36))];
     const query = filterIds.map((id) => `connector_id=${encodeURIComponent(id)}`).join("&");
     // biome-ignore lint/performance/noAwaitInLoops: each size is a separate HTTP boundary assertion.
@@ -264,8 +266,104 @@ async function assertRouteSetScopeParity(asUrl: string): Promise<void> {
   );
 }
 
+function scopeQuery(ids: readonly string[]): string {
+  return ids.map((id) => `connector_id=${encodeURIComponent(id)}`).join("&");
+}
+
+/**
+ * Every scope that page 1 admits must also complete a limit=1 walk. The client
+ * re-sends the scope on every continuation, so a scope that fits page 1 but not
+ * page 1 plus a cursor would strand the later rows behind an HTTP 431. A scope
+ * the server cannot continue must instead fail before page 1 with a typed 400.
+ */
+async function assertLargeScopeContinues(asUrl: string): Promise<void> {
+  await seedConnector(CONNECTOR_A);
+  await seedConnector(CONNECTOR_B);
+  const expected = ["cin_walk_a1", "cin_walk_a2", "cin_walk_b1"];
+  await seedInstance({ connectorId: CONNECTOR_A, connectorInstanceId: expected[0] as string, index: 0 });
+  await seedInstance({ connectorId: CONNECTOR_A, connectorInstanceId: expected[1] as string, index: 1 });
+  await seedInstance({ connectorId: CONNECTOR_B, connectorInstanceId: expected[2] as string, index: 2 });
+
+  const fillerIds = (count: number) => [
+    CONNECTOR_A,
+    CONNECTOR_B,
+    ...Array.from({ length: count - 2 }, (_, i) => `f${i.toString(36)}`),
+  ];
+  let largest = 2;
+  while (scopeQuery(fillerIds(largest + 1)).length <= CONNECTOR_SUMMARY_SCOPE_MAX_BYTES) {
+    largest += 1;
+  }
+  let admitted = 0;
+  let rejected = 0;
+  let rejectedByScopeBound = 0;
+  for (const count of [2, 150, largest, largest + 1, 700, 1001, 5000]) {
+    const ids = fillerIds(count);
+    const base = `${scopeQuery(ids)}&limit=1&profile=retained_count_summary`;
+    // biome-ignore lint/performance/noAwaitInLoops: each scope size is a separate HTTP boundary assertion.
+    const first = await getEnvelope(asUrl, base);
+    if (first.status === 431) {
+      // Beyond Node's own header bound the transport refuses page 1 itself.
+      rejected += 1;
+      continue;
+    }
+    if (first.status === 400) {
+      assert.equal(first.body.error?.code, "invalid_request", `${count}: ${JSON.stringify(first.body)}`);
+      assert.match(first.body.error?.message ?? "", /8192 bytes/);
+      rejectedByScopeBound += 1;
+      continue;
+    }
+    admitted += 1;
+    const seen: string[] = [];
+    let page = first;
+    for (let pages = 0; pages < 10; pages += 1) {
+      assert.equal(page.status, 200, `${count} page ${pages + 1}: ${JSON.stringify(page.body).slice(0, 200)}`);
+      seen.push(...(page.body.data ?? []).map((row) => row.connection_id ?? ""));
+      if (!page.body.has_more) {
+        break;
+      }
+      const cursor = page.body.next_cursor;
+      assert.ok(cursor && cursor.length < 1024, `${count}: cursor must not grow with the scope`);
+      // biome-ignore lint/performance/noAwaitInLoops: each page needs the previous page's cursor.
+      page = await getEnvelope(asUrl, `${base}&cursor=${encodeURIComponent(cursor)}`);
+    }
+    assert.deepEqual(seen.sort(), expected, `${count}: every matching row must be reachable`);
+  }
+  assert.ok(admitted >= 3, "the ladder must exercise admitted scopes");
+  assert.ok(rejectedByScopeBound >= 1, "the ladder must hit the server's scope bound before the transport limit");
+  assert.ok(rejected >= 1, "the ladder must hit the transport's own limit");
+
+  // The cursor is bound to its scope by digest: replaying it on another scope,
+  // or tampering with it, is an invalid cursor.
+  const scoped = `${scopeQuery([CONNECTOR_A, CONNECTOR_B])}&limit=1&profile=retained_count_summary`;
+  const page1 = await getEnvelope(asUrl, scoped);
+  assert.equal(page1.status, 200);
+  const cursor = page1.body.next_cursor;
+  assert.ok(cursor);
+  for (const replay of [
+    `${scopeQuery([CONNECTOR_A, CONNECTOR_C])}&limit=1&profile=retained_count_summary&cursor=${encodeURIComponent(cursor)}`,
+    `${scopeQuery([CONNECTOR_A])}&limit=1&profile=retained_count_summary&cursor=${encodeURIComponent(cursor)}`,
+    `limit=1&profile=retained_count_summary&cursor=${encodeURIComponent(cursor)}`,
+    `${scoped}&cursor=${encodeURIComponent(`${cursor.slice(0, -2)}${cursor.endsWith("AA") ? "BB" : "AA"}`)}`,
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each replay is asserted separately.
+    const result = await getEnvelope(asUrl, replay);
+    assert.equal(result.status, 400, replay.slice(-120));
+    assert.equal(result.body.error?.code, "invalid_cursor");
+  }
+  // The same scope in another order is the same scope.
+  const reordered = await getEnvelope(
+    asUrl,
+    `${scopeQuery([CONNECTOR_B, CONNECTOR_A])}&limit=1&profile=retained_count_summary&cursor=${encodeURIComponent(cursor)}`
+  );
+  assert.equal(reordered.status, 200, JSON.stringify(reordered.body));
+}
+
 test("SQLite mounted route: repeated connector_id SET scope + retained_count_summary profile", async () => {
   await withMountedRoute(null, assertRouteSetScopeParity);
+});
+
+test("SQLite mounted route: every admitted large connector_id scope walks to the last page", async () => {
+  await withMountedRoute(null, assertLargeScopeContinues);
 });
 
 if (POSTGRES_URL) {
@@ -278,6 +376,18 @@ if (POSTGRES_URL) {
         databaseName: `pdpp_route_retained_count_${process.pid}_${Date.now()}`,
       },
       async (url) => await withMountedRoute(url, assertRouteSetScopeParity)
+    );
+  });
+
+  test("PostgreSQL mounted route: every admitted large connector_id scope walks to the last page", async () => {
+    assert.ok(POSTGRES_URL, "PDPP_TEST_POSTGRES_URL must target the disposable PostgreSQL proof service");
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: POSTGRES_URL,
+        databaseName: `pdpp_route_large_scope_${process.pid}_${Date.now()}`,
+      },
+      async (url) => await withMountedRoute(url, assertLargeScopeContinues)
     );
   });
 }

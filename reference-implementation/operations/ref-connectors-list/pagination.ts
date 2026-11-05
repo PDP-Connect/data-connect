@@ -12,6 +12,15 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEq
 import { resolveCredentialEncryptionKey } from "../../server/stores/credential-encryption.ts";
 
 export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
+/**
+ * Byte budget for the `connector_id` scope as a client writes it in the query
+ * string (`connector_id=<id>&...`). The client re-sends the whole scope with
+ * every continuation, so the scope is what limits request size. Node refuses a
+ * request whose header block exceeds 16,384 bytes (HTTP 431) before any handler
+ * runs. Half of that is left for the cursor (about 400 bytes), the request line
+ * and the headers, so a scope accepted for page 1 always fits on page 2.
+ */
+export const CONNECTOR_SUMMARY_SCOPE_MAX_BYTES = 8192;
 const CONNECTOR_SUMMARY_CURSOR_VERSION = 1;
 const CONNECTOR_SUMMARY_CURSOR_PREFIX = "rcs1.";
 const CURSOR_IV_BYTES = 12;
@@ -233,11 +242,25 @@ function parseSourcesVisibility(
  * request (design doc "Canonicalize... Deduplicate after canonicalization;
  * reject duplicates rather than making cursor scope ambiguous").
  */
+function assertConnectorScopeFitsRequest(ids: readonly string[]): void {
+  let bytes = ids.length - 1;
+  for (const id of ids) {
+    bytes += "connector_id=".length + Buffer.byteLength(encodeURIComponent(id));
+  }
+  if (bytes > CONNECTOR_SUMMARY_SCOPE_MAX_BYTES) {
+    throw new ConnectorSummaryPageRequestError(
+      "limit",
+      `connector_id scope must fit in ${CONNECTOR_SUMMARY_SCOPE_MAX_BYTES} bytes of query string so continuation requests fit the HTTP header limit`
+    );
+  }
+}
+
 function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: string) => string): ConnectorIdScope {
   if (rawConnectorId === undefined) {
     return null;
   }
   if (isNonEmptyString(rawConnectorId)) {
+    assertConnectorScopeFitsRequest([rawConnectorId]);
     return rawConnectorId;
   }
   if (!Array.isArray(rawConnectorId)) {
@@ -249,6 +272,7 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
   if (!rawConnectorId.every(isNonEmptyString)) {
     throw new ConnectorSummaryPageRequestError("limit", "every connector_id in the set must be a non-empty string");
   }
+  assertConnectorScopeFitsRequest(rawConnectorId as string[]);
   if (rawConnectorId.length === 1) {
     // A single-element repeated form is the single-id filter, byte-identical
     // request/cursor shape to the pre-existing `?connector_id=A` case.
@@ -333,10 +357,11 @@ export function parseConnectorSummaryPageRequest(
  * (when the page was filtered) the exact `connector_id` scope that produced
  * it. `connectorIdFilter` defaults to `null` (unfiltered, fleet-wide page) —
  * every existing caller that omits it preserves the exact prior cursor scope.
- * The cursor stores the scope's canonical FINGERPRINT (`f`), not raw user
- * ordering (design doc: "a canonical ordered scope-set fingerprint, not raw
- * user ordering") — a set supplied in a different order round-trips to the
- * SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
+ * The cursor binds the scope through the fixed-size `s` digest, which hashes
+ * the canonical sorted scope (design doc: "a canonical ordered scope-set
+ * fingerprint, not raw user ordering"), and never repeats the scope itself, so
+ * cursor size does not grow with the scope. A set supplied in a different order
+ * round-trips to the SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
  * Explore page) — every existing caller that omits it preserves the exact
  * prior cursor scope; the Sources page is the only caller that passes `true`.
  */
@@ -350,7 +375,6 @@ export function encodeConnectorSummaryPageCursor(
   const payload = Buffer.from(
     JSON.stringify({
       c: boundary.connectorId,
-      f: connectorIdScopeFingerprint(connectorIdFilter),
       i: boundary.connectorInstanceId,
       s: scopeDigest(ownerSubjectId, connectorIdFilter, sourcesVisibility).toString("base64url"),
       t: boundary.createdAt,
@@ -367,8 +391,8 @@ export function encodeConnectorSummaryPageCursor(
 /**
  * Decode and scope-check a connector-summary continuation without logging it.
  * `connectorIdFilter` is the CURRENT request's `connector_id` scope (`null`
- * when absent) — its canonical fingerprint must exactly match the fingerprint
- * the cursor was issued under (bound into the same scope digest as the owner
+ * when absent) — its canonical fingerprint must exactly match the scope the
+ * cursor was issued under (both are hashed into the `s` digest with the owner
  * subject), so a cursor from a connector- or connector-SET-filtered page
  * cannot be replayed against an unfiltered request, a different connector's
  * page, a different set, or a reordered-but-different set. `sourcesVisibility`
@@ -412,20 +436,13 @@ export function decodeConnectorSummaryPageCursor(
     !isNonEmptyString(payload.c) ||
     !isNonEmptyString(payload.i) ||
     !isNonEmptyString(payload.s) ||
-    !isNonEmptyString(payload.t) ||
-    typeof payload.f !== "string"
+    !isNonEmptyString(payload.t)
   ) {
-    throw new ConnectorSummaryPageCursorError();
-  }
-  const cursorScopeFingerprint = payload.f;
-  if (cursorScopeFingerprint !== connectorIdScopeFingerprint(connectorIdFilter)) {
     throw new ConnectorSummaryPageCursorError();
   }
   // Bound check for the `sources_visibility` surface flag (2026-08-15 review
   // finding): a cursor issued on one surface must not decode on the other,
-  // even before the scope-digest comparison below — this rejects a
-  // cross-surface replay on a cheap plaintext-shaped field the same way `f`
-  // rejects a connector_id-scope mismatch.
+  // even before the scope-digest comparison below.
   // Cursors issued before the Sources-only boundary was introduced have no
   // `w` field. They were unfiltered cursors, so preserve that valid legacy
   // scope while still rejecting them on the Sources page.
