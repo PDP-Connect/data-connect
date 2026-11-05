@@ -1624,7 +1624,7 @@ function StreamSeeAllLink({
 // The count is the loaded-window count (item #8): a bare number reads as a total, so
 // it is qualified "in view"; when there are zero in view it is HIDDEN (never a "0"
 // that reads as "this source is empty"), never a loaded-window count dressed as a total.
-function FacetRow({
+export function FacetRow({
   leading,
   label,
   mono,
