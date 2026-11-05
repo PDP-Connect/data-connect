@@ -13,14 +13,13 @@ import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 import {
-  connectorInstallRowModel,
   connectorLookupKey,
   isUninstallableCatalogEntry,
 } from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
   browserBoundWithStoredCredentials,
-  sourceSetupCardAction,
+  sourceSetupCardModel,
   sourceSetupAvailability,
   sourceSetupContext,
   sourceSetupGuidance,
@@ -463,17 +462,13 @@ function SourceSetupCard({
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
-  // A row with no click target at all must never offer an install control
-  // either: an OCI package can exist for a connector this dashboard cannot
-  // otherwise use (a known scaffold, a proof-gated or unsupported
-  // disposition), and offering Install there is exactly the dead control the
-  // owner rejected -- a package state fact is still shown, just without a
-  // button that can never do anything.
-  const isUnavailable = sourceSetupRowIsUnavailable(entry);
-  const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle) : null;
-  const packageAvailabilityUnknown = installCatalogTransientlyUnavailable && !installLifecycle?.installed;
-  const packageNeedsInstall = !isUnavailable && installModel?.activationState === "not_installed";
-  const action = sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
+  const {
+    installModel,
+    packageAvailabilityUnknown,
+    packageNeedsInstall,
+    setupAction: action,
+    unavailable: isUnavailable,
+  } = sourceSetupCardModel(entry, installLifecycle, installCatalogTransientlyUnavailable);
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
@@ -508,9 +503,9 @@ function SourceSetupCard({
       </div>
       <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
         <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
-        {isUnavailable ? (
+        {entry.isKnownScaffold ? (
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
-            Not installable: no setup path is available here.
+            This connector's collection code is not built yet.
           </span>
         ) : packageAvailabilityUnknown ? (
           <span className="pdpp-caption text-status-warning-fg" data-testid="connector-install-catalog-transient">
@@ -643,16 +638,17 @@ export function SourceSetupCatalog({
   // Every visible connector is one row. Tier, lifecycle exceptions, and
   // package activation are row properties, so Preview and In development do
   // not create nested containers or disappear from the scan path.
-  //
-  // The one exception: a row with no click target at all (known scaffold,
-  // proof-gated, unsupported, unknown -- see `sourceSetupRowIsUnavailable`)
-  // carries no scannable information a working row doesn't already imply, so
-  // it never sits in the middle of the actionable list. `sourceSetupRank`
-  // already sorts these last; splitting them out here keeps that guarantee
-  // even if a future rank changes, and lets the count stay visible without
-  // N dead rows in the primary scan path.
-  const scannableEntries = filtered.filter((entry) => !sourceSetupRowIsUnavailable(entry));
-  const unavailableEntries = filtered.filter((entry) => sourceSetupRowIsUnavailable(entry));
+  // Keep installable packages visible even before their account setup exists.
+  const scannableEntries: ConnectorCatalogEntry[] = [];
+  const unavailableEntries: ConnectorCatalogEntry[] = [];
+  for (const entry of filtered) {
+    const { unavailable } = sourceSetupCardModel(
+      entry,
+      installLifecycleFor(entry, installLifecycleByConnector),
+      installCatalogTransientlyUnavailable
+    );
+    (unavailable ? unavailableEntries : scannableEntries).push(entry);
+  }
   const anyMatch = filtered.length > 0;
   return (
     <Section
@@ -699,8 +695,7 @@ export function SourceSetupCatalog({
           {unavailableEntries.length > 0 ? (
             <details className="group" data-testid="unavailable-connectors-disclosure">
               <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
-                {unavailableEntries.length}{" "}
-                {unavailableEntries.length === 1 ? "connector is" : "connectors are"} not available on this platform
+                More connectors ({unavailableEntries.length})
               </summary>
               <div className="mt-3">
                 <SourceSetupCardList

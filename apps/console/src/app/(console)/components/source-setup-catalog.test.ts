@@ -8,6 +8,12 @@ import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
+import {
+  parseConnectorInstallCatalogResponse,
+  parseConnectorInstallStatusResponse,
+} from "../lib/connector-install-contract.ts";
+import { connectorInstallCatalogFixture, connectorInstallStatusFixture } from "../lib/connector-install-fixtures.ts";
+import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 
 // The catalog's import graph reaches `server-only`, which throws outside a
 // server component, and its recovery notice calls `useRouter`, which needs a
@@ -47,15 +53,19 @@ const reddit: ConnectorCatalogEntry = {
   supportState: "supported",
 };
 
-async function render(installCatalogTransientlyUnavailable: boolean): Promise<string> {
+async function render(
+  installCatalogTransientlyUnavailable: boolean,
+  entry: ConnectorCatalogEntry = reddit,
+  lifecycle?: ConnectorInstallLifecycle
+): Promise<string> {
   const { SourceSetupCatalog } = await catalogModule;
   return renderToStaticMarkup(
     createElement(SourceSetupCatalog, {
       action: "/sources/add",
-      catalog: [reddit],
+      catalog: [entry],
       installCatalogTransientlyUnavailable,
       // The page builds this from the empty catalog a busy snapshot returns.
-      installLifecycleByConnector: {},
+      installLifecycleByConnector: lifecycle ? { [entry.connectorKey]: lifecycle } : {},
       query: "",
     })
   );
@@ -67,4 +77,116 @@ test("a busy package catalog does not hide an unregistered connector", async () 
 
 test("a known-empty package catalog hides an unregistered connector with no package", async () => {
   assert.doesNotMatch(await render(false), />Reddit</);
+});
+
+const INSTALL_BUTTON = />Install<\/button>/;
+const UNAVAILABLE_FALSE = /data-row-unavailable="false"/;
+const UNAVAILABLE_TRUE = /data-row-unavailable="true"/;
+const UNAVAILABLE_DISCLOSURE = /data-testid="unavailable-connectors-disclosure"/;
+const BROWSER_SETUP_LINK = /href="\/connect\/browser-session\//;
+const INSTALL_OR_BROWSER_SETUP = />Install<\/button>|href="\/connect\/browser-session\//;
+const INSTALL_DISABLED = /data-testid="connector-install-disabled"/;
+const HOST_BLOCK = /Host blocked: Browser unavailable here\./;
+const MORE_CONNECTORS = /More connectors \(1\)/;
+const PLATFORM_COPY = /not available on this platform/;
+const UNKNOWN_PACKAGE = /data-testid="connector-install-catalog-transient"/;
+const NEW_BROWSER_SETUP = /href="\/connect\/browser-session\/new-browser"/;
+
+const unregisteredBrowser: ConnectorCatalogEntry = {
+  ...reddit,
+  connectorKey: "new-browser",
+  disposition: "browser_bound_runbook",
+  displayName: "New browser connector",
+  ownerActionable: false,
+  registrationStatus: "not_registered",
+};
+const packageTemplate = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data.find(
+  (entry) => entry.latest && entry.connector_key === "github"
+);
+assert.ok(packageTemplate);
+const browserPackage: ConnectorInstallLifecycle = {
+  catalog: { ...packageTemplate, connector_id: "new-browser", connector_key: "new-browser", bindings: {} },
+  installed: null,
+};
+
+test("an unregistered browser connector offers Install before account setup exists", async () => {
+  const html = await render(false, unregisteredBrowser, browserPackage);
+  assert.match(html, INSTALL_BUTTON, "the actual package control must remain reachable before registration");
+  assert.match(html, UNAVAILABLE_FALSE);
+  assert.doesNotMatch(html, UNAVAILABLE_DISCLOSURE);
+  assert.doesNotMatch(html, BROWSER_SETUP_LINK, "installation must not invent a working setup route");
+});
+
+test("known scaffolds still offer neither Install nor account setup", async () => {
+  const html = await render(
+    false,
+    {
+      ...unregisteredBrowser,
+      disposition: "browser_collector_manual",
+      isKnownScaffold: true,
+      ownerActionable: true,
+    },
+    browserPackage
+  );
+  assert.match(html, INSTALL_DISABLED);
+  assert.doesNotMatch(html, INSTALL_OR_BROWSER_SETUP);
+});
+
+test("an explicit host restriction is displayed without offering Install", async () => {
+  assert.ok(browserPackage.catalog);
+  const html = await render(false, unregisteredBrowser, {
+    ...browserPackage,
+    catalog: {
+      ...browserPackage.catalog,
+      bindings: { browser: { available: false, reason: "Browser unavailable here." } },
+    },
+  });
+  assert.match(html, HOST_BLOCK);
+  assert.doesNotMatch(html, INSTALL_BUTTON);
+});
+
+test("a package without a latest digest does not gain an Install control", async () => {
+  assert.ok(browserPackage.catalog);
+  const html = await render(false, unregisteredBrowser, {
+    ...browserPackage,
+    catalog: { ...browserPackage.catalog, latest: false },
+  });
+  assert.doesNotMatch(html, INSTALL_BUTTON);
+  assert.match(html, UNAVAILABLE_TRUE);
+  assert.match(html, MORE_CONNECTORS);
+  assert.doesNotMatch(html, PLATFORM_COPY);
+});
+
+test("a busy package catalog shows retry guidance without offering an unknown install", async () => {
+  const html = await render(true, unregisteredBrowser, browserPackage);
+  assert.match(html, UNKNOWN_PACKAGE);
+  assert.match(html, UNAVAILABLE_FALSE);
+  assert.doesNotMatch(html, INSTALL_OR_BROWSER_SETUP);
+});
+
+test("after installation account setup appears only when the setup planner supports it", async () => {
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.ok(browserPackage.catalog);
+  const lifecycle: ConnectorInstallLifecycle = {
+    catalog: { ...browserPackage.catalog, digest: installed.digest },
+    installed: { ...installed, connector_id: "new-browser" },
+  };
+  const stillBlocked = await render(false, unregisteredBrowser, lifecycle);
+  assert.doesNotMatch(stillBlocked, INSTALL_OR_BROWSER_SETUP);
+  assert.match(stillBlocked, UNAVAILABLE_TRUE);
+
+  const ready = await render(
+    false,
+    {
+      ...unregisteredBrowser,
+      disposition: "browser_collector_manual",
+      ownerActionable: true,
+      registrationStatus: "registered",
+    },
+    lifecycle
+  );
+  assert.match(ready, NEW_BROWSER_SETUP);
+  assert.match(ready, UNAVAILABLE_FALSE);
+  assert.doesNotMatch(ready, INSTALL_BUTTON);
 });

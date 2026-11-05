@@ -24,7 +24,12 @@
  */
 
 import { type ConnectorCatalogEntry, isExperimentalEntry, isOwnerActionableEntry } from "./connection-catalog.ts";
-import type { ConnectorInstallActivationState } from "./connector-install-presentation.ts";
+import {
+  type ConnectorInstallActivationState,
+  type ConnectorInstallLifecycle,
+  type ConnectorInstallRowModel,
+  connectorInstallRowModel,
+} from "./connector-install-presentation.ts";
 
 export interface SourceSetupStatus {
   /** One short owner-facing exception label; supported is the implied default. */
@@ -138,10 +143,7 @@ export type SourceSetupAvailability =
 
 /** Owner-facing picker order: actionable dispositions first, unsupported last. */
 export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
-  // A row with no click target at all (see `sourceSetupRowIsUnavailable`)
-  // sorts after every other rank, including the experimental opt-in below:
-  // there is nothing here to compare against those on cost/benefit, only a
-  // dead end, so it never interrupts a scan of rows the owner can act on.
+  // Account setup paths sort before entries that may need package installation.
   if (sourceSetupRowIsUnavailable(entry)) {
     return 10;
   }
@@ -178,20 +180,9 @@ export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
 }
 
 /**
- * Whether this row has no click target at all: a known scaffold, or any
- * other disposition `sourceSetupAction` refuses (proof-gated, unproven,
- * unsupported, unknown). These are the rows the owner has called out as
- * "should not allow you to install" -- offering an install or add control
- * that can never work is worse than not offering one, so the catalog must
- * never render an action (including the Package column's install button)
- * for a row this returns true for, and must sort every such row after
- * every row that does have one.
- *
- * Deliberately narrower than `sourceSetupAvailability(entry) ===
- * "not_available_here"`: that check also covers a real (non-scaffold)
- * Development entry with a genuine self-test action -- e.g. an unproven
- * local-collector connector -- which DOES have something to click and must
- * not be treated as dead.
+ * Whether account setup has no action. This does not decide package
+ * installability: installing a package can register a connector and make its
+ * setup path available. The catalog card combines both facts separately.
  */
 export function sourceSetupRowIsUnavailable(entry: ConnectorCatalogEntry): boolean {
   return sourceSetupAction(entry) === null;
@@ -571,6 +562,35 @@ export function sourceSetupCardAction(
     return null;
   }
   return sourceSetupAction(entry);
+}
+
+export interface SourceSetupCardModel {
+  installModel: ConnectorInstallRowModel | null;
+  packageAvailabilityUnknown: boolean;
+  packageNeedsInstall: boolean;
+  setupAction: SourceSetupAction | null;
+  unavailable: boolean;
+}
+
+/** One card decision shared by the package column and the catalog grouping. */
+export function sourceSetupCardModel(
+  entry: ConnectorCatalogEntry,
+  lifecycle: ConnectorInstallLifecycle | null,
+  catalogTransientlyUnavailable: boolean
+): SourceSetupCardModel {
+  const installModel = lifecycle ? connectorInstallRowModel(entry, lifecycle) : null;
+  const packageAvailabilityUnknown = catalogTransientlyUnavailable && !lifecycle?.installed;
+  const setupAction = entry.isKnownScaffold
+    ? null
+    : sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
+  const packageActionAvailable = !(entry.isKnownScaffold || packageAvailabilityUnknown) && Boolean(installModel?.action);
+  return {
+    installModel,
+    packageAvailabilityUnknown,
+    packageNeedsInstall: packageActionAvailable && installModel?.activationState === "not_installed",
+    setupAction,
+    unavailable: entry.isKnownScaffold || !(setupAction || packageActionAvailable || packageAvailabilityUnknown),
+  };
 }
 
 export function sourceSetupSecondaryAction(_entry: ConnectorCatalogEntry): SourceSetupAction | null {
