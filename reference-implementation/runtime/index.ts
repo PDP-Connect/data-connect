@@ -19,6 +19,7 @@ import {
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
+  OBSERVATION_CAPABILITY,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
   STREAM_EVIDENCE_CAPABILITY,
@@ -34,6 +35,7 @@ import { resolveRunConnectorOptions } from "../server/connector-run-config.ts";
 import { readStoredCollectionScope } from "../server/local-collection-scope.ts";
 import { encodeKey } from "../server/records.ts";
 import { getDefaultCheckpointWithholdStore } from "../server/stores/checkpoint-withhold-store.ts";
+import { getDefaultConnectorObservationStore } from "../server/stores/connector-observation-store.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import type { ConnectorInstanceConfigStore } from "../server/stores/connector-instance-config-store.ts";
@@ -92,6 +94,11 @@ import { describeCursorBandViolation, evaluateCursorBand } from "./cursor-band-c
 import { declaredReasonTokensFor } from "./declared-reason-tokens.ts";
 import { createDetailGapPageReader, validateDetailGapsPageRequest } from "./detail-gap-paging.ts";
 import {
+  collectionProfileDeclarationProblem,
+  readCollectionProfileDeclaration,
+} from "./collection-profile-support.ts";
+import type { DoneError } from "./done-validators.ts";
+import {
   validateDoneError,
   validateDoneExitCode,
   validateDoneRecordsEmitted,
@@ -99,6 +106,7 @@ import {
 } from "./done-validators.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
+import { createObservationRun } from "./observations.ts";
 import {
   buildHttpFailure,
   buildIngestEnvelopeContractViolationFailure,
@@ -2595,13 +2603,23 @@ export function buildBrowserSurfaceLaunchEnv({
 /**
  * Protocol capabilities this runtime implements, listed in
  * START.protocol_capabilities. It accepts DETAIL_COVERAGE empty_keys and
- * unchanged_keys, and validates STREAM_EVIDENCE. It has no BLOB transport and
- * no OBSERVATION handler, so it does not list them.
+ * unchanged_keys, validates STREAM_EVIDENCE and accepts OBSERVATION (Section
+ * 5.10). It has no BLOB transport, so it does not list it.
  */
 const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  OBSERVATION_CAPABILITY,
   STREAM_EVIDENCE_CAPABILITY,
 ];
+
+/** Type of a Collection Profile 0.2.0 OBSERVATION message (Section 5.10). */
+const OBSERVATION_MESSAGE_TYPE = "OBSERVATION";
+/** An unparseable line is an OBSERVATION only when its text names the type. */
+const OBSERVATION_TYPE_TEXT_RE = /"type"\s*:\s*"OBSERVATION"/;
+
+function isObservationMessage(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === OBSERVATION_MESSAGE_TYPE;
+}
 
 /**
  * Declared capabilities this runtime starts a connector with although it does
@@ -3058,7 +3076,20 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const availableBindings = buildAvailableBindings(onInteraction);
 
   validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  const declarationProblem = collectionProfileDeclarationProblem(manifest as unknown as Record<string, unknown>);
+  if (declarationProblem !== null) {
+    throw new Error(`Connector manifest ${declarationProblem}`);
+  }
   validateRequiredProtocolCapabilities(manifest);
+  const profileDeclaration = readCollectionProfileDeclaration(manifest as unknown as Record<string, unknown>);
+  // A 0.2.0 manifest gets the strict DONE error shape (Section 5.8).
+  const strictDoneError = manifest.protocol_version === "0.2.0";
+  const observationRun = createObservationRun({
+    declared: profileDeclaration.observationDeclared,
+    descriptors: profileDeclaration.descriptors,
+  });
+  // Byte counts and parsed values belong to the transport, never wire fields.
+  const observationInputs = new WeakMap<ConnectorMessage, { value: unknown; serializedBytes: number }>();
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
   const declaredCollectionScope = readStoredCollectionScope(state).scope;
@@ -3692,6 +3723,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   let pendingInteraction: ConnectorMessage | null = null;
   let terminalEventRecorded = false;
   let doneMessage: DoneMessageState | null = null;
+  // DONE.error.basis (Section 5.8), used only for the owner diagnosis.
+  let doneBasis: readonly string[] = [];
   // Cancellation intent for this run. Owner cancellation records
   // `run.cancel_requested` and terminals as `run.cancelled`; scheduler timeout
   // records `run.failed` with `run_timed_out`. `ownerCancelForced` flips to true
@@ -5185,6 +5218,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
 
     async function rejectAfterLeaseAccounting(err: unknown): Promise<void> {
       cleanupChildHandles();
+      await persistObservationDiagnosis();
       try {
         await awaitLeaseAccounting();
       } catch (accountingErr) {
@@ -5260,8 +5294,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       err.failure_reason = failureReason;
       err.checkpoint_summary = checkpointSummary;
       err.terminal_reason = failureReason;
-      err.connector_error = null;
-      err.known_gaps = buildKnownGapsForTerminal(failureReason, null);
+      const invalidDoneMessage = (err as { connectorMessage?: string | null }).connectorMessage ?? null;
+      err.connector_error = invalidDoneMessage ? { message: invalidDoneMessage, retryable: null } : null;
+      err.known_gaps = buildKnownGapsForTerminal(failureReason, err.connector_error);
       const runtimeFailureMessage = runtimeAuthoredFailureMessage(err, null);
       const runtimeFailure = runtimeFailureDiagnostic(err);
       err.runtime_retryable = runtimeFailure?.retryable ?? null;
@@ -5273,7 +5308,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
             actor_id: connectorId,
             actor_type: "runtime",
             data: buildRunTerminalData({
-              connectorError: null,
+              connectorError: err.connector_error,
               failureMessage: runtimeFailureMessage,
               failureOrigin: runtimeFailureMessage ? "runtime" : null,
               ingestFailure: err.ingest_failure || null,
@@ -5591,15 +5626,21 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     async function handleDoneMessage(msg: ConnectorMessage): Promise<void> {
-      const invalidDoneStatus = validateDoneStatus(msg.status);
+      const invalidDoneStatus = validateDoneStatus(msg.status, strictDoneError);
       if (invalidDoneStatus) {
-        throw invalidDoneStatus;
+        throw invalidDoneEnvelope(invalidDoneStatus, msg);
       }
       const doneStatus = msg.status as DoneMessageState["status"];
-      const normalizedDoneError = validateDoneError(doneStatus, msg.error as Parameters<typeof validateDoneError>[1]);
-      if (normalizedDoneError instanceof Error) {
-        throw normalizedDoneError;
+      const validatedDoneError = validateDoneError(doneStatus, msg.error as Parameters<typeof validateDoneError>[1], {
+        strict: strictDoneError,
+        observationDeclared: profileDeclaration.observationDeclared,
+        hasEmittedId: (id) => observationRun.hasEmittedId(id),
+      });
+      if (validatedDoneError instanceof Error) {
+        throw invalidDoneEnvelope(validatedDoneError, msg);
       }
+      const normalizedDoneError = validatedDoneError === null ? null : withoutDoneBasis(validatedDoneError);
+      doneBasis = validatedDoneError?.basis ?? [];
       finalStatus = doneStatus;
       doneMessage = {
         error: normalizedDoneError as ConnectorDoneError | null,
@@ -6470,12 +6511,76 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       DETAIL_GAPS_PAGE_REQUEST: handleDetailGapsPageRequest,
       DONE: handleDoneMessage,
       INTERACTION: handleInteractionMessage,
+      OBSERVATION: handleObservationMessage,
       PROGRESS: handleProgressMessage,
       RECORD: handleRecordMessage,
       SKIP_RESULT: handleSkipResultMessage,
       STATE: handleStateMessage,
       STREAM_EVIDENCE: handleStreamEvidenceMessage,
     };
+
+    function withoutDoneBasis(error: DoneError): DoneError {
+      const rest: DoneError = { ...error };
+      delete rest.basis;
+      return rest;
+    }
+
+    /** An invalid DONE keeps its bounded connector message visible on the run failure. */
+    function invalidDoneEnvelope(error: Error, msg: ConnectorMessage): Error {
+      // Only failed DONE can report a terminal connector error. A contradictory
+      // success envelope remains a runtime protocol violation, not that report.
+      const connectorMessage = msg.status === "failed"
+        ? boundConnectorErrorMessage((msg.error as { message?: unknown } | undefined)?.message)
+        : null;
+      return Object.assign(error, { connectorMessage });
+    }
+
+    function handleObservationMessage(msg: ConnectorMessage): Promise<void> {
+      // Accept, or reject and continue (Section 5.10). A rejection is recorded
+      // as a runtime defect and never fails the run. The raw line is not kept.
+      const input = observationInputs.get(msg);
+      if (!input) throw new Error("Missing runtime observation envelope");
+      observationInputs.delete(msg);
+      observationRun.accept(input.value, input.serializedBytes);
+      return Promise.resolve();
+    }
+
+    let observationDiagnosisWrite: Promise<void> | null = null;
+
+    /**
+     * The owner diagnostic record (Section 5.10 and 5.11), written once per run.
+     * The first settle point starts it, and every settle point awaits it, so the
+     * record exists before the caller's promise settles. I/O errors are reported as
+     * progress and never change the run's outcome.
+     */
+    function persistObservationDiagnosis(): Promise<void> {
+      observationDiagnosisWrite ??= getDefaultConnectorObservationStore()
+        .put({
+          connectorId,
+          connectorInstanceId: resolvedConnectorInstanceId,
+          diagnosis: observationRun.diagnose(doneBasis),
+          runId,
+          snapshot: observationRun.snapshot(),
+        })
+        .then(
+          () => undefined,
+          () => {
+            // Optional reporting must not turn a diagnostic write failure into
+            // a collection failure if the consumer also rejects progress.
+            try {
+              onProgress({ type: "observation_record_error" });
+            } catch {
+              // Keep the collection outcome.
+            }
+          }
+        );
+      return observationDiagnosisWrite;
+    }
+
+    async function rejectAfterDiagnosis(error: unknown): Promise<void> {
+      await persistObservationDiagnosis();
+      reject(error);
+    }
 
     async function handleMsg(msg: ConnectorMessage): Promise<void> {
       if (doneMessage) {
@@ -6497,12 +6602,38 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     rl.on("line", (line) => {
-      writeTrace(line);
+      // Parse once. A line is an OBSERVATION by its parsed type, or by its text
+      // when it does not parse. Raw OBSERVATION lines are never traced, logged,
+      // spined or webhooked (Section 5.10).
+      let parsed: unknown;
+      let parseError: RuntimeRunError | null = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch (caught) {
+        parseError = caught as RuntimeRunError;
+      }
+      const observation = parseError === null ? isObservationMessage(parsed) : OBSERVATION_TYPE_TEXT_RE.test(line);
+      if (!observation) {
+        writeTrace(line);
+      }
       if (!line.trim()) {
         return;
       }
+      if (observation) {
+        if (failPendingInteraction(new Error("Connector emitted OBSERVATION while waiting for INTERACTION_RESPONSE"))) {
+          return;
+        }
+        const envelope: ConnectorMessage = { type: OBSERVATION_MESSAGE_TYPE };
+        observationInputs.set(envelope, { value: parsed, serializedBytes: Buffer.byteLength(line, "utf8") });
+        msgQueue.push(envelope);
+        processNext().catch(rejectAfterDiagnosis);
+        return;
+      }
       try {
-        const msg = JSON.parse(line);
+        if (parseError !== null) {
+          throw parseError;
+        }
+        const msg = parsed as ConnectorMessage;
         if (resolvePendingOtpInteraction(msg)) {
           // The matching resolution releases the protocol gate immediately.
           // DONE can arrive on the next line before the async interaction
@@ -6513,7 +6644,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           return;
         }
         msgQueue.push(msg);
-        processNext().catch(reject);
+        processNext().catch(rejectAfterDiagnosis);
       } catch (caught) {
         const err = caught as RuntimeRunError;
         if (
@@ -6534,7 +6665,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           error: enriched,
           type: "__PARSE_ERROR__",
         });
-        processNext().catch(reject);
+        processNext().catch(rejectAfterDiagnosis);
       }
     });
 
@@ -6944,6 +7075,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       stderrTailDiagnostic: Record<string, unknown> | null
     ): Promise<void> {
       cleanupChildHandles();
+      await persistObservationDiagnosis();
       await awaitLeaseAccounting();
       const resolution = deriveClosedRunResolution(code);
       resolve(buildClosedRunResult({ code, resolution, stderrTailDiagnostic }));
@@ -7133,6 +7265,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           await processChildTerminalEvent(terminalEvent);
         } finally {
           cleanupChildHandles();
+          await persistObservationDiagnosis();
         }
       })
       .catch((error: unknown) => reject(error));
