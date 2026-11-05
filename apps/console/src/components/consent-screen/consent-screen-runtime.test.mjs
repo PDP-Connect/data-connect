@@ -278,10 +278,14 @@ test("a white-glyph connector mark keeps its declared brand background on the co
     null,
   );
   const view = render(createElement(ConsentScreen, {
-    connectorIndex: {}, model: whiteGlyphModel, acceptAction: async () => "", rejectAction: async () => "",
+    model: whiteGlyphModel, acceptAction: async () => "", rejectAction: async () => "",
   }));
   const tile = view.container.querySelector(".pdpp-connector-icon");
-  assert.ok(tile?.querySelector("svg"), "the manifest glyph renders");
+  assert.equal(
+    tile?.querySelector("svg path")?.getAttribute("fill")?.toLowerCase(),
+    "#ffffff",
+    "the manifest's white glyph renders, not a fallback mark",
+  );
   assert.equal(
     dom.window.getComputedStyle(tile).backgroundColor,
     "rgb(29, 185, 84)",
