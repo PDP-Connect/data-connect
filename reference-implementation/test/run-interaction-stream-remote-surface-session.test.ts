@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-// biome-ignore lint/correctness/noUnresolvedImports: remote-surface 1.5.1 is installed in the reference implementation workspace; the repository-root checker does not resolve that local package.
+// biome-ignore lint/correctness/noUnresolvedImports: remote-surface is installed in the reference implementation workspace; the repository-root checker does not resolve that local package.
 import { createRemoteSurfaceSession } from "@opendatalabs/remote-surface/client";
 // This file typechecks under its own isolated program (test/tsconfig.dom.json,
 // types: ["node", "jsdom"]) rather than the main reference-implementation

@@ -21,6 +21,7 @@ const MAX_INPUT_TEXT_LENGTH = 16_384;
 const MAX_INPUT_COORDINATE = 32_768;
 const MAX_INPUT_STRING_LENGTH = 512;
 const MAX_WIRE_SEQ = Number.MAX_SAFE_INTEGER;
+const MAX_DEVICE_SCALE_FACTOR = 8;
 // X11 keysyms are 29-bit values (Unicode keysyms are 0x01000000 + code point).
 const MAX_KEYSYM = 0x1f_ff_ff_ff;
 
@@ -31,7 +32,12 @@ type FieldKind = "string" | "number" | "boolean" | "string-list";
 interface FieldSpec {
   readonly kind: FieldKind;
   readonly enum?: ReadonlySet<string>;
-  readonly integer?: boolean;
+  // A "number" field is an integer unless it is declared `float`: only
+  // measurements (coordinates, deltas, pressure, tilt, contact size, the
+  // timestamp and the scale factor) may be fractional. A fractional value in
+  // an integer field (a button index, a keysym, a pointer id) is malformed,
+  // and the CDP layer would otherwise coerce it to some other value.
+  readonly float?: boolean;
   readonly max?: number;
   readonly maxItems?: number;
   readonly maxLength?: number;
@@ -56,8 +62,8 @@ const COMMON_FIELDS: Readonly<Record<string, FieldSpec>> = {
   wireSeq: { kind: "number", max: MAX_WIRE_SEQ, min: 0 },
 };
 
-const COORDINATE: FieldSpec = { kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
-const DELTA: FieldSpec = { kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
+const COORDINATE: FieldSpec = { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
+const DELTA: FieldSpec = { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
 
 // The pointer, keyboard, and text shapes below are the Remote Surface input
 // protocol (`RemoteSurfaceInputPayload`) that the console viewer sends
@@ -69,7 +75,8 @@ const MODIFIERS: FieldSpec = {
   kind: "string-list",
   maxItems: 4,
 };
-const TIMESTAMP: FieldSpec = { kind: "number", max: MAX_WIRE_SEQ, min: 0 };
+// A DOMHighResTimeStamp is a legal source, so the timestamp may be fractional.
+const TIMESTAMP: FieldSpec = { float: true, kind: "number", max: MAX_WIRE_SEQ, min: 0 };
 
 // Closed, type-specific schemas. Each event type dispatched to a CDP command
 // (directly or via the Remote Surface backend) is validated against its own
@@ -97,7 +104,7 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
       key: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
       // The soft-keyboard bridge sends special keys (Backspace, Enter) as X11
       // keysyms with no `key`.
-      keysym: { integer: true, kind: "number", max: MAX_KEYSYM, min: 0 },
+      keysym: { kind: "number", max: MAX_KEYSYM, min: 0 },
       location: { kind: "number", max: 3, min: 0 },
       modifiers: MODIFIERS,
       repeat: { kind: "boolean" },
@@ -133,16 +140,16 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
       deltaX: DELTA,
       deltaY: DELTA,
       gestureBoundary: { kind: "boolean" },
-      height: { kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
+      height: { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
       modifiers: MODIFIERS,
       pointerId: { kind: "number", max: MAX_WIRE_SEQ, min: 0 },
       pointerType: { enum: new Set(["mouse", "pen", "touch"]), kind: "string" },
-      pressure: { kind: "number", max: 1, min: 0 },
+      pressure: { float: true, kind: "number", max: 1, min: 0 },
       source: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
-      tiltX: { kind: "number", max: 90, min: -90 },
-      tiltY: { kind: "number", max: 90, min: -90 },
+      tiltX: { float: true, kind: "number", max: 90, min: -90 },
+      tiltY: { float: true, kind: "number", max: 90, min: -90 },
       timestamp: TIMESTAMP,
-      width: { kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
+      width: { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
       x: COORDINATE,
       y: COORDINATE,
     },
@@ -181,7 +188,7 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
   viewport: {
     fields: {
       ...COMMON_FIELDS,
-      deviceScaleFactor: { kind: "number", max: 8, min: 0 },
+      deviceScaleFactor: { float: true, kind: "number", max: MAX_DEVICE_SCALE_FACTOR, min: 0 },
       hasTouch: { kind: "boolean" },
       height: { kind: "number", max: MAX_INPUT_COORDINATE, min: 1 },
       mobile: { kind: "boolean" },
@@ -200,13 +207,13 @@ function invalidInput(): Error & { code: string } {
   return error;
 }
 
-function validateField(key: string, value: unknown, spec: FieldSpec): void {
+function validateField(value: unknown, spec: FieldSpec): void {
   if (spec.kind === "string-list") {
     if (!Array.isArray(value) || value.length > (spec.maxItems ?? 0)) {
       throw invalidInput();
     }
     for (const item of value) {
-      validateField(key, item, { kind: "string", ...(spec.enum ? { enum: spec.enum } : {}) });
+      validateField(item, { kind: "string", ...(spec.enum ? { enum: spec.enum } : {}) });
     }
     // A repeated name is rejected: the CDP backend adds modifier bits instead
     // of OR-ing them, so ["Control","Control"] would dispatch Meta (4).
@@ -237,7 +244,7 @@ function validateField(key: string, value: unknown, spec: FieldSpec): void {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw invalidInput();
   }
-  if (spec.integer && !Number.isInteger(value)) {
+  if (!(spec.float || Number.isInteger(value))) {
     throw invalidInput();
   }
   if (spec.min !== undefined && value < spec.min) {
@@ -246,7 +253,6 @@ function validateField(key: string, value: unknown, spec: FieldSpec): void {
   if (spec.max !== undefined && value > spec.max) {
     throw invalidInput();
   }
-  void key;
 }
 
 export function parseReferenceWireInputPayload(value: unknown): Record<string, unknown> {
@@ -267,7 +273,7 @@ export function parseReferenceWireInputPayload(value: unknown): Record<string, u
     // "string-list" a bounded array of enum strings. Other nested objects or
     // arrays (e.g. `{ x: { nested: "x" } }`) are rejected before dispatch
     // rather than silently passed through.
-    validateField(key, input[key], fieldSpec);
+    validateField(input[key], fieldSpec);
   }
   for (const key of spec.required) {
     if (!(key in input)) {
@@ -290,21 +296,25 @@ export function normalizeReferenceWireViewportPayload(value: unknown): Reference
   if (!(Number.isFinite(width) && Number.isFinite(height)) || width <= 0 || height <= 0) {
     return null;
   }
+  // The same bounds as the `viewport` input schema above.
+  if (width > MAX_INPUT_COORDINATE || height > MAX_INPUT_COORDINATE) {
+    return null;
+  }
 
   const viewport: ReferenceWireViewportPayload = {
     height,
     width,
   };
   const deviceScaleFactor = Number(input.deviceScaleFactor);
-  if (Number.isFinite(deviceScaleFactor) && deviceScaleFactor > 0) {
+  if (Number.isFinite(deviceScaleFactor) && deviceScaleFactor > 0 && deviceScaleFactor <= MAX_DEVICE_SCALE_FACTOR) {
     viewport.deviceScaleFactor = deviceScaleFactor;
   }
   const screenWidth = Number(input.screenWidth);
-  if (Number.isFinite(screenWidth) && screenWidth > 0) {
+  if (Number.isFinite(screenWidth) && screenWidth > 0 && screenWidth <= MAX_INPUT_COORDINATE) {
     viewport.screenWidth = Math.max(viewport.width, Math.floor(screenWidth));
   }
   const screenHeight = Number(input.screenHeight);
-  if (Number.isFinite(screenHeight) && screenHeight > 0) {
+  if (Number.isFinite(screenHeight) && screenHeight > 0 && screenHeight <= MAX_INPUT_COORDINATE) {
     viewport.screenHeight = Math.max(viewport.height, Math.floor(screenHeight));
   }
   if (typeof input.hasTouch === "boolean") {

@@ -96,35 +96,12 @@ test("mouse rejects non-finite coordinates and unknown actions", () => {
   assert.throws(() => mapInputEventToCdp({ action: "wiggle", type: "mouse", x: 1, y: 2 }), codeIs("invalid_input"));
 });
 
-test("keyboard keydown of a printable char emits keyDown with text", () => {
-  const cmds = mapInputEventToCdp({ action: "keydown", key: "a", type: "keyboard" });
-  assert.equal(cmds.length, 1);
-  assert.equal(paramsAt(cmds, 0).type, "keyDown");
-  assert.equal(paramsAt(cmds, 0).text, "a");
-});
-
-test("keyboard keydown of a named key emits rawKeyDown with virtual key code and no text", () => {
-  const cmds = mapInputEventToCdp({ action: "keydown", key: "Enter", type: "keyboard" });
-  assert.equal(paramsAt(cmds, 0).type, "rawKeyDown");
-  assert.equal(paramsAt(cmds, 0).windowsVirtualKeyCode, 13);
-  assert.equal(paramsAt(cmds, 0).nativeVirtualKeyCode, 13);
-  assert.equal(paramsAt(cmds, 0).text, undefined); // named keys carry no text
-});
-
-test("keyboard keyup emits keyUp and preserves modifiers", () => {
-  const cmds = mapInputEventToCdp({ action: "keyup", key: "a", modifiers: 2, type: "keyboard" });
-  assert.equal(paramsAt(cmds, 0).type, "keyUp");
-  assert.equal(paramsAt(cmds, 0).modifiers, 2);
-});
-
-test("keyboard rejects a missing key and unknown action", () => {
-  assert.throws(() => mapInputEventToCdp({ action: "keydown", key: "", type: "keyboard" }), codeIs("invalid_input"));
-  assert.throws(() => mapInputEventToCdp({ action: "hold", key: "a", type: "keyboard" }), codeIs("invalid_input"));
-});
-
-test("keyboard defaults non-finite modifiers to 0", () => {
-  const cmds = mapInputEventToCdp({ action: "keydown", key: "a", modifiers: "nope", type: "keyboard" });
-  assert.equal(paramsAt(cmds, 0).modifiers, 0);
+test("Remote Surface input events are not mapped to raw CDP commands", () => {
+  // A real CDP session hands these to the assembled backend; this legacy mapper
+  // must not accept a shape it cannot honour (e.g. a modifier name list).
+  for (const type of ["keyboard", "pointer", "text"]) {
+    assert.throws(() => mapInputEventToCdp({ action: "keydown", key: "a", type }), codeIs("invalid_input"));
+  }
 });
 
 test("touch start/move include the touch point; touchEnd sends empty touchPoints", () => {

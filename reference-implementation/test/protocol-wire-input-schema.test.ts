@@ -202,3 +202,81 @@ test("accepts the neko viewer's bare remote-copy request and nothing else on it"
 	assert.equal(parseReferenceWireInputPayload({ type: "copy" }).type, "copy");
 	assertRejected({ text: "x", type: "copy" });
 });
+
+// A minimal valid event of each type, and the fields it can carry. An integer
+// field must reject a fraction: the CDP layer would otherwise coerce it, e.g.
+// button 0.5 to the left button.
+const BASE_EVENTS = {
+	keyboard: { action: "keydown", key: "a", type: "keyboard" },
+	mouse: { action: "click", type: "mouse", x: 1, y: 1 },
+	pointer: { action: "pointerdown", type: "pointer", x: 1, y: 1 },
+	scroll: { deltaX: 1, deltaY: 1, type: "scroll", x: 1, y: 1 },
+	touch: { action: "touchstart", type: "touch", x: 1, y: 1 },
+	viewport: { height: 600, type: "viewport", width: 800 },
+} as const;
+
+const INTEGER_FIELDS: ReadonlyArray<
+	readonly [keyof typeof BASE_EVENTS, string, number]
+> = [
+	["keyboard", "keysym", 65_288],
+	["keyboard", "location", 1],
+	["keyboard", "wireSeq", 1],
+	["mouse", "button", 1],
+	["mouse", "wireSeq", 1],
+	["pointer", "button", 0],
+	["pointer", "buttons", 1],
+	["pointer", "clickCount", 1],
+	["pointer", "pointerId", 1],
+	["touch", "id", 1],
+	["viewport", "height", 600],
+	["viewport", "screenHeight", 900],
+	["viewport", "screenWidth", 1200],
+	["viewport", "width", 800],
+];
+
+const FLOAT_FIELDS: ReadonlyArray<
+	readonly [keyof typeof BASE_EVENTS, string, number]
+> = [
+	["keyboard", "timestamp", 1.5],
+	["mouse", "x", 1.5],
+	["mouse", "y", 1.5],
+	["pointer", "deltaX", 0.5],
+	["pointer", "deltaY", 0.5],
+	["pointer", "height", 2.5],
+	["pointer", "pressure", 0.5],
+	["pointer", "tiltX", 1.5],
+	["pointer", "tiltY", 1.5],
+	["pointer", "timestamp", 1.5],
+	["pointer", "width", 2.5],
+	["pointer", "x", 1.5],
+	["pointer", "y", 1.5],
+	["scroll", "deltaX", 0.5],
+	["scroll", "deltaY", 0.5],
+	["touch", "x", 1.5],
+	["viewport", "deviceScaleFactor", 2.5],
+];
+
+test("integer fields accept an integer and reject a fraction", () => {
+	for (const [type, field, value] of INTEGER_FIELDS) {
+		assert.equal(
+			parseReferenceWireInputPayload({ ...BASE_EVENTS[type], [field]: value })[
+				field
+			],
+			value,
+			`${type}.${field}`,
+		);
+		assertRejected({ ...BASE_EVENTS[type], [field]: value + 0.5 });
+	}
+});
+
+test("measurement fields accept a fraction", () => {
+	for (const [type, field, value] of FLOAT_FIELDS) {
+		assert.equal(
+			parseReferenceWireInputPayload({ ...BASE_EVENTS[type], [field]: value })[
+				field
+			],
+			value,
+			`${type}.${field}`,
+		);
+	}
+});

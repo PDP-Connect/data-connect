@@ -341,8 +341,8 @@ function hostPageTargetResolver(cdpHttpUrl: string, resolveExactTarget: ResolveT
  * DOM event the way real touchscreen hardware does through the compositor's
  * gesture recognizer — verified live against a Reddit reCAPTCHA checkbox: a
  * touch tap at the checkbox's exact coordinates left it unchecked, while a
- * mouse click at the same coordinates advanced the challenge. remote-surface
- * 1.5.2's neko backend already works around this for its own transport
+ * mouse click at the same coordinates advanced the challenge. remote-surface's
+ * neko backend already works around this for its own transport
  * (`NekoPointerController`, "canonical tap-to-click pattern": buttonDown +
  * buttonUp instead of native touch), but `dispatchCdpPointerInput` in
  * `@opendatalabs/remote-surface/backends/cdp` still branches on
@@ -1331,10 +1331,21 @@ export function createCdpCompanion({
     });
   }
 
-  async function start(viewport?: Viewport): Promise<void> {
+  // Concurrent callers share one in-flight start: a second one must not build
+  // another backend and orphan the first lifecycle (screencast, subscription).
+  let starting: Promise<void> | null = null;
+
+  function start(viewport?: Viewport): Promise<void> {
     if (started) {
-      return;
+      return Promise.resolve();
     }
+    starting ??= startBackend(viewport).finally(() => {
+      starting = null;
+    });
+    return starting;
+  }
+
+  async function startBackend(viewport?: Viewport): Promise<void> {
     await ensureOpen();
     await setTargetDiscovery(true, "cdp_target_discovery_failed");
     serverBackend = createServerBackend(viewport);
@@ -1439,6 +1450,11 @@ export function createCdpCompanion({
         const normalized = event.type === "pointer" ? normalizeTouchPointerInputForCdp(event) : event;
         await backendLifecycle.input(normalized as unknown as RemoteSurfaceInputPayload);
         return;
+      }
+      // A remote-copy request is the neko viewer's. A CDP session reads the
+      // selection through readRemoteSelection(); this channel cannot return it.
+      if (event.type === "copy") {
+        throw codedError("Remote copy is not supported on this streaming backend", "clipboard_unsupported");
       }
       if (event.type === "clipboard" && event.action === "local_to_remote") {
         if (!backendLifecycle) {

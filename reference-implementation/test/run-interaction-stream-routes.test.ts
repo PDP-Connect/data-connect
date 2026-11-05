@@ -152,6 +152,26 @@ test("viewport wire normalizes before validating so fractional dimensions never 
   assert.deepEqual(normalizeReferenceWireViewportPayload({ height: 844.9, width: 390.9 }), { height: 844, width: 390 });
 });
 
+test("viewport wire applies the input schema's bounds", () => {
+  assert.equal(normalizeReferenceWireViewportPayload({ height: 800, width: 1_000_000_000 }), null);
+  assert.equal(normalizeReferenceWireViewportPayload({ height: 1_000_000_000, width: 800 }), null);
+  assert.deepEqual(
+    normalizeReferenceWireViewportPayload({
+      deviceScaleFactor: 100,
+      height: 800,
+      screenHeight: 1_000_000_000,
+      screenWidth: 1_000_000_000,
+      width: 400,
+    }),
+    { height: 800, width: 400 }
+  );
+  assert.deepEqual(normalizeReferenceWireViewportPayload({ deviceScaleFactor: 8, height: 800, width: 400 }), {
+    deviceScaleFactor: 8,
+    height: 800,
+    width: 400,
+  });
+});
+
 interface MakeLeaseManagerOptions {
   connectorId?: string;
   hostCdp?: boolean;
