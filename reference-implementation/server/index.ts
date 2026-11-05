@@ -7,6 +7,8 @@
  * Combined AS + RS implementing PDPP v0.1.0 core spec.
  * Starts on port 7662 (AS/introspection) and 7663 (RS query API).
  */
+import { queueStartupSearchIndexRetry } from "./startup-search-index-retry.ts";
+import { currentStorageGeneration } from "./storage-generation.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
@@ -912,6 +914,8 @@ interface ServerOpts {
   } | null;
   trustedProxies?: string | null;
   ownerToken?: string | null;
+  /** Single-use capability for synthetic retained-state restart tests. */
+  testOnlyAlreadyAdmittedPostgresChildAttachment?: string;
   postgresBootstrapLockTimeoutMs?: number;
   postgresSemanticHnswMaintenanceImpl?: typeof schedulePostgresSemanticHnswMaintenance;
   preRegisteredPublicClients?: unknown;
@@ -1286,10 +1290,12 @@ async function collectRetrievalStartupBackfillManifests({
 }
 
 async function runRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1311,6 +1317,7 @@ async function runRetrievalStartupBackfill({
       logger.info({ connectorId }, "retrieval startup backfill connector started");
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
       await lexicalIndexBackfillForManifest({
+        generation,
         log: (msg) => logger.info(msg),
         manifest: manifest as never,
         signal,
@@ -1318,6 +1325,7 @@ async function runRetrievalStartupBackfill({
       const semanticBackend = getSemanticBackend();
       if (semanticBackend?.available()) {
         await semanticIndexBackfillForManifest({
+          generation,
           log: (msg) => logger.info(msg),
           manifest: manifest as never,
           signal,
@@ -1332,6 +1340,11 @@ async function runRetrievalStartupBackfill({
         return;
       }
       logger.warn({ connectorId, err }, "retrieval startup backfill failed for connector");
+      try {
+        await queueStartupSearchIndexRetry(manifest as never, generation);
+      } catch (queueError) {
+        logger.warn({ connectorId, err, queueError }, "retrieval startup backfill retry queue write failed");
+      }
     }
   }
 
@@ -1342,10 +1355,12 @@ async function runRetrievalStartupBackfill({
 }
 
 function scheduleRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1357,7 +1372,7 @@ function scheduleRetrievalStartupBackfill({
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill scheduled after AS/RS listen");
 
   return new Promise((resolve) => setImmediate(resolve))
-    .then(() => runRetrievalStartupBackfill({ logger, manifests, signal }))
+    .then(() => runRetrievalStartupBackfill({ generation, logger, manifests, signal }))
     .catch((err) => {
       // Abort-driven exits travel through this catch when the loop
       // re-throws an AbortError-like value before reaching the inner
@@ -8744,6 +8759,9 @@ export async function startServer(opts: ServerOpts = {}) {
     ...(opts.postgresBootstrapLockTimeoutMs === undefined
       ? {}
       : { bootstrapLockTimeoutMs: opts.postgresBootstrapLockTimeoutMs }),
+    ...(opts.testOnlyAlreadyAdmittedPostgresChildAttachment === undefined
+      ? {}
+      : { testOnlyAlreadyAdmittedChildAttachment: opts.testOnlyAlreadyAdmittedPostgresChildAttachment }),
     log: (msg: string) => logger.info(msg),
   });
   const uninstallRecoveryStore = createConnectorInstallStore();
@@ -9685,6 +9703,7 @@ export async function startServer(opts: ServerOpts = {}) {
   });
   await schedulerManager.start();
   const startupBackfillAbortController = new AbortController();
+  const startupBackfillGeneration = currentStorageGeneration();
   const startupBackfillDone = manifestReconciliationDone
     .then(() =>
       collectRetrievalStartupBackfillManifests({
@@ -9694,6 +9713,7 @@ export async function startServer(opts: ServerOpts = {}) {
     )
     .then((manifests) =>
       scheduleRetrievalStartupBackfill({
+        generation: startupBackfillGeneration,
         logger,
         manifests,
         signal: startupBackfillAbortController.signal,

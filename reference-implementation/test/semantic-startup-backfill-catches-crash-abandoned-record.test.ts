@@ -448,6 +448,13 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
           orphanStreamCleanup: false,
         });
       }
+      async function repairWithLog(stream: string, log: (message: string) => void) {
+        await semanticIndexBackfillForManifest({
+          log,
+          manifest: pinned(stream),
+          orphanStreamCleanup: false,
+        });
+      }
       async function rows(stream = "items") {
         return sql(
           `SELECT scope_key, record_key, input_identity FROM ${table} WHERE connector_instance_id = $1 AND scope_key = $2 ORDER BY record_key`,
@@ -505,6 +512,7 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
         vector,
         writes,
         pinned,
+        repairWithLog,
         childAttachment,
       };
     }
@@ -660,6 +668,123 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
             );
           })
       );
+
+    await t.test(
+      "nonparticipating zero-state repeated repairs report cleanup attempts without claiming stale data was dropped",
+      async () =>
+        fixture(async (f) => {
+          await f.ingest("k1", "ordinary record without semantic fields");
+          const noFields = {
+            ...f.manifest,
+            streams: f.manifest.streams
+              .filter((stream) => stream.name === "items")
+              .map((stream) => ({ ...stream, query: { search: {} } })),
+          };
+          await registerConnector(noFields, { backfillRetrievalIndexes: false });
+          const pinnedNoFields = { ...noFields, connector_instance_id: f.instance };
+          const logs: string[] = [];
+          await semanticIndexBackfillForManifest({
+            log: (message) => logs.push(message),
+            manifest: pinnedNoFields,
+            orphanStreamCleanup: false,
+          });
+          await semanticIndexBackfillForManifest({
+            log: (message) => logs.push(message),
+            manifest: pinnedNoFields,
+            orphanStreamCleanup: false,
+          });
+          assert.equal(logs.length, 2, "each repair says it checked cleanup");
+          assert.ok(logs.every((message) => message.includes("checking cleanup")));
+          assert.ok(logs.every((message) => !message.includes("dropping stale")));
+          assert.deepEqual(await f.rows(), [], "no semantic vectors are created for a nonparticipating stream");
+          assert.equal(
+            (
+              await f.sql("SELECT 1 FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = 'items'", [
+                f.instance,
+              ])
+            ).length,
+            0,
+            "zero-state cleanup does not create completion metadata"
+          );
+          assert.equal(
+            (
+              await f.sql(
+                "SELECT 1 FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND stream = 'items'",
+                [f.instance]
+              )
+            ).length,
+            0,
+            "zero-state cleanup does not create progress"
+          );
+        })
+    );
+
+    await t.test("completion log follows the final metadata and progress transaction", async () =>
+      fixture(async (f) => {
+        await f.ingest("k1", "completion transaction fault");
+        const completionLogs: string[] = [];
+        const failTrigger = "fail_semantic_completion_meta";
+        try {
+          if (kind === "postgres") {
+            await f.sql(
+              "CREATE OR REPLACE FUNCTION semantic_test_fail_completion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'completion metadata failure'; END $$"
+            );
+            await f.sql(
+              `CREATE TRIGGER ${failTrigger} BEFORE INSERT OR UPDATE ON semantic_search_meta FOR EACH ROW EXECUTE FUNCTION semantic_test_fail_completion()`
+            );
+          } else {
+            getDb().exec(
+              `CREATE TRIGGER ${failTrigger} BEFORE INSERT ON semantic_search_meta BEGIN SELECT RAISE(ABORT, 'completion metadata failure'); END;`
+            );
+          }
+          await assert.rejects(
+            f.repairWithLog("items", (message) => {
+              if (message.includes("Semantic index rebuild completed")) {
+                completionLogs.push(message);
+              }
+            }),
+            (error) => error instanceof Error && error.message.includes("completion metadata failure")
+          );
+          assert.equal(completionLogs.length, 0, "a failed final transaction cannot announce completion");
+          assert.equal(
+            (
+              await f.sql(
+                "SELECT 1 FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND stream = 'items'",
+                [f.instance]
+              )
+            ).length,
+            1,
+            "the failed final transaction retains progress for retry"
+          );
+        } finally {
+          if (kind === "postgres") {
+            await f.sql(`DROP TRIGGER IF EXISTS ${failTrigger} ON semantic_search_meta`);
+            await f.sql("DROP FUNCTION IF EXISTS semantic_test_fail_completion()");
+          } else {
+            getDb().exec(`DROP TRIGGER IF EXISTS ${failTrigger}`);
+          }
+        }
+        await f.repairWithLog("items", (message) => {
+          if (message.includes("Semantic index rebuild completed")) {
+            completionLogs.push(message);
+          }
+        });
+        assert.equal(completionLogs.length, 1, "successful retry emits one completion event");
+        assert.equal(
+          (
+            await f.sql(
+              "SELECT 1 FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND stream = 'items'",
+              [f.instance]
+            )
+          ).length,
+          0,
+          "successful retry commits progress deletion"
+        );
+        const calls = f.inputs.length;
+        await f.repair("items");
+        assert.equal(f.inputs.length, calls, "unchanged second pass reuses committed input identities");
+      })
+    );
 
     await t.test(
       "legacy NULL trailing orphan/removed field/empty canonical stream are deleted, with wildcard and other-instance siblings intact",

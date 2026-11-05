@@ -22,9 +22,11 @@
  * for that scope.
  */
 
-import { exec, getOne, iterate, referenceQueries } from "../../lib/db.ts";
+import { exec, getOne, iterate, referenceQueries, writeTransaction } from "../../lib/db.ts";
+import { withConnectorInstanceControlPlaneWrite } from "../connector-instance-write-coordinator.ts";
 import type { PostgresTransactionClient } from "../postgres-storage.ts";
-import { isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
+import { isPostgresStorageBackend, postgresQuery, withPostgresTransaction } from "../postgres-storage.ts";
+import { assertCurrentStorageGeneration } from "../storage-generation.ts";
 
 interface SqlClient {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
@@ -344,4 +346,100 @@ export async function countDirtySearchIndexScopes(): Promise<number> {
   }
   const row = getOne<{ n: number }>(referenceQueries.searchIndexDirtyCountDirty, []);
   return row?.n ?? 0;
+}
+
+/** Startup failures preserve retry policy; ingest alone resets changed-input history.
+ * Discover extant streams inside the same instance fence as deletion. No instance
+ * row is required for legacy direct ingest, but retained/index state is required.
+ */
+export async function markStartupSearchIndexFailure({
+  connectorId,
+  connectorInstanceId,
+  generation,
+}: {
+  connectorId: string;
+  connectorInstanceId: string;
+  generation: number;
+}): Promise<void> {
+  await withConnectorInstanceControlPlaneWrite(connectorInstanceId, async () => {
+    assertCurrentStorageGeneration(generation);
+    const now = new Date().toISOString();
+    if (isPostgresStorageBackend()) {
+      await withPostgresTransaction(
+        async (client) => {
+          assertCurrentStorageGeneration(generation);
+          const extant = await client.query<{ stream: string }>(
+            `SELECT stream FROM records WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM lexical_search_meta WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM semantic_search_meta WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT stream FROM lexical_search_index WHERE connector_instance_id = $1 AND connector_id = $2
+           UNION SELECT (scope_key::jsonb)->>0 AS stream FROM semantic_search_blob WHERE connector_instance_id = $1 AND connector_id = $2`,
+            [connectorInstanceId, connectorId]
+          );
+          for (const { stream } of extant.rows) {
+            // Extant orphan streams must also be repaired even after manifest removal.
+            assertCurrentStorageGeneration(generation);
+            // biome-ignore lint/performance/noAwaitInLoops: One connection's stream batch shares its deletion fence and transaction.
+            await client.query(
+              `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision, operator_parked)
+             SELECT $1, $2, $3, 1, $4, 1, 0
+             WHERE NOT EXISTS (SELECT 1 FROM connector_instances WHERE connector_instance_id = $1 AND connector_id <> $2)
+               AND NOT EXISTS (SELECT 1 FROM connector_instance_tombstones WHERE connector_instance_id = $1)
+             ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
+               connector_id = excluded.connector_id,
+               marked_at = CASE WHEN search_index_dirty.dirty <> 0 THEN search_index_dirty.marked_at ELSE excluded.marked_at END,
+               attempts = CASE WHEN search_index_dirty.dirty <> 0 OR search_index_dirty.operator_parked <> 0 THEN search_index_dirty.attempts ELSE 0 END,
+               next_attempt_at = CASE WHEN search_index_dirty.dirty <> 0 OR search_index_dirty.operator_parked <> 0 THEN search_index_dirty.next_attempt_at ELSE NULL END,
+               dirty = 1, revision = search_index_dirty.revision + 1`,
+              [connectorInstanceId, connectorId, stream, now]
+            );
+          }
+          assertCurrentStorageGeneration(generation);
+        },
+        { lockConnectorInstanceId: connectorInstanceId }
+      );
+      return;
+    }
+    writeTransaction(() => {
+      assertCurrentStorageGeneration(generation);
+      for (const { stream } of [
+        ...iterate<{ stream: string }>(
+          referenceQueries.searchIndexDirtyStartupStreams,
+          Array.from({ length: 7 }, () => [connectorInstanceId, connectorId]).flat()
+        ),
+      ]) {
+        exec(referenceQueries.searchIndexDirtyMarkStartupFailure, [
+          connectorInstanceId,
+          connectorId,
+          stream,
+          now,
+          connectorInstanceId,
+          connectorId,
+          connectorInstanceId,
+        ]);
+      }
+    });
+  });
+}
+
+/** Supplement backfill discovery with orphan index instances, still subject to manifest pins. */
+export async function listStartupSearchIndexInstances(connectorId: string): Promise<string[]> {
+  if (isPostgresStorageBackend()) {
+    const result = await postgresQuery<{ connector_instance_id: string }>(
+      `SELECT connector_instance_id FROM lexical_search_meta WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM lexical_search_index WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM semantic_search_meta WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM semantic_search_backfill_progress WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM semantic_search_blob WHERE connector_id = $1`,
+      [connectorId]
+    );
+    return result.rows.map((row) => row.connector_instance_id);
+  }
+  return [
+    ...iterate<{ connector_instance_id: string }>(
+      referenceQueries.searchIndexDirtyStartupIndexInstances,
+      Array.from({ length: 6 }, () => connectorId)
+    ),
+  ].map((row) => row.connector_instance_id);
 }
