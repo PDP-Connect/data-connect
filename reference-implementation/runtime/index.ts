@@ -5635,6 +5635,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         strict: strictDoneError,
         observationDeclared: profileDeclaration.observationDeclared,
         hasEmittedId: (id) => observationRun.hasEmittedId(id),
+        idLedgerOverflowed: observationRun.idLedgerOverflowed(),
       });
       if (validatedDoneError instanceof Error) {
         throw invalidDoneEnvelope(validatedDoneError, msg);

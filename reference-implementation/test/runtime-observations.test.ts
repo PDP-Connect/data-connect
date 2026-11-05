@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { validateDoneError } from "../runtime/done-validators.ts";
 import {
   type AcceptOutcome,
   type CreateObservationRunInput,
@@ -224,6 +225,43 @@ test("hasEmittedId reports rejected ids as well as accepted ones", () => {
   });
   assert.equal(run.hasEmittedId("h1"), true);
   assert.equal(run.hasEmittedId("never"), false);
+});
+
+test("a failed DONE citing an id past the full id ledger is kept without the unverifiable id", () => {
+  const { run } = harness({ limits: { maxFacts: 64, maxPerWindow: 1000 } });
+  for (let i = 0; i < 64; i += 1) {
+    assert.equal(run.accept(waitExpired(`c${i}`)).status, "accepted");
+  }
+  // The connector did emit this id, but the bounded ledger could not keep it.
+  assert.equal(rejectedReason(run.accept(waitExpired("c64"))), "count_exceeded");
+  const result = validateDoneError(
+    "failed",
+    { basis: ["c0", "c64"], message: "stopped", retryable: false },
+    {
+      hasEmittedId: (id) => run.hasEmittedId(id),
+      idLedgerOverflowed: run.idLedgerOverflowed(),
+      observationDeclared: true,
+      strict: true,
+    }
+  );
+  assert.ok(!(result instanceof Error), "a connector that overflowed the ledger must still get its terminal outcome");
+  assert.deepEqual(result?.basis, ["c0"]);
+});
+
+test("a failed DONE citing an id the connector never emitted is still rejected while the ledger has room", () => {
+  const { run } = harness();
+  run.accept(waitExpired("c0"));
+  const result = validateDoneError(
+    "failed",
+    { basis: ["never"], message: "stopped", retryable: false },
+    {
+      hasEmittedId: (id) => run.hasEmittedId(id),
+      idLedgerOverflowed: run.idLedgerOverflowed(),
+      observationDeclared: true,
+      strict: true,
+    }
+  );
+  assert.ok(result instanceof Error);
 });
 
 test("a descriptor error never echoes the rejected value", () => {

@@ -25,7 +25,7 @@ test("portable DONE basis can cite more than 64 earlier observations without inv
   // supported observation count, not a maximum basis length.
   const basis = Array.from({ length: 65 }, (_, index) => `observation_${index}`);
   const result = validateDoneError("failed", { message: "failed", retryable: false, basis }, {
-    strict: true, observationDeclared: true, hasEmittedId: (id) => basis.includes(id),
+    strict: true, observationDeclared: true, hasEmittedId: (id) => basis.includes(id), idLedgerOverflowed: false,
   });
   assert.ok(!(result instanceof Error), "valid earlier ids must not be rejected by an invented 64-id cap");
   assert.deepEqual(result?.basis, basis);

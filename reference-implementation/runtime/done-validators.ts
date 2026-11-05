@@ -93,12 +93,19 @@ export interface DoneErrorContract {
   readonly observationDeclared: boolean;
   /** True when the connector emitted this OBSERVATION id earlier in the run. */
   readonly hasEmittedId: (id: string) => boolean;
+  /**
+   * True when the runtime's bounded id ledger refused ids. A cited id missing
+   * from the ledger may then still have been emitted, so it cannot be proven
+   * false.
+   */
+  readonly idLedgerOverflowed: boolean;
 }
 
 const LEGACY_DONE_ERROR_CONTRACT: DoneErrorContract = {
   strict: false,
   observationDeclared: false,
   hasEmittedId: () => false,
+  idLedgerOverflowed: false,
 };
 
 export function validateDoneError(
@@ -163,6 +170,9 @@ export function validateDoneError(
  * Section 5.8: `basis` is OPTIONAL, needs a declared OBSERVATION capability,
  * and cites only ids the connector emitted in this run. Invalid-but-emitted
  * ids count as emitted. Returns the ids, undefined when absent, or an Error.
+ * After the id ledger overflowed, an id missing from it is dropped instead of
+ * rejected: the runtime cannot show it was never emitted, and a basis it cannot
+ * verify authorizes nothing.
  */
 function validateDoneBasis(basis: unknown, contract: DoneErrorContract): readonly string[] | undefined | Error {
   if (basis === undefined) {
@@ -174,12 +184,18 @@ function validateDoneBasis(basis: unknown, contract: DoneErrorContract): readonl
   if (!Array.isArray(basis)) {
     return new Error("Connector emitted invalid DONE.error.basis: expected array of observation ids");
   }
+  const verified: string[] = [];
   for (const id of basis) {
-    if (!(isObservationIdSyntax(id) && contract.hasEmittedId(id))) {
+    if (!isObservationIdSyntax(id)) {
+      return new Error("Connector emitted DONE.error.basis citing an OBSERVATION id it did not emit");
+    }
+    if (contract.hasEmittedId(id)) {
+      verified.push(id);
+    } else if (!contract.idLedgerOverflowed) {
       return new Error("Connector emitted DONE.error.basis citing an OBSERVATION id it did not emit");
     }
   }
   // The emitted-id ledger bounds unique citations. Duplicate citations add no
   // diagnosis authority and need not expand the stored record.
-  return [...new Set(basis)] as string[];
+  return [...new Set(verified)];
 }

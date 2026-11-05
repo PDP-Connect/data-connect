@@ -198,6 +198,12 @@ export interface ObservationRun {
    * fact was accepted or rejected. The ledger is bounded by the fact limit.
    */
   hasEmittedId: (id: string) => boolean;
+  /**
+   * True once an id was refused because the ledger was full. Later ids may
+   * have been emitted without being recorded, so absence from the ledger no
+   * longer proves the connector never emitted an id.
+   */
+  idLedgerOverflowed: () => boolean;
   snapshot: () => ObservationSnapshot;
 }
 
@@ -421,6 +427,7 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
   const facts: StoredFact[] = [];
   const factsById = new Map<string, StoredFact>();
   const observedIds = new Set<string>();
+  let idLedgerOverflowed = false;
   const defects = new Map<string, RuntimeDefect>();
   // Keyed by origin and action. The key space is closed (2 origins x 8
   // actions), so the record is bounded without a cap.
@@ -512,6 +519,7 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
         return reject("duplicate_id", false);
       }
       if (observedIds.size >= limits.maxFacts) {
+        idLedgerOverflowed = true;
         return reject("count_exceeded", true);
       }
       observedIds.add(value.id);
@@ -636,6 +644,7 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
     diagnose,
     gateRecoveryHint,
     hasEmittedId,
+    idLedgerOverflowed: () => idLedgerOverflowed,
     snapshot,
   };
 }
