@@ -17,7 +17,7 @@ mock.module("../lib/owner-token.ts", {
 
 process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY ??= "catalog integration fixture key";
 
-test("Add catalog helper and real ref-client exhaust the real HTTP owner feed beyond 100 catalog IDs", async (t) => {
+async function startOwnerFeedServer(t) {
   const { startServer } = await import("../../../../../../reference-implementation/server/index.ts");
   const { closeDb, getDb } = await import("../../../../../../reference-implementation/server/db.ts");
   const { createSqliteAcquisitionBatchStore } = await import(
@@ -45,6 +45,12 @@ test("Add catalog helper and real ref-client exhaust the real HTTP owner feed be
   });
   await server.startupBackfillDone;
   asUrl = `http://localhost:${server.asPort}`;
+  return { closeDb, getDb, createSqliteAcquisitionBatchStore, reconcileConnectorSummaryEvidence, server };
+}
+
+test("Add catalog helper and real ref-client exhaust the real HTTP owner feed beyond 100 catalog IDs", async (t) => {
+  const { createSqliteAcquisitionBatchStore, getDb, reconcileConnectorSummaryEvidence } =
+    await startOwnerFeedServer(t);
   const db = getDb();
   const now = "2026-11-01T00:00:00.000Z";
   const catalogIds = Array.from({ length: 150 }, (_, i) => `catalog-${i}`);
@@ -128,4 +134,65 @@ test("Add catalog helper and real ref-client exhaust the real HTTP owner feed be
     )
   );
   assert.ok(requests[1]?.searchParams.get("cursor"));
+});
+
+test("scoped connector summaries sent by the real client always continue or fail on the first page", async (t) => {
+  const { getDb } = await startOwnerFeedServer(t);
+  const db = getDb();
+  const now = "2026-11-01T00:00:00.000Z";
+  for (const id of ["scope-a", "scope-b"]) {
+    db.prepare("INSERT INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)").run(
+      id,
+      JSON.stringify({
+        connector_id: id,
+        display_name: id,
+        protocol_version: "0.1.0",
+        version: "1.0.0",
+        capabilities: { public_listing: { tier: "supported" } },
+        streams: [{ name: "books", primary_key: ["id"] }],
+      }),
+      now
+    );
+  }
+  const insert = db.prepare(`INSERT INTO connector_instances(connector_instance_id, owner_subject_id, connector_id,
+    display_name, status, source_kind, source_binding_key, source_binding_json, created_at, updated_at, revoked_at)
+    VALUES(?, ?, ?, ?, ?, 'manual', ?, '{}', ?, ?, NULL)`);
+  for (const [id, connector] of [
+    ["walk-1", "scope-a"],
+    ["walk-2", "scope-a"],
+    ["walk-3", "scope-b"],
+  ]) {
+    insert.run(id, "owner_local", connector, id, "active", id, now, now);
+  }
+  const requests = [];
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", (input, init) => {
+    requests.push(new URL(input instanceof Request ? input.url : input));
+    return realFetch(input, init);
+  });
+  const { listConnectorSummaries } = await import("../lib/ref-client.ts");
+  const scope = (padding) => [
+    "scope-a",
+    "scope-b",
+    ...Array.from({ length: 98 }, (_, i) => `${"~".repeat(padding)}${i.toString(36)}`),
+  ];
+  async function walk(connectorId) {
+    const seen = [];
+    let cursor;
+    for (let pages = 0; pages < 10; pages += 1) {
+      const page = await listConnectorSummaries({ connectorId, cursor, limit: 1, profile: "retained_count_summary" });
+      seen.push(...page.data.map((row) => row.connection_id));
+      if (!page.has_more) {
+        return seen;
+      }
+      cursor = page.next_cursor;
+    }
+    throw new Error("scope did not terminate");
+  }
+  // `~` is one byte in an id and three on the wire (URLSearchParams escapes it),
+  // so the padding moves the scope from "fits" to "cannot continue".
+  assert.deepEqual((await walk(scope(1))).sort(), ["walk-1", "walk-2", "walk-3"]);
+  requests.length = 0;
+  await assert.rejects(walk(scope(49)), /too large to continue/);
+  assert.equal(requests.length, 1, "the refusal comes from page 1, before any continuation is sent");
 });

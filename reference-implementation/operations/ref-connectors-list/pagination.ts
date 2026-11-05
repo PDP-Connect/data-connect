@@ -12,15 +12,8 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEq
 import { resolveCredentialEncryptionKey } from "../../server/stores/credential-encryption.ts";
 
 export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
-/**
- * Byte budget for the `connector_id` scope as a client writes it in the query
- * string (`connector_id=<id>&...`). The client re-sends the whole scope with
- * every continuation, so the scope is what limits request size. Node refuses a
- * request whose header block exceeds 16,384 bytes (HTTP 431) before any handler
- * runs. Half of that is left for the cursor (about 400 bytes), the request line
- * and the headers, so a scope accepted for page 1 always fits on page 2.
- */
-export const CONNECTOR_SUMMARY_SCOPE_MAX_BYTES = 8192;
+/** Accepted maximum for a repeated `connector_id` SET scope (R4/design doc "Minimal contract"). Same deliberate ceiling as the page size. */
+export const CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX = 100;
 const CONNECTOR_SUMMARY_CURSOR_VERSION = 1;
 const CONNECTOR_SUMMARY_CURSOR_PREFIX = "rcs1.";
 const CURSOR_IV_BYTES = 12;
@@ -52,8 +45,9 @@ export type ConnectorSummaryPageProfile = "identity_inventory" | "retained_count
 /**
  * A `connector_id` scope on the page request: `null` = unfiltered fleet
  * page (unchanged prior behavior); a single string = the original one-id
- * filter; a readonly array = a repeated-value set of canonical distinct ids
- * (`?connector_id=A&connector_id=B&...`). Request bytes bound its size.
+ * filter; a readonly array = the bounded repeated-value SET scope (design
+ * doc "Minimal contract" — `?connector_id=A&connector_id=B&...`), 1..
+ * {@link CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} canonical distinct ids.
  */
 export type ConnectorIdScope = string | readonly string[] | null;
 
@@ -236,31 +230,19 @@ function parseSourcesVisibility(
  * single-id filter (not a set), so an existing single-id caller that happens
  * to be routed through array-producing middleware is unaffected.
  *
+ * Design doc "Minimal contract": the accepted maximum is
+ * {@link CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} distinct CANONICAL ids.
  * Deduplication happens AFTER canonicalization (`canonicalizeId`, supplied by
  * the host so this operation module never imports the connector-key
  * substrate) — a duplicate-after-canonicalization set is a typed invalid
  * request (design doc "Canonicalize... Deduplicate after canonicalization;
  * reject duplicates rather than making cursor scope ambiguous").
  */
-function assertConnectorScopeFitsRequest(ids: readonly string[]): void {
-  let bytes = ids.length - 1;
-  for (const id of ids) {
-    bytes += "connector_id=".length + Buffer.byteLength(encodeURIComponent(id));
-  }
-  if (bytes > CONNECTOR_SUMMARY_SCOPE_MAX_BYTES) {
-    throw new ConnectorSummaryPageRequestError(
-      "limit",
-      `connector_id scope must fit in ${CONNECTOR_SUMMARY_SCOPE_MAX_BYTES} bytes of query string so continuation requests fit the HTTP header limit`
-    );
-  }
-}
-
 function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: string) => string): ConnectorIdScope {
   if (rawConnectorId === undefined) {
     return null;
   }
   if (isNonEmptyString(rawConnectorId)) {
-    assertConnectorScopeFitsRequest([rawConnectorId]);
     return rawConnectorId;
   }
   if (!Array.isArray(rawConnectorId)) {
@@ -272,11 +254,16 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
   if (!rawConnectorId.every(isNonEmptyString)) {
     throw new ConnectorSummaryPageRequestError("limit", "every connector_id in the set must be a non-empty string");
   }
-  assertConnectorScopeFitsRequest(rawConnectorId as string[]);
   if (rawConnectorId.length === 1) {
     // A single-element repeated form is the single-id filter, byte-identical
     // request/cursor shape to the pre-existing `?connector_id=A` case.
     return rawConnectorId[0] as string;
+  }
+  if (rawConnectorId.length > CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX) {
+    throw new ConnectorSummaryPageRequestError(
+      "limit",
+      `connector_id set must contain at most ${CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} distinct canonical ids`
+    );
   }
   const canonical = (rawConnectorId as string[]).map(canonicalizeId);
   const distinct = new Set(canonical);
@@ -360,8 +347,8 @@ export function parseConnectorSummaryPageRequest(
  * The cursor binds the scope through the fixed-size `s` digest, which hashes
  * the canonical sorted scope (design doc: "a canonical ordered scope-set
  * fingerprint, not raw user ordering"), and never repeats the scope itself, so
- * cursor size does not grow with the scope. A set supplied in a different order
- * round-trips to the SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
+ * cursor size does not grow with the scope. A set supplied in a different
+ * order round-trips to the SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
  * Explore page) — every existing caller that omits it preserves the exact
  * prior cursor scope; the Sources page is the only caller that passes `true`.
  */
@@ -468,4 +455,36 @@ export function decodeConnectorSummaryPageCursor(
     connectorInstanceId: payload.i,
     createdAt: payload.t,
   };
+}
+
+/**
+ * Refuse to hand out a cursor the client cannot send back. The client repeats
+ * the whole request on every continuation, and Node answers HTTP 431 once the
+ * request line plus headers pass `maxHeaderBytes` (16,384 by default). Rather
+ * than predict that size from the scope, measure it: `requestBytes` is the
+ * request this page actually arrived as, in whatever encoding the client used.
+ * The continuation is the same request with the cursor added or replaced.
+ * `slackBytes` absorbs header changes between requests, such as a rotated
+ * cookie. Only a page that issues a cursor is checked, so a large scope that
+ * fits on one page still succeeds.
+ */
+export function assertContinuationFits(options: {
+  readonly currentCursor: string | undefined;
+  readonly maxHeaderBytes: number;
+  readonly nextCursor: string | null | undefined;
+  readonly requestBytes: number;
+  readonly slackBytes: number;
+}): void {
+  if (!options.nextCursor) {
+    return;
+  }
+  const delta = options.currentCursor
+    ? options.nextCursor.length - options.currentCursor.length
+    : "&cursor=".length + options.nextCursor.length;
+  if (options.requestBytes + delta + options.slackBytes > options.maxHeaderBytes) {
+    throw new ConnectorSummaryPageRequestError(
+      "cursor",
+      "this request is too large to continue: the next page request would exceed the HTTP header limit. Send fewer or shorter connector_id values, or omit connector_id and filter the full list."
+    );
+  }
 }

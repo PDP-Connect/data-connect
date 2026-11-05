@@ -22,6 +22,7 @@
 // `resolveOwnerConnectorNamespace` so the substrate lookup stays a single
 // implementation.
 
+import { maxHeaderSize } from "node:http";
 import type { BrowserProfilePurger, BrowserProfilePurgeResult } from "../browser-profile-purge.ts";
 import {
   executeRefConnectorScheduleGet,
@@ -40,6 +41,7 @@ import {
   type RefConnectorsRuntimeStatus,
 } from "../../operations/ref-connectors-list/index.ts";
 import {
+  assertContinuationFits,
   type ConnectorSummaryPageProfile,
   type ConnectorSummaryPageRequest,
   ConnectorSummaryPageRequestError,
@@ -59,7 +61,21 @@ interface RouteRequest {
   readonly body?: unknown;
   readonly params: Readonly<Record<string, string>>;
   readonly query: Readonly<Record<string, unknown>>;
+  /** The request as received on the wire; absent when a handler is called without a transport. */
+  readonly raw?: { readonly method?: string; readonly rawHeaders?: readonly string[]; readonly url?: string };
 }
+
+/** Bytes Node counts against its header limit: request line, header lines and the blank line. */
+function wireRequestBytes(raw: NonNullable<RouteRequest["raw"]>): number {
+  let bytes = Buffer.byteLength(`${raw.method ?? "GET"} ${raw.url ?? ""} HTTP/1.1\r\n\r\n`);
+  const headers = raw.rawHeaders ?? [];
+  for (let i = 0; i + 1 < headers.length; i += 2) {
+    bytes += Buffer.byteLength(`${headers[i]}: ${headers[i + 1]}\r\n`);
+  }
+  return bytes;
+}
+
+const CONTINUATION_HEADER_SLACK_BYTES = 512;
 
 interface RouteResponse {
   end: () => unknown;
@@ -511,6 +527,15 @@ export function mountRefConnectorsList(app: AppLike, ctx: MountRefConnectorsCont
           listConnectorSummariesPage: () =>
             listConnectorSummaryPage(ownerSubjectId, pageRequest) as unknown as RefConnectorsListPage,
         });
+        if (req.raw) {
+          assertContinuationFits({
+            currentCursor: typeof req.query.cursor === "string" ? req.query.cursor : undefined,
+            maxHeaderBytes: maxHeaderSize,
+            nextCursor: (envelope as { next_cursor?: string | null }).next_cursor,
+            requestBytes: wireRequestBytes(req.raw),
+            slackBytes: CONTINUATION_HEADER_SLACK_BYTES,
+          });
+        }
         res.json(envelope);
       } catch (err) {
         ctx.handleError(res, err);

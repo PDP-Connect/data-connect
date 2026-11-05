@@ -47,8 +47,9 @@ const OWNER_FLEET_COUNT = 1000;
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
 const SQLITE_IDENTITY_PAGE_INDEX = /USING INDEX idx_connector_instances_owner_identity_page/;
 // `SCAN json_each VIRTUAL TABLE` is expected and harmless: SQLite always
-// materializes the request-scoped JSON array itself as a virtual-table scan
-// (request bytes bound this input, which is never a table). The forbidden
+// materializes the small in-memory JSON array itself as a virtual-table scan
+// (the array has at most CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX=100
+// elements — a bounded, request-scoped input, never a table). The forbidden
 // outcome is a SCAN of `connector_instances` itself, which would mean the
 // composite index was NOT seeked and the query instead walked the owner's
 // full row set.
