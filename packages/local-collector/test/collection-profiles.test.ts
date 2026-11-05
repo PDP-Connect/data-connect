@@ -101,6 +101,24 @@ test("each pinned profile is the release it pins and declares its definition's b
   }
 });
 
+test("a collector's default streams include every required stream of its pinned profile", () => {
+  // A connector emits a stream only when it is requested, and the server counts
+  // a required stream that is never reported as unknown coverage. A pin that
+  // adds a required stream must therefore add it to the default stream set.
+  for (const pin of COLLECTION_PROFILE_PINS) {
+    const definition = LOCAL_COLLECTOR_DEFINITIONS.find((candidate) => candidate.connector_id === pin.connectorId);
+    assert.ok(definition, pin.connectorId);
+    const profile = JSON.parse(
+      readFileSync(new URL(`${pin.connectorKey}.json`, REFERENCE_PROFILE_DIR), "utf8")
+    ) as { streams: { name: string; required?: boolean }[] };
+    const requested = new Set<string>(definition.streams);
+    const missing = profile.streams
+      .filter((stream) => stream.required !== false && !requested.has(stream.name))
+      .map((stream) => stream.name);
+    assert.deepEqual(missing, [], `${pin.connectorId} never requests its required streams`);
+  }
+});
+
 test("the collector build compiles no connector code", () => {
   const tsconfig = readFileSync(new URL("../tsconfig.build.json", import.meta.url), "utf8");
   assert.doesNotMatch(tsconfig, /polyfill-connectors\/(connectors|src)/);

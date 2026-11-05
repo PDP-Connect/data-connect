@@ -1,12 +1,18 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/codex",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/codex",
+		"display": {
+			"name": "OpenAI Codex CLI"
+		}
+	},
 	"connector_key": "codex",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/codex",
-	"version": "0.3.0",
+	"version": "0.3.3",
 	"display_name": "OpenAI Codex CLI",
 	"brand": {
-		"icon": "icons/codex.svg",
+		"icon": "icon.svg",
 		"background_color": "#10A37F"
 	},
 	"runtime_requirements": {

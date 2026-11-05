@@ -6,6 +6,7 @@ import test from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { classifyConnectorSetupModality, type ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 
 const MANIFESTS: Record<string, unknown> = {
   chatgpt: {
@@ -669,3 +670,55 @@ test("optional capture may omit credentials, while wrong-kind and invalid bundle
     (error) => error instanceof StaticSecretRunCredentialError && error.code === "recovered_secret_bundle_invalid",
   );
 });
+
+// chatgpt 0.1.0 declared a sealed email-and-password setup; chatgpt 0.2.5
+// declares none. A connection that sealed credentials under 0.1.0 keeps its
+// stored credential after the upgrade, but no run reads or injects it.
+const CHATGPT_0_1_0_MANIFEST = {
+  capabilities: { human_interaction: ["manual_action"] },
+  runtime_requirements: { bindings: { browser: { required: true }, network: { required: true } } },
+  setup: {
+    credential_capture: {
+      fields: [
+        { autocomplete: "username", env: ["CHATGPT_USERNAME"], label: "ChatGPT email", name: "username", required: true, secret: true, type: "email" },
+        { autocomplete: "current-password", env: ["CHATGPT_PASSWORD"], label: "ChatGPT password", name: "password", required: true, secret: true, type: "password" },
+      ],
+      kind: "username_password",
+      label: "ChatGPT sign-in details",
+    },
+    modality: "static_secret",
+  },
+};
+const { setup: _removedSetup, ...CHATGPT_0_2_5_MANIFEST } = CHATGPT_0_1_0_MANIFEST;
+
+test(
+  "chatgpt 0.2.5 stops injecting a credential sealed under 0.1.0, leaves it stored, and does not fail the run",
+  withStore(async (store) => {
+    seedConnectorInstance({ connectorId: "chatgpt-pdpp", connectorInstanceId: "cin_chat", ownerSubjectId: "owner_1" });
+    await store.capture({
+      connectorInstanceId: "cin_chat",
+      credentialKind: "username_password",
+      now: NOW,
+      ownerSubjectId: "owner_1",
+      secret: JSON.stringify({ password: "chat-pw", username: "owner@example.test" }),
+    });
+    const args = { connectorId: "chatgpt-pdpp", connectorInstanceId: "cin_chat", ownerSubjectId: "owner_1" };
+
+    const before = await resolveStaticSecretRunEnv({ ...args, credentialStore: store, manifest: CHATGPT_0_1_0_MANIFEST });
+    assert.deepEqual(before, { CHATGPT_PASSWORD: "chat-pw", CHATGPT_USERNAME: "owner@example.test" });
+    assert.equal(classifyConnectorSetupModality("chatgpt", CHATGPT_0_1_0_MANIFEST as unknown as ConnectorManifestLike), "static_secret");
+
+    let recovered = 0;
+    const spy = {
+      recoverSecret: async (recoverArgs: { connectorInstanceId: string; ownerSubjectId: string }) => {
+        recovered += 1;
+        return store.recoverSecret(recoverArgs);
+      },
+    };
+    const after = await resolveStaticSecretRunEnv({ ...args, credentialStore: spy, manifest: CHATGPT_0_2_5_MANIFEST });
+    assert.equal(after, null, "no credential env reaches the 0.2.5 run");
+    assert.equal(recovered, 0, "the sealed credential is not read");
+    assert.notEqual(classifyConnectorSetupModality("chatgpt", CHATGPT_0_2_5_MANIFEST as unknown as ConnectorManifestLike), "static_secret");
+    assert.equal(await store.hasActiveCredential("cin_chat"), true, "the sealed credential stays stored");
+  })
+);
