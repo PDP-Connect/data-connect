@@ -288,3 +288,139 @@ test("a live transport still follows endpoint refreshes", async () => {
     ["/refreshed/input", "/refreshed/clipboard"]
   );
 });
+
+// The host logger of the stream page batches events into POST /api/stream-debug.
+// This stand-in sends that POST synchronously so a late log shows up as network use.
+function makeDebugPostingTransport() {
+  const hostLogs: string[] = [];
+  const transport = createPdppRemoteSurfaceTransport({
+    clipboardUrlRef: { current: "/clipboard" },
+    inputUrlRef: { current: "/input" },
+    logDebug: (event) => {
+      hostLogs.push(event);
+      fetch("/api/stream-debug", { body: JSON.stringify({ events: [event] }), method: "POST" }).catch(() => undefined);
+    },
+    presentationAttachmentReadyRef: { current: true },
+    viewportUrlRef: { current: "/viewport" },
+  });
+  return { hostLogs, transport };
+}
+
+const settleMacrotask = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a live transport logs a failed input POST through the host logger", async () => {
+  const { hostLogs, transport } = makeDebugPostingTransport();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return call.url === "/input" ? Promise.reject(new Error("offline")) : Promise.resolve(new Response("{}", { status: 202 }));
+    },
+    async () => {
+      transport.send({ text: "x", type: "text" });
+      await settleMacrotask();
+    }
+  );
+  assert.deepEqual(hostLogs, ["stream.remote_surface.input.error"]);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/input", "/api/stream-debug"]
+  );
+});
+
+test("an input fetch that rejects after disposal does not log or schedule a debug POST", async () => {
+  const { hostLogs, transport } = makeDebugPostingTransport();
+  const pending = Promise.withResolvers<Response>();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return pending.promise;
+    },
+    async () => {
+      transport.send({ text: "x", type: "text" });
+      transport.dispose();
+      pending.reject(new Error("socket hang up"));
+      await settleMacrotask();
+    }
+  );
+  assert.deepEqual(hostLogs, []);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/input"]
+  );
+});
+
+test("a non-2xx input reply after disposal does not log or schedule a debug POST", async () => {
+  const { hostLogs, transport } = makeDebugPostingTransport();
+  const pending = Promise.withResolvers<Response>();
+  const calls: FetchCall[] = [];
+  await withFetch(
+    (call) => {
+      calls.push(call);
+      return pending.promise;
+    },
+    async () => {
+      transport.send({ text: "x", type: "text" });
+      transport.dispose();
+      pending.resolve(new Response('{"error":{"message":"invalid_input"}}', { status: 400 }));
+      await settleMacrotask();
+    }
+  );
+  assert.deepEqual(hostLogs, []);
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["/input"]
+  );
+});
+
+test("a clipboard request that rejects or fails after disposal does not log or schedule a debug POST", async () => {
+  for (const settle of [
+    (pending: PromiseWithResolvers<Response>) => pending.reject(new Error("socket hang up")),
+    (pending: PromiseWithResolvers<Response>) =>
+      pending.resolve(new Response('{"error":{"message":"clipboard_denied"}}', { status: 403 })),
+  ]) {
+    const { hostLogs, transport } = makeDebugPostingTransport();
+    const pending = Promise.withResolvers<Response>();
+    const calls: FetchCall[] = [];
+    await withFetch(
+      (call) => {
+        calls.push(call);
+        return pending.promise;
+      },
+      async () => {
+        const ack = transport.sendClipboardText("secret");
+        transport.dispose();
+        settle(pending);
+        assert.equal(await ack, false);
+        await settleMacrotask();
+      }
+    );
+    assert.deepEqual(hostLogs, []);
+    assert.deepEqual(
+      calls.map((call) => call.url),
+      ["/clipboard"]
+    );
+  }
+});
+
+test("a disposed transport never calls the host logger from its skip and queue paths", async () => {
+  const hostLogs: string[] = [];
+  const inputUrlRef = { current: null as string | null };
+  const presentationAttachmentReadyRef = { current: false };
+  const transport = createPdppRemoteSurfaceTransport({
+    clipboardUrlRef: { current: "/clipboard" },
+    inputUrlRef,
+    logDebug: (event) => {
+      hostLogs.push(event);
+    },
+    presentationAttachmentReadyRef,
+    viewportUrlRef: { current: "/viewport" },
+  });
+  transport.send({ text: "before", type: "text" });
+  assert.deepEqual(hostLogs, ["stream.remote_surface.input.skip"], "a live transport logs a skipped input");
+  transport.dispose();
+  transport.send({ text: "after", type: "text" });
+  transport.send({ height: 600, requestId: 1, type: "viewport", width: 800 });
+  assert.deepEqual(hostLogs, ["stream.remote_surface.input.skip"]);
+});

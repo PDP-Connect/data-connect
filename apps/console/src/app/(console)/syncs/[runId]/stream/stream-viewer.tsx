@@ -145,10 +145,8 @@ import {
 } from "./stream-viewer-geometry.ts";
 import { normalizedPointerButton, readablePointerInput } from "./stream-viewer-pointer-input.ts";
 import { parseAttachedMessage } from "./stream-viewer-protocol.ts";
-import {
-  createPdppRemoteSurfaceTransport,
-  type PdppRemoteSurfaceTransport,
-} from "./stream-viewer-remote-surface-transport.ts";
+import { mountBrowserSurfaceViewer } from "./stream-viewer-browser-surface-lifecycle.ts";
+import type { PdppRemoteSurfaceTransport } from "./stream-viewer-remote-surface-transport.ts";
 import { getMountedNekoViewerSession } from "./stream-viewer-session-readiness.ts";
 import { createViewportWriters } from "./stream-viewport-writer.ts";
 import { sampleVideoSharpnessTelemetry } from "./stream-visual-quality.ts";
@@ -4814,54 +4812,25 @@ function BrowserSurface({
     if (!(node && canvas)) {
       return;
     }
-    let disposed = false;
-    const transport = createPdppRemoteSurfaceTransport({
+    return mountBrowserSurfaceViewer({
       clipboardUrlRef,
+      createViewer: (transport) =>
+        createRemoteSurfaceViewer({
+          canvas,
+          initialViewport: seedViewport,
+          mediaPlane: "canvas-frames",
+          touchMode: "native",
+          transport,
+        }),
       inputUrlRef,
       logDebug,
+      node,
+      onTransportMounted: (transport) => onTransportMountedRef.current(transport),
+      onViewerMounted: (viewer) => onViewerMountedRef.current(viewer),
       presentationAttachmentReadyRef,
+      transportRef,
       viewportUrlRef,
     });
-    const viewer = createRemoteSurfaceViewer({
-      canvas,
-      initialViewport: seedViewport,
-      mediaPlane: "canvas-frames",
-      touchMode: "native",
-      transport,
-    });
-    transportRef.current = transport;
-    transport.setPresentationAttachmentReady(presentationAttachmentReadyRef.current);
-    try {
-      const mountPromise = viewer.mount(node);
-      if (!disposed) {
-        onTransportMountedRef.current(transport);
-        onViewerMountedRef.current(viewer);
-      }
-      mountPromise.catch((error) => {
-        logDebug("surface.cdp-frame.viewer_mount_error", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    } catch (error) {
-      logDebug("surface.cdp-frame.viewer_mount_error", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    return () => {
-      disposed = true;
-      transport.setPresentationAttachmentReady(false);
-      if (transportRef.current === transport) {
-        transportRef.current = null;
-        onTransportMountedRef.current(null);
-        onViewerMountedRef.current(null);
-      }
-      try {
-        // Permit synchronous SDK cleanup before retiring its transport.
-        viewer.unmount();
-      } finally {
-        transport.dispose();
-      }
-    };
   }, [
     clipboardUrlRef,
     containerRef,
