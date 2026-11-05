@@ -3355,7 +3355,17 @@ const SOFT_KEYBOARD_INPUT_BODIES = [
   { action: "keydown", keysym: 65_288, modifiers: ["Control"], type: "keyboard" },
 ];
 
-test("input POST accepts the Remote Surface input protocol the viewer sends and dispatches it to CDP", async () => {
+interface CdpInputResult {
+  sent: RecordedCdpCall[];
+  status: number;
+}
+
+/**
+ * Mints a run-interaction stream over a real `createCdpCompanion` and hands
+ * `fn` a `post(body)` that POSTs to the real `/input` route and returns the
+ * status plus the CDP commands that body produced.
+ */
+async function withCdpInputRoute(fn: (post: (body: unknown) => Promise<CdpInputResult>) => Promise<void>): Promise<void> {
   const sockets: ReturnType<typeof makeAutoAnsweringCdpSocket>[] = [];
   await withHarness(
     {
@@ -3386,29 +3396,17 @@ test("input POST accepts the Remote Surface input protocol the viewer sends and 
       const reader = sseResp.body.getReader();
       await reader.read();
       try {
-        // The library's clipboard fixture is not an /input body: the host's
-        // clipboard channel is the separate /clipboard route.
-        const libraryFixtures = REMOTE_SURFACE_INPUT_FIXTURES.filter((fixture) => fixture.type !== "clipboard");
-        assert.ok(libraryFixtures.some((fixture) => fixture.type === "keyboard"));
-        const bodies = [...libraryFixtures, ...DESKTOP_VIEWER_INPUT_BODIES, ...SOFT_KEYBOARD_INPUT_BODIES];
         const [socket] = sockets;
         assert.ok(socket, "the real CDP companion opened its page socket");
-        const failures: string[] = [];
-        for (const body of bodies) {
+        await fn(async (body) => {
           const before = socket.calls.length;
           const response = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
             body: JSON.stringify(body),
             headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
             method: "POST",
           });
-          const sent = socket.calls.slice(before).map((call) => call.method);
-          const expected =
-            body.type === "keyboard" ? "Input.dispatchKeyEvent" : body.type === "text" ? "Input.insertText" : null;
-          if (response.status !== 202 || (expected && !sent.includes(expected))) {
-            failures.push(`${response.status} ${JSON.stringify(body)} sent ${JSON.stringify(sent)}`);
-          }
-        }
-        assert.deepEqual(failures, []);
+          return { sent: socket.calls.slice(before), status: response.status };
+        });
       } finally {
         ac.abort();
         await reader.cancel().catch(() => undefined);
@@ -3416,6 +3414,226 @@ test("input POST accepts the Remote Surface input protocol the viewer sends and 
       }
     }
   );
+}
+
+function expectedCdpMethod(body: { action?: string; pointerType?: string; type: string }): string | null {
+  if (body.type === "keyboard") {
+    return "Input.dispatchKeyEvent";
+  }
+  if (body.type === "text") {
+    return "Input.insertText";
+  }
+  if (body.type === "pointer") {
+    // cdp-adapter reroutes touch/pen press and release onto the mouse path
+    // (normalizeTouchPointerInputForCdp); only touch motion stays native touch.
+    return body.pointerType === "touch" && body.action === "pointermove"
+      ? "Input.dispatchTouchEvent"
+      : "Input.dispatchMouseEvent";
+  }
+  return null;
+}
+
+test("input POST accepts the Remote Surface input protocol the viewer sends and dispatches it to CDP", async () => {
+  await withCdpInputRoute(async (post) => {
+    // The library's clipboard fixture is not an /input body: the host's
+    // clipboard channel is the separate /clipboard route.
+    const libraryFixtures = REMOTE_SURFACE_INPUT_FIXTURES.filter((fixture) => fixture.type !== "clipboard");
+    assert.ok(libraryFixtures.some((fixture) => fixture.type === "keyboard"));
+    const bodies = [...libraryFixtures, ...DESKTOP_VIEWER_INPUT_BODIES, ...SOFT_KEYBOARD_INPUT_BODIES];
+    const failures: string[] = [];
+    for (const body of bodies) {
+      const { sent, status } = await post(body);
+      const expected = expectedCdpMethod(body);
+      if (status !== 202 || (expected && !sent.some((call) => call.method === expected))) {
+        failures.push(`${status} ${JSON.stringify(body)} sent ${JSON.stringify(sent.map((call) => call.method))}`);
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
+});
+
+// CDP `modifiers` bitmask: Alt=1, Control=2, Meta=4, Shift=8.
+const CDP_MODIFIER_CASES: { bits: number; names: string[] }[] = [
+  { bits: 1, names: ["Alt"] },
+  { bits: 2, names: ["Control"] },
+  { bits: 4, names: ["Meta"] },
+  { bits: 8, names: ["Shift"] },
+  { bits: 10, names: ["Control", "Shift"] },
+  { bits: 15, names: ["Alt", "Control", "Meta", "Shift"] },
+];
+
+test("input POST turns keyboard modifier names into the exact CDP modifier bitmask", async () => {
+  await withCdpInputRoute(async (post) => {
+    for (const { bits, names } of CDP_MODIFIER_CASES) {
+      const { sent, status } = await post({ action: "keydown", code: "KeyA", key: "a", modifiers: names, type: "keyboard" });
+      assert.equal(status, 202, names.join("+"));
+      const [call] = sent;
+      assert.equal(call?.method, "Input.dispatchKeyEvent");
+      assert.equal(call?.params.modifiers, bits, `keyboard ${names.join("+")}`);
+    }
+    // Pointer events carry the same list and the same bitmask.
+    for (const { bits, names } of CDP_MODIFIER_CASES) {
+      const { sent, status } = await post({
+        action: "pointerdown",
+        buttons: 1,
+        modifiers: names,
+        pointerType: "mouse",
+        type: "pointer",
+        x: 5,
+        y: 6,
+      });
+      assert.equal(status, 202, names.join("+"));
+      const [call] = sent;
+      assert.equal(call?.method, "Input.dispatchMouseEvent");
+      assert.equal(call?.params.modifiers, bits, `pointer ${names.join("+")}`);
+    }
+  });
+});
+
+test("input POST rejects duplicate modifier names instead of dispatching a different chord", async () => {
+  await withCdpInputRoute(async (post) => {
+    // The SDK adds bits per entry: Control twice would dispatch Meta (4) and
+    // Shift twice 16.
+    for (const modifiers of [["Control", "Control"], ["Shift", "Shift"], ["Alt", "Control", "Alt"]]) {
+      const key = await post({ action: "keydown", code: "KeyA", key: "a", modifiers, type: "keyboard" });
+      assert.equal(key.status, 400, JSON.stringify(modifiers));
+      assert.deepEqual(key.sent, []);
+      const pointer = await post({ action: "pointerdown", modifiers, pointerType: "mouse", type: "pointer", x: 1, y: 1 });
+      assert.equal(pointer.status, 400, JSON.stringify(modifiers));
+      assert.deepEqual(pointer.sent, []);
+    }
+  });
+});
+
+test("input POST sends the key, code and text CDP expects for each keyboard shape", async () => {
+  await withCdpInputRoute(async (post) => {
+    const dispatchOf = async (body: unknown) => {
+      const { sent, status } = await post(body);
+      assert.equal(status, 202, JSON.stringify(body));
+      assert.equal(sent.length, 1, JSON.stringify(sent));
+      assert.equal(sent[0]?.method, "Input.dispatchKeyEvent");
+      return sent[0].params;
+    };
+    // Control+Backspace: special key, VK_BACK, Control bit, no text.
+    assert.deepEqual(
+      await dispatchOf({ action: "keydown", code: "Backspace", key: "Backspace", modifiers: ["Control"], type: "keyboard" }),
+      { code: "Backspace", key: "Backspace", modifiers: 2, type: "rawKeyDown", windowsVirtualKeyCode: 8 }
+    );
+    // Shifted punctuation: `!` is Shift+Digit1, so the VK is VK_1 (49), not "!".
+    assert.deepEqual(
+      await dispatchOf({ action: "keydown", code: "Digit1", key: "!", modifiers: ["Shift"], type: "keyboard" }),
+      {
+        code: "Digit1",
+        key: "!",
+        modifiers: 8,
+        text: "!",
+        type: "keyDown",
+        unmodifiedText: "!",
+        windowsVirtualKeyCode: 49,
+      }
+    );
+    // Native key/code wins over a keysym on the same event.
+    assert.deepEqual(
+      await dispatchOf({ action: "keydown", code: "KeyA", key: "a", keysym: 65_288, type: "keyboard" }),
+      { code: "KeyA", key: "a", modifiers: 0, text: "a", type: "keyDown", unmodifiedText: "a", windowsVirtualKeyCode: 65 }
+    );
+    // Keyup releases by key/code/VK only and carries no text.
+    const keyup = await dispatchOf({ action: "keyup", code: "KeyA", key: "a", type: "keyboard" });
+    assert.deepEqual(keyup, { code: "KeyA", key: "a", modifiers: 0, type: "keyUp", windowsVirtualKeyCode: 65 });
+    assert.equal("text" in keyup, false);
+    assert.equal("unmodifiedText" in keyup, false);
+    // A keysym-only special key (soft keyboard Backspace) maps through the keysym table.
+    assert.deepEqual(await dispatchOf({ action: "keydown", keysym: 65_288, type: "keyboard" }), {
+      code: "Backspace",
+      key: "Backspace",
+      modifiers: 0,
+      type: "rawKeyDown",
+      windowsVirtualKeyCode: 8,
+    });
+  });
+});
+
+test("input POST dispatches real mouse and touch CDP events, including double-click press and release", async () => {
+  await withCdpInputRoute(async (post) => {
+    const send = async (body: unknown) => {
+      const { sent, status } = await post(body);
+      assert.equal(status, 202, JSON.stringify(body));
+      assert.equal(sent.length, 1, JSON.stringify(sent));
+      return sent[0] as RecordedCdpCall;
+    };
+    const press = await send({
+      action: "pointerdown",
+      button: 0,
+      buttons: 1,
+      clickCount: 2,
+      pointerType: "mouse",
+      type: "pointer",
+      x: 40,
+      y: 50,
+    });
+    assert.equal(press.method, "Input.dispatchMouseEvent");
+    assert.deepEqual(press.params, {
+      button: "left",
+      buttons: 1,
+      clickCount: 2,
+      modifiers: 0,
+      type: "mousePressed",
+      x: 40,
+      y: 50,
+    });
+    const release = await send({
+      action: "pointerup",
+      button: 0,
+      buttons: 0,
+      clickCount: 2,
+      pointerType: "mouse",
+      type: "pointer",
+      x: 40,
+      y: 50,
+    });
+    assert.deepEqual(release.params, {
+      button: "left",
+      buttons: 0,
+      clickCount: 2,
+      modifiers: 0,
+      type: "mouseReleased",
+      x: 40,
+      y: 50,
+    });
+    // Touch press is rerouted onto the mouse path with clickCount 1 so it
+    // synthesizes a real click (cdp-adapter normalizeTouchPointerInputForCdp).
+    const tap = await send({ action: "pointerdown", pointerId: 7, pointerType: "touch", type: "pointer", x: 12, y: 34 });
+    assert.equal(tap.method, "Input.dispatchMouseEvent");
+    assert.deepEqual(tap.params, {
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+      modifiers: 0,
+      type: "mousePressed",
+      x: 12,
+      y: 34,
+    });
+    // Touch motion stays a native touch event.
+    const drag = await send({ action: "pointermove", pointerId: 7, pointerType: "touch", type: "pointer", x: 15, y: 40 });
+    assert.equal(drag.method, "Input.dispatchTouchEvent");
+    assert.equal(drag.params.type, "touchMove");
+    assert.deepEqual(drag.params.touchPoints, [{ id: 7, radiusX: 1, radiusY: 1, x: 15, y: 40 }]);
+  });
+});
+
+test("input POST inserts committed text and ignores composition start, update and cancel", async () => {
+  await withCdpInputRoute(async (post) => {
+    for (const composition of ["start", "update", "cancel"]) {
+      const { sent, status } = await post({ composition, text: "か", type: "text" });
+      assert.equal(status, 202, composition);
+      assert.deepEqual(sent, [], `composition ${composition} must not insert text`);
+    }
+    const commit = await post({ composition: "commit", text: "か", type: "text" });
+    assert.equal(commit.status, 202);
+    assert.deepEqual(commit.sent, [{ method: "Input.insertText", params: { text: "か" } }]);
+    const plain = await post({ text: "a", type: "text" });
+    assert.deepEqual(plain.sent, [{ method: "Input.insertText", params: { text: "a" } }]);
+  });
 });
 
 test("input POST dispatches to the companion after attach and rejects bad input", async () => {

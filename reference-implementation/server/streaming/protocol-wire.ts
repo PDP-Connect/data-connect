@@ -207,6 +207,11 @@ function validateField(key: string, value: unknown, spec: FieldSpec): void {
     for (const item of value) {
       validateField(key, item, { kind: "string", ...(spec.enum ? { enum: spec.enum } : {}) });
     }
+    // A repeated name is rejected: the CDP backend adds modifier bits instead
+    // of OR-ing them, so ["Control","Control"] would dispatch Meta (4).
+    if (new Set(value).size !== value.length) {
+      throw invalidInput();
+    }
     return;
   }
   if (spec.kind === "boolean") {

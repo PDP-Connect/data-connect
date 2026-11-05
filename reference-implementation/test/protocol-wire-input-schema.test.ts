@@ -160,6 +160,31 @@ test("keyboard modifiers are a bounded list of key names, as the Remote Surface 
 	});
 });
 
+test("rejects duplicate modifier names on keyboard and pointer events", () => {
+	// The Remote Surface CDP backend adds bits per entry, so a repeated name
+	// would dispatch the wrong chord (Control twice = Meta).
+	assertRejected({
+		action: "keydown",
+		code: "KeyA",
+		key: "a",
+		modifiers: ["Control", "Control"],
+		type: "keyboard",
+	});
+	assertRejected({
+		action: "keydown",
+		key: "A",
+		modifiers: ["Shift", "Alt", "Shift"],
+		type: "keyboard",
+	});
+	assertRejected({
+		action: "pointerdown",
+		modifiers: ["Shift", "Shift"],
+		type: "pointer",
+		x: 1,
+		y: 1,
+	});
+});
+
 test("keyboard accepts a keysym-only special key and requires one of key, code, or keysym", () => {
 	const parsed = parseReferenceWireInputPayload({
 		action: "keydown",
