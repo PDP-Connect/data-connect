@@ -31,7 +31,8 @@ export function classifyRuntimeFailure(err: unknown): FailureReason {
   }
   if (
     message === "Connector emitted INTERACTION while already waiting" ||
-    message === "Connector emitted INTERACTION but START.bindings omitted interactive" ||
+    message === "Connector emitted INTERACTION but no interaction handler is configured" ||
+    message.startsWith("Connector emitted INTERACTION.kind not declared in capabilities.human_interaction:") ||
     message.includes(" while waiting for INTERACTION_RESPONSE") ||
     message.startsWith("Connector emitted invalid INTERACTION.") ||
     message.startsWith("Connector emitted invalid STATE.") ||

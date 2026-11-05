@@ -12,6 +12,7 @@ import { runConnector } from "../runtime/index.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Regression coverage for the live runtime path (reference-implementation/runtime/index.ts)
 // used by every real connector run, as distinct from the standalone
@@ -141,29 +142,32 @@ function fakeAdmitRunConnection(
 // shape that discriminates it: one sibling that fully succeeds, one stream
 // that reports its own certified failure.
 function testManifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    display_name: "Runtime stream isolation test",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "sibling_a",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "sibling_b",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Runtime stream isolation test",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "sibling_a",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "sibling_b",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 type RuntimeManifest = NonNullable<Parameters<typeof runConnector>[0]["manifest"]> & {
@@ -173,18 +177,21 @@ type RuntimeManifest = NonNullable<Parameters<typeof runConnector>[0]["manifest"
 type RuntimeManifestStream = NonNullable<RuntimeManifest["streams"]>[number];
 
 function completeManifest(connectorId: string, streams: RuntimeManifestStream[]): RuntimeManifest {
-  return {
-    connector_id: connectorId,
-    display_name: "Runtime stream isolation test",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: streams.map((stream) => ({
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-      ...stream,
-    })),
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Runtime stream isolation test",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: streams.map((stream) => ({
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+        ...stream,
+      })),
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 function writeConnectorStub(tmpDir: string, script: string): string {
@@ -871,10 +878,9 @@ rl.on('line', (line) => {
       type: string;
     };
     assert.equal(replayStart.type, "START");
-    assert.ok(
-      replayStart.protocol_capabilities?.includes("DETAIL_COVERAGE_KEY_SETS"),
-      "START must advertise support before connectors emit empty_keys/unchanged_keys"
-    );
+    // START lists exactly what this runtime implements. DETAIL_COVERAGE_KEY_SETS is
+    // advisory and not advertised, so this connector reports hydrated keys only.
+    assert.deepEqual(replayStart.protocol_capabilities, ["OBSERVATION", "STREAM_EVIDENCE"]);
     const replayStartState = replayStart.state;
     assert.ok(
       !("sibling_b" in (replayStartState ?? {})),

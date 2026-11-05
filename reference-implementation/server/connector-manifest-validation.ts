@@ -10,7 +10,8 @@
  * logic.
  */
 
-import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
+import { BindingDeclarationError, normalizeBindingDeclarations } from "../runtime/binding-declarations.ts";
+import { collectionProfileDeclarationProblem } from "../runtime/collection-profile-support.ts";
 import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
 import {
   normalizeStaticSecretCredentialCapture,
@@ -184,6 +185,36 @@ export function invalidConnectorManifest(message: string, code = "invalid_reques
 }
 
 /**
+ * Prepare a developer-local artifact for the host's full manifest validator.
+ *
+ * Unknown URL identities are not inferred into connector keys. The artifact
+ * must declare its own key; this copy uses that key as the operational id only
+ * for validation. The returned projection is not a trusted or retained source
+ * identity, and callers must keep the original manifest unchanged.
+ */
+export function projectLocalConnectorArtifactForManifestValidation(
+  manifest: Record<string, unknown>
+): Record<string, unknown> {
+  const connectorId = manifest.connector_id;
+  const connectorKey = manifest.connector_key;
+  if (!isNonEmptyString(connectorId)) {
+    throw invalidConnectorManifest("Collection Profile manifest must declare connector_id.");
+  }
+  if (typeof connectorKey !== "string" || !isConnectorKey(connectorKey)) {
+    throw invalidConnectorManifest("Collection Profile manifest must declare a valid connector_key.");
+  }
+  const normalizedKey = connectorKey.trim();
+  const recognizedKey = canonicalConnectorKey(connectorId);
+  if (recognizedKey !== null && recognizedKey !== normalizedKey) {
+    throw invalidConnectorManifest("connector_key must match the canonical key for connector_id");
+  }
+  if (recognizedKey === null && connectorId.trim() !== normalizedKey && !URL.canParse(connectorId)) {
+    throw invalidConnectorManifest("connector_id must be an absolute URI or its declared connector_key");
+  }
+  return { ...manifest, connector_id: normalizedKey };
+}
+
+/**
  * Collection Profile declaration gate (profile Sections 3.1 and 3.4):
  * `protocol_version` names a supported profile version, every
  * `protocol_capabilities` name is known, and a capability added in 0.2.0
@@ -191,12 +222,9 @@ export function invalidConnectorManifest(message: string, code = "invalid_reques
  * manifest without `protocol_version`; it is checked as a 0.1.0 manifest.
  */
 function validateCollectionProfileDeclaration(manifest: Record<string, unknown>, code: string): void {
-  const error = collectionProfileDeclarationError(
-    manifest.protocol_version === undefined ? "0.1.0" : manifest.protocol_version,
-    manifest.protocol_capabilities
-  );
-  if (error !== null) {
-    throw invalidConnectorManifest(error, code);
+  const problem = collectionProfileDeclarationProblem(manifest);
+  if (problem !== null) {
+    throw invalidConnectorManifest(problem, code);
   }
 }
 
@@ -283,13 +311,6 @@ export const REFRESH_POLICY_ALLOWED_KEYS = new Set([
 // production code, but the read-site clamp holds even if it does.
 export const REFRESH_POLICY_MAX_COOLDOWN_CYCLES_RANGE = { max: 24, min: 1 } as const;
 export const REFRESH_POLICY_MAX_RECOVERY_ATTEMPTS_RANGE = { max: 20, min: 1 } as const;
-export const RUNTIME_REQUIREMENT_BINDINGS = new Set([
-  "browser",
-  "desktop_session",
-  "filesystem",
-  "interactive",
-  "network",
-]);
 export const STREAM_AVAILABILITY_STATES = new Set(["supported", "unsupported_in_mode", "experimental", "deprecated"]);
 export const STREAM_AVAILABILITY_ALLOWED_KEYS = new Set(["future_modes", "mode", "reason", "state"]);
 export const STREAM_COVERAGE_POLICIES = new Set([
@@ -326,38 +347,19 @@ const SUPPORTED_RANGE_OPERATORS = new Set(["gte", "gt", "lte", "lt"]);
 const EXTERNAL_TOOL_ALLOWED_KEYS = new Set(["detect", "install_hint", "license", "min_version", "name", "purpose"]);
 const EXTERNAL_TOOL_DETECT_ALLOWED_KEYS = new Set(["args", "executable", "executable_env_override", "exit_code"]);
 
-// Validates `runtime_requirements.bindings` (order-preserving). Returns `false`
-// when `bindings` is absent — the original validator returns from the whole
-// function in that case, so the caller must NOT go on to external_tools (a
-// runtime_requirements object without bindings is accepted verbatim). Returns
-// `true` once bindings are present and fully validated.
-function validateRuntimeBindings(req: Record<string, unknown>, code: string): boolean {
-  // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
-  const bindings = req.bindings;
-  if (bindings === undefined || bindings === null) {
-    return false;
-  }
-  if (typeof bindings !== "object" || Array.isArray(bindings)) {
-    throw invalidConnectorManifest("runtime_requirements.bindings must be an object when declared", code);
-  }
-  const bindingsObj = bindings as Record<string, unknown>;
-  const unknownBindings = Object.keys(bindingsObj).filter((binding) => !RUNTIME_REQUIREMENT_BINDINGS.has(binding));
-  if (unknownBindings.length) {
-    throw invalidConnectorManifest(
-      `runtime_requirements.bindings has unsupported keys: ${unknownBindings.join(", ")}`,
-      code
-    );
-  }
-  for (const [binding, requirement] of Object.entries(bindingsObj)) {
-    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) {
-      throw invalidConnectorManifest(`runtime_requirements.bindings.${binding} must be an object`, code);
+// Validates `runtime_requirements.bindings` with the shared canonical validator
+// (runtime/binding-declarations.ts), the same one `runConnector` runs before spawn.
+// An absent map is valid. A present one must satisfy the canonical schema and
+// the grammar rules, or registration refuses it with the validator's message.
+function validateRuntimeBindings(req: Record<string, unknown>, code: string): void {
+  try {
+    normalizeBindingDeclarations(req.bindings);
+  } catch (error) {
+    if (error instanceof BindingDeclarationError) {
+      throw invalidConnectorManifest(error.message, code);
     }
-    const reqObj = requirement as Record<string, unknown>;
-    if (reqObj.required !== undefined && typeof reqObj.required !== "boolean") {
-      throw invalidConnectorManifest(`runtime_requirements.bindings.${binding}.required must be a boolean`, code);
-    }
+    throw error;
   }
-  return true;
 }
 
 function validateExternalToolDetectExitCode(detect: Record<string, unknown>, index: number, code: string): void {
@@ -652,9 +654,7 @@ export function validateRuntimeRequirements(manifest: Record<string, unknown>, c
   }
   const req = requirements as Record<string, unknown>;
   validateTuningEnvironment(manifest, req, code);
-  if (!validateRuntimeBindings(req, code)) {
-    return;
-  }
+  validateRuntimeBindings(req, code);
   validateExternalTools(req, code, { allowLegacyCommand: !Array.isArray(manifest.streams) });
   validateLocalPaths(req, code);
 }
@@ -794,6 +794,37 @@ function validateRefreshPolicyInternalConsistency(pol: Record<string, unknown>, 
   const contradictions = refreshPolicyContradictions(pol);
   if (contradictions.length > 0) {
     throw invalidConnectorManifest(`capabilities.refresh_policy is self-contradictory: ${contradictions[0]}`, code);
+  }
+}
+
+// Section 3.4: `capabilities.human_interaction` is an optional array of distinct
+// values from this closed set. An INTERACTION.kind outside it is refused at run time.
+const HUMAN_INTERACTION_VALUES = new Set(["credentials", "otp", "manual_action"]);
+
+function validateHumanInteractionCapability(manifest: Record<string, unknown>, code: string): void {
+  const { capabilities } = manifest;
+  if (typeof capabilities !== "object" || capabilities === null || Array.isArray(capabilities)) {
+    return;
+  }
+  const values = (capabilities as Record<string, unknown>).human_interaction;
+  if (values === undefined) {
+    return;
+  }
+  if (!Array.isArray(values)) {
+    throw invalidConnectorManifest("capabilities.human_interaction must be an array when declared", code);
+  }
+  const seen = new Set<unknown>();
+  for (const value of values) {
+    if (!HUMAN_INTERACTION_VALUES.has(value as string)) {
+      throw invalidConnectorManifest(
+        `capabilities.human_interaction value ${JSON.stringify(value)} must be one of: credentials, otp, manual_action`,
+        code
+      );
+    }
+    if (seen.has(value)) {
+      throw invalidConnectorManifest(`capabilities.human_interaction repeats ${String(value)}`, code);
+    }
+    seen.add(value);
   }
 }
 
@@ -2232,6 +2263,7 @@ export function validateConnectorManifest(
     validateCollectionProfileDeclaration(manifest, code);
   }
   validateRuntimeRequirements(manifest, code);
+  validateHumanInteractionCapability(manifest, code);
   validateRefreshPolicyCapability(manifest, code);
   validateDeclaredReasonTokensCapability(manifest, code);
   validateProvenCapability(manifest, code);

@@ -39,7 +39,9 @@ const TOP_LEVEL_REGEX_27 =
   /capabilities\.proven\.local_collector=true requires runtime_requirements\.bindings\.filesystem/;
 const TOP_LEVEL_REGEX_28 = /credential_capture field 'password' is a secret field .* with no label/;
 const TOP_LEVEL_REGEX_29 = /credential_capture field 'password' is a secret field with zero env aliases/;
-const PROFILE_VERSION_PATTERN = /protocol_version must be one of 0\.1\.0, 0\.2\.0, received 0\.3\.0/;
+// The unknown-version message is a fixed rule. It never echoes the manifest's own value.
+const PROFILE_VERSION_PATTERN = /protocol_version must be one of 0\.1\.0, 0\.2\.0$/;
+const PROFILE_VERSION_MESSAGE = "protocol_version must be one of 0.1.0, 0.2.0";
 const PROFILE_0_2_0_CAPABILITY_PATTERN = /protocol_capabilities DETAIL_COVERAGE_KEY_SETS require protocol_version 0\.2\.0/;
 const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of known capability names/;
 
@@ -227,6 +229,11 @@ test("validateConnectorManifest enforces the Collection Profile declaration at r
     validateConnectorManifest({ ...manifestWithStream(), ...keySets, protocol_version: "0.2.0" })
   );
   assert.doesNotThrow(() => validateConnectorManifest({ ...manifestWithStream(), protocol_capabilities: ["BLOB"] }));
+  assert.throws(
+    () => validateConnectorManifest({ ...manifestWithStream(), protocol_version: "0.3.0" }),
+    (error: unknown) => (error as Error).message === PROFILE_VERSION_MESSAGE,
+    "an unknown version is rejected with the fixed rule, not an echo of the manifest value"
+  );
   const rejected: [Record<string, unknown>, RegExp][] = [
     [{ protocol_version: "0.3.0" }, PROFILE_VERSION_PATTERN],
     [{ ...keySets, protocol_version: "0.1.0" }, PROFILE_0_2_0_CAPABILITY_PATTERN],

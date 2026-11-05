@@ -34,6 +34,9 @@ const PROTOCOL_VERSION_NAMED = /protocol_version/;
 const OBSERVATION_NEEDS_020 = /OBSERVATION require protocol_version 0\.2\.0/;
 const DIAGNOSTIC_DESCRIPTORS_NEEDS_020 = /diagnostic_descriptors require protocol_version 0\.2\.0/;
 const UNDECLARED_STEP = /descriptor_undeclared_step/;
+const BLOB_REFUSED = /BLOB/;
+// A refusal before spawn carries a stable code the scheduler and console can key on.
+const CAPABILITY_REFUSAL_REASON = "protocol_capability_unsupported";
 const RETRYABLE_FIELD = /DONE\.error\.retryable/;
 // Backend under test. With the dedicated private PostgreSQL URL the runtime, the
 // admission store and the observation store all use Postgres. Without it the
@@ -132,6 +135,7 @@ type RunOutcome =
       readonly ok: false;
       readonly message: string;
       readonly connectorError: { readonly message?: string } | null;
+      readonly failureReason: string | null;
     };
 
 // A runtime rejection becomes a value, so a failing assertion names the
@@ -187,7 +191,8 @@ async function runStub(
     return { ok: true, result: result as unknown as Record<string, unknown> };
   } catch (caught) {
     const connectorError = (caught as { connector_error?: { message?: string } | null }).connector_error ?? null;
-    return { connectorError, message: (caught as Error).message, ok: false };
+    const failureReason = (caught as { failure_reason?: string }).failure_reason ?? null;
+    return { connectorError, failureReason, message: (caught as Error).message, ok: false };
   } finally {
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) {
@@ -241,6 +246,11 @@ test("declared 0.2.0 OBSERVATION facts are accepted and the run succeeds", async
     assert.equal(outcome.result.status, "succeeded");
     const start = JSON.parse(readFileSync(stub.markerPath, "utf8")) as { protocol_capabilities: string[] };
     assert.ok(start.protocol_capabilities.includes("OBSERVATION"), "START advertises the implemented message");
+    assert.equal(
+      start.protocol_capabilities.includes("DETAIL_COVERAGE_KEY_SETS"),
+      false,
+      "the runtime must not promise key-set extension credit rules it does not implement"
+    );
     const record = await persistedRecord("run_c020_accept");
     assert.ok(record, "the run's bounded diagnostic record must be persisted");
     assert.deepEqual(
@@ -513,6 +523,7 @@ test("OBSERVATION or diagnostic_descriptors without protocol_version 0.2.0 are r
       assert.equal(outcome.ok, false, "a 0.1.0 manifest may not declare OBSERVATION");
       if (!outcome.ok) {
         assert.match(outcome.message, OBSERVATION_NEEDS_020);
+        assert.equal(outcome.failureReason, CAPABILITY_REFUSAL_REASON);
       }
       assert.equal(existsMarker(stub.markerPath), false, "the child must not execute");
     } finally {
@@ -549,6 +560,25 @@ test("an expectation naming an undeclared step is rejected before spawn", async 
     assert.equal(outcome.ok, false, "an expectation on an undeclared step must be rejected");
     if (!outcome.ok) {
       assert.match(outcome.message, UNDECLARED_STEP);
+    }
+    assert.equal(existsMarker(stub.markerPath), false, "the child must not execute");
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
+test("a required BLOB capability is rejected before spawn, not waived", async () => {
+  const stub = makeStub([{ records_emitted: 0, status: "succeeded", type: "DONE" }], 0);
+  try {
+    const outcome = await runStub(
+      stub,
+      "run_c020_blob",
+      manifest({ diagnostic_descriptors: undefined, protocol_capabilities: ["BLOB"], protocol_version: "0.1.0" })
+    );
+    assert.equal(outcome.ok, false, "BLOB is not implemented, so a connector that requires it must not start");
+    if (!outcome.ok) {
+      assert.match(outcome.message, BLOB_REFUSED);
+      assert.equal(outcome.failureReason, CAPABILITY_REFUSAL_REASON);
     }
     assert.equal(existsMarker(stub.markerPath), false, "the child must not execute");
   } finally {

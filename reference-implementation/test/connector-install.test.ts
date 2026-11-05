@@ -21,6 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 
 import {
   type ConnectorCatalogEntry,
@@ -62,6 +63,7 @@ const RE_SYMBOLIC_LINK = /symbolic-link/;
 const RE_UPDATE_FAILED = /crashed while staging update/;
 const RE_UPDATE_TARGET_MISSING = /no verified update target/;
 const RE_REGISTRATION_FAILED = /manifest registration failed/;
+const RE_LOCAL_EXPAND_INVALID = /query\.expand.*must match a same-stream relationships\[\] entry/;
 const require = createRequire(import.meta.url);
 async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
   const started = Date.now();
@@ -85,6 +87,43 @@ const entry: ConnectorCatalogEntry = {
   tier: "supported",
   version: "1.0.0",
 };
+
+test("adding a developer source rejects invalid query.expand before publishing local source state", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-local-profile-validation-"));
+  const sourceRoot = join(dataDir, "candidate");
+  try {
+    const profile = JSON.parse(
+      readFileSync(new URL("./fixtures/collection-profiles/github.json", import.meta.url), "utf8")
+    ) as Record<string, unknown>;
+    // The authoritative validator accepts the unmodified profile. This test
+    // changes only the semantic contract that shallow local checks miss.
+    validateConnectorManifest(profile);
+    assert.ok(Array.isArray(profile.streams));
+    const firstStream = profile.streams[0] as Record<string, unknown>;
+    firstStream.query = { expand: [{ name: "missing_relationship" }] };
+    assert.throws(() => validateConnectorManifest(profile), RE_LOCAL_EXPAND_INVALID);
+
+    mkdirSync(join(sourceRoot, "profile"), { recursive: true });
+    mkdirSync(join(sourceRoot, "dist"));
+    writeFileSync(join(sourceRoot, "profile", "collection-profile.json"), JSON.stringify(profile));
+    writeFileSync(join(sourceRoot, "dist", "collection-profile.mjs"), "export {};\n");
+    const localSourceStore = createFileLocalConnectorSourceStore(dataDir);
+    const service = createConnectorInstallService({
+      dataDir,
+      localSourceStore,
+      registerManifest: async (manifest) => {
+        validateConnectorManifest(manifest);
+      },
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const { addLocalSource } = service;
+    assert.ok(addLocalSource);
+    await assert.rejects(() => addLocalSource(sourceRoot), RE_LOCAL_EXPAND_INVALID);
+    assert.deepEqual(await localSourceStore.list(), [], "a rejected profile must not be published as a local source");
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
 
 test("pinned catalog schema accepts binding features and rejects unknown binding fields", () => {
   const catalog = {
@@ -148,16 +187,16 @@ test("owner local-source state lives in PDPP_DATA_DIR even when PDPP_CONNECTOR_P
   try {
     mkdirSync(join(sourceRoot, "profile"));
     mkdirSync(join(sourceRoot, "dist"));
+    const profile = JSON.parse(
+      readFileSync(new URL("./fixtures/collection-profiles/github.json", import.meta.url), "utf8")
+    ) as Record<string, unknown>;
+    profile.connector_id = "https://vendor.example/connectors/preload-split-fixture";
+    profile.manifest_uri = profile.connector_id;
+    profile.connector_key = "preload-split-fixture";
+    profile.version = "0.1.0";
     writeFileSync(
       join(sourceRoot, "profile", "collection-profile.json"),
-      JSON.stringify({
-        connector_id: "https://registry.pdpp.dev/connectors/preload-split-fixture",
-        connector_key: "preload-split-fixture",
-        display_name: "Preload split fixture",
-        runtime_requirements: { bindings: { network: { required: true } } },
-        streams: [{ name: "items" }],
-        version: "0.1.0",
-      })
+      JSON.stringify(profile)
     );
     writeFileSync(join(sourceRoot, "dist", "collection-profile.mjs"), "export default {};\n");
 

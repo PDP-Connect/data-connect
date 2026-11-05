@@ -38,8 +38,10 @@ import {
   clientAssertionIssuer,
   verifyPrivateKeyJwtClientAssertion,
 } from "./oauth-client-auth.ts";
+import { parseManifestJsonText } from "../runtime/binding-declarations.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
+import { legacyFirstPartySourceIdFor } from "./connector-legacy-source-map.ts";
 import {
   invalidConnectorManifest,
   resolveManifestSensitivity,
@@ -77,7 +79,7 @@ import {
   ownerPasswordVerifierRevision,
 } from "./stores/owner-password-verifier-store.ts";
 import { buildGrantedAuthorizationDetail } from "./source-approved-authorization.ts";
-import { snapshotSourceDeclaration } from "./source-declaration.ts";
+import { InvalidSourceDeclarationError, snapshotSourceDeclaration } from "./source-declaration.ts";
 import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "./source-declaration-legacy-collection.ts";
 import {
   type AcceptedSourceDeclarationRevisionStore,
@@ -3524,6 +3526,7 @@ async function persistManifestAndAdvanceGenerations(
           connectorId,
         ])
       ).rows[0]?.manifest;
+      assertRetainedSourceIdentity(connectorId, previous, manifestJson);
       // A manifest stored before digests were retained is the only record of
       // its version's accepted content: keep it before it is replaced.
       const previousDigest = previous ? declarationDigestOf(previous) : null;
@@ -3595,6 +3598,7 @@ async function persistManifestAndAdvanceGenerations(
     const existing = db
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
+    assertRetainedSourceIdentity(connectorId, existing?.manifest, manifestJson);
     if (options.queueDerivedRepair) {
       const plan = derivedRepairPlan(existing?.manifest ?? null, manifestJson);
       const instances = db
@@ -5550,8 +5554,12 @@ export async function registerConnector(
   } = {}
 ): Promise<string> {
   validateConnectorManifest(manifest);
-  const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
+  // The retained identity is read here and re-checked under the publication lock in
+  // persistManifestAndAdvanceGenerations, which is what makes the choice atomic.
+  const storageContext = await retainedStorageContextForConnector(storageConnectorIdOf(manifest));
+  const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest, storageContext);
   if (!options.skipManifestPersistence) {
+    await maybeRegisterConnectorPhaseForTest("before-manifest-persisted", { connectorId, manifest: storedManifest });
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
       queueDerivedRepair: options.queueDerivedRepair === true,
       replaceAcceptedDigest: options.replaceAcceptedDigest === true,
@@ -5642,13 +5650,137 @@ export async function registerConnector(
  * authority. In particular, legacy manifest projection adds a durable source
  * declaration that is not present in the shipped JSON.
  */
-export function normalizeConnectorManifestForStorage(manifest: Record<string, unknown>): {
+/**
+ * Facts a caller reads under the same authority that will persist the result.
+ * Normalization stays a pure function of its arguments: it never looks anything up.
+ */
+export interface ConnectorManifestStorageContext {
+  /**
+   * The SourceDeclaration an earlier accepted registration retained under this
+   * connector key. When the incoming manifest carries no explicit declaration,
+   * the retained `source.id` is kept. Its projection is re-derived from the
+   * incoming content, so a legitimate content update yields a new
+   * `declaration_version` under the same source identity.
+   */
+  readonly retainedSourceDeclaration?: unknown;
+}
+
+function storageConnectorIdOf(manifest: Record<string, unknown>): unknown {
+  return canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id;
+}
+
+/** The `source_declaration` of a stored or incoming manifest; undefined when absent or unparseable. */
+function sourceDeclarationOf(manifest: unknown): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+    return isRecord(parsed) && isRecord(parsed.source_declaration) ? parsed.source_declaration : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sourceIdOfDeclaration(declaration: Record<string, unknown> | undefined): string | undefined {
+  const source = declaration?.source;
+  return isRecord(source) && typeof source.id === "string" && source.id.length > 0 ? source.id : undefined;
+}
+
+/**
+ * Storage context for a writer that replaces `previousManifest`. Call it with the row read under the same
+ * lock or transaction that persists the result. A row with no retained declaration gives no context, so
+ * its write takes the fresh path: a reviewed mapping or an explicit declaration, else a refusal.
+ */
+export function retainedStorageContext(previousManifest: unknown): ConnectorManifestStorageContext {
+  const declaration = sourceDeclarationOf(previousManifest);
+  return declaration === undefined ? {} : { retainedSourceDeclaration: declaration };
+}
+
+/** The declaration currently retained under a connector key, read before the registration transaction. */
+async function retainedStorageContextForConnector(connectorId: unknown): Promise<ConnectorManifestStorageContext> {
+  if (!isNonEmptyString(connectorId)) {
+    return {};
+  }
+  const row = await getConnectorCatalogStore().getManifestById(connectorId);
+  return retainedStorageContext(row?.manifest);
+}
+
+/** Core Section 5: a retained source identity is never replaced by a registration that names another one. */
+export function assertRetainedSourceIdentity(connectorId: string, previousManifest: unknown, incomingManifestJson: string) {
+  const retained = sourceIdOfDeclaration(sourceDeclarationOf(previousManifest));
+  if (retained === undefined) {
+    return;
+  }
+  const incoming = sourceIdOfDeclaration(sourceDeclarationOf(incomingManifestJson));
+  if (incoming === retained) {
+    return;
+  }
+  throw invalidConnectorManifest(
+    `Connector ${connectorId} is already bound to source ${retained}; this registration names ${incoming ?? "no source"}. A source identity change needs an explicit identity-change path.`
+  );
+}
+
+/** Validate an explicit declaration through the Core boundary before it is retained. */
+function acceptedSourceDeclaration(value: unknown): Record<string, unknown> {
+  try {
+    return snapshotSourceDeclaration(value) as unknown as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof InvalidSourceDeclarationError) {
+      throw invalidConnectorManifest(error.message);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Project the legacy manifest under the source identity a retained declaration
+ * already holds. The projection's content is the incoming manifest's; the
+ * identity is the retained one, never the manifest's provenance.
+ */
+function projectRetainedSourceDeclaration(
+  storedManifest: Record<string, unknown>,
+  retainedValue: unknown
+): Record<string, unknown> {
+  const retained = acceptedSourceDeclaration(retainedValue);
+  const source = retained.source as { id: string; kind: string };
+  const publisher = retained.publisher as { id: string };
+  if (source.kind !== "connector") {
+    throw invalidConnectorManifest(
+      `Connector ${String(storedManifest.connector_key)} is bound to a ${source.kind} source; a connector registration cannot change its source kind`
+    );
+  }
+  return snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(storedManifest, {
+    connectorImplementationId: implementationIdOf(storedManifest, source.id),
+    publisherId: publisher.id,
+    sourceId: source.id,
+  }) as unknown as Record<string, unknown>;
+}
+
+/**
+ * The implementation id a legacy projection records: the manifest document's provenance URI when it
+ * is absolute, else the source id. The alias stamp in `normalizeConnectorManifestForStorage` can put a
+ * non-URI alias in `manifest_uri`; that value is not a provenance URI.
+ */
+function implementationIdOf(storedManifest: Record<string, unknown>, sourceId: string): string {
+  const provenance = storedManifest.manifest_uri;
+  return isNonEmptyString(provenance) && URL.canParse(provenance) ? provenance : sourceId;
+}
+
+export function normalizeConnectorManifestForStorage(
+  manifest: Record<string, unknown>,
+  context: ConnectorManifestStorageContext = {}
+): {
   connectorId: string;
   storedManifest: Record<string, unknown>;
 } {
-  const connectorId = canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id;
+  const connectorId = storageConnectorIdOf(manifest);
   if (!isNonEmptyString(connectorId)) {
     throw invalidConnectorManifest("connector_id is required");
+  }
+  if (URL.canParse(connectorId)) {
+    // Known aliases have already resolved to slugs. Any remaining URL is unsupported as an operational
+    // key, whether or not the manifest carries a source declaration.
+    throw invalidConnectorManifest(
+      `connector_id ${connectorId} is a URL with no connector_key; register a connector key, and keep the URL as manifest_uri`
+    );
   }
   const storedManifest: Record<string, unknown> = {
     ...cloneJson(manifest),
@@ -5661,21 +5793,27 @@ export function normalizeConnectorManifestForStorage(manifest: Record<string, un
       storedManifest.manifest_uri = originalConnectorId;
     }
   }
-  if (!isRecord(storedManifest.source_declaration) && isNonEmptyString(manifest.connector_id)) {
-    // `connector_id` is the local storage key after canonicalization. When a
-    // legacy manifest carried a URL-shaped identity in `manifest_uri`, retain
-    // that explicit URI as the SourceDeclaration identity instead of asking
-    // the projection to materialize a non-URI storage key (for example the
-    // local `codex` catalog entry).
-    const sourceId = isNonEmptyString(manifest.manifest_uri)
-      ? manifest.manifest_uri.trim()
-      : manifest.connector_id.trim();
+  // This optional Core extension treats an absent or null declaration as unspecified. Any nonnull
+  // declaration must validate; it cannot fall back to a retained declaration or compatibility mapping.
+  if (storedManifest.source_declaration !== undefined && storedManifest.source_declaration !== null) {
+    storedManifest.source_declaration = acceptedSourceDeclaration(storedManifest.source_declaration);
+  } else if (context.retainedSourceDeclaration !== undefined) {
+    storedManifest.source_declaration = projectRetainedSourceDeclaration(storedManifest, context.retainedSourceDeclaration);
+  } else {
+    // Fresh registration: no retained identity and no explicit declaration. The only identity
+    // this branch may use is the reviewed legacy source for the canonical connector key. The
+    // incoming provenance (`manifest_uri`) and alias (`connector_id`) never choose it. A key
+    // with no reviewed entry is refused here, before any write.
+    const sourceId = legacyFirstPartySourceIdFor(connectorId);
+    if (sourceId === undefined) {
+      throw invalidConnectorManifest(
+        `Connector ${connectorId} has no source declaration and no reviewed source mapping; register an explicit source_declaration`
+      );
+    }
     storedManifest.source_declaration = snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(
       storedManifest,
       {
-        connectorImplementationId: isNonEmptyString(storedManifest.manifest_uri)
-          ? storedManifest.manifest_uri
-          : sourceId,
+        connectorImplementationId: implementationIdOf(storedManifest, sourceId),
         publisherId: LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID,
         sourceId,
       }
@@ -5735,7 +5873,7 @@ function parseAndValidateConnectorManifestRow(row: DbRow, connectorId: unknown):
     if (!isNonEmptyString(row.manifest)) {
       throw invalidConnectorManifest("Stored connector manifest is missing");
     }
-    const manifest: unknown = JSON.parse(row.manifest);
+    const manifest: unknown = parseManifestJsonText(row.manifest);
     if (!isRecord(manifest)) {
       throw invalidConnectorManifest("Stored connector manifest must be an object");
     }

@@ -53,6 +53,7 @@ declare module "fastify" {
 }
 
 import { publicManifests, referenceManifests } from "@pdpp/reference-contract";
+import { parseManifestJsonText } from "../runtime/binding-declarations.ts";
 import {
   applyRequestValidation,
   applyResponseValidation,
@@ -436,13 +437,18 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // payloads so routes like `POST /grants/:id/revoke` (no body, header still
   // JSON) reach their handlers instead of failing at the transport.
   fastify.removeContentTypeParser("application/json");
-  fastify.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+  // Routes whose body is a Collection Profile manifest also reject any repeated
+  // object key in the raw text, so last-wins cannot change what gets validated.
+  const duplicateKeyRejectingRoutes = new Set(["POST /connectors"]);
+  fastify.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
     if (!body) {
       done(null, {});
       return;
     }
     try {
-      done(null, JSON.parse(typeof body === "string" ? body : body.toString()));
+      const text = typeof body === "string" ? body : body.toString();
+      const routeKey = `${req.method} ${req.routeOptions?.url ?? ""}`;
+      done(null, duplicateKeyRejectingRoutes.has(routeKey) ? parseManifestJsonText(text) : JSON.parse(text));
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
       Object.assign(err, { statusCode: 400 });
