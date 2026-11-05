@@ -22,10 +22,12 @@ import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
 import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
 import { configureSemanticBackend } from "../server/search-semantic.ts";
 import { recordSearchIndexDirtyFailure } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
-const manifestFor = (connectorId: string) => ({
+const manifestFor = (connectorId: string) => {
+  const manifest = {
   capabilities: { human_interaction: [] },
   connector_id: connectorId,
   display_name: connectorId,
@@ -50,7 +52,9 @@ const manifestFor = (connectorId: string) => ({
     },
   ],
   version: "0.1.0",
-});
+  };
+  return withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri });
+};
 
 const target = (connectorId: string, connectorInstanceId: string) => ({
   connector_id: connectorId,
