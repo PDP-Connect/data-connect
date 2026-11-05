@@ -207,6 +207,35 @@ for (const disposition of DISPOSITIONS_WITHOUT_SETUP_PATH) {
   });
 }
 
+test("a ready verdict offers account setup with no readiness note; a failed-verification verdict explains the repair", async () => {
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.ok(browserPackage.catalog);
+  const lifecycle: ConnectorInstallLifecycle = {
+    catalog: { ...browserPackage.catalog, digest: installed.digest },
+    installed: { ...installed, connector_id: "new-browser" },
+  };
+  const setupReady = {
+    ...unregisteredBrowser,
+    disposition: "browser_collector_manual" as const,
+    ownerActionable: true,
+    registrationStatus: "registered" as const,
+  };
+
+  const ready = await render(false, { ...setupReady, readiness: verdict("runnable", "connect") }, lifecycle);
+  assert.match(ready, NEW_BROWSER_SETUP);
+  assert.doesNotMatch(ready, READINESS_NOTE);
+
+  const needsRepair = await render(
+    false,
+    { ...unregisteredBrowser, readiness: verdict("artifact_invalid", "repair", "Digest mismatch.") },
+    lifecycle
+  );
+  assert.match(needsRepair, READINESS_NOTE);
+  assert.match(needsRepair, /failed verification\. Reinstall it to repair it\. Digest mismatch\./);
+  assert.doesNotMatch(needsRepair, BROWSER_SETUP_LINK);
+});
+
 test("an explicit host restriction is displayed without offering Install", async () => {
   assert.ok(browserPackage.catalog);
   const html = await render(false, setupCapable, {
