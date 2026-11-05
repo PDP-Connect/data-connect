@@ -79,3 +79,48 @@ test("res.header() accepts object form and sets all keys", async () => {
   assert.equal(reply.headers["x-one"], "1");
   assert.equal(reply.headers["x-two"], "2");
 });
+
+test("query parser preserves nested Core guards and oversized HTTP requests fail clearly", async (t) => {
+  const { parseReferenceQuery } = await import("../server/transport.ts");
+  assert.deepEqual(parseReferenceQuery("filter[time][gte]=today&expand[]=books"), {
+    expand: ["books"],
+    filter: { time: { gte: "today" } },
+  });
+  assert.deepEqual(parseReferenceQuery("cursor=%FF&filter%5Bname%5D=%E0%A4%A"), {
+    cursor: "%FF",
+    filter: { name: "%E0%A4%A" },
+  });
+  assert.deepEqual(parseReferenceQuery("connector_id=first&cursor=%FF&connector_id=second&filter%5Bname%5D=%E0%A4%A"), {
+    connector_id: ["first", "second"],
+    cursor: "%FF",
+    filter: { name: "%E0%A4%A" },
+  });
+  const bounded = parseReferenceQuery("expand[65]=books&filter[a][b][c][d][e][f][g][h][i]=deep");
+  assert.deepEqual(bounded.expand, { "65": "books" });
+  assert.deepEqual(bounded.filter, { a: { b: { c: { d: { e: { f: { g: { h: { "[i]": "deep" } } } } } } } } });
+  assert.deepEqual(
+    parseReferenceQuery(`connector_id=flat&${"x=1&".repeat(1001)}connector_id[nested]=other`).connector_id,
+    { flat: ["flat"], nested: undefined },
+    "mixed bracket scope remains invalid even beyond qs's parameterLimit"
+  );
+  const app = createApp();
+  t.after(async () => {
+    await app.fastify.close();
+  });
+  app.get("/query-proof", (req: { query: unknown }, res: { json: (body: unknown) => unknown }) => res.json(req.query));
+  await app.fastify.listen({ host: "127.0.0.1", port: 0 });
+  const address = app.fastify.server.address();
+  assert.ok(address && typeof address !== "string");
+  const nestedResponse = await fetch(
+    `http://127.0.0.1:${address.port}/query-proof?expand[65]=books&filter[a][b][c][d][e][f][g][h][i]=deep`
+  );
+  assert.equal(nestedResponse.status, 200);
+  assert.deepEqual(await nestedResponse.json(), bounded);
+  const response = await fetch(`http://127.0.0.1:${address.port}/query-proof?connector_id=${"a".repeat(20_000)}`);
+  assert.equal(response.status, 431, "Node's existing request-byte bound fails before query interpretation");
+  assert.deepEqual(await response.json(), {
+    error: "Request Header Fields Too Large",
+    message: "Exceeded maximum allowed HTTP header size",
+    statusCode: 431,
+  });
+});

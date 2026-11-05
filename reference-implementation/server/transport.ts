@@ -163,6 +163,30 @@ function loadQsParser(): QsParser {
 const localRequire = createRequire(import.meta.url);
 const qs = loadQsParser();
 
+/** Flat connector filters bypass qs's array and parameter count limits. */
+export function parseReferenceQuery(value: string): Record<string, unknown> {
+  const pairs = new URLSearchParams(value);
+  const connectorIds = pairs.getAll("connector_id");
+  // Keep every other pair's original encoding for qs, including malformed escapes.
+  const remaining = connectorIds.length
+    ? value
+        .split("&")
+        .filter((pair) => !new URLSearchParams(pair).has("connector_id"))
+        .join("&")
+    : value;
+  const parsed = qs.parse(remaining, { arrayLimit: 64, depth: 8 });
+  if (connectorIds.length > 0) {
+    // Preserve a malformed mixed flat/bracket scope as invalid input for the
+    // operation validator rather than silently choosing either representation.
+    if ([...pairs.keys()].some((key) => key.startsWith("connector_id["))) {
+      parsed.connector_id = { flat: connectorIds, nested: parsed.connector_id };
+    } else {
+      parsed.connector_id = connectorIds.length === 1 ? connectorIds[0] : connectorIds;
+    }
+  }
+  return parsed;
+}
+
 function canResolvePrettyTransport(): boolean {
   try {
     localRequire.resolve("pino-pretty");
@@ -352,7 +376,7 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
       // (filter[field][gte]=..., expand[]=..., expand_limit[rel]=...) per
       // Core §8. Depth bounded to 8 + arrayLimit 64 to close the DoS surface
       // that Express 5's default `simple` parser was tightening.
-      querystringParser: (str) => qs.parse(str, { arrayLimit: 64, depth: 8 }),
+      querystringParser: parseReferenceQuery,
     },
   });
 

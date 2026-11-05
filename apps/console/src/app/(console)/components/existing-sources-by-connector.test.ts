@@ -7,12 +7,16 @@ import { mock, test } from "node:test";
 
 // Source structure preserves the R5 exactness ruling (add-source-perf-design-agy-0730.md; terminal-read-architecture-fable-0730.md §2 R5).
 
-const requests: Array<Record<string, unknown>> = [];
+const MISSING_CURSOR = /continuation/;
+const PAGE_UNAVAILABLE = /page unavailable/;
+const COMPLETE_FIELD = /\bcomplete\s*[:?]/;
+
+const requests: Record<string, unknown>[] = [];
 let fetchPage: (request: Record<string, unknown>) => Promise<unknown>;
 const moduleApi = (async () => {
   mock.module("../lib/ref-client.ts", {
     exports: {
-      CONNECTOR_SUMMARY_CONNECTOR_ID_SET_MAX: 100,
+      CONNECTOR_SUMMARY_PAGE_LIMIT_MAX: 100,
       listConnectorSummaries: async (request: Record<string, unknown>) => {
         requests.push(request);
         return await fetchPage(request);
@@ -68,31 +72,40 @@ test("existing-source lookup follows cursors, projects profile data, and filters
   ]);
 });
 
-test("catalog lookup batches unique connector ids into bounded scopes", async () => {
+test("catalog lookup traverses the unfiltered feed and selects unique live catalog connections", async () => {
   const { existingSourcesByConnectorCatalog } = await moduleApi;
   requests.length = 0;
-  let active = 0;
-  let maxActive = 0;
-  fetchPage = async (request) => {
-    active += 1;
-    maxActive = Math.max(maxActive, active);
-    await new Promise((resolve) => setTimeout(resolve, 2));
-    active -= 1;
-    return {
-      data: (request.connectorId as string[]).map((id) => row(`cin-${id}`, id)),
-      has_more: false,
-    };
-  };
-  const ids = Array.from({ length: 901 }, (_, index) => `connector-${index}`);
-  const result = await existingSourcesByConnectorCatalog([...ids, ids[0]!]);
-  assert.equal(Object.keys(result).length, 901);
-  assert.equal(requests.length, 10);
-  assert.deepEqual(requests.map((request) => (request.connectorId as string[]).length).sort((a, b) => a - b), [1, ...Array(9).fill(100)]);
-  assert.ok(maxActive > 1 && maxActive <= 8, `expected concurrency from 2 through 8, got ${maxActive}`);
-  assert.ok(requests.every((request) => request.profile === "retained_count_summary"));
+  fetchPage = async (request) =>
+    request.cursor
+      ? {
+          data: [row("z-goodreads", "goodreads"), row("a-goodreads", "goodreads"), row("a-goodreads", "goodreads")],
+          has_more: false,
+        }
+      : {
+          data: [row("off-catalog", "other"), row("revoked", "goodreads", { status: "revoked" })],
+          has_more: true,
+          next_cursor: "second",
+        };
+  const ids = Array.from({ length: 1001 }, (_, index) => `connector-${index}`);
+  const result = await existingSourcesByConnectorCatalog([...ids, "goodreads", "goodreads"]);
+  assert.deepEqual(Object.keys(result), ["goodreads"]);
+  assert.deepEqual(
+    result.goodreads?.map((source) => source.connectionId),
+    ["a-goodreads", "z-goodreads"]
+  );
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((request) => request.connectorId === undefined && request.limit === 100));
+});
+
+test("catalog lookup rejects page failures and missing continuation", async () => {
+  const { existingSourcesByConnectorCatalog } = await moduleApi;
+  fetchPage = async () => ({ data: [], has_more: true });
+  await assert.rejects(existingSourcesByConnectorCatalog(["goodreads"]), MISSING_CURSOR);
+  fetchPage = () => Promise.reject(new Error("page unavailable"));
+  await assert.rejects(existingSourcesByConnectorCatalog(["goodreads"]), PAGE_UNAVAILABLE);
 });
 
 test("source: exact results do not expose a complete or incompleteness field", async () => {
   const source = await readFile(new URL("./existing-sources-by-connector.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /\bcomplete\s*[:?]/);
+  assert.doesNotMatch(source, COMPLETE_FIELD);
 });

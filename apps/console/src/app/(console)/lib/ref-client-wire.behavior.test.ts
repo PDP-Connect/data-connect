@@ -198,3 +198,19 @@ test("approveConsentRequest reviews staged consent and approves only its revisio
     request_uri: "urn:request:staged",
   });
 });
+
+test("listConnectorSummaries serializes scalar and large repeated connector scopes without a count cap", async (t) => {
+  const client = await loadRefClient();
+  const requests: URL[] = [];
+  t.mock.method(globalThis, "fetch", (input: string | URL | Request) => {
+    requests.push(new URL(input instanceof Request ? input.url : input));
+    return Promise.resolve(Response.json({ data: [], has_more: false }));
+  });
+  const ids = Array.from({ length: 1001 }, (_, index) => index.toString(36));
+  await client.listConnectorSummaries({ connectorId: "goodreads", profile: "retained_count_summary" });
+  await client.listConnectorSummaries({ connectorId: ids, limit: 1, profile: "retained_count_summary" });
+  assert.deepEqual(requests[0]?.searchParams.getAll("connector_id"), ["goodreads"]);
+  assert.deepEqual(requests[1]?.searchParams.getAll("connector_id"), ids);
+  assert.equal(requests[1]?.searchParams.get("limit"), "1");
+  assert.equal(requests[1]?.searchParams.get("profile"), "retained_count_summary");
+});
