@@ -456,35 +456,3 @@ export function decodeConnectorSummaryPageCursor(
     createdAt: payload.t,
   };
 }
-
-/**
- * Refuse to hand out a cursor the client cannot send back. The client repeats
- * the whole request on every continuation, and Node answers HTTP 431 once the
- * request line plus headers pass `maxHeaderBytes` (16,384 by default). Rather
- * than predict that size from the scope, measure it: `requestBytes` is the
- * request this page actually arrived as, in whatever encoding the client used.
- * The continuation is the same request with the cursor added or replaced.
- * `slackBytes` absorbs header changes between requests, such as a rotated
- * cookie. Only a page that issues a cursor is checked, so a large scope that
- * fits on one page still succeeds.
- */
-export function assertContinuationFits(options: {
-  readonly currentCursor: string | undefined;
-  readonly maxHeaderBytes: number;
-  readonly nextCursor: string | null | undefined;
-  readonly requestBytes: number;
-  readonly slackBytes: number;
-}): void {
-  if (!options.nextCursor) {
-    return;
-  }
-  const delta = options.currentCursor
-    ? options.nextCursor.length - options.currentCursor.length
-    : "&cursor=".length + options.nextCursor.length;
-  if (options.requestBytes + delta + options.slackBytes > options.maxHeaderBytes) {
-    throw new ConnectorSummaryPageRequestError(
-      "cursor",
-      "this request is too large to continue: the next page request would exceed the HTTP header limit. Send fewer or shorter connector_id values, or omit connector_id and filter the full list."
-    );
-  }
-}

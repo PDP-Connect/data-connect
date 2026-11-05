@@ -168,8 +168,12 @@ async function seedInstance(options: {
     );
 }
 
-async function getEnvelope(asUrl: string, query: string): Promise<{ status: number; body: RouteEnvelope }> {
-  const response = await fetch(`${asUrl}/_ref/connectors?${query}`);
+async function getEnvelope(
+  asUrl: string,
+  query: string,
+  headers?: Record<string, string>
+): Promise<{ status: number; body: RouteEnvelope }> {
+  const response = await fetch(`${asUrl}/_ref/connectors?${query}`, headers ? { headers } : {});
   const body = (await response.json()) as RouteEnvelope;
   return { body, status: response.status };
 }
@@ -264,12 +268,23 @@ function clientQuery(ids: readonly string[], limit: number): string {
   return params.toString();
 }
 
+/** Legal alternate encoding: every character of every `connector_id` name and value sent as %HH. */
+function allPercentEncoded(text: string): string {
+  return [...text].map((c) => `%${c.charCodeAt(0).toString(16).padStart(2, "0")}`).join("");
+}
+
+function encodedKeyQuery(ids: readonly string[], limit: number): string {
+  const key = allPercentEncoded("connector_id");
+  return `${ids.map((id) => `${key}=${allPercentEncoded(id)}`).join("&")}&limit=${limit}&profile=retained_count_summary`;
+}
+
 /**
- * A scope the contract allows (at most 100 ids) must either walk to its last
- * page or fail on page 1 with a typed error. It must never hand out a cursor
- * whose continuation request exceeds Node's header limit (HTTP 431).
- * URLSearchParams escapes `~!'()`, three bytes each, so tilde-padded ids make
- * the wire form much larger than the ids look.
+ * A request that issues a cursor must either walk to its last page or be
+ * refused on page 1. It must never hand out a cursor whose continuation
+ * exceeds Node's header limit (HTTP 431) and strands the later rows. The size
+ * is varied three ways that the decoded ids do not show: URLSearchParams
+ * escapes `~!'()` to three bytes each, parameter names can be percent-encoded,
+ * and headers (here a cookie) count against the same limit.
  */
 async function assertScopedContinuation(asUrl: string): Promise<void> {
   await seedConnector(CONNECTOR_A);
@@ -285,9 +300,12 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
     ...Array.from({ length: fillers }, (_, i) => `${pad}${i.toString(36)}`),
   ];
 
-  async function walk(query: string): Promise<{ failed: { status: number; body: RouteEnvelope } | null; seen: string[] }> {
+  async function walk(
+    query: string,
+    headers?: Record<string, string>
+  ): Promise<{ failed: { status: number; body: RouteEnvelope } | null; seen: string[] }> {
     const seen: string[] = [];
-    let page = await getEnvelope(asUrl, query);
+    let page = await getEnvelope(asUrl, query, headers);
     for (let pages = 0; pages < 10; pages += 1) {
       if (page.status !== 200) {
         return { failed: page, seen };
@@ -299,7 +317,7 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
       const cursor = page.body.next_cursor as string;
       assert.ok(cursor.length < 1024, "cursor must not grow with the scope");
       // biome-ignore lint/performance/noAwaitInLoops: each page needs the previous page's cursor.
-      page = await getEnvelope(asUrl, `${query}&cursor=${encodeURIComponent(cursor)}`);
+      page = await getEnvelope(asUrl, `${query}&cursor=${encodeURIComponent(cursor)}`, headers);
     }
     throw new Error("scope did not terminate");
   }
@@ -309,34 +327,49 @@ async function assertScopedContinuation(asUrl: string): Promise<void> {
   assert.equal(tooMany.status, 400, JSON.stringify(tooMany.body).slice(0, 200));
   assert.equal(tooMany.body.error?.code, "invalid_request");
 
-  // 100 short ids walk to the last page.
-  const small = await walk(clientQuery(scope(98, "f"), 1));
-  assert.equal(small.failed, null, `${JSON.stringify(small.failed?.body)}`.slice(0, 200));
-  assert.deepEqual(small.seen.sort(), expected);
-
-  // 100 tilde-padded ids: page 1 fits but the continuation would not. Every
-  // padding from small to large must walk to the end or fail on page 1.
-  let walked = 0;
-  let guardRefused = 0;
-  for (const tildes of [10, 30, 40, 44, 46, 47, 48, 49, 50, 52, 60]) {
-    // biome-ignore lint/performance/noAwaitInLoops: each padding is a separate HTTP boundary assertion.
-    const result = await walk(clientQuery(scope(98, "~".repeat(tildes)), 1));
-    if (result.failed === null) {
-      assert.deepEqual(result.seen.sort(), expected, `${tildes}: every matching row must be reachable`);
-      walked += 1;
-      continue;
+  const variants: Array<{ name: string; steps: number[]; request: (step: number) => [string, Record<string, string>?] }> =
+    [
+      {
+        name: "URLSearchParams, tilde-padded ids",
+        request: (tildes) => [clientQuery(scope(98, "~".repeat(tildes)), 1)],
+        steps: [0, 10, 30, 40, 44, 46, 47, 48, 49, 50, 52, 60],
+      },
+      {
+        name: "percent-encoded names and values",
+        request: (tildes) => [encodedKeyQuery(scope(98, "~".repeat(tildes)), 1)],
+        steps: [0, 10, 20, 28, 29, 30, 31, 32, 33, 34, 36, 40],
+      },
+      {
+        name: "large cookie header",
+        request: (cookieBytes) => [clientQuery(scope(8, "f"), 1), { cookie: `pad=${"x".repeat(cookieBytes)}` }],
+        steps: [0, 2000, 8000, 14000, 15000, 15400, 15600, 15800, 16000, 16200, 17000],
+      },
+    ];
+  for (const variant of variants) {
+    let walked = 0;
+    let guardRefused = 0;
+    for (const step of variant.steps) {
+      const [query, headers] = variant.request(step);
+      // biome-ignore lint/performance/noAwaitInLoops: each size is a separate HTTP boundary assertion.
+      const result = await walk(query, headers);
+      const label = `${variant.name} ${step}`;
+      if (result.failed === null) {
+        assert.deepEqual(result.seen.sort(), expected, `${label}: every matching row must be reachable`);
+        walked += 1;
+        continue;
+      }
+      assert.equal(result.seen.length, 0, `${label}: a refusal must come from page 1, before any cursor is issued`);
+      if (result.failed.status === 400) {
+        assert.match(result.failed.body.error?.message ?? "", /too large to continue/, label);
+        guardRefused += 1;
+      } else {
+        // Past Node's limit the transport itself refuses page 1; nothing is stranded.
+        assert.equal(result.failed.status, 431, label);
+      }
     }
-    assert.equal(result.seen.length, 0, `${tildes}: a refusal must come from page 1, before any cursor is issued`);
-    if (result.failed.status === 400) {
-      assert.match(result.failed.body.error?.message ?? "", /too large to continue/, `${tildes}`);
-      guardRefused += 1;
-    } else {
-      // Past Node's limit the transport itself refuses page 1; nothing is stranded.
-      assert.equal(result.failed.status, 431, `${tildes}`);
-    }
+    assert.ok(walked >= 2, `${variant.name}: sizes that fit must walk`);
+    assert.ok(guardRefused >= 1, `${variant.name}: a size that fits page 1 but cannot continue must be refused on page 1`);
   }
-  assert.ok(walked >= 3, "paddings that fit must walk");
-  assert.ok(guardRefused >= 1, "paddings that fit page 1 but cannot continue must be refused before page 2");
 }
 
 test("SQLite mounted route: repeated connector_id SET scope + retained_count_summary profile", async () => {
