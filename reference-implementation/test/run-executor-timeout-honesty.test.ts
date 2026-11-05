@@ -25,7 +25,7 @@
 // ingest round-trip that production hit.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -35,6 +35,7 @@ import {
   createRunExecutor,
   type RunExecutorDeps,
   type RunExecutorRuntimeState,
+  type WatchdogTimers,
 } from "../runtime/scheduler/run-executor.ts";
 import type { ConnectorSchedule } from "../runtime/scheduler-domain-types.ts";
 import { getDb } from "../server/db.ts";
@@ -146,30 +147,75 @@ const SCHEDULED_POLICY = projectRunAutomationPolicy({ refreshPolicy: null, trigg
 
 // `maxRunWallClockMs` is a RESETTABLE no-progress allowance, not a total-run
 // budget: `createAttemptWatchdog`'s `markProgress` re-arms the timer on every
-// PROGRESS message (run-executor.ts `arm()`). The watchdog is armed at
-// construction in `createActiveRunAttemptLease`, BEFORE the connector
-// subprocess is spawned, so the FIRST allowance must cover `node` startup, the
-// START handshake and the ingest round-trip together.
+// PROGRESS message (run-executor.ts `arm()`), and a `local_only_phase_started`
+// boundary replaces it with a ceiling of four allowances.
 //
-// Measured on a 24-core host (the run-executor's own `elapsed_ms` at the
-// phase-boundary latch — total attempt time, spawn included): 84-124 ms idle,
-// up to 148 ms under load. Against the previous 150 ms allowance that is a 2 ms
-// margin, which is why this file was the one remaining load-sensitive test in
-// the suite.
-//
-// This raises the no-progress allowance to 400 ms and resets it on connector
-// readiness; the completion case stays at three allowances and the secondary
-// ceiling at four. Startup remains subject to the initial allowance — the ready
-// message widens the allowance available AFTER it, it does not make startup
-// unbounded or remove timing sensitivity.
-//
-// Deadline-honesty is unweakened: every "must time out" test still hangs
-// forever with no further progress, and the phase-boundary test's post-boundary
-// sleep is still a multiple of the allowance.
+// These tests do not race that allowance against the clock. Process startup,
+// the START handshake and the ingest round-trip take a host-dependent time, so
+// any real budget either flakes on a loaded host or makes the test slow. The
+// watchdog's timers are injected (`WatchdogTimers`): the test waits for the
+// event it cares about (records durably ingested, the phase boundary latched),
+// asserts the delay the watchdog armed, and fires it explicitly. The value
+// below only has to be recognisable as the armed delay.
 const WALL_CLOCK_BUDGET_MS = 400;
-// The post-boundary sleep must be unambiguously longer than the budget, so a
-// re-armed (not disarmed) watchdog would still kill the run and fail the test.
-const POST_BOUNDARY_SLEEP_MS = WALL_CLOCK_BUDGET_MS * 3;
+const LOCAL_ONLY_CEILING_MS = WALL_CLOCK_BUDGET_MS * 4;
+const CONNECTOR_SENT_MARKER = "connector-sent";
+const CONNECTOR_RELEASE_MARKER = "connector-release";
+const WAIT_FOR_TIMEOUT_MS = 30_000;
+
+interface ManualWatchdogTimers {
+  /** Delay of the single armed timer, or null when none is armed. */
+  armedDelayMs: () => number | null;
+  /** Runs the single armed timer's callback, as if its delay had elapsed. */
+  fire: () => void;
+  timers: WatchdogTimers;
+}
+
+function manualWatchdogTimers(): ManualWatchdogTimers {
+  const armed = new Map<number, { callback: () => void; ms: number }>();
+  let nextId = 0;
+  return {
+    armedDelayMs: () => {
+      assert.ok(armed.size <= 1, `the watchdog arms at most one timer at a time, got ${armed.size}`);
+      const [only] = [...armed.values()];
+      return only ? only.ms : null;
+    },
+    fire: () => {
+      assert.equal(armed.size, 1, "expected exactly one armed watchdog timer to fire");
+      const [entry] = [...armed.entries()];
+      assert.ok(entry, "expected an armed watchdog timer");
+      const [id, timer] = entry;
+      armed.delete(id);
+      timer.callback();
+    },
+    timers: {
+      clearTimeout: (handle) => {
+        armed.delete((handle as unknown as { id: number }).id);
+      },
+      setTimeout: (callback, ms) => {
+        nextId += 1;
+        armed.set(nextId, { callback, ms });
+        return {
+          id: nextId,
+          unref() {
+            return this;
+          },
+        } as unknown as NodeJS.Timeout;
+      },
+    },
+  };
+}
+
+async function waitFor(condition: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + WAIT_FOR_TIMEOUT_MS;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      assert.fail(`timed out waiting for ${what}`);
+    }
+    // biome-ignore lint/performance/noAwaitInLoops: Polling is sequential by nature.
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 /**
  * Writes a connector that emits `recordCount` RECORD messages + a STATE
@@ -179,6 +225,7 @@ const POST_BOUNDARY_SLEEP_MS = WALL_CLOCK_BUDGET_MS * 3;
  * and exits immediately (used as the "genuinely completed" control).
  */
 function writeConnector(tmpDir: string, recordCount: number, hang: boolean): string {
+  const sentMarker = join(tmpDir, CONNECTOR_SENT_MARKER);
   const connectorPath = join(tmpDir, "connector.mjs");
   const records = Array.from({ length: recordCount }, (_, i) => ({
     data: { id: `i${i}` },
@@ -190,6 +237,7 @@ function writeConnector(tmpDir: string, recordCount: number, hang: boolean): str
   writeFileSync(
     connectorPath,
     `
+import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", (line) => {
@@ -205,8 +253,9 @@ rl.on("line", (line) => {
   }
   process.stdout.write(JSON.stringify({ cursor: { last: records.length ? records[records.length - 1].key : null }, stream: "items", type: "STATE" }) + "\\n");
   if (${hang ? "true" : "false"}) {
-    // Never send DONE, never exit — only the scheduler watchdog's
-    // maxRunWallClockMs setTimeout can end this run.
+    // Never send DONE, never exit — only the scheduler watchdog can end this
+    // run. The marker tells the test every message has been written.
+    writeFileSync(${JSON.stringify(sentMarker)}, "");
     setInterval(() => {}, 1000);
   } else {
     process.stdout.write(JSON.stringify({ records_emitted: records.length, status: "succeeded", type: "DONE" }) + "\\n");
@@ -222,19 +271,14 @@ rl.on("line", (line) => {
 
 /**
  * Writes a connector that emits `recordCount` records, then sends a PROGRESS
- * message with `phase_boundary: "local_only_phase_started"`, then sleeps for
- * `sleepMs` (simulating local-only work with no external dependency) before
- * completing successfully. Used to prove the watchdog stops applying
- * `maxRunWallClockMs` once a connector declares it has left the
- * provider-rate-limited phase — `sleepMs` is deliberately set well past
- * `maxRunWallClockMs` in the test that uses this.
+ * message with `phase_boundary: "local_only_phase_started"`, then waits until
+ * the test releases it (simulating local-only work with no external
+ * dependency) and it completes successfully. Used to prove the watchdog stops
+ * applying `maxRunWallClockMs` once a connector declares it has left the
+ * provider-rate-limited phase.
  */
-function writeConnectorWithPhaseBoundary(
-  tmpDir: string,
-  recordCount: number,
-  sleepMs: number,
-  hangAfterBoundary = false
-): string {
+function writeConnectorWithPhaseBoundary(tmpDir: string, recordCount: number, hangAfterBoundary = false): string {
+  const releaseMarker = join(tmpDir, CONNECTOR_RELEASE_MARKER);
   const connectorPath = join(tmpDir, "connector.mjs");
   const records = Array.from({ length: recordCount }, (_, i) => ({
     data: { id: `i${i}` },
@@ -246,6 +290,7 @@ function writeConnectorWithPhaseBoundary(
   writeFileSync(
     connectorPath,
     `
+import { existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 rl.on("line", async (line) => {
@@ -267,7 +312,10 @@ rl.on("line", async (line) => {
     setInterval(() => {}, 1000);
     return;
   }
-  await new Promise((resolve) => setTimeout(resolve, ${sleepMs}));
+  // Local-only work: finish when the test releases it, not after a wall-clock sleep.
+  while (!existsSync(${JSON.stringify(releaseMarker)})) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   process.stdout.write(JSON.stringify({ records_emitted: records.length, status: "succeeded", type: "DONE" }) + "\\n");
   rl.close();
   process.exit(0);
@@ -319,7 +367,8 @@ function schedule(connectorPath: string, ownerToken: string): ConnectorSchedule 
 function makeHarness(
   runtime: RunExecutorRuntimeState,
   rsUrl: string,
-  maxRunWallClockMs: number
+  maxRunWallClockMs: number,
+  watchdogTimers?: WatchdogTimers
 ): ReturnType<typeof createRunExecutor>["launchRun"] {
   const deps: RunExecutorDeps = {
     admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId }) => ({
@@ -357,6 +406,7 @@ function makeHarness(
     setState: async () => {
       // State persistence is out of scope for this oracle.
     },
+    ...(watchdogTimers ? { watchdogTimers } : {}),
   };
   return createRunExecutor(deps).launchRun;
 }
@@ -388,19 +438,51 @@ function withServerAndTmpDir(
   };
 }
 
+function ingestedRecordCount(): number {
+  const row = getDb().prepare("SELECT count(*) AS n FROM records WHERE connector_id = ?").get(CONNECTOR_ID) as {
+    n: number;
+  };
+  return Number(row.n);
+}
+
+function localOnlyPhaseLatched(): boolean {
+  const row = getDb()
+    .prepare("SELECT count(*) AS n FROM spine_events WHERE event_type = 'run.local_only_phase_started'")
+    .get() as { n: number };
+  return Number(row.n) > 0;
+}
+
+/**
+ * Launches a connector that emits `recordCount` records and then hangs, waits
+ * until every record is durably ingested, and fires the watchdog's armed
+ * timer. Returns the terminal record and the delay the watchdog had armed.
+ */
+async function runHangingConnectorUntilWatchdogFires(
+  ctx: { ownerToken: string; rsUrl: string; tmpDir: string },
+  recordCount: number
+) {
+  const watchdog = manualWatchdogTimers();
+  const launchRun = makeHarness(freshRuntime(), ctx.rsUrl, WALL_CLOCK_BUDGET_MS, watchdog.timers);
+  const pending = launchRun(
+    schedule(writeConnector(ctx.tmpDir, recordCount, true), ctx.ownerToken),
+    false,
+    SCHEDULED_POLICY
+  );
+  await waitFor(() => existsSync(join(ctx.tmpDir, CONNECTOR_SENT_MARKER)), "the connector to write all its messages");
+  await waitFor(() => ingestedRecordCount() === recordCount, `${recordCount} records to be durably ingested`);
+  const armedDelayMs = watchdog.armedDelayMs();
+  watchdog.fire();
+  return { armedDelayMs, record: await pending };
+}
+
 test(
   "a run that durably emits N records before being killed by the wall-clock watchdog reports records_emitted: N, not 0",
-  withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
-    const runtime = freshRuntime();
-    // The allowance resets on the connector's "ready" PROGRESS, so the ingest
-    // round-trip for 5 records gets a full allowance of its own rather than
-    // sharing one with startup. It is still short enough that the test doesn't
-    // hang; the connector hangs forever after emitting, so ONLY the watchdog
-    // can end this run.
-    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
+  withServerAndTmpDir(async (ctx) => {
+    // The connector hangs forever after emitting, so ONLY the watchdog can end
+    // this run; it is fired once all 5 records are durably ingested.
+    const { armedDelayMs, record } = await runHangingConnectorUntilWatchdogFires(ctx, 5);
 
-    const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
-
+    assert.equal(armedDelayMs, WALL_CLOCK_BUDGET_MS);
     assert.equal(record.status, "failed");
     assert.equal(record.terminalReason, "run_timed_out");
     assert.equal(
@@ -413,11 +495,8 @@ test(
 
 test(
   "a run that emits zero records before being killed by the watchdog still reports records_emitted: 0 (no fabrication in either direction)",
-  withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
-    const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
-
-    const record = await launchRun(schedule(writeConnector(tmpDir, 0, true), ownerToken), false, SCHEDULED_POLICY);
+  withServerAndTmpDir(async (ctx) => {
+    const { record } = await runHangingConnectorUntilWatchdogFires(ctx, 0);
 
     assert.equal(record.status, "failed");
     assert.equal(record.terminalReason, "run_timed_out");
@@ -431,11 +510,8 @@ test(
 
 test(
   "a run killed by the watchdog with unfinished work records a typed gap, not an empty known_gaps array",
-  withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
-    const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
-
-    const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
+  withServerAndTmpDir(async (ctx) => {
+    const { record } = await runHangingConnectorUntilWatchdogFires(ctx, 5);
 
     assert.equal(record.status, "failed");
     assert.ok(Array.isArray(record.knownGaps), "knownGaps must be an array");
@@ -466,20 +542,32 @@ test(
 test(
   "a connector that declares a local-only phase boundary is not truncated by maxRunWallClockMs, even though it runs well past that budget",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
-    const runtime = freshRuntime();
-    // The budget is far shorter than the connector's post-boundary sleep
-    // (POST_BOUNDARY_SLEEP_MS = 3x the budget). Without the phase-boundary fix
-    // this run would be killed by run_timed_out one budget after the boundary;
-    // with the fix, the watchdog disarms itself once the PROGRESS
-    // phase_boundary message arrives and the run is free to run past the budget
-    // to genuine completion.
-    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
+    // Without the phase-boundary fix the watchdog would stay armed at one
+    // budget and kill the run once local-only work outlasted it; with the fix
+    // the boundary replaces that timer with the four-budget ceiling. The
+    // connector keeps working until released, so the only thing that could end
+    // the run is the armed timer, which this test asserts is the ceiling.
+    const watchdog = manualWatchdogTimers();
+    const launchRun = makeHarness(freshRuntime(), rsUrl, WALL_CLOCK_BUDGET_MS, watchdog.timers);
 
-    const record = await launchRun(
-      schedule(writeConnectorWithPhaseBoundary(tmpDir, 5, POST_BOUNDARY_SLEEP_MS), ownerToken),
+    const pending = launchRun(
+      schedule(writeConnectorWithPhaseBoundary(tmpDir, 5), ownerToken),
       false,
       SCHEDULED_POLICY
     );
+    try {
+      await waitFor(localOnlyPhaseLatched, "the local-only phase boundary to be latched");
+      assert.equal(
+        watchdog.armedDelayMs(),
+        LOCAL_ONLY_CEILING_MS,
+        "after the boundary the primary budget must be replaced by the local-only ceiling"
+      );
+    } finally {
+      // Release the connector even when an assertion above failed, so a failure
+      // reports instead of hanging on a connector that waits for this marker.
+      writeFileSync(join(tmpDir, CONNECTOR_RELEASE_MARKER), "");
+    }
+    const record = await pending;
 
     assert.equal(
       record.status,
@@ -524,11 +612,8 @@ test(
 
 test(
   "a run with no phase-boundary declaration never emits a local_only_phase_started spine event (control for the durable-trace test above)",
-  withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
-    const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
-
-    const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
+  withServerAndTmpDir(async (ctx) => {
+    const { record } = await runHangingConnectorUntilWatchdogFires(ctx, 5);
 
     assert.equal(record.status, "failed");
     assert.equal(record.terminalReason, "run_timed_out");
@@ -545,19 +630,18 @@ test(
 
 test(
   "without a phase-boundary declaration, a connector running past maxRunWallClockMs IS killed (control for the phase-boundary test above)",
-  withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
-    const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
-
+  withServerAndTmpDir(async (ctx) => {
     // Same shape as the phase-boundary connector but with no phase_boundary
     // PROGRESS message — proves the watchdog's default behavior (kill at
     // maxRunWallClockMs) is still intact and that it is specifically the
     // phase_boundary signal, not merely "the connector kept emitting
-    // PROGRESS", that disarms it. This connector DOES emit a plain "ready"
-    // PROGRESS, so that distinction is now exercised rather than assumed:
-    // a plain PROGRESS re-arms the timer, it does not disarm it.
-    const record = await launchRun(schedule(writeConnector(tmpDir, 5, true), ownerToken), false, SCHEDULED_POLICY);
+    // PROGRESS", that replaces the primary budget. This connector DOES emit a
+    // plain "ready" PROGRESS, so that distinction is exercised rather than
+    // assumed: a plain PROGRESS re-arms the primary budget, it does not
+    // replace it with the local-only ceiling.
+    const { armedDelayMs, record } = await runHangingConnectorUntilWatchdogFires(ctx, 5);
 
+    assert.equal(armedDelayMs, WALL_CLOCK_BUDGET_MS);
     assert.equal(record.status, "failed");
     assert.equal(record.terminalReason, "run_timed_out");
   })
@@ -566,18 +650,28 @@ test(
 test(
   "a connector that hangs after the local-only phase boundary is still killed by the secondary ceiling",
   withServerAndTmpDir(async ({ ownerToken, rsUrl, tmpDir }) => {
-    const runtime = freshRuntime();
-    const launchRun = makeHarness(runtime, rsUrl, WALL_CLOCK_BUDGET_MS);
+    const watchdog = manualWatchdogTimers();
+    const launchRun = makeHarness(freshRuntime(), rsUrl, WALL_CLOCK_BUDGET_MS, watchdog.timers);
 
-    // hangAfterBoundary=true, so the connector never reaches its sleep and the
-    // sleepMs argument is unreachable — the secondary ceiling
-    // (WALL_CLOCK_BUDGET_MS * 4, see createAttemptWatchdog) is what must end
-    // this attempt.
-    const record = await launchRun(
-      schedule(writeConnectorWithPhaseBoundary(tmpDir, 1, POST_BOUNDARY_SLEEP_MS, true), ownerToken),
+    // hangAfterBoundary=true, so the connector never completes — the secondary
+    // ceiling (WALL_CLOCK_BUDGET_MS * 4, see createAttemptWatchdog) is what must
+    // end this attempt.
+    const pending = launchRun(
+      schedule(writeConnectorWithPhaseBoundary(tmpDir, 1, true), ownerToken),
       false,
       SCHEDULED_POLICY
     );
+    try {
+      await waitFor(localOnlyPhaseLatched, "the local-only phase boundary to be latched");
+      assert.equal(watchdog.armedDelayMs(), LOCAL_ONLY_CEILING_MS);
+    } finally {
+      // Fire even when an assertion above failed, so a failure reports instead
+      // of hanging on a connector that never exits.
+      if (watchdog.armedDelayMs() !== null) {
+        watchdog.fire();
+      }
+    }
+    const record = await pending;
 
     assert.equal(record.status, "failed");
     assert.equal(record.terminalReason, "run_timed_out");
