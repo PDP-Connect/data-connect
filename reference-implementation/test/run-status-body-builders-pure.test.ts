@@ -82,6 +82,25 @@ test("buildTerminalRunStatusBody: completed_at + status come from the terminal e
   assert.deepEqual(body.links, { timeline: "/_ref/runs/run-2/timeline" });
 });
 
+test("buildTerminalRunStatusBody: carries the terminal event's rejected-record total, and omits it when absent or invalid", () => {
+  const withTotal = buildTerminalRunStatusBody(
+    "run-2",
+    { ...succeededTerminal, data: { records_permanently_rejected: 3 } },
+    null
+  );
+  assert.equal(withTotal.records_permanently_rejected, 3);
+  const zero = buildTerminalRunStatusBody(
+    "run-2",
+    { ...succeededTerminal, data: { records_permanently_rejected: 0 } },
+    null
+  );
+  assert.equal(zero.records_permanently_rejected, 0, "a reported zero is kept, not treated as absent");
+  for (const data of [{}, { records_permanently_rejected: -1 }, { records_permanently_rejected: "3" }]) {
+    const body = buildTerminalRunStatusBody("run-2", { ...succeededTerminal, data }, null);
+    assert.equal(body.records_permanently_rejected, undefined, `omitted for ${JSON.stringify(data)}`);
+  }
+});
+
 test("buildTerminalRunStatusBody: trace_id prefers the started event, started_at comes from started", () => {
   const started: RunStatusLifecycleEvent = {
     actor_id: null,

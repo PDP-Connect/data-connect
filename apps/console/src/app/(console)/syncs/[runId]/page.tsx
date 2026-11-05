@@ -38,7 +38,7 @@ import {
   type SkippedStreamSummary,
   summarizeSkippedStreams,
 } from "../../lib/run-gaps.ts";
-import { summarizeRunRejections } from "../../lib/run-rejections.ts";
+import { rejectedCount, summarizeRunRejections } from "../../lib/run-rejections.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
 import { RejectedRecordsSection } from "./rejected-records-section.tsx";
@@ -143,11 +143,17 @@ export default async function RunDetailPage({
       ? await getStaticSecretSetup(connectorId).catch(() => null)
       : null;
   const latestProgress = getLatestProgress(events);
-  const rejections = summarizeRunRejections(events);
-  // Receipts are read only when this run rejected something. A failed read
-  // leaves the count, which comes from the run's own events.
+  // One timeline page holds only part of a long run, so the rejected total
+  // comes from the run status first, like liveness above. The page's events
+  // state a count only where they can prove it.
+  const rejections = summarizeRunRejections(events, {
+    statusTotal: runStatus?.records_permanently_rejected ?? null,
+    timelineComplete: cursor === null && !envelope.truncated,
+  });
+  // Receipts are read only when this run rejected something. A failed read, or
+  // a run with no known connection, renders as an unavailable list.
   const rejectionReceipts =
-    rejections.rejectedRecords > 0 && connectionId
+    rejectedCount(rejections) > 0 && connectionId
       ? await listRunRecordRejectionReceipts(connectionId, runId).catch(() => null)
       : null;
   const failure = events.find((e) => e.event_type === "run.failed");

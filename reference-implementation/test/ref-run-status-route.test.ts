@@ -386,6 +386,31 @@ test("run-status route: known_gaps passes through from the terminal event, windo
   });
 });
 
+test("run-status route: records_permanently_rejected passes through from the terminal event", async (t) => {
+  freshDb(t);
+  await emitStarted("run_rejected");
+  await emitSpineEvent({
+    actor_id: CONNECTOR_ID,
+    actor_type: "runtime",
+    data: { records_permanently_rejected: 4, source: { id: CONNECTOR_ID, kind: "connector" } },
+    event_type: "run.completed",
+    object_id: "run_rejected",
+    object_type: "run",
+    occurred_at: "2026-06-10T19:06:00.000Z",
+    run_id: "run_rejected",
+    status: "succeeded",
+    trace_id: "trace_status_1",
+  });
+
+  const app = makeApp();
+  mountRefRunStatus(app, makeSpineCtx());
+  const res = makeRes();
+  await getRoute(app, ROUTE)({ params: { runId: "run_rejected" } }, res);
+
+  assert.equal(res._status, 200);
+  assert.equal(res._body.records_permanently_rejected, 4);
+});
+
 test("run-status route: terminal event wins over not-yet-finalized flight state", async (t) => {
   freshDb(t);
   await emitStarted("run_racing");
