@@ -14,7 +14,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { after, before } from "node:test";
+import test, { after, before, mock } from "node:test";
+import { listSpineEventsPage } from "../lib/spine.ts";
 import { runConnector } from "../runtime/index.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
@@ -489,6 +490,57 @@ test("a failed DONE that cites an accepted fact yields a connector-attributed di
     assert.equal(record.diagnosis.category, "auth_rejected");
     assert.equal(record.diagnosis.attribution, "connector");
     assert.deepEqual(record.diagnosis.basis, ["p1"]);
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
+// A reader who sees a terminal run event expects the owner diagnostic record to
+// exist. The test watches the store write and asks the run timeline whether the
+// terminal event was already there.
+async function terminalEventSeenAtStoreWrite(stub: Stub, runId: string): Promise<boolean | null> {
+  const store = getDefaultConnectorObservationStore();
+  const put = store.put.bind(store);
+  let terminalSeen: boolean | null = null;
+  const spy = mock.method(store, "put", async (input: Parameters<typeof store.put>[0]) => {
+    // PostgreSQL returns a promise here, SQLite a page; await covers both.
+    const page = await listSpineEventsPage("run", runId, { limit: 500 });
+    terminalSeen = page.events.some((event) => event.event_type === "run.failed");
+    return put(input);
+  });
+  try {
+    await runStub(stub, runId, manifest());
+  } finally {
+    spy.mock.restore();
+  }
+  return terminalSeen;
+}
+
+test("the diagnostic record is stored before the terminal event of a failed DONE", async () => {
+  const stub = makeStub(
+    [
+      PROVIDER_REJECTED("o1"),
+      {
+        error: { basis: ["o1"], code: "credential_rejected", message: "refused", retryable: false },
+        records_emitted: 0,
+        status: "failed",
+        type: "DONE",
+      },
+    ],
+    1
+  );
+  try {
+    assert.equal(await terminalEventSeenAtStoreWrite(stub, "run_c020_order_done"), false);
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
+test("the diagnostic record is stored before the terminal event of a protocol violation", async () => {
+  const done = { records_emitted: 0, status: "succeeded", type: "DONE" };
+  const stub = makeStub([PROVIDER_REJECTED("o2"), done, EXPECTATION("o3")], 0);
+  try {
+    assert.equal(await terminalEventSeenAtStoreWrite(stub, "run_c020_order_violation"), false);
   } finally {
     rmSync(stub.dir, { force: true, recursive: true });
   }

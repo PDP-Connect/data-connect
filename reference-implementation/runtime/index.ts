@@ -5287,6 +5287,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     async function handleMessageFailure(caught: unknown): Promise<void> {
       const err = caught as RuntimeRunError;
       finalStatus = "failed";
+      // The owner record must exist before any reader can see the terminal event.
+      await persistObservationDiagnosis();
       const failureReason = classifyRuntimeFailure(err);
       const checkpointSummary = buildCheckpointSummary();
       err.run_id = runId;
@@ -7228,6 +7230,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         }
       }
 
+      // Store the owner record before any terminal event, so a reader who sees
+      // the terminal event can read the record.
+      await persistObservationDiagnosis();
       try {
         if (!terminalEventRecorded) {
           if (runTimedOut) {
