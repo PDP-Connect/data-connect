@@ -206,6 +206,22 @@ function quoteForDisplay(value: string): string {
     : value;
 }
 
+/**
+ * Resolves an `http_health` manifest URL against the operator-supplied
+ * `PDPP_CANARY_ORIGIN`. Manifests carry a path (`/owner/login`) so no
+ * deployment hostname is committed. Absolute URLs pass through unchanged; a
+ * relative path with no origin throws rather than guessing a target.
+ */
+export function resolveProbeUrl(url: string, origin: string | undefined): string {
+  if (URL.canParse(url)) {
+    return url;
+  }
+  if (!origin) {
+    throw new Error(`PDPP_CANARY_ORIGIN is not set; cannot resolve http_health path ${url}`);
+  }
+  return new URL(url, origin).toString();
+}
+
 async function collectMetric(
   manifest: CanaryManifest,
   check: CanaryManifest["checks"][number],
@@ -224,7 +240,7 @@ async function collectMetric(
     case "log_pattern":
       return logPatternCount(manifest.container, check.pattern, check.sinceSeconds);
     case "http_health":
-      return await httpStatus(check.url);
+      return await httpStatus(resolveProbeUrl(check.url, process.env.PDPP_CANARY_ORIGIN));
     case "connector_run":
       // Meaningless before the deploy; only evaluated after.
       return null;

@@ -1405,11 +1405,11 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
 }, async () => {
   // Design D8 (fix-enroll-connector-instance-pk-collision). Live counterexample:
   // a legacy, already-completed connector_instances row for (owner, codex,
-  // vivid-fish) computed its source_binding_key from the OLDER, larger
+  // example-host) computed its source_binding_key from the OLDER, larger
   // sourceBinding shape (kind + device_id + local_binding_name +
   // source_instance_id) that predates deviceExporterSourceBindingIdentity's
   // stable {kind, local_binding_name}-only shape. This is the SAME logical
-  // binding as any fresh enrollment for (owner_local, codex, vivid-fish) —
+  // binding as any fresh enrollment for (owner_local, codex, example-host) —
   // only its key derivation is stale. A partial-write orphan for the same
   // binding (source_kind local_device, connector_instance_id NULL, from a
   // first attempt that failed before consume) exists alongside it. Every
@@ -1450,7 +1450,7 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
         const legacySourceInstanceId = "dsrc_fbff3caefba6c972";
         // The exact live id: today's makeConnectorInstanceId formula
         // deterministically computes this SAME id for (owner_local, codex,
-        // local_device, {kind:'local_device', local_binding_name:'vivid-fish'})
+        // local_device, {kind:'local_device', local_binding_name:'example-host'})
         // — reproducing the real coincidental PK collision, not a synthetic
         // stand-in id chosen to force a failure.
         const legacyConnectorInstanceId = "cin_da9889ea09f0132af33c2f4e";
@@ -1463,7 +1463,7 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
 
         await postgresQuery(
           `INSERT INTO device_exporters(device_id, owner_subject_id, display_name, status, agent_version, collector_protocol_version, last_heartbeat_at, last_error_json, created_at, updated_at, revoked_at)
-           VALUES($1, $2, 'vivid-fish', 'active', NULL, NULL, NULL, NULL, $3, $3, NULL)`,
+           VALUES($1, $2, 'example-host', 'active', NULL, NULL, NULL, NULL, $3, $3, NULL)`,
           [legacyDeviceId, ownerSubjectId, now]
         );
         await postgresQuery(
@@ -1471,7 +1471,7 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
         );
         await postgresQuery(
           `INSERT INTO connector_instances(connector_instance_id, owner_subject_id, connector_id, display_name, status, source_kind, source_binding_key, source_binding_json, created_at, updated_at, revoked_at)
-           VALUES($1, $2, 'codex', 'vivid-fish', 'active', 'local_device', $3, $4::jsonb, $5, $5, NULL)`,
+           VALUES($1, $2, 'codex', 'example-host', 'active', 'local_device', $3, $4::jsonb, $5, $5, NULL)`,
           [
             legacyConnectorInstanceId,
             ownerSubjectId,
@@ -1479,7 +1479,7 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
             JSON.stringify({
               device_id: legacyDeviceId,
               kind: "local_device",
-              local_binding_name: "vivid-fish",
+              local_binding_name: "example-host",
               source_instance_id: legacySourceInstanceId,
             }),
             now,
@@ -1487,12 +1487,12 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
         );
         await postgresQuery(
           `INSERT INTO device_source_instances(source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, source_kind, display_name, status, last_error_json, created_at, updated_at, revoked_at)
-           VALUES($1, $2, 'codex', $3, 'vivid-fish', NULL, 'vivid-fish', 'active', NULL, $4, $4, NULL)`,
+           VALUES($1, $2, 'codex', $3, 'example-host', NULL, 'example-host', 'active', NULL, $4, $4, NULL)`,
           [legacySourceInstanceId, legacyDeviceId, legacyConnectorInstanceId, now]
         );
         await postgresQuery(
           `INSERT INTO device_enrollment_codes(enrollment_code_id, code_hash, owner_subject_id, connector_id, local_binding_id, display_name, device_id, status, created_at, expires_at, consumed_at, revoked_at)
-           VALUES('denroll_legacy_completed', 'hash_legacy_completed', $1, 'codex', 'vivid-fish', NULL, $2, 'consumed', $3, $3, $3, NULL)`,
+           VALUES('denroll_legacy_completed', 'hash_legacy_completed', $1, 'codex', 'example-host', NULL, $2, 'consumed', $3, $3, $3, NULL)`,
           [ownerSubjectId, legacyDeviceId, now]
         );
 
@@ -1505,19 +1505,19 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
         const orphanSourceId = "dsrc_83b8eae8f40c5b86";
         await postgresQuery(
           `INSERT INTO device_exporters(device_id, owner_subject_id, display_name, status, agent_version, collector_protocol_version, last_heartbeat_at, last_error_json, created_at, updated_at, revoked_at)
-           VALUES($1, $2, 'vivid-fish', 'active', NULL, NULL, NULL, NULL, $3, $3, NULL)`,
+           VALUES($1, $2, 'example-host', 'active', NULL, NULL, NULL, NULL, $3, $3, NULL)`,
           [orphanDeviceId, ownerSubjectId, now]
         );
         await postgresQuery(
           `INSERT INTO device_source_instances(source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, source_kind, display_name, status, last_error_json, created_at, updated_at, revoked_at)
-           VALUES($1, $2, 'codex', NULL, 'vivid-fish', 'local_device', 'vivid-fish', 'active', NULL, $3, $3, NULL)`,
+           VALUES($1, $2, 'codex', NULL, 'example-host', 'local_device', 'example-host', 'active', NULL, $3, $3, NULL)`,
           [orphanSourceId, orphanDeviceId, now]
         );
 
         // A fresh pending code for the SAME binding — the exact live
         // remediation path (the only one available once an earlier code
         // expires) — must recover with no manual DB cleanup.
-        const freshCode = await mintCode(asUrl, "vivid-fish", "codex");
+        const freshCode = await mintCode(asUrl, "example-host", "codex");
 
         // Mutation-grade: the pre-D8 code hits this 23505 on EVERY retry,
         // deterministically — assert across three consecutive attempts, not
@@ -1566,7 +1566,7 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
             ? JSON.parse(migratedRow0.source_binding_json as string)
             : migratedRow0.source_binding_json;
         assert.equal((migratedBinding as Record<string, unknown>).kind, "local_device");
-        assert.equal((migratedBinding as Record<string, unknown>).local_binding_name, "vivid-fish");
+        assert.equal((migratedBinding as Record<string, unknown>).local_binding_name, "example-host");
         assert.equal(migratedRow0.status, "active");
 
         // Exactly ONE connector instance exists for this owner+connector+
@@ -1628,11 +1628,11 @@ test("D9 (Postgres): restart coalesces an exact post-enrollment legacy/stable du
       const fullBinding = {
         device_id: deviceId,
         kind: "local_device",
-        local_binding_name: "vivid-fish",
+        local_binding_name: "example-host",
         source_instance_id: sourceInstanceId,
       };
       const stableBindingKey = createHash("sha256")
-        .update('{"kind":"local_device","local_binding_name":"vivid-fish"}')
+        .update('{"kind":"local_device","local_binding_name":"example-host"}')
         .digest("hex");
       const legacyBindingKey = createHash("sha256").update(JSON.stringify(fullBinding)).digest("hex");
       try {
@@ -1643,7 +1643,7 @@ test("D9 (Postgres): restart coalesces an exact post-enrollment legacy/stable du
         );
         await postgresQuery(
           `INSERT INTO device_exporters(device_id, owner_subject_id, display_name, status, created_at, updated_at)
-           VALUES($1, $2, 'vivid-fish', 'active', $3, $3)`,
+           VALUES($1, $2, 'example-host', 'active', $3, $3)`,
           [deviceId, ownerSubjectId, now]
         );
         await Promise.all(
@@ -1655,14 +1655,14 @@ test("D9 (Postgres): restart coalesces an exact post-enrollment legacy/stable du
           ).map(([id, key]) =>
             postgresQuery(
               `INSERT INTO connector_instances(connector_instance_id, owner_subject_id, connector_id, display_name, status, source_kind, source_binding_key, source_binding_json, created_at, updated_at)
-             VALUES($1, $2, 'codex', 'vivid-fish', 'active', 'local_device', $3, $4::jsonb, $5, $5)`,
+             VALUES($1, $2, 'codex', 'example-host', 'active', 'local_device', $3, $4::jsonb, $5, $5)`,
               [id, ownerSubjectId, key, JSON.stringify(fullBinding), now]
             )
           )
         );
         await postgresQuery(
           `INSERT INTO device_source_instances(source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, source_kind, display_name, status, created_at, updated_at)
-           VALUES($1, $2, 'codex', $3, 'vivid-fish', 'local_device', 'vivid-fish', 'active', $4, $4)`,
+           VALUES($1, $2, 'codex', $3, 'example-host', 'local_device', 'example-host', 'active', $4, $4)`,
           [sourceInstanceId, deviceId, canonicalId, now]
         );
         await postgresQuery(
