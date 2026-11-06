@@ -103,6 +103,11 @@ interface UpsertGapInput {
   stream?: string | null;
 }
 
+interface UpsertGapOptions {
+  /** Record this upsert as an observed collection event, in the same transaction. */
+  readonly collectionRevision?: CollectionRevisionEventInput;
+}
+
 // Normalized/derived shape produced by `normalizeGapInput`, consumed by both
 // backend `upsertPendingGap` implementations.
 interface NormalizedGapInput {
@@ -182,10 +187,21 @@ interface CountByStream {
   stream: string;
 }
 
-import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged } from "../../lib/db.ts";
+import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged, writeTransaction } from "../../lib/db.ts";
 import { DEFAULT_QUARANTINE_POLICY } from "../../runtime/recovery-quarantine.ts";
+import { getDb } from "../db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../owner-auth.ts";
-import { getStorageBackendKind, isPostgresStorageBackend, postgresQuery } from "../postgres-storage.ts";
+import {
+  getStorageBackendKind,
+  isPostgresStorageBackend,
+  postgresQuery,
+  withPostgresTransaction,
+} from "../postgres-storage.ts";
+import {
+  type CollectionRevisionEventInput,
+  requirePostgresCollectionRevisionInTransaction,
+  requireSqliteCollectionRevisionInTransaction,
+} from "./collection-revision-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "./connector-instance-store.ts";
 
 const VALID_STATUSES = new Set(["pending", "in_progress", "recovered", "terminal"]);
@@ -1235,6 +1251,155 @@ function postgresPendingReadFilter(
   return { params, sql: parts.join("\n          ") };
 }
 
+/** The SQLite upsert. Runs on the caller's transaction when there is one. */
+function upsertSqlitePendingGap(input: UpsertGapInput): DetailGap | null {
+  const gap = normalizeGapInput(input);
+  const detailLocatorJson = encodeJson(gap.detailLocator);
+  // REVIEWED-DYNAMIC: connector_detail_gaps is owned by this store and
+  // not yet represented in the static query registry.
+  execDynamicSqlAcknowledged(
+    `
+    INSERT INTO connector_detail_gaps(
+      gap_id, connector_id, connector_instance_id, grant_id, source_json, stream, parent_stream, record_key,
+      detail_locator_json, list_cursor_json, scope_json, reason, status, attempt_count,
+      next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at, retryable
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(gap_id) DO UPDATE SET
+      source_json = excluded.source_json,
+      detail_locator_json = excluded.detail_locator_json,
+      list_cursor_json = excluded.list_cursor_json,
+      scope_json = excluded.scope_json,
+      -- retryable: a NULL (absent) observation is NOT a fresh classification.
+      -- On a row that already carries a known value it preserves BOTH the stored
+      -- boolean and its paired reason; a fresh explicit boolean replaces the
+      -- pair atomically (latest valid observation wins, like every other column).
+      reason = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
+                    THEN connector_detail_gaps.reason ELSE excluded.reason END,
+      retryable = COALESCE(excluded.retryable, connector_detail_gaps.retryable),
+      -- §10-A: 'terminal' is always sticky — a terminalized gap must not be
+      -- silently resurrected into the fillable-pending set by a re-upsert.
+      -- 'recovered' is sticky ONLY against a re-upsert from the SAME run
+      -- that recovered it (an ordinary-forward-pass re-defer with no new
+      -- attempt evidence, per the original §10-A regression) — i.e. a
+      -- NON-NULL 'recovered_run_id' that matches 'excluded.last_run_id'
+      -- exactly. A NULL 'recovered_run_id' (a run-id-less recovery, e.g.
+      -- the local-collector policy-budget path in
+      -- 'ref-device-exporters.ts:recoverLocalCollectorGap', which marks a
+      -- gap recovered with '{}' — no spine run backs it) carries no
+      -- same-attempt context to compare against, so SQL's 'NULL = x'
+      -- already evaluates false/unmatched for every 'x' here — the row is
+      -- NEVER treated as a same-attempt re-defer and always reopens on the
+      -- next re-upsert. Do not special-case NULL as a stickiness
+      -- wildcard: an earlier revision did 'recovered_run_id IS NULL OR
+      -- ...', which made every run-id-less recovery sticky FOREVER
+      -- (P1 review finding, reproduced locally: a gap recovered via
+      -- 'markGapStatus(id, 'recovered', {})' never reopened on a later
+      -- 'upsertPendingGap' with a real 'lastRunId') — the exact opposite
+      -- of the reopen-on-later-evidence rule this fix exists to enforce.
+      -- A re-upsert from a LATER run (or ANY re-upsert of a null-run-id
+      -- recovery) reopens the row to 'pending': the connector is
+      -- reporting, with fresh attempt evidence, that a previously-closed
+      -- record is missing again — treating that as permanently satisfied
+      -- silently strands it outside both the pending-retry queue and the
+      -- quarantine escalation path forever (live Amazon order_items
+      -- evidence: 12 order ids stuck 'recovered' while DETAIL_COVERAGE
+      -- reported them uncovered on every run for weeks).
+      status = CASE
+        WHEN connector_detail_gaps.status = 'terminal' THEN 'terminal'
+        WHEN connector_detail_gaps.status = 'recovered'
+          AND connector_detail_gaps.recovered_run_id = excluded.last_run_id
+          THEN 'recovered'
+        ELSE 'pending'
+      END,
+      next_attempt_after = excluded.next_attempt_after,
+      -- Explanatory metadata is never written over a stored permanent
+      -- classification by an unclassified observation.
+      last_error_json = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable = 0
+                             THEN connector_detail_gaps.last_error_json ELSE excluded.last_error_json END,
+      last_run_id = excluded.last_run_id,
+      updated_at = excluded.updated_at
+    -- Identity conflict target = the natural key, with the volatile locator
+    -- dropped when a record_key exists (see detailGapIdentityKey). This is
+    -- what closes the locator-drift orphan class: a re-discovery under a new
+    -- locator shape re-upserts the SAME row instead of inserting a duplicate.
+    ON CONFLICT(connector_instance_id, ifnull(grant_id, ''), stream, ifnull(parent_stream, ''), CASE WHEN nullif(record_key, '') IS NOT NULL THEN 'key:' || record_key ELSE 'loc:' || ifnull(detail_locator_json, '') END) DO UPDATE SET
+      source_json = excluded.source_json,
+      detail_locator_json = excluded.detail_locator_json,
+      list_cursor_json = excluded.list_cursor_json,
+      scope_json = excluded.scope_json,
+      -- retryable: a NULL (absent) observation is NOT a fresh classification.
+      -- On a row that already carries a known value it preserves BOTH the stored
+      -- boolean and its paired reason; a fresh explicit boolean replaces the
+      -- pair atomically (latest valid observation wins, like every other column).
+      reason = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
+                    THEN connector_detail_gaps.reason ELSE excluded.reason END,
+      retryable = COALESCE(excluded.retryable, connector_detail_gaps.retryable),
+      -- §10-A: see the mirrored ON CONFLICT(gap_id) branch above for the
+      -- reopen-on-later-run rationale and the NULL-recovered_run_id
+      -- non-wildcard rule (a run-id-less recovery is never same-attempt).
+      status = CASE
+        WHEN connector_detail_gaps.status = 'terminal' THEN 'terminal'
+        WHEN connector_detail_gaps.status = 'recovered'
+          AND connector_detail_gaps.recovered_run_id = excluded.last_run_id
+          THEN 'recovered'
+        ELSE 'pending'
+      END,
+      next_attempt_after = excluded.next_attempt_after,
+      -- Explanatory metadata is never written over a stored permanent
+      -- classification by an unclassified observation.
+      last_error_json = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable = 0
+                             THEN connector_detail_gaps.last_error_json ELSE excluded.last_error_json END,
+      last_run_id = excluded.last_run_id,
+      updated_at = excluded.updated_at
+  `,
+    [
+      gap.gapId,
+      gap.connectorId,
+      gap.connectorInstanceId,
+      gap.grantId,
+      encodeJson(gap.source),
+      gap.stream,
+      gap.parentStream,
+      gap.recordKey,
+      detailLocatorJson,
+      encodeJson(gap.listCursor),
+      encodeJson(gap.scope),
+      gap.reason,
+      gap.nextAttemptAfter,
+      encodeJson(gap.lastError),
+      gap.discoveredRunId,
+      gap.lastRunId,
+      gap.now,
+      gap.now,
+      gap.retryable,
+    ]
+  );
+  // REVIEWED-DYNAMIC: single-row lookup for the store-owned detail-gap table.
+  // Look up by the identity expression (NOT the locator): on a locator-drift
+  // re-upsert the stored row updates to the newer locator shape, so a
+  // locator-based lookup against the old shape would miss.
+  return rowToGap(
+    firstSqliteRow(
+      `
+    SELECT * FROM connector_detail_gaps
+    WHERE connector_instance_id = ?
+      AND ifnull(grant_id, '') = ?
+      AND stream = ?
+      AND ifnull(parent_stream, '') = ?
+      AND CASE WHEN nullif(record_key, '') IS NOT NULL THEN 'key:' || record_key ELSE 'loc:' || ifnull(detail_locator_json, '') END = ?
+    LIMIT 1
+  `,
+      [
+        gap.connectorInstanceId,
+        gap.grantId || "",
+        gap.stream,
+        gap.parentStream || "",
+        detailGapIdentityKey(gap.recordKey, detailLocatorJson),
+      ]
+    )
+  );
+}
+
 export function createSqliteConnectorDetailGapStore() {
   return {
     // Leasing is not an attempt. Every claimed gap moves pending → in_progress
@@ -1884,155 +2049,112 @@ export function createSqliteConnectorDetailGapStore() {
       }
       return rowToGap(firstSqliteRow("SELECT * FROM connector_detail_gaps WHERE gap_id = ? LIMIT 1", [owner.gapId]));
     },
+    // A delivered failure report is an observed collection event: with
+    // `collectionRevision`, the gap and the connection's next collection
+    // revision commit in one transaction, or neither does.
     // biome-ignore lint/suspicious/useAwait: The async signature is part of this caller-facing contract.
-    async upsertPendingGap(input: UpsertGapInput): Promise<DetailGap | null> {
-      const gap = normalizeGapInput(input);
-      const detailLocatorJson = encodeJson(gap.detailLocator);
-      // REVIEWED-DYNAMIC: connector_detail_gaps is owned by this store and
-      // not yet represented in the static query registry.
-      execDynamicSqlAcknowledged(
-        `
-        INSERT INTO connector_detail_gaps(
-          gap_id, connector_id, connector_instance_id, grant_id, source_json, stream, parent_stream, record_key,
-          detail_locator_json, list_cursor_json, scope_json, reason, status, attempt_count,
-          next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at, retryable
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(gap_id) DO UPDATE SET
-          source_json = excluded.source_json,
-          detail_locator_json = excluded.detail_locator_json,
-          list_cursor_json = excluded.list_cursor_json,
-          scope_json = excluded.scope_json,
-          -- retryable: a NULL (absent) observation is NOT a fresh classification.
-          -- On a row that already carries a known value it preserves BOTH the stored
-          -- boolean and its paired reason; a fresh explicit boolean replaces the
-          -- pair atomically (latest valid observation wins, like every other column).
-          reason = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
-                        THEN connector_detail_gaps.reason ELSE excluded.reason END,
-          retryable = COALESCE(excluded.retryable, connector_detail_gaps.retryable),
-          -- §10-A: 'terminal' is always sticky — a terminalized gap must not be
-          -- silently resurrected into the fillable-pending set by a re-upsert.
-          -- 'recovered' is sticky ONLY against a re-upsert from the SAME run
-          -- that recovered it (an ordinary-forward-pass re-defer with no new
-          -- attempt evidence, per the original §10-A regression) — i.e. a
-          -- NON-NULL 'recovered_run_id' that matches 'excluded.last_run_id'
-          -- exactly. A NULL 'recovered_run_id' (a run-id-less recovery, e.g.
-          -- the local-collector policy-budget path in
-          -- 'ref-device-exporters.ts:recoverLocalCollectorGap', which marks a
-          -- gap recovered with '{}' — no spine run backs it) carries no
-          -- same-attempt context to compare against, so SQL's 'NULL = x'
-          -- already evaluates false/unmatched for every 'x' here — the row is
-          -- NEVER treated as a same-attempt re-defer and always reopens on the
-          -- next re-upsert. Do not special-case NULL as a stickiness
-          -- wildcard: an earlier revision did 'recovered_run_id IS NULL OR
-          -- ...', which made every run-id-less recovery sticky FOREVER
-          -- (P1 review finding, reproduced locally: a gap recovered via
-          -- 'markGapStatus(id, 'recovered', {})' never reopened on a later
-          -- 'upsertPendingGap' with a real 'lastRunId') — the exact opposite
-          -- of the reopen-on-later-evidence rule this fix exists to enforce.
-          -- A re-upsert from a LATER run (or ANY re-upsert of a null-run-id
-          -- recovery) reopens the row to 'pending': the connector is
-          -- reporting, with fresh attempt evidence, that a previously-closed
-          -- record is missing again — treating that as permanently satisfied
-          -- silently strands it outside both the pending-retry queue and the
-          -- quarantine escalation path forever (live Amazon order_items
-          -- evidence: 12 order ids stuck 'recovered' while DETAIL_COVERAGE
-          -- reported them uncovered on every run for weeks).
-          status = CASE
-            WHEN connector_detail_gaps.status = 'terminal' THEN 'terminal'
-            WHEN connector_detail_gaps.status = 'recovered'
-              AND connector_detail_gaps.recovered_run_id = excluded.last_run_id
-              THEN 'recovered'
-            ELSE 'pending'
-          END,
-          next_attempt_after = excluded.next_attempt_after,
-          -- Explanatory metadata is never written over a stored permanent
-          -- classification by an unclassified observation.
-          last_error_json = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable = 0
-                                 THEN connector_detail_gaps.last_error_json ELSE excluded.last_error_json END,
-          last_run_id = excluded.last_run_id,
-          updated_at = excluded.updated_at
-        -- Identity conflict target = the natural key, with the volatile locator
-        -- dropped when a record_key exists (see detailGapIdentityKey). This is
-        -- what closes the locator-drift orphan class: a re-discovery under a new
-        -- locator shape re-upserts the SAME row instead of inserting a duplicate.
-        ON CONFLICT(connector_instance_id, ifnull(grant_id, ''), stream, ifnull(parent_stream, ''), CASE WHEN nullif(record_key, '') IS NOT NULL THEN 'key:' || record_key ELSE 'loc:' || ifnull(detail_locator_json, '') END) DO UPDATE SET
-          source_json = excluded.source_json,
-          detail_locator_json = excluded.detail_locator_json,
-          list_cursor_json = excluded.list_cursor_json,
-          scope_json = excluded.scope_json,
-          -- retryable: a NULL (absent) observation is NOT a fresh classification.
-          -- On a row that already carries a known value it preserves BOTH the stored
-          -- boolean and its paired reason; a fresh explicit boolean replaces the
-          -- pair atomically (latest valid observation wins, like every other column).
-          reason = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
-                        THEN connector_detail_gaps.reason ELSE excluded.reason END,
-          retryable = COALESCE(excluded.retryable, connector_detail_gaps.retryable),
-          -- §10-A: see the mirrored ON CONFLICT(gap_id) branch above for the
-          -- reopen-on-later-run rationale and the NULL-recovered_run_id
-          -- non-wildcard rule (a run-id-less recovery is never same-attempt).
-          status = CASE
-            WHEN connector_detail_gaps.status = 'terminal' THEN 'terminal'
-            WHEN connector_detail_gaps.status = 'recovered'
-              AND connector_detail_gaps.recovered_run_id = excluded.last_run_id
-              THEN 'recovered'
-            ELSE 'pending'
-          END,
-          next_attempt_after = excluded.next_attempt_after,
-          -- Explanatory metadata is never written over a stored permanent
-          -- classification by an unclassified observation.
-          last_error_json = CASE WHEN excluded.retryable IS NULL AND connector_detail_gaps.retryable = 0
-                                 THEN connector_detail_gaps.last_error_json ELSE excluded.last_error_json END,
-          last_run_id = excluded.last_run_id,
-          updated_at = excluded.updated_at
-      `,
-        [
-          gap.gapId,
-          gap.connectorId,
-          gap.connectorInstanceId,
-          gap.grantId,
-          encodeJson(gap.source),
-          gap.stream,
-          gap.parentStream,
-          gap.recordKey,
-          detailLocatorJson,
-          encodeJson(gap.listCursor),
-          encodeJson(gap.scope),
-          gap.reason,
-          gap.nextAttemptAfter,
-          encodeJson(gap.lastError),
-          gap.discoveredRunId,
-          gap.lastRunId,
-          gap.now,
-          gap.now,
-          gap.retryable,
-        ]
-      );
-      // REVIEWED-DYNAMIC: single-row lookup for the store-owned detail-gap table.
-      // Look up by the identity expression (NOT the locator): on a locator-drift
-      // re-upsert the stored row updates to the newer locator shape, so a
-      // locator-based lookup against the old shape would miss.
-      return rowToGap(
-        firstSqliteRow(
-          `
-        SELECT * FROM connector_detail_gaps
-        WHERE connector_instance_id = ?
-          AND ifnull(grant_id, '') = ?
-          AND stream = ?
-          AND ifnull(parent_stream, '') = ?
-          AND CASE WHEN nullif(record_key, '') IS NOT NULL THEN 'key:' || record_key ELSE 'loc:' || ifnull(detail_locator_json, '') END = ?
-        LIMIT 1
-      `,
-          [
-            gap.connectorInstanceId,
-            gap.grantId || "",
-            gap.stream,
-            gap.parentStream || "",
-            detailGapIdentityKey(gap.recordKey, detailLocatorJson),
-          ]
-        )
-      );
+    async upsertPendingGap(input: UpsertGapInput, options: UpsertGapOptions = {}): Promise<DetailGap | null> {
+      const revision = options.collectionRevision;
+      if (!revision) {
+        return upsertSqlitePendingGap(input);
+      }
+      return writeTransaction(() => {
+        requireSqliteCollectionRevisionInTransaction(getDb(), normalizeGapInput(input).connectorInstanceId, revision);
+        return upsertSqlitePendingGap(input);
+      });
     },
   };
+}
+
+/** The Postgres upsert, on the pool or on the caller's transaction client. */
+async function upsertPostgresPendingGap(
+  query: (sql: string, params: unknown[]) => Promise<{ rows: DetailGapRow[] }>,
+  input: UpsertGapInput
+): Promise<DetailGap | null> {
+  const gap = normalizeGapInput(input);
+  const result = await query(
+    `
+    INSERT INTO connector_detail_gaps(
+      gap_id, connector_id, connector_instance_id, grant_id, source_json, stream, parent_stream, record_key,
+      detail_locator_json, list_cursor_json, scope_json, reason, status, attempt_count,
+      next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at, retryable
+    ) VALUES($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, 'pending', 0, $13, $14::jsonb, $15, $16, $17, $17, $18::integer)
+    -- Identity conflict target = the natural key, with the volatile locator
+    -- dropped when a record_key exists (see detailGapIdentityKey). Closes the
+    -- locator-drift orphan class: a re-discovery under a new locator shape
+    -- re-upserts the SAME row instead of inserting a duplicate.
+    ON CONFLICT (connector_instance_id, COALESCE(grant_id, ''), stream, COALESCE(parent_stream, ''), (CASE WHEN NULLIF(record_key, '') IS NOT NULL THEN 'key:' || record_key ELSE 'loc:' || COALESCE(detail_locator_json::text, '') END)) DO UPDATE SET
+      source_json = EXCLUDED.source_json,
+      detail_locator_json = EXCLUDED.detail_locator_json,
+      list_cursor_json = EXCLUDED.list_cursor_json,
+      scope_json = EXCLUDED.scope_json,
+      -- retryable: see the SQLite upsert. A NULL observation preserves BOTH the stored
+      -- boolean and its paired reason; a fresh explicit boolean replaces the pair.
+      reason = CASE WHEN EXCLUDED.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
+                    THEN connector_detail_gaps.reason ELSE EXCLUDED.reason END,
+      retryable = COALESCE(EXCLUDED.retryable, connector_detail_gaps.retryable),
+      -- §10-A: 'terminal' is always sticky — a terminalized gap must not be
+      -- silently resurrected into the fillable-pending set by a re-upsert.
+      -- 'recovered' is sticky ONLY against a re-upsert from the SAME run
+      -- that recovered it (an ordinary-forward-pass re-defer with no new
+      -- attempt evidence, per the original §10-A regression) — i.e. a
+      -- NON-NULL 'recovered_run_id' that matches 'EXCLUDED.last_run_id'
+      -- exactly. A NULL 'recovered_run_id' (a run-id-less recovery, e.g.
+      -- the local-collector policy-budget path in
+      -- 'ref-device-exporters.ts:recoverLocalCollectorGap', which marks a
+      -- gap recovered with '{}' — no spine run backs it) carries no
+      -- same-attempt context to compare against, so SQL's 'NULL = x'
+      -- already evaluates false/unmatched for every 'x' here — the row is
+      -- NEVER treated as a same-attempt re-defer and always reopens on the
+      -- next re-upsert. Do not special-case NULL as a stickiness
+      -- wildcard: an earlier revision did 'recovered_run_id IS NULL OR
+      -- ...', which made every run-id-less recovery sticky FOREVER
+      -- (P1 review finding) — the exact opposite of the reopen-on-later-
+      -- evidence rule this fix exists to enforce. A re-upsert from a
+      -- LATER run (or ANY re-upsert of a null-run-id recovery) reopens
+      -- the row to 'pending': the connector is reporting, with fresh
+      -- attempt evidence, that a previously-closed record is missing
+      -- again — treating that as permanently satisfied silently strands
+      -- it outside both the pending-retry queue and the quarantine
+      -- escalation path forever (live Amazon order_items evidence: 12
+      -- order ids stuck 'recovered' while DETAIL_COVERAGE reported them
+      -- uncovered on every run for weeks).
+      status = CASE
+        WHEN connector_detail_gaps.status = 'terminal' THEN 'terminal'
+        WHEN connector_detail_gaps.status = 'recovered'
+          AND connector_detail_gaps.recovered_run_id = EXCLUDED.last_run_id
+          THEN 'recovered'
+        ELSE 'pending'
+      END,
+      next_attempt_after = EXCLUDED.next_attempt_after,
+      last_error_json = CASE WHEN EXCLUDED.retryable IS NULL AND connector_detail_gaps.retryable = 0
+                             THEN connector_detail_gaps.last_error_json ELSE EXCLUDED.last_error_json END,
+      last_run_id = EXCLUDED.last_run_id,
+      updated_at = EXCLUDED.updated_at
+    RETURNING *
+  `,
+    [
+      gap.gapId,
+      gap.connectorId,
+      gap.connectorInstanceId,
+      gap.grantId,
+      JSON.stringify(gap.source),
+      gap.stream,
+      gap.parentStream,
+      gap.recordKey,
+      encodeJson(gap.detailLocator),
+      encodeJson(gap.listCursor),
+      encodeJson(gap.scope),
+      gap.reason,
+      gap.nextAttemptAfter,
+      encodeJson(gap.lastError),
+      gap.discoveredRunId,
+      gap.lastRunId,
+      gap.now,
+      gap.retryable,
+    ]
+  );
+  return rowToGap(result.rows[0] ?? null);
 }
 
 export function createPostgresConnectorDetailGapStore() {
@@ -2637,91 +2759,22 @@ export function createPostgresConnectorDetailGapStore() {
       );
       return result.rows[0] ? rowToGap(result.rows[0]) : null;
     },
-    async upsertPendingGap(input: UpsertGapInput): Promise<DetailGap | null> {
-      const gap = normalizeGapInput(input);
-      const result = await postgresQuery<DetailGapRow>(
-        `
-        INSERT INTO connector_detail_gaps(
-          gap_id, connector_id, connector_instance_id, grant_id, source_json, stream, parent_stream, record_key,
-          detail_locator_json, list_cursor_json, scope_json, reason, status, attempt_count,
-          next_attempt_after, last_error_json, discovered_run_id, last_run_id, created_at, updated_at, retryable
-        ) VALUES($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, 'pending', 0, $13, $14::jsonb, $15, $16, $17, $17, $18::integer)
-        -- Identity conflict target = the natural key, with the volatile locator
-        -- dropped when a record_key exists (see detailGapIdentityKey). Closes the
-        -- locator-drift orphan class: a re-discovery under a new locator shape
-        -- re-upserts the SAME row instead of inserting a duplicate.
-        ON CONFLICT (connector_instance_id, COALESCE(grant_id, ''), stream, COALESCE(parent_stream, ''), (CASE WHEN NULLIF(record_key, '') IS NOT NULL THEN 'key:' || record_key ELSE 'loc:' || COALESCE(detail_locator_json::text, '') END)) DO UPDATE SET
-          source_json = EXCLUDED.source_json,
-          detail_locator_json = EXCLUDED.detail_locator_json,
-          list_cursor_json = EXCLUDED.list_cursor_json,
-          scope_json = EXCLUDED.scope_json,
-          -- retryable: see the SQLite upsert. A NULL observation preserves BOTH the stored
-          -- boolean and its paired reason; a fresh explicit boolean replaces the pair.
-          reason = CASE WHEN EXCLUDED.retryable IS NULL AND connector_detail_gaps.retryable IS NOT NULL
-                        THEN connector_detail_gaps.reason ELSE EXCLUDED.reason END,
-          retryable = COALESCE(EXCLUDED.retryable, connector_detail_gaps.retryable),
-          -- §10-A: 'terminal' is always sticky — a terminalized gap must not be
-          -- silently resurrected into the fillable-pending set by a re-upsert.
-          -- 'recovered' is sticky ONLY against a re-upsert from the SAME run
-          -- that recovered it (an ordinary-forward-pass re-defer with no new
-          -- attempt evidence, per the original §10-A regression) — i.e. a
-          -- NON-NULL 'recovered_run_id' that matches 'EXCLUDED.last_run_id'
-          -- exactly. A NULL 'recovered_run_id' (a run-id-less recovery, e.g.
-          -- the local-collector policy-budget path in
-          -- 'ref-device-exporters.ts:recoverLocalCollectorGap', which marks a
-          -- gap recovered with '{}' — no spine run backs it) carries no
-          -- same-attempt context to compare against, so SQL's 'NULL = x'
-          -- already evaluates false/unmatched for every 'x' here — the row is
-          -- NEVER treated as a same-attempt re-defer and always reopens on the
-          -- next re-upsert. Do not special-case NULL as a stickiness
-          -- wildcard: an earlier revision did 'recovered_run_id IS NULL OR
-          -- ...', which made every run-id-less recovery sticky FOREVER
-          -- (P1 review finding) — the exact opposite of the reopen-on-later-
-          -- evidence rule this fix exists to enforce. A re-upsert from a
-          -- LATER run (or ANY re-upsert of a null-run-id recovery) reopens
-          -- the row to 'pending': the connector is reporting, with fresh
-          -- attempt evidence, that a previously-closed record is missing
-          -- again — treating that as permanently satisfied silently strands
-          -- it outside both the pending-retry queue and the quarantine
-          -- escalation path forever (live Amazon order_items evidence: 12
-          -- order ids stuck 'recovered' while DETAIL_COVERAGE reported them
-          -- uncovered on every run for weeks).
-          status = CASE
-            WHEN connector_detail_gaps.status = 'terminal' THEN 'terminal'
-            WHEN connector_detail_gaps.status = 'recovered'
-              AND connector_detail_gaps.recovered_run_id = EXCLUDED.last_run_id
-              THEN 'recovered'
-            ELSE 'pending'
-          END,
-          next_attempt_after = EXCLUDED.next_attempt_after,
-          last_error_json = CASE WHEN EXCLUDED.retryable IS NULL AND connector_detail_gaps.retryable = 0
-                                 THEN connector_detail_gaps.last_error_json ELSE EXCLUDED.last_error_json END,
-          last_run_id = EXCLUDED.last_run_id,
-          updated_at = EXCLUDED.updated_at
-        RETURNING *
-      `,
-        [
-          gap.gapId,
-          gap.connectorId,
-          gap.connectorInstanceId,
-          gap.grantId,
-          JSON.stringify(gap.source),
-          gap.stream,
-          gap.parentStream,
-          gap.recordKey,
-          encodeJson(gap.detailLocator),
-          encodeJson(gap.listCursor),
-          encodeJson(gap.scope),
-          gap.reason,
-          gap.nextAttemptAfter,
-          encodeJson(gap.lastError),
-          gap.discoveredRunId,
-          gap.lastRunId,
-          gap.now,
-          gap.retryable,
-        ]
-      );
-      return rowToGap(result.rows[0] ?? null);
+    // See the SQLite store: with `collectionRevision`, the gap and its
+    // revision commit in one transaction. The revision is taken first, so the
+    // connection row is locked before the gap row.
+    async upsertPendingGap(input: UpsertGapInput, options: UpsertGapOptions = {}): Promise<DetailGap | null> {
+      const revision = options.collectionRevision;
+      if (!revision) {
+        return await upsertPostgresPendingGap(postgresQuery, input);
+      }
+      return await withPostgresTransaction(async (client) => {
+        await requirePostgresCollectionRevisionInTransaction(
+          client,
+          normalizeGapInput(input).connectorInstanceId,
+          revision
+        );
+        return await upsertPostgresPendingGap((sql, params) => client.query<DetailGapRow>(sql, params), input);
+      });
     },
   };
 }

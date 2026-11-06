@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 
-import { parseArgs, prepareConnectorSpec } from "../bin/pdpp-local-collector.ts";
+import { bindOptionalRunCoverageToRelease, buildConnectorSpec, parseArgs, prepareConnectorSpec } from "../bin/pdpp-local-collector.ts";
 import { ALLOW_CUSTOM_COMMAND_ENV } from "../src/errors.ts";
 import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
@@ -282,7 +282,10 @@ test("prepareConnectorSpec installs the pinned profile before a pinned connector
   const installed: CollectionProfilePin[] = [];
   const spec = await prepareConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex"]), async (options) => {
     installed.push(options.pin);
-    return installedCollectionProfile(options.installRoot, options.pin);
+    const directory = join(scratch, "prepared-codex");
+    mkdirSync(join(directory, "profile"), { recursive: true });
+    writeFileSync(join(directory, "profile", "collection-profile.json"), readFileSync(new URL("codex.json", REFERENCE_PROFILE_DIR)));
+    return { ...installedCollectionProfile(options.installRoot, options.pin), directory };
   });
   assert.deepEqual(
     installed.map((pin) => pin.connectorId),
@@ -293,6 +296,61 @@ test("prepareConnectorSpec installs the pinned profile before a pinned connector
     (spec.args[0] as string).endsWith(join("connectors", "codex", pin.digest.replace(":", "-"), "dist", "collection-profile.mjs")),
     String(spec.args[0])
   );
+});
+
+test("a 0.2.0 profile with RUN_COVERAGE_V1 and inventories requests store evidence", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages,sessions"]));
+  const pin = { digest: `sha256:${"a".repeat(64)}` };
+  const profile = {
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    protocol_version: "0.2.0",
+    streams: [
+      { name: "messages", coverage_stores: ["messages"], obligation: "content" },
+      { name: "sessions", coverage_stores: ["sessions"], obligation: "content" },
+    ],
+  };
+  const selected = bindOptionalRunCoverageToRelease(spec, pin, profile);
+  assert.equal(selected.runCoverageVersion, 1);
+  assert.equal(selected.artifactDigest, pin.digest);
+  assert.equal(selected.manifestFingerprint?.length, 64);
+  assert.notEqual(selected.manifestFingerprint,
+    bindOptionalRunCoverageToRelease(spec, pin, { ...profile, streams: [{ ...profile.streams[0], obligation: "metadata" }, profile.streams[1]] }).manifestFingerprint);
+});
+
+test("a 0.1.0 profile with RUN_COVERAGE_V1 and inventories requests store evidence", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages"]));
+  const pin = { digest: `sha256:${"a".repeat(64)}` };
+  const profile = {
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    protocol_version: "0.1.0",
+    streams: [{ name: "messages", coverage_stores: ["messages"], obligation: "content" }],
+  };
+  const selected = bindOptionalRunCoverageToRelease(spec, pin, profile);
+  assert.equal(selected.runCoverageVersion, 1);
+  assert.equal(selected.protocol_capabilities[0], "RUN_COVERAGE_V1");
+});
+
+test("RUN_COVERAGE_V1 without a requested stream inventory does not request evidence", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages,sessions"]));
+  const pin = { digest: `sha256:${"a".repeat(64)}` };
+  const profile = {
+    protocol_capabilities: ["RUN_COVERAGE_V1"],
+    protocol_version: "0.2.0",
+    streams: [{ name: "messages", coverage_stores: ["messages"], obligation: "content" }, { name: "sessions" }],
+  };
+  assert.equal(bindOptionalRunCoverageToRelease(spec, pin, profile).runCoverageVersion, undefined);
+});
+
+test("a manifest without RUN_COVERAGE_V1 requests no store evidence", () => {
+  const spec = buildConnectorSpec(parseArgs([...RUN_ARGS, "--connector", "codex", "--streams", "messages"]));
+  const pin = { digest: `sha256:${"a".repeat(64)}` };
+  const profile = {
+    protocol_version: "0.1.0",
+    streams: [{ name: "messages" }],
+  };
+  const selected = bindOptionalRunCoverageToRelease(spec, pin, profile);
+  assert.equal(selected.runCoverageVersion, undefined);
+  assert.deepEqual(selected.protocol_capabilities, []);
 });
 
 test("prepareConnectorSpec installs nothing for a custom --command", async () => {

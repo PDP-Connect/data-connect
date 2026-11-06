@@ -153,6 +153,14 @@ function factsFor(evidence: ConnectorSummaryEvidence): StreamFactsByStream | nul
   return (evidence?.stream_latest_facts as StreamFactsByStream | null | undefined) ?? null;
 }
 
+/** The fact map exactly as stored, before any read masks it: a version-behind row reads as no facts. */
+function storedFactsFor(connectorInstanceId: string): StreamFactsByStream | null {
+  const row = getDb()
+    .prepare("SELECT stream_latest_facts_json FROM connector_summary_evidence WHERE connector_instance_id = ?")
+    .get<{ stream_latest_facts_json: string | null }>(connectorInstanceId);
+  return row?.stream_latest_facts_json ? (JSON.parse(row.stream_latest_facts_json) as StreamFactsByStream) : null;
+}
+
 /**
  * Narrows a possibly-missing per-stream fact entry off a `factsFor(...)`
  * result to a definite `StoredStreamFactEntry`, asserting (never silently
@@ -832,7 +840,7 @@ test("existing-row self-heal: a row pre-seeded in the EXACT pre-fix corrupted sh
       "premise: row reads clean, exactly like the live corrupted row (not merely stale)"
     );
     assert.equal(preFixRow.state, "fresh");
-    const preFixFacts = factsFor(await getConnectorSummaryEvidence("cin_gmail_shaped"));
+    const preFixFacts = storedFactsFor("cin_gmail_shaped");
     const preFixMessages = requireStreamFact(preFixFacts, "messages");
     assert.equal(
       preFixMessages.fact.checkpoint,
@@ -1496,7 +1504,7 @@ test("existing-row self-heal: a row already folded under v5 with its proof ERASE
       )
       .run(JSON.stringify(erasedFacts), erasingSeq, "cin_ac_stale");
 
-    const preFix = requireStreamFact(factsFor(await getConnectorSummaryEvidence("cin_ac_stale")), "contacts");
+    const preFix = requireStreamFact(storedFactsFor("cin_ac_stale"), "contacts");
     assert.equal(preFix.fact.considered, undefined, "precondition: the stored row really is in the erased shape");
 
     // An ordinary reconcile — no connector-specific mutation, no manual repair.

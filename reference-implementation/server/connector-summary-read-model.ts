@@ -35,6 +35,7 @@
  */
 
 import { iterateDynamicSqlAcknowledged } from "../lib/db.ts";
+import { NON_LOCAL_DEVICE_COVERAGE_REASON } from "./connector-instance-placement.ts";
 import { readConnectorInstanceIdPage as readInstanceIdPage } from "./connector-summary-evidence-bounded-reconciliation.ts";
 import type { RepairCandidateReason } from "./connector-summary-evidence-engine.ts";
 import {
@@ -125,9 +126,18 @@ const REASON_CODES = {
    * replay, or overwrite it; this reason fails the row closed instead.
    */
   FOLD_LOGIC_VERSION_INCOMPATIBLE_FUTURE: "fold_logic_version_incompatible_future",
+  /**
+   * A row's stored `stream_facts_fold_version` is BEHIND this binary's: its
+   * cached facts were folded under older semantics and no replay has run yet.
+   * Reads present it as unobserved, never as current evidence.
+   */
+  FOLD_LOGIC_VERSION_BEHIND: "fold_logic_version_behind",
   // A source-attributed terminal event without a matching durable generation
   // is historical, never an empty/current fold result.
   TERMINAL_FACTS_HISTORICAL: "terminal_facts_historical",
+  // The cached terminal was folded under a different source kind than the
+  // current connector instance, so this read cannot treat it as evidence.
+  SOURCE_KIND_MISMATCH: "source_kind_mismatch",
   // A bounded replay lost its CAS race on every attempt. The route receives
   // an in-memory stale overlay instead of trusting the competing durable map.
   TERMINAL_FOLD_CONTENTION: "terminal_fold_contention",
@@ -237,6 +247,16 @@ export function normalizeSourceEventSeq(sourceEventSeq: unknown): number | null 
 }
 
 // ---------------------------------------------------------------------------
+/** Attach the canonical connection kind to a shaped evidence-row query. */
+function withCanonicalSourceKind(query: string): string {
+  return `SELECT evidence.*, instance.connector_instance_id AS canonical_connector_instance_id,
+                 instance.source_kind AS canonical_source_kind
+            FROM (${query}) AS evidence
+            LEFT JOIN connector_instances AS instance
+              ON instance.connector_instance_id = evidence.connector_instance_id
+            ORDER BY evidence.connector_instance_id ASC`;
+}
+
 function createConnectorSummaryStore() {
   if (isPostgresStorageBackend()) {
     return {
@@ -303,7 +323,8 @@ function createConnectorSummaryStore() {
           where = `WHERE connector_instance_id = ANY($${params.length}::text[])`;
         }
         const result = await postgresQuery(
-          `SELECT connector_instance_id, connector_id, display_name, status, source_kind,
+          withCanonicalSourceKind(
+            `SELECT connector_instance_id, connector_id, display_name, status, source_kind,
                   revoked_at, total_records, stream_count, last_record_updated_at,
                   stream_records_json, retained_bytes_json, total_retained_bytes,
                   record_checkpoint_json, manifest_fingerprint,
@@ -318,8 +339,8 @@ function createConnectorSummaryStore() {
                   manifest_generation, schedule_checkpoint, run_lifecycle_event_seq,
                   list_summary_projection_reason_code
              FROM connector_summary_evidence
-             ${where}
-             ORDER BY connector_instance_id ASC`,
+             ${where}`
+          ),
           params
         );
         return result.rows;
@@ -531,13 +552,11 @@ function createConnectorSummaryStore() {
                     CAST(source_revision AS TEXT) AS source_revision,
                     manifest_generation, schedule_checkpoint, run_lifecycle_event_seq,
                     list_summary_projection_reason_code`;
+      const selectEvidence = (where = "") =>
+        withCanonicalSourceKind(`SELECT ${columns} FROM connector_summary_evidence ${where}`);
       if (connectorInstanceId) {
         return db
-          .prepare(
-            `SELECT ${columns} FROM connector_summary_evidence
-              WHERE connector_instance_id = ?
-              ORDER BY connector_instance_id ASC`
-          )
+          .prepare(selectEvidence("WHERE connector_instance_id = ?"))
           .all(connectorInstanceId);
       }
       if (connectorInstanceIds) {
@@ -546,17 +565,11 @@ function createConnectorSummaryStore() {
         }
         const placeholders = connectorInstanceIds.map(() => "?").join(", ");
         return db
-          .prepare(
-            `SELECT ${columns} FROM connector_summary_evidence
-              WHERE connector_instance_id IN (${placeholders})
-              ORDER BY connector_instance_id ASC`
-          )
+          .prepare(selectEvidence(`WHERE connector_instance_id IN (${placeholders})`))
           .all(...connectorInstanceIds);
       }
       return [
-        ...iterateDynamicSqlAcknowledged<Row>(
-          `SELECT ${columns} FROM connector_summary_evidence ORDER BY connector_instance_id ASC`
-        ),
+        ...iterateDynamicSqlAcknowledged<Row>(selectEvidence()),
       ];
     },
     listPendingMaintenanceInstanceIds({ includeIncomplete, limit }: { includeIncomplete: boolean; limit: number }) {
@@ -756,14 +769,33 @@ async function bumpAllCanonicalEvidenceRevisions(): Promise<void> {
  * binary that actually wrote it, or any future binary at that version or
  * newer) still reads `terminal_facts_state` exactly as stored: `current`.
  */
-function shapeTerminalFacts(row: Row) {
+function shapeTerminalFacts(row: Row, sourceKindMatchesCanonical: boolean) {
   const eventSeq = row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq);
+  if (!sourceKindMatchesCanonical) {
+    return {
+      as_of: null,
+      event_seq: null,
+      reason_code: REASON_CODES.SOURCE_KIND_MISMATCH,
+      state: "unobserved",
+    };
+  }
   if (rowIsFoldLogicVersionAhead(row)) {
     return {
       as_of: row.computed_at || null,
       event_seq: eventSeq,
       reason_code: REASON_CODES.FOLD_LOGIC_VERSION_INCOMPATIBLE_FUTURE,
       state: "stale",
+    };
+  }
+  // The mirror of the future case: facts a replay has not yet rebuilt under
+  // this version's semantics are not evidence. The durable row is untouched;
+  // the fold replays it.
+  if (rowIsFoldLogicVersionBehind(row) && row.terminal_facts_state === "current") {
+    return {
+      as_of: row.computed_at || null,
+      event_seq: eventSeq,
+      reason_code: REASON_CODES.FOLD_LOGIC_VERSION_BEHIND,
+      state: "unobserved",
     };
   }
   return {
@@ -830,6 +862,9 @@ function shapeSourceRevision(row: Row): {
 export function shapeEvidenceRow(row: Row) {
   const retainedBytesState = String(row.retained_bytes_state || "unobserved");
   const sourceRevision = shapeSourceRevision(row);
+  const sourceKindMatchesCanonical =
+    row.canonical_connector_instance_id === row.connector_instance_id &&
+    row.canonical_source_kind === row.source_kind;
   return {
     canonical_evidence_revision: String(row.canonical_evidence_revision ?? "0"),
     computed_at: row.computed_at || null,
@@ -867,9 +902,13 @@ export function shapeEvidenceRow(row: Row) {
     status: row.status,
     stream_count: Number(row.stream_count || 0),
     stream_facts_event_seq: row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq),
-    stream_latest_facts: parseEvidenceJson(row.stream_latest_facts_json, null),
+    // A cache folded under an older version credits no stream until replayed.
+    stream_latest_facts:
+      !sourceKindMatchesCanonical || rowIsFoldLogicVersionBehind(row)
+        ? null
+        : parseEvidenceJson(row.stream_latest_facts_json, null),
     stream_records: parseEvidenceJson(row.stream_records_json, []),
-    terminal_facts: shapeTerminalFacts(row),
+    terminal_facts: shapeTerminalFacts(row, sourceKindMatchesCanonical),
     total_records: Number(row.total_records || 0),
     total_retained_bytes: retainedBytesState === "current" ? Number(row.total_retained_bytes || 0) : null,
   };
@@ -1258,7 +1297,9 @@ const TERMINAL_TYPES_SQL = TERMINAL_RUN_EVENT_TYPES.map((t) => `'${t}'`).join(",
 // tests previously hardcoded the then-current number and had to be edited on
 // every semantics bump, which makes a stale literal — not a real regression —
 // look like a failure.
-export const STREAM_FACTS_FOLD_LOGIC_VERSION = 6;
+// Version 8 drops device coverage rejected for its current source kind and replays
+// older fold rows so cached stream facts cannot retain that claim.
+export const STREAM_FACTS_FOLD_LOGIC_VERSION = 8;
 // A route may retry a replay once after a concurrent writer wins its CAS.
 // This is deliberately small: each retry rereads the durable baseline, and
 // persistent contention fails closed in memory rather than spinning or
@@ -1398,7 +1439,7 @@ function createStreamFactsFoldStore() {
       }) {
         const { sql: scopeSql, params: scopeParams } = buildTerminalScopeFragmentPostgres(scope, 4);
         const result = await postgresQuery(
-          `SELECT event_seq, occurred_at, run_id, manifest_generation, data_json::text AS data_json
+          `SELECT event_seq, occurred_at, run_id, actor_type, manifest_generation, data_json::text AS data_json
              FROM spine_events
             WHERE event_type IN (${TERMINAL_TYPES_SQL})
               AND event_seq > $1 AND event_seq <= $2${scopeSql}
@@ -1414,6 +1455,7 @@ function createStreamFactsFoldStore() {
         eventSeq,
         baselineEventSeq,
         baselineFoldVersion,
+        baselineSourceKind,
         foldVersion,
         terminalFactsState,
         terminalFactsReasonCode,
@@ -1423,6 +1465,7 @@ function createStreamFactsFoldStore() {
         eventSeq: number;
         baselineEventSeq: number | null;
         baselineFoldVersion: number | null;
+        baselineSourceKind: string | null;
         foldVersion: number | null;
         terminalFactsState: "current" | "stale";
         terminalFactsReasonCode: string | null;
@@ -1437,7 +1480,13 @@ function createStreamFactsFoldStore() {
                   canonical_evidence_revision = canonical_evidence_revision + 1
             WHERE connector_instance_id = $1
               AND stream_facts_event_seq IS NOT DISTINCT FROM $4
-              AND stream_facts_fold_version IS NOT DISTINCT FROM $8`,
+              AND stream_facts_fold_version IS NOT DISTINCT FROM $8
+              AND source_kind IS NOT DISTINCT FROM $9
+              AND EXISTS (
+                SELECT 1 FROM connector_instances
+                 WHERE connector_instance_id = $1
+                   AND source_kind IS NOT DISTINCT FROM $9
+              )`,
           [
             connectorInstanceId,
             factsJson,
@@ -1447,6 +1496,7 @@ function createStreamFactsFoldStore() {
             terminalFactsState,
             terminalFactsReasonCode,
             baselineFoldVersion,
+            baselineSourceKind,
           ]
         );
         return (result.rowCount ?? 0) > 0;
@@ -1506,7 +1556,7 @@ function createStreamFactsFoldStore() {
       const indexHint = terminalScopeIndexHintSqlite(scope);
       return getDb()
         .prepare(
-          `SELECT event_seq, occurred_at, run_id, manifest_generation, data_json
+          `SELECT event_seq, occurred_at, run_id, actor_type, manifest_generation, data_json
              FROM spine_events${indexHint}
             WHERE event_type IN (${TERMINAL_TYPES_SQL})
               AND event_seq > ? AND event_seq <= ?${scopeSql}
@@ -1521,6 +1571,7 @@ function createStreamFactsFoldStore() {
       eventSeq,
       baselineEventSeq,
       baselineFoldVersion,
+      baselineSourceKind,
       foldVersion,
       terminalFactsState,
       terminalFactsReasonCode,
@@ -1530,6 +1581,7 @@ function createStreamFactsFoldStore() {
       eventSeq: number;
       baselineEventSeq: number | null;
       baselineFoldVersion: number | null;
+      baselineSourceKind: string | null;
       foldVersion: number | null;
       terminalFactsState: "current" | "stale";
       terminalFactsReasonCode: string | null;
@@ -1545,7 +1597,13 @@ function createStreamFactsFoldStore() {
                   canonical_evidence_revision = canonical_evidence_revision + 1
             WHERE connector_instance_id = ?
               AND stream_facts_event_seq IS ?
-              AND stream_facts_fold_version IS ?`
+              AND stream_facts_fold_version IS ?
+              AND source_kind IS ?
+              AND EXISTS (
+                SELECT 1 FROM connector_instances
+                 WHERE connector_instance_id = ?
+                   AND source_kind IS ?
+              )`
         )
         .run(
           factsJson,
@@ -1555,7 +1613,10 @@ function createStreamFactsFoldStore() {
           terminalFactsReasonCode,
           connectorInstanceId,
           baselineEventSeq,
-          baselineFoldVersion
+          baselineFoldVersion,
+          baselineSourceKind,
+          connectorInstanceId,
+          baselineSourceKind
         );
       return result.changes > 0;
     },
@@ -1573,19 +1634,26 @@ function createStreamFactsFoldStore() {
  * stream_facts_fold_version IS <baseline>` predicate in test code. Never
  * used outside tests.
  */
-export function __testOnlyUpdateStreamFactsCasWrite(args: {
+export async function __testOnlyUpdateStreamFactsCasWrite(args: {
   connectorInstanceId: string;
   factsJson: string | null;
   eventSeq: number;
   baselineEventSeq: number | null;
   baselineFoldVersion?: number | null;
+  /** Omitted: the row's current source kind, so the write is fenced by nothing but its other anchors. */
+  baselineSourceKind?: string | null;
   foldVersion?: number | null;
   terminalFactsState?: "current" | "stale";
   terminalFactsReasonCode?: string | null;
-}): Promise<boolean> | boolean {
+}): Promise<boolean> {
+  const baselineSourceKind =
+    args.baselineSourceKind === undefined
+      ? (((await getConnectorSummaryEvidence(args.connectorInstanceId))?.source_kind as string | undefined) ?? null)
+      : args.baselineSourceKind;
   return createStreamFactsFoldStore().updateStreamFacts({
     ...args,
     baselineFoldVersion: args.baselineFoldVersion ?? null,
+    baselineSourceKind,
     foldVersion: args.foldVersion ?? STREAM_FACTS_FOLD_LOGIC_VERSION,
     terminalFactsReasonCode: args.terminalFactsReasonCode ?? null,
     terminalFactsState: args.terminalFactsState ?? "current",
@@ -1626,6 +1694,9 @@ function parseTerminalFactEvent(row: Row): { payload: Row; streams: unknown[] } 
     return null;
   }
   const block = payload.collection_facts as Row | undefined;
+  if (block?.coverage_eligibility_reason === NON_LOCAL_DEVICE_COVERAGE_REASON) {
+    return null;
+  }
   const streams = block && typeof block === "object" && Array.isArray(block.streams) ? block.streams : null;
   return streams && streams.length > 0 ? { payload, streams } : null;
 }
@@ -1886,6 +1957,7 @@ function foldTerminalEventFacts(
   factsByInstance: Map<string, Record<string, StoredStreamFactEntry>>,
   checkpointByInstance: Map<string, number | null>,
   generationByInstance: ReadonlyMap<string, number>,
+  sourceKindByInstance: ReadonlyMap<string, string>,
   generationCurrentByInstance: Map<string, boolean>,
   row: Row,
   counters: { folded: number; refused: number }
@@ -1904,6 +1976,10 @@ function foldTerminalEventFacts(
   if (!instanceId) {
     // Legacy connector-wide event: cannot be attributed to exactly one
     // connection, so it is refused rather than mixed across accounts.
+    counters.refused += 1;
+    return;
+  }
+  if (row.actor_type === "local_device" && sourceKindByInstance.get(instanceId) !== "local_device") {
     counters.refused += 1;
     return;
   }
@@ -2038,10 +2114,20 @@ function checkpointIsResumablePosition(checkpoint: unknown): boolean {
   return checkpoint !== null && checkpoint !== undefined && Number(checkpoint) > 0;
 }
 
+function evidenceRowSourceKind(row: Row): string | null {
+  return row.source_kind === null || row.source_kind === undefined ? null : String(row.source_kind);
+}
+
 /** A participant row's write-time CAS anchor, captured at seed time. */
 interface FoldCasBaseline {
   readonly eventSeq: number | null;
   readonly foldVersion: number | null;
+  /**
+   * The source kind the participant was folded under. Device terminal facts
+   * count only for a local_device connection, so a write built under another
+   * kind must lose to the repair that changed it.
+   */
+  readonly sourceKind: string | null;
 }
 
 /**
@@ -2114,6 +2200,7 @@ function seedFoldState(
     casBaselineByInstance.set(instanceId, {
       eventSeq: row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq),
       foldVersion: row.stream_facts_fold_version === null ? null : Number(row.stream_facts_fold_version),
+      sourceKind: evidenceRowSourceKind(row),
     });
     // The pass's default verdict for an instance no qualifying event touches
     // THIS round (e.g. a generation-transition boundary whose checkpoint
@@ -2396,6 +2483,7 @@ async function stampZeroCheckpointForBootstrap(
     const accepted = await foldStore.updateStreamFacts({
       baselineEventSeq: row.stream_facts_event_seq === null ? null : Number(row.stream_facts_event_seq),
       baselineFoldVersion: row.stream_facts_fold_version === null ? null : Number(row.stream_facts_fold_version),
+      baselineSourceKind: evidenceRowSourceKind(row),
       connectorInstanceId,
       eventSeq: 0,
       factsJson: null,
@@ -2463,6 +2551,7 @@ async function drainTerminalEventBatches({
   factsByInstance,
   checkpointByInstance,
   generationByInstance,
+  sourceKindByInstance,
   generationCurrentByInstance,
   counters,
   ownMaxSeqByInstance,
@@ -2474,6 +2563,7 @@ async function drainTerminalEventBatches({
   factsByInstance: Map<string, Record<string, StoredStreamFactEntry>>;
   checkpointByInstance: Map<string, number | null>;
   generationByInstance: ReadonlyMap<string, number>;
+  sourceKindByInstance: ReadonlyMap<string, string>;
   generationCurrentByInstance: Map<string, boolean>;
   counters: { folded: number; refused: number };
   ownMaxSeqByInstance: ReadonlyMap<string, number>;
@@ -2528,6 +2618,7 @@ async function drainTerminalEventBatches({
           factsByInstance,
           checkpointByInstance,
           generationByInstance,
+          sourceKindByInstance,
           generationCurrentByInstance,
           row,
           counters
@@ -2772,10 +2863,12 @@ async function foldConnectorSummaryStreamFactsOnce(
   // scan.
   const ownMaxSeqByInstance = new Map<string, number>();
   const startCursorByInstance = new Map<string, number>();
+  const sourceKindByInstance = new Map<string, string>();
   for (const row of participants) {
     const instanceId = String(row.connector_instance_id);
     ownMaxSeqByInstance.set(instanceId, maxSeqByInstance.get(instanceId) ?? maxSeq);
     startCursorByInstance.set(instanceId, checkpointByInstance.get(instanceId) ?? 0);
+    sourceKindByInstance.set(instanceId, String(row.source_kind ?? ""));
   }
   const drain = await drainTerminalEventBatches({
     checkpointByInstance,
@@ -2784,6 +2877,7 @@ async function foldConnectorSummaryStreamFactsOnce(
     factsByInstance,
     foldStore,
     generationByInstance,
+    sourceKindByInstance,
     generationCurrentByInstance,
     maxEvents: typeof options.maxEvents === "number" ? options.maxEvents : null,
     ownMaxSeqByInstance,
@@ -2974,10 +3068,11 @@ async function writeParticipantStreamFacts(
 ): Promise<boolean> {
   const effectiveCheckpoint = checkpointByInstance.get(instanceId) ?? null;
   const participantEventSeq = effectiveCheckpoint === null ? writeSeq : Math.max(writeSeq, effectiveCheckpoint);
-  const casBaseline = casBaselineByInstance.get(instanceId) ?? { eventSeq: null, foldVersion: null };
+  const casBaseline = casBaselineByInstance.get(instanceId) ?? { eventSeq: null, foldVersion: null, sourceKind: null };
   return foldStore.updateStreamFacts({
     baselineEventSeq: casBaseline.eventSeq,
     baselineFoldVersion: casBaseline.foldVersion,
+    baselineSourceKind: casBaseline.sourceKind,
     connectorInstanceId: instanceId,
     eventSeq: participantEventSeq,
     factsJson: Object.keys(facts).length > 0 ? JSON.stringify(facts) : null,

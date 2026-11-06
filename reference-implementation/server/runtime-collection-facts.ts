@@ -12,6 +12,7 @@
 
 import { optionalRuntimeScopeFields, readRuntimeSkipFact } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import type { CollectionRateSnapshot } from "../runtime/connection-health.ts";
+import { NON_LOCAL_DEVICE_COVERAGE_REASON } from "./connector-instance-placement.ts";
 import type { RuntimeCollectionFact, RuntimeCollectionFacts } from "./ref-control.ts";
 
 const COLLECTION_RATE_NUMBER_FIELDS = [
@@ -90,6 +91,12 @@ export function readCollectionFactsFromTerminalData(
   }
   const block = data.collection_facts;
   if (!block || typeof block !== "object" || Array.isArray(block)) {
+    return null;
+  }
+  if (
+    (block as { coverage_eligibility_reason?: unknown }).coverage_eligibility_reason ===
+    NON_LOCAL_DEVICE_COVERAGE_REASON
+  ) {
     return null;
   }
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.

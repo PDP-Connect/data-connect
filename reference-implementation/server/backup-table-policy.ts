@@ -74,6 +74,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Subscriptions are durable client delivery configuration.",
   },
+  collection_run_sequences: {
+    classification: "backup_required",
+    reason:
+      "The run sequence the server issued to each run at its start, with its storage epoch. It decides whether a terminal coverage proof can be current, and cannot be rebuilt from any other table. A restore that regresses it must be followed by the storage-epoch restore step (scripts/mark-storage-restored.ts).",
+  },
   connector_accepted_declarations: {
     classification: "backup_required",
     reason:

@@ -56,6 +56,7 @@ import {
   type RefConnectionHealthSnapshot,
   type RefConnectorRunSummary,
   type RefConnectorSummary,
+  type RefCoverageAsOf,
   type RefCoverageHorizon,
   type RefRenderedVerdict,
   type RefRequiredAction,
@@ -176,6 +177,8 @@ export interface ConnectorPageModel {
    * up front and offers Install, instead of letting Sync fail.
    */
   connectorNotInstalled: boolean;
+  /** The run the connection's local coverage describes; `null` when none backs it. */
+  coverageAsOf: RefCoverageAsOf | null;
   /** Current durable horizon disclosures from the reference owner projection. */
   coverageHorizons: readonly RefCoverageHorizon[];
   deviceLabels: string[];
@@ -505,7 +508,13 @@ async function loadConnectorPageModel(
   const connectorNotInstalled = isConnectorNotInstalled(summary);
   const collectionFactsByStream = new Map<string, StreamCollectionFacts>();
   for (const [stream, entry] of indexCollectionReportByStream(summary.collection_report)) {
-    collectionFactsByStream.set(stream, formatStreamCollectionFacts(entry, { connectorNotInstalled }));
+    collectionFactsByStream.set(
+      stream,
+      formatStreamCollectionFacts(entry, {
+        connectorNotInstalled,
+        coverageAsOf: summary.coverage_as_of ?? null,
+      })
+    );
   }
   const actionability = projectSourceActionability(summary);
   const collectionOwnerActionByStream = actionability.ownerActionByStream;
@@ -562,6 +571,7 @@ async function loadConnectorPageModel(
     connectorInstallKey: connectorInstallKey(summary),
     connectorInstanceId,
     connectorNotInstalled,
+    coverageAsOf: summary.coverage_as_of ?? null,
     coverageHorizons: summary.coverage_horizons ?? [],
     deviceLabels,
     displayName,
@@ -704,6 +714,7 @@ function ConnectorPageView({
     connectorInstanceId,
     connectorNotInstalled,
     connectionLabelSeed,
+    coverageAsOf,
     coverageHorizons,
     deviceLabels,
     displayName,
@@ -977,6 +988,7 @@ function ConnectorPageView({
         connectionId={connectorInstanceId ?? connectionId}
         connectorId={connectorId}
         connectorNotInstalled={connectorNotInstalled}
+        coverageAsOf={coverageAsOf}
         localDeviceProgress={overview.localDeviceProgress ?? null}
         now={now}
         providerOrigin={providerOrigin}

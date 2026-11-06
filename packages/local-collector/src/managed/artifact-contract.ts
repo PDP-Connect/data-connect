@@ -38,6 +38,8 @@
  * can be tested against a fixture without a registry.
  */
 
+import type { ConnectorProtocolCapability } from "../../../connector-protocol/src/connector-runtime-protocol.ts";
+
 /** Media type of the artifact envelope a reference resolves to. */
 export type ArtifactMediaType =
   | "application/vnd.oci.image.manifest.v1+json"
@@ -159,10 +161,11 @@ export interface CollectionProfile {
   readonly connector_id: string;
   readonly version: string;
   readonly display_name: string;
+  readonly protocol_capabilities?: readonly ConnectorProtocolCapability[];
   readonly runtime_requirements?: {
     readonly bindings?: Readonly<Record<string, { readonly required: boolean }>>;
   };
-  readonly streams?: readonly { readonly name?: string; readonly id?: string }[];
+  readonly streams?: readonly { readonly name?: string; readonly id?: string; readonly coverage_stores?: readonly string[] }[];
 }
 
 /**

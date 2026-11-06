@@ -39,6 +39,12 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  collectionProfileDeclarationError,
+  isConnectorProtocolCapabilityArray,
+  RUN_COVERAGE_V1_CAPABILITY,
+  type ConnectorProtocolCapability,
+} from "@pdpp/connector-protocol";
+import {
   buildConnectScopeRequest,
   type ConnectScopeChoice,
   ConnectScopeValidationError,
@@ -51,7 +57,9 @@ import { ALLOW_CUSTOM_COMMAND_ENV, CollectorCustomCommandRefusedError, Collector
 import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
 import {
+  COLLECTION_PROFILE_MANIFEST,
   type CollectionProfilePin,
+  collectionProfileMismatch,
   ensureCollectionProfileInstalled,
   installedCollectionProfile,
 } from "../src/managed/collection-profiles.ts";
@@ -70,6 +78,7 @@ import {
   type EnrollmentExchangeResponse,
   enrollCollector,
   getBundledConnectorFrom,
+  hashCanonicalJson,
   isMainModule,
   type LocalCollectorLifecycleState,
   LocalDeviceClient,
@@ -1681,6 +1690,40 @@ export interface LocalOutboxStatusOutput {
     observed: boolean | null;
     record_batches: number;
   };
+  /**
+   * Latest server-acknowledged typed terminal verdict, retained after outbox
+   * pruning.
+   *
+   * - `covered`: every requested store collected, bound to the release this
+   *   device selects, and the run's runtime accounting is clean.
+   * - `incomplete`: bound to the selected release, but a store fell short or
+   *   the runtime accounting shows outstanding debt.
+   * - `unadmitted`: the lane holds open outbox work (queued, leased or
+   *   dead-lettered), or a failure gap no complete run has recovered, so the
+   *   latest run has not reached a durable terminal commit. The acknowledged
+   *   verdict above does not stand for that run.
+   * - `not_current`: acknowledged for another release, or with no release
+   *   binding, or this device selects no release. Says nothing about
+   *   completeness, so it is never read as `incomplete`.
+   * - `no_evidence`: no acknowledged typed verdict, one whose runtime
+   *   accounting is missing or malformed, or one that names no as-of (a
+   *   receipt from before run order, or a run the server issued no sequence).
+   *
+   * `as_of` is what the receipt is a fact about: the run, the run sequence and
+   * storage epoch the server issued, the commit revision it recorded the run
+   * at, and when this device received the acknowledgement.
+   */
+  terminal_coverage: {
+    as_of: {
+      acknowledged_at: string;
+      collection_revision: number;
+      run_id: string;
+      run_sequence: number;
+      storage_epoch: number;
+    } | null;
+    collection_boundary: string | null;
+    verdict: "covered" | "incomplete" | "unadmitted" | "not_current" | "no_evidence";
+  };
   db: {
     configured: boolean;
     exists: boolean;
@@ -1695,13 +1738,17 @@ export interface LocalOutboxStatusOutput {
    */
   deployment_posture: LocalCollectorDeploymentPosture;
   /**
-   * The single mutually-exclusive lifecycle state for this lane, derived
-   * from the outbox counts plus the coverage observation. One of
-   * healthy_idle, draining, retryable_backlog, dead_letter, stale_lease, or
-   * coverage_missing. This is the honest active/drain/coverage signal an
-   * operator or agent reads instead of inferring from raw counts.
+   * The single lifecycle state for this lane. Open work takes priority;
+   * a drained scoped lane is covered only after a v2 terminal ACK for the
+   * selected release, and otherwise reports incomplete, not current, or no
+   * evidence.
    */
-  lifecycle_state: LocalCollectorLifecycleState;
+  lifecycle_state:
+    | LocalCollectorLifecycleState
+    | "covered"
+    | "coverage_incomplete"
+    | "coverage_not_current"
+    | "no_evidence";
   outbox: {
     counts: {
       dead_letter: number;
@@ -1756,11 +1803,10 @@ export interface LocalCollectorReferenceRouteCheck {
 
 export interface LocalOutboxDoctorOutput extends LocalOutboxStatusOutput {
   checks: {
+    terminal_coverage: "ok" | "warn" | "unknown";
     /**
-     * `warn` once the lane has collected records but never carried a
-     * `coverage_diagnostics` record (the local shape behind a stuck
-     * dashboard `coverage_unknown`). `ok` when coverage was observed, the
-     * lane is empty, or no connection id scoped the scan.
+     * Legacy diagnostic observation retained for older status clients.
+     * It cannot by itself prove typed terminal coverage.
      */
     coverage_diagnostics: "ok" | "warn";
     /**
@@ -1833,6 +1879,12 @@ export interface InspectLocalOutboxStatusDeps {
    * deterministic regardless of where the test process itself resolves from.
    */
   deploymentPosture?: LocalCollectorDeploymentPosture;
+  /**
+   * The release this device selects for the lane's connector. Defaults to the
+   * pinned release installed on this device (see {@link selectedCollectionRelease}).
+   * `null` means the device selects none, so no receipt can be current.
+   */
+  selectedRelease?: SelectedCollectionRelease | null;
 }
 
 export function inspectLocalOutboxStatus(
@@ -1843,13 +1895,43 @@ export function inspectLocalOutboxStatus(
   const exists = existsSync(dbPath);
   const inspection = exists
     ? readOutboxInspection(dbPath, options.sourceInstanceId)
-    : { coverageObserved: null, recordBatchCount: 0, summary: emptyOutboxSummary() };
+    : {
+        coverageObserved: null,
+        openGaps: 0,
+        recordBatchCount: 0,
+        summary: emptyOutboxSummary(),
+        terminalCoverage: null,
+      };
   const { coverageObserved, recordBatchCount, summary } = inspection;
-  const lifecycleState = deriveLocalCollectorLifecycleState({
+  const outboxLifecycleState = deriveLocalCollectorLifecycleState({
     coverageObserved,
     recordBatchCount,
     summary,
   });
+  const selectedRelease =
+    inspection.terminalCoverage === null
+      ? null
+      : deps.selectedRelease !== undefined
+        ? deps.selectedRelease
+        : selectedCollectionRelease(options.connector);
+  // Open work for the lane (queued, leased or dead-lettered), and any gap still
+  // open for it, is work the acknowledged receipt does not account for: the
+  // latest run has not reached a durable terminal commit that recovered its
+  // failures. A delivered gap counts, because only a complete run's recovery
+  // closes it. Open work keeps the outbox lifecycle non-idle; on a drained lane,
+  // an unrecovered gap maps to `coverage_incomplete` below.
+  const latestRunOpen = summary.ready + summary.leased + summary.deadLetter > 0 || inspection.openGaps > 0;
+  const terminalVerdict = terminalCoverageVerdict(inspection.terminalCoverage, selectedRelease, latestRunOpen);
+  const lifecycleState =
+    options.sourceInstanceId && (outboxLifecycleState === "healthy_idle" || outboxLifecycleState === "coverage_missing")
+      ? terminalVerdict === "covered"
+        ? "covered"
+        : terminalVerdict === "incomplete" || terminalVerdict === "unadmitted"
+          ? "coverage_incomplete"
+          : terminalVerdict === "not_current"
+            ? "coverage_not_current"
+            : "no_evidence"
+      : outboxLifecycleState;
   const deploymentPosture = deps.deploymentPosture ?? classifyLocalCollectorDeploymentPosture();
   return {
     collector_protocol_version: COLLECTOR_PROTOCOL_VERSION,
@@ -1860,6 +1942,11 @@ export function inspectLocalOutboxStatus(
     coverage: {
       observed: inspection.coverageObserved,
       record_batches: inspection.recordBatchCount,
+    },
+    terminal_coverage: {
+      as_of: receiptAsOf(inspection.terminalCoverage),
+      collection_boundary: inspection.terminalCoverage?.collectionBoundary ?? null,
+      verdict: terminalVerdict,
     },
     db: {
       configured: true,
@@ -2002,14 +2089,43 @@ function redactReferenceBaseUrl(raw: string): string {
 }
 
 export function buildLocalOutboxDoctor(
-  status: LocalOutboxStatusOutput,
+  statusInput: LocalOutboxStatusOutput,
   errorSummary?: LocalDeviceOutboxDeadLetterErrorSummary | null,
   referenceRoute?: LocalCollectorReferenceRouteCheck | null
 ): LocalOutboxDoctorOutput {
+  const activeScope = referenceRoute?.status === "ok" ? referenceRoute.scope : undefined;
+  const staleScope = Boolean(
+    activeScope &&
+      statusInput.terminal_coverage.collection_boundary &&
+      statusInput.terminal_coverage.collection_boundary !== activeScope
+  );
+  const status: LocalOutboxStatusOutput = staleScope
+    ? {
+        ...statusInput,
+        lifecycle_state: statusInput.lifecycle_state === "covered" ? "no_evidence" : statusInput.lifecycle_state,
+        terminal_coverage: { ...statusInput.terminal_coverage, verdict: "no_evidence" },
+      }
+    : statusInput;
   const posture = status.deployment_posture;
   const postureDisqualifiesEvidence = posture.kind === "repo_dist_override" || posture.is_placeholder_version;
   const checks: LocalOutboxDoctorOutput["checks"] = {
-    coverage_diagnostics: status.lifecycle_state === "coverage_missing" ? "warn" : "ok",
+    coverage_diagnostics:
+      status.terminal_coverage.verdict !== "covered" &&
+      status.coverage.observed === false &&
+      status.coverage.record_batches > 0 &&
+      status.lifecycle_state === "no_evidence"
+        ? "warn"
+        : "ok",
+    terminal_coverage:
+      staleScope
+        ? "warn"
+        : status.terminal_coverage.verdict === "covered"
+        ? "ok"
+        : status.terminal_coverage.verdict === "incomplete" ||
+            status.terminal_coverage.verdict === "unadmitted" ||
+            status.terminal_coverage.verdict === "not_current"
+          ? "warn"
+          : "unknown",
     deployment_posture: postureDisqualifiesEvidence ? "warn" : "ok",
     expired_leases: status.outbox.expired_leases > 0 ? "warn" : "ok",
     outbox_db: status.db.exists ? "ok" : "missing",
@@ -2037,13 +2153,20 @@ export function buildLocalOutboxDoctor(
   }
   if (checks.coverage_diagnostics === "warn") {
     remediation.push(
-      `This lane drained ${status.coverage.record_batches} record batch(es) but never carried a ` +
-        "`coverage_diagnostics` record, so the dashboard can only show coverage_unknown. " +
-        "Re-run with a build that emits `coverage_diagnostics` by default and the default stream set (no `--streams`): " +
-        "`npx -y @pdpp/local-collector run …` (or `pdpp-local-collector run …` if already on a current build). " +
-        "Older installs may omit `coverage_diagnostics` from bundled defaults. `npx -y` fetches the latest *published* build, " +
-        "which can still lag the repo build — if the gap persists, confirm the published `latest` carries the fix with " +
-        "`pnpm release:dist-tag-check` (release owner) rather than assuming the published build is current."
+      `This lane drained ${status.coverage.record_batches} record batch(es) without an acknowledged typed terminal ` +
+        "coverage verdict. Coverage remains unknown. Re-run with a connector release that emits DONE.coverage " +
+        "and a collector that accepts its terminal commit."
+    );
+  }
+  if (checks.terminal_coverage === "warn") {
+    remediation.push(
+      staleScope
+        ? "The latest acknowledged terminal verdict belongs to an older collection boundary. Re-run against the active scope before treating this lane as covered."
+        : status.terminal_coverage.verdict === "unadmitted"
+          ? "The latest run has not reached the server: its queued, retrying or dead-lettered work is still open, or a failure gap is not yet recovered, so the last acknowledged verdict does not stand for it. Let the next complete run drain the queue and recover the gap, or resolve dead-letter rows with `pdpp-local-collector recover`."
+          : status.terminal_coverage.verdict === "not_current"
+            ? "The latest acknowledged terminal verdict was produced for a connector release other than the one this device selects, or for none. Re-run the collector on the selected release before treating this lane as covered."
+            : "The latest acknowledged terminal verdict is incomplete; inspect the connector run diagnostics and re-run after resolving the missing store coverage."
     );
   }
   if (checks.deployment_posture === "warn") {
@@ -2058,6 +2181,7 @@ export function buildLocalOutboxDoctor(
     checks,
     ...(includeSummary && errorSummary ? { dead_letter_error_summary: errorSummary } : {}),
     ...(referenceRoute ? { reference_route: referenceRoute } : {}),
+    ...(activeScope ? { scope: { active: activeScope, unknown: false } } : {}),
     ...(remediation.length > 0 ? { remediation } : {}),
     status: doctorSeverityForChecks(checks),
   };
@@ -2124,6 +2248,7 @@ function doctorSeverityForChecks(checks: LocalOutboxDoctorOutput["checks"]): "ok
     checks.expired_leases === "warn" ||
     checks.outbox_db === "missing" ||
     checks.coverage_diagnostics === "warn" ||
+    checks.terminal_coverage === "warn" ||
     checks.deployment_posture === "warn"
   ) {
     return "warning";
@@ -3149,9 +3274,61 @@ export async function prepareConnectorSpec(
   const spec = buildConnectorSpec(options);
   const pin = options.entrypointCommand ? undefined : PINS_BY_CONNECTOR.get(spec.connector_id);
   if (pin) {
-    await install({ pin, installRoot: COLLECTION_PROFILE_ROOT, durableRoot: collectorStateDirectory() });
+    const release = await install({ pin, installRoot: COLLECTION_PROFILE_ROOT, durableRoot: collectorStateDirectory() });
+    const profile = JSON.parse(readFileSync(join(release.directory, COLLECTION_PROFILE_MANIFEST), "utf8")) as unknown;
+    return bindOptionalRunCoverageToRelease(spec, pin, profile);
   }
   return spec;
+}
+
+/** Bind the elective evidence extension to a supported base and verified manifest inventory. */
+export function bindOptionalRunCoverageToRelease(
+  spec: CollectorConnectorSpec,
+  pin: Pick<CollectionProfilePin, "digest">,
+  rawProfile: unknown
+): CollectorConnectorSpec {
+  if (!rawProfile || typeof rawProfile !== "object" || Array.isArray(rawProfile)) return spec;
+  const profile = rawProfile as { protocol_capabilities?: unknown; protocol_version?: unknown; streams?: unknown };
+  const profileVersion = profile.protocol_version === undefined ? "0.1.0" : profile.protocol_version;
+  const rawCapabilities = profile.protocol_capabilities === undefined ? [] : profile.protocol_capabilities;
+  const capabilities = isConnectorProtocolCapabilityArray(rawCapabilities) ? rawCapabilities : [];
+  const profileStreams = Array.isArray(profile.streams) ? profile.streams : [];
+  const declaresCoverageStores = profileStreams.some(
+    (stream) => stream !== null && typeof stream === "object" && !Array.isArray(stream) && Object.hasOwn(stream, "coverage_stores")
+  );
+  const baseSpec: CollectorConnectorSpec = {
+    ...spec,
+    collectionProfileVersion: profileVersion,
+    declaresCoverageStores,
+    protocol_capabilities: rawCapabilities as readonly ConnectorProtocolCapability[],
+  };
+  if (!Array.isArray(profile.streams)) return baseSpec;
+  const inventory = new Map<string, readonly string[]>();
+  for (const value of profile.streams) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
+    const stream = value as { name?: unknown; coverage_stores?: unknown };
+    if (typeof stream.name !== "string" || inventory.has(stream.name)) {
+      return { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
+    }
+    if (Array.isArray(stream.coverage_stores) && stream.coverage_stores.length > 0 &&
+      stream.coverage_stores.every((store) => typeof store === "string" && store.trim())) {
+      inventory.set(stream.name, stream.coverage_stores as readonly string[]);
+    }
+  }
+  const coverageSpec = { ...baseSpec, coverageStoreStreams: [...inventory.keys()] };
+  if (
+    collectionProfileDeclarationError(profileVersion, rawCapabilities, declaresCoverageStores) !== null ||
+    !capabilities.includes(RUN_COVERAGE_V1_CAPABILITY) ||
+    !spec.streams.every((stream) => inventory.has(stream))
+  ) {
+    return coverageSpec;
+  }
+  return {
+    ...coverageSpec,
+    artifactDigest: pin.digest,
+    manifestFingerprint: hashCanonicalJson(rawProfile),
+    runCoverageVersion: 1,
+  };
 }
 
 export function buildConnectorSpec(options: CliOptions): CollectorConnectorSpec {
@@ -3558,8 +3735,68 @@ interface LocalOutboxInspection {
    * refuses an unbounded payload scan).
    */
   coverageObserved: boolean | null;
+  /**
+   * Gap rows still open for the lane: queued, leased, or delivered but not yet
+   * recovered. Delivery is not recovery, so a delivered gap keeps the lane
+   * unadmitted until a complete run recovers it.
+   */
+  openGaps: number;
   recordBatchCount: number;
   summary: LocalDeviceOutboxSummary;
+  terminalCoverage: {
+    asOf: NonNullable<ReturnType<LocalDeviceOutbox["latestTerminalCoverageReceipt"]>>["asOf"];
+    collectionBoundary: string;
+    terminalFacts: readonly StoredTerminalFact[];
+  } | null;
+}
+
+/**
+ * One terminal fact as the outbox returns it. The release fields are absent on
+ * a receipt acknowledged before the release binding existed, which then can
+ * never be current. `runtime_accounting` is the collector's measurement of the
+ * run that wrote the fact. It is read back from JSON, so it is typed `unknown`
+ * until {@link accountingOf} checks its shape.
+ */
+interface StoredTerminalFact {
+  artifact_digest?: string;
+  manifest_fingerprint?: string;
+  runtime_accounting?: unknown;
+  scoped: boolean;
+  stores: readonly { status: string }[];
+}
+
+/**
+ * How a stored fact's runtime accounting reads. `unknown`: missing or malformed,
+ * so the fact is no proof. `owed`: the run measured a gap (detail skipped, debt
+ * outstanding, admission or checkpoint refused, or stream evidence inconsistent),
+ * and the server withholds `collected` for the same facts. `clean`: nothing owed.
+ */
+function accountingOf(fact: StoredTerminalFact): "clean" | "owed" | "unknown" {
+  const accounting = fact.runtime_accounting;
+  if (typeof accounting !== "object" || accounting === null) {
+    return "unknown";
+  }
+  const {
+    checkpoint_eligible: checkpointEligible,
+    detail_complete: detailComplete,
+    durable_admission: durableAdmission,
+    outstanding_debt: outstandingDebt,
+    stream_evidence_consistent: streamEvidenceConsistent,
+  } = accounting as Record<string, unknown>;
+  if (
+    typeof checkpointEligible !== "boolean" ||
+    typeof detailComplete !== "boolean" ||
+    typeof durableAdmission !== "boolean" ||
+    typeof streamEvidenceConsistent !== "boolean" ||
+    typeof outstandingDebt !== "number" ||
+    !Number.isSafeInteger(outstandingDebt) ||
+    outstandingDebt < 0
+  ) {
+    return "unknown";
+  }
+  return checkpointEligible && detailComplete && durableAdmission && streamEvidenceConsistent && outstandingDebt === 0
+    ? "clean"
+    : "owed";
 }
 
 function readOutboxInspection(path: string, sourceInstanceId: string | undefined): LocalOutboxInspection {
@@ -3567,16 +3804,122 @@ function readOutboxInspection(path: string, sourceInstanceId: string | undefined
   try {
     const summary = outbox.summary(sourceInstanceId ? { sourceInstanceId } : {});
     if (!sourceInstanceId) {
-      return { coverageObserved: null, recordBatchCount: 0, summary };
+      return { coverageObserved: null, openGaps: 0, recordBatchCount: 0, summary, terminalCoverage: null };
     }
     return {
       coverageObserved: outbox.hasObservedStream({ sourceInstanceId, stream: COVERAGE_DIAGNOSTICS_STREAM }),
+      openGaps: outbox.countOpenGaps({ sourceInstanceId }),
       recordBatchCount: outbox.countRecordBatches({ sourceInstanceId }),
       summary,
+      terminalCoverage: outbox.latestTerminalCoverageReceipt({ sourceInstanceId }),
     };
   } finally {
     outbox.close();
   }
+}
+
+/**
+ * The release this device selects for a connector: the digest pinned into this
+ * package, and the manifest fingerprint of the profile installed under that
+ * pin. A receipt counts as current only when its facts name exactly these.
+ */
+export interface SelectedCollectionRelease {
+  readonly artifactDigest: string;
+  readonly manifestFingerprint: string;
+}
+
+/**
+ * The release {@link prepareConnectorSpec} would run for `connector`, read
+ * without installing or fetching anything. Null when the connector is unpinned,
+ * or the installed profile is not the pinned one: no release can then be named
+ * as selected.
+ */
+export function selectedCollectionRelease(
+  connector: string | null | undefined,
+  installRoot: string = COLLECTION_PROFILE_ROOT
+): SelectedCollectionRelease | null {
+  const pin = connector ? PINS_BY_CONNECTOR.get(normalizeConnectorId(connector)) : undefined;
+  return pin ? selectedReleaseForPin(pin, installRoot) : null;
+}
+
+/**
+ * The release a pin selects, when its installed profile still passes the same
+ * check a run makes before using it. Reads local files only.
+ */
+export function selectedReleaseForPin(
+  pin: CollectionProfilePin,
+  installRoot: string
+): SelectedCollectionRelease | null {
+  const { directory } = installedCollectionProfile(installRoot, pin);
+  try {
+    if (collectionProfileMismatch(directory, pin) !== null) {
+      return null;
+    }
+    const profile = JSON.parse(readFileSync(join(directory, COLLECTION_PROFILE_MANIFEST), "utf8")) as unknown;
+    return { artifactDigest: pin.digest, manifestFingerprint: hashCanonicalJson(profile) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Covered is a claim about one run on one release. Open work, or an unrecovered
+ * gap, for the lane means the latest run is unadmitted, so the receipt cannot
+ * speak for the lane. A receipt for another digest or fingerprint, or on a device
+ * that selects no release, is `not_current` whatever its stores say. The run's own
+ * runtime accounting must be present and clean: a store reads `collected` only as
+ * the collector measured it.
+ */
+function terminalCoverageVerdict(
+  receipt: LocalOutboxInspection["terminalCoverage"],
+  release: SelectedCollectionRelease | null,
+  latestRunOpen: boolean
+): LocalOutboxStatusOutput["terminal_coverage"]["verdict"] {
+  if (!receipt || !receipt.collectionBoundary.trim()) {
+    return "no_evidence";
+  }
+  if (latestRunOpen) {
+    return "unadmitted";
+  }
+  if (!receipt.asOf) {
+    return "no_evidence";
+  }
+  const isSelectedRelease = (fact: StoredTerminalFact) =>
+    release !== null &&
+    fact.artifact_digest === release.artifactDigest &&
+    fact.manifest_fingerprint === release.manifestFingerprint;
+  if (!receipt.terminalFacts.every(isSelectedRelease)) {
+    return "not_current";
+  }
+  const accounting = receipt.terminalFacts.map(accountingOf);
+  if (accounting.includes("unknown")) {
+    return "no_evidence";
+  }
+  return receipt.terminalFacts.length > 0 &&
+    receipt.terminalFacts.every(
+      (fact, index) =>
+        fact.scoped &&
+        fact.stores.length > 0 &&
+        fact.stores.every((store) => store.status === "collected") &&
+        accounting[index] === "clean"
+    )
+    ? "covered"
+    : "incomplete";
+}
+
+function receiptAsOf(
+  receipt: LocalOutboxInspection["terminalCoverage"]
+): LocalOutboxStatusOutput["terminal_coverage"]["as_of"] {
+  const asOf = receipt?.asOf;
+  return asOf
+    ? {
+        acknowledged_at: asOf.acknowledgedAt,
+        collection_revision: asOf.collectionRevision,
+        run_id: asOf.runId,
+        run_sequence: asOf.runSequence,
+        storage_epoch: asOf.storageEpoch,
+      }
+    : null;
 }
 
 function emptyOutboxSummary(): LocalDeviceOutboxSummary {

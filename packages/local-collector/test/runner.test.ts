@@ -10,6 +10,10 @@ import { dirname, join } from "node:path";
 // biome-ignore lint/correctness/noUnresolvedImports: Biome 2.5.5's built-in Node module registry does not yet recognize node:sqlite; Node's own resolver and tsc both resolve it (same pre-existing gap as packages/collector-runtime/src/local-device-outbox.ts and its sibling test files).
 import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
+import { DEFAULT_COLLECTOR_OUTBOX_POLICY, drainCollectorOutbox } from "@pdpp/collector-runtime/collector-runner";
+import { hashCanonicalJson } from "@pdpp/collector-runtime";
+import { LocalDeviceClient, type TerminalRunCommitRequest } from "@pdpp/collector-runtime/local-device-client";
+import { canonicalTerminalRunCommitEnvelope } from "@pdpp/collector-runtime/local-device-envelope";
 import {
   // The concrete bundled-connector registry is assembled at the composition
   // root (the bin) from connector-owned definitions; the src runtime is
@@ -66,6 +70,7 @@ import {
   COLLECTOR_RUNTIME_CAPABILITIES,
   LocalDeviceHttpError,
   LocalDeviceOutbox,
+  runCollectorConnector,
 } from "../src/runner.ts";
 
 /**
@@ -114,7 +119,7 @@ test("runner exports the collector runtime capability profile with collector id"
   assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.id, "collector");
   const bindings = [...COLLECTOR_RUNTIME_CAPABILITIES.bindings].sort();
   assert.deepEqual(bindings, ["filesystem", "local_device", "network"]);
-  assert.deepEqual([...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities], []);
+  assert.deepEqual([...COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities], ["RUN_COVERAGE_V1"]);
 });
 
 test("runner exports a stable COLLECTOR_PROTOCOL_VERSION string", () => {
@@ -231,18 +236,15 @@ test("bundled connector entries declare filesystem binding as required", () => {
   }
 });
 
-test("bundled connector defaults request coverage_diagnostics whenever the connector's manifest declares that stream, so a drained run is never coverage_unknown", async () => {
+test("legacy profiles that declare coverage_diagnostics request it by default", async () => {
   // Reads each connector's pinned Collection Profile (the manifest of the
   // release the collector installs), which the reference server keeps under
   // reference-implementation/server/local-collector-profiles/.
   //
-  // Local-device collectors push records from a device outbox and write no
-  // spine run, so the connection-health rollup can only project a non-`unknown`
-  // coverage axis from durable `coverage_diagnostics` records where that is the
-  // connector's coverage mechanism. If the published default stream set omits
-  // that stream, every `pdpp-local-collector run` emits zero coverage evidence
-  // and the dashboard is stuck at `coverage_unknown` even after a healthy
-  // drain. See openspec/changes/derive-local-collector-coverage-from-diagnostics.
+  // Older profiles used `coverage_diagnostics` records. When a profile still
+  // declares that stream, its default set must request it. Typed terminal
+  // coverage is checked separately below; this legacy stream alone proves
+  // no current coverage verdict.
   //
   // Not every connector uses this mechanism: iMessage declares a per-stream
   // `coverage_strategy` (snapshot_import_receipt) in its manifest instead, and
@@ -471,6 +473,7 @@ test("local collector doctor flags missing db, expired leases, and dead letters"
       expired_leases: "warn",
       outbox_db: "ok",
       outbox_failures: "fail",
+      terminal_coverage: "unknown",
     });
     // Dead letters dominate the lifecycle state even though no coverage
     // diagnostic was observed: a lane that needs recovery is not first
@@ -2532,11 +2535,9 @@ test("inspectLocalOutboxStatus reads connection-scoped counts from the scoped de
   assert.equal(bOnly.outbox.counts.total, 1);
 });
 
-// --- Lifecycle state axis (Target 2/4): status/doctor must distinguish
-// healthy_idle, draining, retryable_backlog, dead_letter, stale_lease, and
-// coverage_missing from the durable outbox alone. ---
+// --- Lifecycle state axis: queue health and acknowledged terminal coverage. ---
 
-function statusFor(path, sourceInstanceId = "src-1") {
+function statusFor(path, sourceInstanceId = "src-1", selectedRelease = SELECTED_RELEASE) {
   return inspectLocalOutboxStatus(
     {
       baseUrl: "http://127.0.0.1:7662",
@@ -2544,7 +2545,7 @@ function statusFor(path, sourceInstanceId = "src-1") {
       queuePath: path,
       sourceInstanceId,
     },
-    { deploymentPosture: PUBLISHED_POSTURE }
+    { deploymentPosture: PUBLISHED_POSTURE, selectedRelease }
   );
 }
 
@@ -2567,19 +2568,788 @@ function enqueueRecordBatch(outbox, { id, sourceInstanceId = "src-1", streams })
   });
 }
 
-/** Claim + acknowledge a row so it reaches status 'succeeded' (drained). */
+// Run sequences a current server issues: each acknowledged terminal record is a later run.
+let acknowledgedRunSequence = 0;
+
+/**
+ * Claim + acknowledge the next ready row, which must be `id`, so it reaches status 'succeeded' (drained).
+ * A terminal record is acknowledged as a current server does, with its run sequence and revision.
+ */
 function drainRow(outbox, id, sourceInstanceId = "src-1") {
-  const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, sourceInstanceId });
-  assert.ok(claim, `expected to claim a ready row for ${id}`);
-  outbox.acknowledge({ holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
+  const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId });
+  assert.equal(claim?.id, id, `expected ${id} to be the next ready row`);
+  acknowledgedRunSequence += 1;
+  outbox.acknowledge({
+    holder: "drainer",
+    id: claim.id,
+    leaseEpoch: claim.lease_epoch,
+    terminalAck: {
+      collectionRevision: acknowledgedRunSequence,
+      runId: typeof claim.payload?.run_id === "string" ? claim.payload.run_id : claim.id,
+      runSequence: acknowledgedRunSequence,
+      storageEpoch: 1,
+    },
+  });
 }
 
-test("lifecycle_state is healthy_idle on an empty outbox (nothing collected, no coverage to miss)", async () => {
+// The release this device selects for the connector, and one it has since
+// replaced. A v2 receipt is current only when its facts name the selected one.
+const SELECTED_RELEASE = Object.freeze({
+  artifactDigest: `sha256:${"a".repeat(64)}`,
+  manifestFingerprint: "b".repeat(64),
+});
+const SUPERSEDED_RELEASE = Object.freeze({
+  artifactDigest: `sha256:${"c".repeat(64)}`,
+  manifestFingerprint: "d".repeat(64),
+});
+
+/** The release fields a v2 terminal fact carries; `null` models a receipt with no binding. */
+function releaseBinding(release) {
+  return release ? { artifact_digest: release.artifactDigest, manifest_fingerprint: release.manifestFingerprint } : {};
+}
+
+/** The runtime accounting the collector attaches to a v2 fact for a run that ran clean. */
+const CLEAN_ACCOUNTING = Object.freeze({
+  checkpoint_eligible: true,
+  detail_complete: true,
+  durable_admission: true,
+  outstanding_debt: 0,
+  stream_evidence_consistent: true,
+});
+
+/** Enqueue a terminal run commit without draining it. `accounting: null` models a v2 fact with none. */
+function enqueueTerminalCoverage(
+  outbox,
+  {
+    id,
+    sourceInstanceId = "src-1",
+    stores,
+    scoped = true,
+    version = 2,
+    release = SELECTED_RELEASE,
+    accounting = CLEAN_ACCOUNTING,
+  }
+) {
+  outbox.enqueue({
+    id,
+    kind: "terminal_run_commit",
+    payload: {
+      collection_boundary: "unscoped",
+      commit_id: id,
+      connector_id: "claude_code",
+      connector_instance_id: "connector-1",
+      device_id: "device-1",
+      run_id: id,
+      source_instance_id: sourceInstanceId,
+      state_delta: {},
+      terminal_facts: version === 2
+        ? [
+            {
+              ...releaseBinding(release),
+              ...(accounting ? { runtime_accounting: accounting } : {}),
+              scoped,
+              stores,
+              stream: "sessions",
+            },
+          ]
+        : [{ coverage_statuses: ["collected"], stream: "sessions" }],
+      version,
+    },
+    sourceInstanceId,
+  });
+}
+
+function acknowledgeTerminalCoverage(outbox, options) {
+  enqueueTerminalCoverage(outbox, options);
+  drainRow(outbox, options.id, options.sourceInstanceId ?? "src-1");
+}
+
+test("acknowledged v2 coverage stays covered after sent rows are pruned", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-covered",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.outbox.counts.total, 0);
+  assert.equal(status.terminal_coverage.verdict, "covered");
+  assert.equal(status.terminal_coverage.collection_boundary, "unscoped");
+  // The verdict names what it is a fact about: the run and its place in run order.
+  const asOf = status.terminal_coverage.as_of;
+  assert.ok(asOf, "a covered verdict carries its as-of");
+  assert.deepEqual(
+    { ...asOf, acknowledged_at: typeof asOf.acknowledged_at },
+    {
+      acknowledged_at: "string",
+      collection_revision: acknowledgedRunSequence,
+      run_id: "terminal-covered",
+      run_sequence: acknowledgedRunSequence,
+      storage_epoch: 1,
+    }
+  );
+  assert.equal(status.lifecycle_state, "covered");
+  assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "ok");
+  const matchingDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "unscoped",
+    status: "ok",
+  });
+  assert.equal(matchingDoctor.lifecycle_state, "covered");
+  assert.equal(matchingDoctor.scope.active, "unscoped");
+  const staleDoctor = buildLocalOutboxDoctor(status, null, {
+    base_url: "https://pdpp.example.com/",
+    check: "device_source_state",
+    scope: "new-owner-scope",
+    status: "ok",
+  });
+  assert.equal(staleDoctor.lifecycle_state, "no_evidence");
+  assert.equal(staleDoctor.terminal_coverage.verdict, "no_evidence");
+  assert.equal(staleDoctor.checks.terminal_coverage, "warn");
+  assert.equal(staleDoctor.status, "warning");
+});
+
+test("a receipt without a run sequence is no evidence, and an older run's late ACK does not replace a newer receipt", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    // An older server acknowledged the run without a run sequence: the device cannot order it.
+    enqueueTerminalCoverage(outbox, { id: "terminal-unsequenced", stores: [{ store: "local_files", status: "collected" }] });
+    const [unsequenced] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    assert.ok(unsequenced);
+    outbox.acknowledge({ holder: "drainer", id: unsequenced.id, leaseEpoch: unsequenced.lease_epoch });
+  } finally {
+    outbox.close();
+  }
+  const unordered = statusFor(path);
+  assert.equal(unordered.terminal_coverage.verdict, "no_evidence");
+  assert.equal(unordered.terminal_coverage.as_of, null);
+
+  const reopened = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(reopened, { id: "terminal-newer", stores: [{ store: "local_files", status: "collected" }] });
+    const newer = acknowledgedRunSequence;
+    // A run that started before it is acknowledged later, with its own, lower sequence.
+    enqueueTerminalCoverage(reopened, { id: "terminal-older", stores: [{ store: "local_files", status: "partial" }] });
+    const [older] = reopened.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    assert.ok(older);
+    reopened.acknowledge({
+      holder: "drainer",
+      id: older.id,
+      leaseEpoch: older.lease_epoch,
+      terminalAck: { collectionRevision: newer + 1, runId: "terminal-older", runSequence: newer - 1, storageEpoch: 1 },
+    });
+    const status = statusFor(path);
+    assert.equal(status.terminal_coverage.verdict, "covered", "the newer run's receipt stands");
+    assert.equal(status.terminal_coverage.as_of?.run_sequence, newer);
+  } finally {
+    reopened.close();
+  }
+});
+
+test("a later partial terminal receipt replaces a previously covered verdict", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-first",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-second",
+      stores: [{ store: "local_files", status: "partial" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "incomplete");
+  assert.equal(status.lifecycle_state, "coverage_incomplete");
+});
+
+test("a later v1 terminal ACK clears prior v2 coverage proof", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v2",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-v1",
+      stores: [{ store: "local_files", status: "collected" }],
+      version: 1,
+    });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+// The collector's own accounting can contradict a store that reads collected:
+// the server withholds collected for these facts, so the device must not read
+// the receipt as covered either.
+for (const [field, value] of [
+  ["durable_admission", false],
+  ["detail_complete", false],
+  ["stream_evidence_consistent", false],
+  ["checkpoint_eligible", false],
+  ["outstanding_debt", 1],
+]) {
+  test(`v2 receipt with runtime ${field} ${value} is incomplete, even when every store is collected`, async () => {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: `terminal-unclean-${field}`,
+        accounting: { ...CLEAN_ACCOUNTING, [field]: value },
+        stores: [{ store: "local_files", status: "collected" }],
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const status = statusFor(path);
+    assert.equal(status.terminal_coverage.verdict, "incomplete");
+    assert.equal(status.lifecycle_state, "coverage_incomplete");
+    assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+  });
+}
+
+test("v2 receipt without runtime accounting reads no_evidence, even when every store is collected", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-no-accounting",
+      accounting: null,
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+// A covered receipt is proof for the run that wrote it. A later run whose record
+// batch the server refuses is not admitted, and its terminal commit waits behind
+// that batch, so the device must not keep reporting the older run's proof.
+test("a later run whose record batch stays ready makes an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    enqueueTerminalCoverage(outbox, { id: "terminal-run-b", stores: [{ store: "local_files", status: "collected" }] });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.equal(status.lifecycle_state, "draining");
+  assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+});
+
+test("a later run whose record batch is dead-lettered makes an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    const [claim] = outbox.claimReady({ holder: "drainer", leaseMs: 60_000, limit: 1, sourceInstanceId: "src-1" });
+    outbox.deadLetter({ error: "refused", holder: "drainer", id: claim.id, leaseEpoch: claim.lease_epoch });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.equal(status.lifecycle_state, "dead_letter");
+});
+
+/**
+ * A reference stand-in for a server that refuses one pass's state read. Heartbeats
+ * and gap acknowledgements succeed, so a failed pass can still deliver its gap.
+ * Records each gap acknowledgement it receives.
+ */
+async function startStateReadRefusingServer() {
+  const gapAcks = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url.endsWith("/state") && req.method === "GET") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "synthetic_state_read_failure" } }));
+        return;
+      }
+      if (url.includes("/heartbeat")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ object: "device_exporter_heartbeat", status: "accepted" }));
+        return;
+      }
+      if (url.includes("/local-collector-gaps")) {
+        gapAcks.push(JSON.parse(body));
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            attempt_count: 0,
+            connector_id: "claude_code",
+            connector_instance_id: "cin_fake",
+            device_id: "device-1",
+            first_seen_at: null,
+            first_seen_run_id: null,
+            gap_id: "gap_fake",
+            last_run_id: null,
+            object: "device_local_collector_gap",
+            reason: "connector_child_failure",
+            retryable: true,
+            source_instance_id: "src-1",
+            status: "pending",
+            stream: "local-collector/connector_child_failure",
+            updated_at: new Date().toISOString(),
+          })
+        );
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "not_found" } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+    gapAcks,
+    url: `http://127.0.0.1:${address.port}`,
+  };
+}
+
+/** One pass of `src-1` for `claude_code`. Its child is never spawned when the state read is refused. */
+function refusedStatePassConfig(baseUrl, queuePath, runId) {
+  return {
+    baseUrl,
+    connector: {
+      args: [],
+      command: process.execPath,
+      connector_id: "claude_code",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: {} },
+      streams: ["sessions"],
+    },
+    deviceId: "device-1",
+    deviceToken: "device-token",
+    executionRoot: dirname(queuePath),
+    queuePath,
+    runId,
+    sourceInstanceId: "src-1",
+  };
+}
+
+// A failed pass must not leave an earlier covered receipt standing for its lane. Both
+// tests fail the pass at the state read, which is before the scan starts.
+test("a pass that fails before its scan leaves an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+
+  const server = await startStateReadRefusingServer();
+  try {
+    await assert.rejects(
+      runCollectorConnector(refusedStatePassConfig(server.url, path, "run-state-read-failed")),
+      /failed to read prior state/
+    );
+  } finally {
+    await server.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
+test("a pass that fails after its pre-scan drain delivered an earlier gap leaves the lane unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    // An earlier pass's failure gap, not yet delivered. The id is the one the
+    // runner derives for this lane's connector_child_failure gap.
+    outbox.enqueue({
+      id: buildLocalDeviceOutboxId({
+        kind: "gap",
+        parts: ["claude_code", "src-1", "connector_child_failure", null, null],
+        sourceInstanceId: "src-1",
+      }),
+      kind: "gap",
+      payload: {
+        connectorId: "claude_code",
+        firstSeenAt: "2026-10-22T11:00:00.000Z",
+        nextAttemptBackoffMs: 60_000,
+        reason: "connector_child_failure",
+        retryable: true,
+        sourceInstanceId: "src-1",
+      },
+      sourceInstanceId: "src-1",
+    });
+  } finally {
+    outbox.close();
+  }
+
+  const server = await startStateReadRefusingServer();
+  try {
+    await assert.rejects(
+      runCollectorConnector(refusedStatePassConfig(server.url, path, "run-after-pre-scan-drain")),
+      /failed to read prior state/
+    );
+    assert.equal(server.gapAcks.length, 1, "the pre-scan drain delivered the earlier gap");
+  } finally {
+    await server.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "unadmitted");
+});
+
+/**
+ * Enqueues the connector_child_failure gap a failed pass leaves for `src-1`,
+ * under the id the runner derives for it. Returns that id.
+ */
+function enqueueFailureGap(outbox: LocalDeviceOutbox, connectorId: string): string {
+  const id = buildLocalDeviceOutboxId({
+    kind: "gap",
+    parts: [connectorId, "src-1", "connector_child_failure", null, null],
+    sourceInstanceId: "src-1",
+  });
+  outbox.enqueue({
+    id,
+    kind: "gap",
+    payload: {
+      connectorId,
+      firstSeenAt: "2026-10-22T11:00:00.000Z",
+      nextAttemptBackoffMs: 60_000,
+      reason: "connector_child_failure",
+      retryable: true,
+      sourceInstanceId: "src-1",
+    },
+    sourceInstanceId: "src-1",
+  });
+  return id;
+}
+
+/** One independent drain of `src-1`'s ready rows, outside any collector run. */
+async function drainLaneOnce(path: string, baseUrl: string, connectorId: string): Promise<void> {
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    await drainCollectorOutbox({
+      client: new LocalDeviceClient({ baseUrl, deviceId: "device-1", deviceToken: "device-token" }),
+      connectorId,
+      holderId: "independent-drain",
+      outbox,
+      policy: DEFAULT_COLLECTOR_OUTBOX_POLICY,
+      sourceInstanceId: "src-1",
+    });
+  } finally {
+    outbox.close();
+  }
+}
+
+test("a run aborted before start leaves an earlier covered receipt unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+
+  const controller = new AbortController();
+  controller.abort(new Error("operator cancelled run"));
+  await assert.rejects(
+    runCollectorConnector({
+      abortSignal: controller.signal,
+      baseUrl: "http://127.0.0.1:9",
+      connector: {
+        args: [],
+        command: process.execPath,
+        connector_id: "claude_code",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["sessions"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: dirname(path),
+      queuePath: path,
+      runId: "run-aborted-before-start",
+      sourceInstanceId: "src-1",
+    }),
+    /operator cancelled run/
+  );
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
+test("an unrecovered failure gap delivered by an independent drain leaves the lane unadmitted", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+
+  // A failed pass leaves its gap open, then an independent drain delivers it.
+  // Delivery is not recovery: no complete run has resolved the barrier.
+  const seeded = new LocalDeviceOutbox({ path });
+  try {
+    enqueueFailureGap(seeded, "claude_code");
+  } finally {
+    seeded.close();
+  }
+  const server = await startStateReadRefusingServer();
+  try {
+    await drainLaneOnce(path, server.url, "claude_code");
+    assert.equal(server.gapAcks.length, 1, "the independent drain delivered the gap");
+  } finally {
+    await server.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "unadmitted");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
+test("a following successful pass without coverage evidence leaves a delivered failure gap unrecovered and the lane not covered", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  let gapId = "";
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    gapId = enqueueFailureGap(outbox, "custom");
+  } finally {
+    outbox.close();
+  }
+
+  const gapServer = await startStateReadRefusingServer();
+  try {
+    await drainLaneOnce(path, gapServer.url, "custom");
+    assert.equal(gapServer.gapAcks.length, 1, "the independent drain delivered the gap");
+  } finally {
+    await gapServer.close();
+  }
+
+  // A pass that succeeds without negotiating coverage commits a terminal run
+  // record with no evidence. It clears the receipt but recovers no gap.
+  const previous = process.env[ALLOW_CUSTOM_COMMAND_ENV];
+  process.env[ALLOW_CUSTOM_COMMAND_ENV] = "1";
+  const server = await startAcceptingDeviceServer();
+  try {
+    const fixture = await writeCountingFixtureConnector(1);
+    const result = await runCollectorOnce({
+      args: [fixture],
+      baseUrl: server.url,
+      command: "run",
+      connector: "custom",
+      deviceId: "device-1",
+      deviceToken: "token-1",
+      entrypointCommand: "node",
+      quiet: true,
+      queuePath: path,
+      sourceInstanceId: "src-1",
+      streams: ["messages"],
+    });
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(result.statePutFailed, false);
+    assert.equal(
+      result.outboxSummary.ready + result.outboxSummary.leased + result.outboxSummary.deadLetter,
+      0,
+      "the pass drained all of its own work, so any unadmitted verdict comes from the gap"
+    );
+  } finally {
+    await server.close();
+    if (previous === undefined) {
+      delete process.env[ALLOW_CUSTOM_COMMAND_ENV];
+    } else {
+      process.env[ALLOW_CUSTOM_COMMAND_ENV] = previous;
+    }
+  }
+
+  const after = new LocalDeviceOutbox({ path });
+  try {
+    assert.equal(after.get(gapId)?.status, "succeeded", "the successful pass left the delivered gap unrecovered");
+  } finally {
+    after.close();
+  }
+  // The pass's own no-evidence terminal record replaced run A's covered receipt.
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.notEqual(status.lifecycle_state, "covered");
+});
+
+test("open record work without an acknowledged receipt stays no_evidence", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    enqueueRecordBatch(outbox, { id: "rb-first-run", streams: ["sessions"] });
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "draining");
+});
+
+test("a covered verdict returns once the later run's commit is acknowledged clean", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-run-a",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+    enqueueRecordBatch(outbox, { id: "rb-run-b", streams: ["sessions"] });
+    enqueueTerminalCoverage(outbox, { id: "terminal-run-b", stores: [{ store: "local_files", status: "collected" }] });
+    drainRow(outbox, "rb-run-b");
+    drainRow(outbox, "terminal-run-b");
+  } finally {
+    outbox.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "covered");
+  assert.equal(status.lifecycle_state, "covered");
+});
+
+// A receipt is current only for the release this device selects. Each case is
+// a receipt acknowledged for another release, or for none, while every store
+// reads collected: it must not be reported as covered.
+for (const [label, receiptRelease, selectedRelease] of [
+  ["a superseded artifact digest", SUPERSEDED_RELEASE, SELECTED_RELEASE],
+  [
+    "a matching artifact digest and a different manifest fingerprint",
+    { artifactDigest: SELECTED_RELEASE.artifactDigest, manifestFingerprint: "e".repeat(64) },
+    SELECTED_RELEASE,
+  ],
+  ["no release binding on the receipt", null, SELECTED_RELEASE],
+  ["no selected release on this device", SELECTED_RELEASE, null],
+]) {
+  test(`v2 receipt with ${label} is not current, even when every store is collected`, async () => {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: "terminal-not-current",
+        release: receiptRelease,
+        stores: [{ store: "local_files", status: "collected" }],
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const status = statusFor(path, "src-1", selectedRelease);
+    assert.equal(status.terminal_coverage.verdict, "not_current");
+    assert.equal(status.lifecycle_state, "coverage_not_current");
+    assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
+  });
+}
+
+test("partial, failed, unscoped, and v1 terminal commits do not prove coverage", async () => {
+  for (const [statusValue, scoped, version, expected] of [
+    ["partial", true, 2, "incomplete"],
+    ["failed", true, 2, "incomplete"],
+    ["unavailable", true, 2, "incomplete"],
+    ["collected", false, 2, "incomplete"],
+    ["collected", true, 1, "no_evidence"],
+  ]) {
+    const path = await tempOutboxPath();
+    const outbox = new LocalDeviceOutbox({ path });
+    try {
+      acknowledgeTerminalCoverage(outbox, {
+        id: `terminal-${statusValue}-${scoped}-${version}`,
+        stores: [{ store: "local_files", status: statusValue }],
+        scoped,
+        version,
+      });
+      outbox.pruneSent({ dryRun: false, keepCount: 0, sourceInstanceId: "src-1" });
+    } finally {
+      outbox.close();
+    }
+    const observed = statusFor(path);
+    assert.equal(observed.terminal_coverage.verdict, expected);
+    assert.notEqual(observed.lifecycle_state, "covered");
+    assert.equal(buildLocalOutboxDoctor(observed).checks.terminal_coverage, expected === "no_evidence" ? "unknown" : "warn");
+  }
+});
+
+test("a malformed persisted terminal receipt stays unknown without crashing status", async () => {
+  const path = await tempOutboxPath();
+  const outbox = new LocalDeviceOutbox({ path });
+  try {
+    acknowledgeTerminalCoverage(outbox, {
+      id: "terminal-corrupt",
+      stores: [{ store: "local_files", status: "collected" }],
+    });
+  } finally {
+    outbox.close();
+  }
+  const db = new DatabaseSync(path);
+  try {
+    db.prepare("UPDATE local_device_terminal_coverage_receipts SET terminal_facts_json = ? WHERE source_instance_id = ?")
+      .run("{malformed", "src-1");
+  } finally {
+    db.close();
+  }
+  const status = statusFor(path);
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
+  assert.equal(status.lifecycle_state, "no_evidence");
+});
+
+test("lifecycle_state is no_evidence on an empty scoped outbox", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   outbox.close();
   const status = statusFor(path);
-  assert.equal(status.lifecycle_state, "healthy_idle");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
   assert.deepEqual(status.coverage, { observed: false, record_batches: 0 });
   assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
 });
@@ -2654,7 +3424,7 @@ test("lifecycle_state is stale_lease when a lease is past expiry", async () => {
   assert.ok(doctor.remediation.some((line) => /past expiry/.test(line)));
 });
 
-test("lifecycle_state is coverage_missing after a clean drain that never carried a coverage record", async () => {
+test("lifecycle_state is no_evidence after a clean drain without a typed terminal verdict", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2669,36 +3439,16 @@ test("lifecycle_state is coverage_missing after a clean drain that never carried
   assert.equal(status.outbox.counts.leased, 0);
   assert.equal(status.coverage.observed, false);
   assert.ok(status.coverage.record_batches >= 1);
-  assert.equal(status.lifecycle_state, "coverage_missing");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
 
   const doctor = buildLocalOutboxDoctor(status);
   assert.equal(doctor.checks.coverage_diagnostics, "warn");
   assert.equal(doctor.status, "warning");
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.ok(doctor.remediation.some((line) => /coverage_unknown/.test(line)));
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.ok(doctor.remediation.some((line) => /default stream set/.test(line)));
-  // The hint must name the npx -y path so an operator with a stale globally-installed
-  // binary (which may predate coverage_diagnostics in bundled defaults) gets the right
-  // recovery: fetch a current published build, not just re-run with the existing install.
-  assert.ok(
-    // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-    doctor.remediation.some((line) => /npx -y @pdpp\/local-collector/.test(line)),
-    "coverage_missing remediation must name the npx -y upgrade path"
-  );
-  // …but it must not promise that the published build is current. When the
-  // coverage fix only exists on the repo build and not yet published, the npx
-  // path alone would not close the gap, so the hint routes verification through
-  // the release owner's dist-tag check instead of asserting the publish is current.
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  const coverageHint = doctor.remediation.find((line) => /coverage_unknown/.test(line));
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(coverageHint, /can still lag the repo build/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(coverageHint, /release:dist-tag-check/);
+  assert.ok(doctor.remediation.some((line) => /Coverage remains unknown/.test(line)));
 });
 
-test("lifecycle_state is healthy_idle once a drained lane has carried a coverage_diagnostics record", async () => {
+test("legacy coverage_diagnostics alone does not prove typed terminal coverage", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2711,7 +3461,8 @@ test("lifecycle_state is healthy_idle once a drained lane has carried a coverage
   }
   const status = statusFor(path);
   assert.equal(status.coverage.observed, true);
-  assert.equal(status.lifecycle_state, "healthy_idle");
+  assert.equal(status.lifecycle_state, "no_evidence");
+  assert.equal(status.terminal_coverage.verdict, "no_evidence");
   assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
 });
 
@@ -2784,10 +3535,10 @@ test("status/doctor stay bounded and report observed:null on a giant legacy (pre
     queuePath: path,
     sourceInstanceId: "src-legacy",
   });
-  // Unknown coverage suppresses the coverage_missing verdict (never guess from
-  // a partial scan); the lane is fully drained otherwise, so it is healthy_idle.
+  // The bounded legacy scan cannot supply typed terminal proof; a fully
+  // drained lane still reports no evidence.
   assert.equal(status.coverage.observed, null);
-  assert.equal(status.lifecycle_state, "healthy_idle");
+  assert.equal(status.lifecycle_state, "no_evidence");
 
   const doctor = buildLocalOutboxDoctor(status);
   assert.equal(doctor.checks.coverage_diagnostics, "ok");
@@ -3332,6 +4083,79 @@ function tempDirSync(prefix = "pdpp-local-collector-test-"): string {
  * two routes a sample run actually hits. Not a general harness — keep it
  * this small; `collector-runner.test.ts` already owns the full route set.
  */
+/**
+ * A reference stand-in that accepts a whole pass: prior state, state writes, and
+ * ingest batches echoing the accepted count the client requires. Unlike
+ * {@link startSampleTestServer}, a batch it accepts is actually drained, so a
+ * pass that uses it leaves no open work of its own.
+ */
+async function startAcceptingDeviceServer(): Promise<{ close: () => Promise<void>; url: string }> {
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url.endsWith("/state")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            connector_instance_id: "cin-1",
+            device_id: "device-1",
+            object: "device_source_instance_state",
+            source_instance_id: "src-1",
+            state: {},
+            updated_at: null,
+          })
+        );
+        return;
+      }
+      if (url.includes("/ingest-batches")) {
+        const records = (JSON.parse(body || "{}").records ?? []) as unknown[];
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            accepted_record_count: records.length,
+            object: "device_ingest_batch_result",
+            rejected_record_count: 0,
+            status: "accepted",
+          })
+        );
+        return;
+      }
+      if (url.includes("/terminal-run-commits")) {
+        // Every successful pass commits a terminal run record; acknowledge it as the server does.
+        const request = JSON.parse(body || "{}") as TerminalRunCommitRequest;
+        res.writeHead(201, { "content-type": "application/json" });
+        acknowledgedRunSequence += 1;
+        res.end(
+          JSON.stringify({
+            collection_revision: acknowledgedRunSequence,
+            commit_id: request.commit_id,
+            envelope_hash: hashCanonicalJson(canonicalTerminalRunCommitEnvelope(request)),
+            object: "device_terminal_run_commit",
+            run_id: request.run_id,
+            run_sequence: acknowledgedRunSequence,
+            storage_epoch: 1,
+            terminal_event_id: `evt-${request.run_id}`,
+          })
+        );
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    url: `http://127.0.0.1:${address.port}`,
+  };
+}
+
 async function startSampleTestServer(): Promise<{ close: () => Promise<void>; url: string }> {
   const server = createServer((req, res) => {
     if (req.url?.endsWith("/state")) {

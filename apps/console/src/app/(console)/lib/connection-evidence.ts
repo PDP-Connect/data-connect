@@ -24,6 +24,7 @@ import type {
   DeviceSourceInstance,
   RefCollectionRateSnapshot,
   RefConnectionHealthSnapshot,
+  RefCoverageAsOf,
   RefDetailGapBacklog,
   RefForwardDisposition,
   RefLocalDeviceProgress,
@@ -87,12 +88,18 @@ export function outboxAxisIsApplicable(
  */
 export function summarizeAxisChips(
   axes: RefConnectionHealthSnapshot["axes"] | undefined | null,
-  options: { isLocalDeviceBacked?: boolean } = {}
+  options: {
+    coverageAsOf?: RefCoverageAsOf | null;
+    isLocalDeviceBacked?: boolean;
+  } = {}
 ): AxisChip[] {
   if (!axes) {
     return [];
   }
-  const out: AxisChip[] = [formatCoverageAxis(axes.coverage), formatFreshnessAxis(axes.freshness)];
+  const out: AxisChip[] = [
+    withCoverageAsOf(formatCoverageAxis(axes.coverage), axes.coverage, options.coverageAsOf),
+    formatFreshnessAxis(axes.freshness),
+  ];
   const attention = formatAttentionAxis(axes.attention);
   if (attention) {
     out.push(attention);
@@ -120,6 +127,39 @@ export function summarizeAxisChips(
     }
   }
   return out;
+}
+
+const FRACTIONAL_SECONDS = /\.\d+Z$/;
+
+/** UTC, to the second: "2026-10-22 10:00:00Z". Empty for a missing or unparseable time. */
+function formatCoverageAsOfTime(iso: string | null | undefined): string {
+  const parsed = iso ? Date.parse(iso) : Number.NaN;
+  return Number.isFinite(parsed)
+    ? new Date(parsed).toISOString().replace("T", " ").replace(FRACTIONAL_SECONDS, "Z")
+    : "";
+}
+
+/**
+ * Coverage is a fact about one run, never a present-tense claim. When the
+ * reference names the run a coverage verdict describes, the chip reads
+ * "complete as of <time>" and its title names the run, release and collection
+ * revision. Unknown coverage has no run behind it, so it is left unchanged.
+ */
+export function withCoverageAsOf(
+  chip: AxisChip,
+  axis: string | null | undefined,
+  asOf: RefCoverageAsOf | null | undefined
+): AxisChip {
+  const committedAt = formatCoverageAsOfTime(asOf?.committed_at);
+  if (!(asOf && committedAt) || axis === "unknown" || axis === null || axis === undefined) {
+    return chip;
+  }
+  return {
+    ...chip,
+    label: `${chip.label} as of ${committedAt}`,
+    title: `${chip.title} This is a fact about run ${asOf.run_id} (release ${asOf.artifact_digest}), committed at ${committedAt} as collection revision ${asOf.collection_revision}. A later run the reference has not heard about is not reflected.`,
+    value: `${chip.value} as of ${committedAt}`,
+  };
 }
 
 /**

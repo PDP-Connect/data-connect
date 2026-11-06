@@ -25,6 +25,7 @@ INSERT INTO run_history(
   failure_reason,
   terminal_reason,
   facts_json,
-  attempt
-) VALUES(?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, 1)
+  attempt,
+  scheduler_managed
+) VALUES(?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, 1, 0)
 ON CONFLICT(run_id, connector_instance_id) WHERE run_id IS NOT NULL DO NOTHING

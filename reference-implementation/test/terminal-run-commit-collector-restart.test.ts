@@ -153,7 +153,12 @@ async function startHarness(backend: Backend) {
     }
     if (url.includes("/ingest-batches")) {
       ingestCount += Array.isArray(body?.records) ? body.records.length : 0;
-      send(201, { accepted_record_count: 1, object: "device_ingest_batch_result", status: "accepted" });
+      send(201, {
+        accepted_record_count: Array.isArray(body?.records) ? body.records.length : 0,
+        object: "device_ingest_batch_result",
+        rejected_record_count: 0,
+        status: "accepted",
+      });
       return;
     }
     if (url.endsWith("/terminal-run-commits")) {

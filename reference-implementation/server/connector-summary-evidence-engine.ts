@@ -3355,7 +3355,7 @@ const POSTGRES_PROJECTION_RELEVANT_EVIDENCE_CHANGED = projectionRelevantEvidence
 function upsertSqliteEvidenceRow(db: Db, row: Row): void {
   const existing = db
     .prepare(
-      "SELECT manifest_generation, manifest_fingerprint, stream_latest_facts_json, stream_facts_event_seq, terminal_facts_state, terminal_facts_reason_code FROM connector_summary_evidence WHERE connector_instance_id = ?"
+      "SELECT source_kind, manifest_generation, manifest_fingerprint, stream_latest_facts_json, stream_facts_event_seq, terminal_facts_state, terminal_facts_reason_code FROM connector_summary_evidence WHERE connector_instance_id = ?"
     )
     .get(row.connector_instance_id) as Row | undefined;
   const manifestGenerationChanged =
@@ -3457,7 +3457,7 @@ function upsertSqliteEvidenceRow(db: Db, row: Row): void {
 
 async function upsertPostgresEvidenceRow(client: Db, row: Row): Promise<void> {
   const existingResult = await client.query(
-    "SELECT manifest_generation, manifest_fingerprint, stream_latest_facts_json, stream_facts_event_seq, terminal_facts_state, terminal_facts_reason_code FROM connector_summary_evidence WHERE connector_instance_id = $1",
+    "SELECT source_kind, manifest_generation, manifest_fingerprint, stream_latest_facts_json, stream_facts_event_seq, terminal_facts_state, terminal_facts_reason_code FROM connector_summary_evidence WHERE connector_instance_id = $1",
     [row.connector_instance_id]
   );
   const existing = existingResult.rows[0] as Row | undefined;
@@ -3624,6 +3624,11 @@ function terminalFactsForRepair(existing: Row | undefined, row: Row, manifestGen
       reasonCode: REASON_CODES.MANIFEST_GENERATION_CHANGED,
       state: "stale",
     };
+  }
+  // Device terminal facts count only while the connection is local_device. Facts
+  // folded under another source kind cannot be kept: drop them and replay.
+  if (existing && existing.source_kind !== row.source_kind) {
+    return { eventSeq: null, latestFactsJson: null, reasonCode: null, state: "unobserved" };
   }
   if (existing) {
     return {
