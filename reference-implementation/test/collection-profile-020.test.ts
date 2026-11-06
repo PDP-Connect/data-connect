@@ -21,7 +21,10 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
-import { getDefaultConnectorObservationStore } from "../server/stores/connector-observation-store.ts";
+import {
+  CONNECTOR_OBSERVATION_RUNS_PER_CONNECTOR,
+  getDefaultConnectorObservationStore,
+} from "../server/stores/connector-observation-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 
 const CONNECTOR_ID = "collection-profile-020-test";
@@ -823,6 +826,45 @@ test("a valid 0.1.0 run without OBSERVATION still succeeds", async () => {
   } finally {
     rmSync(stub.dir, { force: true, recursive: true });
   }
+});
+
+test("a run with no OBSERVATION and no defects writes no row, so it cannot evict an informative one", async () => {
+  const informativeId = "run_c020_cap_informative";
+  const informative = makeStub([PROVIDER_REJECTED("p1"), { records_emitted: 0, status: "succeeded", type: "DONE" }], 0);
+  try {
+    const first = await runStub(informative, informativeId, manifest());
+    assert.equal(first.ok, true, `the informative run must succeed: ${first.ok ? "" : first.message}`);
+    assert.ok(await persistedRecord(informativeId), "a run with an accepted fact still writes its row");
+  } finally {
+    rmSync(informative.dir, { force: true, recursive: true });
+  }
+  // More silent runs than the per-connector cap holds: legacy connectors, and a
+  // 0.2.0 connector that declared OBSERVATION and sent none.
+  const silentRunIds: string[] = [];
+  for (let index = 0; index < CONNECTOR_OBSERVATION_RUNS_PER_CONNECTOR + 2; index += 1) {
+    const stub = makeStub([{ records_emitted: 0, status: "succeeded", type: "DONE" }], 0);
+    const runId = `run_c020_cap_silent_${String(index)}`;
+    silentRunIds.push(runId);
+    try {
+      const outcome = await runStub(
+        stub,
+        runId,
+        index % 2 === 0
+          ? manifest({ diagnostic_descriptors: undefined, protocol_capabilities: undefined, protocol_version: "0.1.0" })
+          : manifest()
+      );
+      assert.equal(outcome.ok, true, `a silent run must succeed: ${outcome.ok ? "" : outcome.message}`);
+    } finally {
+      rmSync(stub.dir, { force: true, recursive: true });
+    }
+  }
+  for (const runId of silentRunIds) {
+    assert.equal(await persistedRecord(runId), null, `${runId}: no OBSERVATION and no defects, so no row`);
+  }
+  assert.ok(
+    await persistedRecord(informativeId),
+    "the informative row is still there after more silent runs than the cap holds"
+  );
 });
 
 function existsMarker(path: string): boolean {

@@ -106,7 +106,7 @@ import {
 } from "./done-validators.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
-import { createObservationRun, type WireParse } from "./observations.ts";
+import { createObservationRun, type ObservationSnapshot, type WireParse } from "./observations.ts";
 import {
   buildHttpFailure,
   buildIngestEnvelopeContractViolationFailure,
@@ -6563,8 +6563,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     /**
-     * The owner diagnostic record (Section 5.10 and 5.11), written once per run.
-     * The first settle point starts it, and every settle point awaits it, so the
+     * The owner diagnostic record (Section 5.10 and 5.11), written once per run that
+     * has a fact or a defect to record. The first settle point starts it, and every settle point awaits it, so the
      * record exists before the caller's promise settles. I/O errors are reported as
      * progress and never change the run's outcome.
      */
@@ -6573,14 +6573,29 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // the terminal outcome both read it, and `handleCancellation` stops changing
       // it from here on.
       ownerCancelSealed = true;
-      observationDiagnosisWrite ??= getDefaultConnectorObservationStore()
+      if (observationDiagnosisWrite === null) {
+        // A run that sent no OBSERVATION and has no defect has nothing to
+        // record. Writing an empty row would delay every terminal result on
+        // PostgreSQL and would share the per-connector cap with the rows that
+        // explain a failure.
+        const snapshot = observationRun.snapshot();
+        observationDiagnosisWrite =
+          snapshot.facts.length === 0 && snapshot.defects.length === 0
+            ? Promise.resolve()
+            : writeObservationRecord(snapshot);
+      }
+      return observationDiagnosisWrite;
+    }
+
+    function writeObservationRecord(snapshot: ObservationSnapshot): Promise<void> {
+      return getDefaultConnectorObservationStore()
         .put({
           connectorId,
           connectorInstanceId: resolvedConnectorInstanceId,
           // A cancelled run ended by the owner's choice, not by the connector's cause.
           diagnosis: observationRun.diagnose(ownerCancelRequested ? [] : doneBasis),
           runId,
-          snapshot: observationRun.snapshot(),
+          snapshot,
         })
         .then(
           () => undefined,
@@ -6594,7 +6609,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
             }
           }
         );
-      return observationDiagnosisWrite;
     }
 
     async function rejectAfterDiagnosis(error: unknown): Promise<void> {
