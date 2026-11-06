@@ -225,7 +225,7 @@ test("a late succeeded result from a reclaimed run cannot clear a newer run's pr
 	releases[0]?.({ records_emitted: 0, status: "succeeded" });
 	await new Promise((resolve) => setTimeout(resolve, 50).unref());
 
-	assert.deepEqual(calls, [], "the reclaimed run must not reach the recorder");
+	assert.equal(calls.length, 0, "the reclaimed run must not reach the recorder");
 	assert.deepEqual(
 		(await getDefaultProviderInvalidationProofStore().load(INSTANCE_ID))
 			.repairedProofKeys,
