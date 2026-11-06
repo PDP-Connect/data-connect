@@ -7,6 +7,7 @@ name: Browser stack bump
 #
 # Pull requests opened with GITHUB_TOKEN do not start pull_request workflows,
 # so the version check runs here before the pull request is opened.
+# A Patchright-only release makes npm install fail, which stops the job before any pull request.
 
 on:
   schedule:
@@ -52,20 +53,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.latest.outputs.version }}
         run: |
-          if git diff --quiet; then
-            echo "Already on $VERSION"
-            exit 0
-          fi
-          branch="chore/browser-stack-$VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git add package.json package-lock.json reference-implementation/package.json \
-            pdpp-runtime/package.json pdpp-runtime/package-lock.json \
-            playwright-runner/package.json playwright-runner/package-lock.json
-          git commit -s -m "chore(deps): move the browser stack to $VERSION" \
-            -m "Assisted-by: AI"
-          git push origin "$branch"
-          gh pr create --base main --head "$branch" \
-            --title "chore(deps): move the browser stack to $VERSION" \
-            --body "Moves patchright, patchright-core and playwright-core to $VERSION in the root, pdpp-runtime and playwright-runner folders. scripts/check-patchright-version.mjs passed before this pull request opened. Close and reopen it to start the pull request checks."
+          bash scripts/open-browser-stack-pr.sh
