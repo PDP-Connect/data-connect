@@ -409,10 +409,30 @@ function isBoundedWallClock(maxRunWallClockMs: number): boolean {
   return Number.isFinite(maxRunWallClockMs) && maxRunWallClockMs > 0;
 }
 
+// `0` and `Infinity` are the documented explicit opt-outs (see
+// runtime/scheduler-config.ts). NaN and negative values are not: they used to
+// read as "no ceiling", so a hanging connector was never killed and nothing
+// said why. Reject them where the budget enters the watchdog.
+function assertValidWallClockBudget(maxRunWallClockMs: number): void {
+  if (Number.isNaN(maxRunWallClockMs) || maxRunWallClockMs < 0) {
+    throw new Error(`maxRunWallClockMs must be a non-negative number or Infinity; got ${maxRunWallClockMs}`);
+  }
+}
+
+// `setTimeout` cannot delay past 2^31 - 1 ms: Node fires it almost at once.
+// `budget * 4` can also overflow to Infinity, which reads as "unbounded", so a
+// huge finite budget would silently lose its ceiling.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+function clampTimerDelay(ms: number): number {
+  return Math.min(ms, MAX_TIMER_DELAY_MS);
+}
+
 export function createAttemptWatchdog(
   maxRunWallClockMs: number,
   timers: WatchdogTimers = GLOBAL_WATCHDOG_TIMERS
 ): AttemptWatchdog {
+  assertValidWallClockBudget(maxRunWallClockMs);
   const cancellation = new AbortController();
   let timedOut = false;
   let cancelTimer: (() => void) | null = null;
@@ -420,7 +440,9 @@ export function createAttemptWatchdog(
   // watchdog. Keep the exemption bounded: four primary budgets is long enough
   // for the existing local materialization path while still guaranteeing that
   // a connector that stops making progress cannot survive until restart.
-  const localOnlyPhaseMaxRunWallClockMs = maxRunWallClockMs * 4;
+  const localOnlyPhaseMaxRunWallClockMs = isBoundedWallClock(maxRunWallClockMs)
+    ? clampTimerDelay(maxRunWallClockMs * 4)
+    : maxRunWallClockMs;
   // Set once a connector reports `phase_boundary: "local_only_phase_started"`
   // and never cleared for the rest of this attempt. `maxRunWallClockMs` is
   // sized for provider-rate-limited walks (external API pagination); once a
@@ -441,7 +463,7 @@ export function createAttemptWatchdog(
     cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
-    }, maxRunWallClockMs);
+    }, clampTimerDelay(maxRunWallClockMs));
   };
 
   const armLocalOnlyPhaseCeiling = () => {
@@ -456,7 +478,7 @@ export function createAttemptWatchdog(
     cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
-    }, localOnlyPhaseMaxRunWallClockMs);
+    }, clampTimerDelay(localOnlyPhaseMaxRunWallClockMs));
   };
 
   if (isBoundedWallClock(maxRunWallClockMs)) {
@@ -793,6 +815,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     setState,
     watchdogTimers,
   } = deps;
+  // Fail at construction, not on the first run that happens to hang.
+  assertValidWallClockBudget(maxRunWallClockMs);
 
   async function appendRunHistoryBestEffort(record: RunRecord, connectorId: string): Promise<void> {
     if (!schedulerStore) {

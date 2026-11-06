@@ -34,6 +34,7 @@ import test from "node:test";
 
 import { projectRunAutomationPolicy } from "../runtime/run-automation-policy.ts";
 import {
+  createAttemptWatchdog,
   createRunExecutor,
   type RunExecutorDeps,
   type RunExecutorRuntimeState,
@@ -693,3 +694,46 @@ test(
     assert.equal(record.terminalReason, "run_timed_out");
   })
 );
+
+const BUDGET_ERROR = /maxRunWallClockMs/;
+
+// The watchdog budget contract: a positive finite number arms the ceiling,
+// `Infinity` and `0` are the documented ways to disable it
+// (runtime/scheduler-config.ts), and anything else is a configuration error.
+// A NaN or negative budget used to read as "no ceiling", so a hanging connector
+// was never killed and nothing recorded why.
+for (const invalid of [Number.NaN, -1, Number.NEGATIVE_INFINITY]) {
+  test(`createAttemptWatchdog rejects the invalid budget ${String(invalid)} instead of silently disabling the ceiling`, () => {
+    const watchdog = manualWatchdogTimers();
+    assert.throws(() => createAttemptWatchdog(invalid, watchdog.timers), BUDGET_ERROR);
+    assert.equal(watchdog.armedDelayMs(), null);
+  });
+}
+
+for (const optOut of [0, Number.POSITIVE_INFINITY]) {
+  test(`createAttemptWatchdog treats ${String(optOut)} as the explicit opt-out: nothing is armed`, () => {
+    const watchdog = manualWatchdogTimers();
+    const attempt = createAttemptWatchdog(optOut, watchdog.timers);
+    attempt.markProgress({ phase_boundary: "local_only_phase_started" });
+    assert.equal(watchdog.armedDelayMs(), null);
+    assert.equal(attempt.timedOut(), false);
+  });
+}
+
+// setTimeout cannot delay past 2^31 - 1 ms (Node fires it almost at once), and
+// `budget * 4` can overflow to Infinity, which reads as "unbounded". A huge but
+// finite budget must keep a real, finite ceiling.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+for (const hugeBudget of [2 ** 30, 1e308]) {
+  test(`the local-only ceiling for a finite budget of ${String(hugeBudget)} ms is clamped to a finite timer delay`, () => {
+    const watchdog = manualWatchdogTimers();
+    const attempt = createAttemptWatchdog(hugeBudget, watchdog.timers);
+    attempt.markProgress({ phase_boundary: "local_only_phase_started" });
+    assert.equal(watchdog.armedDelayMs(), MAX_TIMER_DELAY_MS);
+  });
+}
+
+test("createRunExecutor rejects an invalid wall-clock budget at construction", () => {
+  assert.throws(() => makeHarness(freshRuntime(), "http://127.0.0.1:1", Number.NaN), BUDGET_ERROR);
+  assert.throws(() => makeHarness(freshRuntime(), "http://127.0.0.1:1", -1), BUDGET_ERROR);
+});
