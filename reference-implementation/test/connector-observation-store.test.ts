@@ -46,6 +46,7 @@ type FaultKind = "prune" | "insert";
 
 /** One storage engine under test. Both implementations expose the same seams. */
 interface Harness {
+  corruptPayload: (connectorId: string, runId: string, payloadJson: string) => Promise<void>;
   deleteConnection: (connectorInstanceId: string) => Promise<void>;
   installFault: (kind: FaultKind) => Promise<void>;
   removeFault: (kind: FaultKind) => Promise<void>;
@@ -170,6 +171,12 @@ function faultSql(kind: FaultKind, action: "install" | "remove"): string[] {
 
 function sqliteHarness(path: string): Harness {
   return {
+    corruptPayload: (connectorId, runId, payloadJson) =>
+      settle(() => {
+        getDb()
+          .prepare("UPDATE connector_observation_runs SET payload_json = ? WHERE connector_id = ? AND run_id = ?")
+          .run(payloadJson, connectorId, runId);
+      }),
     deleteConnection: (connectorInstanceId) =>
       settle(() => {
         getDb().prepare("DELETE FROM connector_instances WHERE connector_instance_id = ?").run(connectorInstanceId);
@@ -227,6 +234,12 @@ function sqliteHarness(path: string): Harness {
 
 function postgresHarness(databaseUrl: string): Harness {
   return {
+    async corruptPayload(connectorId, runId, payloadJson) {
+      await postgresQuery(
+        "UPDATE connector_observation_runs SET payload_json = $1 WHERE connector_id = $2 AND run_id = $3",
+        [payloadJson, connectorId, runId]
+      );
+    },
     async deleteConnection(connectorInstanceId) {
       await postgresQuery("DELETE FROM connector_instances WHERE connector_instance_id = $1", [connectorInstanceId]);
     },
@@ -756,6 +769,52 @@ async function contractConcurrentPutsKeepRetention(harness: Harness): Promise<vo
   assert.equal(await harness.rowCount(other), 1, "concurrent identical puts store one row");
 }
 
+async function contractRejectsMalformedElements(harness: Harness): Promise<void> {
+  const c = uniq("c-elements");
+  const i = uniq("i-elements");
+  await harness.seedConnection(c, i);
+  const base = runInput(c, i, "run-elements");
+  const goodFact = base.snapshot.facts[0];
+  const goodDefect = base.snapshot.defects[0];
+  assert.ok(goodFact && goodDefect, "the runtime fixture has a fact and a defect");
+  const malformed: [string, ConnectorObservationRunInput["snapshot"]][] = [
+    ["a string fact", { ...base.snapshot, facts: ["x"] } as never],
+    ["a null fact", { ...base.snapshot, facts: [null] } as never],
+    ["a fact of an unknown type", { ...base.snapshot, facts: [{ ...goodFact, fact: "credential_submission" }] } as never],
+    ["a fact with free text in its attrs", { ...base.snapshot, facts: [{ ...goodFact, attrs: { note: "private text" } }] } as never],
+    ["a fact without a retired flag", { ...base.snapshot, facts: [{ ...goodFact, retired: undefined }] } as never],
+    ["a number defect", { ...base.snapshot, defects: [7] } as never],
+    ["a defect of an unknown class", { ...base.snapshot, defects: [{ ...goodDefect, class: "free_text" }] } as never],
+    ["a defect carrying connector text", { ...base.snapshot, defects: [{ ...goodDefect, message: "private text" }] } as never],
+  ];
+  await inOrder(malformed, ([label, snapshot]) =>
+    expectStoreError(storeOf().put({ ...base, runId: "run-bad-element", snapshot }), "record_invalid", label)
+  );
+  assert.equal(await harness.rowCount(c), 0, "a rejected record mutates nothing");
+  await storeOf().put(base);
+  assert.equal(await harness.rowCount(c), 1, "the runtime-built record is still accepted");
+}
+
+async function contractListSkipsCorruptRows(harness: Harness): Promise<void> {
+  const c = uniq("c-corrupt");
+  const i = uniq("i-corrupt");
+  await seedAndPut(harness, c, i, ["run-01", "run-02", "run-03"]);
+  await harness.corruptPayload(c, "run-02", '{"snapshot":{"facts":["x"],"defects":[],"truncated":false}}');
+  const listed = await storeOf().list({ connectorId: c });
+  assert.deepEqual(
+    listed.map((record) => record.runId),
+    ["run-03", "run-01"],
+    "one corrupt row must not hide the connector's other records"
+  );
+  await expectStoreError(storeOf().get({ connectorId: c, connectorInstanceId: i, runId: "run-02" }), "record_invalid", "a direct read of the corrupt row fails");
+  await harness.corruptPayload(c, "run-03", "not json");
+  assert.deepEqual(
+    (await storeOf().list({ connectorId: c })).map((record) => record.runId),
+    ["run-01"],
+    "an unparseable payload is skipped the same way"
+  );
+}
+
 test("SQLite connector observation store: persists, reopens and reads back the exact snapshot", async () => {
   await withSqlite(contractPersistsExactSnapshot);
 });
@@ -786,6 +845,26 @@ test("SQLite connector observation store: rolls back the write when the prune or
 
 test("SQLite connector observation store: deleting a connection cascades its run records", async () => {
   await withSqlite(contractDeletingConnectionCascades);
+});
+
+test("SQLite connector observation store: rejects malformed fact and defect elements", async () => {
+  await withSqlite(contractRejectsMalformedElements);
+});
+
+test("SQLite connector observation store: list skips a corrupt stored row", async () => {
+  await withSqlite(contractListSkipsCorruptRows);
+});
+
+test("Postgres connector observation store: rejects malformed fact and defect elements", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await withPostgres(contractRejectsMalformedElements);
+});
+
+test("Postgres connector observation store: list skips a corrupt stored row", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await withPostgres(contractListSkipsCorruptRows);
 });
 
 test("Postgres connector observation store: persists, reopens and reads back the exact snapshot", {

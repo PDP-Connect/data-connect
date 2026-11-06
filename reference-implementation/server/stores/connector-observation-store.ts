@@ -29,7 +29,12 @@
 
 import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged, writeTransaction } from "../../lib/db.ts";
 import { RECOVERY_ACTIONS } from "../../runtime/connector-gap-bounding.ts";
-import type { Diagnosis, ObservationSnapshot } from "../../runtime/observations.ts";
+import {
+  type Diagnosis,
+  isObservedFact,
+  isRuntimeDefect,
+  type ObservationSnapshot,
+} from "../../runtime/observations.ts";
 import {
   getStorageBackendKind,
   isPostgresStorageBackend,
@@ -41,7 +46,7 @@ export const CONNECTOR_OBSERVATION_RUNS_PER_CONNECTOR = 8;
 export const CONNECTOR_OBSERVATION_RECORD_MAX_BYTES = 1024 * 1024;
 
 const RECORD_VERSION = 1;
-const MAX_IDENTITY_LENGTH = 256;
+export const OBSERVATION_IDENTITY_MAX_LENGTH = 256;
 const DIAGNOSIS_CATEGORIES: ReadonlySet<string> = new Set(["auth_rejected", "expectation_mismatch", "unknown"]);
 const DIAGNOSIS_ATTRIBUTIONS: ReadonlySet<string> = new Set(["connector", "none"]);
 const LOCK_NAMESPACE = "connector_observation_runs:";
@@ -163,6 +168,11 @@ function isSnapshot(value: unknown): value is ObservationSnapshot {
   );
 }
 
+/** Element-level check. It runs after the size bound, so a huge record is refused before it is validated. */
+function hasValidElements(snapshot: ObservationSnapshot): boolean {
+  return snapshot.facts.every(isObservedFact) && snapshot.defects.every(isRuntimeDefect);
+}
+
 function isConnectorSuggestions(value: unknown): boolean {
   return (
     Array.isArray(value) &&
@@ -196,9 +206,9 @@ function invalid(message: string): ConnectorObservationStoreError {
 }
 
 function requireIdentity(field: string, value: unknown): string {
-  if (typeof value !== "string" || value.trim().length === 0 || value.length > MAX_IDENTITY_LENGTH) {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > OBSERVATION_IDENTITY_MAX_LENGTH) {
     throw invalid(
-      `connector observation ${field} must be a non-blank string of at most ${MAX_IDENTITY_LENGTH} characters`
+      `connector observation ${field} must be a non-blank string of at most ${OBSERVATION_IDENTITY_MAX_LENGTH} characters`
     );
   }
   return value;
@@ -246,12 +256,22 @@ function encodeRecord(input: ConnectorObservationRunInput): {
       `connector observation record exceeds ${CONNECTOR_OBSERVATION_RECORD_MAX_BYTES} bytes`
     );
   }
+  if (!hasValidElements(input.snapshot)) {
+    throw invalid("connector observation facts and defects must match the runtime shapes");
+  }
   return { key, payload };
 }
 
 function decodeRow(row: RunRow): ConnectorObservationRunRecord {
-  const parsed: unknown = JSON.parse(row.payload_json);
-  if (!(isRecord(parsed) && isSnapshot(parsed.snapshot) && isDiagnosis(parsed.diagnosis))) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.payload_json);
+  } catch {
+    throw invalid("stored connector observation record is malformed");
+  }
+  if (
+    !(isRecord(parsed) && isSnapshot(parsed.snapshot) && hasValidElements(parsed.snapshot) && isDiagnosis(parsed.diagnosis))
+  ) {
     throw invalid("stored connector observation record is malformed");
   }
   return {
@@ -262,6 +282,22 @@ function decodeRow(row: RunRow): ConnectorObservationRunRecord {
     runId: row.run_id,
     snapshot: parsed.snapshot,
   };
+}
+
+/**
+ * A list must not fail for one unreadable row. The row is skipped, and a direct
+ * `get` of its key still reports `record_invalid`.
+ */
+function decodeReadableRows(rows: readonly RunRow[]): ConnectorObservationRunRecord[] {
+  const records: ConnectorObservationRunRecord[] = [];
+  for (const row of rows) {
+    try {
+      records.push(decodeRow(row));
+    } catch {
+      // Skipped on purpose; see above.
+    }
+  }
+  return records;
 }
 
 function assertSamePayload(stored: string, incoming: string): void {
@@ -314,7 +350,7 @@ function createSqliteConnectorObservationRunStore(): ConnectorObservationRunStor
                   limit,
                 ]),
               ];
-        return rows.map(decodeRow);
+        return decodeReadableRows(rows);
       });
     },
     put(input: ConnectorObservationRunInput): Promise<void> {
@@ -381,7 +417,7 @@ function createPostgresConnectorObservationRunStore(): ConnectorObservationRunSt
               requireIdentity("connectorInstanceId", input.connectorInstanceId),
               limit,
             ]);
-      return result.rows.map(decodeRow);
+      return decodeReadableRows(result.rows);
     },
     async put(input: ConnectorObservationRunInput): Promise<void> {
       const { key, payload } = encodeRecord(input);

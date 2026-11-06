@@ -188,3 +188,19 @@ test("the route requires both namespace query parameters", async () => {
   const missingInstance = await invoke("owner", { connector_id: CONNECTOR_ID }, fakeStore(fakeRecord()));
   assert.equal(missingInstance.status, 400);
 });
+
+test("a malformed percent-encoded run id is a 400, not a server error", async () => {
+  const result = await invoke("owner", OWNER_QUERY, fakeStore(fakeRecord()), "%E0%A4%A");
+  assert.equal(result.status, 400);
+  assert.equal((result.body?.error as { code?: string } | undefined)?.code, "invalid_request");
+});
+
+test("an over-long connector or instance id is a 400, not a server error", async () => {
+  const tooLong = "x".repeat(257);
+  const connector = await invoke("owner", { ...OWNER_QUERY, connector_id: tooLong }, fakeStore(fakeRecord()));
+  assert.equal(connector.status, 400);
+  const instance = await invoke("owner", { ...OWNER_QUERY, connector_instance_id: tooLong }, fakeStore(fakeRecord()));
+  assert.equal(instance.status, 400);
+  const run = await invoke("owner", OWNER_QUERY, fakeStore(fakeRecord()), tooLong);
+  assert.equal(run.status, 400);
+});

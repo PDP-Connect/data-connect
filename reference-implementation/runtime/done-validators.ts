@@ -171,8 +171,10 @@ export function validateDoneError(
  * and cites only ids the connector emitted in this run. Invalid-but-emitted
  * ids count as emitted. Returns the ids, undefined when absent, or an Error.
  * After the id ledger overflowed, an id missing from it is dropped instead of
- * rejected: the runtime cannot show it was never emitted, and a basis it cannot
- * verify authorizes nothing.
+ * rejected: the runtime cannot show it was never emitted. The drop cannot
+ * change the diagnosis. Every accepted fact keeps its id in the ledger, so a
+ * dropped id names no stored fact and a basis the runtime cannot verify
+ * authorizes nothing.
  */
 function validateDoneBasis(basis: unknown, contract: DoneErrorContract): readonly string[] | undefined | Error {
   if (basis === undefined) {
@@ -187,7 +189,7 @@ function validateDoneBasis(basis: unknown, contract: DoneErrorContract): readonl
   const verified: string[] = [];
   for (const id of basis) {
     if (!isObservationIdSyntax(id)) {
-      return new Error("Connector emitted DONE.error.basis citing an OBSERVATION id it did not emit");
+      return new Error("Connector emitted DONE.error.basis with a value that is not a valid OBSERVATION id");
     }
     if (contract.hasEmittedId(id)) {
       verified.push(id);

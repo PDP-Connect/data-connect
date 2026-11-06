@@ -12,7 +12,10 @@
 // the owner session that asked, and nothing else reads it.
 
 import type { ConnectorObservationRunStore } from "../stores/connector-observation-store.ts";
-import { getDefaultConnectorObservationStore } from "../stores/connector-observation-store.ts";
+import {
+  getDefaultConnectorObservationStore,
+  OBSERVATION_IDENTITY_MAX_LENGTH,
+} from "../stores/connector-observation-store.ts";
 import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
 
 interface RouteRequest {
@@ -39,6 +42,18 @@ export interface MountRefRunObservationsContext {
   store?: ConnectorObservationRunStore;
 }
 
+/** Decodes the path segment. Malformed percent-encoding is null, not an exception. */
+function decodeRunId(raw: unknown): string | null {
+  if (typeof raw !== "string") {
+    return null;
+  }
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
+
 function requiredQueryString(query: RouteRequest["query"], key: string): string | null {
   const value = query?.[key];
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -48,7 +63,10 @@ export function mountRefRunObservations(app: AppLike, ctx: MountRefRunObservatio
   app.get("/_ref/runs/:runId/observations", ctx.requireOwnerSession, async (req: RouteRequest, res: RouteResponse) => {
     res.setHeader("Cache-Control", "no-store");
     try {
-      const runId = decodeURIComponent(req.params.runId as string);
+      const runId = decodeRunId(req.params.runId);
+      if (runId === null) {
+        return ctx.pdppError(res, 400, "invalid_request", "run_id is not a valid identifier", "run_id");
+      }
       const connectorId = requiredQueryString(req.query, "connector_id");
       const connectorInstanceId = requiredQueryString(req.query, "connector_instance_id");
       if (connectorId === null) {
@@ -56,6 +74,17 @@ export function mountRefRunObservations(app: AppLike, ctx: MountRefRunObservatio
       }
       if (connectorInstanceId === null) {
         return ctx.pdppError(res, 400, "invalid_request", "connector_instance_id is required", "connector_instance_id");
+      }
+
+      // The store would reject an over-long identity as an internal error. It is the caller's mistake.
+      for (const [param, value] of [
+        ["connector_id", connectorId],
+        ["connector_instance_id", connectorInstanceId],
+        ["run_id", runId],
+      ] as const) {
+        if (value.length > OBSERVATION_IDENTITY_MAX_LENGTH || value.trim().length === 0) {
+          return ctx.pdppError(res, 400, "invalid_request", `${param} is not a valid identifier`, param);
+        }
       }
 
       const store = ctx.store ?? getDefaultConnectorObservationStore();

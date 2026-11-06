@@ -227,25 +227,83 @@ test("hasEmittedId reports rejected ids as well as accepted ones", () => {
   assert.equal(run.hasEmittedId("never"), false);
 });
 
-test("a failed DONE citing an id past the full id ledger is kept without the unverifiable id", () => {
+function doneContract(run: ObservationRun) {
+  return {
+    hasEmittedId: (id: string) => run.hasEmittedId(id),
+    idLedgerOverflowed: run.idLedgerOverflowed(),
+    observationDeclared: true,
+    strict: true,
+  };
+}
+
+test("a failed DONE citing an id past the full discard ledger is kept without the unverifiable id", () => {
+  const { run } = harness({ limits: { maxFacts: 64, maxPerWindow: 1000 } });
+  run.accept(authFailure("c0"));
+  // Invalid messages still emit their ids (Sections 5.8 and 5.10.2). The ledger
+  // for them is bounded, so the 65th id is emitted but cannot be kept.
+  for (let i = 0; i < 65; i += 1) {
+    assert.equal(rejectedReason(run.accept({ fact: "nope", id: `d${i}`, type: "OBSERVATION" })), "invalid");
+  }
+  assert.equal(run.idLedgerOverflowed(), true);
+  assert.equal(run.hasEmittedId("d64"), false);
+  const result = validateDoneError("failed", { basis: ["c0", "d64"], message: "stopped", retryable: false }, doneContract(run));
+  assert.ok(!(result instanceof Error), "a connector that overflowed the ledger must still get its terminal outcome");
+  assert.deepEqual(result?.basis, ["c0"]);
+  // The dropped id names no stored fact, so dropping it cannot change the diagnosis.
+  assert.deepEqual(run.diagnose(result?.basis ?? []), run.diagnose(["c0", "d64"]));
+  assert.equal(run.diagnose(result?.basis ?? []).category, "auth_rejected");
+});
+
+test("a valid fact refused for the fact limit still counts as emitted and its id stays citable", () => {
   const { run } = harness({ limits: { maxFacts: 64, maxPerWindow: 1000 } });
   for (let i = 0; i < 64; i += 1) {
     assert.equal(run.accept(waitExpired(`c${i}`)).status, "accepted");
   }
-  // The connector did emit this id, but the bounded ledger could not keep it.
   assert.equal(rejectedReason(run.accept(waitExpired("c64"))), "count_exceeded");
-  const result = validateDoneError(
-    "failed",
-    { basis: ["c0", "c64"], message: "stopped", retryable: false },
-    {
-      hasEmittedId: (id) => run.hasEmittedId(id),
-      idLedgerOverflowed: run.idLedgerOverflowed(),
-      observationDeclared: true,
-      strict: true,
-    }
-  );
-  assert.ok(!(result instanceof Error), "a connector that overflowed the ledger must still get its terminal outcome");
-  assert.deepEqual(result?.basis, ["c0"]);
+  assert.equal(run.idLedgerOverflowed(), false, "refusing a valid fact is not a ledger overflow");
+  const result = validateDoneError("failed", { basis: ["c0", "c64"], message: "stopped", retryable: false }, doneContract(run));
+  assert.ok(!(result instanceof Error));
+  assert.deepEqual(result?.basis, ["c0", "c64"]);
+});
+
+test("invalid traffic does not spend the budget that accepted facts need", () => {
+  const { run } = harness({ limits: { maxFacts: 64, maxPerWindow: 64 } });
+  for (let i = 0; i < 500; i += 1) {
+    assert.equal(rejectedReason(run.accept({ fact: "nope", id: `bad${i}`, type: "OBSERVATION" })), "invalid");
+  }
+  for (let i = 0; i < 64; i += 1) {
+    assert.equal(run.accept(waitExpired(`ok${i}`)).status, "accepted", `valid fact ${i} must not be evicted by invalid traffic`);
+  }
+  assert.equal(run.snapshot().facts.length, 64);
+  assert.equal(run.snapshot().truncated, false, "no valid fact was lost, so the record is not truncated");
+  assert.deepEqual(run.gateRecoveryHint("not_retriable", "skip_result"), { result: "authorized" });
+});
+
+test("a line that is not JSON never marks the record truncated, however long it is", () => {
+  const { run } = harness();
+  assert.equal(rejectedReason(run.acceptLine("x".repeat(5000))), "oversize");
+  assert.equal(run.snapshot().truncated, false);
+  assert.deepEqual(run.gateRecoveryHint("not_retriable", "skip_result"), { result: "authorized" });
+});
+
+test("a duplicate id is reported as duplicate_id even when the repeat is also oversize", () => {
+  const { run } = harness();
+  assert.equal(run.accept(waitExpired("dup")).status, "accepted");
+  assert.equal(rejectedReason(run.accept({ ...waitExpired("dup"), padding: "x".repeat(3000) })), "duplicate_id");
+  // An oversize first sighting still uses its id.
+  assert.equal(rejectedReason(run.accept({ ...waitExpired("big"), padding: "x".repeat(3000) })), "oversize");
+  assert.equal(rejectedReason(run.accept(waitExpired("big"))), "duplicate_id");
+});
+
+test("a DONE basis with a malformed id names the syntax problem, not a missing emission", () => {
+  const { run } = harness();
+  run.accept(waitExpired("c0"));
+  const malformed = validateDoneError("failed", { basis: ["Not A Valid Id"], message: "stopped", retryable: false }, doneContract(run));
+  const missing = validateDoneError("failed", { basis: ["never"], message: "stopped", retryable: false }, doneContract(run));
+  assert.ok(malformed instanceof Error && missing instanceof Error);
+  assert.notEqual(malformed.message, missing.message);
+  assert.match(malformed.message, /not a valid OBSERVATION id/);
+  assert.equal(malformed.message.includes("Not A Valid Id"), false, "the rejected id is not echoed");
 });
 
 test("a failed DONE citing an id the connector never emitted is still rejected while the ledger has room", () => {

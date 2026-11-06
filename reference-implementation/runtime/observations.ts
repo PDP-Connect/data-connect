@@ -9,9 +9,13 @@
 // 5.11 (diagnosis and the recovery-hint gate). The wire grammar is the
 // canonical JSON Schema `observation.schema.json` beside this file, a byte
 // copy of data-connectors blob 8d9384d1f0827647e62e1914e8cac81d809034b3. The
-// schema cannot express the checks below, so this module adds them: declared
-// id references, final-in-states_seen, duplicate ids, the run limits and the
-// diagnosis rules.
+// schema cannot express the checks below, so this module adds them:
+// final-in-states_seen, duplicate ids, the run limits and the diagnosis rules.
+//
+// A fact that names a step, expectation or rule the manifest does not declare
+// is NOT rejected at intake. Sections 3.8 and 5.10.2 say the runtime keeps it,
+// shows it to the owner, and lets it support nothing. Diagnosis enforces that
+// (findingOf), so an undeclared reference is stored but never a cause.
 //
 // The module returns data. It renders no text, retries nothing, prompts for no
 // credential, and performs no provider or storage I/O.
@@ -205,6 +209,52 @@ export interface ObservationRun {
    */
   idLedgerOverflowed: () => boolean;
   snapshot: () => ObservationSnapshot;
+}
+
+const REJECT_REASONS: ReadonlySet<unknown> = new Set<ObservationRejectReason>([
+  "runtime_fact_type",
+  "undeclared_capability",
+  "invalid",
+  "duplicate_id",
+  "oversize",
+  "count_exceeded",
+]);
+
+function hasOnlyKeys(value: object, keys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => keys.includes(key));
+}
+
+/**
+ * True when `value` has the shape of a stored connector fact: a wire-valid
+ * fact plus the runtime's `retired` flag, and nothing else. For readers of
+ * persisted records, which must not trust what they read back.
+ */
+export function isObservedFact(value: unknown): value is ObservedFact {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const { retired, ...wire } = value as Record<string, unknown>;
+  return typeof retired === "boolean" && validateMessage(wire);
+}
+
+/** True when `value` has the shape of a runtime defect record this module produces. */
+export function isRuntimeDefect(value: unknown): value is RuntimeDefect {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const defect = value as Record<string, unknown>;
+  if (!(Number.isSafeInteger(defect.count) && (defect.count as number) >= 1)) {
+    return false;
+  }
+  if (defect.class === "hint_unsupported") {
+    return hasOnlyKeys(defect, ["id", "class", "count"]) && defect.id === HINT_UNSUPPORTED_ID;
+  }
+  return (
+    defect.class === "protocol_violation" &&
+    hasOnlyKeys(defect, ["id", "class", "reason", "count"]) &&
+    REJECT_REASONS.has(defect.reason) &&
+    defect.id === `${PROTOCOL_VIOLATION_ID_PREFIX}${String(defect.reason)}`
+  );
 }
 
 /** Syntax of an OBSERVATION id (schema `observationId`). */
@@ -426,7 +476,10 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
 
   const facts: StoredFact[] = [];
   const factsById = new Map<string, StoredFact>();
-  const observedIds = new Set<string>();
+  // Ids of discarded messages. An accepted fact's id lives in factsById, which
+  // the fact limit bounds. Keeping the two apart means invalid traffic cannot
+  // use up the room that valid facts need.
+  const discardedIds = new Set<string>();
   let idLedgerOverflowed = false;
   const defects = new Map<string, RuntimeDefect>();
   // Keyed by origin and action. The key space is closed (2 origins x 8
@@ -483,7 +536,9 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
     try {
       value = JSON.parse(line);
     } catch {
-      return bytes > limits.maxFactBytes ? reject("oversize", true) : reject("invalid", false);
+      // Text that is not JSON is no fact, so no fact was lost: the oversize
+      // reason is recorded, but the record is not marked truncated.
+      return bytes > limits.maxFactBytes ? reject("oversize", false) : reject("invalid", false);
     }
     return accept(value, bytes);
   }
@@ -496,45 +551,43 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
     if (bytes === undefined || !Number.isSafeInteger(bytes) || bytes < 0) {
       return reject("invalid", false);
     }
-    // Even a discarded fact has emitted its id (Sections 5.8 and 5.10.2).
-    const duplicate = rememberEmittedId(value);
-    if (duplicate) {
-      return duplicate;
+    // A repeated id is a duplicate whatever else is wrong with the repeat. Even
+    // a discarded fact has emitted its id (Sections 5.8 and 5.10.2).
+    const id = emittedIdOf(value);
+    if (id !== undefined && hasEmittedId(id)) {
+      return reject("duplicate_id", false);
     }
-    if (bytes > limits.maxFactBytes) {
-      return reject("oversize", true);
+    const outcome = bytes > limits.maxFactBytes ? reject("oversize", true) : admitParsed(value);
+    if (outcome.status === "rejected" && id !== undefined) {
+      rememberDiscardedId(id);
     }
-    return admitParsed(value);
+    return outcome;
   }
 
   function hasEmittedId(id: string): boolean {
-    return observedIds.has(id);
+    return factsById.has(id) || discardedIds.has(id);
   }
 
-  function rememberEmittedId(value: unknown): AcceptOutcome | null {
-    // An invalid fact still used its id. Bound this ledger independently
-    // so a stream of malformed messages cannot consume unbounded memory.
-    if (typeof value === "object" && value !== null && "id" in value && validateObservationId(value.id)) {
-      if (observedIds.has(value.id)) {
-        return reject("duplicate_id", false);
-      }
-      if (observedIds.size >= limits.maxFacts) {
-        idLedgerOverflowed = true;
-        return reject("count_exceeded", true);
-      }
-      observedIds.add(value.id);
+  function emittedIdOf(value: unknown): string | undefined {
+    return typeof value === "object" && value !== null && "id" in value && validateObservationId(value.id)
+      ? (value.id as string)
+      : undefined;
+  }
+
+  function rememberDiscardedId(id: string): void {
+    if (discardedIds.size >= limits.maxFacts) {
+      // The id was emitted but cannot be kept. Later citations of ids missing
+      // from the ledger can no longer be proven false.
+      idLedgerOverflowed = true;
+      return;
     }
-    return null;
+    discardedIds.add(id);
   }
 
+  // Validation comes before the rate slot and the fact limit, so invalid
+  // traffic spends neither. Only a valid fact that a limit refuses marks the
+  // record truncated.
   function admitParsed(value: unknown): AcceptOutcome {
-    if (!takeRateSlot(now())) {
-      return reject("count_exceeded", true);
-    }
-    if (facts.length >= limits.maxFacts) {
-      return reject("count_exceeded", true);
-    }
-
     if (isRuntimeFactType(value)) {
       return reject("runtime_fact_type", false);
     }
@@ -547,6 +600,12 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
     }
     if (fact.fact === "element_expectation" && !fact.attrs.states_seen.includes(fact.attrs.final)) {
       return reject("invalid", false);
+    }
+    if (!takeRateSlot(now())) {
+      return reject("count_exceeded", true);
+    }
+    if (facts.length >= limits.maxFacts) {
+      return reject("count_exceeded", true);
     }
     // Retirement applies only to earlier accepted connector facts. Unknown ids are a no-op.
     const retired: string[] = [];
