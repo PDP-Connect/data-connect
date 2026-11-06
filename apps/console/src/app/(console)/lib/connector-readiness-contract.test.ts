@@ -116,6 +116,12 @@ test("the verdict alone decides browserBound; the bundled manifest is consulted 
     "no verdict and no 404 gives no guess from the bundled manifest"
   );
   assert.equal(browserConnectSupportFromReadiness("linkedin", null, true).browserBound, true);
+  assert.equal(
+    browserConnectSupportFromReadiness("github", null, true).canAddAccount,
+    false,
+    "a pre-readiness server is deferred to only for a connector the bundled manifest marks browser-bound"
+  );
+  assert.equal(browserConnectSupportFromReadiness("linkedin", null, true).canAddAccount, true);
   assert.equal(browserConnectSupportFromReadiness("some-new-connector", null, true).browserBound, false);
 });
 
@@ -127,6 +133,7 @@ test("blocking reasons have fixed owner copy that never carries the server's det
   assert.match(readinessBlockNote(readiness("retry", "inspection_unavailable"))!, /Retry/);
   assert.match(readinessBlockNote(readiness("retry", "catalog_unavailable"))!, /catalog could not be reached/);
   assert.match(readinessBlockNote(readiness("unavailable", "not_published"))!, /not published/);
+  assert.match(readinessBlockNote(readiness("unavailable", "not_implemented"))!, /placeholder and does not collect data yet/);
   for (const quiet of [
     readiness("connect", "runnable"),
     readiness("install", "not_installed"),

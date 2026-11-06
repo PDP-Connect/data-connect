@@ -18,17 +18,18 @@ export interface BrowserConnectSupport {
  * endpoint (an older server next to a newer console) returns no verdict. That
  * server applies its own rule when the enrollment route is called, so the
  * console defers to it, and uses the bundled manifest to keep the routes
- * reachable for connectors it marks browser-bound. Remove this branch, and the
- * `isBrowserBoundConnector` import, once no supported server predates the
- * endpoint.
+ * reachable (and the add action open) only for connectors it marks
+ * browser-bound. Remove this branch, and the `isBrowserBoundConnector` import,
+ * once no supported server predates the endpoint.
  */
 export function browserConnectSupportFromReadiness(
   connectorId: string,
   readiness: ConnectorReadiness | null,
   serverPredatesReadiness = false
 ): BrowserConnectSupport {
+  const deferToOlderServer = serverPredatesReadiness && isBrowserBoundConnector(connectorId);
   return {
-    browserBound: readiness ? readiness.browserBound : serverPredatesReadiness && isBrowserBoundConnector(connectorId),
-    canAddAccount: readiness ? readiness.action === "connect" : serverPredatesReadiness,
+    browserBound: readiness ? readiness.browserBound : deferToOlderServer,
+    canAddAccount: readiness ? readiness.action === "connect" : deferToOlderServer,
   };
 }

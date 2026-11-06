@@ -238,6 +238,21 @@ test("a ready verdict offers account setup with no readiness note; a failed-veri
   assert.doesNotMatch(needsRepair, BROWSER_SETUP_LINK);
 });
 
+test("a verified package that declares no collection shows the placeholder note and no account setup", async () => {
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.ok(browserPackage.catalog);
+  const html = await render(
+    false,
+    { ...unregisteredBrowser, readiness: verdict("not_implemented", "unavailable", "Declared by the package.") },
+    { catalog: { ...browserPackage.catalog, digest: installed.digest }, installed: { ...installed, connector_id: "new-browser" } }
+  );
+  assert.match(html, READINESS_NOTE);
+  assert.match(html, /placeholder and does not collect data yet/);
+  assert.doesNotMatch(html, /Declared by the package/);
+  assert.doesNotMatch(html, BROWSER_SETUP_LINK);
+});
+
 test("an explicit host restriction is displayed without offering Install", async () => {
   assert.ok(browserPackage.catalog);
   const html = await render(false, setupCapable, {

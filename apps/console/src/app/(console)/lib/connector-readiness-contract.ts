@@ -22,6 +22,7 @@ export const READINESS_REASONS = [
   "artifact_invalid",
   "inspection_unavailable",
   "not_browser_bound",
+  "not_implemented",
   "host_requirement_unmet",
 ] as const;
 export type ConnectorReadinessReason = (typeof READINESS_REASONS)[number];

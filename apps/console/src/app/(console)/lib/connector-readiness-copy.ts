@@ -22,6 +22,8 @@ export function readinessBlockNote(readiness: ConnectorReadiness | null | undefi
       return "The installed connector could not be checked just now. Retry in a moment.";
     case "catalog_unavailable":
       return "The connector catalog could not be reached, so this connector's availability is unknown. Retry in a moment.";
+    case "not_implemented":
+      return "This connector is a placeholder and does not collect data yet.";
     case "not_published":
       return "This connector is not published, and no local source or installed package provides it.";
     case "not_browser_bound":
