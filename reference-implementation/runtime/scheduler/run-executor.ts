@@ -1362,6 +1362,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           connector_error: runNowResult.connector_error || null,
           failure_reason: runNowResult.failure_reason || null,
           known_gaps: runNowResult.known_gaps || null,
+          runtime_retryable: runNowResult.runtime_retryable ?? null,
           terminal_reason: runNowResult.terminal_reason || null,
         })
       ) {

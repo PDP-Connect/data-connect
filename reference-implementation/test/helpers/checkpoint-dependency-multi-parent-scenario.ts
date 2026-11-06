@@ -233,16 +233,13 @@ export async function runMultiParentScenario<Store>({
 }
 
 /**
- * DETAIL_COVERAGE_KEY_SETS credit depends on the manifest declaration, and the
- * runtime omits the capability from START, so every connector here falls back
- * to base-profile `hydrated_keys` on the wire. The two modes differ only in the
- * manifest declaration:
- * - Declaring connector: a hydrated key credits only with an accepted detail
- *   record for it. Activity `A` has one (`valuations` id `A`, the primary key
- *   of its own parent boundary), so activity commits. Holdings `H` has no
- *   record, so its hydration credits nothing and holdings stays put.
- * - Nondeclaring connector: hydration credits by assertion, so `H` credits and
- *   both parents commit.
+ * Hydrated-key credit does not depend on a DETAIL_COVERAGE_KEY_SETS
+ * declaration. The runtime omits the capability from START, so every connector
+ * here sends base-profile `hydrated_keys`, and Section 5.6 credits a hydrated
+ * declaration with no accepted record behind it. The two modes differ only in
+ * the manifest declaration, and both commit both parents:
+ * - Activity `A` has a record (`valuations` id `A`).
+ * - Holdings `H` has none, and its hydration credits it anyway.
  * Raw `empty_keys` and `unchanged_keys` are never emitted, so neither mode
  * credits a key through them. Both backend suites run the same wire exchange
  * and assert the same committed state.
@@ -318,15 +315,12 @@ export async function runHydratedKeyCreditingScenario<Store>({
     assert.equal(result.status, "succeeded");
     assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
     // The runtime omits DETAIL_COVERAGE_KEY_SETS from START, so both modes send
-    // the same base-fallback hydration. Only the manifest declaration differs.
-    // A declaring connector keeps its accepted-record requirement: activity is
-    // proven by its valuations record, holdings' bare hydration is not.
+    // the same base-fallback hydration. Only the manifest declaration differs,
+    // and it changes nothing.
     assert.equal(
       result.checkpoint_summary?.state_streams_committed,
-      declaresKeySets ? 1 : 2,
-      declaresKeySets
-        ? "a declaring connector commits only the parent whose hydrated key has an accepted record"
-        : "a nondeclaring connector's hydrated declarations credit by assertion, so both parents commit"
+      2,
+      "hydrated declarations credit by assertion (Section 5.6), declared extension or not, so both parents commit"
     );
 
     const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
@@ -334,12 +328,7 @@ export async function runHydratedKeyCreditingScenario<Store>({
     });
     assert.equal(stateResp.status, 200);
     const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
-    assert.deepEqual(
-      stateBody.state,
-      declaresKeySets
-        ? { activity: { page: "activity-1" } }
-        : { activity: { page: "activity-1" }, holdings: { page: "holdings-1" } }
-    );
+    assert.deepEqual(stateBody.state, { activity: { page: "activity-1" }, holdings: { page: "holdings-1" } });
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
   }

@@ -912,10 +912,11 @@ test("DETAIL_COVERAGE naming a state_stream-declared stream is still rejected af
 
 // ── Unaccounted outcomes withhold the parent checkpoint ──
 
-// `outcomes.unaccounted` keys have no durable DETAIL_GAP, so nothing replays
-// them once the parent cursor moves past them. The parent checkpoint must stay
-// put so the next run re-collects them.
-test("STREAM_EVIDENCE with outcomes.unaccounted > 0 withholds the parent checkpoint", async () => {
+// Positive, non-gating control (Section 5.7: STREAM_EVIDENCE never gates a
+// checkpoint, including its `unaccounted` count). The shortfall is diagnostic:
+// the parent cursor commits, and the fact keeps the unaccounted count visible.
+// The mutation this would catch is a runtime that lets the evidence withhold.
+test("STREAM_EVIDENCE with outcomes.unaccounted > 0 does not gate the parent checkpoint, and the shortfall stays visible", async () => {
   const { server, asUrl, rsUrl, ownerToken } = await setupServer();
   try {
     const manifest = twoStreamManifest("stream-evidence-no-commit-gating");
@@ -953,15 +954,28 @@ test("STREAM_EVIDENCE with outcomes.unaccounted > 0 withholds the parent checkpo
         | undefined;
       assert.equal(
         checkpointSummary?.commit_status,
-        "not_committed",
-        "messages must not commit while message_bodies reports unaccounted keys"
+        "committed",
+        "messages commits: STREAM_EVIDENCE is diagnostic and never gates a checkpoint"
       );
-      assert.equal(checkpointSummary?.state_streams_committed, 0);
+      assert.equal(checkpointSummary?.state_streams_committed, 1);
       const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
         headers: { Authorization: `Bearer ${ownerToken}` },
       });
       const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
-      assert.ok(!("messages" in (stateBody.state ?? {})), "the parent cursor must not move past unaccounted keys");
+      assert.deepEqual(
+        stateBody.state?.messages,
+        { cursor: "messages-1" },
+        "the durable parent cursor moved although two keys are unaccounted"
+      );
+      const fact = factFor(result.run_id as string, "message_bodies") as unknown as RuntimeCollectionFact;
+      assert.equal(fact.considered, 3, "the connector's considered count is kept");
+      assert.equal(fact.covered, 1, "the unaccounted keys stay visible as uncovered in the fact");
+      // The cursor moved, so nothing replays these keys. The loss is recorded as a
+      // stream-level known gap: it names no keys because STREAM_EVIDENCE carries counts only.
+      const unaccountedGap = (result.known_gaps ?? []).find((gap) => gap.reason === "stream_evidence_unaccounted");
+      assert.ok(unaccountedGap, `expected a stream_evidence_unaccounted known gap, got ${JSON.stringify(result.known_gaps)}`);
+      assert.equal(unaccountedGap.stream, "message_bodies");
+      assert.equal((unaccountedGap.recovery_hint as { action?: unknown } | undefined)?.action, "unknown");
     } finally {
       rmSync(tmpDir, { force: true, recursive: true });
     }

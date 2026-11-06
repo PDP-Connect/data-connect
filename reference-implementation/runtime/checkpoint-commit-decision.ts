@@ -16,28 +16,28 @@
  *
  * 1. A manifest-declared detail stream of that parent sent no DETAIL_COVERAGE
  *    report for it (`coverage_report_missing`).
- * 2. A DETAIL_COVERAGE report leaves a required key uncredited
- *    (`coverage_shortfall`). A key the RS rejected a record for this run (and
- *    never accepted that record) is uncredited whatever the connector says,
- *    unless a durable gap covers it. Otherwise a key is credited by:
- *    - a hydrated declaration. When the report requires evidence, the
- *      declaration must be backed by an accepted record of the detail stream
- *      for that key: its primary key, or the foreign key of a manifest
- *      relationship to the parent; a bare hydrated listing proves nothing.
- *      See `CoverageReport.hydratedKeysNeedEvidence` for which reports;
- *    - an explicit `empty_keys` or `unchanged_keys` outcome: the connector
- *      verified the key has no detail, or no changed detail, this run;
- *    - an optional-skip declaration (an accepted terminal absence); or
+ * 2. A DETAIL_COVERAGE report leaves a required key unaccounted
+ *    (`coverage_shortfall`). A required key is accounted (Section 5.6) by:
+ *    - a hydrated declaration, unless the RS rejected a record for that key
+ *      this run. A rejection uncredits the key whatever the connector says;
+ *      a durable gap for the key still covers it. No accepted record behind a
+ *      hydrated declaration is required (Section 5.6), whatever the manifest
+ *      declares: a parent with no detail records (an empty parent) can list
+ *      its key as hydrated, and withholding it would stall its cursor on
+ *      every run; or
  *    - a pending or recovered durable DETAIL_GAP for the same stream, key and
- *      parent boundary. Declared `gap_keys` alone credit nothing.
- *    Evidence is read once at DONE, after the final flush, so a record sent
- *    after its DETAIL_COVERAGE still counts, for or against the key.
+ *      parent boundary. Declared `gap_keys` alone account for nothing.
+ *    Runtime-specific `empty_keys`, `unchanged_keys` and `optional_skip_keys`
+ *    are not accounting. They neither credit a key nor release a checkpoint.
+ *    Rejection and gap evidence are read once at DONE, after the final flush.
  * 3. A data stream that maps to it reported an omission with no durable work
- *    item (`reported_omission`): a `stream_collection_failed` SKIP_RESULT, a
- *    retryable SKIP_RESULT without a runtime continuation, or STREAM_EVIDENCE
- *    with `outcomes.unaccounted > 0`. Gapped evidence keys are durable
- *    DETAIL_GAPs and do not withhold. An omission that names no stream
- *    withholds every staged cursor: nothing proves any cursor is clear of it.
+ *    item (`reported_omission`): a `stream_collection_failed` SKIP_RESULT, or a
+ *    retryable SKIP_RESULT without a runtime continuation. An omission that
+ *    names no stream withholds every staged cursor: nothing proves any cursor
+ *    is clear of it.
+ *
+ * STREAM_EVIDENCE is diagnostic only (Section 5.7). It never gates a checkpoint,
+ * including its `unaccounted` count, so it is not an input to this decision.
  *
  * Every other staged STATE_STREAM commits.
  *
@@ -45,46 +45,31 @@
  * streams, calls this once at DONE, then records the gaps and commits.
  */
 
-/** One DETAIL_COVERAGE report for one (state_stream, detail stream) boundary. */
+/**
+ * One DETAIL_COVERAGE report for one (state_stream, detail stream) boundary,
+ * with the fields that can decide a commit. The runtime-specific arrays
+ * (`empty_keys`, `unchanged_keys`, `optional_skip_keys`) are parsed and shown
+ * elsewhere; they carry no commit authority here.
+ */
 export interface CoverageReport {
-  /** Keys the connector verified have no detail this run. */
-  emptyKeys: ReadonlySet<string>;
-  /** Keys with an accepted record of `stream` this run, by primary key or parent foreign key. */
-  evidencedKeys: ReadonlySet<string>;
-  /** Hydrated keys as the connector declared them. */
+  /** Keys the connector declared hydrated (Section 5.6). */
   hydratedKeys: ReadonlySet<string>;
-  /**
-   * True when the connector's manifest declares DETAIL_COVERAGE_KEY_SETS: a
-   * hydrated key then credits only when `evidencedKeys` holds it. False for a
-   * connector without the capability: its hydrated declaration credits by
-   * itself, as it did before the capability existed, because such a
-   * connector may list a key with no detail record (an empty parent) as
-   * hydrated. In both cases `empty_keys` and `unchanged_keys` credit without a
-   * record, and a rejection uncredits the key.
-   */
-  hydratedKeysNeedEvidence: boolean;
-  optionalSkipKeys: ReadonlySet<string>;
   /** Keys with a record of `stream` the RS rejected this run and never accepted. */
   rejectedKeys: ReadonlySet<string>;
   requiredKeys: readonly string[];
   stream: string;
-  /** Keys the connector verified have no changed detail this run. */
-  unchangedKeys: ReadonlySet<string>;
 }
 
 /**
- * The required keys the run accounted for: hydrated (with evidence when the
- * report needs it), verified empty, or verified unchanged, and not
- * contradicted by a rejection. Optional skips and gaps release a checkpoint
- * but are not coverage, so a declared `covered` count never exceeds this.
+ * The required keys a hydrated declaration accounts for and no rejection
+ * contradicts. A declared `covered` count never exceeds this: a durable gap
+ * accounts for a key in the commit decision but is not hydration.
  */
 export function coveredRequiredKeys(report: CoverageReport): string[] {
   return report.requiredKeys.filter(
     (key) =>
-      !report.rejectedKeys.has(key) &&
-      ((report.hydratedKeys.has(key) && (!report.hydratedKeysNeedEvidence || report.evidencedKeys.has(key))) ||
-        report.emptyKeys.has(key) ||
-        report.unchangedKeys.has(key))
+      report.hydratedKeys.has(key) &&
+      !report.rejectedKeys.has(key)
   );
 }
 
@@ -96,7 +81,8 @@ export interface DurableGapEvidence {
   stream?: string;
 }
 
-export type OmissionSource = "retryable_skip" | "stream_collection_failed" | "unaccounted_evidence";
+/** The SKIP_RESULT reasons that gate a checkpoint. STREAM_EVIDENCE is not one (Section 5.7). */
+export type OmissionSource = "retryable_skip" | "stream_collection_failed";
 
 /**
  * A report of rows a run did not collect. `stream` is the data stream that
@@ -130,7 +116,12 @@ export type WithholdReason =
       stateStream: string;
       stream: string;
     }
-  | { kind: "reported_omission"; source: OmissionSource; stateStream: string; stream: string | null };
+  | {
+      kind: "reported_omission";
+      source: OmissionSource;
+      stateStream: string;
+      stream: string | null;
+    };
 
 export interface CheckpointCommitDecision {
   /** STATE_STREAM keys to commit, in staging order. */
@@ -195,10 +186,7 @@ function coverageShortfalls(input: CheckpointCommitInput, stateStream: string): 
   for (const report of input.coverageByStateStream.get(stateStream) || []) {
     const gapKeys = durableGapKeys(input, report.stream, stateStream);
     const covered = new Set(coveredRequiredKeys(report));
-    const missingKeyCount = report.requiredKeys.filter(
-      (key) =>
-        !(gapKeys.has(key) || covered.has(key) || (report.optionalSkipKeys.has(key) && !report.rejectedKeys.has(key)))
-    ).length;
+    const missingKeyCount = report.requiredKeys.filter((key) => !(gapKeys.has(key) || covered.has(key))).length;
     if (missingKeyCount) {
       reasons.push({
         kind: "coverage_shortfall",
@@ -236,8 +224,15 @@ function durableGapKeys(input: CheckpointCommitInput, stream: string, stateStrea
 
 function omissionsOwnedBy(input: CheckpointCommitInput, stateStream: string): WithholdReason[] {
   return input.omissions
-    .filter((omission) => omission.stream === null || stateStreamsOwning(omission.stream, input).has(stateStream))
-    .map((omission) => ({ kind: "reported_omission", source: omission.source, stateStream, stream: omission.stream }));
+    .filter(
+      (omission) => omission.stream === null || stateStreamsOwning(omission.stream, input).has(stateStream)
+    )
+    .map((omission) => ({
+      kind: "reported_omission",
+      source: omission.source,
+      stateStream,
+      stream: omission.stream,
+    }));
 }
 
 /**

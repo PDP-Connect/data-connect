@@ -2000,7 +2000,11 @@ rl.on('line', (line) => {
     assert.ok(knownGap, "expected a known gap entry");
     assert.equal(knownGap.kind, "skip_result");
     assert.equal(knownGap.severity, "transient");
-    assert.equal(knownGap.recovery_hint?.action, "retry_by_runtime");
+    // Section 5.5: an absent SKIP_RESULT.recovery_hint is not turned into an action
+    // from the connector's `http_429` reason text. The runtime has no structured
+    // transport evidence for this skip, so the gated action is `unknown`
+    // (Section 5.11). Oracle: the spec clause, not the previous text-inferred value.
+    assert.equal(knownGap.recovery_hint?.action, "unknown");
     assert.deepEqual(knownGap.scope?.resource_ids, ["item_1"]);
 
     const stats = scheduler.getStats();
@@ -2261,7 +2265,13 @@ rl.on('line', (line) => {
   }
 });
 
-test("scheduler retries connector-declared retryable failures and records the succeeding attempt", async () => {
+// A connector's DONE.error.retryable is a claim, not retry authority (Collection
+// Profile Sections 5.8 and 5.11). The runtime must not start an automatic attempt
+// from it. Oracle: the spec clause. The positive control for a runtime-owned
+// transport retry is the `scheduler retries runtime ...` tests below, which stay
+// unchanged. Plausible defect caught: a connector's `retryable: true` restarts a
+// doomed run. Required backend: memory profile (in-memory SQLite, child process).
+test("scheduler does not auto-retry a connector-declared retryable failure (Section 5.11)", async () => {
   const manifest = withFixtureSourceDeclaration(
     {
       connector_id: "scheduler-retryable-terminal-error",
@@ -2381,15 +2391,148 @@ rl.on('line', (line) => {
 
     const [record] = completedRuns;
     assert.ok(record, "expected a completed run record");
-    assert.equal(record.status, "succeeded");
-    assert.equal(record.attempt, 2);
-    assert.equal(record.failureReason, null);
-    assert.equal(record.terminalReason, null);
-    assert.equal(record.connectorError, null);
-    assert.equal(record.recordsEmitted, 1);
+    assert.equal(record.status, "failed");
+    assert.equal(record.attempt, 1, "a connector's retryable claim must not start a second attempt");
+    assert.equal(record.recordsEmitted, 0);
+    // The connector's own report stays visible; its retryable flag is not authority.
+    assert.equal(record.connectorError?.message, "Rate limited, retry later");
+    assert.equal(record.connectorError?.retryable, true);
 
     const attempts = readFileSync(attemptsPath, "utf8").trim().split("\n").filter(Boolean);
-    assert.equal(attempts.length, 2, "retryable terminal failures should be retried once before succeeding");
+    assert.equal(attempts.length, 1, "a connector-declared retryable failure must not be retried automatically");
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+test("scheduler does not auto-retry a DONE(failed) that carries no error object (legacy connector)", async () => {
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "scheduler-no-error-failed-done",
+      display_name: "Scheduler No Error Failed Done Connector",
+      manifest_uri: "https://registry.pdpp.dev/connectors/scheduler-no-error-failed-done",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              value: { type: "string" },
+            },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://registry.pdpp.dev/connectors/scheduler-no-error-failed-done" }
+  );
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-scheduler-no-error-failed-done-"));
+  const connectorPath = join(tmpDir, "connector.mjs");
+  const attemptsPath = join(tmpDir, "attempts.log");
+  writeFileSync(
+    connectorPath,
+    `
+import { appendFileSync, readFileSync } from 'node:fs';
+import { createInterface } from 'readline';
+const attemptsPath = ${JSON.stringify(attemptsPath)};
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type !== 'START') return;
+  appendFileSync(attemptsPath, 'attempt\\n', 'utf8');
+  const attempts = readFileSync(attemptsPath, 'utf8').trim().split('\\n').filter(Boolean).length;
+  if (attempts === 1) {
+    process.stdout.write(JSON.stringify({
+      type: 'DONE',
+      status: 'failed',
+      records_emitted: 0,
+    }) + '\\n');
+    rl.close();
+    process.exit(1);
+    return;
+  }
+
+  process.stdout.write(JSON.stringify({
+    type: 'RECORD',
+    stream: 'items',
+    key: 'retry_success',
+    data: { id: 'retry_success', value: 'after retry' },
+    emitted_at: new Date().toISOString(),
+  }) + '\\n');
+  process.stdout.write(JSON.stringify({
+    type: 'DONE',
+    status: 'succeeded',
+    records_emitted: 1,
+  }) + '\\n');
+  rl.close();
+  process.exit(0);
+});
+`,
+    "utf-8"
+  );
+
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const completedRuns: RunRecord[] = [];
+
+  try {
+    const registerResp = await fetchJson(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+
+    const ownerToken = await issueOwnerToken(asUrl, "scheduler_no_error_failed_done_user");
+    const connectorInstanceId = await materializeRunConnection(
+      manifest.connector_id,
+      "scheduler_no_error_failed_done_user"
+    );
+    const scheduler = createScheduler({
+      admitRunConnection: fakeAdmitRunConnection(),
+      connectors: [
+        {
+          connectorId: manifest.connector_id,
+          connectorInstanceId,
+          connectorPath,
+          intervalMs: 60_000,
+          manifest,
+          maxRetries: 2,
+          ownerSubjectId: "scheduler_no_error_failed_done_user",
+          ownerToken,
+        },
+      ],
+      getState: async () => null,
+      onInteraction: async (interaction: unknown) => cancelledInteractionResponse(interaction),
+      // biome-ignore lint/suspicious/noShadow: fixture terminology mirrors the protocol field name
+      onRunComplete: (record) => completedRuns.push(record),
+      rsUrl,
+      // biome-ignore lint/suspicious/noEmptyBlockStatements: skipped test callback is intentionally empty
+      setState: async () => {},
+    });
+
+    scheduler.start();
+    await waitFor(() => completedRuns.length === 1, 8000);
+    scheduler.stop();
+
+    const [record] = completedRuns;
+    assert.ok(record, "expected a completed run record");
+    assert.equal(record.status, "failed");
+    assert.equal(record.attempt, 1, "a connector-reported failure with no error object must not start a second attempt");
+    assert.equal(record.terminalReason, "connector_reported_failed");
+    assert.equal(record.connectorError, null);
+    assert.equal(record.recordsEmitted, 0);
+
+    const attempts = readFileSync(attemptsPath, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(attempts.length, 1, "a connector-reported failure must not be retried automatically, with or without an error object");
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);
