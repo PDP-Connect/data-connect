@@ -11,10 +11,11 @@ import { existingSourcesByConnectorCatalog } from "../../components/existing-sou
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../components/source-setup-catalog.tsx";
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
+import type { ConnectorInstallSnapshot } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
 import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
 import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
-import { ReferenceServerUnreachableError, ResourceServerHttpError } from "../../lib/owner-token.ts";
+import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
 import { LocalConnectorSourcesPanel } from "./local-connector-sources-panel.tsx";
@@ -47,26 +48,21 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
   let installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null = null;
   let installCatalogBusySnapshotId: string | null = null;
   let installCatalogTransientlyUnavailable = false;
-  let localSources: NonNullable<Awaited<ReturnType<typeof getConnectorInstallSnapshot>>["localSources"]> = [];
+  let installSkippedEntries = 0;
+  let localSources: NonNullable<ConnectorInstallSnapshot["localSources"]> = [];
   let connectorIcons: Readonly<Record<string, ConnectorIconLike | null | undefined>> = {};
   if (process.env.NODE_ENV !== "production" && params.demo === "atlas") {
     const demo = await import("./add-source-demo-data.ts");
     ({ catalog, existingSourcesByConnector } = demo.buildAddSourceDemoCatalog());
   } else {
     try {
-      const installSnapshotPromise = getConnectorInstallSnapshot().catch((err: unknown) => {
-        // The console can remain usable against a pre-install-route reference
-        // server during the RI rollout. No lifecycle claim is shown in that
-        // case; other failures remain visible to the existing page error path.
-        if (err instanceof ResourceServerHttpError && err.status === 404) {
-          return null;
-        }
-        return Promise.reject(err);
-      });
+      // `null` means a reference server that predates the install routes
+      // (during the RI rollout): no lifecycle claim is shown. Other failures
+      // remain visible to the existing page error path.
       const [manifests, templates, installSnapshot] = await Promise.all([
         listConnectorManifests(),
         listOwnerConnectorTemplates(),
-        installSnapshotPromise,
+        getConnectorInstallSnapshot(),
       ]);
       connectorIcons = Object.fromEntries(
         manifests.flatMap((manifest) => [
@@ -79,6 +75,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
         : null;
       installCatalogTransientlyUnavailable = installSnapshot?.catalogUnavailableReason === "transient_busy";
+      installSkippedEntries = installSnapshot?.skippedEntries ?? 0;
       installCatalogBusySnapshotId = installCatalogTransientlyUnavailable ? randomUUID() : null;
       localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
       // EXACT per-connector existing-sources lookup — one `GET
@@ -134,6 +131,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         installCatalogBusySnapshotId={installCatalogBusySnapshotId}
         installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
         installLifecycleByConnector={installLifecycleByConnector}
+        installSkippedEntries={installSkippedEntries}
         query={sourceQuery}
       />
       <LocalConnectorSourcesPanel connectorIcons={connectorIcons} sources={localSources} />
