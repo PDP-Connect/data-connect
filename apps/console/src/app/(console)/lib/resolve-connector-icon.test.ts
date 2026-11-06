@@ -148,3 +148,16 @@ test("product connector mark API reserves geometry and exposes only text spacing
   );
   assert.ok(markup.includes('class="pdpp-connector-icon mr-2"'));
 });
+
+test("no two bundled connectors answer to the same identity with different marks", () => {
+  const owners = new Map<string, string>();
+  for (const entry of corpus.entries) {
+    for (const identity of [entry.connector_id, entry.connector_key]) {
+      for (const key of connectorIconIdentityKeys(identity)) {
+        const previous = owners.get(key);
+        assert.ok(previous === undefined || previous === entry.connector_key, `${key} is claimed by ${previous} and ${entry.connector_key}`);
+        owners.set(key, entry.connector_key);
+      }
+    }
+  }
+});

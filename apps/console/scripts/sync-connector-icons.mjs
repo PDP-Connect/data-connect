@@ -72,6 +72,17 @@ entries.sort((left, right) => {
   }
   return left.connector_key < right.connector_key ? -1 : 1;
 });
+// The runtime indexes marks by connector key and ID with last-writer-wins, so
+// a repeated identity would make the shipped mark depend on file order.
+for (const field of ["connector_key", "connector_id"]) {
+  const seen = new Set();
+  for (const entry of entries) {
+    if (seen.has(entry[field])) {
+      throw new Error(`Duplicate ${field} in the pinned icon set: ${entry[field]}.`);
+    }
+    seen.add(entry[field]);
+  }
+}
 if (entries.length !== EXPECTED_ASSETS) {
   throw new Error(`Pinned source produced ${entries.length} icon assets; expected ${EXPECTED_ASSETS}.`);
 }

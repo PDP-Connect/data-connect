@@ -8,12 +8,11 @@ import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { sanitizeSvg } from "./sanitize-svg.ts";
 
 /**
- * Icon-resolution LAYER 2: a vendored, offline lookup into the simple-icons
- * npm package (CC0-licensed SVG markup, ~3,300 brand icons), used only when
- * a connector's manifest declares no bundled icon of its own (layer 1 in
- * resolve-connector-icon-path.ts). This exists for connectors added AFTER
- * today's fix — every manifest currently shipped already has a bundled icon,
- * so layer 1 alone covers the reported bug.
+ * The `generic` layer of `pickDisplayMark` (resolve-manifest-display-mark.ts):
+ * a vendored, offline lookup into the simple-icons npm package (CC0-licensed
+ * SVG markup, ~3,300 brand icons), used only when neither the manifest nor
+ * the bundled corpus supplies a mark. This exists for connectors added AFTER
+ * the bundled corpus was generated.
  *
  * Offline/build-time only: this reads a file the npm package already
  * installed on disk. It never fetches from a network at render time and
@@ -86,7 +85,7 @@ function slugFromConnectorKey(connectorKey: string): string {
  * connector key (e.g. "claude-code" -> slug "claudecode"). Returns null
  * (never throws) when simple-icons is not installed, the key has no known
  * slug match, the icon file is missing, or its content fails sanitizeSvg —
- * any of which falls through to the deterministic Monogram (layer 3).
+ * any of which falls through to the deterministic Monogram.
  */
 export async function resolveConnectorIconFromSimpleIcons(connectorKey: string): Promise<ConnectorIconLike | null> {
   if (typeof connectorKey !== "string" || connectorKey.trim().length === 0) {

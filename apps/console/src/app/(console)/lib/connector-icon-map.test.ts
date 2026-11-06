@@ -3,7 +3,8 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildConnectorIconMap } from "./connector-icon-map.ts";
+import { buildConnectorIconMap, catalogEntryIcon } from "./connector-icon-map.ts";
+import { resolveManifestDisplayMark } from "./resolve-manifest-display-mark.ts";
 import iconCorpus from "./connector-icons/sanitized-assets.json" with { type: "json" };
 
 const UNSAFE_ONLOAD = /onload/iu;
@@ -37,12 +38,39 @@ test("maps the existing underscore spelling to its hyphenated connector identity
 });
 
 test("preserves the valid inline owner-template mark over the pinned asset", async () => {
-  const icons = await buildConnectorIconMap(
-    [{ connector_id: "github", connector_key: "github", icon: INLINE_MANIFEST_MARK }],
-    [{ connector_id: "github", connector_key: "github", icon: INLINE_TEMPLATE_MARK }]
-  );
+  const icons = await buildConnectorIconMap([], [{ connector_id: "github", connector_key: "github", icon: INLINE_TEMPLATE_MARK }]);
 
   assert.deepEqual(icons.github, INLINE_TEMPLATE_MARK);
+});
+
+test("a template mark beats a manifest's fallback mark but not the manifest's own", async () => {
+  const bundled = await resolveManifestDisplayMark({ connector_id: "github", connector_key: "github" }, "/nonexistent");
+  assert.equal(bundled.source, "bundled");
+  const withFallback = await buildConnectorIconMap(
+    [{ connector_id: "github", connector_key: "github", icon: bundled.icon, resolvedIconSource: bundled.source }],
+    [{ connector_id: "github", connector_key: "github", icon: INLINE_TEMPLATE_MARK }]
+  );
+  assert.deepEqual(withFallback.github, INLINE_TEMPLATE_MARK);
+
+  const own = await buildConnectorIconMap(
+    [{ connector_id: "github", connector_key: "github", icon: INLINE_MANIFEST_MARK, resolvedIconSource: "manifest" }],
+    [{ connector_id: "github", connector_key: "github", icon: INLINE_TEMPLATE_MARK }]
+  );
+  assert.deepEqual(own.github, INLINE_MANIFEST_MARK);
+});
+
+test("a manifest and a template that disagree yield the same mark on every surface", async () => {
+  const manifest = { connector_id: "github", connector_key: "github", icon: INLINE_MANIFEST_MARK } as const;
+  // Setup pages render the resolved manifest mark; summary and add pages read the map.
+  const setup = (await resolveManifestDisplayMark(manifest, "/nonexistent")).icon;
+  const withTemplate = await buildConnectorIconMap([manifest], [
+    { connector_id: "github", connector_key: "github", icon: INLINE_TEMPLATE_MARK },
+  ]);
+  const withoutTemplate = await buildConnectorIconMap([manifest], []);
+
+  assert.deepEqual(setup, withTemplate.github);
+  assert.deepEqual(setup, withoutTemplate.github);
+  assert.equal(withTemplate.github?.color, INLINE_MANIFEST_MARK.color);
 });
 
 test("preserves an explicitly supplied safe inline manifest mark over the pinned asset", async () => {
@@ -86,4 +114,11 @@ test("an iconless owner template preserves a custom manifest mark", async () => 
     [{ connector_id: "github", connector_key: "github" }]
   );
   assert.deepEqual(icons.github, INLINE_MANIFEST_MARK);
+});
+
+test("a catalog entry keeps its own mark when the map does not index its key", async () => {
+  const icons = await buildConnectorIconMap([], []);
+  assert.deepEqual(catalogEntryIcon({ connectorKey: "not-in-the-map", icon: INLINE_TEMPLATE_MARK }, icons), INLINE_TEMPLATE_MARK);
+  assert.equal(catalogEntryIcon({ connectorKey: "not-in-the-map" }, icons), null);
+  assert.deepEqual(catalogEntryIcon({ connectorKey: "github", icon: INLINE_TEMPLATE_MARK }, icons), icons.github);
 });

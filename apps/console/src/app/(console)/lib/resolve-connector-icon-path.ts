@@ -17,10 +17,10 @@ import { sanitizeSvg } from "./sanitize-svg.ts";
  * the resolved, sanitized SVG into the same inline_svg shape
  * resolveConnectorIcon already renders.
  *
- * This is icon-resolution LAYER 1 (bundled-with-the-manifest, checked
- * first) of the three-layer resolver: layer 1 here, layer 2 in
- * resolve-connector-icon-simple-icons.ts, layer 3 (deterministic monogram)
- * already implemented by @pdpp/brand-react's ConnectorIcon fallback.
+ * This reads the file a manifest's `brand.icon` names, which is a manifest-
+ * owned mark. Where it sits among the other sources of a mark (the manifest's
+ * inline icon, bundled marks, simple-icons, the monogram) is decided only by
+ * `pickDisplayMark` in resolve-manifest-display-mark.ts.
  */
 
 /**

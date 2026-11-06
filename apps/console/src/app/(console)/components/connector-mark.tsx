@@ -22,7 +22,7 @@ export function ConnectorMark({
 } & ({ connectorId: string; sourceId?: never } | { sourceId: string; connectorId?: never })) {
   return createElement(ConnectorIcon, {
     className: spacing ? TEXT_SPACING_CLASSES[spacing] : undefined,
-    icon: sourceId === undefined ? resolveConnectorIcon(connectorId ?? "", icon) : resolveSourceIcon(sourceId, icon),
+    icon: sourceId === undefined ? resolveConnectorIcon(connectorId, icon) : resolveSourceIcon(sourceId, icon),
     name,
   });
 }

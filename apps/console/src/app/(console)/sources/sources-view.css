@@ -157,7 +157,7 @@ a.rr-s-item {
 }
 
 .rr-s-status[data-tone="destructive"] {
-  color: var(--destructive);
+  color: var(--destructive-foreground, var(--destructive));
 }
 
 @keyframes rr-s-status-pulse {

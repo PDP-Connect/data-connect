@@ -55,3 +55,13 @@ test("setup, summary and manifest-less surfaces paint the same backdrop behind a
   assert.equal(setup, summary);
   assert.equal(setup, withoutManifests);
 });
+
+test("for every installed manifest the summary map and the setup mark are the same mark", async () => {
+  const [, , { buildConnectorIconMap }, { listConnectorManifests }] = await imports;
+  const manifests = await listConnectorManifests();
+  assert.ok(manifests.length > 0);
+  const icons = await buildConnectorIconMap(manifests, []);
+  for (const manifest of manifests) {
+    assert.deepEqual(icons[manifest.connector_id], manifest.icon ?? undefined, manifest.connector_id);
+  }
+});

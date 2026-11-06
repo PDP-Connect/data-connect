@@ -128,7 +128,11 @@ export function hasConnectorIcon(
 }
 
 /** Core source IDs stay separate from connector IDs. This display-only lookup
- * uses declared source provenance, plus exact legacy brand aliases. */
+ * uses declared source provenance first. Only when no corpus entry declares
+ * the ID does it try an EXACT connector identity (key or canonical ID) for
+ * records that carry the connector key as their source ID; it never matches
+ * a partial or case-folded name. A source ID whose declarations conflict
+ * resolves to no brand, and is deliberately not rescued by that fallback. */
 export function resolveSourceIcon(sourceId: string, icon?: ConnectorIconLike | null): ConnectorIconLike | null {
   const supplied = validatedConnectorIcon(icon);
   if (supplied) {

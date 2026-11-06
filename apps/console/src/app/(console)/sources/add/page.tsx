@@ -13,9 +13,9 @@ import { type ExistingSourceSetupLink, SourceSetupCatalog } from "../../componen
 import { buildOwnerConnectorCatalog, type ConnectorCatalogEntry } from "../../lib/connection-catalog.ts";
 import type { ConnectorInstallSnapshot } from "../../lib/connector-install-contract.ts";
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
-import { buildConnectorInstallLifecycleByConnector, connectorLookupKey } from "../../lib/connector-install-presentation.ts";
+import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
 import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
-import { buildConnectorIconMap } from "../../lib/connector-icon-map.ts";
+import { buildConnectorIconMap, catalogEntryIcon } from "../../lib/connector-icon-map.ts";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
@@ -68,7 +68,7 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
       connectorIcons = await buildConnectorIconMap(manifests, templates);
       catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []).map((entry) => ({
         ...entry,
-        icon: connectorIcons[connectorLookupKey(entry.connectorKey)] ?? null,
+        icon: catalogEntryIcon(entry, connectorIcons),
       }));
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
