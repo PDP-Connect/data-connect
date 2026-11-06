@@ -984,3 +984,78 @@ test("allowlist parser: rejects malformed entries, admits valid connector keys",
     }
   }
 });
+
+// A browser-bound connector with stored credentials is still set up through the
+// owner's browser session, so its UAT exposure needs a runnable browser setup.
+// A connector that is not browser-bound has no such dependency.
+test("UAT exposure of a browser-bound credential connector requires runnable browser setup", async () => {
+  const priorEnv = {
+    allowlist: process.env.PDPP_UAT_CONNECTOR_ALLOWLIST,
+    uat: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT,
+  };
+  const developmentHeb = (): Record<string, unknown> => {
+    const manifest = loadManifest("heb");
+    return {
+      ...manifest,
+      capabilities: { ...asRecord(manifest.capabilities), public_listing: { tier: "development" } },
+    };
+  };
+  const scenarios = [
+    { exposed: true, label: "preview, package published", manifest: () => loadManifest("heb"), publish: true },
+    { exposed: false, label: "preview, no package", manifest: () => loadManifest("heb"), publish: false },
+    {
+      allowlist: "heb",
+      exposed: true,
+      label: "allowlisted development, package published",
+      manifest: developmentHeb,
+      publish: true,
+    },
+    {
+      allowlist: "heb",
+      exposed: false,
+      label: "allowlisted development, no package",
+      manifest: developmentHeb,
+      publish: false,
+    },
+    {
+      exposed: true,
+      key: "gmail",
+      label: "not browser-bound, unaffected by browser setup",
+      manifest: () => loadManifest("gmail"),
+      publish: false,
+    },
+  ];
+  try {
+    for (const scenario of scenarios) {
+      process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT = "1";
+      if (scenario.allowlist) {
+        process.env.PDPP_UAT_CONNECTOR_ALLOWLIST = scenario.allowlist;
+      } else {
+        delete process.env.PDPP_UAT_CONNECTOR_ALLOWLIST;
+      }
+      await withServer(async ({ asUrl, rsUrl }) => {
+        await registerConnector(asUrl, scenario.manifest(), { publish: scenario.publish });
+        const ownerToken = await issueOwnerToken(asUrl);
+        const { body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
+          headers: { Authorization: `Bearer ${ownerToken}` },
+        });
+        assert.equal(
+          byConnector(body, scenario.key ?? "heb").uat_expose_unlisted_connectors,
+          scenario.exposed,
+          scenario.label
+        );
+      });
+    }
+  } finally {
+    for (const [name, value] of [
+      ["PDPP_UAT_CONNECTOR_ALLOWLIST", priorEnv.allowlist],
+      ["PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT", priorEnv.uat],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+});

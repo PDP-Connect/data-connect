@@ -221,6 +221,25 @@ function isOwnerActionablePlan(plan: ReturnType<typeof buildConnectionSetupPlan>
   return isSupportedOwnerActionPlan(plan) || isOwnerSessionBrowserActionPlan(plan, browserRunnable);
 }
 
+/**
+ * A static-secret connector that declares credential capture has a setup path
+ * to try in UAT. A browser-bound one (stored credentials plus an interactive
+ * login) is still set up through the owner's browser session, so it needs a
+ * runnable browser setup; one that is not browser-bound has no such dependency.
+ */
+function hasUatStaticSecretSetup(
+  plan: ReturnType<typeof buildConnectionSetupPlan>,
+  manifest: ConnectorManifestLike,
+  browserRunnable: boolean
+): boolean {
+  return (
+    plan.catalogDisposition === "static_secret_connect" &&
+    plan.setupModality === "static_secret" &&
+    staticSecretCredentialCaptureFromManifest(manifest) !== null &&
+    (plan.connectorModality !== "browser_bound" || browserRunnable)
+  );
+}
+
 function isUatExposablePlan(
   plan: ReturnType<typeof buildConnectionSetupPlan>,
   manifest: ConnectorManifestLike,
@@ -231,12 +250,7 @@ function isUatExposablePlan(
   const basePlan = [
     isOwnerActionablePlan(plan, browserRunnable),
     plan.catalogDisposition === "static_secret_experimental",
-    // Not gated on `browserRunnable`: a connector that declares credential
-    // capture takes its secret through the setup form and never opens the
-    // browser shell, so browser readiness does not apply to this entry.
-    plan.catalogDisposition === "static_secret_connect" &&
-      plan.setupModality === "static_secret" &&
-      staticSecretCredentialCaptureFromManifest(manifest) !== null,
+    hasUatStaticSecretSetup(plan, manifest, browserRunnable),
   ].includes(true);
 
   if (basePlan) {
@@ -249,11 +263,7 @@ function isUatExposablePlan(
     const listing = manifest.capabilities?.public_listing;
     const isDevelopment = listing?.tier === "development";
     if (isDevelopment) {
-      const hasValidSetup =
-        plan.catalogDisposition === "static_secret_connect" &&
-        plan.setupModality === "static_secret" &&
-        staticSecretCredentialCaptureFromManifest(manifest) !== null;
-      return hasValidSetup;
+      return hasUatStaticSecretSetup(plan, manifest, browserRunnable);
     }
   }
 
@@ -425,9 +435,7 @@ async function readinessByConnectorKey(
 ): Promise<ReadonlyMap<string, BrowserEnrollmentReadiness>> {
   const browserBound = templates.flatMap((manifest) => {
     const connectorKey = connectorKeyFromManifest(ctx, manifest);
-    return connectorKey && classifyConnectorIntentModality(manifest) === "browser_bound"
-      ? [connectorKey]
-      : [];
+    return connectorKey && classifyConnectorIntentModality(manifest) === "browser_bound" ? [connectorKey] : [];
   });
   const resolved = await ctx.readinessResolver.resolveMany(browserBound);
   return new Map(resolved.map((entry) => [entry.connector_key, entry]));
