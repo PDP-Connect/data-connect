@@ -28,11 +28,19 @@ export function withFixtureSourceDeclaration<T extends object>(manifest: T, opti
   } as T;
 }
 
-const REGISTRY_CONNECTOR_PREFIX = /^https?:\/\/[^/]+\/connectors\//;
-const NON_SLUG_CHARACTERS = /[^a-z0-9._-]/g;
+const NON_SLUG_CHARACTER = /[^a-z0-9._-]/;
 
-function fixtureSlugOf(content: Record<string, unknown>): string {
+/**
+ * Injective: two different connector keys never share a slug, so two fixtures never share a source identity.
+ * Every character outside `[a-z0-9._-]`, and a leading `.`, is written as `~<hex code point>~`. `~` is itself
+ * escaped, so an escape sequence cannot be forged by a plain character, and a key that is already a clean slug
+ * keeps its own name.
+ */
+export function fixtureSlugOf(content: Record<string, unknown>): string {
   const key = typeof content.connector_key === "string" ? content.connector_key : String(content.connector_id);
-  const tail = key.replace(REGISTRY_CONNECTOR_PREFIX, "");
-  return tail.replace(NON_SLUG_CHARACTERS, "-");
+  return Array.from(key, (character, index) =>
+    NON_SLUG_CHARACTER.test(character) || (index === 0 && character === ".")
+      ? `~${character.codePointAt(0)?.toString(16)}~`
+      : character
+  ).join("");
 }
