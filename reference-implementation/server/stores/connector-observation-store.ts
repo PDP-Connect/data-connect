@@ -28,7 +28,6 @@
  */
 
 import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged, writeTransaction } from "../../lib/db.ts";
-import { RECOVERY_ACTIONS } from "../../runtime/connector-gap-bounding.ts";
 import {
   type Diagnosis,
   isObservedFact,
@@ -163,30 +162,13 @@ function isSnapshot(value: unknown): value is ObservationSnapshot {
     isRecord(value) &&
     Array.isArray(value.facts) &&
     Array.isArray(value.defects) &&
-    typeof value.truncated === "boolean" &&
-    (value.connector_suggestions === undefined || isConnectorSuggestions(value.connector_suggestions))
+    typeof value.truncated === "boolean"
   );
 }
 
 /** Element-level check. It runs after the size bound, so a huge record is refused before it is validated. */
 function hasValidElements(snapshot: ObservationSnapshot): boolean {
   return snapshot.facts.every(isObservedFact) && snapshot.defects.every(isRuntimeDefect);
-}
-
-function isConnectorSuggestions(value: unknown): boolean {
-  return (
-    Array.isArray(value) &&
-    value.length <= 16 &&
-    value.every(
-      (suggestion: unknown) =>
-        isRecord(suggestion) &&
-        Object.keys(suggestion).every((key) => key === "attribution" || key === "action" || key === "origin") &&
-        suggestion.attribution === "connector" &&
-        typeof suggestion.action === "string" &&
-        RECOVERY_ACTIONS.has(suggestion.action) &&
-        (suggestion.origin === "skip_result" || suggestion.origin === "done_error")
-    )
-  );
 }
 
 function isDiagnosis(value: unknown): value is Diagnosis {
@@ -244,11 +226,11 @@ function encodeRecord(input: ConnectorObservationRunInput): {
   if (!(isSnapshot(input.snapshot) && isDiagnosis(input.diagnosis))) {
     throw invalid("connector observation snapshot and diagnosis must match the runtime shapes");
   }
-  const { facts, defects, truncated, connector_suggestions } = input.snapshot;
+  const { facts, defects, truncated } = input.snapshot;
   const { category, attribution, basis, contributing } = input.diagnosis;
   const payload = JSON.stringify({
     diagnosis: { attribution, basis, category, contributing },
-    snapshot: { defects, facts, truncated, ...(connector_suggestions === undefined ? {} : { connector_suggestions }) },
+    snapshot: { defects, facts, truncated },
   });
   if (Buffer.byteLength(payload, "utf8") > CONNECTOR_OBSERVATION_RECORD_MAX_BYTES) {
     throw new ConnectorObservationStoreError(

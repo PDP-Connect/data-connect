@@ -276,14 +276,12 @@ test("invalid traffic does not spend the budget that accepted facts need", () =>
   }
   assert.equal(run.snapshot().facts.length, 64);
   assert.equal(run.snapshot().truncated, false, "no valid fact was lost, so the record is not truncated");
-  assert.deepEqual(run.gateRecoveryHint("not_retriable", "skip_result"), { result: "authorized" });
 });
 
 test("a line that is not JSON never marks the record truncated, however long it is", () => {
   const { run } = harness();
   assert.equal(rejectedReason(run.acceptLine("x".repeat(5000))), "oversize");
   assert.equal(run.snapshot().truncated, false);
-  assert.deepEqual(run.gateRecoveryHint("not_retriable", "skip_result"), { result: "authorized" });
 });
 
 test("acceptWire gives the same outcome as acceptLine for a line that is not JSON", () => {
@@ -806,93 +804,4 @@ test("diagnosis output carries no action authority", () => {
     Object.keys(diagnosis).sort((a, b) => (a < b ? -1 : Number(a > b))),
     ["attribution", "basis", "category", "contributing"]
   );
-  assert.equal(run.gateRecoveryHint("refresh_credentials", "skip_result").result, "unsupported");
-});
-
-// ---------------------------------------------------------------------------
-// Recovery-hint gate
-// ---------------------------------------------------------------------------
-
-test("not_retriable and unknown hold; other hints are unsupported", () => {
-  const { run } = harness();
-  assert.deepEqual(run.gateRecoveryHint("not_retriable", "skip_result"), {
-    result: "authorized",
-  });
-  assert.deepEqual(run.gateRecoveryHint("unknown", "skip_result"), { result: "authorized" });
-  for (const hint of [
-    "refresh_credentials",
-    "manual_action_required",
-    "update_selector",
-    "retry_on_connector_upgrade",
-    "upstream_unblock",
-    "retry_by_runtime",
-  ]) {
-    assert.deepEqual(run.gateRecoveryHint(hint, "skip_result"), { result: "unsupported" });
-  }
-});
-
-test("an unsupported hint from a declarer adds one bounded hint_unsupported defect and never echoes the action", () => {
-  const { run } = harness();
-  run.gateRecoveryHint("refresh_credentials", "skip_result");
-  run.gateRecoveryHint(`SECRET-ACTION-${SECRET}`, "skip_result");
-  assert.deepEqual(run.snapshot().defects, [
-    {
-      class: "hint_unsupported",
-      count: 2,
-      id: "runtime:connector_defect:hint_unsupported",
-    },
-  ]);
-  assert.equal(JSON.stringify(run.snapshot()).includes(SECRET), false);
-});
-
-test("a non-declarer's unsupported hint adds no defect", () => {
-  const { run } = harness({ declared: false });
-  assert.deepEqual(run.gateRecoveryHint("manual_action_required", "skip_result"), {
-    result: "unsupported",
-  });
-  assert.deepEqual(run.snapshot().defects, []);
-});
-
-test("a truncated record blocks even a holding hint", () => {
-  const { run } = harness({ limits: { maxFacts: 64, maxPerWindow: 1000 } });
-  for (let i = 0; i < 65; i += 1) {
-    run.accept(waitExpired(`t${i}`));
-  }
-  assert.equal(run.snapshot().truncated, true);
-  assert.deepEqual(run.gateRecoveryHint("not_retriable", "skip_result"), {
-    reason: "truncated",
-    result: "blocked",
-  });
-  assert.deepEqual(run.gateRecoveryHint("unknown", "skip_result"), {
-    reason: "truncated",
-    result: "blocked",
-  });
-  assert.equal(
-    run.snapshot().defects.find((d) => d.class === "hint_unsupported")?.count,
-    2,
-    "Section 5.11 records unsupported hints even when truncation caused the denial"
-  );
-});
-
-test("connector auth facts never unlock a recovery hint", () => {
-  const { run } = harness();
-  run.accept(authFailure("a1", { rule: "password_rejected" }));
-  assert.deepEqual(run.diagnose(["a1"]).category, "auth_rejected");
-  assert.deepEqual(run.gateRecoveryHint("refresh_credentials", "skip_result"), {
-    result: "unsupported",
-  });
-});
-
-test("an unauthorized connector hint is recorded once per origin and action as a bounded suggestion", () => {
-  const { run } = harness();
-  assert.equal(run.snapshot().connector_suggestions, undefined);
-  run.gateRecoveryHint("refresh_credentials", "done_error");
-  run.gateRecoveryHint("refresh_credentials", "done_error");
-  run.gateRecoveryHint("manual_action_required", "skip_result");
-  run.gateRecoveryHint(`SECRET-ACTION-${SECRET}`, "skip_result");
-  assert.deepEqual(run.snapshot().connector_suggestions, [
-    { action: "refresh_credentials", attribution: "connector", origin: "done_error" },
-    { action: "manual_action_required", attribution: "connector", origin: "skip_result" },
-  ]);
-  assert.equal(JSON.stringify(run.snapshot()).includes(SECRET), false);
 });
