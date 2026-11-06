@@ -119,6 +119,7 @@ import {
   jsonPathForTopLevelField,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
   type TimeConstraint,
 } from "./record-filters.ts";
 import {
@@ -5468,7 +5469,8 @@ interface ValidatedQueryContext {
 
 function validateQueryCursors(
   requestParams: RequestParams,
-  expansions: ReturnType<typeof normalizeExpandRequest>
+  expansions: ReturnType<typeof normalizeExpandRequest>,
+  compiledFilters: readonly CompiledFilter[]
 ): { changesSince: ChangesSinceCursor | null; paginationCursor: PaginationCursor | null } {
   const changesSince =
     typeof requestParams.changes_since === "string" ? parseChangesSinceCursor(requestParams.changes_since) : null;
@@ -5482,6 +5484,7 @@ function validateQueryCursors(
   }
   if (changesSince !== null || paginationCursor?.session === "changes") {
     rejectListOnlyParamsForChangesFeed(requestParams);
+    rejectFiltersWithChangesFeed(compiledFilters);
   }
   if ((changesSince !== null || paginationCursor?.session === "changes") && expansions.length) {
     throw invalidQueryError("expand is not supported with changes_since", "invalid_expand");
@@ -5531,7 +5534,7 @@ async function validateQueryRecordsRequest(
     requestWarnings.push(buildLimitClampedWarning(requestedLimit));
   }
 
-  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions);
+  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, compiledFilters);
 
   return {
     changesSince,

@@ -335,6 +335,21 @@ export function compileRequestFilters(
   return compiled;
 }
 
+/**
+ * A filtered changes feed would have to report records that leave the filtered
+ * set, and the wire format has no entry for that: a tombstone means deletion and
+ * the record still exists. Serving the feed without exits leaves a client mirror
+ * stale while the watermark advances, so reject the combination instead.
+ */
+export function rejectFiltersWithChangesFeed(filters: readonly CompiledFilter[]): void {
+  if (filters.length) {
+    throw invalidQueryError(
+      "filter is not supported with changes_since: a filtered feed cannot report records that leave the filter. " +
+        "Re-read the filtered set in full, or use changes_since without filter"
+    );
+  }
+}
+
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export function passesRequestFilters(
   data: JsonObject | null,

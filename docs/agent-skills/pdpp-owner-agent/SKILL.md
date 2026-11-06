@@ -167,8 +167,8 @@ question. See `references/sync.md` for the full reference; the shape is:
    cursor (`next_cursor` while `has_more`) and field projection. Request only the fields
    you need.
 4. **Incremental sync.** On refresh, prefer `changes_since=<stored cursor>` (bootstrap
-   with `changes_since=beginning`), declared filters, and pagination over rescanning all
-   records. Records also arrive under `data`; persist the returned `next_changes_since`
+   with `changes_since=beginning`) and pagination over rescanning all records; do not
+   add `filter[...]` to a `changes_since` read (rejected, 400 `invalid_request`). Records also arrive under `data`; persist the returned `next_changes_since`
    cursor per stream/connection.
 5. **Periodic metadata refresh.** Re-fetch compact schema and stream metadata on a cadence so
    newly added streams and connections become visible without guessing.

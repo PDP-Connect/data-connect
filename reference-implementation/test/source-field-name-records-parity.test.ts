@@ -272,13 +272,18 @@ async function seedAndAssert(suffix: string): Promise<void> {
     ["child-1"]
   );
 
-  const changes = await queryRecords(
-    connectorId,
-    parentStream,
-    grant,
-    { changes_since: "beginning", filter: { "filter.key": "include" } },
-    manifest
+  // Filtered changes_since is rejected (no filter-exit representation); the unfiltered feed still reads literal keys.
+  await assert.rejects(
+    queryRecords(
+      connectorId,
+      parentStream,
+      grant,
+      { changes_since: "beginning", filter: { "filter.key": "include" } },
+      manifest
+    ),
+    { code: "invalid_request", message: /filter is not supported with changes_since/ }
   );
+  const changes = await queryRecords(connectorId, parentStream, grant, { changes_since: "beginning" }, manifest);
   assert.deepEqual(
     changes.data.map((row) => row.id),
     ["parent-1"]
