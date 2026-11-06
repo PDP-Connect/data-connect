@@ -112,3 +112,17 @@ test("connector-install mutation response still rejects a malformed status recor
     ConnectorInstallContractError
   );
 });
+
+test("connector-install catalog drops a mistyped cosmetic field without dropping the entry", () => {
+  const [first] = connectorInstallCatalogFixture.data;
+  assert.ok(first);
+  const parsed = parseConnectorInstallCatalogResponse({
+    ...connectorInstallCatalogFixture,
+    data: [{ ...first, display_name: 123, published_at: { when: "now" } }],
+  });
+  assert.equal(parsed.skipped, 0);
+  assert.equal(parsed.data.length, 1);
+  assert.equal(parsed.data[0]?.display_name, undefined);
+  assert.equal(parsed.data[0]?.published_at, undefined);
+  assert.equal(parsed.data[0]?.digest, first.digest);
+});

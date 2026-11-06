@@ -3,7 +3,11 @@
 
 import { canonicalConnectorKey } from "pdpp-reference-implementation/connection-setup-plan";
 import type { CatalogPublicTier, ConnectorCatalogEntry } from "./connection-catalog.ts";
-import type { ConnectorInstallCatalogEntry, ConnectorInstallStatus } from "./connector-install-contract.ts";
+import {
+  ConnectorInstallContractError,
+  type ConnectorInstallCatalogEntry,
+  type ConnectorInstallStatus,
+} from "./connector-install-contract.ts";
 
 export interface ConnectorInstallLifecycle {
   readonly catalog: ConnectorInstallCatalogEntry | null;
@@ -39,9 +43,10 @@ export interface ConnectorInstallRowModel {
  * e.g. `apple-contacts`). `canonicalConnectorKey` alone does not bridge this:
  * it only strips a registry URL prefix, so a manifest/catalog pair that
  * differs solely by separator silently misses the Map lookup below and
- * reports a real, published connector as "not_listed". Underscore and
- * hyphen are the only separators either side uses, so normalizing both to
- * hyphen is a safe, narrow fix scoped to this lookup -- it does not touch
+ * reports a real, published connector as "not_listed". Normalizing both
+ * spellings to hyphen is scoped to this lookup. If two catalog keys
+ * normalize alike, `selectCatalogTarget` offers no target for either rather
+ * than guessing. It does not touch
  * `canonicalConnectorKey` itself, which many other call sites rely on for
  * unrelated comparisons against manifest-spelled literals.
  */
@@ -53,24 +58,35 @@ function displayBindingName(binding: string): string {
   return binding.replaceAll(/[_-]+/g, " ");
 }
 
+/**
+ * Why a binding stops Install, from an explicit availability claim. A binding
+ * as the manifest declares it (`{ required: boolean }`) makes no claim and does
+ * not block. A claim that is present but unreadable (`available` is neither
+ * `true` nor `false`) blocks: the signal gates an action, so it fails closed.
+ */
 function explicitBindingBlockReason(bindings: Readonly<Record<string, unknown>>): string | null {
   const reasons: string[] = [];
   for (const [binding, value] of Object.entries(bindings)) {
+    const name = displayBindingName(binding);
     if (value === false) {
-      reasons.push(`${displayBindingName(binding)} is unavailable on this host.`);
+      reasons.push(`${name} is unavailable on this host.`);
       continue;
     }
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    if (typeof value !== "object" || value === null || Array.isArray(value) || !("available" in value)) {
       continue;
     }
     const availability = value as { available?: unknown; reason?: unknown };
+    if (availability.available === true) {
+      continue;
+    }
     if (availability.available !== false) {
+      reasons.push(`${name} availability could not be read.`);
       continue;
     }
     reasons.push(
       typeof availability.reason === "string" && availability.reason.trim()
         ? availability.reason.trim()
-        : `${displayBindingName(binding)} is unavailable on this host.`
+        : `${name} is unavailable on this host.`
     );
   }
   return reasons.length > 0 ? reasons.join(" ") : null;
@@ -96,13 +112,34 @@ export function shortConnectorDigest(digest: string | null): string | null {
   return `${algorithm}:${hash.slice(0, 10)}…${hash.slice(-6)}`;
 }
 
+/**
+ * The one catalog row that can be offered for a connector, or null when the
+ * rows are ambiguous: two connectors whose keys differ only by separator, or
+ * two latest rows with different digests. Offering whichever arrived last
+ * would install a package the owner was not shown, so no target is offered.
+ */
+function selectCatalogTarget(
+  connectorKey: string,
+  rows: readonly ConnectorInstallCatalogEntry[]
+): ConnectorInstallCatalogEntry | null {
+  const spellings = new Set(rows.map((row) => canonicalConnectorKey(row.connector_key.trim())));
+  const latest = rows.filter((row) => row.latest);
+  if (spellings.size > 1 || new Set(latest.map((row) => row.digest)).size > 1) {
+    console.warn(`connector install catalog: ambiguous package entries for "${connectorKey}"; no install target offered`);
+    return null;
+  }
+  return latest.at(-1) ?? rows[0] ?? null;
+}
+
 export function buildConnectorInstallLifecycleByConnector(
   catalog: readonly ConnectorInstallCatalogEntry[],
   status: readonly ConnectorInstallStatus[]
 ): Readonly<Record<string, ConnectorInstallLifecycle>> {
   const keyByIdentity = new Map<string, string>();
+  const rowsByConnector = new Map<string, ConnectorInstallCatalogEntry[]>();
   for (const catalogEntry of catalog) {
     const connectorKey = connectorLookupKey(catalogEntry.connector_key);
+    rowsByConnector.set(connectorKey, [...(rowsByConnector.get(connectorKey) ?? []), catalogEntry]);
     for (const identity of [catalogEntry.connector_key, catalogEntry.connector_id, catalogEntry.catalog_connector_id]) {
       if (identity) {
         keyByIdentity.set(connectorLookupKey(identity), connectorKey);
@@ -111,20 +148,20 @@ export function buildConnectorInstallLifecycleByConnector(
   }
 
   const lifecycleByConnector = new Map<string, ConnectorInstallLifecycle>();
-  for (const catalogEntry of catalog) {
-    const connectorKey = connectorLookupKey(catalogEntry.connector_key);
-    const previous = lifecycleByConnector.get(connectorKey);
-    if (!previous || catalogEntry.latest || !previous.catalog) {
-      lifecycleByConnector.set(connectorKey, {
-        catalog: catalogEntry,
-        installed: previous?.installed ?? null,
-      });
-    }
+  for (const [connectorKey, rows] of rowsByConnector) {
+    lifecycleByConnector.set(connectorKey, { catalog: selectCatalogTarget(connectorKey, rows), installed: null });
   }
   for (const installed of status) {
     const installedIdentity = connectorLookupKey(installed.connector_id);
     const connectorKey = keyByIdentity.get(installedIdentity) ?? installedIdentity;
     const previous = lifecycleByConnector.get(connectorKey);
+    // Two installed packages for one connector is a server inconsistency:
+    // offering Update against whichever row came last could replace the wrong one.
+    if (previous?.installed) {
+      throw new ConnectorInstallContractError(
+        `connector install status: more than one installed package maps to "${connectorKey}"; installed state is unknown.`
+      );
+    }
     lifecycleByConnector.set(connectorKey, {
       catalog: previous?.catalog ?? null,
       installed,

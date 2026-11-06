@@ -5,8 +5,16 @@
  * Wire types and boundary parsing for the owner connector-install API.
  *
  * The API's `bindings` values are intentionally retained as unknown records:
- * the snapshot defines the field but not its nested availability shape. The
- * presentation layer only treats an explicit `available: false` as a block.
+ * the routes pass through the manifest's `runtime_requirements.bindings`
+ * (`{ required: boolean }` per binding, spec-collection-profile.md), which
+ * claims nothing about availability. The presentation layer blocks Install only
+ * on an explicit availability claim (`false`, or an `available` field that is
+ * not `true`).
+ *
+ * Optional cosmetic strings (`display_name`, `published_at`, ...) of the wrong
+ * type are dropped without dropping the entry: skipping an entry hides a whole
+ * connector, which is worse than a missing label. Identity, digest and tier
+ * fields stay strict.
  */
 
 export type ConnectorInstallTier = "supported" | "preview" | "development";

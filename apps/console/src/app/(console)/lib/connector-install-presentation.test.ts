@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ConnectorCatalogEntry } from "./connection-catalog.ts";
 import {
+  ConnectorInstallContractError,
   parseConnectorInstallCatalogResponse,
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
@@ -233,4 +234,141 @@ test("no package state reads Not packaged yet", () => {
   assert.equal(registered.activationLabel, "Included");
   assert.equal(registered.action, null);
   assert.notEqual(connectorInstallRowModel(entry("slack"), none).activationLabel, "Not packaged yet");
+});
+
+// ── ambiguous package facts fail closed ───────────────────────────
+
+function latestTemplate() {
+  const template = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data.find(
+    (candidate) => candidate.latest && candidate.connector_key === "github"
+  );
+  assert.ok(template);
+  return template;
+}
+
+const OTHER_DIGEST = `sha256:${"e".repeat(64)}`;
+
+test("two catalog connectors whose keys differ only by separator offer no install target for either", () => {
+  const template = latestTemplate();
+  const lifecycle = buildConnectorInstallLifecycleByConnector(
+    [
+      { ...template, connector_id: "foo-bar", connector_key: "foo-bar" },
+      { ...template, connector_id: "foo_bar", connector_key: "foo_bar", digest: OTHER_DIGEST },
+    ],
+    []
+  );
+  const key = connectorLookupKey("foo-bar");
+  assert.equal(lifecycle[key]?.catalog ?? null, null, "the colliding key must not pick one digest by arrival order");
+  const model = connectorInstallRowModel(entry("foo-bar"), lifecycle[key] ?? { catalog: null, installed: null });
+  assert.equal(model.action, null);
+});
+
+test("an unambiguous catalog connector still matches a differently separated key", () => {
+  const template = latestTemplate();
+  const lifecycle = buildConnectorInstallLifecycleByConnector(
+    [{ ...template, connector_id: "foo-bar", connector_key: "foo-bar" }],
+    []
+  );
+  assert.equal(lifecycle[connectorLookupKey("foo_bar")]?.catalog?.digest, template.digest);
+});
+
+test("two latest rows with different digests for one connector offer no install target", () => {
+  const template = latestTemplate();
+  const lifecycle = buildConnectorInstallLifecycleByConnector(
+    [template, { ...template, digest: OTHER_DIGEST, version: "9.9.9" }],
+    []
+  );
+  assert.equal(lifecycle[connectorLookupKey(template.connector_key)]?.catalog ?? null, null);
+});
+
+test("a repeated latest row with the same digest is not ambiguous", () => {
+  const template = latestTemplate();
+  const lifecycle = buildConnectorInstallLifecycleByConnector([template, { ...template }], []);
+  assert.equal(lifecycle[connectorLookupKey(template.connector_key)]?.catalog?.digest, template.digest);
+});
+
+test("an ambiguous catalog entry keeps the installed package visible", () => {
+  const template = latestTemplate();
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  const lifecycle = buildConnectorInstallLifecycleByConnector(
+    [template, { ...template, digest: OTHER_DIGEST }],
+    [{ ...installed, connector_id: template.connector_id }]
+  );
+  const merged = lifecycle[connectorLookupKey(template.connector_key)];
+  assert.equal(merged?.catalog ?? null, null);
+  assert.equal(merged?.installed?.digest, installed.digest);
+});
+
+test("two installed rows for one connector fail instead of letting the last win", () => {
+  const catalog = parseConnectorInstallCatalogResponse(connectorInstallCatalogFixture).data;
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.throws(
+    () =>
+      buildConnectorInstallLifecycleByConnector(catalog, [
+        installed,
+        { ...installed, digest: OTHER_DIGEST, version: "2.0.0" },
+      ]),
+    (err: unknown) => err instanceof ConnectorInstallContractError && /more than one installed/i.test(err.message)
+  );
+});
+
+test("installed rows that reach one connector through different ids fail too", () => {
+  const template = latestTemplate();
+  const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
+  assert.ok(installed);
+  assert.throws(
+    () =>
+      buildConnectorInstallLifecycleByConnector(
+        [{ ...template, connector_id: "foo-bar", connector_key: "foo-bar" }],
+        [
+          { ...installed, connector_id: "foo-bar" },
+          { ...installed, connector_id: "foo_bar" },
+        ]
+      ),
+    ConnectorInstallContractError
+  );
+});
+
+// ── binding availability ──────────────────────────────────────────
+
+// The manifest declares `runtime_requirements.bindings` as `{ required: boolean }`
+// per binding (spec-collection-profile.md), and the install routes pass that
+// object through. It carries no availability claim, so it must not block Install.
+test("a binding as the manifest declares it ({ required }) does not block Install", () => {
+  const template = latestTemplate();
+  const model = connectorInstallRowModel(entry("github"), {
+    catalog: { ...template, bindings: { network: { required: true }, interactive: { required: false } } },
+    installed: null,
+  });
+  assert.equal(model.hostBlockReason, null);
+  assert.ok(model.action);
+});
+
+for (const [label, value] of [
+  ['"false"', "false"],
+  ["0", 0],
+  ["null", null],
+  ["an object", {}],
+] as const) {
+  test(`a binding whose available field is ${label} blocks Install instead of passing as available`, () => {
+    const template = latestTemplate();
+    const model = connectorInstallRowModel(entry("github"), {
+      catalog: { ...template, bindings: { filesystem: { available: value } } },
+      installed: null,
+    });
+    assert.equal(model.action, null);
+    assert.match(model.hostBlockReason ?? "", /filesystem availability could not be read/);
+  });
+}
+
+test("a binding that says available: true does not block Install", () => {
+  const template = latestTemplate();
+  const model = connectorInstallRowModel(entry("github"), {
+    catalog: { ...template, bindings: { filesystem: { available: true } } },
+    installed: null,
+  });
+  assert.equal(model.hostBlockReason, null);
+  assert.ok(model.action);
 });
