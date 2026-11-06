@@ -10,8 +10,11 @@ import type { SpineEventRecord } from "../lib/spine.ts";
 import type { RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { runConnector } from "../runtime/index.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
+import { closePostgresStorage, getStorageBackendKind } from "../server/postgres-storage.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 // Regression coverage for the live runtime path (reference-implementation/runtime/index.ts)
 // used by every real connector run, as distinct from the standalone
@@ -51,9 +54,11 @@ interface ClosableServer {
 }
 interface StartServerOptions {
   asPort?: number;
+  databaseUrl?: string;
   dbPath?: string;
   quiet?: boolean;
   rsPort?: number;
+  storageBackend?: "postgres";
 }
 const startServer = startServerUntyped as unknown as (opts: StartServerOptions) => Promise<ClosableServer>;
 
@@ -96,7 +101,7 @@ async function issueOwnerToken(asUrl: string, subjectId = "u1"): Promise<string>
       body: new URLSearchParams({ client_id: clientId }).toString(),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       method: "POST",
-    }
+    },
   );
   const approveResp = await fetch(`${asUrl}/device/approve`, {
     body: new URLSearchParams({ subject_id: subjectId, user_code: device.user_code }).toString(),
@@ -117,7 +122,7 @@ async function issueOwnerToken(asUrl: string, subjectId = "u1"): Promise<string>
 }
 
 function fakeAdmitRunConnection(
-  ownerSubjectIdDefault = "u1"
+  ownerSubjectIdDefault = "u1",
 ): (input: {
   connectorId: string;
   connectorInstanceId: string | null;
@@ -200,7 +205,7 @@ rl.on('line', (line) => {
   ${script}
 });
 `,
-    "utf8"
+    "utf8",
   );
   return connectorPath;
 }
@@ -241,7 +246,7 @@ test("runConnector commits the untouched sibling's checkpoint when the other str
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -273,7 +278,7 @@ test("runConnector commits the untouched sibling's checkpoint when the other str
     assert.deepEqual(stateBody.state, { sibling_a: { cursor: "sibling_a_cursor" } });
 
     const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
-      `${asUrl}/_ref/runs/${encodeURIComponent(result.run_id ?? "")}/timeline`
+      `${asUrl}/_ref/runs/${encodeURIComponent(result.run_id ?? "")}/timeline`,
     );
     const eventTypes = (runTimeline.data || []).map((event) => event.event_type);
     assert.ok(eventTypes.includes("run.state_advanced"), "expected the sibling commit to advance state");
@@ -312,7 +317,7 @@ test("runConnector withholds an unrelated DETAIL_COVERAGE shortfall during a cer
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 0, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -338,7 +343,7 @@ test("runConnector withholds an unrelated DETAIL_COVERAGE shortfall during a cer
     assert.deepEqual(stateBody.state, { sibling_a: { cursor: "sibling_a_cursor" } });
 
     const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
-      `${asUrl}/_ref/runs/${encodeURIComponent(result.run_id ?? "")}/timeline`
+      `${asUrl}/_ref/runs/${encodeURIComponent(result.run_id ?? "")}/timeline`,
     );
     const eventTypes = (runTimeline.data || []).map((event) => event.event_type);
     assert.ok(eventTypes.includes("run.stream_skipped"), "the coverage shortfall must be reported");
@@ -366,7 +371,7 @@ test("runConnector withholds the failed stream's cursor even when the child leak
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -451,7 +456,7 @@ test("runConnector withholds a manifest-declared PARENT state_stream shared with
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { code: 'stream_collection_failed', message: 'stream collection failed: child_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -530,7 +535,7 @@ test("runConnector rejects a state_stream-declared child that emits its own DETA
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { code: 'stream_collection_failed', message: 'stream collection failed: child_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -559,7 +564,7 @@ test("runConnector rejects a state_stream-declared child that emits its own DETA
     assert.deepEqual(
       stateBody.state ?? {},
       {},
-      "no checkpoint may advance once the connector violates the static state_stream contract, not even runtime_parent's own STATE"
+      "no checkpoint may advance once the connector violates the static state_stream contract, not even runtime_parent's own STATE",
     );
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
@@ -616,7 +621,7 @@ test("runConnector withholds every declared parent of a failed shared detail str
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 0, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -641,11 +646,11 @@ test("runConnector withholds every declared parent of a failed shared detail str
     assert.deepEqual(
       stateBody.state ?? {},
       { sibling_a: { cursor: "sibling_a_cursor" } },
-      "every declared parent of the failed detail stream is withheld — including parent_b, which got no live coverage report this run — while an unrelated sibling still commits"
+      "every declared parent of the failed detail stream is withheld — including parent_b, which got no live coverage report this run — while an unrelated sibling still commits",
     );
 
     const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
-      `${asUrl}/_ref/runs/${encodeURIComponent(runId)}/timeline`
+      `${asUrl}/_ref/runs/${encodeURIComponent(runId)}/timeline`,
     );
     const eventTypes = (runTimeline.data || []).map((event) => event.event_type);
     assert.ok(eventTypes.includes("run.failed"));
@@ -675,7 +680,7 @@ test("runConnector discards every staged checkpoint when DONE claims stream_coll
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -717,7 +722,7 @@ test("runConnector discards every staged checkpoint on an ordinary uncoded faile
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { message: 'boom', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -752,7 +757,7 @@ test("runConnector discards every staged checkpoint when the connector crashes w
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -803,7 +808,7 @@ test("runConnector withholds a stream's cursor after a retryable SKIP_RESULT on 
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
   rl.close();
   process.exit(0);
-`
+`,
   );
 
   try {
@@ -821,7 +826,7 @@ test("runConnector withholds a stream's cursor after a retryable SKIP_RESULT on 
     assert.equal(
       result.checkpoint_summary?.state_streams_committed,
       1,
-      "the stream that reported a retryable omission must not commit its cursor"
+      "the stream that reported a retryable omission must not commit its cursor",
     );
 
     const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
@@ -850,7 +855,7 @@ rl.on('line', (line) => {
   process.exit(0);
 });
 `,
-      "utf8"
+      "utf8",
     );
     const replay = (await runConnector({
       admitRunConnection: fakeAdmitRunConnection(),
@@ -873,12 +878,12 @@ rl.on('line', (line) => {
     assert.equal(replayStart.type, "START");
     assert.ok(
       replayStart.protocol_capabilities?.includes("DETAIL_COVERAGE_KEY_SETS"),
-      "START must advertise support before connectors emit empty_keys/unchanged_keys"
+      "START must advertise support before connectors emit empty_keys/unchanged_keys",
     );
     const replayStartState = replayStart.state;
     assert.ok(
       !("sibling_b" in (replayStartState ?? {})),
-      "the replay run must start sibling_b from its prior checkpoint"
+      "the replay run must start sibling_b from its prior checkpoint",
     );
 
     const afterReplay = (await (
@@ -914,7 +919,7 @@ test("runConnector withholds every staged cursor after a retryable SKIP_RESULT t
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
   rl.close();
   process.exit(0);
-`
+`,
   );
 
   try {
@@ -932,7 +937,7 @@ test("runConnector withholds every staged cursor after a retryable SKIP_RESULT t
     assert.equal(
       result.checkpoint_summary?.state_streams_committed,
       0,
-      "no staged cursor is proven clear of the omission"
+      "no staged cursor is proven clear of the omission",
     );
     const withheld = (result.known_gaps ?? []).filter((gap) => gap.kind === "checkpoint_withheld");
     assert.deepEqual(withheld.map((gap) => gap.stream).sort(), ["sibling_a", "sibling_b"]);
@@ -960,7 +965,7 @@ test("runConnector still commits a stream whose SKIP_RESULT is not retryable (co
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
   rl.close();
   process.exit(0);
-`
+`,
   );
 
   try {
@@ -1004,7 +1009,7 @@ test("a certified failure with committed siblings reports the scheduler's facts 
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 0, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -1025,7 +1030,7 @@ test("a certified failure with committed siblings reports the scheduler's facts 
       assert.equal(
         (result.checkpoint_summary as { commit_status?: string } | undefined)?.commit_status,
         "partially_committed",
-        `run ${run}: the sibling committed, the failed stream did not`
+        `run ${run}: the sibling committed, the failed stream did not`,
       );
       assert.equal(result.checkpoint_summary?.state_streams_committed, 1, `run ${run}`);
       const withheld = (result.known_gaps ?? []).find((gap) => gap.kind === "checkpoint_withheld");
@@ -1057,7 +1062,7 @@ test("a certified failure whose failed stream stages no cursor reports the failu
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 0, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
+`,
   );
 
   try {
@@ -1077,12 +1082,12 @@ test("a certified failure whose failed stream stages no cursor reports the failu
       assert.equal(
         (result.checkpoint_summary as { commit_status?: string } | undefined)?.commit_status,
         "committed",
-        `run ${run}: the one staged cursor is the sibling's and it committed`
+        `run ${run}: the one staged cursor is the sibling's and it committed`,
       );
       assert.deepEqual(
         gaps.filter((gap) => gap.kind === "checkpoint_withheld"),
         [],
-        `run ${run}: no staged cursor is withheld, so no checkpoint_withheld or checkpoint_stalled gap`
+        `run ${run}: no staged cursor is withheld, so no checkpoint_withheld or checkpoint_stalled gap`,
       );
       const skipGap = gaps.find((gap) => gap.kind === "skip_result");
       assert.equal(skipGap?.reason, "stream_collection_failed", `run ${run}: the failed stream stays reported`);
@@ -1094,82 +1099,116 @@ test("a certified failure whose failed stream stages no cursor reports the failu
   }
 });
 
-test("runConnector stores a child's buffered records before it commits the parent checkpoint of a certified failure", async () => {
-  // child_c maps to parent_a, and the connector stages parent_a's cursor while
-  // child_c's records are still buffered in the runtime (far under the batch
-  // size). A failed DONE does not flush, so a STATE that flushed only its own
-  // stream would let the certified-failure commit move parent_a past records
-  // that never reached the store: the next run starts after them and nothing
-  // replays them.
-  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-  const asUrl = `http://localhost:${server.asPort}`;
-  const rsUrl = `http://localhost:${server.rsPort}`;
-  const manifest = completeManifest("runtime-stream-isolation-child-flush-before-parent-commit-test", [
-    {
-      name: "parent_a",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-    },
-    {
-      coverage_strategy: "checkpoint_window",
-      name: "child_c",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      state_stream: "parent_a",
-    },
-    {
-      name: "sibling_b",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-    },
-  ]);
-  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-child-flush-before-parent-commit-"));
-  const connectorPath = writeConnectorStub(
-    tmpDir,
-    `
+const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
+
+// child_c maps to parent_a, and the connector stages parent_a's cursor while
+// child_c's records are still buffered in the runtime (far under the batch
+// size). A failed DONE does not flush, so a STATE that flushed only its own
+// stream would let the certified-failure commit move parent_a past records
+// that never reached the store: the next run starts after them and nothing
+// replays them.
+async function assertChildStoredBeforeParentCommit(
+  storage: Pick<StartServerOptions, "databaseUrl" | "dbPath" | "storageBackend">,
+  expectedBackend: "postgres" | "sqlite",
+): Promise<void> {
+  const server = await startServer({ asPort: 0, quiet: true, rsPort: 0, ...storage });
+  // Each acquired resource closes in its own finally, entered immediately
+  // after the acquisition, so a failure in any later setup step cannot leak it.
+  try {
+    assert.equal(getStorageBackendKind(), expectedBackend, "the run uses the backend under test");
+    const asUrl = `http://localhost:${server.asPort}`;
+    const rsUrl = `http://localhost:${server.rsPort}`;
+    const manifest = completeManifest("runtime-stream-isolation-child-flush-before-parent-commit-test", [
+      {
+        name: "parent_a",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+      },
+      {
+        coverage_strategy: "checkpoint_window",
+        name: "child_c",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        state_stream: "parent_a",
+      },
+      {
+        name: "sibling_b",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+      },
+    ]);
+    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-child-flush-before-parent-commit-"));
+    try {
+      const connectorPath = writeConnectorStub(
+        tmpDir,
+        `
   process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'child_c', key: 'c-1', data: { id: 'c-1' }, emitted_at: new Date().toISOString() }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'parent_a', cursor: { cursor: 'parent_a_cursor' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'stream_collection_failed', message: 'upstream 500' }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 1, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
   rl.close();
   process.exit(1);
-`
-  );
+`,
+      );
 
-  try {
-    const registerResp = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(manifest),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
-    });
-    assert.equal(registerResp.status, 201);
-    const ownerToken = await issueOwnerToken(asUrl);
+      const registerResp = await fetch(`${asUrl}/connectors`, {
+        body: JSON.stringify(manifest),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(registerResp.status, 201);
+      const ownerToken = await issueOwnerToken(asUrl);
 
-    const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
-    assert.equal(result.status, "failed");
-    assert.equal(result.checkpoint_summary?.state_streams_committed, 1, "parent_a is unaffected by sibling_b");
+      const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+      assert.equal(result.status, "failed");
+      assert.equal(result.checkpoint_summary?.state_streams_committed, 1, "parent_a is unaffected by sibling_b");
 
-    const recordsResp = await fetch(
-      `${rsUrl}/v1/streams/child_c/records?connector_id=${encodeURIComponent(manifest.connector_id)}`,
-      { headers: { Authorization: `Bearer ${ownerToken}` } }
-    );
-    const records = (await recordsResp.json()) as { data?: { id?: string }[] };
-    assert.deepEqual(
-      (records.data ?? []).map((record) => record.id),
-      ["c-1"],
-      "the child's record is stored before the parent cursor that passes it commits"
-    );
+      const recordsResp = await fetch(
+        `${rsUrl}/v1/streams/child_c/records?connector_id=${encodeURIComponent(manifest.connector_id)}`,
+        { headers: { Authorization: `Bearer ${ownerToken}` } },
+      );
+      const records = (await recordsResp.json()) as { data?: { id?: string }[] };
+      assert.deepEqual(
+        (records.data ?? []).map((record) => record.id),
+        ["c-1"],
+        "the child's record is stored before the parent cursor that passes it commits",
+      );
 
-    const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
-      `${asUrl}/_ref/runs/${encodeURIComponent(result.run_id ?? "")}/timeline`
-    );
-    const eventTypes = (runTimeline.data || []).map((event) => `${event.event_type}:${event.stream_id ?? ""}`);
-    const ingested = eventTypes.indexOf("run.batch_ingested:child_c");
-    const advanced = eventTypes.indexOf("run.state_advanced:parent_a");
-    assert.ok(ingested >= 0, "the child's batch was ingested");
-    assert.ok(advanced > ingested, "the child's batch is ingested before the parent cursor advances");
+      const { body: runTimeline } = await fetchJson<TraceTimelineBody>(
+        `${asUrl}/_ref/runs/${encodeURIComponent(result.run_id ?? "")}/timeline`,
+      );
+      const eventTypes = (runTimeline.data || []).map((event) => `${event.event_type}:${event.stream_id ?? ""}`);
+      const ingested = eventTypes.indexOf("run.batch_ingested:child_c");
+      const advanced = eventTypes.indexOf("run.state_advanced:parent_a");
+      assert.ok(ingested >= 0, "the child's batch was ingested");
+      assert.ok(advanced > ingested, "the child's batch is ingested before the parent cursor advances");
+    } finally {
+      rmSync(tmpDir, { force: true, recursive: true });
+    }
   } finally {
-    rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);
   }
+}
+
+test("runConnector stores a child's buffered records before it commits the parent checkpoint of a certified failure", async () => {
+  await assertChildStoredBeforeParentCommit({ dbPath: ":memory:" }, "sqlite");
 });
+
+if (POSTGRES_URL) {
+  test("runConnector stores a child's buffered records before it commits the parent checkpoint of a certified failure (Postgres)", async () => {
+    await withTemporaryPostgresDatabase(
+      {
+        closeConnections: closePostgresStorage,
+        connectionString: POSTGRES_URL,
+        databaseName: "pdpp_test_child_flush_before_parent_commit",
+      },
+      (databaseUrl) => assertChildStoredBeforeParentCommit({ databaseUrl, storageBackend: "postgres" }, "postgres"),
+    );
+  });
+} else {
+  test("certified-failure child flush ordering on Postgres (skipped: PDPP_TEST_POSTGRES_URL unset)", {
+    skip: true,
+  }, () => {
+    // See the SQLite proof above and the repo's Postgres test convention.
+  });
+}

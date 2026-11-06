@@ -5564,9 +5564,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // flushing only `stateStream` would let a later commit outrun them.
       // Collection Profile §5.3 ("persists STATE only after preceding records
       // are durably written") names all preceding records, not one stream's.
-      // Cost: with `k` buffered streams and STATE under BATCH_SIZE records, a
-      // STATE can make up to `k` ingest POSTs instead of 1. STATE about every
-      // 1000 records, above BATCH_SIZE, flushes the same batches as before.
+      // Cost: batches are per stream, so a STATE can now flush the partial
+      // batches of every buffered stream, not only its own. With `k` buffered
+      // streams and STATE under BATCH_SIZE records, that is up to `k` ingest
+      // POSTs instead of 1. Streams that interleave records between STATEs
+      // pay this even when STATE is infrequent.
       await flushAll();
       // Transient manifest drift: this stream's batch was rejected as
       // not_found for a manifest-declared stream and recorded as a per-stream
