@@ -557,12 +557,12 @@ function listKindForDisplayName(displayName: string, kind: string): string | nul
   }
   // Whole-label containment alone reads the owner's own name for a connection
   // as unrelated to the connector whenever the manifest spells the product more
-  // fully than he does. `peregrine Codex` does not contain `OpenAI Codex CLI`,
-  // so /sources rendered "peregrine Codex OpenAI Codex CLI" — the connector
+  // fully than he does. `workstation Codex` does not contain `OpenAI Codex CLI`,
+  // so /sources rendered "workstation Codex OpenAI Codex CLI" — the connector
   // named twice, once in his words and once in the registry's.
   //
   // Matching on any MEANINGFUL word fixes that without hiding a kind the name
-  // genuinely omits: `peregrine` shares no word with `Signal Desktop`, so that
+  // genuinely omits: `workstation` shares no word with `Signal Desktop`, so that
   // connection still gets its kind and stays legible.
   const displayWords = new Set(display.split(" "));
   const kindWords = kindLabel.split(" ").filter((word) => word.length > 2 && !GENERIC_KIND_WORDS.has(word));
