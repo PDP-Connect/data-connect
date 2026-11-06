@@ -17,12 +17,9 @@ import { DatabaseSync } from "node:sqlite";
 import {
   type ConnectorProtocolCapability,
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
-  HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
-  OBSERVATION_CAPABILITY,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
-  STREAM_EVIDENCE_CAPABILITY,
   unsupportedRequiredProtocolCapabilities,
   validateRuntimeContinuationFact,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
@@ -93,9 +90,12 @@ import { cursorAuditFact } from "./cursor-audit-fact.ts";
 import { describeCursorBandViolation, evaluateCursorBand } from "./cursor-band-contiguity.ts";
 import { declaredReasonTokensFor } from "./declared-reason-tokens.ts";
 import { createDetailGapPageReader, validateDetailGapsPageRequest } from "./detail-gap-paging.ts";
+import { normalizeBindingDeclarations, planBindingPlacement, startBindingsFor } from "./binding-declarations.ts";
 import {
   collectionProfileDeclarationProblem,
+  PROTOCOL_CAPABILITY_UNSUPPORTED_FAILURE_REASON,
   readCollectionProfileDeclaration,
+  REFERENCE_COLLECTION_PROFILE_SUPPORT,
 } from "./collection-profile-support.ts";
 import type { DoneError } from "./done-validators.ts";
 import {
@@ -207,14 +207,6 @@ type ScopeByStream = Map<string, StreamScope>;
 interface AttachmentOutcome {
   object: string;
   [key: string]: unknown;
-}
-
-/** Runtime-advertised child bindings (Collection Profile START.bindings). */
-interface AvailableBindings {
-  browser: Record<string, never>;
-  filesystem: Record<string, never>;
-  interactive?: Record<string, never>;
-  network: Record<string, never>;
 }
 
 /** RS ingest response, after `readIngestResponse` proves the counters and receipt vector. */
@@ -935,18 +927,6 @@ function buildScopeFields(
     streamScope.time_range && manifestStream?.consent_time_field ? [manifestStream.consent_time_field] : [];
 
   return appendUniqueFields(streamScope.fields, [...requiredFields, ...primaryKeyFields, ...timeRangeFields]);
-}
-
-function buildAvailableBindings(onInteraction: unknown): AvailableBindings {
-  // In this reference runtime, connectors run as local Node child processes
-  // with full filesystem access by virtue of being child processes. We
-  // advertise `filesystem` so file-based connectors can declare it as a
-  // required binding per the Collection Profile spec.
-  const bindings: AvailableBindings = { browser: {}, filesystem: {}, network: {} };
-  if (typeof onInteraction === "function") {
-    bindings.interactive = {};
-  }
-  return bindings;
 }
 
 // Strict, index-validating, oracle-tested parser (test/read-ingest-response-oracle.test.ts).
@@ -2602,15 +2582,13 @@ export function buildBrowserSurfaceLaunchEnv({
 
 /**
  * Protocol capabilities this runtime implements, listed in
- * START.protocol_capabilities. It accepts DETAIL_COVERAGE empty_keys and
- * unchanged_keys, validates STREAM_EVIDENCE and accepts OBSERVATION (Section
- * 5.10). It has no BLOB transport, so it does not list it.
+ * START.protocol_capabilities. Key-set extension credit rules are not part of
+ * portable coverage, so DETAIL_COVERAGE_KEY_SETS is omitted: connectors use
+ * their negotiated base-profile fallback. BLOB is required and unsupported,
+ * so a connector requiring it is refused before spawn.
  */
-const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
-  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
-  OBSERVATION_CAPABILITY,
-  STREAM_EVIDENCE_CAPABILITY,
-];
+const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] =
+  REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities;
 
 /** Type of a Collection Profile 0.2.0 OBSERVATION message (Section 5.10). */
 const OBSERVATION_MESSAGE_TYPE = "OBSERVATION";
@@ -2625,46 +2603,25 @@ function isObservationMessage(value: unknown): boolean {
 }
 
 /**
- * Declared capabilities this runtime starts a connector with although it does
- * not implement them. BLOB is a runtime-specific extension (Collection Profile
- * Section 7). chatgpt and anthropic declare it but emit BLOB only for an item
- * over the inline cap, so most of their runs never send one. Such a run
- * completes; a run that does send BLOB fails at that line as an unknown
- * message type. BLOB stays out of START until this runtime implements it.
- */
-const SPAWN_TOLERATED_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [HOST_BLOB_CAPABILITY];
-
-/**
  * Pre-spawn capability gate (Collection Profile Sections 3.4 and 4). An
  * absent `protocol_capabilities` declares none. A malformed list or an unknown
  * name fails closed, and so does a required capability this runtime does not
- * implement, except BLOB (see SPAWN_TOLERATED_PROTOCOL_CAPABILITIES). An
- * advisory capability never blocks the run.
+ * implement. An advisory capability never blocks the run.
  */
+function protocolCapabilityRefusal(message: string): Error {
+  return Object.assign(new Error(message), { failure_reason: PROTOCOL_CAPABILITY_UNSUPPORTED_FAILURE_REASON });
+}
+
 function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
   const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;
   if (!isConnectorProtocolCapabilityArray(declared)) {
-    throw new Error("Connector manifest protocol_capabilities must be an array of known capability names");
+    throw protocolCapabilityRefusal("Connector manifest protocol_capabilities must be an array of known capability names");
   }
-  const unsupported = unsupportedRequiredProtocolCapabilities(declared, [
-    ...RUNTIME_PROTOCOL_CAPABILITIES,
-    ...SPAWN_TOLERATED_PROTOCOL_CAPABILITIES,
-  ]);
+  const unsupported = unsupportedRequiredProtocolCapabilities(declared, RUNTIME_PROTOCOL_CAPABILITIES);
   if (unsupported.length > 0) {
-    throw new Error(
+    throw protocolCapabilityRefusal(
       `Connector requires protocol capabilities this runtime does not support: ${unsupported.join(", ")}`
     );
-  }
-}
-
-function validateRequiredRuntimeBindings(
-  requiredBindings: Record<string, { required?: boolean }>,
-  availableBindings: AvailableBindings
-): void {
-  for (const [binding, req] of Object.entries(requiredBindings)) {
-    if (req.required && !(binding in availableBindings)) {
-      throw new Error(`Runtime cannot satisfy required binding: ${binding}`);
-    }
   }
 }
 
@@ -3074,14 +3031,18 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   });
   const resolvedConnectorInstanceId = admittedConnection.connectorInstanceId;
 
-  // Check binding requirements
-  const requiredBindings = manifest.runtime_requirements?.bindings || {};
-  const availableBindings = buildAvailableBindings(onInteraction);
-
-  validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  // Section 3.3: a required binding this runtime cannot supply is refused before spawn.
+  const bindingInstances = normalizeBindingDeclarations(manifest.runtime_requirements?.bindings);
+  const availableBindings = startBindingsFor(bindingInstances, planBindingPlacement(bindingInstances));
+  // Section 3.4: an INTERACTION.kind must be declared in capabilities.human_interaction.
+  const declaredHumanInteractionValues = (manifest as { capabilities?: { human_interaction?: unknown } }).capabilities
+    ?.human_interaction;
+  const declaredHumanInteraction: ReadonlySet<unknown> = new Set(
+    Array.isArray(declaredHumanInteractionValues) ? declaredHumanInteractionValues : []
+  );
   const declarationProblem = collectionProfileDeclarationProblem(manifest as unknown as Record<string, unknown>);
   if (declarationProblem !== null) {
-    throw new Error(`Connector manifest ${declarationProblem}`);
+    throw protocolCapabilityRefusal(`Connector manifest ${declarationProblem}`);
   }
   validateRequiredProtocolCapabilities(manifest);
   const profileDeclaration = readCollectionProfileDeclaration(manifest as unknown as Record<string, unknown>);
@@ -6382,8 +6343,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const interactionRequestId = msg.request_id as string;
       const interactionTimeoutSeconds = msg.timeout_seconds as number | null | undefined;
       const interactionStream = (msg.stream as string | undefined) || null;
+      if (!declaredHumanInteraction.has(msg.kind)) {
+        throw new Error(`Connector emitted INTERACTION.kind not declared in capabilities.human_interaction: ${msg.kind}`);
+      }
       if (typeof onInteraction !== "function") {
-        throw new Error("Connector emitted INTERACTION but START.bindings omitted interactive");
+        throw new Error("Connector emitted INTERACTION but no interaction handler is configured");
       }
       if (pendingInteraction) {
         // Protocol violation

@@ -11,7 +11,13 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { BindingDeclarationError } from "../runtime/binding-declarations.ts";
+import { getConnectorManifest } from "../server/auth.ts";
+import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
+
+const DUPLICATE_OBJECT_KEY = /repeats object key/;
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -76,8 +82,9 @@ async function registerConnectorManifest(asUrl: string, manifest: unknown): Prom
 }
 
 function makeManifest(runtimeRequirements: unknown) {
-  return {
-    connector_id: "https://registry.pdpp.test/connectors/runtime-requirements-fixture",
+  return withFixtureSourceDeclaration({
+    connector_id: "runtime-requirements-fixture",
+    connector_key: "runtime-requirements-fixture",
     display_name: "Runtime requirements fixture",
     protocol_version: "0.1.0",
     runtime_requirements: runtimeRequirements,
@@ -99,7 +106,7 @@ function makeManifest(runtimeRequirements: unknown) {
       },
     ],
     version: "0.1.0",
-  };
+  });
 }
 
 test("valid browser runtime binding is accepted", async () => {
@@ -122,7 +129,7 @@ test("unsupported runtime binding is rejected", async () => {
     assert.ok(hasErrorBody(body));
     assert.equal(body.error.code, "invalid_request");
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-    assert.match(body.error.message, /unsupported keys: toaster/u);
+    assert.match(body.error.message, /toaster must have required property 'kind'/u);
   });
 });
 
@@ -136,6 +143,77 @@ test("runtime binding required flag must be boolean", async () => {
     assert.ok(hasErrorBody(body));
     assert.equal(body.error.code, "invalid_request");
     // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-    assert.match(body.error.message, /browser\.required must be a boolean/u);
+    assert.match(body.error.message, /browser\.required must be boolean/u);
+  });
+});
+
+const RAW_KEY_CONNECTOR = "raw-binding-keys";
+
+/**
+ * Valid registration for the raw-key tests: the operational key is a slug and
+ * the source identity is a distinct absolute URI. A URI-only `connector_id`
+ * registers with a source-declaration error (sourceId must be an absolute URI)
+ * or stores a URL connector_key that the read path rejects, so neither is a
+ * usable control.
+ */
+function makeRawBindingKeysManifest() {
+  return withFixtureSourceDeclaration({
+    ...makeManifest({ bindings: { network: { required: false } } }),
+    connector_id: RAW_KEY_CONNECTOR,
+    connector_key: RAW_KEY_CONNECTOR,
+    manifest_uri: `https://registry.pdpp.test/connectors/${RAW_KEY_CONNECTOR}`,
+  });
+}
+
+test("registration rejects duplicate binding keys in the raw HTTP body before persistence", async () => {
+  await withHarness(async ({ asUrl }) => {
+    const manifest = makeRawBindingKeysManifest();
+    const valid = JSON.stringify(manifest);
+    const duplicate = valid.replace(
+      '"network":{"required":false}',
+      '"network":{"required":true},"network":{"required":false}'
+    );
+    assert.notEqual(duplicate, valid, "the request must retain both raw object keys");
+    const response = await fetch(`${asUrl}/connectors`, {
+      body: duplicate,
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(response.status, 400);
+    assert.match(await response.text(), DUPLICATE_OBJECT_KEY);
+    assert.equal(await getConnectorManifest(manifest.connector_id), null, "a rejected declaration is not persisted");
+    const baseline = await registerConnectorManifest(asUrl, manifest);
+    assert.equal(baseline.status, 201, "the same declaration without duplicate keys must register");
+  });
+});
+
+test("stored manifest reads reject duplicate raw keys before JSON parsing loses them", async () => {
+  await withHarness(async ({ asUrl }) => {
+    const manifest = makeRawBindingKeysManifest();
+    const registered = await registerConnectorManifest(asUrl, manifest);
+    assert.equal(registered.status, 201);
+    try {
+      assert.ok(await getConnectorManifest(manifest.connector_id));
+    } catch (error: unknown) {
+      assert.fail(
+        `valid stored fixture must load: ${error instanceof Error ? String(error.cause ?? error) : String(error)}`
+      );
+    }
+    const valid = JSON.stringify(manifest);
+    const duplicate = valid.replace(
+      '"network":{"required":false}',
+      '"network":{"required":true},"network":{"required":false}'
+    );
+    assert.notEqual(duplicate, valid);
+    getDb().prepare("UPDATE connectors SET manifest = ? WHERE connector_id = ?").run(duplicate, manifest.connector_id);
+    await assert.rejects(
+      () => getConnectorManifest(manifest.connector_id),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.ok(error.cause instanceof BindingDeclarationError);
+        assert.equal(error.cause.code, "duplicate_json_key");
+        return true;
+      }
+    );
   });
 });

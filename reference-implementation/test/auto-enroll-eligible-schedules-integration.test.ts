@@ -31,6 +31,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const NOW = "2026-08-16T00:00:00.000Z";
@@ -42,34 +43,37 @@ const NOW = "2026-08-16T00:00:00.000Z";
 // stored it under (matching how `canonicalConnectorKey` derives short keys
 // from `https://registry.pdpp.dev/connectors/<slug>` in production).
 async function registerConnectorWithKey(slug: string): Promise<string> {
-  const manifest = {
-    capabilities: {
-      auth: { kind: "env", required: [] },
-      public_listing: { tier: "supported" },
-      refresh_policy: {
-        background_safe: true,
-        interaction_posture: "none",
-        rationale: "Synthetic manifest for the getSchedule active-connection filter contract.",
-        recommended_interval_seconds: 3600,
-        recommended_mode: "automatic",
+  const manifest = withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        auth: { kind: "env", required: [] },
+        public_listing: { tier: "supported" },
+        refresh_policy: {
+          background_safe: true,
+          interaction_posture: "none",
+          rationale: "Synthetic manifest for the getSchedule active-connection filter contract.",
+          recommended_interval_seconds: 3600,
+          recommended_mode: "automatic",
+        },
       },
+      connector_id: slug,
+      display_name: slug,
+      manifest_uri: `https://registry.pdpp.dev/connectors/${slug}`,
+      protocol_version: "0.1.0",
+      runtime_requirements: {},
+      streams: [
+        {
+          name: "records",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: `https://registry.pdpp.dev/connectors/${slug}`,
-    display_name: slug,
-    manifest_uri: `https://registry.pdpp.dev/connectors/${slug}`,
-    protocol_version: "0.1.0",
-    runtime_requirements: {},
-    streams: [
-      {
-        name: "records",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: `https://registry.pdpp.dev/connectors/${slug}` }
+  );
   const connectorId = await registerConnector(manifest);
   return canonicalConnectorKey(connectorId) ?? connectorId;
 }
@@ -129,39 +133,42 @@ async function seedSchedule({ connectorId, connectorInstanceId }: SeedScheduleOp
 const TEST_ENV_KEY = "TEST_AUTO_ENROLL_TOKEN";
 
 function testManifest(recommendedMode: "automatic" | "manual" = "automatic"): Record<string, unknown> {
-  return {
-    capabilities: {
-      auth: { kind: "env", required: [TEST_ENV_KEY] },
-      public_listing: { tier: "supported" },
-      // Mode is DERIVED from these facts, so the synthetic manifest has to
-      // declare a coherent pair rather than just asserting a mode string:
-      // the manual variant is an interactive-login connector that has not
-      // declared session persistence (the Chase/USAA shape), and the
-      // automatic variant needs no per-run owner gesture.
-      refresh_policy: {
-        background_safe: recommendedMode === "automatic",
-        interaction_posture: recommendedMode === "automatic" ? "none" : "otp_likely",
-        rationale: "Synthetic manifest for the scheduler integration contract.",
-        recommended_interval_seconds: 3600,
-        recommended_mode: recommendedMode,
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        auth: { kind: "env", required: [TEST_ENV_KEY] },
+        public_listing: { tier: "supported" },
+        // Mode is DERIVED from these facts, so the synthetic manifest has to
+        // declare a coherent pair rather than just asserting a mode string:
+        // the manual variant is an interactive-login connector that has not
+        // declared session persistence (the Chase/USAA shape), and the
+        // automatic variant needs no per-run owner gesture.
+        refresh_policy: {
+          background_safe: recommendedMode === "automatic",
+          interaction_posture: recommendedMode === "automatic" ? "none" : "otp_likely",
+          rationale: "Synthetic manifest for the scheduler integration contract.",
+          recommended_interval_seconds: 3600,
+          recommended_mode: recommendedMode,
+        },
       },
+      connector_id: `test-auto-enroll-${recommendedMode}`,
+      display_name: `Test auto-enroll (${recommendedMode})`,
+      manifest_uri: `https://registry.pdpp.dev/connectors/test-auto-enroll-${recommendedMode}`,
+      protocol_version: "0.1.0",
+      runtime_requirements: {},
+      streams: [
+        {
+          name: "records",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
     },
-    connector_id: `https://registry.pdpp.dev/connectors/test-auto-enroll-${recommendedMode}`,
-    display_name: `Test auto-enroll (${recommendedMode})`,
-    manifest_uri: `https://registry.pdpp.dev/connectors/test-auto-enroll-${recommendedMode}`,
-    protocol_version: "0.1.0",
-    runtime_requirements: {},
-    streams: [
-      {
-        name: "records",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+    { sourceId: `https://registry.pdpp.dev/connectors/test-auto-enroll-${recommendedMode}` }
+  );
 }
 
 function withTmpDb(fn: () => Promise<void>): () => Promise<void> {
@@ -281,7 +288,7 @@ test(
 );
 
 test(
-  "a manual-default manifest does not auto-enroll but accepts an explicit owner schedule",
+  "a background-unsafe manual manifest neither auto-enrolls nor accepts an enabled owner schedule",
   withTmpDb(async () => {
     const manifest = testManifest("manual");
     const connectorId = manifest.connector_id as string;
@@ -293,6 +300,30 @@ test(
       listConnectors: buildListConnectors(manifest),
     });
     assert.equal(summary.enrolled, 0, "manual-default connectors never auto-enroll on boot");
+    assert.equal(await controller.getSchedule(connectorId), null);
+
+    await assert.rejects(controller.upsertSchedule(connectorId, { enabled: true, interval_seconds: 21_600 }), {
+      code: "invalid_request",
+      message: "Connector refresh policy is not background-safe; automatic scheduling is disabled.",
+    });
+    assert.equal(await controller.getSchedule(connectorId), null, "rejected scheduling must not persist a row");
+  })
+);
+
+test(
+  "a background-safe connector accepts an explicit owner schedule when default enrollment is disabled",
+  withTmpDb(async () => {
+    const manifest = testManifest();
+    const connectorId = manifest.connector_id as string;
+    await registerConnector(manifest);
+    const controller = createController({});
+    const summary = await autoEnrollEligibleSchedules({
+      controller,
+      enabled: false,
+      env: { [TEST_ENV_KEY]: "integration-token" },
+      listConnectors: buildListConnectors(manifest),
+    });
+    assert.equal(summary.enrolled, 0, "disabled default enrollment must not create a schedule");
     assert.equal(await controller.getSchedule(connectorId), null);
 
     const result = await controller.upsertSchedule(connectorId, {

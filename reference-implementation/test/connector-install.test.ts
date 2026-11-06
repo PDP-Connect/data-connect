@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -21,6 +22,7 @@ import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { validateConnectorManifest } from "../server/connector-manifest-validation.ts";
 
 import {
   type ConnectorCatalogEntry,
@@ -62,6 +64,7 @@ const RE_SYMBOLIC_LINK = /symbolic-link/;
 const RE_UPDATE_FAILED = /crashed while staging update/;
 const RE_UPDATE_TARGET_MISSING = /no verified update target/;
 const RE_REGISTRATION_FAILED = /manifest registration failed/;
+const RE_LOCAL_EXPAND_INVALID = /query\.expand.*must match a same-stream relationships\[\] entry/;
 const require = createRequire(import.meta.url);
 async function waitFor(condition: () => boolean, timeoutMs = 5000): Promise<void> {
   const started = Date.now();
@@ -85,6 +88,43 @@ const entry: ConnectorCatalogEntry = {
   tier: "supported",
   version: "1.0.0",
 };
+
+test("adding a developer source rejects invalid query.expand before publishing local source state", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-local-profile-validation-"));
+  const sourceRoot = join(dataDir, "candidate");
+  try {
+    const profile = JSON.parse(
+      readFileSync(new URL("./fixtures/collection-profiles/github.json", import.meta.url), "utf8")
+    ) as Record<string, unknown>;
+    // The authoritative validator accepts the unmodified profile. This test
+    // changes only the semantic contract that shallow local checks miss.
+    validateConnectorManifest(profile);
+    assert.ok(Array.isArray(profile.streams));
+    const firstStream = profile.streams[0] as Record<string, unknown>;
+    firstStream.query = { expand: [{ name: "missing_relationship" }] };
+    assert.throws(() => validateConnectorManifest(profile), RE_LOCAL_EXPAND_INVALID);
+
+    mkdirSync(join(sourceRoot, "profile"), { recursive: true });
+    mkdirSync(join(sourceRoot, "dist"));
+    writeFileSync(join(sourceRoot, "profile", "collection-profile.json"), JSON.stringify(profile));
+    writeFileSync(join(sourceRoot, "dist", "collection-profile.mjs"), "export {};\n");
+    const localSourceStore = createFileLocalConnectorSourceStore(dataDir);
+    const service = createConnectorInstallService({
+      dataDir,
+      localSourceStore,
+      registerManifest: async (manifest) => {
+        validateConnectorManifest(manifest);
+      },
+      store: createFileConnectorInstallStore(dataDir),
+    });
+    const { addLocalSource } = service;
+    assert.ok(addLocalSource);
+    await assert.rejects(() => addLocalSource(sourceRoot), RE_LOCAL_EXPAND_INVALID);
+    assert.deepEqual(await localSourceStore.list(), [], "a rejected profile must not be published as a local source");
+  } finally {
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
 
 test("pinned catalog schema accepts binding features and rejects unknown binding fields", () => {
   const catalog = {
@@ -148,16 +188,16 @@ test("owner local-source state lives in PDPP_DATA_DIR even when PDPP_CONNECTOR_P
   try {
     mkdirSync(join(sourceRoot, "profile"));
     mkdirSync(join(sourceRoot, "dist"));
+    const profile = JSON.parse(
+      readFileSync(new URL("./fixtures/collection-profiles/github.json", import.meta.url), "utf8")
+    ) as Record<string, unknown>;
+    profile.connector_id = "https://vendor.example/connectors/preload-split-fixture";
+    profile.manifest_uri = profile.connector_id;
+    profile.connector_key = "preload-split-fixture";
+    profile.version = "0.1.0";
     writeFileSync(
       join(sourceRoot, "profile", "collection-profile.json"),
-      JSON.stringify({
-        connector_id: "https://registry.pdpp.dev/connectors/preload-split-fixture",
-        connector_key: "preload-split-fixture",
-        display_name: "Preload split fixture",
-        runtime_requirements: { bindings: { network: { required: true } } },
-        streams: [{ name: "items" }],
-        version: "0.1.0",
-      })
+      JSON.stringify(profile)
     );
     writeFileSync(join(sourceRoot, "dist", "collection-profile.mjs"), "export default {};\n");
 
@@ -579,6 +619,74 @@ test("a second store handle cannot create a source while uninstall owns the data
     else process.env.PDPP_DATA_DIR = previousDataDir;
     if (previousPreloadDir === undefined) delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
     else process.env.PDPP_CONNECTOR_PRELOAD_DIR = previousPreloadDir;
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+const DUPLICATE_BINDING_PROFILES = {
+  escaped:
+    '{"connector_id":"github","version":"1.0.0","runtime_requirements":{"bindings":{"network":{"required":true},"n\\u0065twork":{"required":false}}}}',
+  nested:
+    '{"connector_id":"github","version":"1.0.0","runtime_requirements":{"bindings":{"network":{"required":true,"required":false}}}}',
+  plain:
+    '{"connector_id":"github","version":"1.0.0","runtime_requirements":{"bindings":{"network":{"required":true},"network":{"required":false}}}}',
+} as const;
+const RE_PROFILE_REPEATS_KEY = /Connector profile repeats an object key\./;
+
+for (const [name, profileText] of Object.entries(DUPLICATE_BINDING_PROFILES)) {
+  test(`an installed profile with a repeated object key (${name}) is refused, as the HTTP and local paths refuse it`, async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+    try {
+      const store = createFileConnectorInstallStore(dataDir);
+      const registered: unknown[] = [];
+      const service = createConnectorInstallService({
+        catalogLoader: async () => [entry],
+        dataDir,
+        installArtifact: (root) => {
+          writeFixture(root);
+          writeFileSync(join(root, "profile", "collection-profile.json"), profileText);
+        },
+        registerManifest: (manifest) => {
+          registered.push(manifest);
+          return Promise.resolve();
+        },
+        store,
+      });
+      await assert.rejects(service.install("github", digest), RE_PROFILE_REPEATS_KEY);
+      assert.equal(await store.getActive("github"), null, "nothing became active");
+      assert.deepEqual(registered, [], "nothing was registered, so no last-wins value reached the registry");
+      assert.equal(existsSync(join(dataDir, "connectors", "github", digest)), false, "the published root is removed");
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  });
+}
+
+test("an active record whose profile bytes repeat an object key is not runnable", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  try {
+    const store = createFileConnectorInstallStore(dataDir);
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    const active = await service.install("github", digest);
+    // Re-record the altered profile under its own hash, so only the repeated key is wrong.
+    const profile = join(active.root, "profile", "collection-profile.json");
+    writeFileSync(profile, DUPLICATE_BINDING_PROFILES.plain);
+    const manifestSha256 = `sha256:${createHash("sha256").update(readFileSync(profile)).digest("hex")}`;
+    await store.activate({ ...active, manifestSha256 });
+
+    const inspected = await inspectActiveConnector(store, "github");
+    assert.equal(inspected.status, "invalid");
+    assert.match(inspected.status === "invalid" ? inspected.reason : "", RE_PROFILE_REPEATS_KEY);
+    assert.equal(await resolveActiveConnectorPath(store, "github"), null);
+  } finally {
     rmSync(dataDir, { force: true, recursive: true });
   }
 });

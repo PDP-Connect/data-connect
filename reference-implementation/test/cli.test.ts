@@ -7181,7 +7181,8 @@ rl.on('line', (line) => {
 
   await t.test("run timeline keeps partial checkpoint commit artifacts inspectable", async () => {
     const manifest = {
-      connector_id: "https://registry.pdpp.dev/connectors/cli-run-partial-checkpoint-test",
+      connector_id: "cli-run-partial-checkpoint-test",
+      connector_key: "cli-run-partial-checkpoint-test",
       source_declaration: {
         declaration_version: "cli-run-partial-checkpoint-test-v1",
         display: { name: "CLI Run Partial Checkpoint Test" },
