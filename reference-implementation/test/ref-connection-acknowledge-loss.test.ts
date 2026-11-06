@@ -179,7 +179,7 @@ function postAcknowledgeLoss(
 
 const HEB_PURGE_BODY = {
   acknowledged_at: "2026-08-21T00:00:00.000Z",
-  acknowledged_by: "Tim Nunamaker",
+  acknowledged_by: "Jane Doe",
   cause: "provider_deleted_upstream",
   note: "H-E-B purged the order history; heb.com no longer shows those orders.",
   scope: "total",
@@ -248,7 +248,7 @@ test("owner-session stamps an acknowledgement (200), writes source_binding only,
     const stamped = ack.body.acknowledged_loss as Record<string, unknown>;
     assert.equal(stamped.cause, "provider_deleted_upstream");
     assert.equal(stamped.scope, "total");
-    assert.equal(stamped.acknowledgedBy, "Tim Nunamaker");
+    assert.equal(stamped.acknowledgedBy, "Jane Doe");
 
     const after = await store.get("cin_ack_loss_stamp");
     assert.equal(after?.status, before?.status, "acknowledging loss must never change connection status");

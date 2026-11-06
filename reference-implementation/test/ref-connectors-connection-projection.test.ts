@@ -2344,8 +2344,8 @@ test(
 // `--device-label`. Nothing ever composed the connector name into it, so naming
 // depended entirely on what the client happened to send:
 //
-//     peregrine Codex   | codex    <- owner typed the connector name by hand
-//     peregrine         | signal   <- owner forgot; the row said nothing about
+//     workstation Codex   | codex    <- owner typed the connector name by hand
+//     workstation         | signal   <- owner forgot; the row said nothing about
 //                                     WHAT it collects (owner: "it should have
 //                                     been called 'signal' then")
 //
@@ -2360,9 +2360,9 @@ test(
     // The Signal-shaped case: the owner typed only a hostname.
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "peregrine",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      displayName: "workstation",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
@@ -2370,7 +2370,7 @@ test(
     assert.ok(row);
     assert.equal(
       row.display_name,
-      "peregrine Connection First Records",
+      "workstation Connection First Records",
       "a device row must identify both its device and its connector"
     );
     // The connector-type name stays a separate field — this composes for
@@ -2383,18 +2383,18 @@ test(
   "B8: a device label that already names the connector is not duplicated",
   withTmpDb(async () => {
     seedConnector();
-    // The "peregrine Codex" case: the owner already typed the connector name.
+    // The "workstation Codex" case: the owner already typed the connector name.
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "peregrine Connection First Records",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      displayName: "workstation Connection First Records",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "peregrine Connection First Records");
+    assert.equal(row.display_name, "workstation Connection First Records");
   })
 );
 
@@ -2404,15 +2404,15 @@ test(
     seedConnector();
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "peregrine connection-first-records",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      displayName: "workstation connection-first-records",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "peregrine connection-first-records");
+    assert.equal(row.display_name, "workstation connection-first-records");
   })
 );
 
@@ -2444,8 +2444,8 @@ test(
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
       displayName: "",
-      sourceBinding: { device: "peregrine", kind: "local_device" },
-      sourceBindingKey: "peregrine",
+      sourceBinding: { device: "workstation", kind: "local_device" },
+      sourceBindingKey: "workstation",
       sourceKind: "local_device",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);

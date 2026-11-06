@@ -673,7 +673,7 @@ test("tone: unknown coverage on an ordinary (still-refreshing) source keeps the 
 
 test("tone: unknown coverage from a stale local collector build names the fix, not the generic YET copy", () => {
   // Production shape (design-notes/source-state-truth-2026-08-18.md,
-  // peregrine Claude Code): a local-device collector build that predates the
+  // workstation Claude Code): a local-device collector build that predates the
   // `coverage_diagnostics` stream the server now requires re-runs forever and
   // lands in the exact same unmeasured state every time. The generic "not
   // measured YET" copy implies the next scheduled run resolves it, which is
@@ -1077,7 +1077,7 @@ test("channel: stalled outbox state-read block asks for re-run, not dead-letter 
 });
 
 test("freshness: stalled local-device outbox with prior ingest evidence names the last known collection, not a false never-measured claim", () => {
-  // A local-device connection (Signal-shape: peregrine/cin_992b0c94cebeb3066ba42a6e)
+  // A local-device connection (Signal-shape: workstation/cin_992b0c94cebeb3066ba42a6e)
   // whose outbox is stalled loses its heartbeat-derived freshness anchor by
   // design (a stall must never read `fresh`), so `axes.freshness` reads
   // `unknown` even though the device ingested real data days before the

@@ -130,6 +130,6 @@ test("disclosed pre-existing gap: this redactor is not a PII control", () => {
   // options involved — they are under the 24-char threshold. The declared-
   // token change neither causes nor worsens this; it is recorded because it
   // shows LONG_OPAQUE_RE was never the PII boundary it is sometimes read as.
-  assert.equal(redactStderrTail("contact tim.nunamaker@example.com").text, "contact tim.nunamaker@example.com");
-  assert.equal(redactStderrTail("user tim_nunamaker_example").text, "user tim_nunamaker_example");
+  assert.equal(redactStderrTail("contact jane.doe@example.com").text, "contact jane.doe@example.com");
+  assert.equal(redactStderrTail("user jane_doe_example").text, "user jane_doe_example");
 });

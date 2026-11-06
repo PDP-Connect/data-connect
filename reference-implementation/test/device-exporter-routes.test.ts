@@ -2044,7 +2044,7 @@ test("an enrollment code addressed to an existing connection rebinds a new devic
   // empty connection started collecting. Addressing the CONNECTION removes the
   // guess entirely.
   await withServer(async ({ asUrl }) => {
-    const original = await enrollDevice(asUrl, "peregrine", "codex");
+    const original = await enrollDevice(asUrl, "workstation", "codex");
 
     // Mint against the connection id — never naming the binding.
     const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
@@ -2054,7 +2054,7 @@ test("an enrollment code addressed to an existing connection rebinds a new devic
     // The response echoes the resolved target so the owner can confirm it
     // BEFORE handing the code to a device.
     assert.equal(bodyOf(codeResp).connector_instance_id, original.connector_instance_id);
-    assert.equal(bodyOf(codeResp).local_binding_name, "peregrine");
+    assert.equal(bodyOf(codeResp).local_binding_name, "workstation");
 
     const enrollResp = await postJson(
       `${asUrl}/_ref/device-exporters/enroll`,
@@ -2089,7 +2089,7 @@ test("an enrollment code addressed to an existing connection rebinds a new devic
 
 test("a rebind enrollment code cannot be minted for another owner's connection or a missing one", async () => {
   await withServer(async ({ asUrl }) => {
-    const original = await enrollDevice(asUrl, "peregrine-owned", "codex");
+    const original = await enrollDevice(asUrl, "workstation-owned", "codex");
 
     // Unknown connection: 404, the same non-leaking shape revoke uses — a
     // probe must not be able to distinguish "absent" from "someone else's".
@@ -2111,7 +2111,7 @@ test("a rebind enrollment code cannot be minted for another owner's connection o
 
 test("a rebind enrollment code rejects a self-contradicting or non-active target", async () => {
   await withServer(async ({ asUrl }) => {
-    const original = await enrollDevice(asUrl, "peregrine-conflict", "codex");
+    const original = await enrollDevice(asUrl, "workstation-conflict", "codex");
 
     // Stating the target twice could disagree with itself; reject rather than
     // silently picking a winner.
@@ -2219,15 +2219,15 @@ test("device exporter enrollment keeps connector type display names separate fro
   await withServer(async ({ asUrl }) => {
     const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
       connector_id: "claude_code",
-      display_name: "simon@192.168.1.7 Claude Code",
-      local_binding_name: "simon-laptop",
+      display_name: "user@192.0.2.7 Claude Code",
+      local_binding_name: "dev-laptop",
     });
     assert.equal(codeResp.status, 201);
 
     const enrollResp = await postJson(
       `${asUrl}/_ref/device-exporters/enroll`,
       {
-        device_label: "simon@192.168.1.7 Claude Code",
+        device_label: "user@192.0.2.7 Claude Code",
         enrollment_code: bodyOf(codeResp).enrollment_code,
       },
       PROTOCOL_HEADERS
@@ -2262,7 +2262,7 @@ test("device exporter enrollment keeps connector type display names separate fro
         .get(stringField(bodyOf(enrollResp), "connector_instance_id")),
       "instance row must exist"
     );
-    assert.equal(instanceRow.display_name, "simon@192.168.1.7 Claude Code");
+    assert.equal(instanceRow.display_name, "user@192.0.2.7 Claude Code");
   });
 });
 

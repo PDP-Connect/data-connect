@@ -210,16 +210,16 @@ test("the CTA carries no developer language", () => {
  */
 test("the two H-E-B rows still render different, honest verdicts", () => {
   const gezalsatx = renderTerminalCoverage().verdict;
-  const tnunamak = render({ ...baseInput(), freshness: { axis: "stale" } }, [
+  const staleAccount = render({ ...baseInput(), freshness: { axis: "stale" } }, [
     stream({ collected: 100, considered: 100, coverage: "complete" }),
   ]).verdict;
 
-  assert.notEqual(tnunamak.pill.label, gezalsatx.pill.label);
-  assert.notEqual(tnunamak.forward_statement, gezalsatx.forward_statement);
+  assert.notEqual(staleAccount.pill.label, gezalsatx.pill.label);
+  assert.notEqual(staleAccount.forward_statement, gezalsatx.forward_statement);
 
   // The refreshable account keeps its real owner action...
-  assert.equal(tnunamak.forward_statement, "Run a refresh to bring this up to date.");
-  const refresh = tnunamak.required_actions.find((action) => action.audience === "owner");
+  assert.equal(staleAccount.forward_statement, "Run a refresh to bring this up to date.");
+  const refresh = staleAccount.required_actions.find((action) => action.audience === "owner");
   assert.ok(refresh, "the stale account is owner-repairable and must keep its button");
   assert.equal(refresh.cta, "Refresh now");
 

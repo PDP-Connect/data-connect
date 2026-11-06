@@ -2137,7 +2137,7 @@ test("outbox axis: blocked status with no dead letters is a state-read stall", (
 });
 
 test("outbox axis: blocked status with a small open backlog, zero dead letters, zero pending, and a fresh heartbeat is idle (bounded-debris carve-out)", () => {
-  // Reproduces cin_992b0c94cebeb3066ba42a6e (peregrine / Signal Desktop):
+  // Reproduces cin_992b0c94cebeb3066ba42a6e (workstation / Signal Desktop):
   // collection genuinely succeeded (6,448 records, all batches accepted,
   // evidence fresh), but a single superseded-attempt gap-notification row
   // left backlog_open=1 behind. That row already uploaded successfully
@@ -2188,12 +2188,12 @@ test("outbox axis: a small open backlog does NOT get the debris carve-out when t
   // is evidence the collector stopped checking in, not that the server failed
   // to read its state. This assertion previously read `state_read_failed` and
   // encoded the owner-facing defect fixed on 2026-08-27 — see the
-  // Signal/peregrine test below.
+  // Signal/workstation test below.
   assert.equal(r.cause, "stale_heartbeat");
 });
 
 // Owner-reported 2026-08-27 on /sources: the Signal source (connection
-// cin_992b0c94cebeb3066ba42a6e, local_device on host "peregrine") rendered
+// cin_992b0c94cebeb3066ba42a6e, local_device on host "workstation") rendered
 // "Can't collect · Freshness has not been measured yet." The connector was
 // never broken — it had accepted 7,780 records across 18 ingest batches, every
 // one HTTP 201, last at 2026-08-22T01:00:17Z. What changed is that the
@@ -2207,7 +2207,7 @@ test("outbox axis: a small open backlog does NOT get the debris carve-out when t
 // server could read it fine. The honest fact — and the only one that points at
 // the action that fixes it — is that the collector is no longer running on the
 // owner's own machine.
-test("outbox axis: the Signal/peregrine shape blames the stopped collector, not a server read failure", () => {
+test("outbox axis: the Signal/workstation shape blames the stopped collector, not a server read failure", () => {
   const r = deriveOutboxAxisFromHeartbeat(
     heartbeat({
       backlogOpenCount: 1,
