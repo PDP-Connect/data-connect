@@ -26,6 +26,7 @@ import {
   isLogoFetchAllowed,
   resolveClientTrust,
 } from "../client-trust-registry.ts";
+import { hexColorOrNull } from "../connector-manifest-validation.ts";
 import { type FetchClientLogoOptions, fetchAndCacheClientLogo } from "../client-logo-cache.ts";
 import {
   type StreamScopeCapability,
@@ -92,7 +93,15 @@ export interface ConsentPickerCapabilities {
 }
 
 export interface ConsentPickerManifest {
-  /** Declared brand; `background_color` is the backdrop a light glyph needs to be visible. */
+  /**
+   * Declared brand; `background_color` is the backdrop a light glyph needs to be visible.
+   * Implementation extension: `spec-collection-profile.md` does not define `brand`.
+   * It is operator-trusted manifest data, not connector-asserted identity: manifests
+   * come from the operator's own install, and the consent screen shows no trust tier
+   * for a connector. If manifests can ever arrive from an untrusted source, gate this
+   * on provenance first. The value is checked with `hexColorOrNull` before it leaves
+   * the server, because `validateManifestIcon` covers `icon` only.
+   */
   readonly brand?: { readonly background_color?: string | null } | null;
   readonly connector_id?: string | null;
   readonly display_name?: string | null;
@@ -866,7 +875,7 @@ export async function buildHostedMcpConsentChallengeModel(
       row.connectorId,
       icon?.svg
         ? {
-            backgroundColor: manifest?.brand?.background_color ?? null,
+            backgroundColor: hexColorOrNull(manifest?.brand?.background_color),
             color: icon.color ?? null,
             kind: icon.kind ?? null,
             svg: icon.svg,

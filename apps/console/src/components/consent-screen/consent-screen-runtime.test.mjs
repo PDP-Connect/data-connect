@@ -251,22 +251,17 @@ test("older consent models without connector provenance keep the genuine fallbac
   assert.equal(view.container.querySelector(".pdpp-connector-icon svg"), null, "do not infer a brand from a source ID or account name");
 });
 
-test("a white-glyph connector mark keeps its declared brand background on the consent screen", async () => {
-  const brandBackground = "#1DB954";
-  const whiteGlyph = '<svg viewBox="0 0 24 24"><path fill="#ffffff" d="M3 3h18v18H3z"/></svg>';
-  const whiteGlyphManifest = {
-    ...manifest,
-    brand: { background_color: brandBackground },
-    icon: { kind: "inline_svg", svg: whiteGlyph },
-  };
-  const whiteGlyphModel = await buildHostedMcpConsentChallengeModel(
+const whiteGlyph = '<svg viewBox="0 0 24 24"><path fill="#ffffff" d="M3 3h18v18H3z"/></svg>';
+
+function buildModelFor(connectorManifest) {
+  return buildHostedMcpConsentChallengeModel(
     "challenge",
     "owner",
     {
       canonicalConnectorKey: () => "spotify",
       encodeHostedMcpSelection: () => "source",
       encodeHostedMcpStreamSelection: ({ streamName }) => streamName,
-      getConnectorManifest: async () => whiteGlyphManifest,
+      getConnectorManifest: async () => connectorManifest,
       hostedMcpSourceKey: () => "spotify:account",
       isInternalConnectorId: () => false,
       listActiveBindingsForGrant: async () => [{ connectorInstanceId: "account" }],
@@ -277,18 +272,65 @@ test("a white-glyph connector mark keeps its declared brand background on the co
     {},
     null,
   );
-  const view = render(createElement(ConsentScreen, {
-    model: whiteGlyphModel, acceptAction: async () => "", rejectAction: async () => "",
+}
+
+function renderModel(consentModel) {
+  return render(createElement(ConsentScreen, {
+    model: consentModel, acceptAction: async () => "", rejectAction: async () => "",
   }));
-  const tile = view.container.querySelector(".pdpp-connector-icon");
-  assert.equal(
-    tile?.querySelector("svg path")?.getAttribute("fill")?.toLowerCase(),
-    "#ffffff",
-    "the manifest's white glyph renders, not a fallback mark",
-  );
+}
+
+test("a white-glyph connector mark keeps its declared brand background on the consent screen", async () => {
+  const whiteGlyphModel = await buildModelFor({
+    ...manifest,
+    brand: { background_color: "#1DB954" },
+    icon: { kind: "inline_svg", svg: whiteGlyph },
+  });
+  const tile = renderModel(whiteGlyphModel).container.querySelector(".pdpp-connector-icon");
+  assert.ok(tile?.querySelector("svg path"), "the manifest's glyph renders, not a fallback mark");
   assert.equal(
     dom.window.getComputedStyle(tile).backgroundColor,
     "rgb(29, 185, 84)",
     "a white glyph needs the connector's declared brand background to be visible",
   );
+});
+
+// brand.background_color is not covered by validateManifestIcon, so the consent
+// model must reject anything that is not a hex color before it reaches the tile.
+for (const [label, value] of [
+  ["a CSS keyword that paints nothing", "transparent"],
+  ["a color the glyph cannot contrast against", "white"],
+  ["a CSS function", "rgb(0 0 0 / 0)"],
+  ["a declaration break-out", "#fff; background-image: url(//x/y)"],
+  ["a number", 0xffffff],
+  ["an empty string", ""],
+]) {
+  test(`an invalid brand background (${label}) falls back to the default tile`, async () => {
+    const invalidModel = await buildModelFor({
+      ...manifest,
+      brand: { background_color: value },
+      icon: { kind: "inline_svg", svg: whiteGlyph },
+    });
+    assert.equal(invalidModel.sources[0].icon.backgroundColor, null);
+    const tile = renderModel(invalidModel).container.querySelector(".pdpp-connector-icon");
+    assert.ok(tile?.querySelector("svg path"), "the glyph still renders");
+    assert.equal(tile.style.backgroundColor, "", "no inline background: the default tile shows");
+  });
+}
+
+test("a short hex brand background is accepted", async () => {
+  const shortHexModel = await buildModelFor({
+    ...manifest,
+    brand: { background_color: "#1db" },
+    icon: { kind: "inline_svg", svg: whiteGlyph },
+  });
+  assert.equal(shortHexModel.sources[0].icon.backgroundColor, "#1db");
+});
+
+test("a brand background without a manifest glyph is not applied to the resolved identity mark", async () => {
+  const noGlyphModel = await buildModelFor({ ...manifest, brand: { background_color: "#1DB954" }, icon: undefined });
+  assert.equal(noGlyphModel.sources[0].icon, null, "the background only travels with a manifest glyph");
+  const tile = renderModel(noGlyphModel).container.querySelector(".pdpp-connector-icon");
+  assert.ok(tile?.querySelector("svg"), "the resolved identity mark still renders");
+  assert.notEqual(tile.style.backgroundColor, "rgb(29, 185, 84)", "the mark keeps its own background, not the manifest's");
 });

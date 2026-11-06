@@ -1036,6 +1036,15 @@ export function validateManifestSensitivity(manifest: Record<string, unknown>, c
 const MANIFEST_ICON_ALLOWED_KEYS = new Set(["kind", "svg", "color"]);
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
+/**
+ * Returns `value` when it is a `#rgb` / `#rrggbb` string, else `null`. For
+ * manifest colors that reach a browser style but are not covered by
+ * `validateManifestIcon` (for example `brand.background_color`).
+ */
+export function hexColorOrNull(value: unknown): string | null {
+  return typeof value === "string" && HEX_COLOR_RE.test(value) ? value : null;
+}
+
 // A brand glyph is shapes, not behavior: this is the complete element and
 // attribute vocabulary an icon needs. Everything else — script, foreignObject,
 // iframe, use, image, animate/animateTransform/set, style, a, and every
