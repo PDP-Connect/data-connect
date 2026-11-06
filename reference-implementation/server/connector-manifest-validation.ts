@@ -360,6 +360,19 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): vo
     }
     throw error;
   }
+  const bindings = req.bindings;
+  if (typeof bindings !== "object" || bindings === null) {
+    return;
+  }
+  for (const [binding, requirement] of Object.entries(bindings)) {
+    const signInPattern = (requirement as Record<string, unknown> | null)?.sign_in_url_pattern;
+    if (signInPattern !== undefined && (typeof signInPattern !== "string" || signInPattern.trim().length === 0)) {
+      throw invalidConnectorManifest(
+        `runtime_requirements.bindings.${binding}.sign_in_url_pattern must be a non-empty string`,
+        code
+      );
+    }
+  }
 }
 
 function validateExternalToolDetectExitCode(detect: Record<string, unknown>, index: number, code: string): void {
