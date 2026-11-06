@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
 # Commit the bumped manifests and open one pull request. Called by
 # .github/workflows/browser-stack-bump.yml with VERSION set and GH_TOKEN available.
 set -euo pipefail
