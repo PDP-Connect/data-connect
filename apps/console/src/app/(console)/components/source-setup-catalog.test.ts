@@ -258,6 +258,13 @@ test("a setup-capable connector offers Install first and links to account setup 
   assert.doesNotMatch(afterInstall, INSTALL_NEXT_STEP);
 });
 
+test("a registered connector whose package is not installed offers Install and no setup link", async () => {
+  const html = await render(false, { ...setupCapable, registrationStatus: "registered" }, browserPackage);
+  assert.match(html, INSTALL_BUTTON);
+  assert.doesNotMatch(html, NEW_BROWSER_SETUP, "setup must wait for the package even when the connector is registered");
+  assert.match(html, UNAVAILABLE_FALSE);
+});
+
 test("package offers the console could not read are reported, not silently missing", async () => {
   assert.doesNotMatch(await render(false, setupCapable, browserPackage, 0), SKIPPED_NOTICE);
   const one = await render(false, setupCapable, browserPackage, 1);
