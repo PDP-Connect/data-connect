@@ -951,12 +951,13 @@ test("runConnector withholds every staged cursor after a retryable SKIP_RESULT t
   }
 });
 
-// Counterweight for the runtime's informational-skip classification. An explicit
-// `out_of_scope` report remains informational regardless of its recovery hint.
-// This fixture checks that classification; it does not prove the connector's
-// claim about the provider or the owner's requested scope.
-test("runConnector still commits a stream whose SKIP_RESULT is informational (counterweight)", async () => {
-  const result = await runSingleSkipCase("runtime-informational-skip-commits-cursor-test", {
+// A connector's `out_of_scope` reason is a claim, not proof. sibling_b is in the
+// requested collection scope (the manifest declares it and nothing narrows it),
+// so a skip with no continuation is an omission from the requested collection.
+// The runtime's own scope decides this, never the reason text or the gap's
+// informational severity.
+test("runConnector withholds an in-scope stream's cursor when the connector claims out_of_scope", async () => {
+  const result = await runSingleSkipCase("runtime-lying-out-of-scope-withholds-cursor-test", {
     message: "sibling_b is outside the requested collection scope",
     reason: "out_of_scope",
     recovery_hint: "not_retriable",
@@ -964,7 +965,34 @@ test("runConnector still commits a stream whose SKIP_RESULT is informational (co
   });
   assert.equal(result.status, "succeeded");
   assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
-  assert.equal(result.checkpoint_summary?.state_streams_committed, 2);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  const withheld = (result.known_gaps ?? []).filter((gap) => gap.kind === "checkpoint_withheld");
+  assert.deepEqual(
+    withheld.map((gap) => gap.stream),
+    ["sibling_b"],
+    "an unproven out_of_scope claim must not release the in-scope cursor"
+  );
+});
+
+// There is no runtime-proven optional stream a connector can name in a
+// SKIP_RESULT. A stream the manifest declares unsupported in the default scope
+// is outside the START scope, so the runtime rejects a SKIP_RESULT that names
+// it. A connector therefore cannot use that route to make an omission look
+// optional, and no exemption from the omission guard exists.
+test("runConnector rejects a SKIP_RESULT that names a stream outside the default scope", async () => {
+  await assert.rejects(
+    runSingleSkipCase(
+      "runtime-default-scope-unsupported-skip-test",
+      { message: "this mode does not expose sibling_b", reason: "not_available", stream: "sibling_b" },
+      {
+        future_modes: ["api"],
+        mode: "archive",
+        reason: "external archive does not expose this stream",
+        state: "unsupported_in_mode",
+      }
+    ),
+    /SKIP_RESULT for undeclared stream: sibling_b/
+  );
 });
 
 // The `not_retriable` hint does not permit advancement. A non-informational
@@ -994,17 +1022,25 @@ test("runConnector withholds a non-informational SKIP_RESULT cursor even when it
  * Runs one connector that stages cursors for sibling_a and sibling_b, then
  * emits `skip` for sibling_b on a successful DONE, and returns the run result.
  */
-async function runSingleSkipCase(connectorId: string, skip: Record<string, unknown>): Promise<RunResult> {
+async function runSingleSkipCase(
+  connectorId: string,
+  skip: Record<string, unknown>,
+  siblingBAvailability?: Record<string, unknown>
+): Promise<RunResult> {
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
   const manifest = testManifest(connectorId);
+  if (siblingBAvailability) {
+    const sibling = manifest.streams.find((stream: { name: string }) => stream.name === "sibling_b");
+    Object.assign(sibling as object, { availability: siblingBAvailability });
+  }
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-skip-case-"));
   const connectorPath = writeConnectorStub(
     tmpDir,
     `
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'sibling_b_cursor' } }) + '\\n');
+  ${siblingBAvailability ? "" : "process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'sibling_b_cursor' } }) + '\\n');"}
   process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', ...${JSON.stringify(skip)} }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
   rl.close();

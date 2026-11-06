@@ -19,7 +19,6 @@ import {
   type CoverageReport,
   coveredRequiredKeys,
   decideCheckpointCommits,
-  type OmissionSource,
 } from "../runtime/checkpoint-commit-decision.ts";
 import { capCoveredCount } from "../runtime/connector-gap-bounding.ts";
 
@@ -328,20 +327,6 @@ test("STREAM_EVIDENCE is diagnostic: a state_stream child's unaccounted outcomes
   // therefore absent here, and the parent commits.
   const decision = decideCheckpointCommits(
     input({
-      stagedStateStreams: ["messages"],
-      stateStreamByStream: new Map([["bodies", "messages"]]),
-    })
-  );
-  assert.deepEqual(decision, { commit: ["messages"], withheld: [] });
-});
-
-test("a non-gating omission source never withholds, even when a caller still passes one", () => {
-  // `unaccounted_evidence` is no longer an OmissionSource. A caller that still
-  // passes it must not gate a cursor. Removing the guard reddens this test.
-  const removedSource = "unaccounted_evidence" as unknown as OmissionSource;
-  const decision = decideCheckpointCommits(
-    input({
-      omissions: [{ source: removedSource, stream: "bodies" }],
       stagedStateStreams: ["messages"],
       stateStreamByStream: new Map([["bodies", "messages"]]),
     })

@@ -430,6 +430,66 @@ test("T2e: a runtime-owned non-retryable verdict stops the managed scheduler ret
   }
 });
 
+test("T2f: a connector-reported failed DONE with no error object is not retried by the managed scheduler (terminal_reason is the runtime classification)", async () => {
+  // Managed-path counterpart of the unmanaged legacy no-error scenario.
+  // `connector_error` presence is not failure origin: a DONE(failed) without an
+  // error object has terminal_reason connector_reported_failed and must not retry.
+  const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-no-error-failed-"));
+  try {
+    const connectorPath = writeDummyConnector(tmpDir);
+    const connectorId = "chatgpt";
+    const completedRuns: RunRecord[] = [];
+    const controllerCalls: number[] = [];
+
+    const scheduler = createScheduler({
+      connectors: [
+        {
+          connectorId,
+          connectorInstanceId: connectorId,
+          connectorPath,
+          intervalMs: 25,
+          manifest: BACKGROUND_SAFE_MANIFEST,
+          maxRetries: 2,
+          ownerSubjectId: "owner-managed",
+          ownerToken: "owner-token",
+        },
+      ],
+      onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+      onRunComplete: (record) => completedRuns.push(record),
+      rsUrl: "http://localhost.invalid",
+      runManagedConnectorViaController: () => {
+        controllerCalls.push(Date.now());
+        return {
+          // A legacy connector sent DONE(failed) with no error object. The runtime
+          // sets no retry verdict; the terminal reason is the only classification.
+          connector_error: null,
+          known_gaps: [],
+          run_id: `run-no-error-failed-${controllerCalls.length}`,
+          terminal_reason: "connector_reported_failed",
+          status: "failed",
+          trace_id: "trace-no-error-failed",
+        };
+      },
+    });
+
+    try {
+      scheduler.start();
+      await waitFor(() => completedRuns.length >= 1, 5000);
+      scheduler.stop();
+
+      assert.equal(controllerCalls.length, 1, "a connector_reported_failed run must not be retried even without a connector error object");
+      const [record] = completedRuns;
+      assert.ok(record, "a completed run record was captured");
+      assert.equal(record.status, "failed");
+      assert.equal(record.attempt, 1, "terminal record should be the first and only attempt");
+    } finally {
+      scheduler.stop();
+    }
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+  }
+});
+
 test("T2d: a connector-claimed session_required failure is NOT retried and does NOT authorize owner repair", async () => {
   // Negative control for Section 5.11. The run carries only a connector error
   // (`connector_error`) whose text says session_required. There is no runtime

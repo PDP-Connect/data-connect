@@ -88,12 +88,6 @@ export interface DurableGapEvidence {
 /** The SKIP_RESULT reasons that gate a checkpoint. STREAM_EVIDENCE is not one (Section 5.7). */
 export type OmissionSource = "retryable_skip" | "stream_collection_failed";
 
-/** The omission sources that may withhold a cursor. Anything else is diagnostic. */
-const GATING_OMISSION_SOURCES: ReadonlySet<string> = new Set<OmissionSource>([
-  "retryable_skip",
-  "stream_collection_failed",
-]);
-
 /**
  * A report of rows a run did not collect. `stream` is the data stream that
  * omitted them, or null when the report named none: then no cursor is known
@@ -235,9 +229,7 @@ function durableGapKeys(input: CheckpointCommitInput, stream: string, stateStrea
 function omissionsOwnedBy(input: CheckpointCommitInput, stateStream: string): WithholdReason[] {
   return input.omissions
     .filter(
-      (omission) =>
-        GATING_OMISSION_SOURCES.has(omission.source) &&
-        (omission.stream === null || stateStreamsOwning(omission.stream, input).has(stateStream))
+      (omission) => omission.stream === null || stateStreamsOwning(omission.stream, input).has(stateStream)
     )
     .map((omission) => ({
       kind: "reported_omission",

@@ -90,6 +90,15 @@ test("shouldRetryRunFailure: a non-retryable terminal_reason blocks retry", () =
   assert.equal(shouldRetryRunFailure({ terminal_reason: "grant_expired" }), false);
 });
 
+test("shouldRetryRunFailure: a connector-reported failed DONE without an error object is not retryable", () => {
+  assert.equal(
+    shouldRetryRunFailure({ connector_error: null, terminal_reason: "connector_reported_failed" }),
+    false,
+    "the terminal reason, not connector_error presence, marks the failure origin"
+  );
+  assert.equal(shouldRetryRunFailure({ terminal_reason: "connector_reported_failed", runtime_retryable: true }), false);
+});
+
 test("shouldRetryRunFailure: connector retryable claims never authorize a retry", () => {
   assert.equal(shouldRetryRunFailure({ connector_error: { retryable: false } }), false);
   assert.equal(shouldRetryRunFailure({ connector_error: { retryable: true } }), false);
