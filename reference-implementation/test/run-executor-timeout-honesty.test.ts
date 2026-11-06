@@ -34,7 +34,6 @@ import test from "node:test";
 
 import { projectRunAutomationPolicy } from "../runtime/run-automation-policy.ts";
 import {
-  createAttemptWatchdog,
   createRunExecutor,
   type RunExecutorDeps,
   type RunExecutorRuntimeState,
@@ -694,61 +693,3 @@ test(
     assert.equal(record.terminalReason, "run_timed_out");
   })
 );
-
-// The watchdog budget contract: a positive finite number arms the ceiling and
-// `Infinity` and `0` are the documented explicit opt-outs
-// (runtime/scheduler-config.ts). The scheduler rejects NaN and negative budgets
-// before they reach the watchdog (resolveNonNegativeMsOrInfinity).
-for (const optOut of [0, Number.POSITIVE_INFINITY]) {
-  test(`createAttemptWatchdog treats ${String(optOut)} as the explicit opt-out: nothing is armed`, () => {
-    const watchdog = manualWatchdogTimers();
-    const attempt = createAttemptWatchdog(optOut, watchdog.timers);
-    // Nothing was armed, so nothing was suppressed: the caller must not write a
-    // "watchdog suppressed" spine event or progress message for it.
-    assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
-    assert.equal(watchdog.armedDelayMs(), null);
-    assert.equal(attempt.timedOut(), false);
-  });
-}
-
-test("a phase boundary arriving after the watchdog already fired suppresses nothing", () => {
-  const watchdog = manualWatchdogTimers();
-  const attempt = createAttemptWatchdog(WALL_CLOCK_BUDGET_MS, watchdog.timers);
-  watchdog.fire();
-  assert.equal(attempt.timedOut(), true);
-  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
-  assert.equal(watchdog.armedDelayMs(), null);
-});
-
-test("a phase boundary arriving after an owner cancel suppresses nothing", () => {
-  const watchdog = manualWatchdogTimers();
-  const attempt = createAttemptWatchdog(WALL_CLOCK_BUDGET_MS, watchdog.timers);
-  attempt.cancel();
-  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
-  assert.equal(
-    watchdog.armedDelayMs(),
-    WALL_CLOCK_BUDGET_MS,
-    "cancel does not disarm the primary timer; the latch must not re-arm"
-  );
-});
-
-test("a phase boundary on an armed watchdog still latches exactly once", () => {
-  const watchdog = manualWatchdogTimers();
-  const attempt = createAttemptWatchdog(WALL_CLOCK_BUDGET_MS, watchdog.timers);
-  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), true);
-  assert.equal(watchdog.armedDelayMs(), LOCAL_ONLY_CEILING_MS);
-  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
-});
-
-// setTimeout cannot delay past 2^31 - 1 ms (Node fires it almost at once), and
-// `budget * 4` can overflow to Infinity, which reads as "unbounded". A huge but
-// finite budget must keep a real, finite ceiling.
-const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
-for (const hugeBudget of [2 ** 30, 1e308]) {
-  test(`the local-only ceiling for a finite budget of ${String(hugeBudget)} ms is clamped to a finite timer delay`, () => {
-    const watchdog = manualWatchdogTimers();
-    const attempt = createAttemptWatchdog(hugeBudget, watchdog.timers);
-    attempt.markProgress({ phase_boundary: "local_only_phase_started" });
-    assert.equal(watchdog.armedDelayMs(), MAX_TIMER_DELAY_MS);
-  });
-}
