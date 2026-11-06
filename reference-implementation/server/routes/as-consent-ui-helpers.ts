@@ -26,8 +26,8 @@ import {
   isLogoFetchAllowed,
   resolveClientTrust,
 } from "../client-trust-registry.ts";
-import { hexColorOrNull } from "../connector-manifest-validation.ts";
 import { type FetchClientLogoOptions, fetchAndCacheClientLogo } from "../client-logo-cache.ts";
+import { hexColorOrNull } from "../../vendor/brand-react/src/hex-color.ts";
 import {
   type StreamScopeCapability,
   type StreamScopeSelection,

@@ -12,6 +12,7 @@
 
 import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
 import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
+import { hexColorOrNull } from "../vendor/brand-react/src/hex-color.ts";
 import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
@@ -1034,17 +1035,6 @@ export function validateManifestSensitivity(manifest: Record<string, unknown>, c
 // ---------------------------------------------------------------------------
 
 const MANIFEST_ICON_ALLOWED_KEYS = new Set(["kind", "svg", "color"]);
-const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-
-/**
- * Returns `value` when it is a `#rgb` / `#rrggbb` string, else `null`. For
- * manifest colors that reach a browser style but are not covered by
- * `validateManifestIcon` (for example `brand.background_color`).
- */
-export function hexColorOrNull(value: unknown): string | null {
-  return typeof value === "string" && HEX_COLOR_RE.test(value) ? value : null;
-}
-
 // A brand glyph is shapes, not behavior: this is the complete element and
 // attribute vocabulary an icon needs. Everything else — script, foreignObject,
 // iframe, use, image, animate/animateTransform/set, style, a, and every
@@ -1257,7 +1247,7 @@ export function validateManifestIcon(manifest: Record<string, unknown>, code: st
   }
   const svg = iconObj.svg.trim();
   assertSvgIsAllowlisted(svg, code);
-  if (iconObj.color !== undefined && !(isNonEmptyString(iconObj.color) && HEX_COLOR_RE.test(iconObj.color))) {
+  if (iconObj.color !== undefined && hexColorOrNull(iconObj.color) === null) {
     throw invalidConnectorManifest("icon.color must be a hex color (e.g. #1ED760) when declared", code);
   }
 }
