@@ -40,6 +40,7 @@ import {
 import { acquireDirectoryLock, type DirectoryLock } from "./directory-lock.ts";
 import {
   createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
   type LocalConnectorSourceRecord,
   type LocalConnectorSourceStore,
 } from "./local-source.ts";
@@ -555,6 +556,60 @@ export async function listVerifiedActiveConnectors(store: ConnectorInstallStore)
   return { invalid, verified };
 }
 
+/**
+ * The artifact a run would execute for this connector: a selected
+ * developer-local source first (an invalid one blocks, there is no fallback),
+ * then the installed active version, as the run path chooses between those two.
+ * The run path has a third fallback, the built-in seed connectors; they are not
+ * browser-bound connectors, so this inspection does not consider them. Both
+ * kinds are re-verified against their recorded bytes. A store that throws is
+ * not handled here: the caller decides what "could not inspect" means.
+ */
+export type SelectedConnectorArtifact =
+  | { readonly status: "none" }
+  | {
+      readonly status: "active";
+      readonly source: "installed" | "developer_local";
+      readonly version: string | null;
+      readonly digest: string | null;
+      readonly manifest: Record<string, unknown>;
+    }
+  | { readonly status: "invalid"; readonly source: "installed" | "developer_local"; readonly reason: string };
+
+export async function inspectSelectedConnectorArtifact(
+  store: ConnectorInstallStore,
+  localStore: LocalConnectorSourceStore,
+  connectorId: string
+): Promise<SelectedConnectorArtifact> {
+  const local = await inspectActiveLocalConnectorSource(localStore, connectorId);
+  if (local.status === "invalid") {
+    return { reason: local.reason, source: "developer_local", status: "invalid" };
+  }
+  if (local.status === "active") {
+    return {
+      digest: local.record.entrypointSha256,
+      manifest: local.record.manifest,
+      source: "developer_local",
+      status: "active",
+      version: local.record.version,
+    };
+  }
+  const installed = await inspectActiveConnector(store, connectorId);
+  if (installed.status === "invalid") {
+    return { reason: installed.reason, source: "installed", status: "invalid" };
+  }
+  if (installed.status === "active") {
+    return {
+      digest: installed.record.digest,
+      manifest: installed.record.manifest,
+      source: "installed",
+      status: "active",
+      version: installed.record.version,
+    };
+  }
+  return { status: "none" };
+}
+
 /** Returns a runnable installed entrypoint only after every recorded byte check passes. */
 export async function resolveActiveConnectorPath(
   store: ConnectorInstallStore,
@@ -763,6 +818,9 @@ export interface ConnectorInstallService {
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
   resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
+  inspectSelected: (connectorId: string) => Promise<SelectedConnectorArtifact>;
+  /** Ids of active installs, read from the store without verifying their bytes. */
+  installedConnectorIds?: () => Promise<readonly string[]>;
   addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
@@ -1155,6 +1213,8 @@ export function createConnectorInstallService(options: {
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
+    inspectSelected: (connectorId) => inspectSelectedConnectorArtifact(store, localSourceStore, connectorId),
+    installedConnectorIds: async () => (await store.listActive()).map((record) => record.connectorId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
     async update(connectorId) {

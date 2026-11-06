@@ -7,10 +7,12 @@ import type {
   ConnectorInstallService,
 } from "../connector-install/index.ts";
 import type { LocalConnectorSourceRecord } from "../connector-install/local-source.ts";
+import { type BrowserEnrollmentReadinessResolver, toReadinessWire } from "../connector-readiness.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 interface Request {
   readonly body?: Record<string, unknown>;
+  readonly query?: Record<string, unknown>;
 }
 interface Response {
   json: (body: unknown) => unknown;
@@ -73,6 +75,33 @@ function projectLocalSource(record: LocalConnectorSourceRecord): Record<string, 
   };
 }
 
+function queryList(req: Request, key: string): string[] {
+  const value = req.query?.[key];
+  const items = Array.isArray(value) ? value : [value];
+  return items.flatMap((item) => (typeof item === "string" && item.trim() ? [item.trim()] : []));
+}
+
+/** Most connectors one readiness request may name; each costs a hash and a host probe. */
+const MAX_READINESS_CONNECTORS = 50;
+
+/** Every connector an owner could be offered browser setup for: published, installed or developer-local. */
+async function readinessCandidateKeys(service: ConnectorInstallService): Promise<string[]> {
+  const [catalog, installed, local] = await Promise.all([
+    service.catalog().catch(() => []),
+    (service.installedConnectorIds?.() ?? service.status().then((records) => records.map((r) => r.connectorId))).catch(
+      () => []
+    ),
+    (service.listLocalSources?.() ?? Promise.resolve([])).catch(() => []),
+  ]);
+  return [
+    ...new Set([
+      ...catalog.map((entry) => entry.connector_id),
+      ...installed,
+      ...local.map((record) => record.connectorKey),
+    ]),
+  ].sort();
+}
+
 function bodyString(req: Request, key: string): string | null {
   const value = req.body?.[key];
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -92,6 +121,8 @@ export function mountOwnerConnectorInstall(
      */
     readonly onImplementationChanged?: () => void;
     readonly pdppError: PdppErrorFn;
+    /** The server-owned browser-setup verdict, shared with the template list and the enrollment route. */
+    readonly readinessResolver: BrowserEnrollmentReadinessResolver;
   }
 ): void {
   const guarded = [options.requireToken, options.requireOwner] as const;
@@ -244,7 +275,32 @@ export function mountOwnerConnectorInstall(
       options.handleError(res, error);
     }
   };
+  // One projection per connector: `connector_id` (repeatable) names them; with
+  // none named, every published, installed or developer-local connector.
+  const readinessHandler: Handler = async (req, res) => {
+    try {
+      const requested = queryList(req, "connector_id");
+      if (requested.length > MAX_READINESS_CONNECTORS) {
+        options.pdppError(
+          res,
+          400,
+          "invalid_request",
+          `at most ${MAX_READINESS_CONNECTORS} connector_id values per request`,
+          "connector_id"
+        );
+        return;
+      }
+      const keys = requested.length > 0 ? requested : await readinessCandidateKeys(options.service);
+      res.json({
+        data: (await options.readinessResolver.resolveMany(keys)).map(toReadinessWire),
+        object: "connector_browser_enrollment_readiness",
+      });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
   app.get("/v1/owner/connector-install/catalog", ...guarded, catalogHandler);
+  app.get("/v1/owner/connector-install/readiness", ...guarded, readinessHandler);
   app.get("/v1/owner/connector-install/status", ...guarded, statusHandler);
   app.get("/v1/owner/connector-install/local-sources", ...guarded, localSourcesHandler);
   app.post("/v1/owner/connector-install/install", ...guarded, installHandler);

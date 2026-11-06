@@ -13,11 +13,15 @@
 // supported. Interactive browser setup remains owner-mediated in Console.
 
 import {
-  browserEnrollmentSupport,
   buildConnectionSetupPlan,
-  isKnownScaffoldConnector,
+  classifyConnectorIntentModality,
   staticSecretCredentialCaptureFromManifest,
 } from "../connection-setup-plan.ts";
+import {
+  type BrowserEnrollmentReadiness,
+  type BrowserEnrollmentReadinessResolver,
+  toReadinessWire,
+} from "../connector-readiness.ts";
 import type { OwnerAgentControlAction } from "../metadata.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
@@ -93,6 +97,8 @@ export interface MountOwnerConnectorTemplatesContext {
     displayName: string | null | undefined,
     options: { connectorId?: string | null; connectorInstanceId?: string | null }
   ) => string | null;
+  /** The one server-owned answer to "can the owner connect this browser connector now". */
+  readinessResolver: BrowserEnrollmentReadinessResolver;
   requireOwner: MiddlewareHandler;
   requireToken: MiddlewareHandler;
   resolveResource: (req: unknown) => string;
@@ -192,13 +198,13 @@ export function isSupportedOwnerActionPlan(plan: ReturnType<typeof buildConnecti
 /**
  * Browser setup has a shipped owner-session route, but it is not an
  * owner-agent REST primitive: the owner must complete interactive login in
- * the secure browser. `browserEnrollmentSupport`, the rule the console's
- * browser-session routes use, decides browser-backed static-secret entries;
- * the manual disposition already comes from the same rule in the planner.
+ * the secure browser. Whether that route can run now is the readiness
+ * projection's `connect` verdict, passed in as `browserRunnable`; the manual
+ * disposition already comes from the same verdict in the planner.
  */
 export function isOwnerSessionBrowserActionPlan(
   plan: ReturnType<typeof buildConnectionSetupPlan>,
-  manifest: ConnectorManifestLike
+  browserRunnable: boolean
 ): boolean {
   if (plan.connectorModality !== "browser_bound") {
     return false;
@@ -207,31 +213,44 @@ export function isOwnerSessionBrowserActionPlan(
     return plan.nextStepKind === "enroll_browser_collector" && typeof plan.enrollmentKey === "string";
   }
   return (
-    plan.catalogDisposition === "static_secret_connect" &&
-    plan.setupModality === "static_secret" &&
-    browserEnrollmentSupport(plan.connectorKey, manifest).canAddAccount
+    plan.catalogDisposition === "static_secret_connect" && plan.setupModality === "static_secret" && browserRunnable
   );
 }
 
-function isOwnerActionablePlan(
+function isOwnerActionablePlan(plan: ReturnType<typeof buildConnectionSetupPlan>, browserRunnable: boolean): boolean {
+  return isSupportedOwnerActionPlan(plan) || isOwnerSessionBrowserActionPlan(plan, browserRunnable);
+}
+
+/**
+ * A static-secret connector that declares credential capture has a setup path
+ * to try in UAT. A browser-bound one (stored credentials plus an interactive
+ * login) is still set up through the owner's browser session, so it needs a
+ * runnable browser setup; one that is not browser-bound has no such dependency.
+ */
+function hasUatStaticSecretSetup(
   plan: ReturnType<typeof buildConnectionSetupPlan>,
-  manifest: ConnectorManifestLike
+  manifest: ConnectorManifestLike,
+  browserRunnable: boolean
 ): boolean {
-  return isSupportedOwnerActionPlan(plan) || isOwnerSessionBrowserActionPlan(plan, manifest);
+  return (
+    plan.catalogDisposition === "static_secret_connect" &&
+    plan.setupModality === "static_secret" &&
+    staticSecretCredentialCaptureFromManifest(manifest) !== null &&
+    (plan.connectorModality !== "browser_bound" || browserRunnable)
+  );
 }
 
 function isUatExposablePlan(
   plan: ReturnType<typeof buildConnectionSetupPlan>,
   manifest: ConnectorManifestLike,
+  browserRunnable: boolean,
   connectorKey?: string | null,
   allowlist?: ReadonlySet<string>
 ): boolean {
   const basePlan = [
-    isOwnerActionablePlan(plan, manifest),
+    isOwnerActionablePlan(plan, browserRunnable),
     plan.catalogDisposition === "static_secret_experimental",
-    plan.catalogDisposition === "static_secret_connect" &&
-      plan.setupModality === "static_secret" &&
-      staticSecretCredentialCaptureFromManifest(manifest) !== null,
+    hasUatStaticSecretSetup(plan, manifest, browserRunnable),
   ].includes(true);
 
   if (basePlan) {
@@ -244,11 +263,7 @@ function isUatExposablePlan(
     const listing = manifest.capabilities?.public_listing;
     const isDevelopment = listing?.tier === "development";
     if (isDevelopment) {
-      const hasValidSetup =
-        plan.catalogDisposition === "static_secret_connect" &&
-        plan.setupModality === "static_secret" &&
-        staticSecretCredentialCaptureFromManifest(manifest) !== null;
-      return hasValidSetup;
+      return hasUatStaticSecretSetup(plan, manifest, browserRunnable);
     }
   }
 
@@ -256,6 +271,7 @@ function isUatExposablePlan(
 }
 
 function buildTemplateSupportedActions(args: {
+  browserRunnable: boolean;
   manifest: ConnectorManifestLike;
   plan: ReturnType<typeof buildConnectionSetupPlan>;
   resource: string;
@@ -276,7 +292,7 @@ function buildTemplateSupportedActions(args: {
       },
     ];
   }
-  if (isActionable && isOwnerSessionBrowserActionPlan(args.plan, args.manifest)) {
+  if (isActionable && isOwnerSessionBrowserActionPlan(args.plan, args.browserRunnable)) {
     return [
       {
         family: "initiate_connection",
@@ -300,13 +316,14 @@ function buildTemplateSupportedActions(args: {
 
 function projectSetupPlan(
   manifest: ConnectorManifestLike,
-  plan: ReturnType<typeof buildConnectionSetupPlan>
+  plan: ReturnType<typeof buildConnectionSetupPlan>,
+  browserRunnable: boolean
 ): Record<string, unknown> {
   // Owner-facing actionability: manifest is listed AND plan is actionable (lifecycle authority unchanged).
   // UAT exposure via uat_expose_unlisted_connectors does not modify setup_plan; it is a separate flag
   // for the console to enable testing without claiming Supported or Preview tier.
   const isActionableManifest = isActionablePublicListing(manifest);
-  const isActionablePlan = isOwnerActionablePlan(plan, manifest);
+  const isActionablePlan = isOwnerActionablePlan(plan, browserRunnable);
   const ownerActionable = isActionableManifest && isActionablePlan;
   return {
     catalog_disposition: plan.catalogDisposition,
@@ -329,13 +346,16 @@ function projectTemplate(
   ctx: MountOwnerConnectorTemplatesContext,
   manifest: ConnectorManifestLike,
   connectionsByConnector: ReadonlyMap<string, readonly ConnectorInstanceRow[]>,
-  resource: string
+  resource: string,
+  readiness: BrowserEnrollmentReadiness | null
 ): Record<string, unknown> | null {
   const connectorKey = connectorKeyFromManifest(ctx, manifest);
   if (!connectorKey) {
     return null;
   }
+  const browserRunnable = readiness?.action === "connect";
   const plan = buildConnectionSetupPlan({
+    browserEnrollmentRunnable: browserRunnable,
     configuredProviderAuthConnectorKeys: ctx.configuredProviderAuthConnectorKeys ?? [],
     connectorKey,
     manifest,
@@ -354,8 +374,10 @@ function projectTemplate(
 
   const uatExposeUnlistedConnectors =
     ctx.uatExposeUnlistedConnectors === true &&
-    ((isUnproven && isUatExposablePlan(plan, manifest, connectorKey, ctx.uatConnectorAllowlist)) ||
-      (isDevelopment && isAllowlisted && isUatExposablePlan(plan, manifest, connectorKey, ctx.uatConnectorAllowlist)));
+    ((isUnproven && isUatExposablePlan(plan, manifest, browserRunnable, connectorKey, ctx.uatConnectorAllowlist)) ||
+      (isDevelopment &&
+        isAllowlisted &&
+        isUatExposablePlan(plan, manifest, browserRunnable, connectorKey, ctx.uatConnectorAllowlist)));
 
   return {
     connection_count: connections.length,
@@ -363,20 +385,23 @@ function projectTemplate(
     connector_id: connectorKey,
     connector_key: connectorKey,
     connector_modality: modality,
+    // The server-owned browser-setup verdict (connector-readiness.ts). Null for
+    // a template that is not browser-bound.
+    connector_readiness: readiness ? toReadinessWire(readiness) : null,
     display_name: displayNameForTemplate(connectorKey, manifest),
     icon: manifest.icon ?? null,
-    // Development-tier-only fact: whether this connector is a KNOWN scaffold
-    // (unconditional SKIP_RESULT, no real collection) versus real-but-unproven.
-    // The console needs this to decide whether a Development-tier card may
-    // ever render an add action -- a scaffold must never get one, because
-    // clicking it cannot collect anything.
-    is_known_scaffold: isKnownScaffoldConnector(connectorKey),
     object: "owner_connector_template",
     public_listing: manifest.capabilities?.public_listing ?? null,
     registration_status: "registered",
-    setup_plan: projectSetupPlan(manifest, plan),
+    setup_plan: projectSetupPlan(manifest, plan, browserRunnable),
     stream_count: Array.isArray(manifest.streams) ? manifest.streams.length : 0,
-    supported_actions: buildTemplateSupportedActions({ manifest, plan, resource, uatExposeUnlistedConnectors }),
+    supported_actions: buildTemplateSupportedActions({
+      browserRunnable,
+      manifest,
+      plan,
+      resource,
+      uatExposeUnlistedConnectors,
+    }),
     uat_expose_unlisted_connectors: uatExposeUnlistedConnectors,
     version: manifest.version ?? null,
   };
@@ -401,6 +426,19 @@ async function collectConnectorTemplates(ctx: MountOwnerConnectorTemplatesContex
   return Array.from(byConnectorKey.entries())
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([, manifest]) => manifest);
+}
+
+/** Browser-bound templates only: other templates have no browser-setup verdict. */
+async function readinessByConnectorKey(
+  ctx: MountOwnerConnectorTemplatesContext,
+  templates: readonly ConnectorManifestLike[]
+): Promise<ReadonlyMap<string, BrowserEnrollmentReadiness>> {
+  const browserBound = templates.flatMap((manifest) => {
+    const connectorKey = connectorKeyFromManifest(ctx, manifest);
+    return connectorKey && classifyConnectorIntentModality(manifest) === "browser_bound" ? [connectorKey] : [];
+  });
+  const resolved = await ctx.readinessResolver.resolveMany(browserBound);
+  return new Map(resolved.map((entry) => [entry.connector_key, entry]));
 }
 
 async function connectionsByConnectorKey(
@@ -438,6 +476,7 @@ export function mountOwnerConnectorTemplates(app: AppLike, ctx: MountOwnerConnec
           collectConnectorTemplates(ctx),
           connectionsByConnectorKey(ctx, ownerSubjectId),
         ]);
+        const readiness = await readinessByConnectorKey(ctx, templates);
         res.json({
           data: templates
             .map((manifest) => {
@@ -445,7 +484,8 @@ export function mountOwnerConnectorTemplates(app: AppLike, ctx: MountOwnerConnec
               // template from an owner agent — same isolation as the read loop
               // in collectConnectorTemplates above.
               try {
-                return projectTemplate(ctx, manifest, connections, resource);
+                const key = connectorKeyFromManifest(ctx, manifest);
+                return projectTemplate(ctx, manifest, connections, resource, (key && readiness.get(key)) || null);
               } catch {
                 return null;
               }

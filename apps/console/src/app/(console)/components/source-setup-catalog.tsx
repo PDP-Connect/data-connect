@@ -12,6 +12,7 @@ import { ConnectorMark } from "./connector-mark.tsx";
 import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
+import { readinessBlockNote } from "../lib/connector-readiness-copy.ts";
 import {
   connectorLookupKey,
   isUninstallableCatalogEntry,
@@ -144,16 +145,13 @@ function SourceAcquisitionPaths({ paths }: { paths: readonly ConnectorAcquisitio
  * Development-tier method line, resolved before the `not_available_here`
  * short-circuit below. `sourceSetupAvailability` reports `not_available_here`
  * for every Development entry regardless of whether it renders an add
- * action (see `sourceSetupAction`'s scaffold check), so that check alone
+ * action (see `sourceSetupAction`'s disposition check), so that check alone
  * would print "No proven setup path is available" directly above a real
  * "Add account" button for a self-testable entry -- contradicting the
  * action right next to it.
  */
 function developmentMethodLine(entry: ConnectorCatalogEntry): string {
-  if (entry.isKnownScaffold) {
-    return "Not built yet: nobody has written this connector's collection code.";
-  }
-  return "Setup path implemented, not yet proven against a live account.";
+  return readinessBlockNote(entry.readiness) ?? "Setup path implemented, not yet proven against a live account.";
 }
 
 function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: number): string {
@@ -466,6 +464,7 @@ function SourceSetupCard({
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
+  const readinessNote = readinessBlockNote(entry.readiness);
   const {
     installModel,
     noSetupPath,
@@ -509,11 +508,12 @@ function SourceSetupCard({
       </div>
       <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
         <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
-        {entry.isKnownScaffold ? (
-          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
-            This connector's collection code is not built yet.
+        {readinessNote ? (
+          <span className="pdpp-caption mb-2 block text-muted-foreground" data-testid="connector-readiness-note">
+            {readinessNote}
           </span>
-        ) : noSetupPath ? (
+        ) : null}
+        {noSetupPath ? (
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
             Not installable: no setup path is available here.
           </span>

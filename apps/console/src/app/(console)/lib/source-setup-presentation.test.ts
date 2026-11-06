@@ -53,7 +53,6 @@ function makeEntry(overrides: Partial<ConnectorCatalogEntry> & Pick<ConnectorCat
     deploymentReadiness: { blockers: [], guidance: null, state: "ready" },
     displayName: "Stub connector",
     externalDocs: [],
-    isKnownScaffold: false,
     listingNote: null,
     modality: "network",
     nextStepKind: "unsupported",
@@ -204,9 +203,8 @@ test("preview + browser_collector_manual (Venmo) is offered on /sources/add", ()
  * Development entry is never a runnable ADD OFFER (isRunnableAddOffer stays
  * false, unconditionally, for the whole tier -- see "development tier is
  * never offered" above), but it DOES get a self-test action, distinct status
- * label, and honest guidance in the Development disclosure. A KNOWN scaffold
- * gets none of those: no action, "Not built yet" status, and guidance that
- * says plainly there is nothing to test yet.
+ * label, and honest guidance in the Development disclosure. Whether the owner
+ * can act now is the server's readiness verdict, not the tier or a roster.
  */
 
 test("development + real (non-scaffold) self-testable disposition gets a self-test action, never a runnable offer", () => {
@@ -214,7 +212,6 @@ test("development + real (non-scaffold) self-testable disposition gets a self-te
     connectorKey: "imessage",
     disposition: "local_collector_enroll",
     displayName: "iMessage",
-    isKnownScaffold: false,
     modality: "local_collector",
     ownerActionable: false,
     publicTier: "development",
@@ -228,47 +225,49 @@ test("development + real (non-scaffold) self-testable disposition gets a self-te
   assert.equal(sourceSetupStatus(imessage).label, "In development");
 });
 
-test("development + known scaffold gets no action and a distinct 'Not built yet' status", () => {
+test("a development entry the server cannot run gets no action and the tier label, not 'Not built yet'", () => {
   const anthropic = makeEntry({
     connectorKey: "anthropic",
     disposition: "browser_bound_runbook",
     displayName: "Anthropic",
-    isKnownScaffold: true,
     modality: "browser_bound",
     ownerActionable: false,
     publicTier: "development",
+    readiness: {
+      action: "unavailable",
+      browserBound: true,
+      connectorKey: "anthropic",
+      detail: null,
+      reason: "not_published",
+    },
     setupModality: "browser_bound",
   });
   assert.equal(isRunnableAddOffer(anthropic), false);
-  assert.equal(sourceSetupAction(anthropic), null, "a known scaffold must never render an add action");
-  assert.equal(sourceSetupStatus(anthropic).label, "Not built yet");
-  assert.match(
-    sourceSetupGuidance(anthropic),
-    /scaffold/i,
-    "scaffold guidance must say plainly there is nothing to test yet"
-  );
+  assert.equal(sourceSetupAction(anthropic), null, "a disposition with no safe action renders no action");
+  assert.equal(sourceSetupStatus(anthropic).label, "In development");
+  assert.doesNotMatch(sourceSetupGuidance(anthropic), /scaffold/i);
 });
 
-test("development + known scaffold with a self-testable disposition still gets no action", () => {
-  // The structural safety property: isKnownScaffold overrides disposition.
-  // Even if a scaffold's disposition happens to land in the self-test
-  // allowlist (e.g. a future scaffold resolves to static_secret_connect),
-  // clicking an action for it can never collect anything.
-  const scaffoldWithRunnableDisposition = makeEntry({
-    connectorKey: "hypothetical-scaffold",
+test("a roster-style name never changes what a card offers: only disposition and the verdict do", () => {
+  // The same key with the same disposition gets the same action whatever the
+  // verdict says; the server expresses a block through the disposition.
+  const base = {
+    connectorKey: "hypothetical-name",
     disposition: "static_secret_connect",
-    isKnownScaffold: true,
     publicTier: "development",
     setupModality: "static_secret",
+  } as const;
+  const withVerdict = makeEntry({
+    ...base,
+    readiness: { action: "install", browserBound: true, connectorKey: "hypothetical-name", detail: null, reason: "not_installed" },
   });
-  assert.equal(sourceSetupAction(scaffoldWithRunnableDisposition), null);
+  assert.deepEqual(sourceSetupAction(withVerdict), sourceSetupAction(makeEntry(base)));
 });
 
 test("development + a disposition with no safe action gets honest fallback guidance, not the generic dead-end", () => {
   const localCollectorUnproven = makeEntry({
     connectorKey: "some-filesystem-connector",
     disposition: "local_collector_unproven",
-    isKnownScaffold: false,
     modality: "local_collector",
     ownerActionable: false,
     publicTier: "development",
@@ -286,7 +285,6 @@ test("development real entry surfaces its manifest listingNote in guidance when 
   const spotify = makeEntry({
     connectorKey: "spotify",
     disposition: "static_secret_connect",
-    isKnownScaffold: false,
     listingNote: "Hidden from the reference dashboard catalog until a credentialed run proves useful records in the deployment.",
     publicTier: "development",
     setupModality: "static_secret",
@@ -299,27 +297,24 @@ test("development real entry surfaces its manifest listingNote in guidance when 
  * offer an install action" defect. `sourceSetupRowIsUnavailable` is the
  * predicate the catalog uses to suppress the Package column's install
  * control and sort a row to the bottom -- it must match exactly "nothing
- * this owner can click" (a known scaffold, or any other disposition
- * `sourceSetupAction` refuses), never the broader
+ * this owner can click" (any disposition `sourceSetupAction` refuses), never the broader
  * `sourceSetupAvailability === "not_available_here"` set, which also covers
  * a real self-testable Development entry that DOES have a click target.
  */
-test("a known scaffold has no click target and is unavailable", () => {
-  const scaffold = makeEntry({
+test("a disposition with no safe action has no click target and is unavailable", () => {
+  const unrunnable = makeEntry({
     connectorKey: "anthropic",
     disposition: "browser_bound_runbook",
-    isKnownScaffold: true,
     publicTier: "development",
     setupModality: "browser_bound",
   });
-  assert.equal(sourceSetupRowIsUnavailable(scaffold), true);
+  assert.equal(sourceSetupRowIsUnavailable(unrunnable), true);
 });
 
 test("a real self-testable development entry has a click target and is NOT unavailable", () => {
   const imessage = makeEntry({
     connectorKey: "imessage",
     disposition: "local_collector_enroll",
-    isKnownScaffold: false,
     modality: "local_collector",
     ownerActionable: false,
     publicTier: "development",
@@ -332,7 +327,6 @@ test("a supported entry with a real action is not unavailable", () => {
   const chatgpt = makeEntry({
     connectorKey: "chatgpt",
     disposition: "static_secret_connect",
-    isKnownScaffold: false,
     ownerActionable: true,
     publicTier: "supported",
     setupModality: "static_secret",
@@ -344,7 +338,6 @@ test("an unclassified unsupported disposition has no click target and is unavail
   const unsupported = makeEntry({
     connectorKey: "some-dead-connector",
     disposition: "unknown_unsupported",
-    isKnownScaffold: false,
     ownerActionable: false,
     publicTier: "supported",
     setupModality: "provider_authorization",
@@ -353,24 +346,22 @@ test("an unclassified unsupported disposition has no click target and is unavail
 });
 
 test("sourceSetupRank always sorts an unavailable row after every rank a normal row can have", () => {
-  const scaffold = makeEntry({
+  const unrunnable = makeEntry({
     connectorKey: "anthropic",
     disposition: "browser_bound_runbook",
-    isKnownScaffold: true,
     publicTier: "development",
     setupModality: "browser_bound",
   });
   const experimental = makeEntry({
     connectorKey: "signal",
     disposition: "static_secret_experimental",
-    isKnownScaffold: false,
     publicTier: "preview",
     setupModality: "static_secret",
     supportState: "experimental",
   });
   assert.equal(sourceSetupRowIsUnavailable(experimental), false, "test fixture sanity: experimental opt-in has a click target");
   assert.ok(
-    sourceSetupRank(scaffold) > sourceSetupRank(experimental),
+    sourceSetupRank(unrunnable) > sourceSetupRank(experimental),
     "an unavailable row's rank must exceed even the lowest-priority actionable rank"
   );
 });

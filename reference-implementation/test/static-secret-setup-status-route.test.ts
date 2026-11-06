@@ -9,6 +9,7 @@ import { emitSpineEvent } from "../lib/spine.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { CREDENTIAL_ENCRYPTION_KEY_ENV } from "../server/stores/credential-encryption.ts";
+import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 
 // Integration coverage for the owner-session static-secret SETUP-STATUS route —
 // the durable surface that makes an in-flight static-secret setup visible to the
@@ -232,9 +233,14 @@ const VALID_TIMELINE_BODY = JSON.stringify({
   ],
 });
 
-async function registerConnector(asUrl: string, name: string): Promise<void> {
+async function registerConnector(
+  asUrl: string,
+  name: string,
+  fixtures?: ReturnType<typeof createBrowserArtifactFixtures>
+): Promise<void> {
+  const manifest = loadManifest(name) as Record<string, unknown>;
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(loadManifest(name)),
+    body: JSON.stringify(fixtures ? await fixtures.publish(manifest) : manifest),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
@@ -987,8 +993,13 @@ test("manual/upload setup status shows committed acquisition-batch counts after 
 });
 
 test("ChatGPT browser-enrollment-shell draft is classified browser_session, not static_secret, despite its credential-capture manifest", async () => {
-  await withServer(async ({ asUrl }) => {
-    await registerConnector(asUrl, "chatgpt");
+  // Registration alone is not code availability: the enrollment route refuses
+  // a connector with no runnable artifact, so give it a verified one.
+  const fixtures = createBrowserArtifactFixtures();
+  const restoreHost = setBrowserHostCapability(true);
+  try {
+    await withServer(async ({ asUrl }) => {
+    await registerConnector(asUrl, "chatgpt", fixtures);
     const cookie = await login(asUrl);
 
     const created = await createBrowserEnrollmentShell(asUrl, cookie, "chatgpt");
@@ -1038,7 +1049,11 @@ test("ChatGPT browser-enrollment-shell draft is classified browser_session, not 
     assert.doesNotMatch(remediation, NO_BROWSER_CREDENTIAL_REMEDIATION);
     assert.doesNotMatch(remediation, NO_BROWSER_REENTER_REMEDIATION);
     assert.match(remediation, SECURE_BROWSER_REMEDIATION);
-  });
+    });
+  } finally {
+    restoreHost();
+    fixtures.close();
+  }
 });
 
 test("setup status requires an owner session and 404s an unknown connection", async () => {

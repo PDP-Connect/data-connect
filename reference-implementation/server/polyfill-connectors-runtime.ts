@@ -233,16 +233,8 @@ export function readPolyfillManifests(): readonly PolyfillManifestEntry[] {
   return typeof read === "function" ? (read() as readonly PolyfillManifestEntry[]) : [];
 }
 
-/**
- * Whether the conformance roster loaded. Without it the two lists below are
- * empty, which means "unknown", not "no connector is production-ready or a
- * scaffold".
- */
-export const CONFORMANCE_ROSTER_LOADED: boolean = optionalModules.roster !== null;
 export const PRODUCTION_READY_CONNECTORS: Readonly<Record<string, { readonly testFile: string }>> =
   (optionalModules.roster?.PRODUCTION_READY_CONNECTORS as Readonly<Record<string, { readonly testFile: string }>> | undefined) ?? {};
-export const KNOWN_SCAFFOLD_CONNECTORS: readonly string[] =
-  (optionalModules.roster?.KNOWN_SCAFFOLD_CONNECTORS as readonly string[] | undefined) ?? [];
 
 function cleanString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
