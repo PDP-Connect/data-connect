@@ -8,8 +8,12 @@
 //
 // The record is keyed by connector, connector instance and run. A run id that
 // exists under another connector or instance is absent, so it returns a typed
-// `not_found` 404. This route exports nothing: it returns the stored record to
-// the owner session that asked, and nothing else reads it.
+// `not_found` 404. The instance must also belong to the calling owner subject,
+// as in the `abandon-enrollment` route of ref-browser-enrollment-shell.ts: an
+// unknown instance, another owner's instance and an instance of another
+// connector all give the same 404, before the record is read. This route
+// exports nothing: it returns the stored record to the owner session that
+// asked, and nothing else reads it.
 
 import type { ConnectorObservationRunStore } from "../stores/connector-observation-store.ts";
 import {
@@ -34,7 +38,18 @@ interface AppLike {
   get: (path: string, ...handlers: (MiddlewareHandler | RouteHandler)[]) => AppLike;
 }
 
+interface OwnedConnectorInstance {
+  readonly connectorId: string;
+  readonly ownerSubjectId: string;
+}
+
+interface ConnectorInstanceLookup {
+  get: (id: string) => Promise<OwnedConnectorInstance | null> | OwnedConnectorInstance | null;
+}
+
 export interface MountRefRunObservationsContext {
+  createRequestConnectorInstanceStore: () => ConnectorInstanceLookup;
+  getOwnerSubjectId: (req: unknown) => string;
   handleError: (res: unknown, err: unknown) => void;
   pdppError: PdppErrorFn;
   requireOwnerSession: MiddlewareHandler;
@@ -85,6 +100,13 @@ export function mountRefRunObservations(app: AppLike, ctx: MountRefRunObservatio
         if (value.length > OBSERVATION_IDENTITY_MAX_LENGTH || value.trim().length === 0) {
           return ctx.pdppError(res, 400, "invalid_request", `${param} is not a valid identifier`, param);
         }
+      }
+
+      // Ownership first. The three misses (unknown, foreign, other connector) are indistinguishable.
+      const ownerSubjectId = ctx.getOwnerSubjectId(req);
+      const instance = await ctx.createRequestConnectorInstanceStore().get(connectorInstanceId);
+      if (!instance || instance.ownerSubjectId !== ownerSubjectId || instance.connectorId !== connectorId) {
+        return ctx.pdppError(res, 404, "not_found", `Run observations not found: ${runId}`, "run_id");
       }
 
       const store = ctx.store ?? getDefaultConnectorObservationStore();

@@ -625,6 +625,10 @@ function findingOf(fact: ConnectorFact, scope: DeclaredScope): Category | undefi
       if (fact.attrs.kind !== "auth_failure") {
         return undefined;
       }
+      // `step` is OPTIONAL for this fact and so is `rule` (docs/spec/collection-profile.md at
+      // data-connectors a87edcdc, :1525 and :1541), and an `auth_failure` with no runtime
+      // record derives `auth_rejected` as the connector's report (:1702). So a bare one
+      // supports the category. A step or rule that it does name must be declared.
       if (fact.step !== undefined && !scope.steps.has(fact.step)) {
         return undefined;
       }

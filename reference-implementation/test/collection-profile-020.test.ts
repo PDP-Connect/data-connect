@@ -423,6 +423,50 @@ test("a malformed line never reaches the trace or the run error, whatever its ty
   }
 });
 
+test("prose that quotes the OBSERVATION type is not an OBSERVATION: only a line that starts as a JSON object is", async () => {
+  // OBSERVATION_TYPE_TEXT_RE classifies a line that does not parse. A log line that
+  // merely quotes the type pair is still a protocol violation (as any unparseable
+  // line is), not a malformed OBSERVATION that is discarded while the run goes on.
+  const stub = makeStub(
+    [
+      'note: the connector should emit {"type":"OBSERVATION"} here',
+      { records_emitted: 0, status: "succeeded", type: "DONE" },
+    ],
+    0
+  );
+  try {
+    const outcome = await runStub(stub, "run_c020_prose_quotes_type", manifest());
+    assert.equal(outcome.ok, false, "a prose line is a protocol violation, as any unparseable line is");
+    const record = await persistedRecord("run_c020_prose_quotes_type");
+    assert.deepEqual(
+      (record?.snapshot.defects ?? []).map(defectKey),
+      [],
+      "a prose line must not accrue an OBSERVATION defect"
+    );
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
+test("a truncated OBSERVATION object is a discarded OBSERVATION and collection continues", async () => {
+  const stub = makeStub(
+    ['{"type":"OBSERVATION","id":"cut1"', { records_emitted: 0, status: "succeeded", type: "DONE" }],
+    0
+  );
+  try {
+    const outcome = await runStub(stub, "run_c020_truncated_observation", manifest());
+    assert.equal(
+      outcome.ok,
+      true,
+      `a truncated OBSERVATION must not abort the run: ${outcome.ok ? "" : outcome.message}`
+    );
+    const record = await persistedRecord("run_c020_truncated_observation");
+    assert.deepEqual((record?.snapshot.defects ?? []).map(defectKey), ["invalid"]);
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
 test("an oversize line that is not JSON records oversize without marking the record truncated", async () => {
   // This goes through the runtime's child stdout path, not the unit entry.
   const stub = makeStub(

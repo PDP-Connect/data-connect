@@ -23,6 +23,20 @@ const RUN_ID = "run_observations_route";
 
 type Session = "owner" | "client" | "anonymous";
 
+const OWNER_SUBJECT = "owner_subject_1";
+const OTHER_OWNER_SUBJECT = "owner_subject_2";
+
+interface ViewerOptions {
+  /** The owner subject of the calling session. */
+  readonly subject?: string;
+  /** Instances the connector-instance store knows, by id. Defaults to one instance owned by OWNER_SUBJECT. */
+  readonly instances?: Readonly<Record<string, { connectorId: string; ownerSubjectId: string }>>;
+}
+
+const DEFAULT_INSTANCES: NonNullable<ViewerOptions["instances"]> = {
+  [INSTANCE_ID]: { connectorId: CONNECTOR_ID, ownerSubjectId: OWNER_SUBJECT },
+};
+
 interface Captured {
   body: Record<string, unknown> | null;
   headers: Record<string, string>;
@@ -43,6 +57,7 @@ function fakeRecord(): ConnectorObservationRunRecord {
 function fakeStore(record: ConnectorObservationRunRecord | null): ConnectorObservationRunStore {
   const calls: unknown[] = [];
   return {
+    calls,
     get(key: ConnectorObservationRunKey) {
       calls.push(key);
       if (
@@ -70,8 +85,10 @@ async function invoke(
   session: Session,
   query: Record<string, string | undefined>,
   store: ConnectorObservationRunStore,
-  runId = RUN_ID
+  runId = RUN_ID,
+  viewer: ViewerOptions = {}
 ): Promise<Captured> {
+  const instances = viewer.instances ?? DEFAULT_INSTANCES;
   type Handler = (req: unknown, res: unknown, next?: () => void) => unknown;
   const routes: { middleware: Handler[]; handler: Handler | undefined } = { handler: undefined, middleware: [] };
   const app = {
@@ -83,6 +100,15 @@ async function invoke(
     },
   };
   mountRefRunObservations(app as never, {
+    createRequestConnectorInstanceStore: () => ({
+      get: (id: string) => {
+        const found = instances[id];
+        return found
+          ? { connectorId: found.connectorId, connectorInstanceId: id, ownerSubjectId: found.ownerSubjectId }
+          : null;
+      },
+    }),
+    getOwnerSubjectId: () => viewer.subject ?? OWNER_SUBJECT,
     handleError: (_res, err) => {
       throw err;
     },
@@ -174,6 +200,35 @@ test("a run that exists under another connector or instance is not found", async
   assert.equal(otherConnector.status, 404);
   const otherInstance = await invoke("owner", { ...OWNER_QUERY, connector_instance_id: "instance_other" }, store);
   assert.equal(otherInstance.status, 404);
+});
+
+test("a second owner subject gets 404 for the first owner's run, and the store is never read", async () => {
+  const store = fakeStore(fakeRecord());
+  const result = await invoke("owner", OWNER_QUERY, store, RUN_ID, { subject: OTHER_OWNER_SUBJECT });
+  assert.equal(result.status, 404);
+  assert.equal((result.body?.error as { code?: string } | undefined)?.code, "not_found");
+  assert.notEqual(result.body?.object, "run_observations");
+  assert.equal(result.body?.snapshot, undefined, "the foreign owner must not see any part of the record");
+  assert.equal(
+    (store as unknown as { calls: unknown[] }).calls.length,
+    0,
+    "ownership is decided before the record is read"
+  );
+});
+
+test("an instance the store does not know is a 404 even when a record exists under that key", async () => {
+  const result = await invoke("owner", OWNER_QUERY, fakeStore(fakeRecord()), RUN_ID, { instances: {} });
+  assert.equal(result.status, 404);
+  assert.equal((result.body?.error as { code?: string } | undefined)?.code, "not_found");
+});
+
+test("an instance registered under a different connector is a 404", async () => {
+  const result = await invoke("owner", OWNER_QUERY, fakeStore(fakeRecord()), RUN_ID, {
+    instances: {
+      [INSTANCE_ID]: { connectorId: "https://registry.pdpp.dev/connectors/other", ownerSubjectId: OWNER_SUBJECT },
+    },
+  });
+  assert.equal(result.status, 404);
 });
 
 test("an unknown run id is a typed not_found 404", async () => {

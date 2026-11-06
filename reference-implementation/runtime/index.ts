@@ -2614,8 +2614,11 @@ const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
 
 /** Type of a Collection Profile 0.2.0 OBSERVATION message (Section 5.10). */
 const OBSERVATION_MESSAGE_TYPE = "OBSERVATION";
-/** An unparseable line is an OBSERVATION only when its text names the type. */
-const OBSERVATION_TYPE_TEXT_RE = /"type"\s*:\s*"OBSERVATION"/;
+/**
+ * An unparseable line is an OBSERVATION only when it starts as a JSON object and
+ * its text names the type. Prose that merely quotes the type pair is not one.
+ */
+const OBSERVATION_TYPE_TEXT_RE = /^\s*\{.*"type"\s*:\s*"OBSERVATION"/s;
 
 function isObservationMessage(value: unknown): boolean {
   return typeof value === "object" && value !== null && (value as { type?: unknown }).type === OBSERVATION_MESSAGE_TYPE;

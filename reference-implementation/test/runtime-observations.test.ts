@@ -717,6 +717,9 @@ test("violation defects aggregate by reason with counts and no connector text", 
 // Diagnosis
 // ---------------------------------------------------------------------------
 
+// Section 5.10.1: `step` and `rule` are OPTIONAL for provider_message, so a bare
+// auth_failure (no step, no rule) supports auth_rejected. A named step or rule must be declared
+// (see the test further down).
 test("an auth_failure cited in the basis diagnoses auth_rejected attributed to the connector", () => {
   const { run } = harness();
   run.accept(authFailure("a1"));

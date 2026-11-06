@@ -5956,6 +5956,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
   } as unknown as Parameters<typeof mountRefRunStatus>[1]);
   // Owner-only diagnostic read of a run's OBSERVATION record (Collection Profile 0.2.0 Section 5.10).
   mountRefRunObservations(app, {
+    createRequestConnectorInstanceStore,
+    getOwnerSubjectId,
     handleError,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
