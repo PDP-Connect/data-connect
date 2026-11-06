@@ -231,9 +231,6 @@ for (const disposition of DISPOSITIONS_WITHOUT_SETUP_PATH) {
       ...unregisteredBrowser,
       disposition,
       ownerActionable: undefined,
-      // For a browser-bound connector the disposition alone no longer decides:
-      // the server's verdict does, and this one says installing cannot help.
-      readiness: verdict("not_implemented", "unavailable"),
       supportState: "unsupported",
     };
     for (const busy of [false, true]) {
@@ -334,11 +331,7 @@ test("after installation account setup appears only when the setup planner suppo
     catalog: { ...browserPackage.catalog, digest: installed.digest },
     installed: { ...installed, connector_id: "new-browser" },
   };
-  const stillBlocked = await render(
-    false,
-    { ...unregisteredBrowser, readiness: verdict("host_requirement_unmet", "configure") },
-    lifecycle
-  );
+  const stillBlocked = await render(false, unregisteredBrowser, lifecycle);
   assert.doesNotMatch(stillBlocked, INSTALL_OR_BROWSER_SETUP);
   assert.match(stillBlocked, UNAVAILABLE_TRUE);
 

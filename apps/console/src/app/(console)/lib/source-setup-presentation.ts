@@ -184,11 +184,13 @@ export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
 }
 
 /**
- * A browser connector's account setup comes from its package. Before the
- * reference has registered it there is no verdict (the page builds such entries
- * from the manifest alone), and a verdict of `install` or `repair` names the
- * package as the next step; the server then decides whether the connector can
- * run. Any other verdict says installing cannot help. Only an offered tier
+ * A browser connector's account setup comes from its package. A manifest-only
+ * entry (the page builds it before the reference has a template, so it has
+ * neither a verdict nor a `registrationStatus`) awaits its package, and so does
+ * an entry whose verdict is `install` or `repair`; the server then decides
+ * whether the connector can run. Any other verdict says installing cannot help.
+ * An entry with a `registrationStatus` but no verdict (a server that predates
+ * the readiness endpoint) keeps the disposition's answer. Only an offered tier
  * qualifies: a development or undeclared tier is never an add offer.
  */
 function browserSetupAwaitsPackage(entry: ConnectorCatalogEntry): boolean {
@@ -198,7 +200,7 @@ function browserSetupAwaitsPackage(entry: ConnectorCatalogEntry): boolean {
   if (entry.readiness) {
     return entry.readiness.action === "install" || entry.readiness.action === "repair";
   }
-  return entry.registrationStatus !== "registered";
+  return entry.registrationStatus === undefined;
 }
 
 /**
