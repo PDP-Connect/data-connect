@@ -410,16 +410,6 @@ function isBoundedWallClock(maxRunWallClockMs: number): boolean {
   return Number.isFinite(maxRunWallClockMs) && maxRunWallClockMs > 0;
 }
 
-// `0` and `Infinity` are the documented explicit opt-outs (see
-// runtime/scheduler-config.ts). NaN and negative values are not: they used to
-// read as "no ceiling", so a hanging connector was never killed and nothing
-// said why. Reject them where the budget enters the watchdog.
-function assertValidWallClockBudget(maxRunWallClockMs: number): void {
-  if (Number.isNaN(maxRunWallClockMs) || maxRunWallClockMs < 0) {
-    throw new Error(`maxRunWallClockMs must be a non-negative number or Infinity; got ${maxRunWallClockMs}`);
-  }
-}
-
 // `setTimeout` cannot delay past 2^31 - 1 ms: Node fires it almost at once.
 // `budget * 4` can also overflow to Infinity, which reads as "unbounded", so a
 // huge finite budget would silently lose its ceiling.
@@ -433,7 +423,6 @@ export function createAttemptWatchdog(
   maxRunWallClockMs: number,
   timers: WatchdogTimers = GLOBAL_WATCHDOG_TIMERS
 ): AttemptWatchdog {
-  assertValidWallClockBudget(maxRunWallClockMs);
   const cancellation = new AbortController();
   let timedOut = false;
   let cancelTimer: (() => void) | null = null;
@@ -823,8 +812,6 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     setState,
     watchdogTimers,
   } = deps;
-  // Fail at construction, not on the first run that happens to hang.
-  assertValidWallClockBudget(maxRunWallClockMs);
 
   async function appendRunHistoryBestEffort(record: RunRecord, connectorId: string): Promise<void> {
     if (!schedulerStore) {

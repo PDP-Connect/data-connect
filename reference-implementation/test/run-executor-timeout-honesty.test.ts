@@ -695,21 +695,10 @@ test(
   })
 );
 
-const BUDGET_ERROR = /maxRunWallClockMs/;
-
-// The watchdog budget contract: a positive finite number arms the ceiling,
-// `Infinity` and `0` are the documented ways to disable it
-// (runtime/scheduler-config.ts), and anything else is a configuration error.
-// A NaN or negative budget used to read as "no ceiling", so a hanging connector
-// was never killed and nothing recorded why.
-for (const invalid of [Number.NaN, -1, Number.NEGATIVE_INFINITY]) {
-  test(`createAttemptWatchdog rejects the invalid budget ${String(invalid)} instead of silently disabling the ceiling`, () => {
-    const watchdog = manualWatchdogTimers();
-    assert.throws(() => createAttemptWatchdog(invalid, watchdog.timers), BUDGET_ERROR);
-    assert.equal(watchdog.armedDelayMs(), null);
-  });
-}
-
+// The watchdog budget contract: a positive finite number arms the ceiling and
+// `Infinity` and `0` are the documented explicit opt-outs
+// (runtime/scheduler-config.ts). The scheduler rejects NaN and negative budgets
+// before they reach the watchdog (resolveNonNegativeMsOrInfinity).
 for (const optOut of [0, Number.POSITIVE_INFINITY]) {
   test(`createAttemptWatchdog treats ${String(optOut)} as the explicit opt-out: nothing is armed`, () => {
     const watchdog = manualWatchdogTimers();
@@ -763,8 +752,3 @@ for (const hugeBudget of [2 ** 30, 1e308]) {
     assert.equal(watchdog.armedDelayMs(), MAX_TIMER_DELAY_MS);
   });
 }
-
-test("createRunExecutor rejects an invalid wall-clock budget at construction", () => {
-  assert.throws(() => makeHarness(freshRuntime(), "http://127.0.0.1:1", Number.NaN), BUDGET_ERROR);
-  assert.throws(() => makeHarness(freshRuntime(), "http://127.0.0.1:1", -1), BUDGET_ERROR);
-});
