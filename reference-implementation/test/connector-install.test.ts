@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -618,6 +619,74 @@ test("a second store handle cannot create a source while uninstall owns the data
     else process.env.PDPP_DATA_DIR = previousDataDir;
     if (previousPreloadDir === undefined) delete process.env.PDPP_CONNECTOR_PRELOAD_DIR;
     else process.env.PDPP_CONNECTOR_PRELOAD_DIR = previousPreloadDir;
+    rmSync(dataDir, { force: true, recursive: true });
+  }
+});
+
+const DUPLICATE_BINDING_PROFILES = {
+  escaped:
+    '{"connector_id":"github","version":"1.0.0","runtime_requirements":{"bindings":{"network":{"required":true},"n\\u0065twork":{"required":false}}}}',
+  nested:
+    '{"connector_id":"github","version":"1.0.0","runtime_requirements":{"bindings":{"network":{"required":true,"required":false}}}}',
+  plain:
+    '{"connector_id":"github","version":"1.0.0","runtime_requirements":{"bindings":{"network":{"required":true},"network":{"required":false}}}}',
+} as const;
+const RE_PROFILE_REPEATS_KEY = /Connector profile repeats an object key\./;
+
+for (const [name, profileText] of Object.entries(DUPLICATE_BINDING_PROFILES)) {
+  test(`an installed profile with a repeated object key (${name}) is refused, as the HTTP and local paths refuse it`, async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+    try {
+      const store = createFileConnectorInstallStore(dataDir);
+      const registered: unknown[] = [];
+      const service = createConnectorInstallService({
+        catalogLoader: async () => [entry],
+        dataDir,
+        installArtifact: (root) => {
+          writeFixture(root);
+          writeFileSync(join(root, "profile", "collection-profile.json"), profileText);
+        },
+        registerManifest: (manifest) => {
+          registered.push(manifest);
+          return Promise.resolve();
+        },
+        store,
+      });
+      await assert.rejects(service.install("github", digest), RE_PROFILE_REPEATS_KEY);
+      assert.equal(await store.getActive("github"), null, "nothing became active");
+      assert.deepEqual(registered, [], "nothing was registered, so no last-wins value reached the registry");
+      assert.equal(existsSync(join(dataDir, "connectors", "github", digest)), false, "the published root is removed");
+    } finally {
+      rmSync(dataDir, { force: true, recursive: true });
+    }
+  });
+}
+
+test("an active record whose profile bytes repeat an object key is not runnable", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-connector-install-"));
+  try {
+    const store = createFileConnectorInstallStore(dataDir);
+    const service = createConnectorInstallService({
+      catalogLoader: async () => [entry],
+      dataDir,
+      installArtifact: (root) => {
+        writeFixture(root);
+      },
+      registerManifest: () => Promise.resolve(),
+      store,
+    });
+    const active = await service.install("github", digest);
+    // Re-record the altered profile under its own hash, so only the repeated key is wrong.
+    const profile = join(active.root, "profile", "collection-profile.json");
+    writeFileSync(profile, DUPLICATE_BINDING_PROFILES.plain);
+    const manifestSha256 = `sha256:${createHash("sha256").update(readFileSync(profile)).digest("hex")}`;
+    await store.activate({ ...active, manifestSha256 });
+
+    const inspected = await inspectActiveConnector(store, "github");
+    assert.equal(inspected.status, "invalid");
+    assert.match(inspected.status === "invalid" ? inspected.reason : "", RE_PROFILE_REPEATS_KEY);
+    assert.equal(await resolveActiveConnectorPath(store, "github"), null);
+  } finally {
     rmSync(dataDir, { force: true, recursive: true });
   }
 });

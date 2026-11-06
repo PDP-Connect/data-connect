@@ -25,6 +25,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
+import { BindingDeclarationError, parseManifestJsonText } from "../../runtime/binding-declarations.ts";
 import { snapshotSourceDeclaration } from "../source-declaration.ts";
 import {
   assertConnectorLifecycleAvailable,
@@ -581,6 +582,22 @@ export async function resolveActiveConnectorPath(
   });
 }
 
+/**
+ * Parses a Collection Profile from the text on disk. A repeated object key is rejected, as on the HTTP and
+ * local-source paths: `JSON.parse` alone keeps the last value and the repeat is gone before registration. The
+ * error names no key or path, because the profile text is not trusted and an install error reaches the owner.
+ */
+function parseProfileText(text: string): unknown {
+  try {
+    return parseManifestJsonText(text);
+  } catch (error) {
+    if (error instanceof BindingDeclarationError) {
+      throw new Error("Connector profile repeats an object key.");
+    }
+    throw new Error("Connector profile is not valid JSON.");
+  }
+}
+
 function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDir?: string): ConnectorInstallRecord {
   assertStoredRecordMetadata(active);
   const normalizedRoot = resolve(root);
@@ -595,7 +612,7 @@ function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDi
   if (!manifestFile) {
     throw new Error("Active connector manifest path is invalid.");
   }
-  const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
+  const manifest = parseProfileText(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
   const manifestKey = canonicalManifestKey(manifest);
   if (manifestKey !== active.connectorId) {
     throw new Error("Active connector manifest identity does not match its record.");
@@ -716,7 +733,7 @@ function readVerifiedRecord(
   if (lstatSync(manifestFile).size > MAX_CONFIG_BYTES) {
     throw new Error("Connector profile exceeds the 1 MiB RI limit.");
   }
-  const manifest: unknown = JSON.parse(readFileSync(manifestFile, "utf8"));
+  const manifest: unknown = parseProfileText(readFileSync(manifestFile, "utf8"));
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Connector profile is invalid.");
   }
