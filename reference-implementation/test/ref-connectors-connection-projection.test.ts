@@ -1825,7 +1825,7 @@ test(
   })
 );
 
-// ChatGPT-shaped case (Tim's live symptom): a connector that is BOTH
+// ChatGPT-shaped case (a live symptom): a connector that is BOTH
 // static-secret-capable AND browser-bound, enrolled with a `browser_collector`
 // binding, with no stored credential. The steady-state repair the owner is
 // routed to MUST be a durable credential reauth/capture action — NOT a
