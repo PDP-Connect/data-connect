@@ -115,6 +115,13 @@ export interface RunExecutorDeps {
     | null
     | undefined;
   setState: SetStateHandler;
+  /**
+   * Timer functions the attempt watchdog arms. Optional: defaults to the
+   * global timers, so callers that do not care are unaffected. A test injects a
+   * manual implementation to fire the watchdog at a chosen point instead of
+   * racing a real wall-clock budget against process startup.
+   */
+  watchdogTimers?: WatchdogTimers;
 }
 
 // ─── Public interface ─────────────────────────────────────────────────────────
@@ -356,6 +363,25 @@ async function invokeRunConnector(call: RunConnectorCall): Promise<RunConnectorR
 
 // ─── Attempt watchdog ─────────────────────────────────────────────────────────
 
+/**
+ * The watchdog's only timer need: run `callback` after `ms`, and be able to
+ * cancel it. `setTimeout` returns the canceller, so the seam owns no handle
+ * type and an implementation is never forced to fabricate a Node timer.
+ */
+export interface WatchdogTimers {
+  setTimeout: (callback: () => void, ms: number) => () => void;
+}
+
+// The production default. `unref` keeps a pending watchdog from holding the
+// process open on its own.
+const GLOBAL_WATCHDOG_TIMERS: WatchdogTimers = {
+  setTimeout: (callback, ms) => {
+    const handle = setTimeout(callback, ms);
+    handle.unref();
+    return () => clearTimeout(handle);
+  },
+};
+
 interface AttemptWatchdog {
   cancel: () => void;
   clear: () => void;
@@ -383,10 +409,13 @@ function isBoundedWallClock(maxRunWallClockMs: number): boolean {
   return Number.isFinite(maxRunWallClockMs) && maxRunWallClockMs > 0;
 }
 
-export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdog {
+export function createAttemptWatchdog(
+  maxRunWallClockMs: number,
+  timers: WatchdogTimers = GLOBAL_WATCHDOG_TIMERS
+): AttemptWatchdog {
   const cancellation = new AbortController();
   let timedOut = false;
-  let timer: NodeJS.Timeout | null = null;
+  let cancelTimer: (() => void) | null = null;
   // Local-only work no longer has provider progress to reset the primary
   // watchdog. Keep the exemption bounded: four primary budgets is long enough
   // for the existing local materialization path while still guaranteeing that
@@ -408,14 +437,11 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     if (!isBoundedWallClock(maxRunWallClockMs) || timedOut || localOnlyPhase || cancellation.signal.aborted) {
       return;
     }
-    if (timer) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
     }, maxRunWallClockMs);
-    timer.unref?.();
   };
 
   const armLocalOnlyPhaseCeiling = () => {
@@ -426,14 +452,11 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     ) {
       return;
     }
-    if (timer) {
-      clearTimeout(timer);
-    }
-    timer = setTimeout(() => {
+    cancelTimer?.();
+    cancelTimer = timers.setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
     }, localOnlyPhaseMaxRunWallClockMs);
-    timer.unref?.();
   };
 
   if (isBoundedWallClock(maxRunWallClockMs)) {
@@ -447,17 +470,13 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
       }
     },
     clear() {
-      if (timer) {
-        clearTimeout(timer);
-        timer = null;
-      }
+      cancelTimer?.();
+      cancelTimer = null;
     },
     markProgress(extra) {
       if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase) {
         localOnlyPhase = true;
-        if (timer) {
-          clearTimeout(timer);
-        }
+        cancelTimer?.();
         armLocalOnlyPhaseCeiling();
         // TRUE only on the latching call — the caller emits the durable trace.
         return true;
@@ -772,6 +791,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     runManagedConnectorViaController,
     schedulerStore,
     setState,
+    watchdogTimers,
   } = deps;
 
   async function appendRunHistoryBestEffort(record: RunRecord, connectorId: string): Promise<void> {
@@ -1046,7 +1066,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     const { connectorId, connectorInstanceId = connectorId } = schedule;
     const originalOnProgress = call.onProgress;
     const activeRunStore = selectActiveRunStore();
-    const watchdog = createAttemptWatchdog(maxRunWallClockMs);
+    const watchdog = createAttemptWatchdog(maxRunWallClockMs, watchdogTimers);
     // A cryptographically strong UUID keeps this fallback globally
     // collision-resistant: run_id is the sole uniqueness key for the durable
     // STREAM_EVIDENCE claim registry, and a millisecond-granularity fallback
