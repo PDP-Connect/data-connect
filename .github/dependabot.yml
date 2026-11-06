@@ -25,16 +25,16 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Dependabot documents one pull request across directories only for
+      # `group-by: dependency-name`, which splits patchright from playwright.
+      # The weekly workflow browser-stack-bump.yml opens the single pull
+      # request; this group keeps Dependabot's own bumps of these packages
+      # together and out of the generic group.
       browser:
         applies-to: version-updates
-        # Dependabot opens one pull request per dependency name across the
-        # directories, so patchright and playwright arrive as two pull requests.
-        # Each fails the version check until both are merged together.
-        group-by: dependency-name
         patterns:
           - patchright
           - patchright-core
-          - playwright
           - playwright-core
       npm:
         applies-to: version-updates
