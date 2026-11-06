@@ -6,7 +6,7 @@
  * store's teardown guarantee under a genuine fault in the terminal-
  * processing callback.
  *
- * Independent re-review (STREAM-EVIDENCE-P1-2-REREVIEW.md item 4) found
+ * An independent re-review found
  * the prior round's proof of this property used a temporary, fully-
  * reverted source mutation (an unconditional throw manually inserted,
  * observed, then removed) rather than a permanent test — leaving no

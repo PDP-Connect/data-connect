@@ -572,6 +572,41 @@ test("one detail stream can independently prove two parent checkpoints", async (
   assert.match(String(coverageGap?.message ?? ""), HOLDINGS_STATE_STREAM_PATTERN);
 });
 
+// Pins a limit, not a wish. Collection Profile 0.2.0 Section 5.6 makes `required_keys` the
+// connector's own complete key accounting for one detail stream and parent boundary
+// (docs/spec/collection-profile.md at data-connectors a87edcdc, :1353-1370). It does not
+// require every parent key to be listed: a parent record whose detail is already held needs no
+// detail this run, and shipped connectors (amazon `orders` and `order_items`) report
+// `required_keys: []` with accepted parent records. A runtime check that rejected such a report
+// would stall those connectors, so the runtime credits against the declared set only. A
+// connector that under-declares is not caught here; STREAM_EVIDENCE never gates (Section 5.7).
+test("an empty required_keys report for a parent with accepted records is the connector's declaration and commits", async (t) => {
+  const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  t.after(() => closeServer(server));
+  const ownerToken = await registerAndAuthorize(server);
+
+  const messages: Record<string, unknown>[] = [
+    { data: { id: "H" }, emitted_at: "2026-04-18T00:00:00Z", key: "H", stream: "holdings", type: "RECORD" },
+    {
+      hydrated_keys: [],
+      reference_only: true,
+      required_keys: [],
+      state_stream: "holdings",
+      stream: "valuations",
+      type: "DETAIL_COVERAGE",
+    },
+    { cursor: { page: "holdings-1" }, stream: "holdings", type: "STATE" },
+    { records_emitted: 1, status: "succeeded", type: "DONE" },
+  ];
+
+  const { result, thrown } = await runShortfall(server, ownerToken, messages);
+
+  assert.equal(thrown, null);
+  assert.ok(result?.checkpoint_summary);
+  assert.equal(result.checkpoint_summary.state_streams_committed, 1);
+  assert.equal((result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"), false);
+});
+
 test("a durable gap cannot satisfy the same detail key under a different parent", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));

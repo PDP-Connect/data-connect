@@ -7,8 +7,7 @@
 // gap/diagnostic/scope/recovery payloads are sanitised, size-bounded, and
 // normalised before being persisted to spine events. This is not a neutral
 // constants bucket — every symbol here participates in the bounding/projection
-// policy for connector output. See the §E contract:
-// tmp/workstreams/refactor-loop/decomp-loop/contract.runtime-bound-diagnostics.yaml
+// policy for connector output.
 //
 // Public facade (what runtime/index.js imports):
 //   Functions: boundString, boundStringList, boundGapString,
