@@ -50,6 +50,7 @@ const NON_RETRYABLE_FAILURE_REASONS: ReadonlySet<string> = new Set([
 const NON_RETRYABLE_TERMINAL_REASONS: ReadonlySet<TerminalReason> = new Set<TerminalReason>([
   "authentication_error",
   "connector_reported_cancelled",
+  "connector_reported_failed",
   "grant_consumed",
   "grant_expired",
   "grant_invalid",

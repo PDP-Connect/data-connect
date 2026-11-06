@@ -6091,12 +6091,15 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       });
       // A continuation replays the omitted slice. Without one, retaining the
       // cursor is a data-loss guard, independent of authorizing recovery: the
-      // connector's retryable flag, hint and prose do not decide this guard.
-      // Informational skips (for example an out-of-scope optional stream) do
-      // not claim an omission from the requested collection.
+      // connector's retryable flag, hint, reason and prose do not decide this
+      // guard, and neither does the gap's display severity. A connector's
+      // `out_of_scope` or `user_disabled` claim never exempts a stream: the
+      // validator above proved the named stream is in the requested scope, and
+      // the runtime can name no scope that excludes an in-scope stream, so every
+      // skip without a continuation is an omission.
       if (msg.reason === "stream_collection_failed") {
         skipOmissions.push({ source: "stream_collection_failed", stream: skipStream });
-      } else if (continuation === null && gap.severity !== "informational") {
+      } else if (continuation === null) {
         skipOmissions.push({ source: "retryable_skip", stream: skipStream });
       }
       appendKnownGap(gap);
