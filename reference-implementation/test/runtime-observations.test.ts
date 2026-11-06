@@ -286,6 +286,17 @@ test("a line that is not JSON never marks the record truncated, however long it 
   assert.deepEqual(run.gateRecoveryHint("not_retriable", "skip_result"), { result: "authorized" });
 });
 
+test("acceptWire gives the same outcome as acceptLine for a line that is not JSON", () => {
+  // The runtime parses the wire line once and enters here, so both entries must agree.
+  const text = "x".repeat(5000);
+  const { run: viaLine } = harness();
+  const { run: viaWire } = harness();
+  assert.equal(rejectedReason(viaLine.acceptLine(text)), "oversize");
+  assert.equal(rejectedReason(viaWire.acceptWire({ ok: false }, Buffer.byteLength(text, "utf8"))), "oversize");
+  assert.equal(viaWire.snapshot().truncated, viaLine.snapshot().truncated);
+  assert.equal(viaWire.snapshot().truncated, false);
+});
+
 test("a duplicate id is reported as duplicate_id even when the repeat is also oversize", () => {
   const { run } = harness();
   assert.equal(run.accept(waitExpired("dup")).status, "accepted");

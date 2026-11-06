@@ -106,7 +106,7 @@ import {
 } from "./done-validators.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
-import { createObservationRun } from "./observations.ts";
+import { createObservationRun, type WireParse } from "./observations.ts";
 import {
   buildHttpFailure,
   buildIngestEnvelopeContractViolationFailure,
@@ -3089,7 +3089,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     descriptors: profileDeclaration.descriptors,
   });
   // Byte counts and parsed values belong to the transport, never wire fields.
-  const observationInputs = new WeakMap<ConnectorMessage, { value: unknown; serializedBytes: number }>();
+  const observationInputs = new WeakMap<ConnectorMessage, { parse: WireParse; serializedBytes: number }>();
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
   const declaredCollectionScope = readStoredCollectionScope(state).scope;
@@ -3730,6 +3730,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // records `run.failed` with `run_timed_out`. `ownerCancelForced` flips to true
   // if the connector child ignored graceful termination and had to be SIGKILL'd.
   let ownerCancelRequested = false;
+  // Set when the owner record starts being stored. From then on the run's cancel state is sealed.
+  let ownerCancelSealed = false;
+  let observationDiagnosisWrite: Promise<void> | null = null;
   let runTimedOut = false;
   let ownerCancelForced = false;
   const terminalStopRequested = (): boolean => ownerCancelRequested || runTimedOut;
@@ -5131,6 +5134,14 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         return;
       }
       runTimedOut = cancelSignal?.reason === "run_timed_out";
+      if (!runTimedOut && ownerCancelSealed) {
+        // The owner record is already being stored, so the run's outcome is
+        // sealed: its diagnosis was decided with it. A later owner cancel stops
+        // the child but cannot turn the sealed outcome into a cancellation.
+        msgQueue.length = 0;
+        terminateChild();
+        return;
+      }
       if (!runTimedOut) {
         ownerCancelRequested = true;
         // Emit the audit marker without blocking the terminate path; the terminal
@@ -6544,11 +6555,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const input = observationInputs.get(msg);
       if (!input) throw new Error("Missing runtime observation envelope");
       observationInputs.delete(msg);
-      observationRun.accept(input.value, input.serializedBytes);
+      observationRun.acceptWire(input.parse, input.serializedBytes);
       return Promise.resolve();
     }
-
-    let observationDiagnosisWrite: Promise<void> | null = null;
 
     /**
      * The owner diagnostic record (Section 5.10 and 5.11), written once per run.
@@ -6557,6 +6566,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
      * progress and never change the run's outcome.
      */
     function persistObservationDiagnosis(): Promise<void> {
+      // Starting the write seals the owner-cancel state: the diagnosis below and
+      // the terminal outcome both read it, and `handleCancellation` stops changing
+      // it from here on.
+      ownerCancelSealed = true;
       observationDiagnosisWrite ??= getDefaultConnectorObservationStore()
         .put({
           connectorId,
@@ -6606,71 +6619,61 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     rl.on("line", (line) => {
-      // Parse once. A line is an OBSERVATION by its parsed type, or by its text
-      // when it does not parse. Raw OBSERVATION lines are never traced, logged,
-      // spined or webhooked (Section 5.10).
-      let parsed: unknown;
-      let parseError: RuntimeRunError | null = null;
-      try {
-        parsed = JSON.parse(line);
-      } catch (caught) {
-        parseError = caught as RuntimeRunError;
-      }
-      const observation = parseError === null ? isObservationMessage(parsed) : OBSERVATION_TYPE_TEXT_RE.test(line);
-      if (!observation) {
-        writeTrace(line);
-      }
       if (!line.trim()) {
+        writeTrace(line);
         return;
+      }
+      // Parse once. A line is an OBSERVATION by its parsed type, or by its text
+      // when it does not parse. Nothing is known about the content of a line that
+      // does not parse, so it is never traced and its text or parser message is
+      // never put in an error: only its length is (Section 5.10).
+      let wire: WireParse;
+      try {
+        wire = { ok: true, value: JSON.parse(line) };
+      } catch {
+        wire = { ok: false };
+      }
+      const observation = wire.ok ? isObservationMessage(wire.value) : OBSERVATION_TYPE_TEXT_RE.test(line);
+      if (!wire.ok) {
+        writeTrace(`[unparseable line: ${Buffer.byteLength(line, "utf8")} bytes withheld]`);
+      } else if (!observation) {
+        writeTrace(line);
       }
       if (observation) {
         if (failPendingInteraction(new Error("Connector emitted OBSERVATION while waiting for INTERACTION_RESPONSE"))) {
           return;
         }
         const envelope: ConnectorMessage = { type: OBSERVATION_MESSAGE_TYPE };
-        observationInputs.set(envelope, { value: parsed, serializedBytes: Buffer.byteLength(line, "utf8") });
+        observationInputs.set(envelope, { parse: wire, serializedBytes: Buffer.byteLength(line, "utf8") });
         msgQueue.push(envelope);
         processNext().catch(rejectAfterDiagnosis);
         return;
       }
-      try {
-        if (parseError !== null) {
-          throw parseError;
-        }
-        const msg = parsed as ConnectorMessage;
-        if (resolvePendingOtpInteraction(msg)) {
-          // The matching resolution releases the protocol gate immediately.
-          // DONE can arrive on the next line before the async interaction
-          // completion clears pendingInteraction.
-          return;
-        }
-        if (failPendingInteraction(new Error(`Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`))) {
-          return;
-        }
-        msgQueue.push(msg);
-        processNext().catch(rejectAfterDiagnosis);
-      } catch (caught) {
-        const err = caught as RuntimeRunError;
+      if (!wire.ok || typeof wire.value !== "object" || wire.value === null) {
+        const detail = `${wire.ok ? "not a JSON object" : "not valid JSON"} (line_length=${line.length})`;
         if (
           failPendingInteraction(
-            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${err.message}`)
+            new Error(`Connector emitted invalid JSONL while waiting for INTERACTION_RESPONSE: ${detail}`)
           )
         ) {
           return;
         }
-        // Context for debugging: include byte length and a preview of the
-        // offending line in the error message.
-        const preview =
-          line.length > 400
-            ? `${line.slice(0, 200)} … [truncated ${line.length - 400} chars] … ${line.slice(-200)}`
-            : line;
-        const enriched = `${err.message} (line_length=${line.length} preview=${JSON.stringify(preview).slice(0, 600)})`;
-        msgQueue.push({
-          error: enriched,
-          type: "__PARSE_ERROR__",
-        });
+        msgQueue.push({ error: detail, type: "__PARSE_ERROR__" });
         processNext().catch(rejectAfterDiagnosis);
+        return;
       }
+      const msg = wire.value as ConnectorMessage;
+      if (resolvePendingOtpInteraction(msg)) {
+        // The matching resolution releases the protocol gate immediately.
+        // DONE can arrive on the next line before the async interaction
+        // completion clears pendingInteraction.
+        return;
+      }
+      if (failPendingInteraction(new Error(`Connector emitted ${msg.type} while waiting for INTERACTION_RESPONSE`))) {
+        return;
+      }
+      msgQueue.push(msg);
+      processNext().catch(rejectAfterDiagnosis);
     });
 
     async function recordRunTimedOutTerminal(code: number | null): Promise<void> {

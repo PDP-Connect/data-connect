@@ -80,6 +80,7 @@ interface Stub {
   readonly markerPath: string;
 }
 
+// A string message is written to stdout as is, so a test can send a line that is not valid JSON.
 // The child writes a marker file as soon as it receives START. A test that
 // expects no spawn checks that the marker is absent.
 function makeStub(messages: readonly unknown[], exitCode: number): Stub {
@@ -95,7 +96,7 @@ const rl = createInterface({ input: process.stdin, terminal: false });
 rl.on('line', (line) => {
   if (JSON.parse(line).type !== 'START') return;
   writeFileSync(${JSON.stringify(markerPath)}, line);
-  for (const message of ${JSON.stringify(messages)}) process.stdout.write(JSON.stringify(message) + '\\n');
+  for (const message of ${JSON.stringify(messages)}) process.stdout.write((typeof message === 'string' ? message : JSON.stringify(message)) + '\\n');
   rl.close();
   process.exit(${exitCode});
 });
@@ -395,6 +396,54 @@ test("raw OBSERVATION lines, including rejected ones, never reach the runtime tr
   }
 });
 
+test("a malformed line never reaches the trace or the run error, whatever its type spelling", async () => {
+  // The type is JSON-escaped and the closing brace is missing: the line does not
+  // parse, and a text match on "type":"OBSERVATION" cannot classify it. It must be
+  // treated as possibly private, not as trace-safe.
+  const traceDir = mkdtempSync(join(tmpdir(), "pdpp-collection-profile-020-trace-"));
+  const stub = makeStub(
+    [
+      `{"type":"\\u004fBSERVATION","private":"${SECRET_MARKER}"`,
+      { records_emitted: 0, status: "succeeded", type: "DONE" },
+    ],
+    0
+  );
+  try {
+    const outcome = await runStub(stub, "run_c020_escaped_malformed", manifest(), { PDPP_TRACE_DIR: traceDir });
+    const traceText = readdirSync(traceDir)
+      .map((name) => readFileSync(join(traceDir, name), "utf8"))
+      .join("\n");
+    assert.ok(traceText.includes("pdpp-runtime-trace"), "the trace file must exist, so the absence below is meaningful");
+    assert.equal(traceText.includes(SECRET_MARKER), false, "an unparseable line must not be traced verbatim");
+    assert.equal(JSON.stringify(outcome).includes(SECRET_MARKER), false, "the run error must not carry the line");
+    assert.equal(outcome.ok, false, "an unparseable line that names no OBSERVATION is still a protocol violation");
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+    rmSync(traceDir, { force: true, recursive: true });
+  }
+});
+
+test("an oversize line that is not JSON records oversize without marking the record truncated", async () => {
+  // This goes through the runtime's child stdout path, not the unit entry.
+  const stub = makeStub(
+    [
+      `{"type":"OBSERVATION","id":"junk1","pad":"${"x".repeat(3000)}`,
+      { records_emitted: 0, status: "succeeded", type: "DONE" },
+    ],
+    0
+  );
+  try {
+    const outcome = await runStub(stub, "run_c020_oversize_nonjson", manifest());
+    assert.equal(outcome.ok, true, `run must succeed: ${outcome.ok ? "" : outcome.message}`);
+    const record = await persistedRecord("run_c020_oversize_nonjson");
+    assert.ok(record, "the diagnostic record must be persisted");
+    assert.deepEqual(record.snapshot.defects.map(defectKey), ["oversize"]);
+    assert.equal(record.snapshot.truncated, false, "text that is not JSON is no fact, so no fact was lost");
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
 test("a declared-profile run whose manifest names an unknown profile version never spawns the child", async () => {
   const stub = makeStub([{ records_emitted: 0, status: "succeeded", type: "DONE" }], 0);
   try {
@@ -573,6 +622,49 @@ test("a cancelled run stores no cause, even when its failed DONE cited an auth f
     assert.equal(record.diagnosis.category, "unknown");
     assert.equal(record.diagnosis.attribution, "none");
     assert.deepEqual(record.diagnosis.basis, []);
+  } finally {
+    rmSync(stub.dir, { force: true, recursive: true });
+  }
+});
+
+test("a cancel that lands while the record is being stored cannot split the record from the terminal outcome", async () => {
+  // The owner record is written once, before the terminal event. The terminal
+  // outcome and the record's diagnosis are decided together at that write, so an
+  // abort that arrives during the write changes neither: the run ends as its
+  // failed DONE said, and its record keeps the cause that DONE cited.
+  const stub = makeStub(
+    [
+      PROVIDER_REJECTED("y1"),
+      {
+        error: { basis: ["y1"], code: "credential_rejected", message: "refused", retryable: false },
+        records_emitted: 0,
+        status: "failed",
+        type: "DONE",
+      },
+    ],
+    1
+  );
+  const abort = new AbortController();
+  const store = getDefaultConnectorObservationStore();
+  const put = store.put.bind(store);
+  const spy = mock.method(store, "put", async (input: Parameters<typeof store.put>[0]) => {
+    abort.abort();
+    return put(input);
+  });
+  try {
+    await runStub(stub, "run_c020_cancel_during_put", manifest(), {}, { cancelSignal: abort.signal });
+  } finally {
+    spy.mock.restore();
+  }
+  try {
+    const record = await persistedRecord("run_c020_cancel_during_put");
+    assert.ok(record, "the diagnostic record must be persisted");
+    const page = await listSpineEventsPage("run", "run_c020_cancel_during_put", { limit: 500 });
+    const terminal = page.events.map((event) => event.event_type);
+    assert.equal(terminal.includes("run.cancelled"), false, "a cancel after the record is sealed does not cancel the run");
+    assert.equal(terminal.includes("run.failed"), true);
+    assert.equal(record.diagnosis.category, "auth_rejected");
+    assert.deepEqual(record.diagnosis.basis, ["y1"]);
   } finally {
     rmSync(stub.dir, { force: true, recursive: true });
   }

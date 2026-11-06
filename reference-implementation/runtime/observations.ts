@@ -181,6 +181,9 @@ export interface CreateObservationRunInput {
   readonly now?: () => number;
 }
 
+/** The result of parsing one wire line. A line that is not JSON carries no value. */
+export type WireParse = { readonly ok: true; readonly value: unknown } | { readonly ok: false };
+
 export interface ObservationRun {
   /** Runtime-owned raw byte count, or canonical JSON size for in-memory callers. */
   accept: (value: unknown, serializedBytes?: number) => AcceptOutcome;
@@ -190,6 +193,11 @@ export interface ObservationRun {
    * is read as a size.
    */
   acceptLine: (line: string) => AcceptOutcome;
+  /**
+   * The same intake for a caller that has already parsed the line. `acceptLine`
+   * is this entry plus a parse, so both give one outcome for one wire line.
+   */
+  acceptWire: (parse: WireParse, serializedBytes: number) => AcceptOutcome;
   diagnose: (basis?: readonly string[]) => Diagnosis;
   /**
    * Section 5.11 gate for one connector hint. `authorized` means the runtime
@@ -528,19 +536,25 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
   }
 
   function acceptLine(line: string): AcceptOutcome {
+    let parse: WireParse;
+    try {
+      parse = { ok: true, value: JSON.parse(line) };
+    } catch {
+      parse = { ok: false };
+    }
+    return acceptWire(parse, Buffer.byteLength(line, "utf8"));
+  }
+
+  function acceptWire(parse: WireParse, serializedBytes: number): AcceptOutcome {
     if (!input.declared) {
       return reject("undeclared_capability", false);
     }
-    const bytes = Buffer.byteLength(line, "utf8");
-    let value: unknown;
-    try {
-      value = JSON.parse(line);
-    } catch {
+    if (!parse.ok) {
       // Text that is not JSON is no fact, so no fact was lost: the oversize
       // reason is recorded, but the record is not marked truncated.
-      return bytes > limits.maxFactBytes ? reject("oversize", false) : reject("invalid", false);
+      return serializedBytes > limits.maxFactBytes ? reject("oversize", false) : reject("invalid", false);
     }
-    return accept(value, bytes);
+    return accept(parse.value, serializedBytes);
   }
 
   function accept(value: unknown, serializedBytes?: number): AcceptOutcome {
@@ -700,6 +714,7 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
   return {
     accept,
     acceptLine,
+    acceptWire,
     diagnose,
     gateRecoveryHint,
     hasEmittedId,

@@ -394,7 +394,7 @@ function createSqliteConnectorObservationRunStore(): ConnectorObservationRunStor
   };
 }
 
-function createPostgresConnectorObservationRunStore(): ConnectorObservationRunStore {
+function createPostgresConnectorObservationRunStore(writeTimeoutMs: number): ConnectorObservationRunStore {
   return {
     async get(input: ConnectorObservationRunKey): Promise<ConnectorObservationRunRecord | null> {
       const key = requireKey(input);
@@ -423,6 +423,14 @@ function createPostgresConnectorObservationRunStore(): ConnectorObservationRunSt
       const { key, payload } = encodeRecord(input);
       const recordedAt = new Date().toISOString();
       await withPostgresTransaction(async (client) => {
+        // The record is optional reporting, and the runtime waits for this write
+        // before it publishes a terminal result. Bound the wait for the writer lock
+        // and the work itself, so a stalled writer fails this put, and the server
+        // cancels its own query. Transaction-local, so the pooled client is not
+        // left with the setting.
+        await client.query("SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $1, true)", [
+          String(writeTimeoutMs),
+        ]);
         // Transaction-scoped, so it releases at COMMIT or ROLLBACK, and it
         // serializes writers in every process that shares this database.
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
@@ -458,9 +466,18 @@ function createPostgresConnectorObservationRunStore(): ConnectorObservationRunSt
   };
 }
 
-export function createConnectorObservationRunStore(): ConnectorObservationRunStore {
+/** How long one PostgreSQL write may wait for the writer lock or run, in milliseconds. */
+export const CONNECTOR_OBSERVATION_WRITE_TIMEOUT_MS = 5000;
+
+export interface ConnectorObservationRunStoreOptions {
+  readonly writeTimeoutMs?: number;
+}
+
+export function createConnectorObservationRunStore(
+  options: ConnectorObservationRunStoreOptions = {}
+): ConnectorObservationRunStore {
   return isPostgresStorageBackend()
-    ? createPostgresConnectorObservationRunStore()
+    ? createPostgresConnectorObservationRunStore(options.writeTimeoutMs ?? CONNECTOR_OBSERVATION_WRITE_TIMEOUT_MS)
     : createSqliteConnectorObservationRunStore();
 }
 

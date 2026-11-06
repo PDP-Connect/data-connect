@@ -24,13 +24,19 @@ import {
   validateDiagnosticDescriptors,
 } from "../runtime/observations.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import {
+  closePostgresStorage,
+  initPostgresStorage,
+  postgresQuery,
+  withPostgresTransaction,
+} from "../server/postgres-storage.ts";
 import {
   CONNECTOR_OBSERVATION_RECORD_MAX_BYTES,
   CONNECTOR_OBSERVATION_RUNS_PER_CONNECTOR,
   type ConnectorObservationRunInput,
   type ConnectorObservationRunStore,
   ConnectorObservationStoreError,
+  createConnectorObservationRunStore,
   getDefaultConnectorObservationStore,
   resetDefaultConnectorObservationStoreCache,
 } from "../server/stores/connector-observation-store.ts";
@@ -919,4 +925,45 @@ test("Postgres connector observation store: deleting a connection cascades its r
   skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
   await withPostgres(contractDeletingConnectionCascades);
+});
+
+async function contractWriteWaitIsBounded(harness: Harness): Promise<void> {
+  const c = uniq("c-lock");
+  const i = uniq("i-lock");
+  await harness.seedConnection(c, i);
+  const bounded = createConnectorObservationRunStore({ writeTimeoutMs: 300 });
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let locked: () => void = () => undefined;
+  const lockTaken = new Promise<void>((resolve) => {
+    locked = resolve;
+  });
+  // Another transaction keeps this connector's writer lock, as a stalled writer would.
+  const holder = withPostgresTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      `connector_observation_runs:${c}`,
+    ]);
+    locked();
+    await held;
+  });
+  try {
+    await lockTaken;
+    const started = Date.now();
+    await assert.rejects(bounded.put(runInput(c, i, "run-blocked")), "a put behind a stalled writer must fail");
+    assert.ok(Date.now() - started < 5000, "the wait for the writer lock is bounded");
+  } finally {
+    release();
+    await holder;
+  }
+  await bounded.put(runInput(c, i, "run-after"));
+  assert.equal(await harness.rowCount(c), 1, "a later put succeeds once the lock is free");
+}
+
+test("Postgres connector observation store: a put behind a stalled writer fails within a bound", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+  timeout: 20_000,
+}, async () => {
+  await withPostgres(contractWriteWaitIsBounded);
 });
