@@ -2635,7 +2635,7 @@ test("Collection Profile conformance", async (t) => {
   });
 
   await t.test(
-    "STATE currently flushes and stages only the named stream when other streams still have buffered records",
+    "STATE flushes every buffered stream before it stages the named stream",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -2696,8 +2696,8 @@ rl.on('line', (line) => {
 
         assert.equal(result.status, "failed");
         assert.equal(result.exit_code, 1);
-        assert.equal(checkpointSummaryOf(result).records_flushed, 1);
-        assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 1);
+        assert.equal(checkpointSummaryOf(result).records_flushed, 2);
+        assert.equal(checkpointSummaryOf(result).buffered_records_dropped, 0);
         assert.equal(checkpointSummaryOf(result).state_streams_staged, 1);
         assert.equal(checkpointSummaryOf(result).state_streams_committed, 0);
 
@@ -2713,7 +2713,10 @@ rl.on('line', (line) => {
 
         const otherPage = await fetchRecords(rsPort, connectorId, ownerToken, "", "other_items");
         const otherFound = otherPage.find((record) => record.data?.id === "stream_other_1");
-        assert.ok(!otherFound, "other buffered streams should remain unflushed");
+        assert.ok(
+          otherFound,
+          "other buffered streams are flushed too: a cursor may pass only records the store already holds"
+        );
 
         const { body: runTimeline } = await fetchJson<TimelineBody>(
           `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
@@ -2728,8 +2731,8 @@ rl.on('line', (line) => {
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(failedEvent);
         assert.equal(failedEvent.data.reason, "connector_exit_without_done");
-        assert.equal(failedEvent.data.records_flushed, 1);
-        assert.equal(failedEvent.data.buffered_records_dropped, 1);
+        assert.equal(failedEvent.data.records_flushed, 2);
+        assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.state_streams_staged, 1);
         assert.equal(failedEvent.data.state_streams_committed, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
