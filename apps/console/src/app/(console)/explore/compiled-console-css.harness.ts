@@ -8,15 +8,22 @@
  * order, `!important`, pseudo-elements, interaction states), so a test reads
  * what a user would see and no second cascade lives here.
  *
- * The browser is the Chrome that is installed on the machine (GitHub's
- * hosted runners include it). When none is found the launch fails loudly:
- * a silently skipped readability test would hide the regression it guards.
+ * The browser is the Google Chrome installed on the machine (GitHub's hosted
+ * runners include it; elsewhere install it, or run
+ * `npx playwright-core install chrome`). It is not the Chromium the e2e tier
+ * downloads: that would need an install step in the console CI job. When no
+ * Chrome is found the launch fails loudly: a silently skipped readability
+ * test would hide the regression it guards.
+ *
+ * The page cannot reach the network. The sheet and markup are inline, and any
+ * other request is aborted, so a future external `@import` or font URL fails
+ * a test instead of making it depend on the network.
  */
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import tailwind from "@tailwindcss/postcss";
-import { type Browser, type Page, chromium } from "playwright-core";
+import { type Browser, chromium, type Page } from "playwright-core";
 import postcss from "postcss";
 
 const GLOBALS_CSS = fileURLToPath(
@@ -34,11 +41,15 @@ function shippedConsoleCss(): Promise<string> {
 }
 
 export function launchBrowser(): Promise<Browser> {
+	// --no-sandbox: hosted Ubuntu runners and test sandboxes block the
+	// unprivileged user namespaces Chrome's sandbox needs. The page only ever
+	// holds our own inline markup and cannot navigate or fetch (see above).
 	return chromium
 		.launch({ args: ["--no-sandbox"], channel: "chrome" })
 		.catch((cause: unknown) => {
 			throw new Error(
-				"These tests need an installed Google Chrome (playwright channel 'chrome').",
+				"These tests need an installed Google Chrome (playwright channel 'chrome'). " +
+					"Install Chrome, or run `npx playwright-core install chrome`.",
 				{ cause },
 			);
 		});
@@ -62,7 +73,10 @@ export async function openShippedPage(
 	html: string,
 	{ extraCss = "", theme = "light", width = 800 }: PageOptions = {},
 ): Promise<Page> {
-	const page = await browser.newPage({ viewport: { height: 600, width: 1000 } });
+	const page = await browser.newPage({
+		viewport: { height: 600, width: 1000 },
+	});
+	await page.route("**/*", (route) => route.abort());
 	await page.setContent(
 		`<!doctype html><html data-theme="${theme}"><head><style>${await shippedConsoleCss()}</style>` +
 			`<style>${extraCss}</style>` +
@@ -79,7 +93,12 @@ export interface Rgba {
 	r: number;
 }
 
-/** The sRGB value the browser paints for any CSS colour string. */
+/**
+ * The sRGB value the browser paints for any CSS colour string. A canvas does
+ * the conversion because `getComputedStyle` keeps the authored colour space:
+ * the brand tokens are `oklch(...)`, and Chrome reports them as `oklch(...)`,
+ * not as `rgb(...)`.
+ */
 export function resolveColor(page: Page, value: string): Promise<Rgba> {
 	return page.evaluate((css) => {
 		const context = document.createElement("canvas").getContext("2d", {
