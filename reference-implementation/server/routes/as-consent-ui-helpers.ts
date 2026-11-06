@@ -92,8 +92,16 @@ export interface ConsentPickerCapabilities {
 }
 
 export interface ConsentPickerManifest {
+  /** Declared brand; `background_color` is the backdrop a light glyph needs to be visible. */
+  readonly brand?: { readonly background_color?: string | null } | null;
   readonly connector_id?: string | null;
   readonly display_name?: string | null;
+  /** Manifest-declared glyph, already allowlist-checked by `validateManifestIcon` on the read that produced it. */
+  readonly icon?: {
+    readonly color?: string | null;
+    readonly kind?: string | null;
+    readonly svg?: string | null;
+  } | null;
   readonly manifest_uri?: string | null;
   readonly name?: string | null;
   readonly source_declaration?: {
@@ -853,16 +861,12 @@ export async function buildHostedMcpConsentChallengeModel(
       continue;
     }
     const manifest = await caps.getConnectorManifest(row.connectorId);
-    const declared = manifest as {
-      brand?: { background_color?: string | null } | null;
-      icon?: { color?: string | null; kind?: string | null; svg?: string | null } | null;
-    } | null;
-    const icon = declared?.icon;
+    const icon = manifest?.icon;
     icons.set(
       row.connectorId,
       icon?.svg
         ? {
-            backgroundColor: declared?.brand?.background_color ?? null,
+            backgroundColor: manifest?.brand?.background_color ?? null,
             color: icon.color ?? null,
             kind: icon.kind ?? null,
             svg: icon.svg,
