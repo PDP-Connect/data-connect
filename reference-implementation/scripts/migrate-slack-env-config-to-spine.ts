@@ -26,7 +26,8 @@
  *     happen until the spine is the ONLY read path -- removing it here
  *     would risk a live-deploy regression this task explicitly forbids.
  *   - It does NOT activate the captured value as the connection's active
- *     collection-scope revision. An agent-authored collection_scope value
+ *     collection-scope revision. Per the adversarial design review (finding #6
+ *     and acceptance attack #12): an agent-authored collection_scope value
  *     must land `proposed`, never grandfathered as owner-authored, and a
  *     migration of a legacy env var must not silently become the new
  *     authority. An owner must separately confirm it (or reject it and

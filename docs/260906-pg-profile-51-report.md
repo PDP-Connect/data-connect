@@ -194,7 +194,7 @@ $ git diff --check
 ```
 
 The interrupted-run event log is retained at
-`full-profile.log` in the local scratch directory used for this run;
+`<scratch>/pg-profile-51/full-profile.log`;
 clean-main comparison logs are retained in the same directory.
 
 ## 2026-09-03 independent corrected-oracle rerun

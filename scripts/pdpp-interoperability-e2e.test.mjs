@@ -14,6 +14,10 @@
  * - ConsentGrantStore: PAR, owner approve/deny, and grant revocation
  * - TokenIntrospector: bearer validity before and after restart
  * - GrantScopedRecordsRepository: stream/record reads and field enforcement
+ *
+ * Environment:
+ * - DATACONNECT_PDPP_ROOT: path to a PDPP checkout that provides
+ *   `reference-implementation/`. When unset, every test in this file is skipped.
  */
 import assert from "node:assert/strict"
 import { existsSync } from "node:fs"
@@ -23,10 +27,9 @@ import { join } from "node:path"
 import test from "node:test"
 
 const PDPP_ROOT = process.env.DATACONNECT_PDPP_ROOT ?? ""
-assert.ok(
-  PDPP_ROOT,
-  "DATACONNECT_PDPP_ROOT must name a PDPP checkout that provides the reference implementation."
-)
+const SKIP_REASON = PDPP_ROOT
+  ? false
+  : "DATACONNECT_PDPP_ROOT is unset; it must name a PDPP checkout that provides the reference implementation."
 const REFERENCE_ROOT = join(PDPP_ROOT, "reference-implementation")
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "dataconnect-pdpp-interop-dcr-token"
 const OWNER_BOOTSTRAP_CLIENT_ID = "pdpp_cli"
@@ -39,45 +42,56 @@ function requiredPath(path) {
   return path
 }
 
-const referenceServerPath = requiredPath(
-  join(REFERENCE_ROOT, "server", "index.js")
-)
-const referenceFlowPath = requiredPath(
-  join(REFERENCE_ROOT, "examples", "third-party-app", "lib", "flow.js")
-)
-const referenceContractBuildersPath = requiredPath(
-  join(
-    PDPP_ROOT,
-    "packages",
-    "reference-contract",
-    "src",
-    "builders",
-    "index.ts"
-  )
-)
-const referenceRuntimePath = requiredPath(
-  join(REFERENCE_ROOT, "runtime", "index.js")
-)
-const githubManifestPath = requiredPath(
-  join(REFERENCE_ROOT, "manifests", "github.json")
-)
-const githubSeedConnectorPath = requiredPath(
-  join(REFERENCE_ROOT, "connectors", "seed", "index.js")
-)
+let githubManifestPath
+let githubSeedConnectorPath
+let startServer
+let runConnector
+let approveInline
+let buildHostedApprovalUrl
+let denyInline
+let introspectToken
+let queryStreamRecords
+let queryStreams
+let registerClient
+let stageParRequest
+let buildParRequest
 
-const { startServer } = await import(referenceServerPath)
-const { runConnector } = await import(referenceRuntimePath)
-const {
-  approveInline,
-  buildHostedApprovalUrl,
-  denyInline,
-  introspectToken,
-  queryStreamRecords,
-  queryStreams,
-  registerClient,
-  stageParRequest,
-} = await import(referenceFlowPath)
-const { buildParRequest } = await import(referenceContractBuildersPath)
+// Resolve paths and load the reference implementation only when the PDPP
+// checkout is named; otherwise the test below is skipped.
+if (!SKIP_REASON) {
+  const referenceServerPath = requiredPath(
+    join(REFERENCE_ROOT, "server", "index.js")
+  )
+  const referenceFlowPath = requiredPath(
+    join(REFERENCE_ROOT, "examples", "third-party-app", "lib", "flow.js")
+  )
+  const referenceContractBuildersPath = requiredPath(
+    join(PDPP_ROOT, "packages", "reference-contract", "src", "builders", "index.ts")
+  )
+  const referenceRuntimePath = requiredPath(
+    join(REFERENCE_ROOT, "runtime", "index.js")
+  )
+  githubManifestPath = requiredPath(
+    join(REFERENCE_ROOT, "manifests", "github.json")
+  )
+  githubSeedConnectorPath = requiredPath(
+    join(REFERENCE_ROOT, "connectors", "seed", "index.js")
+  )
+
+  ;({ startServer } = await import(referenceServerPath))
+  ;({ runConnector } = await import(referenceRuntimePath))
+  ;({
+    approveInline,
+    buildHostedApprovalUrl,
+    denyInline,
+    introspectToken,
+    queryStreamRecords,
+    queryStreams,
+    registerClient,
+    stageParRequest,
+  } = await import(referenceFlowPath))
+  ;({ buildParRequest } = await import(referenceContractBuildersPath))
+}
 
 async function closeReferenceServer(server) {
   server.schedulerManager?.stop?.()
@@ -268,7 +282,10 @@ function createPersonalServerPorts({ asUrl, rsUrl }) {
   }
 }
 
-test("DataConnect PDPP interoperability: grant-scoped GitHub records survive restart and fail closed after revoke", async t => {
+test(
+  "DataConnect PDPP interoperability: grant-scoped GitHub records survive restart and fail closed after revoke",
+  { skip: SKIP_REASON },
+  async t => {
   const dataDir = await mkdtemp(join(tmpdir(), "dataconnect-pdpp-interop-"))
   const dbPath = join(dataDir, "personal-server.sqlite")
   let personalServer

@@ -352,7 +352,7 @@ test("a forward-evidence-debt probe failure fails closed to false (no debt) and 
 
 // ── P1-B regression: debt must never make a tick dispatch NOTHING ───────────
 //
-// Debt previously only suppressed the recovery-only
+// Design review (2026-07-21, Part 2 section 3): debt only suppressed the recovery-only
 // branch; `eligible` stayed `intervalElapsed && !cooldownDefers`. When the
 // recovery cadence had elapsed but the failure-backoff-inflated forward-walk
 // interval had not — the exact live deadlock shape the surviving

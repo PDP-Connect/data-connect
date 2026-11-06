@@ -33,12 +33,13 @@ server has none, unpack the package and name its root. This works on PostgreSQL 
 root access:
 
 ```
-PGVECTOR_ROOT="$(mktemp -d)"
+export PGVECTOR_ROOT="$(mktemp -d)"
 (cd "$PGVECTOR_ROOT" &&
   apt-get download postgresql-18-pgvector &&
   dpkg-deb -x postgresql-18-pgvector_*.deb .)
-# then, from reference-implementation/:
+# from reference-implementation/:
 PDPP_TEST_PGVECTOR_ROOT="$PGVECTOR_ROOT" npm run test:postgres
+rm -rf "$PGVECTOR_ROOT"   # when done
 ```
 
 The path must be absolute. `scripts/test-postgres-private.sh` points the private cluster's
