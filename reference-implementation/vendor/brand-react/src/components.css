@@ -2390,6 +2390,7 @@
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .rr-x-facet__name--mono {
   font-family: var(--font-mono);
