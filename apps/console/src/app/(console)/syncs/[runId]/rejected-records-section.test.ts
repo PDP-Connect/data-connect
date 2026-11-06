@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { RunRecordRejectionReceipts } from "../../lib/ref-client.ts";
-import type { RunRejectionSummary } from "../../lib/run-rejections.ts";
+import { loadRunRejectionView, type RunRejectionSummary } from "../../lib/run-rejections.ts";
 import { RejectedRecordsSection } from "./rejected-records-section.tsx";
 
 const receipt = {
@@ -71,6 +71,23 @@ test("an unreadable count renders as unavailable, never as nothing", () => {
   assert.match(html, /Rejected records/);
   assert.match(html, /count is not available here/);
   assert.doesNotMatch(html, /receipt list is unavailable/);
+});
+
+test("an unknown count still lists the receipts the server holds for the run", async () => {
+  // The run page's data flow: an old server reports no total, the timeline
+  // page is partial, so the count is unknown. The receipt list is still read
+  // and rendered beside the unavailable-count sentence.
+  const view = await loadRunRejectionView({
+    connectionId: "conn_1",
+    events: [],
+    inputs: { active: false, statusTotal: null, timelineComplete: false },
+    readReceipts: async () => ({ receipts: [receipt], truncated: false }),
+    runId: "run_1",
+  });
+  const html = render(view.summary, view.receipts);
+  assert.match(html, /count is not available here/);
+  assert.match(html, /<code>messages<\/code>/);
+  assert.match(html, /<code>schema violation<\/code>/);
 });
 
 test("unaccounted streams on other timeline pages are flagged as not listed", () => {

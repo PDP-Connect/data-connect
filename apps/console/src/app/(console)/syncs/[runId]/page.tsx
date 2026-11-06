@@ -38,7 +38,7 @@ import {
   type SkippedStreamSummary,
   summarizeSkippedStreams,
 } from "../../lib/run-gaps.ts";
-import { rejectedCount, summarizeRunRejections } from "../../lib/run-rejections.ts";
+import { loadRunRejectionView } from "../../lib/run-rejections.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
 import { RejectedRecordsSection } from "./rejected-records-section.tsx";
@@ -144,18 +144,21 @@ export default async function RunDetailPage({
       : null;
   const latestProgress = getLatestProgress(events);
   // One timeline page holds only part of a long run, so the rejected total
-  // comes from the run status first, like liveness above. The page's events
-  // state a count only where they can prove it.
-  const rejections = summarizeRunRejections(events, {
-    statusTotal: runStatus?.records_permanently_rejected ?? null,
-    timelineComplete: cursor === null && !envelope.truncated,
+  // comes from the run status first, like liveness above, and `active` is that
+  // same liveness. The page's events state a count only where they can prove
+  // it. Receipts are read when the count is positive or unknown; a failed read
+  // or a run with no known connection renders as an unavailable list.
+  const { receipts: rejectionReceipts, summary: rejections } = await loadRunRejectionView({
+    connectionId,
+    events,
+    inputs: {
+      active,
+      statusTotal: runStatus?.records_permanently_rejected ?? null,
+      timelineComplete: cursor === null && !envelope.truncated,
+    },
+    readReceipts: listRunRecordRejectionReceipts,
+    runId,
   });
-  // Receipts are read only when this run rejected something. A failed read, or
-  // a run with no known connection, renders as an unavailable list.
-  const rejectionReceipts =
-    rejectedCount(rejections) > 0 && connectionId
-      ? await listRunRecordRejectionReceipts(connectionId, runId).catch(() => null)
-      : null;
   const failure = events.find((e) => e.event_type === "run.failed");
   const terminalKnownGaps = extractTerminalKnownGaps(events);
   const gapClassification = classifyKnownGaps(terminalKnownGaps.gaps);
