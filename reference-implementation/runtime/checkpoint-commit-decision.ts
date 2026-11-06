@@ -21,9 +21,10 @@
  *    - a hydrated declaration, unless the RS rejected a record for that key
  *      this run. A rejection uncredits the key whatever the connector says;
  *      a durable gap for the key still covers it. No accepted record behind a
- *      hydrated declaration is required by the base profile. A connector that
- *      declares the separately coordinated DETAIL_COVERAGE_KEY_SETS extension
- *      retains its accepted-record evidence requirement; or
+ *      hydrated declaration is required (Section 5.6), whatever the manifest
+ *      declares: a parent with no detail records (an empty parent) can list
+ *      its key as hydrated, and withholding it would stall its cursor on
+ *      every run; or
  *    - a pending or recovered durable DETAIL_GAP for the same stream, key and
  *      parent boundary. Declared `gap_keys` alone account for nothing.
  *    Runtime-specific `empty_keys`, `unchanged_keys` and `optional_skip_keys`
@@ -51,12 +52,8 @@
  * elsewhere; they carry no commit authority here.
  */
 export interface CoverageReport {
-  /** Accepted detail keys at this parent boundary, for the declared extension. */
-  evidencedKeys?: ReadonlySet<string>;
   /** Keys the connector declared hydrated (Section 5.6). */
   hydratedKeys: ReadonlySet<string>;
-  /** The package extension conditions proof on declaration, even during fallback. */
-  hydratedKeysNeedEvidence?: boolean;
   /** Keys with a record of `stream` the RS rejected this run and never accepted. */
   rejectedKeys: ReadonlySet<string>;
   requiredKeys: readonly string[];
@@ -72,8 +69,7 @@ export function coveredRequiredKeys(report: CoverageReport): string[] {
   return report.requiredKeys.filter(
     (key) =>
       report.hydratedKeys.has(key) &&
-      !report.rejectedKeys.has(key) &&
-      (!report.hydratedKeysNeedEvidence || report.evidencedKeys?.has(key) === true)
+      !report.rejectedKeys.has(key)
   );
 }
 

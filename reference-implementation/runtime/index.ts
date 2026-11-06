@@ -16,7 +16,6 @@ import { join as joinPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   type ConnectorProtocolCapability,
-  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
   isConnectorProtocolCapabilityArray,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
@@ -954,14 +953,9 @@ interface AcceptedKeysStore {
   distinctCount: (stream: string) => number;
   /**
    * Of `keys` for the (`stream`, `parentStream`) coverage boundary: the keys
-   * an accepted record answers for, and the keys a record the RS rejected and
-   * never accepted answers for.
+   * a record the RS rejected and never accepted answers for.
    */
-  boundaryEvidence: (
-    stream: string,
-    parentStream: string,
-    keys: Iterable<string>
-  ) => { evidenced: Set<string>; rejected: Set<string> };
+  rejectedKeys: (stream: string, parentStream: string, keys: Iterable<string>) => Set<string>;
   /**
    * Record survivors (batch entries NOT in `rejectedIndexes`) as accepted for
    * `stream` and the rest as rejected. A record answers for its own primary
@@ -991,7 +985,6 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
   let insertStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let countStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let insertRefStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
-  let evidencedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
   let rejectedStmt: ReturnType<InstanceType<typeof DatabaseSync>["prepare"]> | null = null;
 
   function ensureOpen(): void {
@@ -1035,26 +1028,21 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
         "ON CONFLICT (stream, ref, parent, key) DO UPDATE SET accepted = MAX(record_refs.accepted, excluded.accepted)"
     );
     const refsFor = "FROM record_refs r WHERE r.stream = ? AND r.ref = ? AND r.parent IN (?, ?)";
-    evidencedStmt = db.prepare(`SELECT 1 AS hit ${refsFor} AND r.accepted = 1 LIMIT 1`);
     rejectedStmt = db.prepare(`SELECT 1 AS hit ${refsFor} AND r.accepted = 0 LIMIT 1`);
   }
 
   return {
-    boundaryEvidence(stream: string, parentStream: string, keys: Iterable<string>) {
-      const evidenced = new Set<string>();
+    rejectedKeys(stream: string, parentStream: string, keys: Iterable<string>) {
       const rejected = new Set<string>();
-      if (!(evidencedStmt && rejectedStmt)) {
-        return { evidenced, rejected };
+      if (!rejectedStmt) {
+        return rejected;
       }
       for (const key of keys) {
-        if (evidencedStmt.get(stream, key, OWN_KEY_PARENT, parentStream)) {
-          evidenced.add(key);
-        }
         if (rejectedStmt.get(stream, key, OWN_KEY_PARENT, parentStream)) {
           rejected.add(key);
         }
       }
-      return { evidenced, rejected };
+      return rejected;
     },
     close(): void {
       try {
@@ -1066,7 +1054,6 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       insertStmt = null;
       countStmt = null;
       insertRefStmt = null;
-      evidencedStmt = null;
       rejectedStmt = null;
       if (dir) {
         try {
@@ -3067,11 +3054,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const manifestStateStreamByStream = buildManifestStateStreamMap(manifest);
   const manifestDetailParentStreamsByStream = buildManifestDetailParentStreamsMap(manifest);
   const manifestParentForeignKeysByStream = buildManifestParentForeignKeysMap(manifest);
-  // This package extension keys its stronger proof rule on the connector's
-  // declaration. Omitting START advertisement does not waive that obligation.
-  const hydratedKeysNeedEvidence =
-    Array.isArray(manifest.protocol_capabilities) &&
-    manifest.protocol_capabilities.includes(DETAIL_COVERAGE_KEY_SETS_CAPABILITY);
   // `getDefaultConnectorDetailGapStore()` is declared `unknown` at its own
   // module boundary (that store has not been migrated yet), so the runtime
   // states the surface it actually drives here.
@@ -4170,16 +4152,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       settled.set(
         stateStream,
         entries.map((entry) => {
-          const { evidenced, rejected } = acceptedKeysDb.boundaryEvidence(
-            entry.stream,
-            stateStream,
-            entry.requiredKeys
-          );
           const report: CoverageReport = {
             ...entry,
-            evidencedKeys: evidenced,
-            hydratedKeysNeedEvidence,
-            rejectedKeys: rejected,
+            rejectedKeys: acceptedKeysDb.rejectedKeys(entry.stream, stateStream, entry.requiredKeys),
           };
           const uncoveredCount = entry.requiredKeys.length - coveredRequiredKeys(report).length;
           return {

@@ -583,7 +583,7 @@ test("SQLite/Postgres parity scenario (SQLite side): one detail stream independe
   }
 });
 
-test("SQLite/Postgres parity scenario (SQLite side): a DETAIL_COVERAGE_KEY_SETS-declaring connector still needs an accepted record behind a hydrated key when START omits the extension; a nondeclaring connector's hydration credits by assertion", async () => {
+test("SQLite/Postgres parity scenario (SQLite side): a hydrated key credits by assertion whether or not the manifest declares DETAIL_COVERAGE_KEY_SETS", async () => {
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;

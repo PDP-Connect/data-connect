@@ -118,18 +118,6 @@ test("a hydrated declaration credits its required key with no accepted record be
   assert.deepEqual(decision, { commit: ["orders"], withheld: [] });
 });
 
-test("a key-set declaration retains its accepted-record proof rule when the runtime omits advertisement", () => {
-  const declared = report({
-    hydratedKeys: new Set(["k"]), requiredKeys: ["k"], hydratedKeysNeedEvidence: true,
-  });
-  assert.deepEqual(coveredRequiredKeys(declared), [], "missing evidence is not credit for a declaring connector");
-  assert.deepEqual(coveredRequiredKeys({ ...declared, evidencedKeys: new Set(["other"]) }), [],
-    "an unrelated accepted key cannot credit this boundary");
-  assert.deepEqual(coveredRequiredKeys({ ...declared, evidencedKeys: new Set(["k"]) }), ["k"]);
-  assert.deepEqual(coveredRequiredKeys({ ...declared, evidencedKeys: new Set(["k"]), rejectedKeys: new Set(["k"]) }), [],
-    "rejection still invalidates the declaring connector's hydration claim");
-});
-
 test("a required key with no hydrated declaration, gap or other accounting withholds", () => {
   const decision = decideCheckpointCommits(detailInput(report({ requiredKeys: ["k"] })));
   assert.deepEqual(decision, { commit: [], withheld: [SHORTFALL_ONE_KEY] });
