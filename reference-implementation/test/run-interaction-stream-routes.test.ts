@@ -27,6 +27,7 @@ import {
   DEFAULT_NEKO_PRIORITY_RANKS,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome resolver lacks this runtime-supported dependency export shape.
 } from "@opendatalabs/remote-surface/leases";
+import { REMOTE_SURFACE_INPUT_FIXTURES } from "@opendatalabs/remote-surface/testing";
 import {
   __resetControllerInteractionStateForTests,
   type Controller,
@@ -42,6 +43,7 @@ import {
   createSqliteConnectorInstanceStore,
   makeDefaultAccountConnectorInstanceId,
 } from "../server/stores/connector-instance-store.ts";
+import { createCdpCompanion } from "../server/streaming/cdp-adapter.ts";
 import { createMockCompanion, type MockCompanion } from "../server/streaming/cdp-companion.ts";
 import { createNekoCompanion as createNekoCompanionUntyped } from "../server/streaming/neko-adapter.ts";
 import { normalizeReferenceWireViewportPayload } from "../server/streaming/protocol-wire.ts";
@@ -148,6 +150,26 @@ test("viewport wire normalizes before validating so fractional dimensions never 
   assert.equal(normalizeReferenceWireViewportPayload({ height: 800, width: 0.5 }), null);
   assert.equal(normalizeReferenceWireViewportPayload({ height: 0.5, width: 800 }), null);
   assert.deepEqual(normalizeReferenceWireViewportPayload({ height: 844.9, width: 390.9 }), { height: 844, width: 390 });
+});
+
+test("viewport wire applies the input schema's bounds", () => {
+  assert.equal(normalizeReferenceWireViewportPayload({ height: 800, width: 1_000_000_000 }), null);
+  assert.equal(normalizeReferenceWireViewportPayload({ height: 1_000_000_000, width: 800 }), null);
+  assert.deepEqual(
+    normalizeReferenceWireViewportPayload({
+      deviceScaleFactor: 100,
+      height: 800,
+      screenHeight: 1_000_000_000,
+      screenWidth: 1_000_000_000,
+      width: 400,
+    }),
+    { height: 800, width: 400 }
+  );
+  assert.deepEqual(normalizeReferenceWireViewportPayload({ deviceScaleFactor: 8, height: 800, width: 400 }), {
+    deviceScaleFactor: 8,
+    height: 800,
+    width: 400,
+  });
 });
 
 interface MakeLeaseManagerOptions {
@@ -3285,6 +3307,353 @@ test("n.eko status keeps native control available separate from strict stealth p
       await cancelRun(asUrl, started.run_id, pending.interaction_id);
     }
   );
+});
+
+/**
+ * A CDP page socket that answers every command with an empty result and
+ * records it, so the real `createCdpCompanion` (and the Remote Surface CDP
+ * backend inside it) runs end to end behind the `/input` route.
+ */
+interface RecordedCdpCall {
+  method: string;
+  params: Record<string, unknown>;
+}
+type SocketListener = (event: { data?: string }) => void;
+
+function makeAutoAnsweringCdpSocket(): { calls: RecordedCdpCall[]; ctor: typeof WebSocket } {
+  const calls: RecordedCdpCall[] = [];
+  function AutoAnsweringSocket(this: unknown) {
+    const listeners: Record<string, SocketListener[]> = { close: [], error: [], message: [], open: [] };
+    let readyState = 0;
+    const emit = (name: string, event: { data?: string }) => {
+      for (const listener of listeners[name] ?? []) {
+        listener(event);
+      }
+    };
+    queueMicrotask(() => {
+      readyState = 1;
+      emit("open", {});
+    });
+    return {
+      addEventListener(name: string, listener: SocketListener) {
+        listeners[name]?.push(listener);
+      },
+      close() {
+        readyState = 3;
+        emit("close", {});
+      },
+      get readyState() {
+        return readyState;
+      },
+      send(data: string) {
+        const message = JSON.parse(data) as { id: number; method: string; params?: Record<string, unknown> };
+        calls.push({ method: message.method, params: message.params ?? {} });
+        queueMicrotask(() => emit("message", { data: JSON.stringify({ id: message.id, result: {} }) }));
+      },
+    };
+  }
+  return { calls, ctor: AutoAnsweringSocket as unknown as typeof WebSocket };
+}
+
+// Bodies the console viewer (`@opendatalabs/remote-surface` client)
+// was observed sending from a desktop browser and from the phone soft
+// keyboard bridge. Each must reach CDP through `/input`.
+const DESKTOP_VIEWER_INPUT_BODIES = [
+  { action: "pointerdown", button: 0, buttons: 1, pointerId: 1, pointerType: "mouse", type: "pointer", x: 400, y: 250 },
+  { action: "pointerup", button: 0, buttons: 0, pointerId: 1, pointerType: "mouse", type: "pointer", x: 400, y: 250 },
+  { action: "keydown", code: "KeyA", key: "a", modifiers: [], type: "keyboard" },
+  { action: "keyup", code: "KeyA", key: "a", modifiers: [], type: "keyboard" },
+  { action: "keydown", code: "KeyA", key: "A", modifiers: ["Shift"], type: "keyboard" },
+  { action: "keydown", code: "Backspace", key: "Backspace", modifiers: [], type: "keyboard" },
+  { action: "keydown", code: "Enter", key: "Enter", modifiers: [], type: "keyboard" },
+];
+const SOFT_KEYBOARD_INPUT_BODIES = [
+  { text: "a", type: "text" },
+  { action: "keydown", keysym: 65_288, type: "keyboard" },
+  { action: "keyup", keysym: 65_288, type: "keyboard" },
+  { action: "keydown", keysym: 65_293, type: "keyboard" },
+  { action: "keydown", keysym: 65_288, modifiers: ["Control"], type: "keyboard" },
+];
+
+interface CdpInputResult {
+  sent: RecordedCdpCall[];
+  status: number;
+}
+
+/**
+ * Mints a run-interaction stream over a real `createCdpCompanion` and hands
+ * `fn` a `post(body)` that POSTs to the real `/input` route and returns the
+ * status plus the CDP commands that body produced.
+ */
+async function withCdpInputRoute(fn: (post: (body: unknown) => Promise<CdpInputResult>) => Promise<void>): Promise<void> {
+  const sockets: ReturnType<typeof makeAutoAnsweringCdpSocket>[] = [];
+  await withHarness(
+    {
+      makeCompanion: ({ browser_session_id }: CompanionSpawnArgs) => {
+        const socket = makeAutoAnsweringCdpSocket();
+        sockets.push(socket);
+        return createCdpCompanion({
+          browser_session_id,
+          WebSocketCtor: socket.ctor,
+          wsUrl: "ws://127.0.0.1:9/devtools/page/x",
+        });
+      },
+    },
+    async ({ asUrl, spotifyManifest }) => {
+      const started = await startRun(asUrl, spotifyManifest.connector_id);
+      const pending = await waitForPendingInteraction(asUrl, started.run_id);
+      const mint = await fetchJson(`${asUrl}/_ref/runs/${encodeURIComponent(started.run_id)}/run-interaction-stream`, {
+        body: JSON.stringify({ interaction_id: pending.interaction_id }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      assert.equal(mint.status, 201, JSON.stringify(mint.body));
+      const ac = new AbortController();
+      const sseResp = await fetch(`${asUrl}${(mint.body as MintBody).viewer_path}`, { signal: ac.signal });
+      assert.equal(sseResp.status, 200);
+      const attachmentCookie = presentationAttachmentCookie(sseResp);
+      assert.ok(sseResp.body);
+      const reader = sseResp.body.getReader();
+      await reader.read();
+      try {
+        const [socket] = sockets;
+        assert.ok(socket, "the real CDP companion opened its page socket");
+        await fn(async (body) => {
+          const before = socket.calls.length;
+          const response = await fetchJson(`${asUrl}${(mint.body as MintBody).input_path}`, {
+            body: JSON.stringify(body),
+            headers: { "Content-Type": "application/json", Cookie: attachmentCookie },
+            method: "POST",
+          });
+          return { sent: socket.calls.slice(before), status: response.status };
+        });
+      } finally {
+        ac.abort();
+        await reader.cancel().catch(() => undefined);
+        await cancelRun(asUrl, started.run_id, pending.interaction_id);
+      }
+    }
+  );
+}
+
+function expectedCdpMethod(body: { action?: string; pointerType?: string; type: string }): string | null {
+  if (body.type === "keyboard") {
+    return "Input.dispatchKeyEvent";
+  }
+  if (body.type === "text") {
+    return "Input.insertText";
+  }
+  if (body.type === "pointer") {
+    // cdp-adapter reroutes touch/pen press and release onto the mouse path
+    // (normalizeTouchPointerInputForCdp); only touch motion stays native touch.
+    return body.pointerType === "touch" && body.action === "pointermove"
+      ? "Input.dispatchTouchEvent"
+      : "Input.dispatchMouseEvent";
+  }
+  return null;
+}
+
+test("input POST accepts the Remote Surface input protocol the viewer sends and dispatches it to CDP", async () => {
+  await withCdpInputRoute(async (post) => {
+    // The library's clipboard fixture is not an /input body: the host's
+    // clipboard channel is the separate /clipboard route.
+    const libraryFixtures = REMOTE_SURFACE_INPUT_FIXTURES.filter((fixture) => fixture.type !== "clipboard");
+    assert.ok(libraryFixtures.some((fixture) => fixture.type === "keyboard"));
+    const bodies = [...libraryFixtures, ...DESKTOP_VIEWER_INPUT_BODIES, ...SOFT_KEYBOARD_INPUT_BODIES];
+    const failures: string[] = [];
+    for (const body of bodies) {
+      const { sent, status } = await post(body);
+      const expected = expectedCdpMethod(body);
+      if (status !== 202 || (expected && !sent.some((call) => call.method === expected))) {
+        failures.push(`${status} ${JSON.stringify(body)} sent ${JSON.stringify(sent.map((call) => call.method))}`);
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
+});
+
+// CDP `modifiers` bitmask: Alt=1, Control=2, Meta=4, Shift=8.
+const CDP_MODIFIER_CASES: { bits: number; names: string[] }[] = [
+  { bits: 1, names: ["Alt"] },
+  { bits: 2, names: ["Control"] },
+  { bits: 4, names: ["Meta"] },
+  { bits: 8, names: ["Shift"] },
+  { bits: 10, names: ["Control", "Shift"] },
+  { bits: 15, names: ["Alt", "Control", "Meta", "Shift"] },
+];
+
+test("input POST turns keyboard modifier names into the exact CDP modifier bitmask", async () => {
+  await withCdpInputRoute(async (post) => {
+    for (const { bits, names } of CDP_MODIFIER_CASES) {
+      const { sent, status } = await post({ action: "keydown", code: "KeyA", key: "a", modifiers: names, type: "keyboard" });
+      assert.equal(status, 202, names.join("+"));
+      const [call] = sent;
+      assert.equal(call?.method, "Input.dispatchKeyEvent");
+      assert.equal(call?.params.modifiers, bits, `keyboard ${names.join("+")}`);
+    }
+    // Pointer events carry the same list and the same bitmask.
+    for (const { bits, names } of CDP_MODIFIER_CASES) {
+      const { sent, status } = await post({
+        action: "pointerdown",
+        buttons: 1,
+        modifiers: names,
+        pointerType: "mouse",
+        type: "pointer",
+        x: 5,
+        y: 6,
+      });
+      assert.equal(status, 202, names.join("+"));
+      const [call] = sent;
+      assert.equal(call?.method, "Input.dispatchMouseEvent");
+      assert.equal(call?.params.modifiers, bits, `pointer ${names.join("+")}`);
+    }
+  });
+});
+
+test("input POST rejects duplicate modifier names instead of dispatching a different chord", async () => {
+  await withCdpInputRoute(async (post) => {
+    // The SDK adds bits per entry: Control twice would dispatch Meta (4) and
+    // Shift twice 16.
+    for (const modifiers of [["Control", "Control"], ["Shift", "Shift"], ["Alt", "Control", "Alt"]]) {
+      const key = await post({ action: "keydown", code: "KeyA", key: "a", modifiers, type: "keyboard" });
+      assert.equal(key.status, 400, JSON.stringify(modifiers));
+      assert.deepEqual(key.sent, []);
+      const pointer = await post({ action: "pointerdown", modifiers, pointerType: "mouse", type: "pointer", x: 1, y: 1 });
+      assert.equal(pointer.status, 400, JSON.stringify(modifiers));
+      assert.deepEqual(pointer.sent, []);
+    }
+  });
+});
+
+test("input POST sends the key, code and text CDP expects for each keyboard shape", async () => {
+  await withCdpInputRoute(async (post) => {
+    const dispatchOf = async (body: unknown) => {
+      const { sent, status } = await post(body);
+      assert.equal(status, 202, JSON.stringify(body));
+      assert.equal(sent.length, 1, JSON.stringify(sent));
+      assert.equal(sent[0]?.method, "Input.dispatchKeyEvent");
+      return sent[0].params;
+    };
+    // Control+Backspace: special key, VK_BACK, Control bit, no text.
+    assert.deepEqual(
+      await dispatchOf({ action: "keydown", code: "Backspace", key: "Backspace", modifiers: ["Control"], type: "keyboard" }),
+      { code: "Backspace", key: "Backspace", modifiers: 2, type: "rawKeyDown", windowsVirtualKeyCode: 8 }
+    );
+    // Shifted punctuation: `!` is Shift+Digit1, so the VK is VK_1 (49), not "!".
+    assert.deepEqual(
+      await dispatchOf({ action: "keydown", code: "Digit1", key: "!", modifiers: ["Shift"], type: "keyboard" }),
+      {
+        code: "Digit1",
+        key: "!",
+        modifiers: 8,
+        text: "!",
+        type: "keyDown",
+        unmodifiedText: "!",
+        windowsVirtualKeyCode: 49,
+      }
+    );
+    // Native key/code wins over a keysym on the same event.
+    assert.deepEqual(
+      await dispatchOf({ action: "keydown", code: "KeyA", key: "a", keysym: 65_288, type: "keyboard" }),
+      { code: "KeyA", key: "a", modifiers: 0, text: "a", type: "keyDown", unmodifiedText: "a", windowsVirtualKeyCode: 65 }
+    );
+    // Keyup releases by key/code/VK only and carries no text.
+    const keyup = await dispatchOf({ action: "keyup", code: "KeyA", key: "a", type: "keyboard" });
+    assert.deepEqual(keyup, { code: "KeyA", key: "a", modifiers: 0, type: "keyUp", windowsVirtualKeyCode: 65 });
+    assert.equal("text" in keyup, false);
+    assert.equal("unmodifiedText" in keyup, false);
+    // A keysym-only special key (soft keyboard Backspace) maps through the keysym table.
+    assert.deepEqual(await dispatchOf({ action: "keydown", keysym: 65_288, type: "keyboard" }), {
+      code: "Backspace",
+      key: "Backspace",
+      modifiers: 0,
+      type: "rawKeyDown",
+      windowsVirtualKeyCode: 8,
+    });
+  });
+});
+
+test("input POST dispatches real mouse and touch CDP events, including double-click press and release", async () => {
+  await withCdpInputRoute(async (post) => {
+    const send = async (body: unknown) => {
+      const { sent, status } = await post(body);
+      assert.equal(status, 202, JSON.stringify(body));
+      assert.equal(sent.length, 1, JSON.stringify(sent));
+      return sent[0] as RecordedCdpCall;
+    };
+    const press = await send({
+      action: "pointerdown",
+      button: 0,
+      buttons: 1,
+      clickCount: 2,
+      pointerType: "mouse",
+      type: "pointer",
+      x: 40,
+      y: 50,
+    });
+    assert.equal(press.method, "Input.dispatchMouseEvent");
+    assert.deepEqual(press.params, {
+      button: "left",
+      buttons: 1,
+      clickCount: 2,
+      modifiers: 0,
+      type: "mousePressed",
+      x: 40,
+      y: 50,
+    });
+    const release = await send({
+      action: "pointerup",
+      button: 0,
+      buttons: 0,
+      clickCount: 2,
+      pointerType: "mouse",
+      type: "pointer",
+      x: 40,
+      y: 50,
+    });
+    assert.deepEqual(release.params, {
+      button: "left",
+      buttons: 0,
+      clickCount: 2,
+      modifiers: 0,
+      type: "mouseReleased",
+      x: 40,
+      y: 50,
+    });
+    // Touch press is rerouted onto the mouse path with clickCount 1 so it
+    // synthesizes a real click (cdp-adapter normalizeTouchPointerInputForCdp).
+    const tap = await send({ action: "pointerdown", pointerId: 7, pointerType: "touch", type: "pointer", x: 12, y: 34 });
+    assert.equal(tap.method, "Input.dispatchMouseEvent");
+    assert.deepEqual(tap.params, {
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+      modifiers: 0,
+      type: "mousePressed",
+      x: 12,
+      y: 34,
+    });
+    // Touch motion stays a native touch event.
+    const drag = await send({ action: "pointermove", pointerId: 7, pointerType: "touch", type: "pointer", x: 15, y: 40 });
+    assert.equal(drag.method, "Input.dispatchTouchEvent");
+    assert.equal(drag.params.type, "touchMove");
+    assert.deepEqual(drag.params.touchPoints, [{ id: 7, radiusX: 1, radiusY: 1, x: 15, y: 40 }]);
+  });
+});
+
+test("input POST inserts committed text and ignores composition start, update and cancel", async () => {
+  await withCdpInputRoute(async (post) => {
+    for (const composition of ["start", "update", "cancel"]) {
+      const { sent, status } = await post({ composition, text: "か", type: "text" });
+      assert.equal(status, 202, composition);
+      assert.deepEqual(sent, [], `composition ${composition} must not insert text`);
+    }
+    const commit = await post({ composition: "commit", text: "か", type: "text" });
+    assert.equal(commit.status, 202);
+    assert.deepEqual(commit.sent, [{ method: "Input.insertText", params: { text: "か" } }]);
+    const plain = await post({ text: "a", type: "text" });
+    assert.deepEqual(plain.sent, [{ method: "Input.insertText", params: { text: "a" } }]);
+  });
 });
 
 test("input POST dispatches to the companion after attach and rejects bad input", async () => {
