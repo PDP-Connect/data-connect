@@ -18,6 +18,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Patchright must move together with pdpp-runtime/package-lock.json and
+      # playwright-runner, which this entry does not update.
+      # scripts/check-patchright-version.mjs fails CI on a partial bump.
+      - dependency-name: patchright
     groups:
       npm:
         applies-to: version-updates
