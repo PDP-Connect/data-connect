@@ -101,11 +101,6 @@ export const LOCKED_ARTIFACT_SOURCE = Object.freeze({
 // would need a registry fetch per entry on every install and `--check`, or a
 // new lock field. Delete the id here when #634 re-pins github-pdpp to a release
 // that carries a declaration.
-//
-// This is not the profile hold in
-// packages/local-collector/collection-profile-holds.json. A hold keeps a
-// collector pin below the catalog's latest release for a stated reason, and
-// that pin installs through the current core.
 export const PRE_DECLARATION_OCI_CONNECTORS = Object.freeze(
   new Set(["github-pdpp"])
 )

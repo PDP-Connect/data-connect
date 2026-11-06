@@ -25,26 +25,12 @@
  * Usage (network required):
  *
  *   npm run pin:collection-profiles --workspace @pdpp/local-collector
- *   npm run pin:collection-profiles --workspace @pdpp/local-collector -- --latest
- *   npm run pin:collection-profiles --workspace @pdpp/local-collector -- --version claude-code=0.3.4
  *
- * With no flag the current pins stay where they are: the files are rewritten
- * from the same releases, and a connector with no pin yet takes the catalog's
- * latest. `--latest` moves every connector without a hold to the latest
- * release; review the diff as a connector upgrade. `--version
- * <connector-key>=<version>` (repeatable) pins that connector to a named
- * catalog release and beats a hold. Any other argument, an unknown connector
- * key, or a malformed `--version` is an error. A release the run keeps or
- * moves to (named, held, or already pinned) that the catalog does not list
- * fails the run before anything is written; only a connector with no pin and
- * no request may be left unpinned.
- *
- * A hold keeps a pin below the latest release, with the reason, in
- * `collection-profile-holds.json`. Holds apply under `--latest`; change a hold
- * in that file in the same change that moves the pin.
+ * Re-running it moves every pin to the catalog's latest release. Review the
+ * diff as a connector upgrade.
  */
 
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -54,7 +40,6 @@ import {
   fetchResolvedArtifact,
 } from "@opendatalabs/data-connectors-tools/installer-core";
 
-import { COLLECTION_PROFILE_PINS } from "../src/generated/collection-profile-pins.generated.ts";
 import { LOCAL_COLLECTOR_DEFINITIONS } from "../src/generated/collector-definitions.generated.ts";
 import {
   COLLECTION_PROFILE_ENTRYPOINT,
@@ -62,11 +47,9 @@ import {
   type CollectionProfilePin,
   collectionProfileRepository,
 } from "../src/managed/collection-profiles.ts";
-import { choosePin, parseHolds, parsePinArguments } from "./pin-selection.ts";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pinsModule = path.join(packageRoot, "src", "generated", "collection-profile-pins.generated.ts");
-const holdsFile = path.join(packageRoot, "collection-profile-holds.json");
 const REFERENCE_PROFILE_DIR = path.resolve(
   packageRoot,
   "..",
@@ -76,15 +59,9 @@ const REFERENCE_PROFILE_DIR = path.resolve(
   "local-collector-profiles"
 );
 
-interface CatalogRelease {
-  readonly digest: string;
-  readonly version: string;
-}
-
 interface CatalogConnector {
   readonly connector_key: string;
-  readonly latest?: CatalogRelease;
-  readonly versions?: readonly CatalogRelease[];
+  readonly latest?: { readonly digest: string; readonly version: string };
 }
 
 interface ResolvedArtifact {
@@ -98,59 +75,21 @@ function connectorKeyFor(connectorId: string): string {
   return connectorId.replaceAll("_", "-");
 }
 
-/** Everything the script touches outside its own logic, so a test can run it offline against a temp tree. */
-export interface PinScriptDeps {
-  readonly argv: readonly string[];
-  readonly definitions: readonly { readonly connector_id: string }[];
-  readonly currentPins: readonly { readonly connectorKey: string; readonly version: string }[];
-  readonly holdsFile: string;
-  readonly pinsModule: string;
-  readonly referenceProfileDir: string;
-  readonly fetchCatalog: () => Promise<{ catalog: { connectors: readonly CatalogConnector[] } }>;
-  readonly fetchResolvedArtifact: (
-    context: null,
-    artifact: Record<string, unknown>,
-    options: Record<string, unknown>
-  ) => Promise<ResolvedArtifact>;
-  readonly log: (line: string) => void;
-}
-
-export async function runPinScript(deps: PinScriptDeps): Promise<void> {
-  const { pinsModule, referenceProfileDir: REFERENCE_PROFILE_DIR } = deps;
-  const knownKeys = new Set(deps.definitions.map((definition) => connectorKeyFor(definition.connector_id)));
-  const args = parsePinArguments(deps.argv, knownKeys);
-  const holds = parseHolds(JSON.parse(readFileSync(deps.holdsFile, "utf8")));
-  const currentVersions = new Map(deps.currentPins.map((pin) => [pin.connectorKey, pin.version]));
-  const catalogResult = await deps.fetchCatalog();
+async function main(): Promise<void> {
+  const catalogResult = (await fetchCatalog({})) as { catalog: { connectors: readonly CatalogConnector[] } };
   const catalog = new Map(catalogResult.catalog.connectors.map((entry) => [entry.connector_key, entry]));
 
   const pins: CollectionProfilePin[] = [];
   const profiles = new Map<string, Buffer>();
-  for (const definition of deps.definitions) {
+  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
     const connectorKey = connectorKeyFor(definition.connector_id);
-    const listed = catalog.get(connectorKey);
-    const choice = choosePin({
-      connectorKey,
-      args,
-      hold: holds.get(connectorKey),
-      currentVersion: currentVersions.get(connectorKey),
-    });
-    const latest =
-      choice.kind === "latest" ? listed?.latest : listed?.versions?.find((release) => release.version === choice.version);
+    const latest = catalog.get(connectorKey)?.latest;
     if (!latest) {
-      // A release this run was asked to keep or move to must exist. Only a
-      // connector with no pin and no request may be left out, and then the
-      // collector refuses it by name.
-      if (choice.kind === "version" || currentVersions.has(connectorKey)) {
-        throw new Error(
-          `cannot pin ${connectorKey}: the signed catalog lists no ${choice.kind === "version" ? choice.version : "latest release"} (${choice.why}). Nothing was written.`
-        );
-      }
-      deps.log(`unpinned ${definition.connector_id}: the signed catalog lists no ${connectorKey}`);
+      process.stdout.write(`unpinned ${definition.connector_id}: the signed catalog lists no ${connectorKey}\n`);
       continue;
     }
     const repository = collectionProfileRepository({ connectorKey });
-    const resolved = await deps.fetchResolvedArtifact(
+    const resolved = (await fetchResolvedArtifact(
       null,
       {
         artifactKind: "pdpp-collection-profile",
@@ -166,7 +105,7 @@ export async function runPinScript(deps: PinScriptDeps): Promise<void> {
         ociCertificateIdentityResolver: ({ registry, repository: requested }: { registry: string; repository: string }) =>
           registry === "ghcr.io" && requested === repository ? DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY : null,
       }
-    );
+    )) as ResolvedArtifact;
     pins.push({
       connectorId: definition.connector_id,
       connectorKey,
@@ -176,7 +115,7 @@ export async function runPinScript(deps: PinScriptDeps): Promise<void> {
       entrypointSha256: resolved.checksums.entrypoint,
     });
     profiles.set(connectorKey, resolved.manifestBuffer);
-    deps.log(`pinned ${definition.connector_id} ${latest.version} ${resolved.oci.digest} (${choice.why})`);
+    process.stdout.write(`pinned ${definition.connector_id} ${latest.version} ${resolved.oci.digest}\n`);
   }
 
   writeFileSync(pinsModule, renderPinsModule(pins));
@@ -219,16 +158,5 @@ ${body}
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  await runPinScript({
-    argv: process.argv.slice(2),
-    currentPins: COLLECTION_PROFILE_PINS,
-    definitions: LOCAL_COLLECTOR_DEFINITIONS,
-    fetchCatalog: async () => (await fetchCatalog({})) as { catalog: { connectors: readonly CatalogConnector[] } },
-    fetchResolvedArtifact: async (context, artifact, options) =>
-      (await fetchResolvedArtifact(context, artifact, options)) as ResolvedArtifact,
-    holdsFile,
-    log: (line) => process.stdout.write(`${line}\n`),
-    pinsModule,
-    referenceProfileDir: REFERENCE_PROFILE_DIR,
-  });
+  await main();
 }
