@@ -1145,9 +1145,10 @@ const runWatchdogSettlements = new Map<string, { promise: Promise<void>; resolve
 // Growth is bounded by the number of distinct connector_instance keys ever
 // admitted, not by run count.
 const runGenerations = new Map<string, number>();
-// Runs whose terminal sign-in evidence capture has been claimed. The first
-// terminal path to reach a run owns the capture; later paths skip it.
-const signInProofClaimedRuns = new Set<string>();
+// The in-flight terminal sign-in evidence capture per run. The first terminal
+// path to reach a run starts it; every later path, and slot cleanup, awaits
+// the same promise so the slot is not released while the capture is in flight.
+const signInProofCaptures = new Map<string, Promise<void>>();
 // Keyed by run_id. Interaction broker state is intentionally in-memory:
 // dashboard-submitted values satisfy the current live run only and are never
 // persisted to `.env.local`, SQLite config/state, or spine event payloads.
@@ -3411,10 +3412,30 @@ export function createController(opts: ControllerOptions = {}): Controller {
   }): Promise<void> {
     const stillCurrent = () =>
       activeRuns.get(input.key)?.run_id === input.runId && runGenerations.get(input.key) === input.generation;
-    if (!stillCurrent() || signInProofClaimedRuns.has(input.runId)) {
+    const claimed = signInProofCaptures.get(input.runId);
+    if (claimed) {
+      await claimed;
       return;
     }
-    signInProofClaimedRuns.add(input.runId);
+    if (!stillCurrent()) {
+      return;
+    }
+    const capture = captureSignInProof(input, stillCurrent);
+    signInProofCaptures.set(input.runId, capture);
+    await capture;
+  }
+
+  async function captureSignInProof(
+    input: {
+      readonly browserSurfaceLease: BrowserSurfaceLease | null;
+      readonly connectorId: string;
+      readonly connectorInstanceId: string;
+      readonly manifest: ConnectorManifest;
+      readonly runId: string;
+      readonly status: string | null | undefined;
+    },
+    stillCurrent: () => boolean
+  ): Promise<void> {
     try {
       const surfaceId = input.browserSurfaceLease?.surface_id;
       const cdpUrl = surfaceId ? (browserSurfaceLeaseManager?.getSurface(surfaceId)?.cdp_url ?? null) : null;
@@ -3445,7 +3466,13 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly runId: string;
     readonly traceContext: SpineTraceContext;
   }): Promise<void> {
-    signInProofClaimedRuns.delete(input.runId);
+    // Let a claimed capture finish before the slot is released, so its
+    // currency check still sees the run as the slot owner.
+    const capture = signInProofCaptures.get(input.runId);
+    if (capture) {
+      await capture;
+      signInProofCaptures.delete(input.runId);
+    }
     // Idempotency guard: the watchdog and the run's own .finally() can both
     // call finalizeRunCleanup. Only the first call does real work; subsequent
     // calls are silent no-ops. We detect "already finalized" by checking

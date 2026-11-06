@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import test from "node:test";
 import { emitSpineEvent } from "../lib/spine.ts";
+import { recordSignInProofAfterRun } from "../runtime/browser-surface/sign-in-proof-recorder.ts";
 import {
 	__resetControllerInteractionStateForTests,
 	createController,
@@ -321,4 +322,72 @@ test("a watchdog on a run that already completed does not record failure evidenc
 		0,
 		"no failure evidence for a run that already succeeded",
 	);
+});
+
+async function persistedProofSurvivesCompetingTerminalPath(
+	t: TestContext,
+	first: "watchdog" | "result",
+): Promise<void> {
+	await freshDb(t);
+	let openGate: () => void = () => undefined;
+	const gate = new Promise<void>((resolve) => {
+		openGate = resolve;
+	});
+	// The real recorder, with only its DevTools read held open and answering
+	// with a page that matches the manifest's sign-in pattern.
+	const fetchImpl = (async () => {
+		await gate;
+		return new Response(
+			JSON.stringify([
+				{ type: "page", url: "https://accounts.example.test/signin?next=1" },
+			]),
+		);
+	}) as unknown as typeof fetch;
+	let rejectRun: (err: Error) => void = () => undefined;
+	let resolveRun: (result: RuntimeRunConnectorResult) => void = () => undefined;
+	const controller = createController({
+		admitRunConnection: admit(),
+		connectorPathResolver: () => "/tmp/connector.js",
+		logger: { error: () => undefined, warn: () => undefined },
+		maxRunWallClockMs: 20,
+		recordSignInProof: (deps, input) =>
+			recordSignInProofAfterRun(
+				{ ...deps, fetchImpl },
+				{ ...input, cdpUrl: "http://127.0.0.1:1" },
+			),
+		runConnectorImpl: () =>
+			new Promise<RuntimeRunConnectorResult>((resolve, reject) => {
+				resolveRun = resolve;
+				rejectRun = reject;
+			}),
+		schedulerStore: schedulerStore(),
+	});
+	await controller.runNow(CONNECTOR_ID, runOptions("run_race"));
+	if (first === "watchdog") {
+		await new Promise((resolve) => setTimeout(resolve, 200).unref());
+		rejectRun(new Error("late rejection"));
+	} else {
+		resolveRun({ records_emitted: 0, status: "failed" });
+		await new Promise((resolve) => setTimeout(resolve, 200).unref());
+	}
+	await new Promise((resolve) => setTimeout(resolve, 100).unref());
+	// Release the DevTools read only now, after the competing path ran.
+	openGate();
+	await controller.drainActiveRuns(2000);
+	await new Promise((resolve) => setTimeout(resolve, 100).unref());
+	const loaded =
+		await getDefaultProviderInvalidationProofStore().load(INSTANCE_ID);
+	assert.equal(
+		loaded.proof?.evidence_id,
+		"run_race",
+		"the claimed capture finished before the lease was released, so its proof is durable",
+	);
+}
+
+test("a held capture still persists its proof when the run's rejection races the watchdog", async (t) => {
+	await persistedProofSurvivesCompetingTerminalPath(t, "watchdog");
+});
+
+test("a held capture still persists its proof when the watchdog races a failed result", async (t) => {
+	await persistedProofSurvivesCompetingTerminalPath(t, "result");
 });
