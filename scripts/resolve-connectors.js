@@ -17,17 +17,29 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "path"
 import { fileURLToPath } from "url"
 import {
-  DEFAULT_CONNECTOR_INDEX_URL,
   DEFAULT_OCI_SIGSTORE_CERTIFICATE_IDENTITY,
   fetchResolvedArtifact,
-  generateLock,
   installFromLock,
-  loadConnectorIndex,
   readJson,
-  satisfies,
   sha256Buffer,
   verifyInstalled,
 } from "@opendatalabs/data-connectors-tools/installer-core"
+// STOPGAP, removed when the legacy tarball connectors move to Collection
+// Profiles (tracked in #633). The current installer core installs only signed
+// OCI Collection Profiles that carry a signed source declaration. The bundled tarball
+// connectors, and the one OCI release published before source declarations
+// existed (see PRE_DECLARATION_OCI_CONNECTORS), still need the earlier core,
+// which is pinned under its own name so it cannot be mistaken for the current
+// one.
+import {
+  DEFAULT_CONNECTOR_INDEX_URL,
+  fetchResolvedArtifact as legacyFetchResolvedArtifact,
+  generateLock,
+  installFromLock as legacyInstallFromLock,
+  loadConnectorIndex,
+  satisfies,
+  verifyInstalled as legacyVerifyInstalled,
+} from "data-connectors-legacy-installer/installer-core"
 import { isMainModule } from "./is-main-module.js"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -55,10 +67,99 @@ const NON_CONNECTOR_FILES = new Set([
   "types",
 ])
 
+// What the earlier installer core reads in place of a connector index.
 export const LOCKED_ARTIFACT_SOURCE = Object.freeze({
   mode: "locked",
   doc: Object.freeze({}),
 })
+
+// STOPGAP. The earlier installer core installs exactly 13 lock entries, and
+// this is the one place that names them. A guard test in
+// resolve-connectors.test.mjs fails if connectors/lock.json and this list
+// disagree.
+//
+//   held back by                       connectors                    released by
+//   not an OCI artifact (tarball)      chatgpt-playwright,           #633
+//                                      claude-export-playwright,
+//                                      github-playwright,
+//                                      heb-playwright,
+//                                      instagram-ads-playwright,
+//                                      instagram-playwright,
+//                                      linkedin-playwright,
+//                                      oura-playwright,
+//                                      shop-playwright,
+//                                      spotify-playwright,
+//                                      wholefoods-playwright,
+//                                      youtube-playwright
+//   no signed source declaration       github-pdpp                   #634
+//
+// The tarballs are picked out by `!entry.oci`. github-pdpp has to be named:
+// nothing a lock entry or the catalog carries says its release lacks a signed
+// source declaration. A lock entry holds the OCI digests and checksums, and a
+// catalog release holds a digest and a version; the declaration is a layer of
+// the artifact itself, and the catalog has no github entry at all. Reading it
+// would need a registry fetch per entry on every install and `--check`, or a
+// new lock field. Delete the id here when #634 re-pins github-pdpp to a release
+// that carries a declaration.
+export const PRE_DECLARATION_OCI_CONNECTORS = Object.freeze(
+  new Set(["github-pdpp"])
+)
+
+export const usesEarlierInstallerCore = entry =>
+  !entry.oci || PRE_DECLARATION_OCI_CONNECTORS.has(entry.connectorId)
+
+function splitLockByInstallerCore(lock) {
+  const earlier = lock.connectors.filter(usesEarlierInstallerCore)
+  const current = lock.connectors.filter(
+    entry => !usesEarlierInstallerCore(entry)
+  )
+  return {
+    earlier: { ...lock, connectors: earlier },
+    current: { ...lock, connectors: current },
+  }
+}
+
+// Install each entry with the core that accepts it. The two cores write
+// disjoint paths (`<company>/...` and `collection-profiles/<id>/...`).
+export async function installLockedConnectors({ lock, source, ...options }) {
+  const { earlier, current } = splitLockByInstallerCore(lock)
+  const results = []
+  if (earlier.connectors.length > 0) {
+    results.push(
+      await legacyInstallFromLock({ lock: earlier, source, ...options })
+    )
+  }
+  if (current.connectors.length > 0) {
+    // The current core takes no connector index; `source` stays null.
+    results.push(
+      await installFromLock({ lock: current, source: null, ...options })
+    )
+  }
+  return {
+    connectorCount: results.reduce((n, r) => n + r.connectorCount, 0),
+    filesWritten: results.reduce((n, r) => n + r.filesWritten, 0),
+  }
+}
+
+async function verifyLockedConnectors({ lock, source, ...options }) {
+  const { earlier, current } = splitLockByInstallerCore(lock)
+  const results = []
+  if (earlier.connectors.length > 0) {
+    results.push(
+      await legacyVerifyInstalled({ lock: earlier, source, ...options })
+    )
+  }
+  if (current.connectors.length > 0) {
+    results.push(
+      await verifyInstalled({ lock: current, source: null, ...options })
+    )
+  }
+  return {
+    ok: results.every(r => r.ok),
+    missing: results.flatMap(r => r.missing),
+    mismatched: results.flatMap(r => r.mismatched),
+  }
+}
 
 // Absent an explicit `--index-url`, stay pinned to whatever the existing lock
 // already resolved against — for BOTH `--check` and a normal (re)generation.
@@ -280,7 +381,7 @@ export async function installConnectorsAtomically({
   lock,
   source = LOCKED_ARTIFACT_SOURCE,
   installRoot,
-  install = installFromLock,
+  install = installLockedConnectors,
   ...options
 }) {
   recoverInterruptedInstall(installRoot)
@@ -432,11 +533,18 @@ export async function authorOciProfile(
       repository: `pdp-connect/connector/${connectorKey}`,
     },
   }
-  const artifact = await fetchResolvedArtifact(
-    LOCKED_ARTIFACT_SOURCE,
-    candidate,
-    { allowTagResolution: true, ociCertificateIdentityResolver, ...options }
-  )
+  const fetchOptions = {
+    allowTagResolution: true,
+    ociCertificateIdentityResolver,
+    ...options,
+  }
+  const artifact = PRE_DECLARATION_OCI_CONNECTORS.has(connectorId)
+    ? await legacyFetchResolvedArtifact(
+        LOCKED_ARTIFACT_SOURCE,
+        candidate,
+        fetchOptions
+      )
+    : await fetchResolvedArtifact(null, candidate, fetchOptions)
   const { registry, repository, digest, configDigest } = artifact.oci
   return {
     ...candidate,
@@ -630,7 +738,7 @@ async function main() {
     }
     if (
       !reportInstalledCheck(
-        await verifyInstalled({
+        await verifyLockedConnectors({
           lock,
           source,
           installRoot: CONNECTORS_DIR,

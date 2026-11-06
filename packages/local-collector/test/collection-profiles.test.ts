@@ -101,6 +101,24 @@ test("each pinned profile is the release it pins and declares its definition's b
   }
 });
 
+test("a collector's default streams include every required stream of its pinned profile", () => {
+  // A connector emits a stream only when it is requested, and the server counts
+  // a required stream that is never reported as unknown coverage. A pin that
+  // adds a required stream must therefore add it to the default stream set.
+  for (const pin of COLLECTION_PROFILE_PINS) {
+    const definition = LOCAL_COLLECTOR_DEFINITIONS.find((candidate) => candidate.connector_id === pin.connectorId);
+    assert.ok(definition, pin.connectorId);
+    const profile = JSON.parse(
+      readFileSync(new URL(`${pin.connectorKey}.json`, REFERENCE_PROFILE_DIR), "utf8")
+    ) as { streams: { name: string; required?: boolean }[] };
+    const requested = new Set<string>(definition.streams);
+    const missing = profile.streams
+      .filter((stream) => stream.required !== false && !requested.has(stream.name))
+      .map((stream) => stream.name);
+    assert.deepEqual(missing, [], `${pin.connectorId} never requests its required streams`);
+  }
+});
+
 test("the collector build compiles no connector code", () => {
   const tsconfig = readFileSync(new URL("../tsconfig.build.json", import.meta.url), "utf8");
   assert.doesNotMatch(tsconfig, /polyfill-connectors\/(connectors|src)/);
@@ -175,7 +193,7 @@ test("a fresh install lands the pinned files under the digest directory and pass
   const call = core.calls[0] as {
     lock: { connectors: { oci: unknown; version: string; artifactKind: string }[] };
     ociCertificateIdentityResolver: (input: { registry: string; repository: string }) => string | null;
-    artifactCertificateIdentityResolver: () => unknown;
+    source: unknown;
   };
   assert.deepEqual(call.lock.connectors[0]?.oci, {
     digest: fakePin().digest,
@@ -190,7 +208,7 @@ test("a fresh install lands the pinned files under the digest directory and pass
   );
   assert.equal(call.ociCertificateIdentityResolver({ registry: "ghcr.io", repository: "pdp-connect/connector/other" }), null);
   assert.equal(call.ociCertificateIdentityResolver({ registry: "docker.io", repository: "pdp-connect/connector/fake-connector" }), null);
-  assert.equal(call.artifactCertificateIdentityResolver(), null);
+  assert.equal(call.source, null);
 });
 
 test("a cached release that matches its pin is used without the network", async () => {

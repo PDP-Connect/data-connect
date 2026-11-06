@@ -1,12 +1,18 @@
 {
 	"protocol_version": "0.1.0",
 	"connector_id": "https://registry.pdpp.dev/connectors/apple-photos",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/apple_photos",
+		"display": {
+			"name": "Apple Photos"
+		}
+	},
 	"connector_key": "apple-photos",
 	"manifest_uri": "https://registry.pdpp.dev/connectors/apple-photos",
-	"version": "0.1.0",
+	"version": "0.1.3",
 	"display_name": "Apple Photos",
 	"brand": {
-		"icon": "icons/apple_photos.svg",
+		"icon": "icon.svg",
 		"background_color": "#FA633E"
 	},
 	"runtime_requirements": {
