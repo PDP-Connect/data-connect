@@ -9,7 +9,8 @@
  * what a user would see and no second cascade lives here.
  *
  * The browser is the Google Chrome installed on the machine (GitHub's hosted
- * runners include it; elsewhere install it, or run
+ * runners include it, so the `test client and console` CI job runs these tests
+ * without an install step; elsewhere install it, or run
  * `npx playwright-core install chrome`). It is not the Chromium the e2e tier
  * downloads: that would need an install step in the console CI job. When no
  * Chrome is found the launch fails loudly: a silently skipped readability
@@ -40,12 +41,22 @@ function shippedConsoleCss(): Promise<string> {
 	return compiled;
 }
 
-export function launchBrowser(): Promise<Browser> {
+export interface LaunchOptions {
+	/** Launch this executable instead of the installed Google Chrome. */
+	executablePath?: string;
+}
+
+export function launchBrowser({
+	executablePath,
+}: LaunchOptions = {}): Promise<Browser> {
 	// --no-sandbox: hosted Ubuntu runners and test sandboxes block the
 	// unprivileged user namespaces Chrome's sandbox needs. The page only ever
 	// holds our own inline markup and cannot navigate or fetch (see above).
 	return chromium
-		.launch({ args: ["--no-sandbox"], channel: "chrome" })
+		.launch({
+			args: ["--no-sandbox"],
+			...(executablePath ? { executablePath } : { channel: "chrome" }),
+		})
 		.catch((cause: unknown) => {
 			throw new Error(
 				"These tests need an installed Google Chrome (playwright channel 'chrome'). " +
@@ -53,6 +64,16 @@ export function launchBrowser(): Promise<Browser> {
 				{ cause },
 			);
 		});
+}
+
+/**
+ * Closes the browser a failed `launchBrowser` never returned. Teardown must not
+ * throw its own TypeError over the launch error, which says what to install.
+ */
+export async function closeBrowser(
+	browser: Browser | undefined,
+): Promise<void> {
+	await browser?.close();
 }
 
 export interface PageOptions {

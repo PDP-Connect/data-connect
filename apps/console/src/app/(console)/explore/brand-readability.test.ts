@@ -17,6 +17,7 @@ import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+	closeBrowser,
 	launchBrowser,
 	openShippedPage,
 	type PageOptions,
@@ -47,7 +48,7 @@ before(async () => {
 	browser = await launchBrowser();
 });
 after(async () => {
-	await browser?.close();
+	await closeBrowser(browser);
 });
 
 async function withPage<T>(
@@ -599,4 +600,21 @@ test("a later rule that washes out the excluded name is detected", async () => {
 			".rr-x-facet-row.is-excluded .rr-x-facet__name { color: var(--background); }",
 	});
 	assert.match(problems.join("; "), /name contrast 1\.00:1 is below 4\.5:1/);
+});
+
+test("a failed browser launch reports the install hint and tears down without a TypeError", async () => {
+	let launched: Browser | undefined;
+	let launchError: unknown;
+	try {
+		launched = await launchBrowser({
+			executablePath: "/nonexistent/pdpp-test-chrome",
+		});
+	} catch (error) {
+		launchError = error;
+	}
+	assert.equal(launched, undefined);
+	assert.ok(launchError instanceof Error, "the launch must fail");
+	assert.match(launchError.message, /need an installed Google Chrome/);
+	// The same teardown the `after` hook runs when `before` never got a browser.
+	await assert.doesNotReject(closeBrowser(launched));
 });
