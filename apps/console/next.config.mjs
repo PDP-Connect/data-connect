@@ -56,6 +56,9 @@ const nextConfig = {
     "/llms-full.txt": ["../../docs/agent-skills/**/*.md"],
     "/llms.txt": ["../../docs/agent-skills/**/*.md"],
     "/well-known/skills/**": ["../../docs/agent-skills/**/*.md"],
+    // The icon resolver reads this offline corpus by path at runtime rather
+    // than importing each SVG, so Next's standalone tracer cannot infer it.
+    "/*": ["../../node_modules/simple-icons/data/simple-icons.json", "../../node_modules/simple-icons/icons/*.svg"],
   },
   outputFileTracingRoot: path.join(__dirname, "../.."),
   reactStrictMode: true,

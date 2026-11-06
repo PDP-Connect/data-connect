@@ -457,7 +457,7 @@ export default async function StreamPage({
         count={headerCount}
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
             <span>
               Source <span className="text-foreground">{sourceLabel}</span>
             </span>

@@ -232,8 +232,6 @@
 }
 .sourceIcon {
   flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
 }
 .sourceText {
   display: flex;

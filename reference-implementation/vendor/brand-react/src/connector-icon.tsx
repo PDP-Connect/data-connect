@@ -9,19 +9,20 @@
  * — see `server/connector-manifest-validation.ts`'s `validateManifestIcon`)
  * and falls back to the shared Monogram primitive (a deterministic
  * initial+color derived from `name`) when `icon` is absent. There is no
- * connector-id -> icon map here or anywhere else in the console: every
- * caller passes the manifest value it already has, and a connector this
- * component has never heard of renders exactly as well as one it has.
+ * connector-specific lookup here: callers pass a normalized display mark.
  *
- * The no-icon state (Monogram) is a first-class, good-looking default — most
- * connectors will not declare an icon, so this is the common case, not a
- * degraded fallback.
+ * Callers resolve and validate connector assets before rendering. Missing
+ * or rejected assets use the shared deterministic Monogram fallback.
  */
 import type { CSSProperties } from "react";
 import { Monogram } from "./data-row.tsx";
+import { hexColorOrNull } from "./hex-color.ts";
+import { sanitizeSvg } from "./sanitize-svg.ts";
 import "./connector-icon.css";
 
 export interface ConnectorIconLike {
+  /** Display-only backdrop from the connector brand declaration. */
+  readonly backgroundColor?: string | null;
   readonly color?: string | null;
   readonly kind?: string | null;
   readonly svg?: string | null;
@@ -40,33 +41,36 @@ interface ConnectorIconProps {
   name: string;
 }
 
-function isRenderableInlineSvgIcon(icon: ConnectorIconLike): icon is ConnectorIconLike & { svg: string } {
-  return icon.kind === "inline_svg" && typeof icon.svg === "string" && icon.svg.trim().length > 0;
+/** The allowlisted markup of an `inline_svg` icon, or null when it is absent or unsafe. */
+function safeInlineSvg(icon: ConnectorIconLike): string | null {
+  return icon.kind === "inline_svg" && typeof icon.svg === "string" ? sanitizeSvg(icon.svg) : null;
 }
 
-// The SOLE choke point for icon.svg is assertSvgIsAllowlisted in
-// reference-implementation/server/connector-manifest-validation.ts
-// (validateManifestIcon). It is a strict ALLOWLIST of shape-only elements
-// and attributes — no script, foreignObject, iframe, use, image, animate,
-// set, style, a, or any href/xlink:href; see its doc comment for the full
-// vocabulary — not a denylist, so there is no attack-vector list to keep
-// exhaustive. It also re-runs on every read of a stored manifest
-// (server/auth.ts's parseAndValidateConnectorManifestRow calls
-// validateConnectorManifest, which calls validateManifestIcon, on every
-// fetch), so icon.svg is validated immediately before this component ever
-// sees it, not merely once at registration time.
+// Callers validate SVG markup too, but this is the last step before
+// dangerouslySetInnerHTML, so the shape-only allowlist runs here again.
 export function ConnectorIcon({ icon, name, className }: ConnectorIconProps) {
-  if (icon && isRenderableInlineSvgIcon(icon)) {
-    const cls = ["pdpp-connector-icon", className].filter(Boolean).join(" ");
+  const cls = ["pdpp-connector-icon", className].filter(Boolean).join(" ");
+  const svg = icon ? safeInlineSvg(icon) : null;
+  if (icon && svg) {
+    const color = hexColorOrNull(icon.color);
+    const backgroundColor = hexColorOrNull(icon.backgroundColor);
     return (
       <span
         aria-hidden="true"
         className={cls}
-        // biome-ignore lint/security/noDangerouslySetInnerHtml: see the allowlist choke-point comment above ConnectorIcon.
-        dangerouslySetInnerHTML={{ __html: icon.svg }}
-        style={icon.color ? ({ color: icon.color } as CSSProperties) : undefined}
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: `svg` passed the shape-only SVG allowlist just above.
+        dangerouslySetInnerHTML={{ __html: svg }}
+        style={
+          color || backgroundColor
+            ? ({ color: color ?? undefined, backgroundColor: backgroundColor ?? undefined } as CSSProperties)
+            : undefined
+        }
       />
     );
   }
-  return <Monogram className={className} name={name} tinted />;
+  return (
+    <span aria-hidden="true" className={cls}>
+      <Monogram name={name} tinted />
+    </span>
+  );
 }

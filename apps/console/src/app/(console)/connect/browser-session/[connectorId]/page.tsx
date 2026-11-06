@@ -254,7 +254,7 @@ export default async function BrowserSessionConnectPage({
         breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: pageTitle }]}
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
+            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
             <span>
               {repairMode
                 ? `Log in to ${displayName} in the secure browser to restore collection. Your existing records and history are preserved.`
@@ -264,7 +264,7 @@ export default async function BrowserSessionConnectPage({
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={displayName} />
+            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={displayName} />
             {pageTitle}
           </span>
         }

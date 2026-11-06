@@ -242,7 +242,7 @@ function ExistingSourceLinks({
             >
               <div className="min-w-0">
                 <p className="flex items-center gap-2 pdpp-caption font-medium text-foreground">
-                  <ConnectorMark className="size-5 shrink-0" icon={icon} name={source.displayName} />
+                  <ConnectorMark connectorId={connectorKey} icon={icon} name={source.displayName} />
                   {source.displayName}
                 </p>
                 <p className="pdpp-caption text-muted-foreground">
@@ -488,7 +488,7 @@ function SourceSetupCard({
     >
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <ConnectorMark className="size-8 shrink-0" icon={entry.icon} name={entry.displayName} />
+          <ConnectorMark connectorId={entry.connectorKey} icon={entry.icon} name={entry.displayName} />
           <h3 className="pdpp-title text-foreground">{entry.displayName}</h3>
           {/* Current support / blocked fact, kept distinct from the next action. */}
           {status.label ? (

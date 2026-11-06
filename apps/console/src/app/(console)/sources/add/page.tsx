@@ -15,6 +15,7 @@ import type { ConnectorInstallSnapshot } from "../../lib/connector-install-contr
 import type { ConnectorInstallLifecycle } from "../../lib/connector-install-presentation.ts";
 import { buildConnectorInstallLifecycleByConnector } from "../../lib/connector-install-presentation.ts";
 import { getConnectorInstallSnapshot } from "../../lib/connector-install-client.ts";
+import { buildConnectorIconMap, catalogEntryIcon } from "../../lib/connector-icon-map.ts";
 import { ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { listConnectorManifests, listOwnerConnectorTemplates } from "../../lib/rs-client.ts";
 import { isDeterministicSourcesReadError } from "../read-error-classification.ts";
@@ -64,13 +65,11 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
         listOwnerConnectorTemplates(),
         getConnectorInstallSnapshot(),
       ]);
-      connectorIcons = Object.fromEntries(
-        manifests.flatMap((manifest) => [
-          [manifest.connector_id, manifest.icon] as const,
-          ...(manifest.connector_key ? ([[manifest.connector_key, manifest.icon]] as const) : []),
-        ])
-      );
-      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []);
+      connectorIcons = await buildConnectorIconMap(manifests, templates);
+      catalog = buildOwnerConnectorCatalog(manifests, templates, installSnapshot?.catalog ?? []).map((entry) => ({
+        ...entry,
+        icon: catalogEntryIcon(entry, connectorIcons),
+      }));
       installLifecycleByConnector = installSnapshot
         ? buildConnectorInstallLifecycleByConnector(installSnapshot.catalog, installSnapshot.status)
         : null;

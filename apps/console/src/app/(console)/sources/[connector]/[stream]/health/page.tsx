@@ -89,6 +89,7 @@ export default async function StreamHealthPage({
       return (
         <StreamHealthUnavailable
           connectionId={connectionId}
+          connectorId={connectorId}
           connectorIcon={connectorIcon}
           sourceLabel={sourceLabel}
           streamName={streamName}
@@ -101,6 +102,7 @@ export default async function StreamHealthPage({
   return (
     <StreamHealthReport
       connectionId={connectionId}
+      connectorId={connectorId}
       connectorIcon={connectorIcon}
       health={health}
       sourceLabel={sourceLabel}
@@ -114,12 +116,14 @@ export default async function StreamHealthPage({
 // render branches live here, in a presentational component.
 function StreamHealthReport({
   connectionId,
+  connectorId,
   connectorIcon,
   health,
   sourceLabel,
   streamName,
 }: {
   connectionId: string;
+  connectorId: string;
   connectorIcon: ConnectorManifest["icon"];
   health: StreamHealth;
   sourceLabel: string;
@@ -145,7 +149,7 @@ function StreamHealthReport({
         }
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
             <span>Source {sourceLabel}</span>
           </span>
         }
@@ -283,11 +287,13 @@ function StreamHealthReport({
 // to the records segment error boundary.
 function StreamHealthUnavailable({
   connectionId,
+  connectorId,
   connectorIcon,
   sourceLabel,
   streamName,
 }: {
   connectionId: string;
+  connectorId: string;
   connectorIcon: ConnectorManifest["icon"];
   sourceLabel: string;
   streamName: string;
@@ -303,7 +309,7 @@ function StreamHealthUnavailable({
         ]}
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={sourceLabel} />
+            <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={sourceLabel} />
             <span>Source {sourceLabel}</span>
           </span>
         }
