@@ -9,11 +9,8 @@
  *   2. A well-typed, fully-attributed AGENT write must not itself become
  *      the connection's active configuration when it shapes collection
  *      scope -- only authenticated confirmation by the connection owner may
- *      activate it. This
- *      is the correction from the adversarial design review
- *      (~/.tmp/reorg-0814/CONFIG-REDTEAM-CODEX.md) of an earlier draft
- *      that stored mutable current-state and therefore let a
- *      well-typed agent write pass as if owner-chosen.
+ *      activate it. Mutable current-state would let a well-typed agent write
+ *      pass as if owner-chosen.
  *   3. An inherited default is distinguishable from an explicit choice.
  *
  * See server/stores/connector-instance-config-store.ts for the full

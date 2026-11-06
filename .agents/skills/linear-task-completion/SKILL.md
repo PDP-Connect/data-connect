@@ -15,7 +15,7 @@ After finishing work on a Linear task, execute this workflow.
 ### 1. Fetch the issue
 
 Use the MCP Linear tool via `CallMcpTool` after reading its schema in
-`/Users/callumflack/.cursor/projects/Users-callumflack-Repos-vana-vana-app/mcps/user-Linear/tools/`.
+`<home>/.cursor/projects/<project>/mcps/user-Linear/tools/`.
 
 Extract `gitBranchName` and the issue ID from the response.
 

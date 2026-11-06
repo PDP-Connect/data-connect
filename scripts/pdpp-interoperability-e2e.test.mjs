@@ -22,8 +22,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 
-const PDPP_ROOT =
-  process.env.DATACONNECT_PDPP_ROOT || "/home/tnunamak/code/pdpp"
+const PDPP_ROOT = process.env.DATACONNECT_PDPP_ROOT ?? ""
+assert.ok(
+  PDPP_ROOT,
+  "DATACONNECT_PDPP_ROOT must name a PDPP checkout that provides the reference implementation."
+)
 const REFERENCE_ROOT = join(PDPP_ROOT, "reference-implementation")
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "dataconnect-pdpp-interop-dcr-token"
 const OWNER_BOOTSTRAP_CLIENT_ID = "pdpp_cli"

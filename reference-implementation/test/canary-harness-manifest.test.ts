@@ -539,7 +539,7 @@ const LIVE_INSPECT = {
   HostConfig: {
     Binds: [
       "pdpp_pdpp-transformers:/var/cache/pdpp/transformers",
-      "/home/tnunamak/.claude:/imports/claude:ro",
+      "/home/owner/.claude:/imports/claude:ro",
       "pdpp_pdpp-data:/var/lib/pdpp",
       "pdpp_pdpp-home:/root/.pdpp",
     ],

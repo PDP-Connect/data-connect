@@ -352,14 +352,13 @@ test("a forward-evidence-debt probe failure fails closed to false (no debt) and 
 
 // ── P1-B regression: debt must never make a tick dispatch NOTHING ───────────
 //
-// Fable review (2026-07-21, PART 2 §3): debt only suppressed the recovery-only
+// Debt previously only suppressed the recovery-only
 // branch; `eligible` stayed `intervalElapsed && !cooldownDefers`. When the
 // recovery cadence had elapsed but the failure-backoff-inflated forward-walk
 // interval had not — the exact live deadlock shape the surviving
 // "recovery cadence elapsed but forward-walk interval not yet elapsed" test
 // above documents — a debt-true tick dispatched NEITHER recovery NOR forward:
-// `{"probeCalls":1,"eligible":false,"recoveryOnly":false}`. Lifted directly
-// from the review's own repro (`~/.tmp/fable-review-repro-governor-donothing.mjs`).
+// `{"probeCalls":1,"eligible":false,"recoveryOnly":false}`.
 // Debt may only PREFER forward when forward is otherwise eligible; it must
 // never veto recovery's own independent cadence and leave the tick dispatching
 // nothing.

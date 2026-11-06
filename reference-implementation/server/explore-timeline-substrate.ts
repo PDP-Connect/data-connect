@@ -945,8 +945,7 @@ async function postgresCountNewSinceSnapshot(input: CountNewSinceSnapshotInput):
 
 // Empirically calibrated, not copied by precedent: benchmarked live against the
 // production database (153 partitions) at caps 1/4/6/8 under concurrent
-// representative run_history writes (see
-// /home/tnunamak/.tmp/explore-live-terminal-tail-0730.md for the exact evidence).
+// representative run_history writes.
 // Serial (1) was 47ms p50 with no writer-admission regression either; 4 already
 // cuts that to ~15ms with the same zero-regression profile, and further cap
 // increases (6, 8) bought under 6ms more at no measured benefit — Upcoming is not

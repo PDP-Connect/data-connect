@@ -47,7 +47,7 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const testDir = __dirname;
-const reportPath = join(testDir, "..", "..", "PG-PROFILE-51-REPORT.md");
+const reportPath = join(testDir, "..", "..", "docs", "260906-pg-profile-51-report.md");
 
 /**
  * A file is Postgres-profile-relevant when it either clones/bootstraps its
