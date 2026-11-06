@@ -15,25 +15,32 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+// Anchor on the git checkout, not this file's directory: mutation testing runs
+// the suite from a sandbox copy that excludes quality/ and is not tracked.
+const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+  cwd: dirname(fileURLToPath(import.meta.url)),
+  encoding: "utf8",
+}).trim();
+
+const QUALITY_DIR = "reference-implementation/quality";
 
 const ABSOLUTE_PATH = /(?:^|[\s"'`=(:,])(?:\/(?:home|Users|root|tmp)\/|~\/|[A-Za-z]:[\\/])/;
 
-const trackedFiles = execFileSync("git", ["ls-files", "-z", "--", "quality"], {
-  cwd: repoRoot,
+const trackedFiles = execFileSync("git", ["ls-files", "-z", "--", QUALITY_DIR], {
+  cwd: gitRoot,
   encoding: "utf8",
 })
   .split("\0")
   .filter(Boolean);
 
 test("tracked quality artifacts exist to be checked", () => {
-  assert.ok(trackedFiles.length > 0, "git ls-files returned no files under quality/");
+  assert.ok(trackedFiles.length > 0, `git ls-files returned no files under ${QUALITY_DIR}/`);
 });
 
 test("tracked quality artifacts contain no absolute filesystem paths", () => {
   const offenders: string[] = [];
   for (const file of trackedFiles) {
-    readFileSync(join(repoRoot, file), "utf8")
+    readFileSync(join(gitRoot, file), "utf8")
       .split("\n")
       .forEach((line, index) => {
         if (ABSOLUTE_PATH.test(line)) {
@@ -45,8 +52,8 @@ test("tracked quality artifacts contain no absolute filesystem paths", () => {
 });
 
 test("inventory and packet repo_root values are relative", () => {
-  for (const file of trackedFiles.filter((f) => /^quality\/(inventory\/.*\.json|packets\/.*\.yaml)$/.test(f))) {
-    const text = readFileSync(join(repoRoot, file), "utf8");
+  for (const file of trackedFiles.filter((f) => /^reference-implementation\/quality\/(inventory\/.*\.json|packets\/.*\.yaml)$/.test(f))) {
+    const text = readFileSync(join(gitRoot, file), "utf8");
     for (const match of text.matchAll(/"?repo_root"?:\s*"([^"]*)"/g)) {
       assert.ok(!/^(?:\/|~|[A-Za-z]:[\\/])/.test(match[1] ?? ""), `${file}: repo_root is absolute: ${match[1]}`);
     }
