@@ -27,6 +27,7 @@ import {
   resolveClientTrust,
 } from "../client-trust-registry.ts";
 import { type FetchClientLogoOptions, fetchAndCacheClientLogo } from "../client-logo-cache.ts";
+import { hexColorOrNull } from "../../vendor/brand-react/src/hex-color.ts";
 import {
   type StreamScopeCapability,
   type StreamScopeSelection,
@@ -92,8 +93,24 @@ export interface ConsentPickerCapabilities {
 }
 
 export interface ConsentPickerManifest {
+  /**
+   * Declared brand; `background_color` is the backdrop a light glyph needs to be visible.
+   * Implementation extension: `spec-collection-profile.md` does not define `brand`.
+   * It is operator-trusted manifest data, not connector-asserted identity: manifests
+   * come from the operator's own install, and the consent screen shows no trust tier
+   * for a connector. If manifests can ever arrive from an untrusted source, gate this
+   * on provenance first. The value is checked with `hexColorOrNull` before it leaves
+   * the server, because `validateManifestIcon` covers `icon` only.
+   */
+  readonly brand?: { readonly background_color?: string | null } | null;
   readonly connector_id?: string | null;
   readonly display_name?: string | null;
+  /** Manifest-declared glyph, already allowlist-checked by `validateManifestIcon` on the read that produced it. */
+  readonly icon?: {
+    readonly color?: string | null;
+    readonly kind?: string | null;
+    readonly svg?: string | null;
+  } | null;
   readonly manifest_uri?: string | null;
   readonly name?: string | null;
   readonly source_declaration?: {
@@ -761,7 +778,13 @@ export interface HostedMcpConsentChallengeModel {
     /** Display provenance only; grant selection still uses the opaque values below. */
     readonly connectorId: string;
     /** Manifest-declared brand glyph, passed straight to ConnectorIcon; null renders its Monogram. */
-    readonly icon: { readonly color: string | null; readonly kind: string | null; readonly svg: string | null } | null;
+    readonly icon: {
+      /** The connector's declared brand background (`brand.background_color`); a light glyph needs it to be visible. */
+      readonly backgroundColor: string | null;
+      readonly color: string | null;
+      readonly kind: string | null;
+      readonly svg: string | null;
+    } | null;
     readonly id: string;
     readonly name: string;
     readonly selectionValue: string;
@@ -847,10 +870,17 @@ export async function buildHostedMcpConsentChallengeModel(
       continue;
     }
     const manifest = await caps.getConnectorManifest(row.connectorId);
-    const icon = (manifest as { icon?: { color?: string | null; kind?: string | null; svg?: string | null } | null })?.icon;
+    const icon = manifest?.icon;
     icons.set(
       row.connectorId,
-      icon?.svg ? { color: icon.color ?? null, kind: icon.kind ?? null, svg: icon.svg } : null
+      icon?.svg
+        ? {
+            backgroundColor: hexColorOrNull(manifest?.brand?.background_color),
+            color: icon.color ?? null,
+            kind: icon.kind ?? null,
+            svg: icon.svg,
+          }
+        : null
     );
   }
   return {
