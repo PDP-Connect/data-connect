@@ -655,8 +655,8 @@ export interface RuntimeRunConnectorOptions {
    * terminal-finalization handlers (`recordRunTimedOutTerminal`,
    * `handleOwnerCancellationClose`, `handleDoneClose`,
    * `handleConnectorExitClose`, `resolveClosedRun`) — the general class of
-   * fallible pre-finalization work independent review
-   * (STREAM-EVIDENCE-P1-2-REREVIEW.md item 4) named. Defaults to a no-op; a
+   * fallible pre-finalization work that an independent review of the
+   * accepted-keys store named as a risk. Defaults to a no-op; a
    * test may inject a synchronous throw here to prove the surrounding
    * `try { ... } finally { cleanupChildHandles(); } ` wrapper genuinely
    * releases every child handle (including the STREAM_EVIDENCE
@@ -933,7 +933,7 @@ function buildScopeFields(
 // hostedRejectionReceipts: true, so this runtime's ingest responses always
 // carry a validated `rejections` vector on the live path; a weaker inline
 // parser previously dropped that vector on the floor instead of consuming
-// it. See STREAM-EVIDENCE-TERMINAL-DESIGN-REVIEW.md §10.2.
+// it.
 function readIngestResponse(resp: Response, stream: string, batchSize: number): Promise<IngestResult> {
   return strictReadIngestResponse(resp, stream, batchSize, { buildHttpFailure });
 }
@@ -997,10 +997,10 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
     // synchronous=FULL): the default fsyncs twice per COMMIT (journal, then
     // main file), which is what made the production flush cadence (one
     // transaction per BATCH_SIZE=500 flush, ~2,000 transactions at 1M rows)
-    // measure ~118x slower than a single 1M-row transaction in independent
-    // review (STREAM-EVIDENCE-P1-2-REREVIEW.md item 1: 138,336ms vs 1,221ms
-    // for the same row count, entirely explained by fsync-per-commit
-    // overhead on slower storage). WAL defers the fsync to a later
+    // measure ~118x slower than a single 1M-row transaction in an independent
+    // review (138,336ms vs 1,221ms for the same row count, entirely explained
+    // by fsync-per-commit overhead on slower storage; see
+    // test/stream-evidence-accepted-keys-cadence-benchmark.test.ts). WAL defers the fsync to a later
     // checkpoint; synchronous=NORMAL means a transaction commits durably to
     // the WAL without its own fsync barrier. This is the standard SQLite
     // safe-for-crash-safety, fast-for-write-heavy-workloads pair (sqlite.org:
@@ -1084,7 +1084,7 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
       // One transaction per flush, not one implicit autocommit per row: a
       // synchronous commit/fsync per INSERT measured ~87x slower than the
       // same rows batched in one transaction (1,738ms/20 rows vs 218ms/100k
-      // rows on the review's reference hardware) and blocks the runtime
+      // rows, measured on one development machine) and blocks the runtime
       // event loop for the duration. `db` is asserted non-null: `ensureOpen`
       // above is the only path that can leave it null, and it always sets it.
       (db as InstanceType<typeof DatabaseSync>).exec("BEGIN IMMEDIATE");
@@ -1119,7 +1119,7 @@ function createAcceptedKeysStore(): AcceptedKeysStore {
  * Runtime-authored structured diagnosis for a protocol violation.
  *
  * Scope (vertical slice): only `progress_for_undeclared_stream` is emitted
- * today. Remaining subtypes — listed in tmp/opaque-violation-diagnosis-memo.md —
+ * today. The other envelope types still throw a plain `Error`; their subtypes
  * are deferred until the shape proves out on a real case. If/when the full
  * enumeration lands, it should land via a dedicated OpenSpec change first.
  *
@@ -1755,8 +1755,7 @@ function validateOptionalScopedStream(stream: unknown, envelopeType: string, sco
     // String form preserved for back-compat with classifyRuntimeFailure's
     // pattern match (still yields top-level reason: connector_protocol_violation).
     // For PROGRESS specifically we also carry a machine-readable ProtocolViolation;
-    // other envelope types keep the legacy plain Error for now (tracked in
-    // tmp/opaque-violation-diagnosis-memo.md).
+    // other envelope types keep the legacy plain Error for now.
     const message = `Connector emitted ${envelopeType} for undeclared stream: ${stream}`;
     if (envelopeType === "PROGRESS") {
       throw new ProtocolViolation({
@@ -2082,8 +2081,7 @@ const STREAM_EVIDENCE_OUTCOME_KEYS = ["emitted", "unchanged", "gapped", "unaccou
  *
  * An earlier revision kept this fact in an in-process `Map`, scoped to the
  * `runConnector` invocation OR (in a later revision) to the process
- * lifetime. Independent exact-head re-review
- * (STREAM-EVIDENCE-P1-2-EXACT-HEAD-REREVIEW.md) correctly found that ANY
+ * lifetime. An independent exact-head re-review correctly found that ANY
  * process-lifetime-scoped store loses the fact on process restart, while
  * root profile rule 5 defines "same run" strictly by `run_id` and grants
  * no restart exception: `runtime/scheduler/run-executor.ts`'s
@@ -3642,8 +3640,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // `outcomes.emitted === COUNT(*)` an exact intra-run duplicate-key check
   // rather than a per-line counter. Lifetime is exactly this `runConnector`
   // invocation: no cross-run state, no schema/migration, torn down in
-  // `cleanupChildHandles` on every terminal path. See
-  // STREAM-EVIDENCE-TERMINAL-DESIGN-REVIEW.md §10.1(b)/(c), §10.2.
+  // `cleanupChildHandles` on every terminal path.
   const acceptedKeysDb = createAcceptedKeysStore();
   let recordsAttempted = 0;
   let recordsAccepted = 0;
@@ -4116,6 +4113,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       gapKeys: keySet("gap_keys"),
       hydratedKeys: keySet("hydrated_keys"),
       optionalSkipKeys: keySet("optional_skip_keys"),
+      // The connector's own declaration (Collection Profile 0.2.0 Section 5.6,
+      // docs/spec/collection-profile.md at data-connectors a87edcdc, :1353-1370): the spec
+      // does not tie it to the parent keys this run accepted, and shipped connectors report
+      // `[]` beside accepted parent records. The gate credits against this set only.
       requiredKeys: (msg.required_keys as (string | number)[]).map(normalizeCoverageKey),
       stream,
       unchangedKeys: keySet("unchanged_keys"),
