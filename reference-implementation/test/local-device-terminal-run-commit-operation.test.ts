@@ -107,7 +107,7 @@ test("terminal run commit resolves authorization before receipt lookup and passe
 });
 
 /**
- * Production defect, peregrine 2026-08-22: a terminal run commit dead-lettered
+ * Production defect, workstation 2026-08-22: a terminal run commit dead-lettered
  * with `400 invalid_request` and blocked the Claude Code outbox for five days
  * (1 dead_letter behind 10,000 succeeded uploads).
  *
@@ -151,7 +151,7 @@ test("a device sending the legacy connector alias still commits: both sides are 
       },
     },
     req: {
-      // The exact spelling the peregrine collector emits.
+      // The exact spelling the workstation collector emits.
       body: validBody({ connector_id: "claude_code" }),
       deviceExporter: { deviceId: "dev-1" },
       params: { deviceId: "dev-1", sourceInstanceId: "src-1" },

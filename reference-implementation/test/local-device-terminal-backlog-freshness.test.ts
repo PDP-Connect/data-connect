@@ -17,7 +17,7 @@ import {
 // on its own, so it is a settled fact about lost records, not evidence that
 // collection stopped.
 //
-// Observed in production (peregrine Claude Code, 2026-08-22): outbox
+// Observed in production (workstation Claude Code, 2026-08-22): outbox
 // total 10001 / succeeded 10000 / pending 0 / retrying 0 / dead_letter 1 /
 // backlog_open 1, heartbeat 10.5 minutes old, 18,453 ingest batches all
 // accepted with zero rejections. That single terminal row forced heartbeat
@@ -63,7 +63,7 @@ test("terminal-only backlog: a fresh blocked heartbeat with only dead letters st
 });
 
 test("terminal-only backlog: live pending work keeps the stall load-bearing", () => {
-  // peregrine Codex's real shape: 2 records still pending. Nothing is settled
+  // workstation Codex's real shape: 2 records still pending. Nothing is settled
   // here, so this must NOT be greened.
   assert.equal(
     localDeviceFreshnessHeartbeatAt(

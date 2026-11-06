@@ -65,11 +65,11 @@ test("apple contacts: grey pill renders an empty circle and 'Not measured'", () 
   assert.equal(row.streams[0]?.countsLabel, "0 of 1 covered");
 });
 
-test("peregrine Claude Code: red pill renders the interdict glyph and carries the freshness note", () => {
+test("workstation Claude Code: red pill renders the interdict glyph and carries the freshness note", () => {
   const row = projectSourceRow(
     summary({
       connection_health: { axes: { coverage: "unknown", freshness: "unknown", outbox: "stalled" } },
-      display_name: "peregrine Claude Code",
+      display_name: "workstation Claude Code",
       rendered_verdict: {
         annotations: [{ kind: "freshness", text: "freshness has not been measured yet" }],
         pill: { label: "Can't collect", tone: "red" },

@@ -7,7 +7,7 @@ a private PID namespace and a private `/tmp`. `--pg 16|18` starts a disposable
 PostgreSQL cluster that dies with the run. Run it with no arguments for usage.
 
 This file is a verbatim copy. The canonical source is
-`ai/skills/local/test-architecture/scripts/test-sandbox` in Tim Nunamaker's
+`ai/skills/local/test-architecture/scripts/test-sandbox` in the maintainer's
 dotfiles, where its own test suite lives. Do not edit the copy here: change the
 canonical file, run its tests, then copy it and refresh the digest:
 

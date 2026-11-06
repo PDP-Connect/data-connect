@@ -295,12 +295,12 @@ describe("forced-release refusals", () => {
   })
 
   it("accepts a valid request and records the audit trail", () => {
-    const plan = planForcedRelease({ ...valid, actor: "tnunamak" })
-    expect(plan).toMatchObject({ releaseType: "patch", actor: "tnunamak" })
+    const plan = planForcedRelease({ ...valid, actor: "example-user" })
+    expect(plan).toMatchObject({ releaseType: "patch", actor: "example-user" })
 
     const record = formatAuditRecord(plan)
     expect(record).toContain("connector fix merged unscoped")
-    expect(record).toContain("tnunamak")
+    expect(record).toContain("example-user")
     expect(record).toContain("patch")
   })
 })
