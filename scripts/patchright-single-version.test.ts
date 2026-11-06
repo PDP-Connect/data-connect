@@ -3,7 +3,9 @@
 
 // One Patchright for the whole workspace. The Dockerfile installs the browser
 // revision of reference-implementation's exact `patchright` pin, and
-// runtime/browser-executable.ts checks for that revision. A second copy of
+// runtime/browser-executable.ts checks for that revision. Whether the built
+// image really launches that browser is covered by the docker-images workflow,
+// not here. A second copy of
 // Patchright in the lockfile (for example one pinned by the vendored
 // @pdpp/polyfill-connectors tarball) launches a different Chromium revision
 // than the one the image installs. The root `overrides` entry for
@@ -56,12 +58,4 @@ test("the root overrides keep the vendored connectors package on the root patchr
   // Without this entry the lockfile test above still passes until the next
   // regeneration, when npm would nest the tarball's own pin again.
   assert.equal(readJson("package.json").overrides?.["@pdpp/polyfill-connectors"]?.patchright, "$patchright");
-});
-
-test("the Dockerfile installs browsers for reference-implementation's patchright pin", () => {
-  const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8");
-  assert.match(dockerfile, /COPY reference-implementation\/package\.json \/tmp\/reference-implementation-package\.json/);
-  assert.match(dockerfile, /reference-implementation-package\.json'.*packageJson\.dependencies\.patchright/);
-  assert.match(dockerfile, /npm install [^\n]*"patchright@\$\{PATCHRIGHT_VERSION\}"/);
-  assert.match(dockerfile, /npx patchright install [^\n]*chromium/);
 });
