@@ -14,7 +14,7 @@
   }
 
   ::selection {
-    @apply bg-accent/70 text-background;
+    @apply bg-accent text-accent-foreground;
   }
 
   ::after,
