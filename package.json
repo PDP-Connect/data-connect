@@ -135,6 +135,9 @@
     "@huggingface/transformers": {
       "sharp": "^0.35.4"
     },
+    "@pdpp/polyfill-connectors": {
+      "patchright": "$patchright"
+    },
     "qs": "^6.15.2"
   }
 }

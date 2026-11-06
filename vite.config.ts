@@ -63,6 +63,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/mutation-falsification/*.test.ts",
       "scripts/check-dockerfile-copy-paths.test.ts",
       "scripts/chrome-distrust-policy.test.ts",
+      "scripts/patchright-single-version.test.ts",
       "scripts/check-flyio-deploy-env.test.ts",
       "scripts/check-railway-deploy-env.test.ts",
       "scripts/check-railway-ghcr-public.test.ts",

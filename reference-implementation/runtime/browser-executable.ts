@@ -39,7 +39,7 @@ export const IMAGE_BROWSERS_PATH = "/opt/patchright-browsers";
  */
 export const BROWSERS_PATH_ENV_KEYS = ["PLAYWRIGHT_BROWSERS_PATH", "PATCHRIGHT_BROWSERS_PATH"] as const;
 
-/** The only variable patchright-core 1.63.0 reads for the browsers directory. */
+/** The only variable patchright-core reads for the browsers directory. */
 const PATCHRIGHT_READS_KEY = "PLAYWRIGHT_BROWSERS_PATH";
 
 const LINUX_EXECUTABLE_DIRS: Readonly<Record<string, string>> = {
