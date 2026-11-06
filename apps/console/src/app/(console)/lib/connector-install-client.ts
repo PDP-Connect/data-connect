@@ -122,7 +122,9 @@ export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSna
 
 async function readConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot> {
   let catalogUnavailableReason: ConnectorInstallSnapshot["catalogUnavailableReason"];
-  const [catalog, status, localSources] = await Promise.all([
+  // Settle every leg before judging any of them, so the outcome does not
+  // depend on which route answers first.
+  const [catalogLeg, statusLeg, localSourcesLeg] = await Promise.allSettled([
     fetchInstallCatalog().catch((err: unknown) => {
       if (isTransientConnectorInstallCatalogError(err)) {
         catalogUnavailableReason = "transient_busy";
@@ -137,11 +139,25 @@ async function readConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot>
       isConnectorInstallRouteUnavailableError(err) ? [] : Promise.reject(err)
     ),
   ]);
+  // An auth, server, network or contract failure wins over "this server has
+  // no install routes", which the caller turns into an empty page.
+  const failures = [catalogLeg, statusLeg, localSourcesLeg].flatMap((leg) =>
+    leg.status === "rejected" ? [leg.reason as unknown] : []
+  );
+  const decisive = failures.find((err) => !isConnectorInstallRouteUnavailableError(err)) ?? failures[0];
+  if (decisive !== undefined) {
+    throw decisive;
+  }
+  if (catalogLeg.status !== "fulfilled" || statusLeg.status !== "fulfilled" || localSourcesLeg.status !== "fulfilled") {
+    throw new Error("connector install snapshot: a read settled without a value.");
+  }
+  const catalog = catalogLeg.value;
+  const status = statusLeg.value;
   const skippedEntries = catalog.skipped + status.skipped;
   return {
     catalog: catalog.entries,
     ...(catalogUnavailableReason ? { catalogUnavailableReason } : {}),
-    localSources,
+    localSources: localSourcesLeg.value,
     ...(skippedEntries > 0 ? { skippedEntries } : {}),
     status: status.entries,
   };
