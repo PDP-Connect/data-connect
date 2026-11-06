@@ -1289,7 +1289,7 @@ const TERMINAL_COVERAGE_CTA = "Missing data needs review";
  * `source-actionability.ts` sets the row's `what` from
  * `verdict.forward_statement` and its `actionLabel` from this `cta`. The hard
  * branch used to return the forward statement's own sentence verbatim, so
- * `HEB - gezalsatx@yahoo.com` rendered "Some data from this source can't be
+ * `HEB - jane.doe@example.com` rendered "Some data from this source can't be
  * collected." above "Some data from this source can't be collected" — one
  * fact, printed twice, in the slot reserved for what happens next.
  *
@@ -2919,7 +2919,7 @@ function copyClaim(text: string): string {
  * or as inert status text (maintainer). A `cta` that merely repeats the
  * sentence next to it spends that slot saying nothing.
  *
- * THE LIVE DEFECT (2026-08-25). `HEB - gezalsatx@yahoo.com` rendered:
+ * THE LIVE DEFECT (2026-08-25). `HEB - jane.doe@example.com` rendered:
  *
  *     pill:              "Can't collect"
  *     forward_statement: "Some data from this source can't be collected."

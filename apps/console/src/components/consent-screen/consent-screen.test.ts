@@ -40,9 +40,9 @@ const AS_HELPERS_SOURCE = readFileSync(
 );
 
 test("a repeated source name is stripped from the account label", () => {
-  assert.equal(sourceAccountLabel("Amazon", "Amazon - gezalsatx@gmail.com"), "gezalsatx@gmail.com");
-  assert.equal(sourceAccountLabel("Apple Contacts", "Apple Contacts - tim@opendatalabs.com"), "tim@opendatalabs.com");
-  assert.equal(sourceAccountLabel("ChatGPT", "chaka.dondo@gmail.com"), "chaka.dondo@gmail.com");
+  assert.equal(sourceAccountLabel("Amazon", "Amazon - jane.doe@example.com"), "jane.doe@example.com");
+  assert.equal(sourceAccountLabel("Apple Contacts", "Apple Contacts - jane.doe@example.com"), "jane.doe@example.com");
+  assert.equal(sourceAccountLabel("ChatGPT", "alex.roe@example.com"), "alex.roe@example.com");
   assert.equal(sourceAccountLabel("H-E-B", "HEB - x"), "x");
 });
 

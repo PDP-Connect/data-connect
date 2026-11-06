@@ -226,7 +226,7 @@ async function runConformance(
   // collector's "starting"/skip-scan heartbeats never resend `last_error` —
   // only its completion/corrective heartbeat does). Losing the detail here
   // hides the one lost record behind a bare "1 failed upload" count with no
-  // way to see what it was (2026-08-22 peregrine Claude Code investigation).
+  // way to see what it was (2026-08-22 workstation Claude Code investigation).
   await driver.call("markSourceInstanceHeartbeat", "dev_1", "src_1", {
     lastError: { kind: "dead_letter_backlog", top_dead_letter_classes: [{ count: 1, error_class: "schema_invalid" }] },
     outboxDiagnostics: { dead_letter: 1, succeeded: 10_000, total: 10_001 },

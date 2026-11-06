@@ -1233,8 +1233,8 @@ test("unreliableReason distinguishes coverage genuinely unproven from a refused-
 });
 
 test("SourceCoverageComplete names a stale collector build, not a generic 'evidence missing', when local coverage is unknown specifically because a required store was never reported", () => {
-  // Reproduces the four production local-device connections (peregrine
-  // Claude Code/Codex, vivid fish Claude Code, Simon VM Claude Code): their
+  // Reproduces four production local-device connections (Claude Code and
+  // Codex on one host, Claude Code on a second host, Claude Code on a VM): their
   // collector builds predate 4d9e6b7e4 (the commit that added
   // derived_messages/derived_attachments/derived_memory_notes to the
   // descriptor authority), so their committed coverage_diagnostics snapshot

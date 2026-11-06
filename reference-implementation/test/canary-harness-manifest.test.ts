@@ -21,7 +21,13 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { greppedCountInImage } from "../scripts/canary/collectors.ts";
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
-import { redact, renderRunArgs } from "../scripts/canary/deploy-canary.ts";
+import {
+  evaluateAfter,
+  probeOriginProblem,
+  redact,
+  renderRunArgs,
+  resolveProbeUrl,
+} from "../scripts/canary/deploy-canary.ts";
 import { deriveEnv, parseEnvEntries, toDockerEnvArgs } from "../scripts/canary/env-derivation.ts";
 import {
   type CheckOutcome,
@@ -432,7 +438,7 @@ const LIVE_ENV_SAMPLE = [
   "PDPP_DB_PATH=/root/.pdpp/pdpp.sqlite",
   "PDPP_CONNECTOR_ARTIFACT_ROOT=/root/.pdpp/connector-artifacts",
   "PDPP_EMBEDDING_CACHE_DIR=/var/cache/pdpp/transformers",
-  "PDPP_REFERENCE_ORIGIN=https://pdpp.vivid.fish",
+  "PDPP_REFERENCE_ORIGIN=https://pdpp.example.com",
   "PDPP_REFERENCE_REVISION=drain",
   "NODE_ENV=production",
   "PLAYWRIGHT_BROWSERS_PATH=/opt/patchright-browsers",
@@ -539,7 +545,7 @@ const LIVE_INSPECT = {
   HostConfig: {
     Binds: [
       "pdpp_pdpp-transformers:/var/cache/pdpp/transformers",
-      "/home/tnunamak/.claude:/imports/claude:ro",
+      "/home/user/.claude:/imports/claude:ro",
       "pdpp_pdpp-data:/var/lib/pdpp",
       "pdpp_pdpp-home:/root/.pdpp",
     ],
@@ -685,4 +691,63 @@ test("renderRunArgs does not leak a secret whose value contains a space", () => 
   const rendered = renderRunArgs(["-e", "CHASE_PASSWORD=two words here", "-e", "NTFY_TOPIC=pdpp"]);
   assert.equal(rendered.includes("two words here"), false);
   assert.match(rendered, VISIBLE_NTFY_TOPIC_PATTERN);
+});
+
+test("resolveProbeUrl resolves a manifest path against the operator origin and refuses without one", () => {
+  assert.equal(resolveProbeUrl("/owner/login", "https://pdpp.example.com"), "https://pdpp.example.com/owner/login");
+  assert.equal(resolveProbeUrl("https://other.example.org/x", undefined), "https://other.example.org/x");
+  assert.throws(() => resolveProbeUrl("/owner/login", undefined), /PDPP_CANARY_ORIGIN is not set/);
+  assert.throws(() => resolveProbeUrl("/owner/login", ""), /PDPP_CANARY_ORIGIN is not set/);
+});
+
+test("probeOriginProblem flags a relative http_health path without an origin, before any deploy step", () => {
+  const checks = [{ kind: "http_health", url: "/owner/login" }, { kind: "log_pattern" }] as never;
+  assert.match(probeOriginProblem(checks, undefined) ?? "", /PDPP_CANARY_ORIGIN/);
+  assert.equal(probeOriginProblem(checks, "https://pdpp.example.com"), null);
+  assert.equal(probeOriginProblem([{ kind: "http_health", url: "https://x.example.org/" }] as never, undefined), null);
+  assert.equal(probeOriginProblem([{ kind: "log_pattern" }] as never, undefined), null);
+});
+
+test("probeOriginProblem rejects a set but malformed or non-http origin", () => {
+  const checks = [{ kind: "http_health", url: "/owner/login" }] as never;
+  assert.match(probeOriginProblem(checks, "not-a-url") ?? "", /http/);
+  assert.match(probeOriginProblem(checks, "ftp://pdpp.example.com") ?? "", /http/);
+  assert.equal(probeOriginProblem(checks, "http://pdpp.example.com"), null);
+  // An absolute-only manifest needs no origin, so a bad one is irrelevant.
+  assert.equal(probeOriginProblem([{ kind: "http_health", url: "https://x.example.org/" }] as never, "not-a-url"), null);
+});
+
+test("resolveProbeUrl throws on a malformed origin and passes through only http(s) URLs", () => {
+  assert.throws(() => resolveProbeUrl("/owner/login", "not-a-url"), TypeError);
+  assert.equal(resolveProbeUrl("http://h.example.org/x", undefined), "http://h.example.org/x");
+  // "localhost:8080/health" parses with scheme "localhost"; it is a path-like value, not absolute.
+  assert.throws(() => resolveProbeUrl("localhost:8080/health", undefined), /PDPP_CANARY_ORIGIN is not set/);
+  assert.match(
+    probeOriginProblem([{ kind: "http_health", url: "localhost:8080/health" }] as never, undefined) ?? "",
+    /PDPP_CANARY_ORIGIN/
+  );
+});
+
+test("evaluateAfter turns a throwing probe into a failed outcome so rollback can run", async () => {
+  const saved = process.env.PDPP_CANARY_ORIGIN;
+  process.env.PDPP_CANARY_ORIGIN = "not-a-url";
+  try {
+    const check = {
+      blocking: true,
+      description: "login page is up",
+      id: "login-up",
+      kind: "http_health",
+      url: "/owner/login",
+    } as never;
+    const outcome = await evaluateAfter({ checks: [] } as never, check, null, null);
+    assert.equal(outcome.passed, false);
+    assert.equal(outcome.blocking, true);
+    assert.match(outcome.detail, /probe threw/);
+  } finally {
+    if (saved === undefined) {
+      delete process.env.PDPP_CANARY_ORIGIN;
+    } else {
+      process.env.PDPP_CANARY_ORIGIN = saved;
+    }
+  }
 });

@@ -206,6 +206,50 @@ function quoteForDisplay(value: string): string {
     : value;
 }
 
+const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
+
+function isHttpUrl(value: string): boolean {
+  return URL.canParse(value) && HTTP_PROTOCOLS.has(new URL(value).protocol);
+}
+
+/**
+ * Resolves an `http_health` manifest URL against the operator-supplied
+ * `PDPP_CANARY_ORIGIN`. Manifests carry a path (`/owner/login`) so no
+ * deployment hostname is committed. Absolute http(s) URLs pass through
+ * unchanged; anything else is a path, so a missing origin throws rather than
+ * guessing a target, and a malformed origin throws from the URL parser.
+ */
+export function resolveProbeUrl(url: string, origin: string | undefined): string {
+  if (isHttpUrl(url)) {
+    return url;
+  }
+  if (!origin) {
+    throw new Error(`PDPP_CANARY_ORIGIN is not set; cannot resolve http_health path ${url}`);
+  }
+  return new URL(url, origin).toString();
+}
+
+/**
+ * Returns an error message when an `http_health` check needs
+ * `PDPP_CANARY_ORIGIN` and it is unset or is not an http(s) URL, else null.
+ * `main` calls this before the build, so a missing or malformed origin stops
+ * the run before any image or container action instead of surfacing
+ * mid-deploy.
+ */
+export function probeOriginProblem(
+  checks: ReadonlyArray<{ readonly kind: string; readonly url?: string }>,
+  origin: string | undefined
+): string | null {
+  const needsOrigin = checks.some((check) => check.kind === "http_health" && !isHttpUrl(check.url ?? ""));
+  if (!needsOrigin) {
+    return null;
+  }
+  if (!origin) {
+    return "PDPP_CANARY_ORIGIN is required: an http_health check uses a relative path";
+  }
+  return isHttpUrl(origin) ? null : "PDPP_CANARY_ORIGIN must be an http: or https: URL";
+}
+
 async function collectMetric(
   manifest: CanaryManifest,
   check: CanaryManifest["checks"][number],
@@ -224,7 +268,7 @@ async function collectMetric(
     case "log_pattern":
       return logPatternCount(manifest.container, check.pattern, check.sinceSeconds);
     case "http_health":
-      return await httpStatus(check.url);
+      return await httpStatus(resolveProbeUrl(check.url, process.env.PDPP_CANARY_ORIGIN));
     case "connector_run":
       // Meaningless before the deploy; only evaluated after.
       return null;
@@ -327,7 +371,7 @@ function evaluateNonNumericCheck(
   return null;
 }
 
-async function evaluateAfter(
+export async function evaluateAfter(
   manifest: CanaryManifest,
   check: CanaryManifest["checks"][number],
   before: string | number | null,
@@ -345,7 +389,14 @@ async function evaluateAfter(
     return await evaluateConnectorRun(check, base);
   }
 
-  const after = await collectMetric(manifest, check, spec);
+  let after: string | number | null;
+  try {
+    after = await collectMetric(manifest, check, spec);
+  } catch (error) {
+    // A probe that throws is a failed check, not a crashed deploy: the caller
+    // must still reach rollback and the receipt.
+    return { ...base, after: null, detail: `probe threw: ${String(error)}`, passed: false };
+  }
 
   const nonNumeric = evaluateNonNumericCheck(check, base, before, after);
   if (nonNumeric) {
@@ -604,6 +655,11 @@ async function main(): Promise<number> {
   }
   const startedAt = new Date();
   const manifest = parseManifest(JSON.parse(readFileSync(resolve(args.manifest), "utf8")) as unknown);
+  const originProblem = probeOriginProblem(manifest.checks, process.env.PDPP_CANARY_ORIGIN);
+  if (originProblem) {
+    console.error(originProblem);
+    return 2;
+  }
   const ref = args.ref ?? "HEAD";
   const image = `${manifest.imageRepo}:${manifest.imageTag}`;
 

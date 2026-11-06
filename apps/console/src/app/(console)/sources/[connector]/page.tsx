@@ -1338,7 +1338,7 @@ function RenderedVerdictHeaderAction({
     // forever — so a concluded run still produced a `/syncs/<id>` link. The
     // owner clicked "Complete the requested action" and nothing happened,
     // because the run that owned the interaction had already ended and taken
-    // the interaction with it (production, ChatGPT chaka.dondo@gmail.com: three
+    // the interaction with it (production, ChatGPT alex.roe@example.com: three
     // consecutive `expired` attention records, each still carrying a run id).
     //
     // With no live run there is nothing to complete. The honest destination is

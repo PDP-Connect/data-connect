@@ -214,7 +214,7 @@ test("a PII-shaped message threaded through the run logger is redacted, not carr
   // (design-notes/failure-diagnosability-2026-08-18.md): a long opaque
   // alphanumeric run that could be a secret, a session token, or — the
   // load-bearing case stderr-redact.ts's own tests pin — a personal name.
-  const piiShapedToken = "tim_nunamaker_gmail_com_account_identifier";
+  const piiShapedToken = "jane_doe_gmail_com_account_identifier";
   runLogger.error(`ingest failed for account ${piiShapedToken}`);
 
   assert.equal(calls.length, 1);
