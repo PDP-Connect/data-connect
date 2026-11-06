@@ -182,6 +182,14 @@ export function LiveProvider({
     })
   }, [active, mint, queryClient])
 
+  // A refetch that failed while the server was down (a desktop restart) is
+  // retried once the channel is back. `hello` refetches only topics whose
+  // revision changed, and this tab already saw the revision it failed to read.
+  useEffect(() => {
+    if (state !== "live") return
+    void queryClient.refetchQueries({ predicate: query => query.state.status === "error", type: "active" })
+  }, [state, queryClient])
+
   // Machine-readable state for tests and agents: `<html data-live-state>`.
   useEffect(() => {
     document.documentElement.dataset.liveState = active ? state : "idle"
