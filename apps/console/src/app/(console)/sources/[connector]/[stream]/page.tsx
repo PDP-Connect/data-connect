@@ -21,6 +21,7 @@ import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { ServerUnreachable } from "../../../components/server-unreachable.tsx";
 import { WarningsBanner } from "../../../components/warnings-banner.tsx";
 import { formatStreamCollectionFacts, type StreamCollectionFacts } from "../../../lib/collection-report.ts";
@@ -299,11 +300,11 @@ export default async function StreamPage({
       return (
         <RecordroomShellWithPalette>
           <PageHeader
-            breadcrumbs={[
-              { href: "/sources", label: "Sources" },
+            breadcrumbs={breadcrumbsFor(
+              `/sources/${connector}/${stream}`,
               { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
-              { label: humanizeFieldLabel(streamName) },
-            ]}
+              { label: humanizeFieldLabel(streamName) }
+            )}
             title={<span title={streamName}>{humanizeFieldLabel(streamName)}</span>}
           />
           <div className="rounded-md border border-border/70 bg-muted/30 p-4">
@@ -449,11 +450,11 @@ export default async function StreamPage({
             </Link>
           </>
         }
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
+        breadcrumbs={breadcrumbsFor(
+          `/sources/${connector}/${stream}`,
           { href: `/sources/${encodeURIComponent(connectionId)}`, label: sourceLabel },
-          { label: humanizeFieldLabel(streamName) },
-        ]}
+          { label: humanizeFieldLabel(streamName) }
+        )}
         count={headerCount}
         description={
           <span className="inline-flex items-center gap-2">

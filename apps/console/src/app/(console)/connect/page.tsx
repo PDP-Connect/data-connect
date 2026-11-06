@@ -310,7 +310,6 @@ export default async function ConnectPage({ searchParams }: { searchParams: Prom
             Deployment readiness
           </Link>
         }
-        breadcrumbs={[{ href: "/", label: "Overview" }, { label: "Connect apps" }]}
         description="Give apps and local clients grant-scoped read access to data already in this instance. To add or manage data sources, go to Sources."
         title="Connect apps"
       />

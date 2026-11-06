@@ -8,6 +8,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { LivePoller } from "../../../components/live-poller.tsx";
 import {
   type ConnectionSetupStatus,
@@ -713,7 +714,7 @@ export default async function ConnectionSetupStatusPage({
             Back to Sources
           </Link>
         }
-        breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: "Setup status" }]}
+        breadcrumbs={breadcrumbsFor(`/connect/status/${rawConnectionId}`, { label: "Setup status" })}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />

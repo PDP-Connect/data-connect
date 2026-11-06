@@ -8,6 +8,7 @@ import { notFound } from "next/navigation";
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { getStaticSecretSetup, RefNotFoundError, type StaticSecretSetupField } from "../../../lib/ref-client.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
@@ -160,7 +161,7 @@ export default async function StaticSecretConnectPage({
             Back to Sources
           </Link>
         }
-        breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: pageTitle }]}
+        breadcrumbs={breadcrumbsFor(`/connect/static-secret/${rawConnectorId}`, { label: pageTitle })}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={setup.display_name} />

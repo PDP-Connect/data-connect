@@ -5,6 +5,7 @@ import { buttonVariants, IcButton, IcInput, IcSelect, IcTimestamp } from "@pdpp/
 import { MetaPill, PageHeader, Section } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import {
   buildGrantRequestExamples,
   type ConnectionPinOption,
@@ -352,7 +353,7 @@ export default async function GrantRequestPage({ searchParams }: { searchParams:
     <RecordroomShellWithPalette>
       <PageHeader
         actions={<HeaderActions ownerLoginUrl={ownerLoginUrl} />}
-        breadcrumbs={[{ href: "/grants", label: "Grants" }, { label: "Grant request" }]}
+        breadcrumbs={breadcrumbsFor("/grants/request", { label: "Grant request" })}
         description="Register a public client, stage a real PAR request with PDPP authorization details, then drive the resulting consent through the public approval path."
         meta={<HeaderMeta workspace={workspace} />}
         title="Grant request"
