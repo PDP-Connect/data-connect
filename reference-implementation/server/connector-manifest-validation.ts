@@ -356,6 +356,13 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): bo
     if (reqObj.required !== undefined && typeof reqObj.required !== "boolean") {
       throw invalidConnectorManifest(`runtime_requirements.bindings.${binding}.required must be a boolean`, code);
     }
+    const signInPattern = reqObj.sign_in_url_pattern;
+    if (signInPattern !== undefined && (typeof signInPattern !== "string" || signInPattern.trim().length === 0)) {
+      throw invalidConnectorManifest(
+        `runtime_requirements.bindings.${binding}.sign_in_url_pattern must be a non-empty string`,
+        code
+      );
+    }
   }
   return true;
 }

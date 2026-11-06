@@ -64,6 +64,7 @@ import {
   getDefaultBrowserSurfaceReplacementReceiptStore,
 } from "../server/stores/browser-surface-replacement-ledger-store.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
+import { getDefaultProviderInvalidationProofStore } from "../server/stores/provider-invalidation-proof-store.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import {
   createPostgresConnectorInstanceStore,
@@ -85,6 +86,7 @@ import {
   observeDynamicBrowserSurfaceRuntimeInventory,
   observeDynamicBrowserSurfaceRuntimeSurfaces,
 } from "./browser-surface/allocator-observation.ts";
+import { recordSignInProofAfterRun } from "./browser-surface/sign-in-proof-recorder.ts";
 import {
   type BrowserSurfaceManagerDeps,
   type BrowserSurfaceReadinessProbe,
@@ -3381,6 +3383,38 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
   }
 
+  // Runtime-side provider-invalidation proof: the run's own browser surface
+  // is read while the lease is still held. Never lets a recording failure
+  // change the run outcome.
+  async function recordSignInProofForRun(input: {
+    readonly browserSurfaceLease: BrowserSurfaceLease | null;
+    readonly connectorId: string;
+    readonly connectorInstanceId: string;
+    readonly manifest: ConnectorManifest;
+    readonly runId: string;
+    readonly status: string | null | undefined;
+  }): Promise<void> {
+    try {
+      const surfaceId = input.browserSurfaceLease?.surface_id;
+      const cdpUrl = surfaceId ? (browserSurfaceLeaseManager?.getSurface(surfaceId)?.cdp_url ?? null) : null;
+      await recordSignInProofAfterRun(
+        { store: getDefaultProviderInvalidationProofStore() },
+        {
+          cdpUrl,
+          connectionId: input.connectorInstanceId,
+          connectorId: input.connectorId,
+          manifest: input.manifest,
+          nowIso: nowIso(),
+          runId: input.runId,
+          status: input.status,
+        }
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn?.(`[controller] failed to record sign-in proof for ${input.runId}: ${message}`);
+    }
+  }
+
   async function finalizeRunCleanup(input: {
     readonly browserSurfaceLease: BrowserSurfaceLease | null;
     readonly connectorId: string;
@@ -4499,6 +4533,14 @@ export function createController(opts: ControllerOptions = {}): Controller {
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
       .then(async (result) => {
         runResult = result;
+        await recordSignInProofForRun({
+          browserSurfaceLease,
+          connectorId,
+          connectorInstanceId,
+          manifest,
+          runId,
+          status: result?.status,
+        });
         // A managed dynamic surface can pass pre-flight readiness and still
         // wedge before the connector reaches any record/progress. The
         // connector-runtime source boundary (browser-launch.ts's

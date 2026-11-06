@@ -2518,6 +2518,18 @@ CREATE TABLE IF NOT EXISTS storage_migration_ledger (
   completed_at      TEXT
 );
 
+-- Runtime-observed provider-invalidation proofs: one row per failed run whose
+-- last top-level navigation matched the connector's declared sign-in URL
+-- pattern. repaired_at is the replay-suppression record for that proof key.
+CREATE TABLE IF NOT EXISTS provider_invalidation_proofs (
+  connection_id TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  provider      TEXT NOT NULL,
+  observed_at   TEXT NOT NULL,
+  repaired_at   TEXT,
+  PRIMARY KEY (connection_id, run_id)
+);
+
 -- Durable scheduling cursors for bounded, periodic maintenance sweeps
 -- (name-keyed, one row per stage). Not evidence, not owner-visible data.
 CREATE TABLE IF NOT EXISTS connector_maintenance_cursor (

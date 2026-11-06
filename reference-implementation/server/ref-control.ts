@@ -205,6 +205,7 @@ import {
 import { getDefaultBrowserSurfaceLeaseStore } from "./stores/browser-surface-lease-store.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import { getDefaultConnectorCoverageHorizonStore } from "./stores/connector-coverage-horizon-store.ts";
+import { getDefaultProviderInvalidationProofStore } from "./stores/provider-invalidation-proof-store.ts";
 import { getDefaultConnectorDetailGapStore } from "./stores/connector-detail-gap-store.ts";
 import {
   type CredentialStateChange,
@@ -6848,6 +6849,8 @@ interface ConnectorSummarySynthesisInput {
    * `openspec/changes/add-coverage-horizon-and-actionability-banner/design.md`.
    */
   readonly coverageHorizons: readonly ConnectionCoverageHorizon[];
+  /** Durable runtime-observed sign-in proof for this connection, pre-fetched by the caller; `null` when none. */
+  readonly browserSurfaceRepair: BrowserSurfaceRepairContext | null;
   /**
    * Durable stored-credential presence evidence for this connection, pre-
    * fetched by the caller (kept out of this function so it stays a pure
@@ -7013,6 +7016,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     // credential row.
     authenticates: connectionAuthenticatesToProvider(manifest),
     browserSessionRepairCapable,
+    browserSurfaceRepair: input.browserSurfaceRepair,
     collectionRate: authoritativeCollectionRate,
     coverageHorizons: input.coverageHorizons,
     credential,
@@ -7717,6 +7721,29 @@ function connectorUsesNekoSurface(
     .some((entry) => entry === connectorId || (canonicalConnectorKey(entry) ?? entry) === canonicalTarget);
 }
 
+// Loads the durable runtime-observed sign-in proof for a browser-session
+// connection. A store read failure yields no proof (never a fabricated one).
+async function loadBrowserSurfaceRepair(input: {
+  readonly connectorId: string;
+  readonly connectorInstanceId: string;
+  readonly instance: ConnectorInstanceRow;
+  readonly manifest: ConnectorManifest;
+}): Promise<BrowserSurfaceRepairContext | null> {
+  if (!connectionHasBrowserSessionRepairCapability(input.instance, input.manifest)) {
+    return null;
+  }
+  try {
+    const { proof, repairedProofKeys } = await getDefaultProviderInvalidationProofStore().load(
+      input.connectorInstanceId
+    );
+    return proof
+      ? { connectionId: input.connectorInstanceId, evidence: proof, provider: input.connectorId, repairedProofKeys }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function connectionHasBrowserSessionRepairCapability(
   instance: ConnectorInstanceRow,
   manifest: ConnectorManifest
@@ -7963,6 +7990,7 @@ async function projectConnectorSummaryForInstance(
     acquisitionCoverage,
     credentialMetadata,
     coverageHorizons,
+    browserSurfaceRepair,
   ] = await Promise.all([
     schedulePromise,
     hydrateRunSummaries ? getLatestRunSummaryForConnectionId(connectorInstanceId) : Promise.resolve(null),
@@ -8025,6 +8053,7 @@ async function projectConnectorSummaryForInstance(
       : getDefaultConnectorCoverageHorizonStore()
           .getCurrentCoverageHorizons(connectorInstanceId)
           .catch(() => []),
+    loadBrowserSurfaceRepair({ connectorId, connectorInstanceId, instance, manifest }),
   ]);
   // Connections that are not static-secret-bound (browser-session connections,
   // or non-static-secret connectors): the ternary above resolved
@@ -8073,6 +8102,7 @@ async function projectConnectorSummaryForInstance(
     collectionRate,
     connectorId,
     connectorImplementation,
+    browserSurfaceRepair,
     connectorInstanceId,
     coverageHorizons,
     credential,
