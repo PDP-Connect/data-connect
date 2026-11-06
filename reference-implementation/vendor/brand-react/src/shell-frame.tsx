@@ -42,7 +42,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import "./components.css";
 import {
   IcDialog,
@@ -52,6 +52,7 @@ import {
   IcDialogPortal,
   IcDialogTrigger,
 } from "./dialog.tsx";
+import { DEFAULT_JUMP_SHORTCUT_LABEL, jumpShortcutLabel } from "./jump-shortcut.ts";
 import { DATACONNECT_PRODUCT_IDENTITY } from "./product-identity.ts";
 import "./shell.css";
 
@@ -283,6 +284,31 @@ function useThemeToggle(): [Theme, () => void] {
   return [theme, toggle];
 }
 
+// ─── Jump button (platform-aware shortcut label) ──────────────────
+
+function detectPlatform(): string | undefined {
+  if (typeof navigator === "undefined") {
+    return;
+  }
+  const withUaData = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return withUaData.userAgentData?.platform || navigator.platform;
+}
+
+const subscribeNever = () => () => undefined;
+const clientJumpLabel = () => jumpShortcutLabel(detectPlatform());
+const serverJumpLabel = () => DEFAULT_JUMP_SHORTCUT_LABEL;
+
+function JumpButton({ onJump }: { onJump: () => void }) {
+  // The server snapshot is the neutral label, so hydration matches the server
+  // markup; the client snapshot switches to the Command glyph on Apple platforms.
+  const label = useSyncExternalStore(subscribeNever, clientJumpLabel, serverJumpLabel);
+  return (
+    <button className="rr-chrome-btn" onClick={onJump} type="button">
+      Jump <span className="rr-kbd">{label}</span>
+    </button>
+  );
+}
+
 // ─── RecordroomShell ──────────────────────────────────────────────
 
 interface RecordroomShellProps {
@@ -341,9 +367,7 @@ export function RecordroomShell({
                 provider, not this shell. Pages that mount a command palette
                 pass onJump so the button and the shortcut open the same one. */}
               {onJump ? (
-                <button className="rr-chrome-btn" onClick={onJump} type="button">
-                  Jump <span className="rr-kbd">⌘K</span>
-                </button>
+                <JumpButton onJump={onJump} />
               ) : null}
               <IcDialogTrigger className="rr-chrome-btn rr-menu-btn" type="button">
                 Menu
