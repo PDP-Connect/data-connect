@@ -61,6 +61,7 @@ import {
   isRequestValidationEnforced,
   isResponseCanary,
 } from "./contract-validation.ts";
+import { recordReceivedHead } from "./continuation-budget.ts";
 import { HOSTED_INGEST_MAX_REQUEST_BYTES } from "./hosted-ingest-limits.ts";
 
 // Header name the reference sets on responses to expose the protocol trace
@@ -383,7 +384,8 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // Force `Connection: close` on every response. See the note above the
   // Fastify config block. An `onRequest` hook sets it before handlers run so
   // there's no race with streaming replies.
-  fastify.addHook("onRequest", (_request, reply, done) => {
+  fastify.addHook("onRequest", (request, reply, done) => {
+    recordReceivedHead(request.raw);
     reply.header("connection", "close");
     done();
   });

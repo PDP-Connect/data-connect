@@ -46,6 +46,7 @@ import {
 
 process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY ??= "test connector-summary cursor key";
 
+import { recordReceivedHead } from "../server/continuation-budget.ts";
 import type { MiddlewareHandler } from "../server/routes/_route-contract.ts";
 import { type MountRefConnectorsContext, mountRefConnectorsList } from "../server/routes/ref-connectors.ts";
 
@@ -70,8 +71,11 @@ const WIRE_REQUEST = {
   httpVersion: "1.1",
   method: "GET",
   rawHeaders: ["Host", "127.0.0.1"],
+  // The socket has read exactly this request's head.
+  socket: { bytesRead: "GET /_ref/connectors?limit=1 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".length },
   url: "/_ref/connectors?limit=1",
 };
+recordReceivedHead(WIRE_REQUEST);
 type RouteResponse = Parameters<RouteHandler>[1];
 
 function summaryItem(connectorId: string, connectionId: string = connectorId): RefConnectorsListItem {

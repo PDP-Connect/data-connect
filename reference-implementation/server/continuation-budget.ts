@@ -12,7 +12,10 @@
  * The check measures the request as it arrived (target and headers, in the
  * client's own encoding, cookies included) instead of predicting its size from
  * decoded query values: percent-encoded parameter names, escaped characters
- * and header size all change the real size. The cursor is the one part that
+ * and header size all change the real size. Node trims whitespace around header
+ * values before it shows them in `rawHeaders` but still counts it toward the
+ * limit, so the check also reads the number of bytes the socket received for
+ * this request ({@link recordReceivedHead}) and charges any difference. The cursor is the one part that
  * does not exist yet, so the check reserves its worst case: the longest cursor
  * the server can issue, with every character percent-encoded and the parameter
  * name percent-encoded too. The request is measured with its current cursor
@@ -38,16 +41,39 @@ const PERCENT_ENCODED_BYTES_PER_CHARACTER = 3;
 
 export interface WireRequest {
   readonly httpVersion?: string;
-  readonly method?: string;
+  readonly method?: string | undefined;
   readonly rawHeaders?: readonly string[];
-  /** The listening server; its `maxHeaderSize` is the limit that applies. */
-  readonly socket?: { readonly server?: { readonly maxHeaderSize?: number } };
-  readonly url?: string;
+  readonly socket?: {
+    /** Bytes the socket has read so far, across every request it carried. */
+    readonly bytesRead?: number | undefined;
+    /** The listening server; its `maxHeaderSize` is the limit that applies. */
+    readonly server?: object | null | undefined;
+  };
+  readonly url?: string | undefined;
+}
+
+const receivedHeadBytes = new WeakMap<object, number>();
+const socketBytesAlreadyAttributed = new WeakMap<object, number>();
+
+/**
+ * Record how many bytes the socket received for this request. The transport
+ * calls it for every request, before any route runs, so the next request on a
+ * kept-alive socket starts from the right place. The figure can only be too
+ * large (a body or a pipelined request in the same read), never too small.
+ */
+export function recordReceivedHead(request: WireRequest): void {
+  const socket = request.socket;
+  if (!(socket && typeof socket.bytesRead === "number")) {
+    return;
+  }
+  const before = socketBytesAlreadyAttributed.get(socket) ?? 0;
+  socketBytesAlreadyAttributed.set(socket, socket.bytesRead);
+  receivedHeadBytes.set(request, Math.max(0, socket.bytesRead - before));
 }
 
 export interface ContinuationMeasurement {
   readonly fits: boolean;
-  /** Header lines the request carries, in bytes. */
+  /** Header lines the request carries, in bytes, including whitespace Node trimmed. */
   readonly headerBytes: number;
   /** The server's header limit. */
   readonly limit: number;
@@ -94,14 +120,24 @@ export function measureContinuation(options: {
   if (!request.httpVersion?.startsWith("1.")) {
     throw new Error(`continuation size cannot be measured for HTTP ${request.httpVersion ?? "(unknown version)"}`);
   }
-  const targetBytes = Buffer.byteLength(`${request.method ?? "GET"} ${withoutCursorParam(request.url)} HTTP/1.1\r\n\r\n`);
-  let headerBytes = 0;
-  for (let i = 0; i + 1 < request.rawHeaders.length; i += 2) {
-    headerBytes += Buffer.byteLength(`${request.rawHeaders[i]}: ${request.rawHeaders[i + 1]}\r\n`);
+  const received = receivedHeadBytes.get(request);
+  if (received === undefined) {
+    throw new Error("continuation size cannot be measured: the bytes received for this request were not recorded");
   }
+  const method = request.method ?? "GET";
+  const requestLineBytes = Buffer.byteLength(`${method} ${request.url} HTTP/1.1\r\n`);
+  const targetBytes = Buffer.byteLength(`${method} ${withoutCursorParam(request.url)} HTTP/1.1\r\n\r\n`);
+  let parsedHeaderBytes = 0;
+  for (let i = 0; i + 1 < request.rawHeaders.length; i += 2) {
+    parsedHeaderBytes += Buffer.byteLength(`${request.rawHeaders[i]}: ${request.rawHeaders[i + 1]}\r\n`);
+  }
+  // Whitespace that Node trimmed from header values is in `received` only.
+  const trimmedBytes = Math.max(0, received - (requestLineBytes + parsedHeaderBytes + 2));
+  const headerBytes = parsedHeaderBytes + trimmedBytes;
   const reserveBytes =
     CURSOR_PARAM_NAME_AND_PUNCTUATION_BYTES + cursorMaxLength * PERCENT_ENCODED_BYTES_PER_CHARACTER;
-  const limit = request.socket?.server?.maxHeaderSize ?? defaultMaxHeaderSize;
+  // `socket.server` is typed as a net.Server; for an HTTP request it is the http.Server.
+  const limit = (request.socket?.server as { maxHeaderSize?: number } | null | undefined)?.maxHeaderSize ?? defaultMaxHeaderSize;
   return {
     fits: targetBytes + headerBytes + reserveBytes + CONTINUATION_HEADER_SLACK_BYTES <= limit,
     headerBytes,
