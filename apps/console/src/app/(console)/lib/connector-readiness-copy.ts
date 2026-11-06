@@ -7,7 +7,7 @@ import type { ConnectorReadiness } from "./connector-readiness-contract.ts";
  * Owner-facing text for a readiness verdict that blocks setup, or null when the
  * verdict needs no explanation of its own: `connect` needs none, and `install`
  * is the package column's own Install action. The text is fixed per reason: the
- * server's `detail` is diagnostic and is never shown to the owner.
+ * server's `detail` is a diagnostic that the console does not render.
  */
 export function readinessBlockNote(readiness: ConnectorReadiness | null | undefined): string | null {
   if (!readiness) {

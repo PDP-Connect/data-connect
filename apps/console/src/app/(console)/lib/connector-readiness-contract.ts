@@ -31,7 +31,7 @@ export interface ConnectorReadiness {
   readonly action: ConnectorReadinessAction;
   readonly browserBound: boolean;
   readonly connectorKey: string;
-  /** Owner-readable cause for repair, configure and retry. Null otherwise. */
+  /** Server diagnostic for repair, configure and retry. Null otherwise. The console does not render it. */
   readonly detail: string | null;
   readonly reason: ConnectorReadinessReason;
 }

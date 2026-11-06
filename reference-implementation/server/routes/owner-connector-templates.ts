@@ -231,6 +231,9 @@ function isUatExposablePlan(
   const basePlan = [
     isOwnerActionablePlan(plan, browserRunnable),
     plan.catalogDisposition === "static_secret_experimental",
+    // Not gated on `browserRunnable`: a connector that declares credential
+    // capture takes its secret through the setup form and never opens the
+    // browser shell, so browser readiness does not apply to this entry.
     plan.catalogDisposition === "static_secret_connect" &&
       plan.setupModality === "static_secret" &&
       staticSecretCredentialCaptureFromManifest(manifest) !== null,

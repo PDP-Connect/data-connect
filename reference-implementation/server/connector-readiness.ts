@@ -53,7 +53,10 @@ export interface BrowserEnrollmentReadiness {
   readonly browser_bound: boolean;
   readonly catalog: CatalogFact;
   readonly connector_key: string;
-  /** Owner-readable cause for repair, configure and retry. Null otherwise. */
+  /**
+   * Server diagnostic for repair, configure and retry. It can name store errors
+   * and host paths. The console does not render it. Null otherwise.
+   */
   readonly detail: string | null;
   readonly host: "ready" | "blocked" | "not_evaluated";
   readonly reason: ReadinessReason;

@@ -20,6 +20,7 @@ import {
   parseConnectorLocalSourcesResponse,
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
+import { canonicalConnectorKey } from "./connection-modality.ts";
 import { type ConnectorReadiness, parseConnectorReadinessResponse } from "./connector-readiness-contract.ts";
 import { describeErrorText } from "./describe-error.ts";
 import {
@@ -106,12 +107,20 @@ export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[
   return [...parseConnectorLocalSourcesResponse(payload)];
 }
 
-/** The server's browser-setup verdict for one connector, or null when the server returns none. */
+/**
+ * The server's browser-setup verdict for one connector, or null when the
+ * response holds none for it. The endpoint answers for many connectors, so the
+ * entry is chosen by its key, never by position.
+ */
 export async function getConnectorReadiness(connectorId: string): Promise<ConnectorReadiness | null> {
   const payload = await connectorInstallFetch(
     `/v1/owner/connector-install/readiness?connector_id=${encodeURIComponent(connectorId)}`
   );
-  return parseConnectorReadinessResponse(payload)[0] ?? null;
+  const requestedKey = canonicalConnectorKey(connectorId);
+  const match = parseConnectorReadinessResponse(payload).find(
+    (entry) => canonicalConnectorKey(entry.connectorKey) === requestedKey
+  );
+  return match ?? null;
 }
 
 /**
