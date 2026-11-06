@@ -17,9 +17,9 @@ import test from "node:test";
 
 import {
   type ConnectorCatalogEntry,
+  type ConnectorInstallService,
   createConnectorInstallService,
   createFileConnectorInstallStore,
-  type ConnectorInstallService,
 } from "../server/connector-install/index.ts";
 import { createFileLocalConnectorSourceStore } from "../server/connector-install/local-source.ts";
 import {
@@ -450,8 +450,13 @@ test("the console's readiness vocabulary matches the server's", async () => {
   // The console cannot import the server module (it pulls in the install
   // service), so it keeps its own copy of the vocabulary. This test is the
   // single check that the two copies agree.
-  const consoleContract = await import(
-    "../../apps/console/src/app/(console)/lib/connector-readiness-contract.ts"
+  //
+  // The specifier is built at runtime and the result typed by hand, so tsc
+  // never resolves apps/console's module graph under this package's compiler
+  // options (apps/console has its own tsconfig and typecheck script).
+  const consoleLibDirectory = ["..", "..", "apps", "console", "src", "app", "(console)", "lib"].join("/");
+  const consoleContract: { READINESS_ACTIONS: readonly string[]; READINESS_REASONS: readonly string[] } = await import(
+    `${consoleLibDirectory}/connector-readiness-contract.ts`
   );
   assert.deepEqual([...consoleContract.READINESS_ACTIONS], [...READINESS_ACTIONS]);
   assert.deepEqual([...consoleContract.READINESS_REASONS], [...READINESS_REASONS]);
