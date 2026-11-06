@@ -35,6 +35,7 @@ export const READINESS_REASONS = [
   "artifact_invalid",
   "inspection_unavailable",
   "not_browser_bound",
+  "not_implemented",
   "host_requirement_unmet",
 ] as const;
 export type ReadinessReason = (typeof READINESS_REASONS)[number];
@@ -98,6 +99,20 @@ function isBrowserBound(manifest: object | null): boolean {
   return classifyConnectorIntentModality(manifest as ConnectorManifestLike | null) === "browser_bound";
 }
 
+/**
+ * Whether the package's own manifest says it collects nothing yet. A placeholder
+ * package verifies and runs, but its collection step only reports a skip, so
+ * offering it would send the owner through sign-in for no data. The package
+ * declares this about itself (`capabilities.collection.implemented: false`);
+ * the server holds no list of such connectors, and an absent declaration means
+ * the package collects.
+ */
+function declaresNoCollection(manifest: object | null): boolean {
+  const capabilities = (manifest as { capabilities?: unknown } | null)?.capabilities;
+  const collection = (capabilities as { collection?: unknown } | null | undefined)?.collection;
+  return (collection as { implemented?: unknown } | null | undefined)?.implemented === false;
+}
+
 function artifactSummary(artifact: ArtifactFact): BrowserEnrollmentReadiness["artifact"] {
   switch (artifact.status) {
     case "active":
@@ -117,6 +132,7 @@ function artifactSummary(artifact: ArtifactFact): BrowserEnrollmentReadiness["ar
  *   artifact inspection threw                       -> retry      inspection_unavailable
  *   artifact bytes fail verification                -> repair     artifact_invalid
  *   artifact verified, manifest not browser-bound   -> unavailable not_browser_bound
+ *   artifact verified, declares no collection       -> unavailable not_implemented
  *   artifact verified, host requirement unmet       -> configure  host_requirement_unmet
  *   artifact verified, host ready                   -> connect    runnable
  *   no artifact, catalog offers it                  -> install    not_installed
@@ -158,6 +174,9 @@ export function projectBrowserEnrollmentReadiness(facts: ReadinessFacts): Browse
     if (!browserBound) {
       return result("unavailable", "not_browser_bound");
     }
+    if (declaresNoCollection(artifact.manifest)) {
+      return result("unavailable", "not_implemented");
+    }
     if (facts.host && !facts.host.ready) {
       return result("configure", "host_requirement_unmet", { detail: facts.host.reason ?? null, host: "blocked" });
     }
@@ -191,6 +210,8 @@ export function readinessReasonMessage(reason: ReadinessReason): string {
       return "its installed package could not be checked just now";
     case "not_browser_bound":
       return "it does not use browser setup";
+    case "not_implemented":
+      return "it does not collect data yet";
     case "host_requirement_unmet":
       return "this server is not set up to run it yet";
     case "runnable":
@@ -305,7 +326,7 @@ export function createBrowserEnrollmentReadinessResolver(deps: {
   ): Promise<BrowserEnrollmentReadiness> => {
     const artifact = await deps.installService.inspectSelected(connectorKey);
     const host =
-      artifact.status === "active" && isBrowserBound(artifact.manifest)
+      artifact.status === "active" && isBrowserBound(artifact.manifest) && !declaresNoCollection(artifact.manifest)
         ? await hostFor(connectorKey, artifact, reuseHostResult)
         : null;
     const hint =

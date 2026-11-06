@@ -456,3 +456,45 @@ test("the console's readiness vocabulary matches the server's", async () => {
   assert.deepEqual([...consoleContract.READINESS_ACTIONS], [...READINESS_ACTIONS]);
   assert.deepEqual([...consoleContract.READINESS_REASONS], [...READINESS_REASONS]);
 });
+
+// ─── A verified package that declares it does not collect ───────────────────
+
+test("a verified, browser-bound package that declares no collection is unavailable, not connect", async () => {
+  let hostAsked = false;
+  const stub = {
+    ...activeArtifact(),
+    manifest: {
+      capabilities: { collection: { implemented: false } },
+      connector_id: "acme-stub",
+      runtime_requirements: { bindings: BROWSER_BINDINGS },
+    },
+  };
+  const resolver = createBrowserEnrollmentReadinessResolver({
+    checkHost: async () => {
+      hostAsked = true;
+      return { ready: true };
+    },
+    installService: { catalog: async () => [], inspectSelected: async () => stub },
+  });
+  const readiness = await resolver.resolve("acme-stub");
+  assert.equal(readiness.action, "unavailable");
+  assert.equal(readiness.reason, "not_implemented");
+  assert.equal(readiness.browser_bound, true, "the routes stay reachable for an existing connection");
+  assert.equal(hostAsked, false, "no host probe for a package that cannot collect");
+});
+
+test("only an explicit implemented:false withholds connect; an absent or other declaration does not", async () => {
+  for (const capabilities of [undefined, {}, { collection: {} }, { collection: { implemented: true } }]) {
+    const resolver = createBrowserEnrollmentReadinessResolver({
+      checkHost: async () => ({ ready: true }),
+      installService: {
+        catalog: async () => [],
+        inspectSelected: async () => ({
+          ...activeArtifact(),
+          manifest: { capabilities, connector_id: "acme-shop", runtime_requirements: { bindings: BROWSER_BINDINGS } },
+        }),
+      },
+    });
+    assert.equal((await resolver.resolve("acme-shop")).action, "connect", JSON.stringify(capabilities));
+  }
+});

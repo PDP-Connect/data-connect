@@ -443,6 +443,33 @@ test("browser-enrollment shell: refuses when this host lacks a tool the connecto
   });
 });
 
+test("browser-enrollment shell: refuses a verified package that declares it does not collect (409)", async () => {
+  await withServer(async ({ asUrl }) => {
+    const manifest = loadManifest("chase") as Record<string, unknown>;
+    const placeholder = {
+      ...manifest,
+      capabilities: { ...(manifest.capabilities as Record<string, unknown>), collection: { implemented: false } },
+    };
+    const registered = await fixtures?.publish(placeholder);
+    const resp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(registered),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(resp.status, 201, await resp.text());
+    const cookie = await ownerLogin(asUrl);
+    const res = await fetch(`${asUrl}/_ref/connectors/chase/browser-enrollment-shell`, {
+      headers: { cookie },
+      method: "POST",
+    });
+    assert.equal(res.status, 409);
+    const error = asRecord((await jsonBody(res)).error);
+    assert.equal(error.code, "connector_browser_setup_unavailable");
+    assert.match(asString(error.message), /not_implemented/);
+    assert.match(asString(error.message), /does not collect data yet/);
+  });
+});
+
 test("browser-enrollment shell: rejects unknown connector (404)", async () => {
   await withServer(async ({ asUrl }) => {
     const cookie = await ownerLogin(asUrl);
