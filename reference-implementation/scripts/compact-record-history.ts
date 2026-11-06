@@ -91,6 +91,21 @@
  *     as the operator's rollback handle.
  *   - Insert/delete row counts are asserted equal before commit; any
  *     mismatch rolls the transaction back.
+ *   - The transaction takes the connector instance's write lock first, the
+ *     same advisory lock every writer and every stream reset takes, then the
+ *     stream's version_counter row, then touches history. That is the order
+ *     ingest uses, so compaction can neither deadlock with a reset nor change
+ *     the rows an ingest is reading.
+ *   - A plan is only valid for the rows it was made from. Under the lock, apply
+ *     refuses the plan ("stale compaction plan") if the connection's
+ *     record_reset_generation moved (a reset deletes a stream's history and
+ *     counter, so version numbers restart and name different rows), if any
+ *     named row no longer matches the digest recorded at plan time, or if a
+ *     named row is now the key's current anchor or has no successor.
+ *   - The same transaction raises version_counter.changes_floor to the newest
+ *     version that superseded a removed row, so changes_since cursors that
+ *     needed a removed row expire. A stream with no counter row cannot record
+ *     that floor, so apply refuses it.
  *
  * Usage:
  *   node reference-implementation/scripts/compact-record-history.mjs \
@@ -112,6 +127,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  connectorInstanceAdvisoryLockKey,
+  connectorInstanceLockWaitMs,
+} from "../server/connector-instance-write-coordinator.ts";
 import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -308,6 +327,8 @@ export interface CompactionPolicy {
 export interface HistoryRow {
   deleted: boolean;
   payload_bytes: string | number | null;
+  /** Database-computed digest of the stored row; see `ROW_DIGEST_SQL`. Absent in pure selector tests. */
+  payload_digest?: string | null;
   record_json: unknown;
   version: number | string;
 }
@@ -855,11 +876,47 @@ export interface CompactionPlan {
   estimatedRemovedBytes: number;
   mode: CompactionMode;
   removableByKey: Map<string, number[]>;
+  /** Per key, one digest over the stored rows named in `removableByKey`; apply refuses rows that no longer match it. */
+  removableDigestByKey: Map<string, string>;
   removableVersions: number;
+  /** `connector_instances.record_reset_generation` as decimal text, read before any row was planned. */
+  resetGeneration: string;
   retainedVersionsAfter: number;
   scannedKeys: number;
   scannedVersions: number;
   stream: string;
+}
+
+/**
+ * Digest of one stored history row, computed by the database so the plan and
+ * the apply hash the same bytes: the `deleted` flag and the canonical jsonb
+ * text of the payload. Unqualified, so it binds to the one `record_changes`
+ * row source of the query it is used in.
+ */
+const ROW_DIGEST_SQL = "encode(sha256(convert_to(concat_ws(':', deleted::text, record_json::text), 'UTF8')), 'hex')";
+
+/** One digest for the set of rows a plan names for a key, independent of the order they were read in. */
+function digestRemovedRows(rows: ReadonlyArray<Pick<HistoryRow, "payload_digest" | "version">>): string {
+  const hash = createHash("sha256");
+  for (const row of [...rows].sort((a, b) => Number(a.version) - Number(b.version))) {
+    if (!row.payload_digest) {
+      throw new Error(`row digest missing for history version ${row.version}`);
+    }
+    hash.update(`${Number(row.version)}:${row.payload_digest}\n`);
+  }
+  return hash.digest("hex");
+}
+
+/**
+ * The connection's `record_reset_generation` as decimal text. A missing
+ * connection reads as "0", as the server's own reads do.
+ */
+async function readResetGeneration(db: Pick<pg.Pool, "query">, connectorInstanceId: string): Promise<string> {
+  const result = await db.query<{ reset_generation: string }>(
+    "SELECT record_reset_generation::text AS reset_generation FROM connector_instances WHERE connector_instance_id = $1",
+    [connectorInstanceId]
+  );
+  return String(result.rows[0]?.reset_generation ?? "0");
 }
 
 export async function planCompaction({
@@ -877,6 +934,12 @@ export async function planCompaction({
     assertCanonicalEligible(policy, policy.connectorIds[0] ?? null, stream);
   }
 
+  // Read the reset generation before any row. A reset that lands while the plan
+  // is being made then leaves the plan older than the rows it holds, and apply
+  // refuses it; read afterwards, the plan would carry the new generation over
+  // old rows.
+  const resetGeneration = await readResetGeneration(pool, connectorInstanceId);
+
   // Fetch the current row versions (and connector_id, for consistency).
   const limitClause = limitKeys ? `LIMIT ${Number(limitKeys)}` : "";
   const current = await pool.query<CurrentRow>(
@@ -891,6 +954,7 @@ export async function planCompaction({
   let scannedKeys = 0;
   let scannedVersions = 0;
   const removableByKey = new Map<string, number[]>();
+  const removableDigestByKey = new Map<string, string>();
   let removedBytesEstimate = 0;
   const connectorIdsSeen = new Set<string>();
 
@@ -899,7 +963,8 @@ export async function planCompaction({
     connectorIdsSeen.add(row.connector_id);
     // biome-ignore lint/performance/noAwaitInLoops: this is a type-authoring pass, not a refactor -- parallelizing per-key history reads with Promise.all would change the pool's concurrent-connection load and is an out-of-scope behavior change for this slice; preserved sequential exactly as the original .mjs read it.
     const history = await pool.query<HistoryRow>(
-      `SELECT version, record_json, deleted, octet_length(record_json::text) AS payload_bytes
+      `SELECT version, record_json, deleted, octet_length(record_json::text) AS payload_bytes,
+              ${ROW_DIGEST_SQL} AS payload_digest
          FROM record_changes
         WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
         ORDER BY version ASC`,
@@ -910,10 +975,10 @@ export async function planCompaction({
     if (removable.length) {
       removableByKey.set(row.record_key, removable);
       const removableSet = new Set(removable.map(Number));
-      for (const h of history.rows) {
-        if (removableSet.has(Number(h.version))) {
-          removedBytesEstimate += Number(h.payload_bytes || 0);
-        }
+      const removedRows = history.rows.filter((h) => removableSet.has(Number(h.version)));
+      removableDigestByKey.set(row.record_key, digestRemovedRows(removedRows));
+      for (const h of removedRows) {
+        removedBytesEstimate += Number(h.payload_bytes || 0);
       }
     }
   }
@@ -926,7 +991,9 @@ export async function planCompaction({
     estimatedRemovedBytes: removedBytesEstimate,
     mode,
     removableByKey,
+    removableDigestByKey,
     removableVersions,
+    resetGeneration,
     retainedVersionsAfter: scannedVersions - removableVersions,
     scannedKeys,
     scannedVersions,
@@ -947,36 +1014,162 @@ export interface ApplyCompactionResult {
   runId: string;
 }
 
+// Postgres SQLSTATE raised when `SET LOCAL lock_timeout` expires while waiting on a lock.
+const POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE = "55P03";
+
+/**
+ * Take the connector instance's transaction-scoped advisory lock: the lock every
+ * Postgres writer and every stream reset takes before it touches a row
+ * (`acquireConnectorInstanceXactLock` in server/postgres-storage.ts, which this
+ * tool cannot import without loading the whole server). Same key and the same
+ * bounded `SET LOCAL lock_timeout` ahead of the blocking call, so compaction
+ * queues behind a writer for at most the shared wait budget. Call it right
+ * after BEGIN. The timeout stays in force for the rest of the transaction, so
+ * `applyCompaction` reports any later lock wait that expires the same way.
+ */
+async function acquireConnectorInstanceLock(client: pg.PoolClient, connectorInstanceId: string): Promise<void> {
+  await client.query(`SET LOCAL lock_timeout = '${connectorInstanceLockWaitMs()}ms'`);
+  await client.query("SELECT pg_advisory_xact_lock($1::bigint)", [
+    connectorInstanceAdvisoryLockKey(connectorInstanceId),
+  ]);
+}
+
+function staleCompactionPlan(plan: CompactionPlan, detail: string, recordKey?: string): Error {
+  const scope = [plan.connectorInstanceId, plan.stream, recordKey].filter(Boolean).join("/");
+  return new Error(`stale compaction plan for ${scope}: ${detail}; re-run the plan`);
+}
+
+/**
+ * Under the instance lock, before any history is touched: the plan must not
+ * predate a reset, and the stream's counter row, which holds the changes floor,
+ * must exist. The counter row is locked here because ingest locks it before it
+ * touches history; taking it in the same order means the two never wait on each
+ * other, and no ingest can move a key's current anchor while apply checks it.
+ */
+async function lockPlannedStream(client: pg.PoolClient, plan: CompactionPlan): Promise<void> {
+  const generation = await readResetGeneration(client, plan.connectorInstanceId);
+  if (generation !== plan.resetGeneration) {
+    throw staleCompactionPlan(
+      plan,
+      `the record reset generation moved from ${plan.resetGeneration} to ${generation} since the plan was made`
+    );
+  }
+  const counter = await client.query(
+    `SELECT 1 FROM version_counter WHERE connector_instance_id = $1 AND stream = $2 FOR UPDATE`,
+    [plan.connectorInstanceId, plan.stream]
+  );
+  if (counter.rowCount === 0) {
+    throw new Error(
+      `cannot compact ${plan.connectorInstanceId}/${plan.stream}: its version_counter row is missing, so the changes floor cannot be recorded. The stream's next write recreates the row; re-run the plan after that`
+    );
+  }
+}
+
+/**
+ * Re-read, under the lock, the rows the plan names for one key and refuse the
+ * plan unless they are the rows it judged: the same digest, none of them the
+ * key's current anchor, each with a successor. A version number alone does not
+ * identify a row, because a reset reissues version numbers from 1; a deleted
+ * current anchor cannot be recovered by a floor. Returns the newest successor
+ * of the named rows, the floor their removal implies.
+ */
+async function revalidateRemovableRows(
+  client: pg.PoolClient,
+  plan: CompactionPlan,
+  recordKey: string,
+  versions: number[]
+): Promise<number> {
+  const current = await client.query(
+    `SELECT version::bigint AS version FROM records
+      WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3`,
+    [plan.connectorInstanceId, plan.stream, recordKey]
+  );
+  const currentVersion = Number(current.rows[0]?.version ?? 0);
+  // Each named row's digest and newest successor, read BEFORE the delete from the
+  // rows present now, so an old plan cannot understate the frontier.
+  const named = await client.query<{ payload_digest: string; successor: string | null; version: string }>(
+    `SELECT rc.version::bigint AS version,
+            ${ROW_DIGEST_SQL} AS payload_digest,
+            (SELECT MIN(n.version) FROM record_changes n
+              WHERE n.connector_instance_id = rc.connector_instance_id
+                AND n.stream = rc.stream
+                AND n.record_key = rc.record_key
+                AND n.version > rc.version)::bigint AS successor
+       FROM record_changes rc
+      WHERE rc.connector_instance_id = $1 AND rc.stream = $2 AND rc.record_key = $3
+        AND rc.version = ANY($4::bigint[])
+      ORDER BY rc.version`,
+    [plan.connectorInstanceId, plan.stream, recordKey, versions]
+  );
+  if (
+    named.rows.length !== versions.length ||
+    digestRemovedRows(named.rows) !== plan.removableDigestByKey.get(recordKey)
+  ) {
+    throw staleCompactionPlan(plan, `history rows ${versions.join(",")} changed since the plan was made`, recordKey);
+  }
+  let floor = 0;
+  for (const row of named.rows) {
+    if (row.successor === null || Number(row.version) >= currentVersion) {
+      throw staleCompactionPlan(
+        plan,
+        `version ${row.version} is the current anchor or has no successor (current ${currentVersion})`,
+        recordKey
+      );
+    }
+    floor = Math.max(floor, Number(row.successor));
+  }
+  return floor;
+}
+
 export async function applyCompaction({ pool, plan, runId }: ApplyCompactionInput): Promise<ApplyCompactionResult> {
   if (!plan.removableVersions) {
     return { backupTable: null, deleted: 0, inserted: 0, runId };
   }
+  // A plan without its proof cannot be checked, so it is refused rather than trusted.
+  if (typeof plan.resetGeneration !== "string" || !(plan.removableDigestByKey instanceof Map)) {
+    throw staleCompactionPlan(plan, "it carries no reset generation or row digests");
+  }
 
   const backupTable = `compact_record_history_backup_${runId}`;
-  // Create backup table once per run, shared across (connector_instance_id, stream).
-  await pool.query(
-    `CREATE TABLE IF NOT EXISTS ${quoteIdent(backupTable)} (
-       connector_id TEXT NOT NULL,
-       connector_instance_id TEXT NOT NULL,
-       stream TEXT NOT NULL,
-       record_key TEXT NOT NULL,
-       version BIGINT NOT NULL,
-       record_json JSONB,
-       emitted_at TEXT NOT NULL,
-       deleted BOOLEAN NOT NULL,
-       deleted_at TEXT,
-       compacted_at TIMESTAMPTZ NOT NULL DEFAULT now()
-     )`
-  );
 
   const client = await pool.connect();
   let inserted = 0;
   let deleted = 0;
+  // Newest version that superseded any row this run removes. A removed row
+  // (k, v) is the snapshot a changes_since cursor s needs when v <= s < next(k),
+  // so cursors below the maximum successor can no longer be reconstructed (a
+  // delete would lose its tombstone, an excluded-field change its upsert).
+  let changesFloor = 0;
   try {
     await client.query("BEGIN");
 
+    // Lock order is the one ingest uses: the instance lock, then the stream's
+    // counter row, then history. A reset takes the instance lock before it
+    // deletes anything, so it cannot interleave with this transaction at all.
+    await acquireConnectorInstanceLock(client, plan.connectorInstanceId);
+    await lockPlannedStream(client, plan);
+
+    // Create the backup table once per run, shared across (connector_instance_id,
+    // stream). It is created in this transaction, so a refused or failed apply
+    // leaves nothing behind.
+    await client.query(
+      `CREATE TABLE IF NOT EXISTS ${quoteIdent(backupTable)} (
+         connector_id TEXT NOT NULL,
+         connector_instance_id TEXT NOT NULL,
+         stream TEXT NOT NULL,
+         record_key TEXT NOT NULL,
+         version BIGINT NOT NULL,
+         record_json JSONB,
+         emitted_at TEXT NOT NULL,
+         deleted BOOLEAN NOT NULL,
+         deleted_at TEXT,
+         compacted_at TIMESTAMPTZ NOT NULL DEFAULT now()
+       )`
+    );
+
     for (const [recordKey, versions] of plan.removableByKey) {
       const versionsAsNumbers = versions.map(Number);
+      changesFloor = Math.max(changesFloor, await revalidateRemovableRows(client, plan, recordKey, versionsAsNumbers));
       // biome-ignore lint/performance/noAwaitInLoops: every insert/delete pair in this loop shares ONE pg.PoolClient inside a single BEGIN/COMMIT transaction -- a pg client serializes queries on one connection regardless, and parallelizing here would not overlap I/O, only reorder statements inside the transaction non-deterministically.
       const insertRes = await client.query(
         `INSERT INTO ${quoteIdent(backupTable)}
@@ -1009,12 +1202,26 @@ export async function applyCompaction({ pool, plan, runId }: ApplyCompactionInpu
       deleted += deleteRes.rowCount || 0;
     }
 
+    if (changesFloor > 0) {
+      await client.query(
+        `UPDATE version_counter SET changes_floor = GREATEST(changes_floor, $3)
+          WHERE connector_instance_id = $1 AND stream = $2`,
+        [plan.connectorInstanceId, plan.stream, changesFloor]
+      );
+    }
+
     await client.query("COMMIT");
   } catch (err) {
     try {
       await client.query("ROLLBACK");
     } catch {
       // Best-effort rollback; the original error is what the caller needs.
+    }
+    if ((err as { code?: string } | null)?.code === POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE) {
+      throw new Error(
+        `connector instance ${plan.connectorInstanceId} is busy: a lock held by another transaction was not released within ${connectorInstanceLockWaitMs()}ms; nothing was changed, re-run when it is idle`,
+        { cause: err }
+      );
     }
     throw err;
   } finally {

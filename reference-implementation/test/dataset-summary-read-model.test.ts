@@ -274,7 +274,15 @@ test("record-change pruning subtracts the inclusive retention boundary", async (
         key: "m1",
         stream: "messages",
       });
+      await ingestRecord("gmail", {
+        data: { id: "m1", subject: "v3" },
+        emitted_at: "2026-01-03T00:00:00.000Z",
+        key: "m1",
+        stream: "messages",
+      });
 
+      // v1 is pruned; v2 (the newest row at the horizon, kept for changes_since)
+      // and v3 (the current anchor) remain.
       const projection = getDatasetSummaryProjection();
       assert.equal(projection.retained_bytes.record_changes_json_bytes, recordChangeJsonBytes());
       assert.equal(
@@ -282,7 +290,7 @@ test("record-change pruning subtracts the inclusive retention boundary", async (
           getDb().prepare("SELECT COUNT(*) AS n FROM record_changes").get<{ n: number }>(),
           "record change count row must exist"
         ).n,
-        1
+        2
       );
     } finally {
       if (previousLimit === undefined) {

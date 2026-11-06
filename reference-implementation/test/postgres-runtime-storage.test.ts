@@ -870,14 +870,27 @@ if (POSTGRES_URL) {
         ["b"]
       );
 
+      // Supersede `a` so its version-1 row is no longer the current anchor, then
+      // drop it the way pruning would.
+      await ingestRecord(connectorId, {
+        data: {
+          created_at: "2026-04-01T00:00:00.000Z",
+          "event-time": "2026-04-01T00:00:00.000Z",
+          id: "a",
+          mutable_time: "2026-04-02T12:00:00.000Z",
+          title: "Alpha relaunch",
+        },
+        key: "a",
+        stream,
+      });
       await postgresQuery("DELETE FROM record_changes WHERE connector_id = $1 AND stream = $2 AND version = 1", [
         connectorId,
         stream,
       ]);
-      await assert.rejects(
-        () => queryRecords(connectorId, stream, fullGrant, { changes_since: "beginning" }, manifest),
-        { code: "cursor_expired" }
-      );
+      // `beginning` holds no consumer state, so history pruned below it must not
+      // fail the recovery request; it returns the live records.
+      const afterPrune = await queryRecords(connectorId, stream, fullGrant, { changes_since: "beginning" }, manifest);
+      assert.deepEqual(afterPrune.data.map((row) => row.id).sort(), ["a", "b"]);
     } finally {
       await postgresQuery("DELETE FROM record_changes WHERE connector_id = $1", [connectorId]);
       await postgresQuery("DELETE FROM records WHERE connector_id = $1", [connectorId]);

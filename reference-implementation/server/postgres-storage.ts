@@ -44,6 +44,7 @@ import {
 } from "./postgres-test-database-guard.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
+import { getChangeHistoryLimit } from "./storage-utils.ts";
 
 const VALID_BACKENDS = new Set(["sqlite", "postgres"]);
 const LEGACY_SYNC_STATE_OWNER_SUBJECT_ID = "owner_local";
@@ -1416,6 +1417,30 @@ export async function withPostgresTransaction<T>(
       await client.query("ROLLBACK");
     } catch {
       // Rollback failure must not hide the original transaction error.
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Run `fn` against one REPEATABLE READ, read-only snapshot on a single client.
+ * Every statement inside sees the same committed state, so a multi-statement
+ * read cannot straddle a concurrent writer's commit.
+ */
+export async function withPostgresSnapshotRead<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await getPostgresPool().connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const value = await fn(client);
+    await client.query("COMMIT");
+    return value;
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Rollback failure must not hide the original read error.
     }
     throw err;
   } finally {
@@ -3185,6 +3210,7 @@ async function bootstrapPostgresSchemaOnce({
         connector_instance_id TEXT NOT NULL,
         stream TEXT NOT NULL,
         max_version BIGINT NOT NULL DEFAULT 0,
+        changes_floor BIGINT NOT NULL DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
 
@@ -5655,6 +5681,7 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
   );
   await client.query("ALTER TABLE semantic_search_backfill_progress ADD COLUMN IF NOT EXISTS fields_fingerprint TEXT");
   if (checks.every(Boolean)) {
+    await ensurePostgresChangesFloor(client);
     await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
     return;
   }
@@ -5790,8 +5817,179 @@ async function migratePostgresRecordsBlobSearchInstanceColumns(client: PoolClien
     }
     throw err;
   }
+  await ensurePostgresChangesFloor(client);
   await ensurePostgresRecordsBlobSearchInstanceIndexes(client);
 }
+
+// Longest the seed waits for its ACCESS EXCLUSIVE lock on version_counter. A
+// lock request queued behind a long-running transaction makes every later
+// ingest and read of the table queue behind the request, so the wait is bounded
+// and startup fails, with a message naming the cause, instead of stalling the
+// service. The process supervisor starts it again once the transaction ends.
+const POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_ENV = "PDPP_POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_MS";
+const POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_DEFAULT_MS = 30_000;
+
+function postgresChangesFloorLockTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env[POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_ENV]);
+  return Number.isInteger(configured) && configured > 0 ? configured : POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_DEFAULT_MS;
+}
+
+/**
+ * Distinct (connector_instance_id, stream) pairs of a table that has an index
+ * led by those two columns, found with one index probe per pair. A DISTINCT or
+ * UNION over the table reads every index entry: 21.6 s on 12M history rows in a
+ * benchmark, against 60 ms for this. The seed runs under an ACCESS EXCLUSIVE
+ * lock, so it must not scan the history.
+ */
+function distinctStreamPairsCte(cte: string, table: "record_changes" | "records"): string {
+  return `${cte} AS (
+      (SELECT connector_instance_id, stream FROM ${table} ORDER BY connector_instance_id, stream LIMIT 1)
+      UNION ALL
+      SELECT next_pair.connector_instance_id, next_pair.stream
+        FROM ${cte}
+       CROSS JOIN LATERAL (
+         SELECT connector_instance_id, stream FROM ${table}
+          WHERE (connector_instance_id, stream) > (${cte}.connector_instance_id, ${cte}.stream)
+          ORDER BY connector_instance_id, stream LIMIT 1
+       ) next_pair
+    )`;
+}
+
+// A stream can hold history or current rows but no counter row (a lost
+// counter). The allocator would create that row on the stream's next write with
+// floor 0, so a gapped history would lose its floor then. This creates the row
+// first, at the head the allocator would continue from (it allocates above both
+// maxima), so the seed below treats it like every other counter row.
+const RESTORE_MISSING_VERSION_COUNTERS_SQL = `
+  WITH RECURSIVE
+    ${distinctStreamPairsCte("history_pairs", "record_changes")},
+    ${distinctStreamPairsCte("current_pairs", "records")}
+  INSERT INTO version_counter (connector_id, connector_instance_id, stream, max_version)
+  SELECT COALESCE(
+           (SELECT rc.connector_id FROM record_changes rc
+             WHERE rc.connector_instance_id = p.connector_instance_id AND rc.stream = p.stream LIMIT 1),
+           (SELECT r.connector_id FROM records r
+             WHERE r.connector_instance_id = p.connector_instance_id AND r.stream = p.stream LIMIT 1)),
+         p.connector_instance_id,
+         p.stream,
+         GREATEST(
+           COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                      WHERE rc.connector_instance_id = p.connector_instance_id AND rc.stream = p.stream), 0),
+           COALESCE((SELECT MAX(r.version) FROM records r
+                      WHERE r.connector_instance_id = p.connector_instance_id AND r.stream = p.stream), 0))
+    FROM (SELECT connector_instance_id, stream FROM history_pairs
+          UNION
+          SELECT connector_instance_id, stream FROM current_pairs) p
+   WHERE NOT EXISTS (SELECT 1 FROM version_counter vc
+                      WHERE vc.connector_instance_id = p.connector_instance_id AND vc.stream = p.stream)`;
+
+// A counter row can lag the durable data: the allocator documents drift it has
+// seen live (postgres-records.ts, allocateNextVersion) and heals it on the next
+// write by allocating above the counter, the newest history row and the newest
+// current row. The gap rule below compares retained rows with the head, so it
+// must use that same head. Seeded at a lagging counter, the floor lands below a
+// gap that lies above the counter, and a stale token holding a deleted record
+// stays valid with its baseline gone. This raises each counter to its durable
+// maximum, never lowers it, and writes only the rows that lag.
+const RAISE_LAGGING_VERSION_COUNTERS_SQL = `
+  UPDATE version_counter vc
+     SET max_version = durable.max_version
+    FROM (
+      SELECT c.connector_instance_id, c.stream,
+             GREATEST(
+               COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                          WHERE rc.connector_instance_id = c.connector_instance_id AND rc.stream = c.stream), 0),
+               COALESCE((SELECT MAX(r.version) FROM records r
+                          WHERE r.connector_instance_id = c.connector_instance_id AND r.stream = c.stream), 0)) AS max_version
+        FROM version_counter c
+    ) durable
+   WHERE vc.connector_instance_id = durable.connector_instance_id
+     AND vc.stream = durable.stream
+     AND vc.max_version < durable.max_version`;
+
+// A current row can sit at a version no history row records (a write that
+// stopped between the two inserts, or history pruned past a live row). Raising
+// the counter does not restore that anchor: `beginning` reads history, so it
+// would serve the row's older state, and a later change could be suppressed
+// against that stale predecessor. This writes the history row ingest would have
+// written for the current state: same payload, emitted_at and deleted
+// semantics (a tombstone keeps the payload it had before deletion). A version
+// already taken by another key's history row is left alone.
+const BACKFILL_MISSING_CURRENT_ANCHORS_SQL = `
+  INSERT INTO record_changes
+    (connector_id, connector_instance_id, stream, record_key, version, record_json, emitted_at, deleted, deleted_at)
+  SELECT r.connector_id, r.connector_instance_id, r.stream, r.record_key, r.version,
+         r.record_json, r.emitted_at, r.deleted, r.deleted_at
+    FROM records r
+   WHERE NOT EXISTS (SELECT 1 FROM record_changes rc
+                      WHERE rc.connector_instance_id = r.connector_instance_id
+                        AND rc.stream = r.stream
+                        AND rc.record_key = r.record_key
+                        AND rc.version = r.version)
+  ON CONFLICT (connector_instance_id, stream, version) DO NOTHING`;
+
+// Oldest reconstructible changes_since watermark. The column and its seed
+// commit in one transaction: an interrupted seed must not leave a column that
+// makes the next startup skip it. Runs after the instance-namespace migration
+// so version_counter and record_changes both carry connector_instance_id.
+// Seed the floor at the head (tokens strictly below it expire; clients re-sync
+// from `beginning`) when retention is on, or when a stream's history has a gap:
+// fewer retained rows than versions means rows were pruned or compacted
+// earlier, even if retention is off now. Complete histories keep floor 0. A
+// stream with skipped version numbers also reads as a gap, which only costs one
+// re-sync. The head is the stream's durable maximum, so streams that lost their
+// counter row get one first and lagging counters are raised first; the same
+// rule then covers them.
+async function ensurePostgresChangesFloor(client: PoolClient): Promise<void> {
+  if (await hasPostgresColumn(client, "version_counter", "changes_floor")) {
+    return;
+  }
+  const lockTimeoutMs = postgresChangesFloorLockTimeoutMs();
+  await client.query("BEGIN");
+  try {
+    await client.query(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
+    // Serialize concurrent starters: the loser re-checks after the winner commits.
+    await client.query("LOCK TABLE version_counter IN ACCESS EXCLUSIVE MODE");
+    if (!(await hasPostgresColumn(client, "version_counter", "changes_floor"))) {
+      await client.query("ALTER TABLE version_counter ADD COLUMN changes_floor BIGINT NOT NULL DEFAULT 0");
+      await client.query(RESTORE_MISSING_VERSION_COUNTERS_SQL);
+      await client.query(RAISE_LAGGING_VERSION_COUNTERS_SQL);
+      await client.query(
+        `UPDATE version_counter SET changes_floor = max_version
+          WHERE $1::boolean OR (
+            SELECT COUNT(*) FROM record_changes rc
+             WHERE rc.connector_instance_id = version_counter.connector_instance_id
+               AND rc.stream = version_counter.stream
+          ) < max_version`,
+        [getChangeHistoryLimit() > 0]
+      );
+      // After the floor: a rebuilt row is not evidence that the original
+      // history was complete, so it must not lower the floor.
+      await client.query(BACKFILL_MISSING_CURRENT_ANCHORS_SQL);
+    }
+    await client.query("COMMIT");
+  } catch (err) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // The original error is what the caller needs.
+    }
+    if ((err as { code?: string } | null)?.code === POSTGRES_LOCK_NOT_AVAILABLE_SQLSTATE) {
+      throw new Error(
+        `Startup stopped: could not get the locks needed to add and seed version_counter.changes_floor within ${lockTimeoutMs}ms, because a long-running transaction holds one of them. Waiting longer would queue every ingest and read of version_counter behind the ALTER. End that transaction and start again (${POSTGRES_CHANGES_FLOOR_LOCK_TIMEOUT_ENV} changes the wait).`,
+        { cause: err }
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Test-only entry to the one-time floor seed. The test-database guard refuses to
+ * re-admit a database whose `records` table holds rows, so a test that needs
+ * current rows beside the counters runs the seed on a client of its own.
+ */
+export const __ensurePostgresChangesFloorForTest = ensurePostgresChangesFloor;
 
 async function ensurePostgresRecordsBlobSearchInstanceIndexes(client: PoolClient): Promise<void> {
   await withPostgresAdvisoryLock(client, RECORDS_BLOB_SEARCH_INDEX_LOCK_ID, async () => {
