@@ -29,6 +29,7 @@ import {
   PRE_DECLARATION_OCI_CONNECTORS,
   resolveIndexUrl,
   recoverInterruptedInstall,
+  usesEarlierInstallerCore,
 } from "./resolve-connectors.js"
 
 const require = createRequire(import.meta.url)
@@ -853,6 +854,32 @@ describe("OCI consumer acceptance", () => {
         ).toBeNull()
       }
     }))
+
+  it("B-T10 the earlier core installs exactly the 13 connectors resolve-connectors.js names", () => {
+    const named = [
+      "chatgpt-playwright",
+      "claude-export-playwright",
+      "github-playwright",
+      "heb-playwright",
+      "instagram-ads-playwright",
+      "instagram-playwright",
+      "linkedin-playwright",
+      "oura-playwright",
+      "shop-playwright",
+      "spotify-playwright",
+      "wholefoods-playwright",
+      "youtube-playwright",
+      "github-pdpp",
+    ].sort()
+    const routed = lock.connectors
+      .filter(usesEarlierInstallerCore)
+      .map(connector => connector.connectorId)
+      .sort()
+    expect(routed).toEqual(named)
+    // The comment above PRE_DECLARATION_OCI_CONNECTORS is the one list of them.
+    const source = readFileSync("scripts/resolve-connectors.js", "utf8")
+    for (const id of named) expect(source).toContain(id)
+  })
 
   it("B-T9 a mixed lock installs through the default install: tarball by the earlier core, declaration-bearing OCI by the current core, declaration-less listed OCI by the earlier core; an unlisted declaration-less OCI is refused", async () =>
     temporary(async root => {

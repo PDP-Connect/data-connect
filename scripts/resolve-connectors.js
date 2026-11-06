@@ -73,16 +73,44 @@ export const LOCKED_ARTIFACT_SOURCE = Object.freeze({
   doc: Object.freeze({}),
 })
 
-// STOPGAP. OCI connectors whose pinned release has no signed source
-// declaration, so the current installer core refuses it. They install and
-// author through the earlier core, like the tarball connectors. Delete an id
-// here once its connector is re-pinned to a release that carries a declaration
-// (tracked in #634).
+// STOPGAP. The earlier installer core installs exactly 13 lock entries, and
+// this is the one place that names them. A guard test in
+// resolve-connectors.test.mjs fails if connectors/lock.json and this list
+// disagree.
+//
+//   held back by                       connectors                    released by
+//   not an OCI artifact (tarball)      chatgpt-playwright,           #633
+//                                      claude-export-playwright,
+//                                      github-playwright,
+//                                      heb-playwright,
+//                                      instagram-ads-playwright,
+//                                      instagram-playwright,
+//                                      linkedin-playwright,
+//                                      oura-playwright,
+//                                      shop-playwright,
+//                                      spotify-playwright,
+//                                      wholefoods-playwright,
+//                                      youtube-playwright
+//   no signed source declaration       github-pdpp                   #634
+//
+// The tarballs are picked out by `!entry.oci`. github-pdpp has to be named:
+// nothing a lock entry or the catalog carries says its release lacks a signed
+// source declaration. A lock entry holds the OCI digests and checksums, and a
+// catalog release holds a digest and a version; the declaration is a layer of
+// the artifact itself, and the catalog has no github entry at all. Reading it
+// would need a registry fetch per entry on every install and `--check`, or a
+// new lock field. Delete the id here when #634 re-pins github-pdpp to a release
+// that carries a declaration.
+//
+// This is not the profile hold in
+// packages/local-collector/collection-profile-holds.json. A hold keeps a
+// collector pin below the catalog's latest release for a stated reason, and
+// that pin installs through the current core.
 export const PRE_DECLARATION_OCI_CONNECTORS = Object.freeze(
   new Set(["github-pdpp"])
 )
 
-const usesEarlierInstallerCore = entry =>
+export const usesEarlierInstallerCore = entry =>
   !entry.oci || PRE_DECLARATION_OCI_CONNECTORS.has(entry.connectorId)
 
 function splitLockByInstallerCore(lock) {
