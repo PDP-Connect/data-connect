@@ -14,6 +14,7 @@ import {
 } from "../server/records.ts";
 import { lexicalIndexBackfillForManifest as lexicalIndexBackfillForManifestUntyped } from "../server/search.ts";
 import { buildSemanticSearchPlanForGrant as buildSemanticSearchPlanForGrantUntyped } from "../server/search-semantic.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // queryRecords/getRecord/lexicalIndexBackfillForManifest are imported from
 // checkJs:false JS. Their `manifest` parameters are either inferred as the
@@ -94,31 +95,34 @@ const grant = {
   streams: [{ fields: ["id", "subject"], name: STREAM }],
 };
 
-const manifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: CONNECTOR_ID,
-  display_name: "Instance Records",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: STREAM,
-      primary_key: ["id"],
-      query: { search: { lexical_fields: ["subject"], semantic_fields: ["subject"] } },
-      schema: {
-        properties: {
-          id: { type: "string" },
-          subject: { type: "string" },
+const manifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: CONNECTOR_ID,
+    display_name: "Instance Records",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: STREAM,
+        primary_key: ["id"],
+        query: { search: { lexical_fields: ["subject"], semantic_fields: ["subject"] } },
+        schema: {
+          properties: {
+            id: { type: "string" },
+            subject: { type: "string" },
+          },
+          required: ["id", "subject"],
+          type: "object",
         },
-        required: ["id", "subject"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 function setup() {
   initDb();

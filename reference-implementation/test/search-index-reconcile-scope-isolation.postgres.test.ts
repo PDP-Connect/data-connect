@@ -38,6 +38,7 @@ import {
   recordSearchIndexDirtyFailure,
 } from "../server/stores/search-index-dirty-store.ts";
 import { createPostgresConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
@@ -99,7 +100,7 @@ function streamDef(name: string, semantic: boolean) {
 }
 
 function manifestFor(connectorId: string, semantic: boolean) {
-  return {
+  const manifest = {
     capabilities: { human_interaction: [] },
     connector_id: connectorId,
     display_name: connectorId,
@@ -108,6 +109,7 @@ function manifestFor(connectorId: string, semantic: boolean) {
     streams: [streamDef("alpha", semantic), streamDef("beta", semantic)],
     version: "0.1.0",
   };
+  return withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri });
 }
 
 const target = (connectorId: string, connectorInstanceId: string) => ({

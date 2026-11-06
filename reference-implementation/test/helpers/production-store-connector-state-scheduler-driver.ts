@@ -30,7 +30,6 @@ import { closeDb, initDb } from "../../server/db.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../../server/stores/connector-instance-store.ts";
 import { createSqliteConnectorStateStore } from "../../server/stores/connector-state-store.ts";
 import { createSqliteSchedulerStore } from "../../server/stores/scheduler-store.ts";
-
 import {
   announceHarnessRunStarted,
   CONNECTOR_A,
@@ -38,6 +37,7 @@ import {
   runHarnessBootReconciliation,
   spineHasRunAbandoned,
 } from "./connector-state-scheduler-conformance.ts";
+import { withFixtureSourceDeclaration } from "./fixture-source-declaration.ts";
 
 interface StateScope {
   connectorId: string;
@@ -274,7 +274,7 @@ export function createProductionStoreConnectorStateSchedulerDriver() {
       initDb();
       for (const manifest of HARNESS_MANIFESTS) {
         // biome-ignore lint/performance/noAwaitInLoops: ordered test setup is intentionally sequential
-        await registerConnector(manifest);
+        await registerConnector(withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri }));
       }
       stateStore = createSqliteConnectorStateStore();
       schedulerStore = createSqliteSchedulerStore();

@@ -7,8 +7,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "./helpers/sqlite-driver.ts";
-
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 // biome-ignore lint/performance/noNamespaceImport: the test uses the module namespace as the observable import surface.
@@ -23,36 +21,41 @@ import {
 import { createSqliteConnectorStateStore } from "../server/stores/connector-state-store.ts";
 import { createSqliteDeviceExporterStore } from "../server/stores/device-exporter-store.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
+import Database from "./helpers/sqlite-driver.ts";
 
 const NOW = "2026-05-18T12:00:00.000Z";
 const GMAIL = "gmail-acceptance";
 const LOCAL = "local-collector-acceptance";
 
 function manifest(connectorId: string, stream = "messages") {
-  return {
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    runtime_requirements: { bindings: { network: { required: true } } },
-    streams: [
-      {
-        name: stream,
-        primary_key: ["id"],
-        schema: {
-          properties: {
-            id: { type: "string" },
-            subject: { type: "string" },
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      runtime_requirements: { bindings: { network: { required: true } } },
+      streams: [
+        {
+          name: stream,
+          primary_key: ["id"],
+          schema: {
+            properties: {
+              id: { type: "string" },
+              subject: { type: "string" },
+            },
+            required: ["id", "subject"],
+            type: "object",
           },
-          required: ["id", "subject"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 // `records.js` is untyped legacy JS: `queryRecords`'s `manifest` parameter is

@@ -27,34 +27,40 @@ import { closeDb, initDb } from "../server/db.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { listConnectorSummaries } from "../server/ref-control.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
-const CONNECTOR_ID = "https://test.pdpp.dev/connectors/grant-fail-closed";
+const SOURCE_ID = "https://test.pdpp.dev/connectors/grant-fail-closed";
+const CONNECTOR_ID = "grant-fail-closed";
 const STREAM = "messages";
 
-const listedManifest = {
-  // Supported so it would have been materialized by the old read-time
-  // catalog fan-out — the exact shape that produced phantom bindings.
-  capabilities: { public_listing: { tier: "supported" } },
-  connector_id: CONNECTOR_ID,
-  display_name: "Grant Fail-Closed Connector",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          id: { type: "string" },
+const listedManifest = withFixtureSourceDeclaration(
+  {
+    // Supported so it would have been materialized by the old read-time
+    // catalog fan-out — the exact shape that produced phantom bindings.
+    capabilities: { public_listing: { tier: "supported" } },
+    connector_id: CONNECTOR_ID,
+    display_name: "Grant Fail-Closed Connector",
+    manifest_uri: SOURCE_ID,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            id: { type: "string" },
+          },
+          required: ["id"],
+          type: "object",
         },
-        required: ["id"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: SOURCE_ID }
+);
 
 function withDb(fn: () => Promise<void>): () => Promise<void> {
   return async () => {

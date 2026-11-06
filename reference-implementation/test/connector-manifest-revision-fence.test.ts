@@ -35,6 +35,7 @@ import {
   semanticIndexBackfillForManifest,
 } from "../server/search-semantic.ts";
 import { countDirtySearchIndexScopes, listDirtySearchIndexScopes } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const connectorId = "manifest-revision-fence";
@@ -46,7 +47,7 @@ const MANIFEST_CLEANUP_CHANGED = /revision changed|reintroduced/;
 const ACTIVE_ACTIVATION_STREAM_SHAPE = /stream shape while its installed activation is active/i;
 
 function manifest(field: "subject" | "title") {
-  return {
+  return withFixtureSourceDeclaration({
     capabilities: { human_interaction: [] },
     connector_id: connectorId,
     display_name: "Manifest revision fence",
@@ -67,11 +68,14 @@ function manifest(field: "subject" | "title") {
       },
     ],
     version: field === "subject" ? "1.0.0" : "2.0.0",
-  };
+  });
 }
 
 function pinnedManifest(field: "subject" | "title") {
-  return { ...manifest(field), storage_binding: { connector_instance_id: connectorInstanceId } };
+  return withFixtureSourceDeclaration({
+    ...manifest(field),
+    storage_binding: { connector_instance_id: connectorInstanceId },
+  });
 }
 
 function deferred() {
@@ -87,13 +91,13 @@ function deferred() {
 
 function retrievalManifest(field: "subject" | "title") {
   const base = manifest(field);
-  return {
+  return withFixtureSourceDeclaration({
     ...base,
     streams: base.streams.map((entry) => ({
       ...entry,
       query: { search: { lexical_fields: [field], semantic_fields: [field] } },
     })),
-  };
+  });
 }
 
 async function assertStaleLexicalPageRejected(pauseAt = "before-instance-fence"): Promise<void> {
@@ -296,7 +300,7 @@ async function assertStaleSemanticPageRejected(): Promise<void> {
       return stub.embedDocument(value);
     },
   });
-  const semanticManifest = (field: "subject" | "title") => ({
+  const semanticManifest = (field: "subject" | "title") => withFixtureSourceDeclaration({
     ...manifest(field),
     streams: manifest(field).streams.map((entry) => ({
       ...entry,
@@ -379,7 +383,7 @@ test("PostgreSQL: a stale semantic page cannot overwrite the index after manifes
 
 function recordRepairManifest(field: "subject" | "title") {
   const current = manifest(field);
-  return {
+  return withFixtureSourceDeclaration({
     ...current,
     streams: current.streams.map((entry) => ({
       ...entry,
@@ -394,7 +398,7 @@ function recordRepairManifest(field: "subject" | "title") {
         },
       },
     })),
-  };
+  });
 }
 
 async function seedRecordRepairA(): Promise<{
@@ -831,12 +835,12 @@ async function assertLexicalCleanupCannotRemoveReintroducedStream(removed: boole
       { deferIndexes: true }
     );
     await lexicalIndexBackfillForManifest({ manifest: pinnedManifest("subject") });
-    const inactive = {
+    const inactive = withFixtureSourceDeclaration({
       ...manifest("subject"),
       streams: removed
         ? manifest("subject").streams.map((entry) => ({ ...entry, name: "other" }))
         : manifest("subject").streams.map((entry) => ({ ...entry, query: {} })),
-    };
+    });
     await registerConnector(inactive, { backfillRetrievalIndexes: false });
     __setLexicalBackfillPhaseHookForTest(async (point) => {
       if (point === "before-stream-cleanup" && !held) {
@@ -1049,7 +1053,7 @@ test("PostgreSQL: live publication overlaps lexical repair without a tuple/publi
         }
       });
       repair = lexicalIndexBackfillForManifest({
-        manifest: { ...retrievalManifest("subject"), storage_binding: { connector_instance_id: connectorInstanceId } },
+        manifest: withFixtureSourceDeclaration({ ...retrievalManifest("subject"), storage_binding: { connector_instance_id: connectorInstanceId } }),
         verifyContent: true,
       });
       const repairOutcome = repair.then(

@@ -20,7 +20,6 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { configureNativeManifest, registerConnector } from "../server/auth.ts";
 import { closeDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -28,6 +27,7 @@ import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { deleteRecord, ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface Backend {
   databaseUrl?: string;
@@ -72,16 +72,19 @@ function notesStream(): JsonObject {
 }
 
 function runtimeManifest(connectorKey: string): JsonObject {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorKey,
-    connector_key: connectorKey,
-    display_name: "Records projection and limit",
-    manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
-    protocol_version: "0.1.0",
-    streams: [notesStream()],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorKey,
+      connector_key: connectorKey,
+      display_name: "Records projection and limit",
+      manifest_uri: `https://implementations.example/connectors/${connectorKey}`,
+      protocol_version: "0.1.0",
+      streams: [notesStream()],
+      version: "1.0.0",
+    },
+    { sourceId: `https://implementations.example/connectors/${connectorKey}` }
+  );
 }
 
 function localFulfillment(sourceId: string, connectorKey: string): JsonObject {
@@ -196,7 +199,12 @@ async function assertSparseTombstone(rsUrl: string, clientToken: string, cursor:
   assert.equal(full.status, 200, `${label}: ${JSON.stringify(full.body)}`);
   const [fullTombstone] = full.body.data;
   assert.ok(fullTombstone, `${label}: the delete must produce a tombstone`);
-  assert.deepEqual(Object.keys(fullTombstone).filter((key) => TOMBSTONE_KEYS.includes(key)).sort(), TOMBSTONE_KEYS);
+  assert.deepEqual(
+    Object.keys(fullTombstone)
+      .filter((key) => TOMBSTONE_KEYS.includes(key))
+      .sort(),
+    TOMBSTONE_KEYS
+  );
 
   for (const fields of ["title", "id", "kind,title"]) {
     const sparse = await fetchJson(
@@ -330,11 +338,9 @@ async function runScenario(backend: Backend): Promise<void> {
 
 test("records-list projection and limit contract on SQLite", () => runScenario({ name: "sqlite" }));
 
-test(
-  "records-list projection and limit contract on PostgreSQL",
-  { skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is required" },
-  () => {
-    assert.ok(POSTGRES_URL);
-    return runScenario({ databaseUrl: POSTGRES_URL, name: "postgres" });
-  }
-);
+test("records-list projection and limit contract on PostgreSQL", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is required",
+}, () => {
+  assert.ok(POSTGRES_URL);
+  return runScenario({ databaseUrl: POSTGRES_URL, name: "postgres" });
+});
