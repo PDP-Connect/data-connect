@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -246,4 +246,34 @@ test("a cursor issued on the Sources (sources_visibility) surface is rejected wh
   );
   assert.deepEqual(parsedSourcesRequest?.cursor, boundary);
   assert.equal(parsedSourcesRequest?.sourcesVisibility, true);
+});
+
+// The previous release's decoder rejects a cursor that has no string `f` or whose `f`
+// differs from the request's scope fingerprint. During a rolling deploy or a rollback
+// it can read a cursor this release issued, so the unfiltered and single-connector
+// scopes, whose fingerprint is small, still carry `f`. A set scope cannot: its
+// fingerprint grows with the set, which is what the size bound removes.
+function openCursorPayload(cursor: string): Record<string, unknown> {
+  const encoded = Buffer.from(cursor.slice("rcs1.".length), "base64url");
+  const key = createHash("sha256").update(`pdpp.ref-connectors-page.cursor.v1\n${cursorKey}`).digest();
+  const decipher = createDecipheriv("aes-256-gcm", key, encoded.subarray(0, 12));
+  decipher.setAuthTag(encoded.subarray(12, 28));
+  return JSON.parse(Buffer.concat([decipher.update(encoded.subarray(28)), decipher.final()]).toString("utf8"));
+}
+
+test("an issued cursor stays readable by the previous decoder for unfiltered and single-connector scopes", () => {
+  const unfiltered = openCursorPayload(encodeConnectorSummaryPageCursor(boundary, "owner_a", cursorKey));
+  assert.equal(unfiltered.f, "", "the previous decoder requires a string `f` equal to the empty scope");
+  const single = openCursorPayload(encodeConnectorSummaryPageCursor(boundary, "owner_a", cursorKey, "github"));
+  assert.equal(single.f, "github");
+  const sources = openCursorPayload(encodeConnectorSummaryPageCursor(boundary, "owner_a", cursorKey, null, true));
+  assert.equal(sources.f, "");
+});
+
+test("a set-scope cursor does not repeat the set, so its size does not grow with the set", () => {
+  const ids = Array.from({ length: 100 }, (_, index) => `connector_with_a_fairly_long_identifier_${index}`);
+  const cursor = encodeConnectorSummaryPageCursor(boundary, "owner_a", cursorKey, ids);
+  assert.equal("f" in openCursorPayload(cursor), false);
+  assert.ok(cursor.length < 400, `a 100-id set cursor is ${cursor.length} characters`);
+  assert.deepEqual(decodeConnectorSummaryPageCursor(cursor, "owner_a", ids, cursorKey), boundary);
 });

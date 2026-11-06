@@ -19,6 +19,8 @@ const PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE =
   /installCatalogTransientlyUnavailable=\{installCatalogTransientlyUnavailable\}/;
 const PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE =
   /installCatalogBusySnapshotId=\{installCatalogBusySnapshotId\}/;
+const TAKES_TRUNCATED_FROM_LOOKUP_RE = /truncated: existingSourcesTruncated \} =\s*await existingSourcesByConnectorCatalog/;
+const WARNS_WHEN_TRUNCATED_RE = /\{existingSourcesTruncated \? \(\s*<div[^>]*role="status"[\s\S]*?could not be loaded/;
 
 test("Add Source renders a deterministic reference request failure before it reaches Next's error boundary", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -39,4 +41,10 @@ test("Add Source preserves transient connector catalog-busy state for package pr
   assert.match(src, TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE);
   assert.match(src, PASSES_TRANSIENT_INSTALL_CATALOG_STATE_RE);
   assert.match(src, PASSES_TRANSIENT_INSTALL_CATALOG_SNAPSHOT_ID_RE);
+});
+
+test("Add Source warns that existing sources are missing when the lookup was refused part way", async () => {
+  const src = await readFile(PAGE_FILE, "utf8");
+  assert.match(src, TAKES_TRUNCATED_FROM_LOOKUP_RE);
+  assert.match(src, WARNS_WHEN_TRUNCATED_RE);
 });
