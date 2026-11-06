@@ -13,6 +13,7 @@ import { isOwnerSessionRequiredBody } from "./auth-errors.ts";
 import { describeErrorText } from "./describe-error.ts";
 import { redirectToOwnerLogin } from "./login-redirect.ts";
 import { getAsInternalUrl, ReferenceServerUnreachableError, withOwnerSessionCookie } from "./owner-token.ts";
+import { type RejectedRecordReceipt, receiptsForRun } from "./run-rejections.ts";
 import { isCredentialRefusal, refErrorCode } from "./static-secret-refusal.ts";
 import { verifyDashboardSession } from "./verify-session.ts";
 
@@ -104,6 +105,12 @@ export interface RunStatusEnvelope {
   known_gaps_summary?: unknown;
   links: { timeline: string };
   object: "run_status";
+  /**
+   * The run's total of records the store rejected for good, off the
+   * window-independent terminal event. `null` while the run has no terminal
+   * event, or when the server predates the field.
+   */
+  records_permanently_rejected: number | null;
   run_id?: string | null;
   started_at: string | null;
   status: RunHandleStatus;
@@ -217,6 +224,7 @@ function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
     known_gaps_summary?: unknown;
     links?: unknown;
     object?: unknown;
+    records_permanently_rejected?: unknown;
     run_id?: unknown;
     started_at?: unknown;
     status?: unknown;
@@ -233,6 +241,12 @@ function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
     known_gaps_summary: r.known_gaps_summary,
     links: normalizeRunLinks(r.links),
     object: "run_status",
+    records_permanently_rejected:
+      typeof r.records_permanently_rejected === "number" &&
+      Number.isInteger(r.records_permanently_rejected) &&
+      r.records_permanently_rejected >= 0
+        ? r.records_permanently_rejected
+        : null,
     run_id: typeof r.run_id === "string" ? r.run_id : "",
     started_at: typeof r.started_at === "string" ? r.started_at : null,
     status,
@@ -2639,6 +2653,35 @@ export interface ConnectionSetupStatus {
 }
 
 export type StaticSecretSetupStatus = ConnectionSetupStatus;
+
+// A connection's record-rejection receipts are listed oldest first with no run
+// filter, so one run's receipts can sit behind other runs' pages. The page cap
+// bounds the read; `truncated` is true when the cap stopped the read with more
+// pages left, so the caller can say the list is partial.
+const RECORD_REJECTION_RECEIPT_MAX_PAGES = 10;
+
+export interface RunRecordRejectionReceipts {
+  receipts: RejectedRecordReceipt[];
+  truncated: boolean;
+}
+
+export async function listRunRecordRejectionReceipts(
+  connectionId: string,
+  runId: string
+): Promise<RunRecordRejectionReceipts> {
+  const receipts: RejectedRecordReceipt[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < RECORD_REJECTION_RECEIPT_MAX_PAGES; page += 1) {
+    const body = await refFetch(`/_ref/connections/${encodeURIComponent(connectionId)}/record-rejections`, { cursor });
+    const result = receiptsForRun(body, runId);
+    receipts.push(...result.receipts);
+    if (!result.nextCursor) {
+      return { receipts, truncated: false };
+    }
+    cursor = result.nextCursor;
+  }
+  return { receipts, truncated: true };
+}
 
 export async function getConnectionSetupStatus(
   connectionId: string,

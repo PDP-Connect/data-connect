@@ -123,6 +123,13 @@ export interface RunStatusBody {
   readonly known_gaps_summary?: unknown;
   readonly links: { readonly timeline: string };
   readonly object: "run_status";
+  /**
+   * The run's total of records the store rejected for good, copied from the
+   * terminal event's `records_permanently_rejected`. Same window-independent
+   * source as `known_gaps`. Absent when the run has no terminal event yet or
+   * the terminal event predates the field.
+   */
+  readonly records_permanently_rejected?: number | undefined;
   readonly run_id: string;
   readonly started_at: string | null;
   readonly status: "active" | "completed" | "failed" | "cancelled" | "abandoned" | BrowserSurfaceRunStatus;
@@ -137,6 +144,11 @@ function timelineLink(runId: string): { timeline: string } {
 function readString(data: Readonly<Record<string, unknown>> | null, key: string): string | null {
   const value = data?.[key];
   return typeof value === "string" && value ? value : null;
+}
+
+function readCount(data: Readonly<Record<string, unknown>> | null, key: string): number | undefined {
+  const value = data?.[key];
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function browserSurfaceProjection(event: RunStatusLifecycleEvent | null): Readonly<Record<string, unknown>> | null {
@@ -223,6 +235,7 @@ export function buildTerminalRunStatusBody(
     known_gaps_summary: terminal.data?.known_gaps_summary,
     links: timelineLink(runId),
     object: "run_status",
+    records_permanently_rejected: readCount(terminal.data, "records_permanently_rejected"),
     run_id: runId,
     started_at: started?.occurred_at ?? null,
     status: terminal.status,
