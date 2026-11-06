@@ -391,27 +391,34 @@ function RecentSyncsFilterForm({ paging }: { paging: RecentSyncsPaging }) {
   const connectorId = paging.params.connector_id ?? "";
   const hasFilter = status !== "" || connectorId !== "";
   return (
-    <form
-      action={RECENT_SYNCS_PATH}
-      className="rr-sync__recent-filters"
-      method="get"
-      style={{ alignItems: "center", display: "flex", flexWrap: "wrap", gap: 8 }}
-    >
-      <IcSelect
-        aria-label="Filter recent syncs by outcome"
-        defaultValue={status}
-        name="status"
-        options={paging.statusOptions}
-        style={{ minWidth: 160 }}
-      />
-      {paging.connectorOptions.length > 0 ? (
+    <form action={RECENT_SYNCS_PATH} className="rr-sync__recent-filters" method="get">
+      <div className="rr-sync__filter">
+        <label className="rr-sync__filter-label" htmlFor="recent-syncs-outcome">
+          Outcome
+        </label>
         <IcSelect
-          aria-label="Filter recent syncs by source"
-          defaultValue={connectorId}
-          name="connector_id"
-          options={paging.connectorOptions}
-          style={{ minWidth: 160 }}
+          aria-label="Filter recent syncs by outcome"
+          defaultValue={status}
+          id="recent-syncs-outcome"
+          name="status"
+          options={paging.statusOptions}
+          placeholder="any outcome"
         />
+      </div>
+      {paging.connectorOptions.length > 0 ? (
+        <div className="rr-sync__filter">
+          <label className="rr-sync__filter-label" htmlFor="recent-syncs-source">
+            Source
+          </label>
+          <IcSelect
+            aria-label="Filter recent syncs by source"
+            defaultValue={connectorId}
+            id="recent-syncs-source"
+            name="connector_id"
+            options={paging.connectorOptions}
+            placeholder="any source"
+          />
+        </div>
       ) : null}
       <IcButton size="sm" type="submit" variant="ghost">
         Apply
