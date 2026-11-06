@@ -21,6 +21,8 @@ export interface DisplayMarkLayers {
   readonly generic?: ConnectorIconLike | null;
 }
 
+const DISPLAY_MARK_ORDER = ["manifest", "template", "bundled", "generic"] as const;
+
 /**
  * The one precedence rule for a connector's display mark, first hit wins:
  *   1. `manifest`: a mark the manifest owns;
@@ -32,14 +34,16 @@ export interface DisplayMarkLayers {
  * Every surface reaches a mark through this function, so no two surfaces can
  * order the same layers differently.
  */
-export function pickDisplayMark(layers: DisplayMarkLayers): {
-  icon: ConnectorIconLike | null;
-  layer: keyof DisplayMarkLayers | undefined;
-} {
-  for (const layer of ["manifest", "template", "bundled", "generic"] as const) {
-    const icon = layers[layer];
+export function pickDisplayMark<L extends keyof DisplayMarkLayers>(
+  layers: Pick<DisplayMarkLayers, L>
+): { icon: ConnectorIconLike | null; layer: L | undefined } {
+  // `layers` holds only the keys the caller supplied, so a layer the caller
+  // never passes can never be reported as the source.
+  const supplied: DisplayMarkLayers = layers;
+  for (const layer of DISPLAY_MARK_ORDER) {
+    const icon = supplied[layer];
     if (icon) {
-      return { icon, layer };
+      return { icon, layer: layer as L };
     }
   }
   return { icon: null, layer: undefined };
@@ -61,14 +65,19 @@ export async function resolveManifestDisplayMark(
   const inline = validatedConnectorIcon(manifest.icon, declaredBackground);
   const fromPath =
     !inline && manifest.brand?.icon
-      ? validatedConnectorIcon(await resolveConnectorIconFromManifestPath(manifestsDir, manifest.brand.icon), declaredBackground)
+      ? validatedConnectorIcon(
+          await resolveConnectorIconFromManifestPath(manifestsDir, manifest.brand.icon),
+          declaredBackground
+        )
       : null;
   const owned = inline ?? fromPath;
   const bundled =
     resolveConnectorIcon(manifest.connector_id) ??
     (manifest.connector_key ? resolveConnectorIcon(manifest.connector_key) : null);
   const generic =
-    !owned && !bundled && manifest.connector_key ? await resolveConnectorIconFromSimpleIcons(manifest.connector_key) : null;
+    !(owned || bundled) && manifest.connector_key
+      ? await resolveConnectorIconFromSimpleIcons(manifest.connector_key)
+      : null;
   const { icon, layer } = pickDisplayMark({ bundled, generic, manifest: owned });
-  return { icon, source: layer === "generic" ? "simple-icons" : layer === "template" ? undefined : layer };
+  return { icon, source: layer === "generic" ? "simple-icons" : layer };
 }
