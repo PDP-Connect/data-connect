@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Pure, no-DB unit tests for the run-status envelope builders in
-// server/routes/ref-run-status.ts. Neither is imported by name. They build the
+// server/run-status-read-model.ts. Neither is imported by name. They build the
 // `run_status` object returned by GET /_ref/runs/:id/status; the active-vs-terminal
 // field shapes, the connector_id/trace_id/started_at fallbacks, and the
 // terminal_reason dual-key lookup are the mutation surface.
@@ -24,7 +24,7 @@ import {
   buildTerminalRunStatusBody,
   type RunStatusLifecycleEvent,
   type RunStatusTerminalEvent,
-} from "../server/routes/ref-run-status.ts";
+} from "../server/run-status-read-model.ts";
 
 // ---------------------------------------------------------------------------
 // buildActiveRunStatusBody
