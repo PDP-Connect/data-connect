@@ -671,7 +671,7 @@ Example LaunchAgent:
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>fish.vivid.pdpp.local-collector.claude-code</string>
+  <string>com.example.pdpp.local-collector.claude-code</string>
   <key>ProgramArguments</key>
   <array>
     <string>/Users/<you>/.local/bin/pdpp-local-collector-run</string>
@@ -692,9 +692,9 @@ Example LaunchAgent:
 Install and inspect:
 
 ```bash
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/fish.vivid.pdpp.local-collector.claude-code.plist"
-launchctl kickstart -k "gui/$(id -u)/fish.vivid.pdpp.local-collector.claude-code"
-launchctl print "gui/$(id -u)/fish.vivid.pdpp.local-collector.claude-code"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.example.pdpp.local-collector.claude-code.plist"
+launchctl kickstart -k "gui/$(id -u)/com.example.pdpp.local-collector.claude-code"
+launchctl print "gui/$(id -u)/com.example.pdpp.local-collector.claude-code"
 ```
 
 launchd has no per-job equivalent of systemd's `MemoryMax`/`MemorySwapMax`

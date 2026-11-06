@@ -21,7 +21,7 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { greppedCountInImage } from "../scripts/canary/collectors.ts";
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
-import { redact, renderRunArgs } from "../scripts/canary/deploy-canary.ts";
+import { redact, renderRunArgs, resolveProbeUrl } from "../scripts/canary/deploy-canary.ts";
 import { deriveEnv, parseEnvEntries, toDockerEnvArgs } from "../scripts/canary/env-derivation.ts";
 import {
   type CheckOutcome,
@@ -432,7 +432,7 @@ const LIVE_ENV_SAMPLE = [
   "PDPP_DB_PATH=/root/.pdpp/pdpp.sqlite",
   "PDPP_CONNECTOR_ARTIFACT_ROOT=/root/.pdpp/connector-artifacts",
   "PDPP_EMBEDDING_CACHE_DIR=/var/cache/pdpp/transformers",
-  "PDPP_REFERENCE_ORIGIN=https://pdpp.vivid.fish",
+  "PDPP_REFERENCE_ORIGIN=https://pdpp.example.com",
   "PDPP_REFERENCE_REVISION=drain",
   "NODE_ENV=production",
   "PLAYWRIGHT_BROWSERS_PATH=/opt/patchright-browsers",
@@ -539,7 +539,7 @@ const LIVE_INSPECT = {
   HostConfig: {
     Binds: [
       "pdpp_pdpp-transformers:/var/cache/pdpp/transformers",
-      "/home/tnunamak/.claude:/imports/claude:ro",
+      "/home/user/.claude:/imports/claude:ro",
       "pdpp_pdpp-data:/var/lib/pdpp",
       "pdpp_pdpp-home:/root/.pdpp",
     ],
@@ -685,4 +685,11 @@ test("renderRunArgs does not leak a secret whose value contains a space", () => 
   const rendered = renderRunArgs(["-e", "CHASE_PASSWORD=two words here", "-e", "NTFY_TOPIC=pdpp"]);
   assert.equal(rendered.includes("two words here"), false);
   assert.match(rendered, VISIBLE_NTFY_TOPIC_PATTERN);
+});
+
+test("resolveProbeUrl resolves a manifest path against the operator origin and refuses without one", () => {
+  assert.equal(resolveProbeUrl("/owner/login", "https://pdpp.example.com"), "https://pdpp.example.com/owner/login");
+  assert.equal(resolveProbeUrl("https://other.example.org/x", undefined), "https://other.example.org/x");
+  assert.throws(() => resolveProbeUrl("/owner/login", undefined), /PDPP_CANARY_ORIGIN is not set/);
+  assert.throws(() => resolveProbeUrl("/owner/login", ""), /PDPP_CANARY_ORIGIN is not set/);
 });

@@ -92,7 +92,8 @@ failing **blocking** check triggers rollback.
   the new bytes.
 - **`log_pattern`** — `pattern`, `maxOccurrences`, `sinceSeconds`. `0` means
   "must not appear"; a positive value allows an expected containment message.
-- **`http_health`** — `url`, `expectStatus`.
+- **`http_health`** — `url`, `expectStatus`. `url` is a path such as
+  `/owner/login`, resolved against `PDPP_CANARY_ORIGIN` (required).
 - **`connector_run`** — `connectionId`, `connectorSlug`, `timeoutSeconds`.
   Triggers a real run and waits for `succeeded`. A timeout reports `timeout`,
   not `failed`: an unfinished run is an unknown.
