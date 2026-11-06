@@ -366,7 +366,8 @@ async function invokeRunConnector(call: RunConnectorCall): Promise<RunConnectorR
 /**
  * The watchdog's only timer need: run `callback` after `ms`, and be able to
  * cancel it. `setTimeout` returns the canceller, so the seam owns no handle
- * type and an implementation is never forced to fabricate a Node timer.
+ * type and an implementation is never forced to fabricate a Node timer. The
+ * canceller must be safe to call more than once.
  */
 export interface WatchdogTimers {
   setTimeout: (callback: () => void, ms: number) => () => void;
@@ -466,6 +467,12 @@ export function createAttemptWatchdog(
     }, clampTimerDelay(maxRunWallClockMs));
   };
 
+  // Suppression is only real while a primary timer could still fire: with an
+  // opt-out budget, after the watchdog fired, or after an owner cancel there is
+  // nothing to suppress, and the caller must not record that it did.
+  const canSuppressPrimaryBudget = () =>
+    isBoundedWallClock(maxRunWallClockMs) && !timedOut && !cancellation.signal.aborted;
+
   const armLocalOnlyPhaseCeiling = () => {
     if (
       !isBoundedWallClock(localOnlyPhaseMaxRunWallClockMs) ||
@@ -496,9 +503,10 @@ export function createAttemptWatchdog(
       cancelTimer = null;
     },
     markProgress(extra) {
-      if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase) {
+      if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase && canSuppressPrimaryBudget()) {
         localOnlyPhase = true;
         cancelTimer?.();
+        cancelTimer = null;
         armLocalOnlyPhaseCeiling();
         // TRUE only on the latching call — the caller emits the durable trace.
         return true;

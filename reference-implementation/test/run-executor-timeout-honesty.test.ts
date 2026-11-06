@@ -714,11 +714,42 @@ for (const optOut of [0, Number.POSITIVE_INFINITY]) {
   test(`createAttemptWatchdog treats ${String(optOut)} as the explicit opt-out: nothing is armed`, () => {
     const watchdog = manualWatchdogTimers();
     const attempt = createAttemptWatchdog(optOut, watchdog.timers);
-    attempt.markProgress({ phase_boundary: "local_only_phase_started" });
+    // Nothing was armed, so nothing was suppressed: the caller must not write a
+    // "watchdog suppressed" spine event or progress message for it.
+    assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
     assert.equal(watchdog.armedDelayMs(), null);
     assert.equal(attempt.timedOut(), false);
   });
 }
+
+test("a phase boundary arriving after the watchdog already fired suppresses nothing", () => {
+  const watchdog = manualWatchdogTimers();
+  const attempt = createAttemptWatchdog(WALL_CLOCK_BUDGET_MS, watchdog.timers);
+  watchdog.fire();
+  assert.equal(attempt.timedOut(), true);
+  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
+  assert.equal(watchdog.armedDelayMs(), null);
+});
+
+test("a phase boundary arriving after an owner cancel suppresses nothing", () => {
+  const watchdog = manualWatchdogTimers();
+  const attempt = createAttemptWatchdog(WALL_CLOCK_BUDGET_MS, watchdog.timers);
+  attempt.cancel();
+  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
+  assert.equal(
+    watchdog.armedDelayMs(),
+    WALL_CLOCK_BUDGET_MS,
+    "cancel does not disarm the primary timer; the latch must not re-arm"
+  );
+});
+
+test("a phase boundary on an armed watchdog still latches exactly once", () => {
+  const watchdog = manualWatchdogTimers();
+  const attempt = createAttemptWatchdog(WALL_CLOCK_BUDGET_MS, watchdog.timers);
+  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), true);
+  assert.equal(watchdog.armedDelayMs(), LOCAL_ONLY_CEILING_MS);
+  assert.equal(attempt.markProgress({ phase_boundary: "local_only_phase_started" }), false);
+});
 
 // setTimeout cannot delay past 2^31 - 1 ms (Node fires it almost at once), and
 // `budget * 4` can overflow to Infinity, which reads as "unbounded". A huge but
