@@ -13,6 +13,11 @@ export interface RecordSignInProofInput {
 	readonly cdpUrl: string | null;
 	readonly connectionId: string;
 	readonly connectorId: string;
+	/**
+	 * Re-checked after the DevTools read and before the write; false means the
+	 * run was superseded while the read was in flight, so nothing is written.
+	 */
+	readonly isCurrent?: () => boolean;
 	readonly manifest: Parameters<typeof signInUrlPatternFromManifest>[0];
 	readonly nowIso: string;
 	readonly runId: string;
@@ -35,13 +40,15 @@ export async function recordSignInProofAfterRun(
 	deps: RecordSignInProofDeps,
 	input: RecordSignInProofInput,
 ): Promise<"recorded" | "repaired" | "none"> {
-	const pattern = signInUrlPatternFromManifest(input.manifest);
-	if (!pattern) {
-		return "none";
-	}
+	// Repair first: a success must clear earlier proofs even when the manifest
+	// no longer declares a pattern.
 	if (input.status === "succeeded") {
 		await deps.store.markRepaired(input.connectionId, input.nowIso);
 		return "repaired";
+	}
+	const pattern = signInUrlPatternFromManifest(input.manifest);
+	if (!pattern) {
+		return "none";
 	}
 	if (input.status !== "failed" || !input.cdpUrl) {
 		return "none";
@@ -59,7 +66,7 @@ export async function recordSignInProofAfterRun(
 		runFailed: true,
 		runId: input.runId,
 	});
-	if (!proof) {
+	if (!proof || input.isCurrent?.() === false) {
 		return "none";
 	}
 	await deps.store.record(proof);
