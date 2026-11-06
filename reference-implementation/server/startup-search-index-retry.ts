@@ -1,12 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { resolveLexicalBackfillConnectorInstanceIds } from "./search.ts";
-import { resolveSemanticBackfillConnectorInstanceIds } from "./search-semantic.ts";
 import { assertCurrentStorageGeneration } from "./storage-generation.ts";
 import { listStartupSearchIndexInstances, markStartupSearchIndexFailure } from "./stores/search-index-dirty-store.ts";
 
-type Manifest = Parameters<typeof resolveLexicalBackfillConnectorInstanceIds>[0]["manifest"] &
-  Parameters<typeof resolveSemanticBackfillConnectorInstanceIds>[0]["manifest"];
+type Manifest = {
+  connector_id: string;
+  connector_instance_id?: string | null;
+  storage_binding?: { connector_instance_id?: string | null } | null;
+  streams?: unknown;
+};
 
 /** True when any stream declares semantic fields, so a semantic pass is owed. */
 export function manifestDeclaresSemanticFields(manifest: { streams?: unknown }): boolean {
@@ -24,23 +26,13 @@ export function manifestDeclaresSemanticFields(manifest: { streams?: unknown }):
 export async function queueStartupSearchIndexRetry(manifest: Manifest, generation: number): Promise<void> {
   assertCurrentStorageGeneration(generation);
   const connectorId = manifest.connector_id;
-  const lexical = await resolveLexicalBackfillConnectorInstanceIds({
-    connectorId,
-    manifest,
-  });
-  assertCurrentStorageGeneration(generation);
-  const semantic = await resolveSemanticBackfillConnectorInstanceIds({
-    connectorId,
-    manifest,
-  });
-  assertCurrentStorageGeneration(generation);
   const pin = manifest.storage_binding?.connector_instance_id || manifest.connector_instance_id;
-  const orphanInstances = pin ? [] : await listStartupSearchIndexInstances(connectorId);
+  const instances = pin ? [pin] : await listStartupSearchIndexInstances(connectorId);
   assertCurrentStorageGeneration(generation);
   // One instance's failed mark must not leave its siblings without a durable
   // retry, so every instance is attempted before the failures are reported.
   const failures: unknown[] = [];
-  for (const connectorInstanceId of new Set([...lexical, ...semantic, ...orphanInstances])) {
+  for (const connectorInstanceId of new Set(instances)) {
     try {
       // biome-ignore lint/performance/noAwaitInLoops: Never hold more than one instance deletion fence.
       await markStartupSearchIndexFailure({

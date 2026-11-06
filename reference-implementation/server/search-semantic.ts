@@ -2921,7 +2921,7 @@ function deleteBackfillProgress({
 // can be current, removed from the manifest, or represented only by an
 // interrupted backfill row; all three need the same per-instance critical
 // section. The caller then holds one fence per instance, never two at once.
-export async function resolveSemanticBackfillConnectorInstanceIds({
+async function resolveSemanticBackfillConnectorInstanceIds({
   connectorId,
   manifest,
 }: {

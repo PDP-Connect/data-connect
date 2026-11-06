@@ -482,6 +482,7 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchIndexDirtyRecordEvidence: MutationQuery;
   readonly searchIndexDirtyRecordFailure: MutationQuery;
   readonly searchIndexDirtyStartupIndexInstances: IterateQuery;
+  readonly searchIndexDirtyStartupSemanticState: ReadOneQuery;
   readonly searchIndexDirtyStartupStreams: IterateQuery;
   readonly searchIndexInsertRow: MutationQuery;
   readonly searchIndexPageAfterRowid: ReadManyQuery;

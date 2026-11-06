@@ -348,6 +348,16 @@ export async function countDirtySearchIndexScopes(): Promise<number> {
   return row?.n ?? 0;
 }
 
+/** The stream a canonical semantic scope key (`[stream, field]` JSON) names, or null for anything else. */
+function streamOfSemanticScopeKey(scopeKey: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(scopeKey);
+    return Array.isArray(parsed) && typeof parsed[0] === "string" ? parsed[0] : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Startup failures preserve retry policy; ingest alone resets changed-input history.
  * Discover extant streams inside the same instance fence as deletion. No instance
  * row is required for legacy direct ingest, but retained/index state is required.
@@ -373,11 +383,24 @@ export async function markStartupSearchIndexFailure({
            UNION SELECT stream FROM lexical_search_meta WHERE connector_instance_id = $1 AND connector_id = $2
            UNION SELECT stream FROM semantic_search_meta WHERE connector_instance_id = $1 AND connector_id = $2
            UNION SELECT stream FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND connector_id = $2
-           UNION SELECT stream FROM lexical_search_index WHERE connector_instance_id = $1 AND connector_id = $2
-           UNION SELECT (scope_key::jsonb)->>0 AS stream FROM semantic_search_blob WHERE connector_instance_id = $1 AND connector_id = $2`,
+           UNION SELECT stream FROM lexical_search_index WHERE connector_instance_id = $1 AND connector_id = $2`,
             [connectorInstanceId, connectorId]
           );
-          for (const { stream } of extant.rows) {
+          // Decode semantic keys here, not with a SQL jsonb cast: one malformed key
+          // must not fail the whole mark. Untrusted keys name no stream and are left
+          // for the repair that fails closed on them (same rule as the SQLite query).
+          const blobKeys = await client.query<{ scope_key: string }>(
+            "SELECT DISTINCT scope_key FROM semantic_search_blob WHERE connector_instance_id = $1 AND connector_id = $2",
+            [connectorInstanceId, connectorId]
+          );
+          const streams = new Set(extant.rows.map((row) => row.stream));
+          for (const { scope_key: scopeKey } of blobKeys.rows) {
+            const stream = streamOfSemanticScopeKey(scopeKey);
+            if (stream !== null) {
+              streams.add(stream);
+            }
+          }
+          for (const stream of streams) {
             // Extant orphan streams must also be repaired even after manifest removal.
             assertCurrentStorageGeneration(generation);
             // biome-ignore lint/performance/noAwaitInLoops: One connection's stream batch shares its deletion fence and transaction.
@@ -423,11 +446,12 @@ export async function markStartupSearchIndexFailure({
   });
 }
 
-/** Supplement backfill discovery with orphan index instances, still subject to manifest pins. */
+/** Every instance that holds records or search-index state for a connector. Instances with neither cannot need a ticket. */
 export async function listStartupSearchIndexInstances(connectorId: string): Promise<string[]> {
   if (isPostgresStorageBackend()) {
     const result = await postgresQuery<{ connector_instance_id: string }>(
-      `SELECT connector_instance_id FROM lexical_search_meta WHERE connector_id = $1
+      `SELECT connector_instance_id FROM records WHERE connector_id = $1
+       UNION SELECT connector_instance_id FROM lexical_search_meta WHERE connector_id = $1
        UNION SELECT connector_instance_id FROM lexical_search_index WHERE connector_id = $1
        UNION SELECT connector_instance_id FROM semantic_search_meta WHERE connector_id = $1
        UNION SELECT connector_instance_id FROM semantic_search_backfill_progress WHERE connector_id = $1
@@ -439,7 +463,27 @@ export async function listStartupSearchIndexInstances(connectorId: string): Prom
   return [
     ...iterate<{ connector_instance_id: string }>(
       referenceQueries.searchIndexDirtyStartupIndexInstances,
-      Array.from({ length: 6 }, () => connectorId)
+      Array.from({ length: 7 }, () => connectorId)
     ),
   ].map((row) => row.connector_instance_id);
+}
+
+/** True when any instance of the connector still holds semantic index state (meta, progress or vectors). */
+export async function connectorHasRetainedSemanticState(connectorId: string): Promise<boolean> {
+  if (isPostgresStorageBackend()) {
+    const result = await postgresQuery<{ present: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM semantic_search_meta WHERE connector_id = $1
+         UNION ALL SELECT 1 FROM semantic_search_backfill_progress WHERE connector_id = $1
+         UNION ALL SELECT 1 FROM semantic_search_blob WHERE connector_id = $1
+       ) AS present`,
+      [connectorId]
+    );
+    return result.rows[0]?.present === true;
+  }
+  const row = getOne<{ present: number }>(
+    referenceQueries.searchIndexDirtyStartupSemanticState,
+    Array.from({ length: 4 }, () => connectorId)
+  );
+  return row?.present === 1;
 }

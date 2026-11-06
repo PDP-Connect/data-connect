@@ -640,6 +640,7 @@ import {
 } from "./stores/run-history-backfill-stage.ts";
 import { getDefaultSchedulerStore, type SchedulerStore } from "./stores/scheduler-store.ts";
 import {
+  connectorHasRetainedSemanticState,
   countDirtySearchIndexScopes,
   parkSearchIndexDirtyScope,
   rearmSearchIndexDirtyScope,
@@ -1289,6 +1290,32 @@ async function collectRetrievalStartupBackfillManifests({
   return registered.map(({ manifest }) => manifest);
 }
 
+const STARTUP_TICKET_RETRY_BASE_MS = 250;
+const STARTUP_TICKET_RETRY_MAX_MS = 30_000;
+
+/** Exponential backoff from 250 ms, capped at 30 s. */
+function startupTicketRetryDelayMs(attempt: number): number {
+  return Math.min(STARTUP_TICKET_RETRY_MAX_MS, STARTUP_TICKET_RETRY_BASE_MS * 2 ** attempt);
+}
+
+/** Waits `ms`; resolves false at once if `signal` aborts first. */
+function sleepUnlessAborted(ms: number, signal: AbortSignal | null): Promise<boolean> {
+  if (signal?.aborted) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function runRetrievalStartupBackfill({
   generation = currentStorageGeneration(),
   manifests,
@@ -1309,8 +1336,11 @@ async function runRetrievalStartupBackfill({
 
   // A failed queue write (for example a transient read or write fault while
   // finding the scopes to mark) must not leave a failed backfill without a
-  // ticket. Those manifests get one more attempt after the loop, so the
-  // retry costs no new state: only a local list for this run.
+  // ticket. Those manifests stay in this local list and are retried with
+  // bounded backoff until a mark commits or shutdown aborts the run, so a fault
+  // that outlasts a fixed number of attempts still ends in a ticket. No new
+  // durable state: if the process stops first, the next startup repeats the
+  // backfill.
   const queueWriteFailed: ConnectorManifest[] = [];
   const queueRetry = async (manifest: ConnectorManifest, err: unknown) => {
     try {
@@ -1347,10 +1377,15 @@ async function runRetrievalStartupBackfill({
           manifest: manifest as never,
           signal,
         });
-      } else if (semanticBackend && manifestDeclaresSemanticFields(manifest)) {
+      } else if (
+        semanticBackend &&
+        (manifestDeclaresSemanticFields(manifest) || (await connectorHasRetainedSemanticState(String(connectorId))))
+      ) {
         // Configured but not available (for example still warming): the semantic
-        // half is unproven, so leave a ticket. With no backend configured at all
-        // nothing is queued, or every boot would dirty every semantic connector.
+        // half is unproven, so leave a ticket. Retained semantic state counts like
+        // declared fields, because removed-field cleanup also needs the backend.
+        // With no backend configured at all nothing is queued, or every boot would
+        // dirty every semantic connector.
         logger.warn({ connectorId }, "retrieval startup backfill skipped semantic pass: backend unavailable");
         await queueRetry(manifest, new Error("semantic backend unavailable at startup"));
         continue;
@@ -1368,19 +1403,30 @@ async function runRetrievalStartupBackfill({
     }
   }
 
-  for (const manifest of queueWriteFailed) {
-    if (signal?.aborted) {
+  let pending = queueWriteFailed;
+  for (let attempt = 0; pending.length > 0; attempt++) {
+    // biome-ignore lint/performance/noAwaitInLoops: Backoff is sequential by design.
+    if (!(await sleepUnlessAborted(startupTicketRetryDelayMs(attempt), signal))) {
+      logger.info({ reason: "shutdown" }, "retrieval startup ticket retry aborted");
       return;
     }
-    try {
-      // biome-ignore lint/performance/noAwaitInLoops: Never hold more than one instance deletion fence.
-      await queueStartupSearchIndexRetry(manifest as never, generation);
-    } catch (queueError) {
-      logger.warn(
-        { connectorId: manifest.connector_id, queueError },
-        "retrieval startup backfill ticket write failed again after retry; the next startup repeats the backfill"
-      );
+    const stillFailing: ConnectorManifest[] = [];
+    for (const manifest of pending) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: Never hold more than one instance deletion fence.
+        await queueStartupSearchIndexRetry(manifest as never, generation);
+      } catch (queueError) {
+        if (signal?.aborted) {
+          return;
+        }
+        logger.warn(
+          { attempt: attempt + 1, connectorId: manifest.connector_id, queueError },
+          "retrieval startup backfill ticket write failed again; retrying"
+        );
+        stillFailing.push(manifest);
+      }
     }
+    pending = stillFailing;
   }
 
   logger.info(
