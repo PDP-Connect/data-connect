@@ -51,3 +51,17 @@ test("the root patchright dependency matches the reference-implementation pin", 
     readJson("reference-implementation/package.json").dependencies.patchright
   );
 });
+
+test("the root overrides keep the vendored connectors package on the root patchright", () => {
+  // Without this entry the lockfile test above still passes until the next
+  // regeneration, when npm would nest the tarball's own pin again.
+  assert.equal(readJson("package.json").overrides?.["@pdpp/polyfill-connectors"]?.patchright, "$patchright");
+});
+
+test("the Dockerfile installs browsers for reference-implementation's patchright pin", () => {
+  const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8");
+  assert.match(dockerfile, /COPY reference-implementation\/package\.json \/tmp\/reference-implementation-package\.json/);
+  assert.match(dockerfile, /reference-implementation-package\.json'.*packageJson\.dependencies\.patchright/);
+  assert.match(dockerfile, /npm install [^\n]*"patchright@\$\{PATCHRIGHT_VERSION\}"/);
+  assert.match(dockerfile, /npx patchright install [^\n]*chromium/);
+});
