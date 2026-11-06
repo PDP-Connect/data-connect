@@ -22,7 +22,8 @@ const CONNECTOR_SUMMARY_CURSOR_PREFIX = "rcs1.";
  * query string equals its length. Real cursors are about 300 characters (a
  * connector id, an instance id, a timestamp and a 43-character digest, sealed
  * with a 28-byte nonce and tag). The bound leaves room for connector and
- * instance ids of about 300 bytes each.
+ * instance ids of about 200 bytes each (a single-connector cursor carries the
+ * connector id twice).
  */
 export const CONNECTOR_SUMMARY_CURSOR_MAX_LENGTH = 1024;
 const CURSOR_IV_BYTES = 12;
@@ -363,9 +364,9 @@ export function parseConnectorSummaryPageRequest(
  * every existing caller that omits it preserves the exact prior cursor scope.
  * The cursor binds the scope through the fixed-size `s` digest, which hashes
  * the canonical sorted scope (design doc: "a canonical ordered scope-set
- * fingerprint, not raw user ordering"), and never repeats the scope itself, so
- * cursor size does not grow with the scope. A set supplied in a different
- * order round-trips to the SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
+ * fingerprint, not raw user ordering"). A set scope is not repeated in the
+ * cursor, so cursor size does not grow with the set. A set supplied in a
+ * different order round-trips to the SAME cursor scope. `sourcesVisibility` defaults to `false` (the unfiltered/
  * Explore page) — every existing caller that omits it preserves the exact
  * prior cursor scope; the Sources page is the only caller that passes `true`.
  */
@@ -379,6 +380,12 @@ export function encodeConnectorSummaryPageCursor(
   const payload = Buffer.from(
     JSON.stringify({
       c: boundary.connectorId,
+      // The previous release's decoder requires `f`; it is small for these two
+      // scopes, so keep sending it and a cursor survives a rollback. A set's
+      // fingerprint grows with the set and is left out: `s` already binds it.
+      ...(connectorIdFilter === null || typeof connectorIdFilter === "string"
+        ? { f: connectorIdScopeFingerprint(connectorIdFilter) }
+        : {}),
       i: boundary.connectorInstanceId,
       s: scopeDigest(ownerSubjectId, connectorIdFilter, sourcesVisibility).toString("base64url"),
       t: boundary.createdAt,
