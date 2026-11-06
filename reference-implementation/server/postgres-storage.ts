@@ -3518,6 +3518,17 @@ async function bootstrapPostgresSchemaOnce({
       CREATE INDEX IF NOT EXISTS idx_pg_connector_summary_evidence_connector
         ON connector_summary_evidence(connector_id);
 
+      -- Runtime-observed provider-invalidation proofs (see the SQLite DDL in
+      -- server/db.ts). repaired_at records replay suppression per proof key.
+      CREATE TABLE IF NOT EXISTS provider_invalidation_proofs (
+        connection_id TEXT NOT NULL REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        repaired_at TEXT,
+        PRIMARY KEY (connection_id, run_id)
+      );
+
       -- Scheduling state only: name-keyed cursors resume bounded maintenance
       -- passes after restart without becoming evidence or owner-visible data.
       CREATE TABLE IF NOT EXISTS connector_maintenance_cursor (
