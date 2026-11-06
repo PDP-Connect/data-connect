@@ -1042,7 +1042,7 @@ test("source issues omit healthy advisory refresh hints", () => {
     connector({
       connection_id: "cin_reddit",
       connector_id: "reddit",
-      display_name: "Reddit - dondochaka",
+      display_name: "Reddit - janedoe",
       source_work: "review",
       rendered_verdict: verdict({
         channel: "advisory",
