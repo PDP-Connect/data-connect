@@ -1683,7 +1683,13 @@ function deadLetterWhere(input: LocalDeviceOutboxRequeueDeadLettersInput): {
   return { clauses, params };
 }
 
-function activeOutboxRowPredicate(table = "local_device_outbox"): string {
+/**
+ * SQL fragment that excludes terminal commits retired by the supersession
+ * ledger. Shared with local-collector's durable-state resolver so both agree on
+ * what counts as undelivered work. It references
+ * `local_device_terminal_commit_supersessions`, which only exists from schema v4.
+ */
+export function activeOutboxRowPredicate(table = "local_device_outbox"): string {
   return `NOT (
       ${table}.kind = 'terminal_run_commit'
       AND ${table}.status = 'dead_letter'
