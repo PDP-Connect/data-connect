@@ -21,7 +21,10 @@ import {
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
 import { describeErrorText } from "./describe-error.ts";
-import { isTransientConnectorInstallCatalogError } from "./connector-install-transient.ts";
+import {
+  isConnectorInstallRouteUnavailableError,
+  isTransientConnectorInstallCatalogError,
+} from "./connector-install-transient.ts";
 import {
   getOwnerToken,
   getRsInternalUrl,
@@ -102,7 +105,22 @@ export async function listConnectorLocalSources(): Promise<ConnectorLocalSource[
   return [...parseConnectorLocalSourcesResponse(payload)];
 }
 
-export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot> {
+/**
+ * One read of the three install facts, or `null` when the server predates the
+ * install route family (the page then shows no package facts at all).
+ */
+export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot | null> {
+  try {
+    return await readConnectorInstallSnapshot();
+  } catch (err) {
+    if (isConnectorInstallRouteUnavailableError(err)) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function readConnectorInstallSnapshot(): Promise<ConnectorInstallSnapshot> {
   let catalogUnavailableReason: ConnectorInstallSnapshot["catalogUnavailableReason"];
   const [catalog, status, localSources] = await Promise.all([
     fetchInstallCatalog().catch((err: unknown) => {
@@ -113,7 +131,11 @@ export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSna
       return Promise.reject(err);
     }),
     fetchInstallStatus(),
-    listConnectorLocalSources(),
+    // Developer local sources are optional: a server without them still has
+    // package facts worth showing.
+    listConnectorLocalSources().catch((err: unknown) =>
+      isConnectorInstallRouteUnavailableError(err) ? [] : Promise.reject(err)
+    ),
   ]);
   const skippedEntries = catalog.skipped + status.skipped;
   return {
@@ -128,10 +150,6 @@ export async function getConnectorInstallSnapshot(): Promise<ConnectorInstallSna
 export interface InstallConnectorInput {
   readonly connectorId: string;
   readonly digest: string;
-}
-
-function parseStatusRecord(payload: unknown): ConnectorInstallStatus {
-  return parseConnectorInstallResponse(payload);
 }
 
 function parseLocalSourceRecord(payload: unknown, operation: "add" | "reload"): ConnectorLocalSource {
@@ -154,7 +172,7 @@ export async function installConnector(input: InstallConnectorInput): Promise<Co
     }),
     method: "POST",
   });
-  return parseStatusRecord(payload);
+  return parseConnectorInstallResponse(payload);
 }
 
 export async function updateConnector(connectorId: string): Promise<ConnectorInstallStatus> {
@@ -162,7 +180,7 @@ export async function updateConnector(connectorId: string): Promise<ConnectorIns
     body: JSON.stringify({ connector_id: connectorId }),
     method: "POST",
   });
-  return parseStatusRecord(payload);
+  return parseConnectorInstallResponse(payload);
 }
 
 export async function uninstallConnector(connectorKey: string): Promise<void> {

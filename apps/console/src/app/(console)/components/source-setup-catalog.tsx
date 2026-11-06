@@ -606,6 +606,7 @@ export function SourceSetupCatalog({
   installCatalogBusySnapshotId = null,
   installCatalogTransientlyUnavailable = false,
   installLifecycleByConnector = null,
+  installSkippedEntries = 0,
   query,
 }: {
   action: string;
@@ -622,6 +623,8 @@ export function SourceSetupCatalog({
   installCatalogTransientlyUnavailable?: boolean;
   /** Null means the install route is not available on this server. */
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
+  /** Package offers the console could not read; they are missing from the list. */
+  installSkippedEntries?: number;
   query: string;
 }) {
   const developerMode = useSyncExternalStore(
@@ -676,6 +679,12 @@ export function SourceSetupCatalog({
             Developer mode
           </Link>
           .
+        </p>
+      ) : null}
+      {installSkippedEntries > 0 ? (
+        <p className="pdpp-caption mb-4 text-muted-foreground" data-testid="install-skipped-notice">
+          {installSkippedEntries} package {installSkippedEntries === 1 ? "offer" : "offers"} could not be read and{" "}
+          {installSkippedEntries === 1 ? "is" : "are"} not listed. Check the service logs.
         </p>
       ) : null}
       <ConnectorCatalogRecoveryNotice

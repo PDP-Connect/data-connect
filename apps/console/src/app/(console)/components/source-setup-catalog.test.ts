@@ -56,7 +56,8 @@ const reddit: ConnectorCatalogEntry = {
 async function render(
   installCatalogTransientlyUnavailable: boolean,
   entry: ConnectorCatalogEntry = reddit,
-  lifecycle?: ConnectorInstallLifecycle
+  lifecycle?: ConnectorInstallLifecycle,
+  installSkippedEntries = 0
 ): Promise<string> {
   const { SourceSetupCatalog } = await catalogModule;
   return renderToStaticMarkup(
@@ -64,6 +65,7 @@ async function render(
       action: "/sources/add",
       catalog: [entry],
       installCatalogTransientlyUnavailable,
+      installSkippedEntries,
       // The page builds this from the empty catalog a busy snapshot returns.
       installLifecycleByConnector: lifecycle ? { [entry.connectorKey]: lifecycle } : {},
       query: "",
@@ -91,6 +93,8 @@ const CANNOT_ADD_HERE = /1 connector cannot be added here/;
 const PLATFORM_COPY = /not available on this platform/;
 const UNKNOWN_PACKAGE = /data-testid="connector-install-catalog-transient"/;
 const INSTALL_FIRST = /Install package first/;
+const INSTALL_NEXT_STEP = /data-testid="connector-install-next-step"/;
+const SKIPPED_NOTICE = /data-testid="install-skipped-notice"/;
 const NEW_BROWSER_SETUP = /href="\/connect\/browser-session\/new-browser"/;
 
 const unregisteredBrowser: ConnectorCatalogEntry = {
@@ -237,6 +241,7 @@ test("a setup-capable connector offers Install first and links to account setup 
   const beforeInstall = await render(false, setupCapable, browserPackage);
   assert.match(beforeInstall, INSTALL_BUTTON);
   assert.match(beforeInstall, INSTALL_FIRST);
+  assert.match(beforeInstall, INSTALL_NEXT_STEP);
   assert.doesNotMatch(beforeInstall, BROWSER_SETUP_LINK, "setup must not be linked before the package is installed");
   assert.match(beforeInstall, UNAVAILABLE_FALSE);
 
@@ -250,6 +255,15 @@ test("a setup-capable connector offers Install first and links to account setup 
   assert.match(afterInstall, NEW_BROWSER_SETUP);
   assert.doesNotMatch(afterInstall, INSTALL_BUTTON);
   assert.doesNotMatch(afterInstall, INSTALL_FIRST);
+  assert.doesNotMatch(afterInstall, INSTALL_NEXT_STEP);
+});
+
+test("package offers the console could not read are reported, not silently missing", async () => {
+  assert.doesNotMatch(await render(false, setupCapable, browserPackage, 0), SKIPPED_NOTICE);
+  const one = await render(false, setupCapable, browserPackage, 1);
+  assert.match(one, SKIPPED_NOTICE);
+  assert.match(one, /1 package offer could not be read/);
+  assert.match(await render(false, setupCapable, browserPackage, 3), /3 package offers could not be read/);
 });
 
 test("an installed connector that the reference has not registered shows registration pending, not a setup link", async () => {
