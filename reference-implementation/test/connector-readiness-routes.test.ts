@@ -17,9 +17,9 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { createConnectorInstallService } from "../server/connector-install/index.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { startServer } from "../server/index.ts";
-import { closeTestServer } from "./helpers/close-test-server.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
+import { closeTestServer } from "./helpers/close-test-server.ts";
 
 const CATALOG_DIGEST = `sha256:${"a".repeat(64)}`;
 

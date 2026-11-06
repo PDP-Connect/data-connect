@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { browserConnectSupportFromReadiness } from "./browser-connect-readiness.ts";
-import { readinessBlockNote } from "./connector-readiness-copy.ts";
 import {
   type ConnectorReadiness,
   parseConnectorReadiness,
@@ -12,6 +11,7 @@ import {
   READINESS_ACTIONS,
   READINESS_REASONS,
 } from "./connector-readiness-contract.ts";
+import { readinessBlockNote } from "./connector-readiness-copy.ts";
 
 const wire = (overrides: Record<string, unknown> = {}) => ({
   action: "connect",
@@ -125,15 +125,22 @@ test("the verdict alone decides browserBound; the bundled manifest is consulted 
   assert.equal(browserConnectSupportFromReadiness("some-new-connector", null, true).browserBound, false);
 });
 
+/** The owner copy for a verdict that must have some. */
+function blockNote(verdict: ReturnType<typeof readiness>): string {
+  const note = readinessBlockNote(verdict);
+  assert.ok(note !== null, "expected owner copy for a blocking verdict");
+  return note;
+}
+
 test("blocking reasons have fixed owner copy that never carries the server's detail; others have none", () => {
-  const configure = readinessBlockNote(readiness("configure", "host_requirement_unmet", "No display at /srv/run."))!;
+  const configure = blockNote(readiness("configure", "host_requirement_unmet", "No display at /srv/run."));
   assert.match(configure, /not set up to run this connector yet\./);
   assert.doesNotMatch(configure, /No display|\/srv/);
-  assert.match(readinessBlockNote(readiness("repair", "artifact_invalid"))!, /failed verification/);
-  assert.match(readinessBlockNote(readiness("retry", "inspection_unavailable"))!, /Retry/);
-  assert.match(readinessBlockNote(readiness("retry", "catalog_unavailable"))!, /catalog could not be reached/);
-  assert.match(readinessBlockNote(readiness("unavailable", "not_published"))!, /not published/);
-  assert.match(readinessBlockNote(readiness("unavailable", "not_implemented"))!, /placeholder and does not collect data yet/);
+  assert.match(blockNote(readiness("repair", "artifact_invalid")), /failed verification/);
+  assert.match(blockNote(readiness("retry", "inspection_unavailable")), /Retry/);
+  assert.match(blockNote(readiness("retry", "catalog_unavailable")), /catalog could not be reached/);
+  assert.match(blockNote(readiness("unavailable", "not_published")), /not published/);
+  assert.match(blockNote(readiness("unavailable", "not_implemented")), /placeholder and does not collect data yet/);
   for (const quiet of [
     readiness("connect", "runnable"),
     readiness("install", "not_installed"),

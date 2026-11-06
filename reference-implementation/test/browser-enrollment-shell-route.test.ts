@@ -11,13 +11,13 @@ import {
   expiredEnrollmentShellIds,
   retireExpiredBrowserEnrollmentShells,
 } from "../server/browser-enrollment-shell-retirement.ts";
-import { getDb } from "../server/db.ts";
 import { createConnectorInstallService } from "../server/connector-install/index.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
+import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
-import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 import { BROWSER_ENROLLMENT_SHELL_TTL_MS } from "../server/routes/ref-browser-enrollment-shell.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 
 // Integration coverage for the browser-enrollment shell routes:
 //   POST /_ref/connectors/:connectorId/browser-enrollment-shell  (on AS)

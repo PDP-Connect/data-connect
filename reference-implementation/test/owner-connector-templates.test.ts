@@ -14,10 +14,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
-
-import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { createConnectorInstallService } from "../server/connector-install/index.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";

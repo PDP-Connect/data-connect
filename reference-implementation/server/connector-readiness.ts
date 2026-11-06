@@ -20,9 +20,9 @@
  */
 
 import { checkAttendedEnrollmentHostReadiness } from "../runtime/scheduler-readiness.ts";
-import { classifyConnectorIntentModality, type ConnectorManifestLike } from "./connection-setup-plan.ts";
-import { canonicalConnectorKey } from "./connector-key.ts";
+import { type ConnectorManifestLike, classifyConnectorIntentModality } from "./connection-setup-plan.ts";
 import type { ConnectorCatalogEntry, ConnectorInstallService, SelectedConnectorArtifact } from "./connector-install/index.ts";
+import { canonicalConnectorKey } from "./connector-key.ts";
 
 export const READINESS_ACTIONS = ["connect", "install", "repair", "configure", "retry", "unavailable"] as const;
 export type ReadinessAction = (typeof READINESS_ACTIONS)[number];
