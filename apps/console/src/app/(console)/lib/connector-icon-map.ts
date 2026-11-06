@@ -2,15 +2,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ConnectorIconLike } from "@pdpp/brand-react";
-import iconCorpus from "./connector-icons/sanitized-assets.json" with { type: "json" };
 import { connectorLookupKey } from "./connector-install-presentation.ts";
-import { hasConnectorIcon, indexConnectorIcon, validatedConnectorIcon } from "./resolve-connector-icon.ts";
+import {
+  bundledIconIdentities,
+  hasConnectorIcon,
+  indexConnectorIcon,
+  validatedConnectorIcon,
+} from "./resolve-connector-icon.ts";
 import { resolveConnectorIconFromSimpleIcons } from "./resolve-connector-icon-simple-icons.ts";
 import { type DisplayMarkLayers, pickDisplayMark } from "./resolve-manifest-display-mark.ts";
 import type { ConnectorManifest, OwnerConnectorTemplate } from "./rs-client.ts";
 
 /** Icons indexed by the exact server-projected connector identity. */
 export type ConnectorIconMap = Readonly<Record<string, ConnectorIconLike | null | undefined>>;
+
+function layerForSource(
+  layers: Record<keyof DisplayMarkLayers, Map<string, ConnectorIconLike>>,
+  source: ConnectorManifest["resolvedIconSource"]
+): Map<string, ConnectorIconLike> {
+  if (source === "bundled") {
+    return layers.bundled;
+  }
+  return source === "simple-icons" ? layers.generic : layers.manifest;
+}
 
 /**
  * A display projection; it never adds or changes a connector manifest. Each
@@ -23,32 +37,19 @@ export async function buildConnectorIconMap(
   templates: readonly OwnerConnectorTemplate[]
 ): Promise<ConnectorIconMap> {
   const layers = {
-    bundled: new Map<string, ConnectorIconLike>(),
+    bundled: bundledIconIdentities(),
     generic: new Map<string, ConnectorIconLike>(),
     manifest: new Map<string, ConnectorIconLike>(),
     template: new Map<string, ConnectorIconLike>(),
   } satisfies Record<keyof DisplayMarkLayers, Map<string, ConnectorIconLike>>;
-  for (const entry of iconCorpus.entries) {
-    indexConnectorIcon(
-      layers.bundled,
-      [entry.connector_key, entry.connector_id],
-      validatedConnectorIcon({
-        backgroundColor: entry.background_color,
-        kind: "inline_svg",
-        svg: entry.svg,
-      })
-    );
-  }
   // Manifest marks are already normalized (resolveManifestDisplayMark). Which
   // layer one belongs to follows the source it resolved from.
   for (const manifest of manifests) {
-    const layer =
-      manifest.resolvedIconSource === "bundled"
-        ? layers.bundled
-        : manifest.resolvedIconSource === "simple-icons"
-          ? layers.generic
-          : layers.manifest;
-    indexConnectorIcon(layer, [manifest.connector_id, manifest.connector_key], validatedConnectorIcon(manifest.icon));
+    indexConnectorIcon(
+      layerForSource(layers, manifest.resolvedIconSource),
+      [manifest.connector_id, manifest.connector_key],
+      validatedConnectorIcon(manifest.icon)
+    );
   }
   for (const template of templates) {
     indexConnectorIcon(

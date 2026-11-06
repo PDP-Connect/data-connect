@@ -11,8 +11,9 @@ import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import { ConnectorMark } from "../components/connector-mark.tsx";
+import { connectorIconIdentityKeys } from "./connector-icon-identity.ts";
 import corpus from "./connector-icons/sanitized-assets.json" with { type: "json" };
-import { connectorIconIdentityKeys, resolveConnectorIcon, resolveSourceIcon } from "./resolve-connector-icon.ts";
+import { resolveConnectorIcon, resolveSourceIcon } from "./resolve-connector-icon.ts";
 
 // The repository test harness transpiles source JSX with the classic runtime.
 Object.assign(globalThis, { React });

@@ -6,9 +6,12 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeSvg } from "@pdpp/brand-react/sanitize-svg";
+import { assertIconCorpusConsistent } from "../src/app/(console)/lib/connector-icon-corpus-checks.ts";
 
 const REPOSITORY = "PDP-Connect/data-connectors";
 const REVISION = "23aee3aaeafad3a804d504e8614763f7845add60";
+// Intentional tripwire: a connector gaining or losing a declared icon changes
+// the shipped bundle, so the pinned count is bumped together with REVISION.
 const EXPECTED_ASSETS = 65;
 const MANIFEST_PATH = /^connectors\/[^/]+\/manifest\.json$/u;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -72,17 +75,10 @@ entries.sort((left, right) => {
   }
   return left.connector_key < right.connector_key ? -1 : 1;
 });
-// The runtime indexes marks by connector key and ID with last-writer-wins, so
-// a repeated identity would make the shipped mark depend on file order.
-for (const field of ["connector_key", "connector_id"]) {
-  const seen = new Set();
-  for (const entry of entries) {
-    if (seen.has(entry[field])) {
-      throw new Error(`Duplicate ${field} in the pinned icon set: ${entry[field]}.`);
-    }
-    seen.add(entry[field]);
-  }
-}
+// The runtime indexes marks by every spelling of an identity, so a repeated or
+// colliding identity, a free-form background, or a source whose entries
+// disagree would make the shipped mark depend on file order.
+assertIconCorpusConsistent(entries);
 if (entries.length !== EXPECTED_ASSETS) {
   throw new Error(`Pinned source produced ${entries.length} icon assets; expected ${EXPECTED_ASSETS}.`);
 }

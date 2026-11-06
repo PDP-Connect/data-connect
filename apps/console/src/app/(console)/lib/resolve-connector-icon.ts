@@ -3,35 +3,11 @@
 
 import type { ConnectorIconLike } from "@pdpp/brand-react";
 import { hexColorOrNull } from "@pdpp/brand-react/hex-color";
-import iconCorpus from "./connector-icons/sanitized-assets.json" with { type: "json" };
 import { sanitizeSvg } from "@pdpp/brand-react/sanitize-svg";
-
-const URI_SCHEME = /^[a-z][a-z\d+.-]*:/iu;
-const REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
-const TRAILING_SLASH = /\/$/u;
+import { connectorIconIdentityKeys } from "./connector-icon-identity.ts";
+import iconCorpus from "./connector-icons/sanitized-assets.json" with { type: "json" };
 
 type CorpusEntry = (typeof iconCorpus.entries)[number];
-
-/** Preserve the first-party registry/key aliases; unrelated URLs remain exact identities. */
-export function connectorIconIdentityKeys(connectorId: string): readonly string[] {
-  const value = connectorId.trim();
-  if (!value) {
-    return [];
-  }
-  const keys = new Set([value]);
-  let localKey: string | null = value;
-  if (value.startsWith(REGISTRY_PREFIX)) {
-    localKey = value.slice(REGISTRY_PREFIX.length).replace(TRAILING_SLASH, "");
-  } else if (URI_SCHEME.test(value)) {
-    localKey = null;
-  }
-  if (localKey !== null) {
-    const canonical = localKey.replaceAll("_", "-");
-    keys.add(canonical);
-    keys.add(canonical.replaceAll("-", "_"));
-  }
-  return [...keys];
-}
 
 /** Validate an SVG mark at the shared display boundary. */
 export function validatedConnectorIcon(
@@ -75,6 +51,11 @@ for (const entry of iconCorpus.entries) {
   }
 }
 
+/** A copy of the bundled corpus indexed by every accepted identity spelling, for callers that layer it. */
+export function bundledIconIdentities(): Map<string, ConnectorIconLike> {
+  return new Map(BUNDLED_ICONS_BY_IDENTITY);
+}
+
 /** Resolve an explicit safe icon first, then a bundled mark for the exact connector identity. */
 export function resolveConnectorIcon(
   connectorId: string,
@@ -94,7 +75,18 @@ export function resolveConnectorIcon(
   return null;
 }
 
-/** Add a resolved mark under every accepted explicit connector spelling. */
+const conflictedKeysByLayer = new WeakMap<Map<string, ConnectorIconLike>, Set<string>>();
+
+function sameMark(left: ConnectorIconLike, right: ConnectorIconLike): boolean {
+  return left.svg === right.svg && left.color === right.color && left.backgroundColor === right.backgroundColor;
+}
+
+/**
+ * Add a resolved mark under every accepted explicit connector spelling.
+ * Two different marks claiming one spelling in the same layer (for example
+ * `foo_bar` and `foo-bar`) is ambiguous: neither wins, the spelling gets no
+ * mark from this layer, and the collision is logged once.
+ */
 export function indexConnectorIcon(
   icons: Map<string, ConnectorIconLike>,
   connectorIds: readonly (string | null | undefined)[],
@@ -103,11 +95,27 @@ export function indexConnectorIcon(
   if (!icon) {
     return;
   }
+  let conflicted = conflictedKeysByLayer.get(icons);
   for (const connectorId of connectorIds) {
-    if (connectorId) {
-      for (const key of connectorIconIdentityKeys(connectorId)) {
-        icons.set(key, icon);
+    if (!connectorId) {
+      continue;
+    }
+    for (const key of connectorIconIdentityKeys(connectorId)) {
+      const existing = icons.get(key);
+      if (conflicted?.has(key)) {
+        continue;
       }
+      if (existing && !sameMark(existing, icon)) {
+        conflicted ??= new Set();
+        conflictedKeysByLayer.set(icons, conflicted);
+        conflicted.add(key);
+        icons.delete(key);
+        console.warn(
+          `Connector icon identity "${key}" is claimed by two different marks in one layer; showing neither.`
+        );
+        continue;
+      }
+      icons.set(key, icon);
     }
   }
 }

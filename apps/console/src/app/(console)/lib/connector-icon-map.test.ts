@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { buildConnectorIconMap, catalogEntryIcon } from "./connector-icon-map.ts";
 import iconCorpus from "./connector-icons/sanitized-assets.json" with { type: "json" };
+import { resolveConnectorIcon } from "./resolve-connector-icon.ts";
 import { resolveManifestDisplayMark } from "./resolve-manifest-display-mark.ts";
 
 const UNSAFE_ONLOAD = /onload/iu;
@@ -144,4 +145,55 @@ test("a catalog entry's own unsafe mark is rejected when the map misses its key"
     )?.backgroundColor,
     undefined
   );
+});
+
+test("two manifests whose identities collide on _/- spelling get no mark from that layer", async () => {
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    const mark = (svg: string) => ({ kind: "inline_svg", svg }) as const;
+    const icons = await buildConnectorIconMap(
+      [
+        {
+          connector_id: "foo-bar",
+          connector_key: "foo-bar",
+          icon: mark('<svg viewBox="0 0 24 24"><path d="M0 0z"/></svg>'),
+        },
+        {
+          connector_id: "foo_bar",
+          connector_key: "foo_bar",
+          icon: mark('<svg viewBox="0 0 24 24"><path d="M1 1z"/></svg>'),
+        },
+      ] as never,
+      []
+    );
+    assert.equal(icons["foo-bar"], undefined, "the later manifest must not silently take the earlier one's identity");
+    assert.equal(icons.foo_bar, undefined);
+    assert.ok(warn.mock.calls.length > 0, "the collision is reported");
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("two manifests that resolve to the same mark under one identity are not a collision", async () => {
+  const warn = mock.method(console, "warn", () => undefined);
+  try {
+    const icons = await buildConnectorIconMap(
+      [
+        { connector_id: "foo-bar", connector_key: "foo-bar", icon: INLINE_MANIFEST_MARK },
+        { connector_id: "foo_bar", connector_key: "foo_bar", icon: INLINE_MANIFEST_MARK },
+      ] as never,
+      []
+    );
+    assert.deepEqual(icons["foo-bar"], INLINE_MANIFEST_MARK);
+    assert.equal(warn.mock.calls.length, 0);
+  } finally {
+    warn.mock.restore();
+  }
+});
+
+test("the map's bundled layer is the resolver's bundled corpus, identity for identity", async () => {
+  const icons = await buildConnectorIconMap([], []);
+  for (const entry of iconCorpus.entries) {
+    assert.deepEqual(icons[entry.connector_key], resolveConnectorIcon(entry.connector_id), entry.connector_key);
+  }
 });
