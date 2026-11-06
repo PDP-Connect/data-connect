@@ -98,8 +98,15 @@ async function selectionProblems(
 			};
 		});
 		assert.equal(selected, "selected", "the text is really selected");
-		const text = await resolveColor(page, color);
+		const ink = await resolveColor(page, color);
 		const fill = await resolveColor(page, background);
+		// Text that is not fully opaque shows the selection fill through it.
+		const text: Rgba = {
+			a: 1,
+			b: ink.a * ink.b + (1 - ink.a) * fill.b,
+			g: ink.a * ink.g + (1 - ink.a) * fill.g,
+			r: ink.a * ink.r + (1 - ink.a) * fill.r,
+		};
 		const problems: string[] = [];
 		if (fill.a < 1) {
 			problems.push(`selection background is translucent (alpha ${fill.a.toFixed(2)})`);
@@ -126,6 +133,14 @@ test("a later element-qualified selection rule that hides selected text is detec
 	const problems = await selectionProblems({
 		extraCss:
 			"p::selection { color: oklch(0 0 0); background-color: oklch(0 0 0); }",
+	});
+	assert.match(problems.join("; "), /contrast 1\.00:1 is below 7:1/);
+});
+
+test("a transparent selection foreground is detected as invisible text", async () => {
+	const problems = await selectionProblems({
+		extraCss:
+			"p::selection { color: rgba(0, 0, 0, 0); background-color: #fff; }",
 	});
 	assert.match(problems.join("; "), /contrast 1\.00:1 is below 7:1/);
 });
