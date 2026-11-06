@@ -206,14 +206,21 @@ function quoteForDisplay(value: string): string {
     : value;
 }
 
+const HTTP_PROTOCOLS = new Set(["http:", "https:"]);
+
+function isHttpUrl(value: string): boolean {
+  return URL.canParse(value) && HTTP_PROTOCOLS.has(new URL(value).protocol);
+}
+
 /**
  * Resolves an `http_health` manifest URL against the operator-supplied
  * `PDPP_CANARY_ORIGIN`. Manifests carry a path (`/owner/login`) so no
- * deployment hostname is committed. Absolute URLs pass through unchanged; a
- * relative path with no origin throws rather than guessing a target.
+ * deployment hostname is committed. Absolute http(s) URLs pass through
+ * unchanged; anything else is a path, so a missing origin throws rather than
+ * guessing a target, and a malformed origin throws from the URL parser.
  */
 export function resolveProbeUrl(url: string, origin: string | undefined): string {
-  if (URL.canParse(url)) {
+  if (isHttpUrl(url)) {
     return url;
   }
   if (!origin) {
@@ -224,16 +231,23 @@ export function resolveProbeUrl(url: string, origin: string | undefined): string
 
 /**
  * Returns an error message when an `http_health` check needs
- * `PDPP_CANARY_ORIGIN` and it is unset, else null. `main` calls this before
- * the build, so a missing origin stops the run before any image or container
- * action instead of surfacing mid-deploy.
+ * `PDPP_CANARY_ORIGIN` and it is unset or is not an http(s) URL, else null.
+ * `main` calls this before the build, so a missing or malformed origin stops
+ * the run before any image or container action instead of surfacing
+ * mid-deploy.
  */
 export function probeOriginProblem(
   checks: ReadonlyArray<{ readonly kind: string; readonly url?: string }>,
   origin: string | undefined
 ): string | null {
-  const needsOrigin = checks.some((check) => check.kind === "http_health" && !URL.canParse(check.url ?? ""));
-  return needsOrigin && !origin ? "PDPP_CANARY_ORIGIN is required: an http_health check uses a relative path" : null;
+  const needsOrigin = checks.some((check) => check.kind === "http_health" && !isHttpUrl(check.url ?? ""));
+  if (!needsOrigin) {
+    return null;
+  }
+  if (!origin) {
+    return "PDPP_CANARY_ORIGIN is required: an http_health check uses a relative path";
+  }
+  return isHttpUrl(origin) ? null : "PDPP_CANARY_ORIGIN must be an http: or https: URL";
 }
 
 async function collectMetric(
@@ -357,7 +371,7 @@ function evaluateNonNumericCheck(
   return null;
 }
 
-async function evaluateAfter(
+export async function evaluateAfter(
   manifest: CanaryManifest,
   check: CanaryManifest["checks"][number],
   before: string | number | null,
@@ -375,7 +389,14 @@ async function evaluateAfter(
     return await evaluateConnectorRun(check, base);
   }
 
-  const after = await collectMetric(manifest, check, spec);
+  let after: string | number | null;
+  try {
+    after = await collectMetric(manifest, check, spec);
+  } catch (error) {
+    // A probe that throws is a failed check, not a crashed deploy: the caller
+    // must still reach rollback and the receipt.
+    return { ...base, after: null, detail: `probe threw: ${String(error)}`, passed: false };
+  }
 
   const nonNumeric = evaluateNonNumericCheck(check, base, before, after);
   if (nonNumeric) {
