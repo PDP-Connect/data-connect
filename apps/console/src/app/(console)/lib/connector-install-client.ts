@@ -10,6 +10,7 @@
  */
 
 import {
+  ConnectorInstallContractError,
   type ConnectorInstallCatalogEntry,
   type ConnectorLocalSource,
   type ConnectorInstallSnapshot,
@@ -60,24 +61,32 @@ async function connectorInstallFetch(path: string, init: RequestInit = {}): Prom
   return response.json();
 }
 
-function warnSkipped(kind: "catalog" | "status", skipped: number): void {
+function warnSkippedCatalogEntries(skipped: number): void {
   if (skipped > 0) {
-    console.warn(`connector install ${kind}: skipped ${skipped} malformed entr${skipped === 1 ? "y" : "ies"}`);
+    console.warn(`connector install catalog: skipped ${skipped} malformed entr${skipped === 1 ? "y" : "ies"}`);
   }
 }
 
 async function fetchInstallCatalog(): Promise<{ entries: ConnectorInstallCatalogEntry[]; skipped: number }> {
   const payload = await connectorInstallFetch("/v1/owner/connector-install/catalog");
   const parsed = parseConnectorInstallCatalogResponse(payload);
-  warnSkipped("catalog", parsed.skipped);
+  warnSkippedCatalogEntries(parsed.skipped);
   return { entries: [...parsed.data], skipped: parsed.skipped };
 }
 
 async function fetchInstallStatus(): Promise<{ entries: ConnectorInstallStatus[]; skipped: number }> {
   const payload = await connectorInstallFetch("/v1/owner/connector-install/status");
   const parsed = parseConnectorInstallStatusResponse(payload);
-  warnSkipped("status", parsed.skipped);
-  return { entries: [...parsed.data], skipped: parsed.skipped };
+  // A skipped catalog entry only hides one package offer. A skipped status
+  // entry loses an installed-package fact, and the card would then render
+  // that installed package as "Not installed" with an Install button, so the
+  // status read stays all-or-nothing.
+  if (parsed.skipped > 0) {
+    throw new ConnectorInstallContractError(
+      `connector install status: ${parsed.skipped} malformed entr${parsed.skipped === 1 ? "y" : "ies"}; installed state is unknown.`
+    );
+  }
+  return { entries: [...parsed.data], skipped: 0 };
 }
 
 export async function listConnectorInstallCatalog(): Promise<ConnectorInstallCatalogEntry[]> {

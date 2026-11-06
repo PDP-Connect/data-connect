@@ -468,6 +468,7 @@ function SourceSetupCard({
   const status = sourceSetupStatus(entry);
   const {
     installModel,
+    noSetupPath,
     packageAvailabilityUnknown,
     packageNeedsInstall,
     registrationPending,
@@ -511,6 +512,10 @@ function SourceSetupCard({
         {entry.isKnownScaffold ? (
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
             This connector's collection code is not built yet.
+          </span>
+        ) : noSetupPath ? (
+          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
+            Not installable: no setup path is available here.
           </span>
         ) : packageAvailabilityUnknown ? (
           <span className="pdpp-caption text-status-warning-fg" data-testid="connector-install-catalog-transient">
@@ -704,7 +709,8 @@ export function SourceSetupCatalog({
           {unavailableEntries.length > 0 ? (
             <details className="group" data-testid="unavailable-connectors-disclosure">
               <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
-                More connectors ({unavailableEntries.length})
+                {unavailableEntries.length}{" "}
+                {unavailableEntries.length === 1 ? "connector cannot" : "connectors cannot"} be added here
               </summary>
               <div className="mt-3">
                 <SourceSetupCardList

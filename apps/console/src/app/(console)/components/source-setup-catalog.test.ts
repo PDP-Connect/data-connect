@@ -87,7 +87,7 @@ const BROWSER_SETUP_LINK = /href="\/connect\/browser-session\//;
 const INSTALL_OR_BROWSER_SETUP = />Install<\/button>|href="\/connect\/browser-session\//;
 const INSTALL_DISABLED = /data-testid="connector-install-disabled"/;
 const HOST_BLOCK = /Host blocked: Browser unavailable here\./;
-const MORE_CONNECTORS = /More connectors \(1\)/;
+const CANNOT_ADD_HERE = /1 connector cannot be added here/;
 const PLATFORM_COPY = /not available on this platform/;
 const UNKNOWN_PACKAGE = /data-testid="connector-install-catalog-transient"/;
 const INSTALL_FIRST = /Install package first/;
@@ -110,8 +110,17 @@ const browserPackage: ConnectorInstallLifecycle = {
   installed: null,
 };
 
+// A connector whose account setup is fully supported once it is registered.
+// Before its package is installed the setup route would answer 404, so the
+// card must lead with Install and only link to setup afterwards.
+const setupCapable: ConnectorCatalogEntry = {
+  ...unregisteredBrowser,
+  disposition: "browser_collector_manual",
+  ownerActionable: true,
+};
+
 test("an unregistered browser connector offers Install before account setup exists", async () => {
-  const html = await render(false, unregisteredBrowser, browserPackage);
+  const html = await render(false, setupCapable, browserPackage);
   assert.match(html, INSTALL_BUTTON, "the actual package control must remain reachable before registration");
   assert.match(html, UNAVAILABLE_FALSE);
   assert.doesNotMatch(html, UNAVAILABLE_DISCLOSURE);
@@ -133,9 +142,40 @@ test("known scaffolds still offer neither Install nor account setup", async () =
   assert.doesNotMatch(html, INSTALL_OR_BROWSER_SETUP);
 });
 
+// Installing a package registers a connector but cannot create a setup path:
+// these dispositions stay without an account action after registration, so an
+// Install button for them would end in a connector that can never collect.
+const DISPOSITIONS_WITHOUT_SETUP_PATH = [
+  "provider_auth_proof_gated",
+  "api_network_unsupported",
+  "unknown_unsupported",
+  "browser_bound_runbook",
+] as const;
+const NOT_INSTALLABLE = /Not installable: no setup path is available here\./;
+
+for (const disposition of DISPOSITIONS_WITHOUT_SETUP_PATH) {
+  test(`${disposition} never offers an install control and sorts into the collapsed footer`, async () => {
+    const entry: ConnectorCatalogEntry = {
+      ...unregisteredBrowser,
+      disposition,
+      ownerActionable: undefined,
+      supportState: "unsupported",
+    };
+    for (const busy of [false, true]) {
+      const html = await render(busy, entry, browserPackage);
+      assert.doesNotMatch(html, INSTALL_BUTTON, `${disposition} (busy=${busy}) must not offer Install`);
+      assert.doesNotMatch(html, INSTALL_FIRST);
+      assert.match(html, INSTALL_DISABLED);
+      assert.match(html, NOT_INSTALLABLE);
+      assert.match(html, UNAVAILABLE_TRUE);
+      assert.match(html, UNAVAILABLE_DISCLOSURE);
+    }
+  });
+}
+
 test("an explicit host restriction is displayed without offering Install", async () => {
   assert.ok(browserPackage.catalog);
-  const html = await render(false, unregisteredBrowser, {
+  const html = await render(false, setupCapable, {
     ...browserPackage,
     catalog: {
       ...browserPackage.catalog,
@@ -148,19 +188,19 @@ test("an explicit host restriction is displayed without offering Install", async
 
 test("a package without a latest digest does not gain an Install control", async () => {
   assert.ok(browserPackage.catalog);
-  const html = await render(false, unregisteredBrowser, {
+  const html = await render(false, setupCapable, {
     ...browserPackage,
     catalog: { ...browserPackage.catalog, latest: false },
   });
   assert.doesNotMatch(html, INSTALL_BUTTON);
   assert.match(html, UNAVAILABLE_TRUE);
   assert.match(html, UNAVAILABLE_DISCLOSURE);
-  assert.match(html, MORE_CONNECTORS);
+  assert.match(html, CANNOT_ADD_HERE);
   assert.doesNotMatch(html, PLATFORM_COPY);
 });
 
 test("a busy package catalog shows retry guidance without offering an unknown install", async () => {
-  const html = await render(true, unregisteredBrowser, browserPackage);
+  const html = await render(true, setupCapable, browserPackage);
   assert.match(html, UNKNOWN_PACKAGE);
   assert.match(html, UNAVAILABLE_FALSE);
   assert.doesNotMatch(html, INSTALL_OR_BROWSER_SETUP);
@@ -192,15 +232,6 @@ test("after installation account setup appears only when the setup planner suppo
   assert.match(ready, UNAVAILABLE_FALSE);
   assert.doesNotMatch(ready, INSTALL_BUTTON);
 });
-
-// A connector whose account setup is fully supported once it is registered.
-// Before its package is installed the setup route would answer 404, so the
-// card must lead with Install and only link to setup afterwards.
-const setupCapable: ConnectorCatalogEntry = {
-  ...unregisteredBrowser,
-  disposition: "browser_collector_manual",
-  ownerActionable: true,
-};
 
 test("a setup-capable connector offers Install first and links to account setup only once installed", async () => {
   const beforeInstall = await render(false, setupCapable, browserPackage);

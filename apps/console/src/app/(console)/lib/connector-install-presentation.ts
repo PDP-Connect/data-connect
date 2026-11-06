@@ -189,10 +189,3 @@ export function connectorInstallRowModel(
     tier: tierFor(entry, lifecycle),
   };
 }
-
-export function connectorInstallTierLabel(tier: CatalogPublicTier): string {
-  if (tier === "unknown") {
-    return "Tier not declared";
-  }
-  return tier.charAt(0).toUpperCase() + tier.slice(1);
-}

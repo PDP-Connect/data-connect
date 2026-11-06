@@ -82,6 +82,8 @@ test("development and unavailable entries cannot become runnable add offers", ()
   assert.ok(development);
   assert.equal(development.publicTier, "development");
   assert.equal(isRunnableAddOffer(development), false);
+  // An undeclared tier is neither supported nor preview, so it is no offer.
+  assert.equal(isRunnableAddOffer({ ...development, publicTier: "unknown" }), false);
 });
 
 const TRAILING_SLASH_RE = /\/$/;

@@ -9,8 +9,17 @@ const installed: string[] = [];
 let catalog: ConnectorInstallCatalogEntry[] = [];
 
 const noop = async () => undefined;
+let denyAccess = false;
 mock.module("next/cache", { namedExports: { revalidatePath() {} } });
-mock.module("../../lib/dashboard-access.ts", { namedExports: { requireDashboardAccess: noop } });
+mock.module("../../lib/dashboard-access.ts", {
+  namedExports: {
+    requireDashboardAccess: async () => {
+      if (denyAccess) {
+        throw new Error("redirect:/sign-in");
+      }
+    },
+  },
+});
 mock.module("../../lib/connector-install-client.ts", {
   namedExports: {
     addConnectorLocalSource: noop,
@@ -56,4 +65,37 @@ test("installing the current latest digest goes through", async () => {
   catalog = [row(OLD, false), row(NEW, true)];
   assert.deepEqual(await installConnectorAction("github", NEW), { ok: true });
   assert.deepEqual(installed, [`github@${NEW}`]);
+});
+
+test("a package that left the catalog is reported as gone, not as superseded", async () => {
+  const { installConnectorAction } = await actions;
+  installed.length = 0;
+  catalog = [];
+  const result = await installConnectorAction("github", OLD);
+  assert.equal(result.ok, false);
+  assert.ok(!result.ok);
+  assert.match(result.message, /no longer listed/i);
+  assert.doesNotMatch(result.message, /newer/i);
+  assert.deepEqual(installed, []);
+});
+
+test("a superseded digest is still reported as a newer version", async () => {
+  const { installConnectorAction } = await actions;
+  catalog = [row(OLD, false), row(NEW, true)];
+  const result = await installConnectorAction("github", OLD);
+  assert.ok(!result.ok);
+  assert.match(result.message, /newer/i);
+});
+
+test("a request without dashboard access never reaches the catalog or the install call", async () => {
+  const { installConnectorAction } = await actions;
+  installed.length = 0;
+  catalog = [row(NEW, true)];
+  denyAccess = true;
+  try {
+    await assert.rejects(installConnectorAction("github", NEW), /redirect:\/sign-in/);
+  } finally {
+    denyAccess = false;
+  }
+  assert.deepEqual(installed, []);
 });
