@@ -13,7 +13,7 @@ import type { ProviderInvalidationProof } from "./repair-decision.ts";
  * message text.
  */
 
-const MAX_PATTERN_LENGTH = 512;
+export const MAX_SIGN_IN_PATTERN_LENGTH = 512;
 const MAX_URL_LENGTH = 2048;
 
 /** Declared at `runtime_requirements.bindings.browser.sign_in_url_pattern`. */
@@ -32,29 +32,58 @@ export function signInUrlPatternFromManifest(manifest: {
 	}
 	const pattern = (browser as { readonly sign_in_url_pattern?: unknown })
 		.sign_in_url_pattern;
-	return typeof pattern === "string" &&
-		pattern.trim().length > 0 &&
-		pattern.length <= MAX_PATTERN_LENGTH
-		? pattern.trim()
+	const trimmed = typeof pattern === "string" ? pattern.trim() : "";
+	return trimmed.length > 0 && trimmed.length <= MAX_SIGN_IN_PATTERN_LENGTH
+		? trimmed
 		: null;
 }
 
-/** Anchored glob over the whole URL; `*` matches any run of characters, everything else is literal. */
+/**
+ * Anchored glob over the whole URL; `*` matches any run of characters and
+ * everything else is literal. Segments are matched left to right with
+ * `indexOf`, never a regular expression, so a hostile pattern cannot trigger
+ * backtracking; both inputs are length-capped, which bounds the work.
+ */
 export function signInUrlMatchesPattern(pattern: string, url: string): boolean {
-	if (pattern.length > MAX_PATTERN_LENGTH || url.length > MAX_URL_LENGTH) {
+	if (
+		pattern.length > MAX_SIGN_IN_PATTERN_LENGTH ||
+		url.length > MAX_URL_LENGTH
+	) {
 		return false;
 	}
-	const source = pattern
-		.split("*")
-		.map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-		.join(".*");
-	return new RegExp(`^${source}$`).test(url);
+	const parts = pattern.split("*");
+	if (parts.length === 1) {
+		return pattern === url;
+	}
+	const first = parts[0] ?? "";
+	const last = parts.at(-1) ?? "";
+	if (
+		!(url.startsWith(first) && url.endsWith(last)) ||
+		first.length + last.length > url.length
+	) {
+		return false;
+	}
+	const end = url.length - last.length;
+	let position = first.length;
+	for (const part of parts.slice(1, -1)) {
+		if (part === "") {
+			continue;
+		}
+		const found = url.indexOf(part, position);
+		if (found < 0 || found + part.length > end) {
+			return false;
+		}
+		position = found + part.length;
+	}
+	return true;
 }
 
 /**
- * Reads the most recent top-level page URL from the run's own browser surface
- * (DevTools target list on the surface the runtime leased). It sends nothing
- * to the provider.
+ * Reads the run's top-level page URL from its own browser surface (DevTools
+ * target list). It sends nothing to the provider. The list does not carry
+ * navigation order or run ownership, so it fails closed: the URL is returned
+ * only when exactly one page target has an http(s) URL. Several candidates
+ * (another tab, a popup) make "the last navigation" unknowable, so no proof.
  */
 export async function observeLastTopLevelUrl(
 	cdpUrl: string,
@@ -70,19 +99,17 @@ export async function observeLastTopLevelUrl(
 	if (!Array.isArray(targets)) {
 		return null;
 	}
-	for (const target of targets as readonly {
-		readonly type?: unknown;
-		readonly url?: unknown;
-	}[]) {
-		if (
-			target?.type === "page" &&
-			typeof target.url === "string" &&
-			/^https?:/i.test(target.url)
-		) {
-			return target.url;
-		}
-	}
-	return null;
+	const candidates = (
+		targets as readonly { readonly type?: unknown; readonly url?: unknown }[]
+	)
+		.filter(
+			(target) =>
+				target?.type === "page" &&
+				typeof target.url === "string" &&
+				/^https?:/i.test(target.url),
+		)
+		.map((target) => target.url as string);
+	return candidates.length === 1 ? (candidates[0] ?? null) : null;
 }
 
 export interface SignInProofInput {

@@ -11,6 +11,7 @@
  */
 
 import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
+import { MAX_SIGN_IN_PATTERN_LENGTH } from "../runtime/browser-surface/sign-in-proof.ts";
 import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
 import {
   normalizeStaticSecretCredentialCapture,
@@ -356,10 +357,15 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): bo
     if (reqObj.required !== undefined && typeof reqObj.required !== "boolean") {
       throw invalidConnectorManifest(`runtime_requirements.bindings.${binding}.required must be a boolean`, code);
     }
-    const signInPattern = reqObj.sign_in_url_pattern;
-    if (signInPattern !== undefined && (typeof signInPattern !== "string" || signInPattern.trim().length === 0)) {
+    const signInPattern = binding === "browser" ? reqObj.sign_in_url_pattern : undefined;
+    if (
+      signInPattern !== undefined &&
+      (typeof signInPattern !== "string" ||
+        signInPattern.trim().length === 0 ||
+        signInPattern.trim().length > MAX_SIGN_IN_PATTERN_LENGTH)
+    ) {
       throw invalidConnectorManifest(
-        `runtime_requirements.bindings.${binding}.sign_in_url_pattern must be a non-empty string`,
+        `runtime_requirements.bindings.browser.sign_in_url_pattern must be a non-empty string of at most ${MAX_SIGN_IN_PATTERN_LENGTH} characters`,
         code
       );
     }

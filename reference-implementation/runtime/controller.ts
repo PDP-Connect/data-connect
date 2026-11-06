@@ -554,6 +554,11 @@ export interface ControllerOptions {
   }) => Promise<void> | void;
   /** Awaited before a managed surface lease becomes reusable after run cleanup. */
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
+  /** Run-completion sign-in proof writer. Defaults to the durable store-backed recorder; tests may observe it. */
+  recordSignInProof?: (
+    deps: Parameters<typeof recordSignInProofAfterRun>[0],
+    input: Parameters<typeof recordSignInProofAfterRun>[1]
+  ) => ReturnType<typeof recordSignInProofAfterRun>;
   /**
    * Resolves the host allocator's recorded start failure (code + message) for a
    * run whose browser-surface lease just went surface_failed. Wired to the host
@@ -3386,18 +3391,28 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // Runtime-side provider-invalidation proof: the run's own browser surface
   // is read while the lease is still held. Never lets a recording failure
   // change the run outcome.
+  //
+  // Fenced on run identity: only the run that still owns the connection slot,
+  // at the generation it was admitted under, may write. A late result from a
+  // run the watchdog already reclaimed must neither clear a newer run's proof
+  // nor attribute another run's page to itself.
   async function recordSignInProofForRun(input: {
     readonly browserSurfaceLease: BrowserSurfaceLease | null;
     readonly connectorId: string;
     readonly connectorInstanceId: string;
+    readonly generation: number;
+    readonly key: string;
     readonly manifest: ConnectorManifest;
     readonly runId: string;
     readonly status: string | null | undefined;
   }): Promise<void> {
+    if (activeRuns.get(input.key)?.run_id !== input.runId || runGenerations.get(input.key) !== input.generation) {
+      return;
+    }
     try {
       const surfaceId = input.browserSurfaceLease?.surface_id;
       const cdpUrl = surfaceId ? (browserSurfaceLeaseManager?.getSurface(surfaceId)?.cdp_url ?? null) : null;
-      await recordSignInProofAfterRun(
+      await (opts.recordSignInProof ?? recordSignInProofAfterRun)(
         { store: getDefaultProviderInvalidationProofStore() },
         {
           cdpUrl,
@@ -4176,14 +4191,17 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly browserSurfaceLease: BrowserSurfaceLease | null;
     readonly connectorId: string;
     readonly connectorInstanceId: string;
+    readonly generation: number;
     readonly key: string;
+    readonly manifest: ConnectorManifest;
     readonly runId: string;
     readonly traceContext: SpineTraceContext;
   }): void {
     if (!Number.isFinite(maxRunWallClockMs) || maxRunWallClockMs <= 0) {
       return;
     }
-    const { browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext } = input;
+    const { browserSurfaceLease, connectorId, connectorInstanceId, generation, key, manifest, runId, traceContext } =
+      input;
     let resolveSettlement!: () => void;
     const settlementPromise = new Promise<void>((resolve) => {
       resolveSettlement = resolve;
@@ -4233,6 +4251,17 @@ export function createController(opts: ControllerOptions = {}): Controller {
           const emitMessage = emitErr instanceof Error ? emitErr.message : String(emitErr);
           log.warn?.(`[controller] watchdog: failed to emit run_timed_out terminal for ${runId}: ${emitMessage}`);
         }
+        // Capture terminal evidence while the lease is still held.
+        await recordSignInProofForRun({
+          browserSurfaceLease,
+          connectorId,
+          connectorInstanceId,
+          generation,
+          key,
+          manifest,
+          runId,
+          status: "failed",
+        });
         await finalizeRunCleanup({ browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext });
       };
       emitAndFinalize()
@@ -4537,6 +4566,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
           browserSurfaceLease,
           connectorId,
           connectorInstanceId,
+          generation: myRunGeneration,
+          key,
           manifest,
           runId,
           status: result?.status,
@@ -4613,6 +4644,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
           );
           return;
         }
+        // The run rejected before a result existed: capture failure evidence
+        // while the lease is still held (the fence above and in the recorder
+        // keep a reclaimed run out).
+        await recordSignInProofForRun({
+          browserSurfaceLease,
+          connectorId,
+          connectorInstanceId,
+          generation: myRunGeneration,
+          key,
+          manifest,
+          runId,
+          status: "failed",
+        });
         // Close the phantom-202 window: a throw before the runtime's
         // `run.started` emit (env/spawn prep) used to leave a 202-returned
         // run id with ZERO spine events — log-and-forget. Emit a typed
@@ -4704,7 +4748,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // in activeRuns that blocks all future run-nows with 409 until restart.
     // armRunWatchdog bounds this: it force-finalizes the run after the budget
     // expires and is a no-op when maxRunWallClockMs is Infinity or zero.
-    armRunWatchdog({ browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext });
+    armRunWatchdog({
+      browserSurfaceLease,
+      connectorId,
+      connectorInstanceId,
+      generation: myRunGeneration,
+      key,
+      manifest,
+      runId,
+      traceContext,
+    });
 
     return { run_id: runId, status: "started", trace_id: traceContext.trace_id, ...automationMetadata };
   }
