@@ -1013,18 +1013,10 @@ export function createConnectorInstallService(options: {
           );
         } else {
           // A crash can leave the published directory between rename and the
-          // active-record commit. A root that still verifies against the catalog
-          // entry is adopted: activate and register it as an install would.
-          // Anything else is an invalid leftover and is removed.
-          let adoptable = true;
-          try {
-            readVerifiedRecord(root, entry);
-          } catch {
-            adoptable = false;
-          }
-          if (adoptable) {
-            return await reuseExistingInstall(root, entry, null, null, dataDir, options.registerManifest, store, signal);
-          }
+          // active-record commit. No record means no retained verification: hashing
+          // the bytes found here into a new record would make whatever is on disk the
+          // verified bytes. The leftover is removed and the install below takes the
+          // bytes from the verified artifact again.
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
             throw new Error("Connector digest root already exists without a matching active record.");

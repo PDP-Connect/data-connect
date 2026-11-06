@@ -26,7 +26,8 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -464,7 +465,7 @@ test("a retried install after a kill between pointer and registry also restores 
   });
 });
 
-test("killed after the root is published and before the pointer write: a retried install adopts the root", async () => {
+test("killed after the root is published and before the pointer write: a retried install reinstalls the root", async () => {
   await withSandbox(async ({ dataDir, dbPath }) => {
     const env = { PDPP_DATA_DIR: dataDir };
     await killChildAt(CHILD, "connector-install:after-publish", {
@@ -475,9 +476,54 @@ test("killed after the root is published and before the pointer write: a retried
     assert.equal(existsSync(rootOf(dataDir, GMAIL_INSTALL_DIGEST)), true, "the crash left a published root");
     assert.equal(await activeRecord(), null, "no pointer was written");
 
-    const adopted = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
+    const installed = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
 
-    assert.equal(adopted.digest, GMAIL_INSTALL_DIGEST);
-    assert.equal((await agreement()).agree, true, "the adopted root is active and registered");
+    assert.equal(installed.digest, GMAIL_INSTALL_DIGEST);
+    assert.equal((await agreement()).agree, true, "the reinstalled root is active and registered");
+  });
+});
+
+// A root with no active record has no retained verification, so nothing it contains can vouch for
+// itself. Hashing its bytes into a fresh record would make the altered bytes the verified ones, so
+// the install removes the leftover and takes the bytes from the verified artifact again.
+test("a root left by a crash and then altered is not adopted: the retry installs the verified bytes", async () => {
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    const env = { PDPP_DATA_DIR: dataDir };
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env,
+    });
+    await initDb(dbPath);
+    const root = rootOf(dataDir, GMAIL_INSTALL_DIGEST);
+    writeFileSync(join(root, "dist", "collection-profile.mjs"), "process.exit(1);\n");
+    writeFileSync(join(root, "provenance.json"), '{"altered":true}\n');
+    writeFileSync(join(root, "source-declaration.json"), '{"altered":true}');
+    writeFileSync(join(root, "planted-extra.mjs"), "export {};\n");
+
+    const installed = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
+
+    assert.equal(readFileSync(join(installed.root, "dist", "collection-profile.mjs"), "utf8"), "export {};\n");
+    assert.equal(readFileSync(join(installed.root, "provenance.json"), "utf8"), "{}\n");
+    assert.equal(existsSync(join(installed.root, "source-declaration.json")), false, "an altered sidecar is gone");
+    assert.equal(existsSync(join(installed.root, "planted-extra.mjs")), false, "nothing the crash left survives");
+    assert.equal(installed.sourceDeclarationSha256, undefined, "no sidecar digest comes from observed bytes");
+    assert.equal((await agreement()).agree, true);
+  });
+});
+
+test("a root left by a crash with only its executable altered is not adopted", async () => {
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    const env = { PDPP_DATA_DIR: dataDir };
+    await killChildAt(CHILD, "connector-install:after-publish", {
+      args: [dbPath, dataDir, "install"],
+      env,
+    });
+    await initDb(dbPath);
+    writeFileSync(join(rootOf(dataDir, GMAIL_INSTALL_DIGEST), "dist", "collection-profile.mjs"), "process.exit(1);\n");
+
+    const installed = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
+
+    assert.equal(readFileSync(join(installed.root, "dist", "collection-profile.mjs"), "utf8"), "export {};\n");
+    assert.equal(installed.entrypointSha256, `sha256:${createHash("sha256").update("export {};\n").digest("hex")}`);
   });
 });
