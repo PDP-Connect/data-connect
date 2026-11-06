@@ -8,7 +8,7 @@
  *   POST /_ref/connections/:connectorInstanceId/acknowledge-loss
  *
  * This is the missing write path for `runtime/acknowledged-loss.ts`
- * (BANNER-ZERO-PLAN.md workstream E, H-E-B gezalsatx row): the record shape,
+ * (BANNER-ZERO-PLAN.md workstream E, H-E-B terminal-gap row): the record shape,
  * validation, and rendering already existed and are covered by
  * `test/acknowledged-loss.test.ts` and `test/acknowledged-loss-store.test.ts`
  * — this suite proves only the NEW route's own behavior (auth, validation,

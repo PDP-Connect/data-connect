@@ -520,13 +520,13 @@ const STORE_FIXTURES: Record<string, StoreFixture> = {
   reddit: {
     expectedEnv: {
       REDDIT_PASSWORD: "stored-reddit-password",
-      REDDIT_USERNAME: "dondochaka",
+      REDDIT_USERNAME: "janedoe",
     },
     recovered: {
       credentialKind: "username_password",
       secret: JSON.stringify({
         password: "stored-reddit-password",
-        username: "dondochaka",
+        username: "janedoe",
       }),
     },
     sourceBinding: null,

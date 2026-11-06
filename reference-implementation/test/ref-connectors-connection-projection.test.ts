@@ -1969,14 +1969,14 @@ test(
   "ChatGPT-shaped browser_collector connection with no credential does NOT project credential_required (binding-first: session repair, not static-secret capture)",
   withTmpDb(async () => {
     seedBrowserBoundStaticSecretConnector();
-    // Mirror the live dondochaka shape exactly: source_kind is `account`, and the
+    // Mirror the live janedoe shape exactly: source_kind is `account`, and the
     // browser_collector fact lives in source_binding.kind (not source_kind). This
     // connection logs in via the browser session (e.g. Google SSO), so an absent
     // credential row is normal — NOT a "capture a username/password" repair need.
     await seedInstance({
       connectorId: CHATGPT_SHAPED_CONNECTOR_ID,
       connectorInstanceId: CHATGPT_SHAPED_INSTANCE_ID,
-      displayName: "ChatGPT - dondochaka-like",
+      displayName: "ChatGPT - janedoe-like",
       sourceBinding: { device: "personal", kind: "browser_collector" },
       sourceBindingKey: "browser-static-secret",
       sourceKind: "account",
@@ -2009,7 +2009,7 @@ test(
   })
 );
 
-// Live wedge regression (dondochaka, cin_e4ab231c7d49b8f59e4c80ed): after an
+// Live wedge regression (janedoe, cin_e4ab231c7d49b8f59e4c80ed): after an
 // attended browser-session repair times out, the next scheduled run's
 // DOM/API auth probe reports a definitive auth failure (401/unauthorized)
 // wrapped in ChatGPT's `_session_failed` terminal-error prefix. The known-gap
@@ -2029,7 +2029,7 @@ test(
     await seedInstance({
       connectorId: CHATGPT_SHAPED_CONNECTOR_ID,
       connectorInstanceId: CHATGPT_SHAPED_INSTANCE_ID,
-      displayName: "ChatGPT - dondochaka-like",
+      displayName: "ChatGPT - janedoe-like",
       sourceBinding: { device: "personal", kind: "browser_collector" },
       sourceBindingKey: "browser-static-secret",
       sourceKind: "account",
@@ -2466,7 +2466,7 @@ test(
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
       displayName: "",
-      sourceBinding: { kind: "static_secret", verified_identity: "gezalsatx@yahoo.com" },
+      sourceBinding: { kind: "static_secret", verified_identity: "jane.doe@example.com" },
       sourceBindingKey: "identity_a",
       sourceKind: "account",
     });
@@ -2482,7 +2482,7 @@ test(
     const b = rows.find((r) => r.connector_instance_id === PERSONAL_INSTANCE_ID);
     assert.ok(a);
     assert.ok(b);
-    assert.equal(a.display_name, "Connection First Records - gezalsatx@yahoo.com");
+    assert.equal(a.display_name, "Connection First Records - jane.doe@example.com");
     assert.equal(b.display_name, "Connection First Records - owner@example.com");
     assert.notEqual(a.display_name, b.display_name, "two accounts of one connector must never render identically");
   })
@@ -2495,14 +2495,14 @@ test(
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
       displayName: "Shopping",
-      sourceBinding: { kind: "static_secret", verified_identity: "gezalsatx@yahoo.com" },
+      sourceBinding: { kind: "static_secret", verified_identity: "jane.doe@example.com" },
       sourceBindingKey: "identity_a",
       sourceKind: "account",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "Shopping - gezalsatx@yahoo.com", "the owner's own name is preserved, not replaced");
+    assert.equal(row.display_name, "Shopping - jane.doe@example.com", "the owner's own name is preserved, not replaced");
   })
 );
 
@@ -2512,15 +2512,15 @@ test(
     seedConnector();
     await seedInstance({
       connectorInstanceId: WORK_INSTANCE_ID,
-      displayName: "Amazon gezalsatx@yahoo.com",
-      sourceBinding: { kind: "static_secret", verified_identity: "gezalsatx@yahoo.com" },
+      displayName: "Amazon jane.doe@example.com",
+      sourceBinding: { kind: "static_secret", verified_identity: "jane.doe@example.com" },
       sourceBindingKey: "identity_a",
       sourceKind: "account",
     });
     const rows = (await listConnectorSummaries()).filter((row) => row.connector_id === CONNECTOR_ID);
     const row = rows.find((r) => r.connector_instance_id === WORK_INSTANCE_ID);
     assert.ok(row);
-    assert.equal(row.display_name, "Amazon gezalsatx@yahoo.com");
+    assert.equal(row.display_name, "Amazon jane.doe@example.com");
   })
 );
 
