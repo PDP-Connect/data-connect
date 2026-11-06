@@ -4299,7 +4299,7 @@ export function deriveOutboxAxisFromHeartbeat(
  * Extracted from `deriveOutboxAxisFromHeartbeat` to keep that function's
  * cognitive complexity within the repo's lint budget.
  *
- * Stale-heartbeat split (owner-reported 2026-08-27, Signal/peregrine): a
+ * Stale-heartbeat split (owner-reported 2026-08-27, Signal/workstation): a
  * `blocked` heartbeat with no dead letters used to classify
  * `state_read_failed` REGARDLESS of heartbeat age, and that cause renders
  * "The server cannot read the collector's last state from that host." For

@@ -1133,12 +1133,12 @@ test("source issues do not classify legacy degraded health without a server work
 test("attention routeId targets the EXACT connection instance, not the connector type", () => {
   // The multi-account seam bug: three Claude Code devices share connector_id
   // "claude-code"; only laptop is in attention. Routing by connector_id would
-  // resolve to whichever connection is first (e.g. healthy Simon VM). The routeId
+  // resolve to whichever connection is first (e.g. healthy VM). The routeId
   // must be the connection identity (connector_instance_id ?? connection_id) so
   // the CTA lands on the connection that actually needs the owner.
   const connectors: RefConnectorSummary[] = [
     connector({
-      connection_id: "cin_simon",
+      connection_id: "cin_vm",
       connector_id: "claude-code",
       source_work: "none",
       rendered_verdict: verdict({ channel: "calm" }),

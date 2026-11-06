@@ -154,7 +154,7 @@ function occurrences(haystack: string, needle: string): number {
 
 test("a state label that already carries its freshness note renders it exactly once", () => {
   // Owner-reported 2026-08-23 against live production data: the /sources row for
-  // "peregrine Claude Code" read
+  // "workstation Claude Code" read
   //   Can't collect · Freshness has not been measured yet. · Freshness has not been measured yet
   // — the same sentence twice, differing only by the trailing period that
   // `freshnessSlot` strips.

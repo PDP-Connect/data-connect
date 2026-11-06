@@ -96,7 +96,7 @@ export interface RedactedStderr {
  *
  * Shape alone CANNOT fix this, and that is the load-bearing finding. A tighter
  * "alphabetic snake_case" rule admits `login_form_never_appeared` but also
- * admits `tim_nunamaker_gmail_com` — a personal name is alphabetic snake_case
+ * admits `jane_doe_example_com` — a personal name is alphabetic snake_case
  * too. No regex separates a declared reason from a name, because the
  * difference is PROVENANCE, not spelling.
  *
