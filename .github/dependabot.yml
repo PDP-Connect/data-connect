@@ -15,19 +15,36 @@ updates:
           - "*"
 
   - package-ecosystem: npm
-    directory: /
+    # The browser dependencies are declared in three places, and CI, the Docker
+    # image and the desktop app must launch the same Chromium. scripts/
+    # check-patchright-version.mjs fails CI when they drift apart.
+    directories:
+      - /
+      - /pdpp-runtime
+      - /playwright-runner
     schedule:
       interval: weekly
-    ignore:
-      # Patchright must move together with pdpp-runtime/package-lock.json and
-      # playwright-runner, which this entry does not update.
-      # scripts/check-patchright-version.mjs fails CI on a partial bump.
-      - dependency-name: patchright
     groups:
+      browser:
+        applies-to: version-updates
+        # Dependabot opens one pull request per dependency name across the
+        # directories, so patchright and playwright arrive as two pull requests.
+        # Each fails the version check until both are merged together.
+        group-by: dependency-name
+        patterns:
+          - patchright
+          - patchright-core
+          - playwright
+          - playwright-core
       npm:
         applies-to: version-updates
         patterns:
           - "*"
+        exclude-patterns:
+          - patchright
+          - patchright-core
+          - playwright
+          - playwright-core
       npm-security:
         applies-to: security-updates
         patterns:
