@@ -466,7 +466,8 @@ interface NativeManifest extends JsonRecord {
 
 interface ResourceRecord extends JsonRecord {
   data: JsonRecord;
-  emitted_at: string;
+  // Owner records carry emitted_at; client-token records do not (Core "Response records").
+  emitted_at?: string;
   id: string;
 }
 
@@ -862,27 +863,47 @@ function parseGrantTimelineResponse(value: unknown): GrantTimelineResponse {
   };
 }
 
-function parseResourceRecord(value: unknown, description: string): ResourceRecord {
+// Core "Response records": an owner response carries emitted_at and a
+// client-token response must not. Client-token call sites pass "client".
+type RecordTokenKind = "client" | "owner";
+
+function parseResourceRecord(
+  value: unknown,
+  description: string,
+  tokenKind: RecordTokenKind = "owner"
+): ResourceRecord {
   const record = requireJsonRecord(value, description);
-  return {
+  const parsed = {
     ...record,
     data: requireJsonRecord(record.data, `${description}.data`),
-    emitted_at: requireString(record.emitted_at, `${description}.emitted_at`),
     id: requireString(record.id, `${description}.id`),
   };
+  if (tokenKind === "client") {
+    assert.equal(Object.hasOwn(record, "emitted_at"), false, `${description} must not carry emitted_at`);
+    return parsed;
+  }
+  return { ...parsed, emitted_at: requireString(record.emitted_at, `${description}.emitted_at`) };
 }
 
-function parseResourceRecordListResponse(value: unknown): ResourceRecordListResponse {
+function parseResourceRecordListResponse(
+  value: unknown,
+  tokenKind: RecordTokenKind = "owner"
+): ResourceRecordListResponse {
   const body = requireJsonRecord(value, "resource record-list response");
   const data = requireJsonRecordArray(body.data, "resource record-list response.data");
   return {
-    data: data.map((record, index) => parseResourceRecord(record, `resource record-list response.data[${index}]`)),
+    data: data.map((record, index) =>
+      parseResourceRecord(record, `resource record-list response.data[${index}]`, tokenKind)
+    ),
   };
 }
 
-function parseResourceRecordPageResponse(value: unknown): ResourceRecordPageResponse {
+function parseResourceRecordPageResponse(
+  value: unknown,
+  tokenKind: RecordTokenKind = "owner"
+): ResourceRecordPageResponse {
   const body = requireJsonRecord(value, "resource record page response");
-  const list = parseResourceRecordListResponse(body);
+  const list = parseResourceRecordListResponse(body, tokenKind);
   return {
     ...list,
     has_more: requireBoolean(body.has_more, "resource record page response.has_more"),
@@ -892,8 +913,11 @@ function parseResourceRecordPageResponse(value: unknown): ResourceRecordPageResp
   };
 }
 
-function parseResourceRecordDetailResponse(value: unknown): ResourceRecordDetailResponse {
-  return parseResourceRecord(value, "resource record-detail response");
+function parseResourceRecordDetailResponse(
+  value: unknown,
+  tokenKind: RecordTokenKind = "owner"
+): ResourceRecordDetailResponse {
+  return parseResourceRecord(value, "resource record-detail response", tokenKind);
 }
 
 function parseResourceStreamListResponse(value: unknown): ResourceStreamListResponse {
@@ -1898,7 +1922,7 @@ test("PDPP reference implementation integration", async (t) => {
         headers: { Authorization: `Bearer ${approved.token}` },
       });
       assert.equal(clientRecordsResp.status, 200);
-      const clientRecords = parseResourceRecordListResponse(await clientRecordsResp.json());
+      const clientRecords = parseResourceRecordListResponse(await clientRecordsResp.json(), "client");
       assert.equal(Array.isArray(clientRecords.data), true);
       assert.equal(clientRecords.data.length, 1);
 
@@ -4519,7 +4543,7 @@ test("PDPP reference implementation integration", async (t) => {
       const recordsTraceId = recordsResp.headers.get("PDPP-Reference-Trace-Id");
       assert.ok(recordsRequestId?.startsWith("req_"));
       assert.equal(recordsTraceId, initialTimeline.trace_id);
-      const recordsBody = parseResourceRecordListResponse(await recordsResp.json());
+      const recordsBody = parseResourceRecordListResponse(await recordsResp.json(), "client");
       assert.equal(recordsBody.data.length, 1);
       assert.equal(requireFirst(recordsBody.data, "native client records").id, "ps_2026_04_15");
 
@@ -4546,7 +4570,7 @@ test("PDPP reference implementation integration", async (t) => {
       const recordTraceId = recordResp.headers.get("PDPP-Reference-Trace-Id");
       assert.ok(recordRequestId?.startsWith("req_"));
       assert.equal(recordTraceId, initialTimeline.trace_id);
-      const recordBody = parseResourceRecordDetailResponse(await recordResp.json());
+      const recordBody = parseResourceRecordDetailResponse(await recordResp.json(), "client");
       assert.equal(recordBody.id, "ps_2026_04_15");
 
       const { body: postQueryTimeline } = await fetchGrantTimeline(asUrl, approved.grant.grant_id);
@@ -7497,7 +7521,7 @@ test("PDPP reference implementation integration", async (t) => {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
         assert.equal(clientRecordsResp.status, 200);
-        const clientRecordsBody = parseResourceRecordListResponse(await clientRecordsResp.json());
+        const clientRecordsBody = parseResourceRecordListResponse(await clientRecordsResp.json(), "client");
         // biome-ignore lint/suspicious/noUnnecessaryConditions: Runtime guard protects an untyped external/test boundary.
         const clientRecords = clientRecordsBody.data || [];
 
@@ -7512,9 +7536,12 @@ test("PDPP reference implementation integration", async (t) => {
           ["spotify:artist:0C0XlULifJtAgn6ZNCW2eu", "spotify:artist:1Xyo4u8uXC1ZmMpatF05PJ"].sort()
         );
 
+        // Core "Response records": client records carry no emitted_at, so each
+        // visible record's emitted_at is read from the owner list by id.
+        const ownerEmittedAt = new Map(ownerRecords.map((record) => [record.id, record.emitted_at] as const));
         const expectedLastUpdated =
           clientRecords
-            .map((record) => record.emitted_at)
+            .map((record) => requireString(ownerEmittedAt.get(record.id), `owner emitted_at for ${record.id}`))
             .sort()
             .at(-1) || null;
         assert.equal(topArtistsSummary.last_updated, expectedLastUpdated);
@@ -7566,7 +7593,7 @@ test("PDPP reference implementation integration", async (t) => {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
         assert.equal(clientRecordsResp.status, 200);
-        const clientRecordsBody = parseResourceRecordListResponse(await clientRecordsResp.json());
+        const clientRecordsBody = parseResourceRecordListResponse(await clientRecordsResp.json(), "client");
         // biome-ignore lint/suspicious/noUnnecessaryConditions: Runtime guard protects an untyped external/test boundary.
         const clientRecords = clientRecordsBody.data || [];
 
@@ -7577,9 +7604,12 @@ test("PDPP reference implementation integration", async (t) => {
         );
         assert.equal(topArtistsSummary.record_count, clientRecords.length);
 
+        // Core "Response records": client records carry no emitted_at, so each
+        // visible record's emitted_at is read from the owner list by id.
+        const ownerEmittedAt = new Map(ownerRecords.map((record) => [record.id, record.emitted_at] as const));
         const expectedLastUpdated =
           clientRecords
-            .map((record) => record.emitted_at)
+            .map((record) => requireString(ownerEmittedAt.get(record.id), `owner emitted_at for ${record.id}`))
             .sort()
             .at(-1) || null;
         assert.equal(topArtistsSummary.last_updated, expectedLastUpdated);
@@ -7879,7 +7909,7 @@ test("PDPP reference implementation integration", async (t) => {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
         assert.equal(clientRecordsResp.status, 200);
-        const clientRecordsBody = parseResourceRecordListResponse(await clientRecordsResp.json());
+        const clientRecordsBody = parseResourceRecordListResponse(await clientRecordsResp.json(), "client");
         // biome-ignore lint/suspicious/noUnnecessaryConditions: Runtime guard protects an untyped external/test boundary.
         const clientRecords = clientRecordsBody.data || [];
 
@@ -7985,7 +8015,7 @@ test("PDPP reference implementation integration", async (t) => {
       assert.ok(requestId?.startsWith("req_"));
       assert.ok(traceId?.startsWith("trc_"));
 
-      const body = parseResourceRecordPageResponse(await resp.json());
+      const body = parseResourceRecordPageResponse(await resp.json(), "client");
       assert.equal(body.object, "list");
       assert.equal(body.has_more, false, "hidden records should not make has_more appear true");
       assert.ok(!body.next_cursor, "no pagination cursor should be exposed when no additional visible records exist");
@@ -8086,7 +8116,7 @@ test("PDPP reference implementation integration", async (t) => {
           headers: { Authorization: `Bearer ${approved.token}` },
         });
         assert.equal(listResp.status, 200);
-        const listBody = parseResourceRecordListResponse(await listResp.json());
+        const listBody = parseResourceRecordListResponse(await listResp.json(), "client");
         // biome-ignore lint/suspicious/noUnnecessaryConditions: Runtime guard protects an untyped external/test boundary.
         const firstRecord = listBody.data?.[0];
         assert.ok(firstRecord, "expected at least one granted record");
@@ -8108,7 +8138,7 @@ test("PDPP reference implementation integration", async (t) => {
           }
         );
         assert.equal(detailResp.status, 200);
-        const detailBody = parseResourceRecordDetailResponse(await detailResp.json());
+        const detailBody = parseResourceRecordDetailResponse(await detailResp.json(), "client");
         assert.equal(detailBody.object, "record");
         // biome-ignore lint/suspicious/noUnnecessaryConditions: Runtime guard protects an untyped external/test boundary.
         assert.deepEqual(Object.keys(detailBody.data || {}).sort(), ["genres", "id", "name"]);
@@ -8703,8 +8733,8 @@ test("PDPP reference implementation integration", async (t) => {
       assert.equal(Object.hasOwn(unrestrictedTombstone, "data"), false);
 
       // spec-core §4 "Tombstones": sparse `fields` select data fields; they must
-      // not strip the tombstone envelope (object, id, stream, deleted, both
-      // timestamps) or add a data field.
+      // not strip the client tombstone envelope (object, id, instance_id, stream,
+      // deleted) or add a data field.
       for (const fields of ["id", "name", "name&limit=1"]) {
         const sparseDelta = await fetchJson(
           `${rsUrl}/v1/streams/top_artists/records?changes_since=${encodeURIComponent(visibleDelta.body.next_changes_since)}&fields=${fields}`,
@@ -8719,8 +8749,9 @@ test("PDPP reference implementation integration", async (t) => {
         assert.equal(sparseTombstone.id, deletedId, `fields=${fields}`);
         assert.equal(sparseTombstone.stream, "top_artists", `fields=${fields}`);
         assert.equal(sparseTombstone.deleted, true, `fields=${fields}`);
-        assert.ok(requireString(sparseTombstone.deleted_at, "tombstone deleted_at").length > 0, `fields=${fields}`);
-        assert.ok(requireString(sparseTombstone.emitted_at, "tombstone emitted_at").length > 0, `fields=${fields}`);
+        // Core Section 4: a client tombstone carries neither timestamp.
+        assert.equal(Object.hasOwn(sparseTombstone, "deleted_at"), false, `fields=${fields}`);
+        assert.equal(Object.hasOwn(sparseTombstone, "emitted_at"), false, `fields=${fields}`);
         assert.equal(Object.hasOwn(sparseTombstone, "data"), false, `fields=${fields}`);
         // Sparse and unrestricted reads expose the same tombstone envelope.
         assert.deepEqual(sparseTombstone, unrestrictedTombstone, `fields=${fields}`);
@@ -8916,7 +8947,7 @@ test("PDPP reference implementation integration", async (t) => {
         assert.ok(requestId?.startsWith("req_"));
         assert.ok(traceId?.startsWith("trc_"));
 
-        const body = parseResourceRecordPageResponse(await resp.json());
+        const body = parseResourceRecordPageResponse(await resp.json(), "client");
         assert.equal(body.object, "list");
         assert.equal(body.has_more, false, "hidden change groups should not make has_more appear true");
         assert.ok(!body.next_cursor, "no pagination cursor should be exposed when no additional visible changes exist");
