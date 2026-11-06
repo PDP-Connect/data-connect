@@ -83,3 +83,31 @@ export function parseConnectorReadinessResponse(payload: unknown): readonly Conn
     return readiness ? [readiness] : [];
   });
 }
+
+const REGISTRY_CONNECTOR_PREFIX = "https://registry.pdpp.dev/connectors/";
+const TRAILING_SLASH = /\/$/;
+
+/**
+ * The bare key of a connector id: the registry-URL prefix and a trailing slash
+ * removed. It repeats the rule of `canonicalConnectorKey` in
+ * `connection-modality.ts`, which this module cannot import: that module reaches
+ * the shared setup planner, and the staged-console probe must not find the
+ * owner-token client in the same bundle module as the connector package
+ * (see `connector-install-client.import-graph.test.ts`). A test pins the two
+ * copies to the same answers.
+ */
+export function readinessConnectorKey(connectorId: string): string {
+  const trimmed = connectorId.trim();
+  return trimmed.startsWith(REGISTRY_CONNECTOR_PREFIX)
+    ? trimmed.slice(REGISTRY_CONNECTOR_PREFIX.length).replace(TRAILING_SLASH, "")
+    : trimmed;
+}
+
+/** The verdict for one connector from a response that may hold many, chosen by key and never by position. */
+export function selectConnectorReadiness(
+  entries: readonly ConnectorReadiness[],
+  connectorId: string
+): ConnectorReadiness | null {
+  const requestedKey = readinessConnectorKey(connectorId);
+  return entries.find((entry) => readinessConnectorKey(entry.connectorKey) === requestedKey) ?? null;
+}

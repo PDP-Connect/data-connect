@@ -20,8 +20,11 @@ import {
   parseConnectorLocalSourcesResponse,
   parseConnectorInstallStatusResponse,
 } from "./connector-install-contract.ts";
-import { canonicalConnectorKey } from "./connection-modality.ts";
-import { type ConnectorReadiness, parseConnectorReadinessResponse } from "./connector-readiness-contract.ts";
+import {
+  type ConnectorReadiness,
+  parseConnectorReadinessResponse,
+  selectConnectorReadiness,
+} from "./connector-readiness-contract.ts";
 import { describeErrorText } from "./describe-error.ts";
 import {
   isConnectorInstallRouteUnavailableError,
@@ -116,11 +119,7 @@ export async function getConnectorReadiness(connectorId: string): Promise<Connec
   const payload = await connectorInstallFetch(
     `/v1/owner/connector-install/readiness?connector_id=${encodeURIComponent(connectorId)}`
   );
-  const requestedKey = canonicalConnectorKey(connectorId);
-  const match = parseConnectorReadinessResponse(payload).find(
-    (entry) => canonicalConnectorKey(entry.connectorKey) === requestedKey
-  );
-  return match ?? null;
+  return selectConnectorReadiness(parseConnectorReadinessResponse(payload), connectorId);
 }
 
 /**

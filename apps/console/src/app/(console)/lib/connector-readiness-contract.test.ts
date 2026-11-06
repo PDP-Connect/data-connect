@@ -4,12 +4,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { browserConnectSupportFromReadiness } from "./browser-connect-readiness.ts";
+import { canonicalConnectorKey } from "./connection-modality.ts";
 import {
   type ConnectorReadiness,
   parseConnectorReadiness,
   parseConnectorReadinessResponse,
   READINESS_ACTIONS,
   READINESS_REASONS,
+  readinessConnectorKey,
+  selectConnectorReadiness,
 } from "./connector-readiness-contract.ts";
 import { readinessBlockNote } from "./connector-readiness-copy.ts";
 
@@ -149,4 +152,27 @@ test("blocking reasons have fixed owner copy that never carries the server's det
     assert.equal(readinessBlockNote(quiet), null, quiet.reason);
   }
   assert.equal(readinessBlockNote(null), null);
+});
+
+test("the readiness key rule answers the same as the console's canonical connector key", () => {
+  for (const id of [
+    "linkedin",
+    "https://registry.pdpp.dev/connectors/linkedin",
+    "https://registry.pdpp.dev/connectors/linkedin/",
+    "  https://registry.pdpp.dev/connectors/linkedin ",
+    " goodreads ",
+    "https://example.test/connectors/custom",
+    "",
+  ]) {
+    assert.equal(readinessConnectorKey(id), canonicalConnectorKey(id), JSON.stringify(id));
+  }
+});
+
+test("a verdict is chosen by connector key, in any position, and none matches to null", () => {
+  const first = readiness("connect", "runnable");
+  const second = { ...readiness("install", "not_installed"), connectorKey: "goodreads" };
+  assert.equal(selectConnectorReadiness([first, second], "https://registry.pdpp.dev/connectors/goodreads"), second);
+  assert.equal(selectConnectorReadiness([first, second], first.connectorKey), first);
+  assert.equal(selectConnectorReadiness([first, second], "missing"), null);
+  assert.equal(selectConnectorReadiness([], first.connectorKey), null);
 });
