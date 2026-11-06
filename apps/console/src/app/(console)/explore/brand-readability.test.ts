@@ -380,18 +380,62 @@ for (const theme of THEMES) {
 		assert.deepEqual(await fadedExcludeStates({ theme }), []);
 	});
 
-	test(`an excluded row's name and control are readable against the ${theme} theme`, {
-		// Measured 4.22:1 on the light theme: `--warning` (oklch 0.62 0.15 70)
-		// misses WCAG AA for small text on the light page. The token is shared
-		// vendored brand data, so changing it is outside this PR; this case
-		// flips to passing once the token is darkened upstream.
-		todo:
-			theme === "light"
-				? "--warning is 4.22:1 on the light page, below 4.5:1"
-				: false,
-	}, async () => {
+	test(`an excluded row's name and control are readable against the ${theme} theme`, async () => {
 		assert.deepEqual(await excludedRowProblems({ theme }), []);
 	});
+
+	test(`warning text is readable on the page, the card and its own tint in the ${theme} theme`, async () => {
+		assert.deepEqual(await warningTextProblems({ theme }), []);
+	});
+}
+
+/** `--warning` is used as text on the page, on cards and on its own tint (chips, banners). */
+async function warningTextProblems(options: PageOptions): Promise<string[]> {
+	return await withPage(
+		`<div data-surface="page" style="background:var(--background)"><span data-text>x</span></div>
+		<div data-surface="card" style="background:var(--card)"><span data-text>x</span></div>
+		<div data-surface="tint-on-page" style="background:var(--background)"><span data-text style="background:var(--warning-tint)">x</span></div>
+		<div data-surface="tint-on-card" style="background:var(--card)"><span data-text style="background:var(--warning-tint)">x</span></div>`,
+		options,
+		async (page) => {
+			const surfaces = await page.evaluate(() =>
+				[...document.querySelectorAll("[data-surface]")].map((surface) => {
+					const text = surface.querySelector("[data-text]") as HTMLElement;
+					text.style.color = "var(--warning)";
+					const chain: string[] = [];
+					for (
+						let element: Element | null = text;
+						element;
+						element = element.parentElement
+					) {
+						chain.push(getComputedStyle(element).backgroundColor);
+					}
+					return {
+						backdrops: chain.reverse(),
+						color: getComputedStyle(text).color,
+						name: (surface as HTMLElement).dataset.surface ?? "",
+					};
+				}),
+			);
+			const problems: string[] = [];
+			for (const surface of surfaces) {
+				let backdrop: Rgba = { a: 1, b: 255, g: 255, r: 255 };
+				for (const css of surface.backdrops) {
+					backdrop = composite(await resolveColor(page, css), backdrop);
+				}
+				const ratio = contrastRatio(
+					composite(await resolveColor(page, surface.color), backdrop),
+					backdrop,
+				);
+				if (ratio < FACET_TEXT_MIN_CONTRAST) {
+					problems.push(
+						`warning text on ${surface.name} contrast ${ratio.toFixed(2)}:1 is below 4.5:1`,
+					);
+				}
+			}
+			return problems;
+		},
+	);
 }
 
 /** Why the warning-coloured name and control of an excluded row are hard to read, if they are. */
