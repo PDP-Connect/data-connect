@@ -56,7 +56,7 @@ const PALETTE_USES_CONTEXT = /const palette = useCommandPalette\(\)/;
 const LAYOUT_PROVIDER_WRAP =
   /<CommandPaletteProvider>[\s\S]*\{children\}[\s\S]*<CommandPalette basePath=\{CONSOLE_BASE_PATH\} mode="live" segments=\{CONSOLE_SEGMENTS\} \/>[\s\S]*<\/CommandPaletteProvider>/;
 const SHELL_BRIDGE_USES_CONTEXT = /const \{ toggle \} = useCommandPalette\(\)/;
-const SHELL_BRIDGE_WIRES_JUMP = /<RecordroomShell build=\{build\} host=\{host\} onJump=\{toggle\}>/;
+const SHELL_BRIDGE_WIRES_JUMP = /<RecordroomShell[\s\S]*?\sonJump=\{toggle\}/;
 const PALETTE_USES_REGISTRY = /import \{[^}]*\bmatchDashboardCommands\b[^}]*\} from "\.\/command-registry\.ts"/;
 const CONSOLE_REEXPORTS_UNIFIED_RE =
   /export \{[\s\S]*CommandPalette[\s\S]*\} from "@pdpp\/operator-ui\/components\/command-palette"/;
