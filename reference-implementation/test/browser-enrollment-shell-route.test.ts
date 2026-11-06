@@ -3,9 +3,8 @@
 
 import assert from "node:assert/strict";
 import type { Server as HttpServer } from "node:http";
-import test from "node:test";
+import test, { after } from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
-
 import { listSpineEventsPage } from "../lib/spine.ts";
 import {
   expiredEnrollmentShellIds,
@@ -15,6 +14,11 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { BROWSER_ENROLLMENT_SHELL_TTL_MS } from "../server/routes/ref-browser-enrollment-shell.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { createBrowserArtifactFixtures } from "./helpers/browser-artifact-fixtures.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
+
+const browserArtifacts = createBrowserArtifactFixtures();
+after(() => browserArtifacts.close());
 
 // Integration coverage for the browser-enrollment shell routes:
 //   POST /_ref/connectors/:connectorId/browser-enrollment-shell  (on AS)
@@ -36,8 +40,9 @@ function loadManifest(name: string): unknown {
 }
 
 async function registerConnector(asUrl: string, name: string): Promise<void> {
+  const manifest = await browserArtifacts.publish(loadManifest(name) as Record<string, unknown>);
   const resp = await fetch(`${asUrl}/connectors`, {
-    body: JSON.stringify(loadManifest(name)),
+    body: JSON.stringify(manifest),
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
@@ -309,14 +314,15 @@ test("browser-enrollment shell: creates draft for a browser-bound connector outs
   await withServer(async ({ asUrl }) => {
     // A connector installed from the runtime catalog: its registered manifest
     // declares a browser binding, and no generated key list names it.
-    const manifest = {
+    const manifest = withFixtureSourceDeclaration({
       ...(loadManifest("amazon") as Record<string, unknown>),
       connector_id: "acme-shop",
       connector_key: "acme-shop",
       display_name: "Acme Shop",
-    };
+    });
+    const executableManifest = await browserArtifacts.publish(manifest);
     const registered = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(manifest),
+      body: JSON.stringify(executableManifest),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });

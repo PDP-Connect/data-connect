@@ -16,6 +16,7 @@ import type { CredentialValidationMode } from "./polyfill-connectors-runtime.ts"
 import { legacyLocalAliasMap } from "./connector-key.ts";
 import {
   BROWSER_BOUND_KEYS,
+  KNOWN_SCAFFOLD_KEYS,
   LEGACY_LOCAL_ALIASES,
   LOCAL_COLLECTOR_PROVEN_KEYS,
   PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS,
@@ -135,7 +136,17 @@ export function connectionConfigEntriesFromManifest(
   return out;
 }
 
+/** Host-produced artifact evidence. Never accepted from enrollment request bodies. */
+export type BrowserEnrollmentArtifact =
+  | { readonly status: "none" | "invalid" }
+  | {
+      readonly status: "verified";
+      readonly trust: "signed-installed" | "developer-local-unsigned";
+      readonly manifest: ConnectorManifestLike;
+    };
+
 export interface ConnectorManifestLike {
+  readonly browser_enrollment_artifact?: BrowserEnrollmentArtifact;
   readonly capabilities?: {
     readonly auth?: {
       readonly kind?: string | null;
@@ -358,19 +369,15 @@ export const SUPPORTED_BROWSER_COLLECTOR_CONNECTORS: readonly SupportedBrowserCo
  * Whether this connector key names a KNOWN scaffold: manifest ships,
  * registers, and validates, but its `collect()` is an unconditional
  * `SKIP_RESULT` placeholder with no real parsing/pagination/cursor logic.
- * `connector-conformance-roster.ts`'s `KNOWN_SCAFFOLD_CONNECTORS` is the
- * single hand-maintained list this reads (kept disjoint from
- * `PRODUCTION_READY_CONNECTORS` and `REAL_UNLISTED_CONNECTORS` by
- * `connector-conformance.test.ts`), so a Development-tier connector never
- * needs a second allowlist to tell "unproven but real" apart from
- * "unimplemented": a genuine stub must never render an add action, even
- * inside a Development disclosure, because clicking it can never collect
- * anything.
+ * The package owns that list. This reads its optional runtime roster and
+ * the generated snapshot retained when the package is absent. Snapshot
+ * exclusions persist until the generated data is refreshed; an artifact's
+ * presence alone does not prove a previously unfinished connector now collects.
  */
 export function isKnownScaffoldConnector(connectorKey: string | null | undefined): boolean {
   return (
     typeof connectorKey === "string" &&
-    (KNOWN_SCAFFOLD_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorKey) ?? connectorKey)
+    [...KNOWN_SCAFFOLD_CONNECTORS, ...KNOWN_SCAFFOLD_KEYS].includes(canonicalConnectorKey(connectorKey))
   );
 }
 
@@ -618,25 +625,22 @@ export interface BrowserEnrollmentSupport {
   readonly canAddAccount: boolean;
 }
 
-/**
- * Browser-session support from the connector's own manifest bindings, shared
- * by the console's browser-session routes and the RI's enrollment-shell route
- * so both give the same answer. A connector installed from the runtime catalog
- * qualifies through its bindings, without a connector-key list.
- *
- * A known scaffold can never collect, so it cannot add an account. The
- * scaffold list comes from the optional conformance roster; when the roster
- * did not load, no connector can add an account, because a scaffold cannot be
- * told apart from a real connector.
+/** Shared pure policy: verified current artifacts permit setup, not a live-proof claim.
+ * Explicit absent/invalid evidence overrides the development roster fallback.
  */
 export function browserEnrollmentSupport(
   connectorKey: string,
   manifest: ConnectorManifestLike | null
 ): BrowserEnrollmentSupport {
-  const browserBound = classifyConnectorIntentModality(manifest) === "browser_bound";
+  const artifact = manifest?.browser_enrollment_artifact;
+  const effective = artifact?.status === "verified" ? artifact.manifest : manifest;
+  const browserBound = classifyConnectorIntentModality(effective) === "browser_bound";
   return {
     browserBound,
-    canAddAccount: browserBound && CONFORMANCE_ROSTER_LOADED && !isKnownScaffoldConnector(connectorKey),
+    canAddAccount:
+      browserBound &&
+      !isKnownScaffoldConnector(connectorKey) &&
+      (artifact === undefined ? CONFORMANCE_ROSTER_LOADED : artifact.status === "verified"),
   };
 }
 
@@ -1197,12 +1201,17 @@ function buildUnsupportedSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionS
   };
 }
 
-export function buildConnectionSetupPlan(args: {
+export function buildConnectionSetupPlan(input: {
   readonly connectorKey?: string | null;
   readonly configuredProviderAuthConnectorKeys?: readonly string[];
   readonly deploymentEnv?: DeploymentEnvLike;
   readonly manifest: ConnectorManifestLike | null;
 }): ConnectionSetupPlan {
+  const artifact = input.manifest?.browser_enrollment_artifact;
+  const args =
+    artifact?.status === "verified"
+      ? { ...input, manifest: { ...artifact.manifest, browser_enrollment_artifact: artifact } }
+      : input;
   const rawConnectorKey = typeof args.connectorKey === "string" ? args.connectorKey.trim() : "";
   const connectorKey =
     (rawConnectorKey ? canonicalConnectorKey(rawConnectorKey) : null) ??

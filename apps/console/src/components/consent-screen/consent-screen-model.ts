@@ -56,6 +56,8 @@ export interface ConsentStreamModel {
 
 export interface ConsentSourceModel {
   readonly account: string;
+  /** Optional for compatibility with servers predating display identity. */
+  readonly connectorId?: string;
   readonly icon?: ConsentSourceIcon | null;
   readonly id: string;
   readonly name: string;

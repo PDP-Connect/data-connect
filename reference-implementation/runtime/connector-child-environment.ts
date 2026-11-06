@@ -105,7 +105,8 @@ const RUN_KEYS = [
   "PDPP_RUN_TRIGGER_KIND",
   "PDPP_RUN_AUTOMATION_MODE",
 ] as const;
-const RESERVED = new Set([...PLATFORM_KEYS, ...RUN_KEYS].map((key) => key.toUpperCase()));
+const CONTROL_SECRET_KEYS = ["PDPP_BINDING_ALLOCATOR_TOKEN", "PDPP_BINDING_AUTHORIZER_TOKEN"] as const;
+const RESERVED = new Set([...PLATFORM_KEYS, ...RUN_KEYS, ...CONTROL_SECRET_KEYS].map((key) => key.toUpperCase()));
 
 export interface ConnectorChildEnvironmentInput {
   /**
@@ -233,6 +234,9 @@ function parseBinding(
   }
   exactKeys(source, ["kind", "key"], `${bindingLabel}.source`);
   const key = environmentKey(source.key, `${bindingLabel}.source.key`);
+  if (CONTROL_SECRET_KEYS.some((secret) => secret === key.toUpperCase())) {
+    throw new Error(`${bindingLabel}.source.key is reserved`);
+  }
   return { connectorId, logicalKey: logical, source: { key, kind: source.kind }, targetKey };
 }
 
@@ -680,5 +684,12 @@ export function composeConnectorChildEnvironment(input: ConnectorChildEnvironmen
   // layer supplied it. Replaces a path that lacks the bundled Chromium with the
   // image's own; leaves a path that has it alone.
   reconcileConnectorBrowsersPath(env, { platform, ...input.browserPath });
+  for (const secret of CONTROL_SECRET_KEYS) {
+    for (const key of Object.keys(env)) {
+      if (key.toUpperCase() === secret) {
+        delete env[key];
+      }
+    }
+  }
   return env;
 }

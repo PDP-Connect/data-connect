@@ -163,6 +163,7 @@ function mergeAvailabilityManifests(
  * for that separate API capability.
  */
 export interface OwnerConnectorTemplateLike {
+  browser_enrollment_artifact?: import("pdpp-reference-implementation/connection-setup-plan").BrowserEnrollmentArtifact;
   /** Staged deployments may expose only the canonical connector URI identity. */
   connector_id?: string | null;
   connector_key?: string | null;

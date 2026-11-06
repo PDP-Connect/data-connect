@@ -168,7 +168,7 @@ tail:
 
 The completed profile receipt recorded 1,034 files; that historical receipt
 is unchanged. The template equivalence registry is a different measure:
-156 eligible plus 37 cold-required files, for **193** total. The
+171 eligible plus 38 cold-required files, for **209** total after R94. The
 handle-generation, issuance-cutover, opaque-cursor and search-index repair
 tests remain registered. These counts are recomputed from the merged registry arrays.
 
@@ -365,3 +365,17 @@ binary; they are not a missing Node executable.
 The reviewer repair and this continuation note are in the pushed canonical PR
 history. The archived fork remains unsuitable for future pushes; use the
 canonical remote for PR #51.
+
+## Binding access policy r20 selection
+
+Two additional seeded database journeys are template eligible: `connector-binding-access-policy-store.test.ts` and `owner-binding-access-policy-journey.test.ts`. They test the separate prepared-access policy ledger and owner decisions on real SQLite/PostgreSQL. Inventory and accounting receipts are in the r20 evidence packet; no full-suite claim.
+
+R24 adds `test/browser-binding-admission-journey.test.ts` to the template-eligible inventory. It uses the runner-owned database and existing schema; no bootstrap or migration observation.
+
+R75 adds `test/run-upload-permission-store.test.ts` as template eligible: live upload permission state and actual PostgreSQL blob publication on runner-owned databases. SQLite tests exercise the synchronous participant, not HTTP host composition. No full profile claim.
+
+R81 adds `test/run-upload-http.test.ts` as template eligible. It starts the real HTTP server over the runner-owned SQLite/PostgreSQL database and tests the selected run-upload permission at the blob route; bootstrap itself is not the subject under test. This focused addition does not change the historical full-profile receipt or claim a full profile rerun.
+
+R89 adds `test/run-upload-staging-store.test.ts` as template eligible. It exercises private transient stages, quota accounting, and staged-grant refusal by canonical publication against seeded SQLite/PostgreSQL storage. No full profile rerun is claimed.
+
+R94 adds `test/run-upload-record-promotion.test.ts` as template eligible: private staging plus owner HTTP record acceptance on seeded storage. It does not observe bootstrap. No full profile claim.

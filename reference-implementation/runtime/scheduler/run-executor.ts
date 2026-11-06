@@ -39,6 +39,7 @@ import {
   type RunTriggerKind,
 } from "../run-automation-policy.ts";
 import { createRunLogger, NOOP_RUN_BASE_LOGGER, type RunBaseLogger } from "../run-logger.ts";
+import { endsFailureStreak } from "../scheduler-backoff.ts";
 import type {
   ConnectorSchedule,
   GetStateHandler,
@@ -56,7 +57,6 @@ import type {
   SchedulerOptions,
   SetStateHandler,
 } from "../scheduler-domain-types.ts";
-import { endsFailureStreak } from "../scheduler-backoff.ts";
 import {
   type RunConnectorError,
   runRequiresOwnerAuthRepair,
@@ -419,11 +419,7 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
   };
 
   const armLocalOnlyPhaseCeiling = () => {
-    if (
-      !isBoundedWallClock(localOnlyPhaseMaxRunWallClockMs) ||
-      timedOut ||
-      cancellation.signal.aborted
-    ) {
+    if (!isBoundedWallClock(localOnlyPhaseMaxRunWallClockMs) || timedOut || cancellation.signal.aborted) {
       return;
     }
     if (timer) {
@@ -1349,6 +1345,23 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         return null;
       }
 
+      if (runNowResult.status === "owner_action_required" || runNowResult.status === "placement_refused") {
+        // Runtime placement has no connector failure or credential-repair claim.
+        // Pause this exact connection until a deliberate owner/operator action.
+        markNeedsHuman(connectorId, connectorInstanceId);
+        const failure = "placement_failure" in runNowResult ? runNowResult.placement_failure : null;
+        const code = failure && typeof failure === "object" && "code" in failure ? failure.code : null;
+        const placementReason =
+          code === "unsupported_binding" || code === "binding_unavailable" || code === "binding_cleanup_unverified"
+            ? code
+            : runNowResult.status;
+        return recordAndNotify({
+          ...buildBrowserSurfaceUnavailableSkip(connectorId, runNowResult.status, connectorInstanceId),
+          failureReason: placementReason,
+          runId: runNowResult.run_id,
+          traceId: runNowResult.trace_id,
+        });
+      }
       if (runNowResult.status && BROWSER_SURFACE_UNAVAILABLE_STATUSES.has(runNowResult.status)) {
         return recordAndNotify(
           buildBrowserSurfaceUnavailableSkip(connectorId, runNowResult.status, connectorInstanceId)
@@ -1362,6 +1375,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           connector_error: runNowResult.connector_error || null,
           failure_reason: runNowResult.failure_reason || null,
           known_gaps: runNowResult.known_gaps || null,
+          runtime_retryable: runNowResult.runtime_retryable ?? null,
           terminal_reason: runNowResult.terminal_reason || null,
         })
       ) {

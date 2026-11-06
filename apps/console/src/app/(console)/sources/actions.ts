@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache";
 import { CONNECTOR_NOT_INSTALLED_CODE, runNowRejectionFromError } from "../lib/connector-implementation.ts";
 import { runConnectionNow, runConnectorNow } from "../lib/operator-runs.ts";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
+import { parseRunStartResponse, type RunStartResponse } from "../lib/run-start-result.ts";
 
 /**
  * Where a failed run-start stopped.
@@ -26,6 +27,19 @@ export type RunStartFailurePhase = "before_server" | "after_server";
 
 export type RunNowResult =
   | { ok: true; run_id: string; trace_id: string }
+  | {
+      ok: false;
+      reason: "owner_action_required";
+      owner_action: Extract<RunStartResponse, { status: "owner_action_required" }>["owner_action"];
+      message: string;
+    }
+  | {
+      ok: false;
+      reason: "placement_refused";
+      placement_failure: Extract<RunStartResponse, { status: "placement_refused" }>["placement_failure"];
+      message: string;
+    }
+  | { ok: false; reason: "surface_pending"; run_id: string; message: string }
   | { ok: false; reason: "already_running"; run_id?: string; message: string }
   /**
    * The reference has no implementation to run this connector
@@ -57,18 +71,49 @@ export async function runConnectorNowAction(
 ): Promise<RunNowResult> {
   try {
     const runOptions = { force: options.force === true };
-    const body = (await (connectionId
-      ? runConnectionNow(connectionId, { ...runOptions, runAdmission: "setup" })
-      : runConnectorNow(connectorId, runOptions))) as {
-      run_id?: string;
-      trace_id?: string;
-    };
+    const body = parseRunStartResponse(
+      await (connectionId
+        ? runConnectionNow(connectionId, { ...runOptions, runAdmission: "setup" })
+        : runConnectorNow(connectorId, runOptions)),
+      connectionId
+    );
+    // A request can create an access review without starting collection.
+    // Server actions refresh the currently viewed path after invalidation.
     revalidatePath("/sources");
     revalidatePath(`/sources/${encodeURIComponent(connectionId ?? connectorId)}`);
+    if (body.status === "owner_action_required") {
+      return {
+        ok: false,
+        reason: body.status,
+        owner_action: body.owner_action,
+        message: "Sync did not start. Review this connection's access before approving.",
+      };
+    }
+    if (body.status === "placement_refused") {
+      return {
+        ok: false,
+        reason: body.status,
+        placement_failure: body.placement_failure,
+        message:
+          body.placement_failure.code === "binding_cleanup_unverified"
+            ? "Sync did not start. Cleanup of an earlier run is unverified. Resolve resource cleanup before starting another sync."
+            : body.placement_failure.code === "binding_unavailable"
+              ? "Sync did not start. Protected access is unavailable. Check the binding service setup and availability."
+              : "Sync did not start. Required access is unsupported; approval cannot provide it.",
+      };
+    }
+    if (body.status === "surface_pending") {
+      return {
+        ok: false,
+        reason: body.status,
+        run_id: body.run_id,
+        message: "Sync is waiting for a browser surface. No started sync was reported.",
+      };
+    }
     return {
       ok: true,
-      run_id: body.run_id ?? "",
-      trace_id: body.trace_id ?? body.run_id ?? "",
+      run_id: body.run_id,
+      trace_id: body.trace_id,
     };
   } catch (err) {
     // Transport failure: the fetch never completed, so the reference server

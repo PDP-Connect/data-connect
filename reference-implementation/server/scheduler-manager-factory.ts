@@ -50,6 +50,8 @@ import {
 } from "./web-push-notifications.ts";
 
 const SURFACE_UNAVAILABLE_HANDLE_STATUSES = Object.freeze([
+  "owner_action_required",
+  "placement_refused",
   "run_browser_surface_queued",
   "browser_surface_probe_failed",
   "browser_surface_lost",

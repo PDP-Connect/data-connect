@@ -240,6 +240,22 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly authTokensRevokeByPackage: MutationQuery;
   readonly authTokensRevokeByRefreshFamily: MutationQuery;
   readonly authTokensRevokeByTokenId: MutationQuery;
+  readonly runUploadPromotionNext: ReadOneQuery;
+  readonly runUploadPromotionConsume: MutationQuery;
+  readonly runUploadGet: ReadOneQuery;
+  readonly runUploadResolve: ReadOneQuery;
+  readonly runUploadOwner: ReadOneQuery;
+  readonly runUploadRevoke: MutationQuery;
+  readonly runUploadRetainedConnections: IterateQuery;
+  readonly runUploadEpoch: MutationQuery;
+  readonly runUploadInsertBinding: MutationQuery;
+  readonly runUploadIssue: MutationQuery;
+  readonly runUploadStageDeleteConnection: MutationQuery;
+  readonly runUploadStageDeleteGrant: MutationQuery;
+  readonly runUploadStageGet: ReadOneQuery;
+  readonly runUploadStageSumRun: ReadOneQuery;
+  readonly runUploadStageSumGlobal: ReadOneQuery;
+  readonly runUploadStageInsert: MutationQuery;
   readonly blobsGetRowById: ReadOneQuery;
   readonly blobsGetSizeById: ReadOneQuery;
   readonly blobsGetStoredById: ReadOneQuery;
@@ -476,10 +492,13 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly searchIndexDirtyGetByScope: ReadOneQuery;
   readonly searchIndexDirtyListDirty: IterateQuery;
   readonly searchIndexDirtyMarkDirty: MutationQuery;
+  readonly searchIndexDirtyMarkStartupFailure: MutationQuery;
   readonly searchIndexDirtyPark: MutationQuery;
   readonly searchIndexDirtyRearm: MutationQuery;
   readonly searchIndexDirtyRecordEvidence: MutationQuery;
   readonly searchIndexDirtyRecordFailure: MutationQuery;
+  readonly searchIndexDirtyStartupIndexInstances: IterateQuery;
+  readonly searchIndexDirtyStartupStreams: IterateQuery;
   readonly searchIndexInsertRow: MutationQuery;
   readonly searchIndexPageAfterRowid: ReadManyQuery;
   readonly searchIndexPageByRecordKeysAfterRowid: ReadManyQuery;
@@ -865,7 +884,23 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     // Blobs — content-addressed blob persistence + binding maintenance.
     "blobsInsertBlob",
     "blobsGetStoredById",
+    "runUploadInsertBinding",
     "blobsInsertBinding",
+    "runUploadPromotionNext",
+    "runUploadPromotionConsume",
+    "runUploadGet",
+    "runUploadResolve",
+    "runUploadOwner",
+    "runUploadRevoke",
+    "runUploadRetainedConnections",
+    "runUploadEpoch",
+    "runUploadIssue",
+    "runUploadStageDeleteConnection",
+    "runUploadStageDeleteGrant",
+    "runUploadStageGet",
+    "runUploadStageSumRun",
+    "runUploadStageSumGlobal",
+    "runUploadStageInsert",
     "blobsGetRowById",
     "blobsGetSizeById",
     "blobsListBindingsById",

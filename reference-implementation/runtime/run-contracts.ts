@@ -17,6 +17,8 @@
 // biome-ignore lint/correctness/noUnresolvedImports: remote-surface 1.5.1 exports ./leases; Biome 2.5.5 fails to resolve this package export.
 import type { BrowserSurfaceProjection } from "@opendatalabs/remote-surface/leases";
 import type { SpineTraceContext } from "../lib/spine.ts";
+import type { BindingAuthorityRecord } from "./binding-authority.ts";
+import type { BrowserBindingOwnerAction, BrowserBindingPlacementRefused } from "./binding-control.ts";
 import type { RunAutomationMode, RunTriggerKind } from "./run-automation-policy.ts";
 
 export type ConnectorManifest = Record<string, unknown>;
@@ -69,8 +71,25 @@ export interface RunNowResult {
    * reason is known.
    */
   readonly browser_surface_failure?: { readonly code: string; readonly message: string };
+  readonly owner_action?: BrowserBindingOwnerAction;
+  readonly placement_failure?: BrowserBindingPlacementRefused["failure"];
   readonly run_id: string;
-  readonly status?: "started" | BrowserSurfaceProjection["browser_surface_status"];
+  readonly status?:
+    | "owner_action_required"
+    | "placement_refused"
+    | "started"
+    | BrowserSurfaceProjection["browser_surface_status"];
   readonly trace_id: string;
   readonly trigger_kind?: RunTriggerKind;
+}
+
+/** Resource protocol; run bookkeeping remains with the controller. */
+export interface ProtectedBrowserSurfaceLifecycle {
+  admit: (args: { connectionId: string; runId: string; manifest: unknown }) => Promise<void>;
+  handoff: (args: { runId: string; surfaceId: string; signal: AbortSignal }) => Promise<BindingAuthorityRecord | void>;
+  release: (runId: string, reconcile?: boolean) => Promise<"stopped" | "not_acquired">;
+  resolvePlacementFailure?: (runId: string) => Promise<void>;
+  retainedState?: () => { runs: number; manifests: number; aliases: number };
+  /** Called only after durable cleanup, bookkeeping removal and fenced lease release. */
+  retire?: (runId: string) => void | Promise<void>;
 }

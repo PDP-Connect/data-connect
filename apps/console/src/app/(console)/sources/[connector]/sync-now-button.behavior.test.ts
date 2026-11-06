@@ -19,10 +19,7 @@ import { mock, test } from "node:test";
 import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-
-type RunResult =
-  | { ok: false; reason: "connector_not_installed"; connector_id: string; message: string }
-  | { ok: false; reason: "error"; phase: "after_server"; reached_server: true; message: string };
+import type { RunNowResult as RunResult } from "../actions.ts";
 
 let runResult: RunResult = {
   connector_id: "chase",
@@ -45,6 +42,7 @@ const harness = (async () => {
     MouseEvent: dom.window.MouseEvent,
     Node: dom.window.Node,
     window: dom.window,
+    self: dom.window,
   });
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
   mock.module("next/navigation", {
@@ -182,5 +180,46 @@ test("a run-start error flows below the button and wraps instead of floating ove
     const wrapper = toast.parentElement;
     assert.ok(wrapper?.className.includes("flex-col"), "the message stacks under the button in normal flow");
     assert.ok(wrapper?.className.includes("max-w-full"), "the wrapper never exceeds its container");
+  });
+});
+
+for (const reason of ["owner_action_required", "placement_refused"] as const) {
+  test(`${reason} remains local and links to this connection review without a started toast`, async () => {
+    runResult =
+      reason === "owner_action_required"
+        ? {
+            ok: false,
+            reason,
+            owner_action: { kind: "confirm_browser_access", connectionId: "cin_chase", proposalId: "p1" },
+            message: "Sync did not start. Review access.",
+          }
+        : {
+            ok: false,
+            reason,
+            placement_failure: { code: "unsupported_binding", instanceKey: "browser" },
+            message: "Sync did not start. Required access is unsupported.",
+          };
+    refreshCalls = 0;
+    await mounted({}, async (container) => {
+      await act(async () => button(container, "Refresh now").click());
+      assert.ok(container.textContent?.includes("Sync did not start"));
+      assert.ok(!container.textContent?.includes("Sync started."));
+      assert.equal(
+        container.querySelector('a[href="/sources/cin_chase#access-review"]')?.textContent,
+        "Review current access"
+      );
+      assert.equal(refreshCalls, 0);
+    });
+  });
+}
+test("ordinary started result still shows success and refreshes only after explicit Sync", async () => {
+  runResult = { ok: true, run_id: "run_success", trace_id: "trace_success" };
+  refreshCalls = 0;
+  await mounted({}, async (container) => {
+    assert.equal(refreshCalls, 0);
+    await act(async () => button(container, "Refresh now").click());
+    assert.ok(container.textContent?.includes("Sync started."));
+    assert.equal(container.querySelector('a[href="/syncs/run_success"]')?.textContent, "View sync →");
+    assert.equal(refreshCalls, 1);
   });
 });

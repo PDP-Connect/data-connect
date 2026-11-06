@@ -48,30 +48,28 @@ test("source-setup-catalog renders external documentation links with new-tab for
   );
 });
 
-test("unavailable rows never offer an install control and sort into a collapsed footer", async () => {
+test("source: package controls and catalog grouping share the card decision, with a separate scaffold block", async () => {
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
-  assert.match(src, /sourceSetupRowIsUnavailable/, "must use the shared unavailable predicate, not a local reimplementation");
-  // The Package column must render a disabled fact instead of ConnectorInstallRow
-  // for an unavailable row -- an OCI package existing for a scaffold or
-  // proof-gated connector must never surface an Install button.
+  assert.match(src, /sourceSetupCardModel/, "package and account setup decisions must stay together");
+  // A known scaffold still has no collection code, even if a package exists.
+  // Other unavailable setup paths must not suppress a real package control.
   assert.match(src, /data-testid="connector-install-disabled"/);
-  assert.match(src, /isUnavailable[\s\S]{0,80}\?[\s\S]{0,200}data-testid="connector-install-disabled"/);
-  // The primary action column must also stay empty for an unavailable row.
+  assert.match(src, /entry\.isKnownScaffold[\s\S]{0,80}\?[\s\S]{0,200}data-testid="connector-install-disabled"/);
   assert.match(
     src,
-    /const action = sourceSetupCardAction\(entry, installModel\?\.activationState \?\? null, packageAvailabilityUnknown\);/
+    /sourceSetupCardModel\(entry, installLifecycle, installCatalogTransientlyUnavailable\)/
   );
   // Unavailable rows collapse into their own disclosure, separate from the
   // primary scannable list, so N dead rows never sit in the middle of it.
   assert.match(src, /data-testid="unavailable-connectors-disclosure"/);
-  assert.match(src, /not available on this platform/);
+  assert.match(src, /More connectors/);
+  assert.doesNotMatch(src, /not available on this platform/);
 });
 
 test("transient install catalog failures disable unknown package actions without hiding installed rows", async () => {
   const src = await readFile(SOURCE_SETUP_CATALOG_FILE, "utf8");
   assert.match(src, /installCatalogTransientlyUnavailable = false/);
-  assert.match(src, /const packageAvailabilityUnknown = installCatalogTransientlyUnavailable && !installLifecycle\?\.installed;/);
-  assert.match(src, /const action = sourceSetupCardAction\(entry, installModel\?\.activationState \?\? null, packageAvailabilityUnknown\)/);
+  assert.match(src, /sourceSetupCardModel\(entry, installLifecycle, installCatalogTransientlyUnavailable\)/);
   assert.match(src, /data-testid="connector-install-catalog-transient"/);
   assert.match(src, /Package availability is unknown while the catalog is busy; this page will retry once shortly\./);
   assert.match(src, /Package availability is unknown while the catalog is busy; use Retry to check again\./);

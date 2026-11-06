@@ -47,6 +47,7 @@ interface Props {
 interface SyncToast {
   expiresAt?: number;
   message: string;
+  reviewHref?: string;
   runId?: string;
   tone: "info" | "error" | "warning";
 }
@@ -123,10 +124,7 @@ export function SyncNowButton({
     startTransition(async () => {
       const res: RunNowResult = await runConnectorNowAction(connectorId, connectionId, { force });
       if (res.ok === true) {
-        const runId =
-          "run_id" in res && typeof res.run_id === "string" && res.run_id.trim().length > 0
-            ? res.run_id.trim()
-            : undefined;
+        const runId = res.run_id?.trim() || undefined;
         const expiresAt = Date.now() + TOAST_TTL_MS;
         const nextToast = {
           expiresAt,
@@ -144,10 +142,7 @@ export function SyncNowButton({
         return;
       }
       if (res.reason === "already_running") {
-        const runId =
-          "run_id" in res && typeof res.run_id === "string" && res.run_id.trim().length > 0
-            ? res.run_id.trim()
-            : undefined;
+        const runId = res.run_id?.trim() || undefined;
         const expiresAt = Date.now() + TOAST_TTL_MS;
         const nextToast = {
           expiresAt,
@@ -170,6 +165,19 @@ export function SyncNowButton({
           return;
         }
         setNotInstalledKey(res.connector_id);
+        return;
+      }
+      if (res.reason === "owner_action_required" || res.reason === "placement_refused") {
+        setToast({
+          message: res.message,
+          tone: "warning",
+          reviewHref: `/sources/${encodeURIComponent(connectionId ?? connectorId)}#access-review`,
+        });
+        return;
+      }
+      if (res.reason === "surface_pending") {
+        setToast({ message: res.message, runId: res.run_id, tone: "warning" });
+        router.refresh();
         return;
       }
       // Stay on this connection and say whether the request reached the server.
@@ -215,6 +223,11 @@ export function SyncNowButton({
           role="status"
         >
           {toast.message}{" "}
+          {toast.reviewHref ? (
+            <Link className="underline underline-offset-2" href={toast.reviewHref}>
+              Review current access
+            </Link>
+          ) : null}
           {toastRunHref ? (
             <Link className="underline underline-offset-2" href={toastRunHref}>
               View sync →

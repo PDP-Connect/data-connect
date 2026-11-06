@@ -7,6 +7,10 @@
  * Combined AS + RS implementing PDPP v0.1.0 core spec.
  * Starts on port 7662 (AS/introspection) and 7663 (RS query API).
  */
+import { queueStartupSearchIndexRetry } from "./startup-search-index-retry.ts";
+import { currentStorageGeneration } from "./storage-generation.ts";
+import { createBrowserEnrollmentArtifactResolver } from "./browser-enrollment-artifact.ts";
+import { protectedBrowserSurfaceControllerOptions } from "./protected-browser-surface.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
@@ -69,6 +73,7 @@ import {
   type BrowserSurfaceReadinessProbe,
   createDefaultBrowserSurfaceReadinessProbe,
 } from "../runtime/browser-surface-readiness.ts";
+import { REFERENCE_COLLECTION_PROFILE_SUPPORT } from "../runtime/collection-profile-support.ts";
 import {
   type ConnectorEnvironmentPolicy,
   parseConnectorEnvironmentPolicy,
@@ -510,6 +515,17 @@ import {
   type ProviderAuthExchanger,
 } from "./routes/ref-provider-auth.ts";
 import { mountRefRecordRejections } from "./routes/ref-record-rejections.ts";
+import {
+  type BrowserBindingAdmissionOptions,
+  createBrowserBindingAdmission,
+} from "./browser-binding-admission.ts";
+import { readBrowserBindingRuntimeConfig } from "./browser-binding-runtime-config.ts";
+import { NekoBindingControlClient } from "../runtime/binding-control.ts";
+import { reconcileProtectedBrowserResources } from "./protected-browser-recovery.ts";
+import { createConnectorBindingResourceStore } from "./stores/connector-binding-resource-store.ts";
+import { mountOwnerBindingAccessPolicy } from "./routes/owner-binding-access-policy.ts";
+import { mountOwnerBindingAuthority } from "./routes/owner-binding-authority.ts";
+import { mountRefRunObservations } from "./routes/ref-run-observations.ts";
 import { mountRefRunStatus } from "./routes/ref-run-status.ts";
 import { mountRefGrants, mountRefRuns, mountRefTraces } from "./routes/ref-spine-correlations.ts";
 import { mountRefGrantTimeline, mountRefRunTimeline, mountRefTraceTimeline } from "./routes/ref-spine-timelines.ts";
@@ -528,7 +544,7 @@ import {
   mountRsRoot,
 } from "./routes/root-and-discovery.ts";
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
-import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
+import { type BlobUploadAccess, mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
 import { mountRefRunCancel } from "./routes/run-cancel.ts";
 import { mountRefDevPlaygroundSession, mountRefRunInteraction } from "./routes/run-interaction.ts";
@@ -636,6 +652,14 @@ import {
   createResumableRunHistoryBackfillStage,
   runStartupRunHistoryBackfillToCompletion,
 } from "./stores/run-history-backfill-stage.ts";
+import {
+  assertSqliteRunUploadWithinTransaction,
+  copyRunUploadAuthority,
+  createRunUploadPermissionStore,
+  RunUploadPermissionError,
+} from "./stores/run-upload-permission-store.ts";
+import { initializeRunUploadIssuer } from "./run-upload-issuer.ts";
+import { createRunUploadStagingStore } from "./stores/run-upload-staging-store.ts";
 import { getDefaultSchedulerStore, type SchedulerStore } from "./stores/scheduler-store.ts";
 import {
   countDirtySearchIndexScopes,
@@ -686,6 +710,7 @@ interface ResLike {
 
 interface ReqLike {
   accepts?: (types: string | string[]) => string | false;
+  blobUploadAccess?: BlobUploadAccess;
   body?: unknown;
   connection?: { remoteAddress?: string };
   get: (name: string) => string | undefined;
@@ -826,7 +851,10 @@ interface ServerOpts {
   autoEnrollEligibleSchedules?: boolean;
   awaitStartupBackfill?: boolean;
   bindHost?: string;
+  bindingAdmissionBridge?: ReturnType<typeof createBrowserBindingAdmission>;
   reachabilityContract?: ReachabilityContract | null;
+  /** Opt-in service control plane. No credential or owner approval is inferred. */
+  browserBindingAdmission?: BrowserBindingAdmissionOptions;
   browserSurfaceAllocator?: BrowserSurfaceAllocator;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager | null;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
@@ -912,6 +940,8 @@ interface ServerOpts {
   } | null;
   trustedProxies?: string | null;
   ownerToken?: string | null;
+  /** Single-use capability for synthetic retained-state restart tests. */
+  testOnlyAlreadyAdmittedPostgresChildAttachment?: string;
   postgresBootstrapLockTimeoutMs?: number;
   postgresSemanticHnswMaintenanceImpl?: typeof schedulePostgresSemanticHnswMaintenance;
   preRegisteredPublicClients?: unknown;
@@ -943,6 +973,9 @@ interface ServerOpts {
   rsPort?: number;
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
+  /** Trusted operator limit for private staged run-upload bytes. */
+  runUploadStagingGlobalMaxBytes?: number | null;
+  runUploadStagingMaxBytes?: number;
   runTargetRegistry?: import("./streaming/run-target-registry.ts").RunTargetRegistry | null;
   schedulerStore?: SchedulerStore;
   semanticRetrievalBackend?: unknown;
@@ -1286,10 +1319,12 @@ async function collectRetrievalStartupBackfillManifests({
 }
 
 async function runRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1311,6 +1346,7 @@ async function runRetrievalStartupBackfill({
       logger.info({ connectorId }, "retrieval startup backfill connector started");
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
       await lexicalIndexBackfillForManifest({
+        generation,
         log: (msg) => logger.info(msg),
         manifest: manifest as never,
         signal,
@@ -1318,6 +1354,7 @@ async function runRetrievalStartupBackfill({
       const semanticBackend = getSemanticBackend();
       if (semanticBackend?.available()) {
         await semanticIndexBackfillForManifest({
+          generation,
           log: (msg) => logger.info(msg),
           manifest: manifest as never,
           signal,
@@ -1332,6 +1369,11 @@ async function runRetrievalStartupBackfill({
         return;
       }
       logger.warn({ connectorId, err }, "retrieval startup backfill failed for connector");
+      try {
+        await queueStartupSearchIndexRetry(manifest as never, generation);
+      } catch (queueError) {
+        logger.warn({ connectorId, err, queueError }, "retrieval startup backfill retry queue write failed");
+      }
     }
   }
 
@@ -1342,10 +1384,12 @@ async function runRetrievalStartupBackfill({
 }
 
 function scheduleRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1357,7 +1401,7 @@ function scheduleRetrievalStartupBackfill({
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill scheduled after AS/RS listen");
 
   return new Promise((resolve) => setImmediate(resolve))
-    .then(() => runRetrievalStartupBackfill({ logger, manifests, signal }))
+    .then(() => runRetrievalStartupBackfill({ generation, logger, manifests, signal }))
     .catch((err) => {
       // Abort-driven exits travel through this catch when the loop
       // re-throws an AbortError-like value before reaching the inner
@@ -2579,26 +2623,6 @@ function buildControllerStaticSecretRunEnvResolver() {
       manifest,
       ownerSubjectId,
       sourceBinding: connectorInstance?.sourceBinding ?? null,
-    });
-  };
-}
-
-function buildControllerStaticSecretCredentialRejectionMarker() {
-  return async ({
-    connectorInstanceId,
-    reason,
-    rejectedAt,
-  }: {
-    connectorInstanceId: string;
-    reason: string | null;
-    rejectedAt: string;
-    [k: string]: unknown;
-  }) => {
-    const credentialStore = createRequestConnectorInstanceCredentialStore();
-    await credentialStore.markRejected({
-      connectorInstanceId,
-      reason,
-      rejectedAt,
     });
   };
 }
@@ -4656,6 +4680,9 @@ async function persistContentAddressedBlob({
   recordKey,
   mimeType,
   data,
+  jsonPath = "@record",
+  uploadAccess,
+  stagingStore,
 }: {
   connectorId: string;
   connectorInstanceId: string;
@@ -4663,7 +4690,29 @@ async function persistContentAddressedBlob({
   recordKey: string;
   mimeType: string;
   data: Buffer;
+  jsonPath?: string;
+  uploadAccess: BlobUploadAccess;
+  stagingStore?: ReturnType<typeof createRunUploadStagingStore> | null;
 }) {
+  if (uploadAccess.kind === "run-upload" && uploadAccess.authority.grant.staging) {
+    if (!stagingStore) {
+      throw Object.assign(new Error("Run upload staging is not configured"), { code: "temporarily_unavailable" });
+    }
+    return stagingStore.stage({
+      authority: uploadAccess.authority,
+      data,
+      mimeType,
+      target: { connectionId: connectorInstanceId, connectorId, jsonPath, recordKey, stream },
+    });
+  }
+  let copiedAccess: BlobUploadAccess;
+  if (uploadAccess.kind === "run-upload") {
+    copiedAccess = { authority: copyRunUploadAuthority(uploadAccess.authority), kind: "run-upload" };
+  } else if (uploadAccess.kind === "owner") {
+    copiedAccess = { kind: "owner" };
+  } else {
+    throw new RunUploadPermissionError();
+  }
   return withConnectorInstanceWrite(connectorInstanceId, (ownership) => {
     // The connector-instance existence/status re-check (closing the
     // delete-or-revoke/write TOCTOU) runs INSIDE each backend's own durable
@@ -4680,9 +4729,11 @@ async function persistContentAddressedBlob({
       connectorInstanceId,
       coordinatorOwnership: ownership,
       data,
+      jsonPath,
       mimeType,
       recordKey,
       stream,
+      uploadAccess: copiedAccess,
     });
   });
 }
@@ -4694,6 +4745,8 @@ async function persistContentAddressedBlobWithinFence({
   recordKey,
   mimeType,
   data,
+  jsonPath = "@record",
+  uploadAccess,
   coordinatorOwnership,
 }: {
   connectorId: string;
@@ -4702,6 +4755,8 @@ async function persistContentAddressedBlobWithinFence({
   recordKey: string;
   mimeType: string;
   data: Buffer;
+  jsonPath?: string;
+  uploadAccess: BlobUploadAccess;
   coordinatorOwnership: ConnectorInstanceWriteOwnership;
 }) {
   if (isPostgresStorageBackend()) {
@@ -4709,6 +4764,7 @@ async function persistContentAddressedBlobWithinFence({
       connectorId,
       connectorInstanceId,
       coordinatorOwnership,
+      ...(uploadAccess.kind === "run-upload" ? { jsonPath, uploadAuthority: uploadAccess.authority } : {}),
       data,
       mimeType,
       recordKey,
@@ -4741,6 +4797,15 @@ async function persistContentAddressedBlobWithinFence({
     // was deleted or revoked concurrently. Inside the SAME synchronous
     // transaction as the insert below, mirroring the Postgres arm's
     // in-transaction call.
+    if (uploadAccess.kind === "run-upload") {
+      assertSqliteRunUploadWithinTransaction(uploadAccess.authority, {
+        connectionId: connectorInstanceId,
+        connectorId,
+        jsonPath,
+        recordKey,
+        stream,
+      });
+    }
     assertSqliteConnectorInstanceWritableWithinTransaction(connectorInstanceId);
     const insertResult = exec(referenceQueries.blobsInsertBlob, [
       blobId,
@@ -4762,13 +4827,10 @@ async function persistContentAddressedBlobWithinFence({
       }) as unknown as ApiError;
     }
 
-    const bindingResult = exec(referenceQueries.blobsInsertBinding, [
-      blobId,
-      connectorId,
-      connectorInstanceId,
-      stream,
-      recordKey,
-    ]);
+    const bindingResult =
+      uploadAccess.kind === "run-upload"
+        ? exec(referenceQueries.runUploadInsertBinding, [blobId, connectorId, connectorInstanceId, stream, recordKey, jsonPath])
+        : exec(referenceQueries.blobsInsertBinding, [blobId, connectorId, connectorInstanceId, stream, recordKey]);
     if (insertResult.changes > 0) {
       applyDatasetSummaryBlobDelta({ blobBytesDelta: sizeBytes });
     }
@@ -5953,6 +6015,19 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
   } as unknown as Parameters<typeof mountRefRunStatus>[1]);
+  // Owner-only diagnostic read of a run's OBSERVATION record (Collection Profile 0.2.0 Section 5.10).
+  app.get(
+    "/_ref/collection-profile",
+    ownerAuth.requireOwnerSession,
+    (_req: unknown, res: { json: (body: unknown) => unknown }) => {
+      res.json({ object: "collection_profile_support", ...REFERENCE_COLLECTION_PROFILE_SUPPORT });
+    }
+  );
+  mountRefRunObservations(app, {
+    handleError,
+    pdppError,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountRefRunObservations>[1]);
 
   // Run-interaction streaming companion (reference-only). The store and
   // companion factory live in this AS app so the mint route, the SSE viewer
@@ -6904,6 +6979,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   // setup. Creates an invisible shell with TTL; owner can also abandon explicitly.
   // Shell transitions to active when an enrollment run captures source identity;
   // first sync then runs as normal collection on that active connection.
+  const resolveBrowserEnrollmentArtifact = createBrowserEnrollmentArtifactResolver(connectorInstallService);
   mountRefBrowserEnrollmentShell(app, {
     canonicalConnectorKey,
     createRequestConnectorInstanceStore,
@@ -6914,6 +6990,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     handleError,
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
+    resolveBrowserEnrollmentArtifact,
     resolveRegisteredConnectorManifest,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountRefBrowserEnrollmentShell>[1]);
@@ -7454,6 +7531,10 @@ function buildOwnerAgentOnboardingMetadata({
 }
 
 function buildRsApp(opts: ServerOpts = {}) {
+  const runUploadStagingStore =
+    opts.runUploadStagingGlobalMaxBytes === null || opts.runUploadStagingGlobalMaxBytes === undefined
+      ? null
+      : createRunUploadStagingStore({ globalMaxBytes: opts.runUploadStagingGlobalMaxBytes });
   const rsPurgeBrowserProfile = createOwnerBrowserProfilePurger(opts);
   const app = createApp({
     ...(opts.logger === null ? {} : { logger: opts.logger }),
@@ -7511,6 +7592,28 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
     requireTokenWithIntrospection(req, res, next, introspectToken);
+
+  const requireBlobUpload = async (req: ReqLike, res: ResLike, next: () => void) => {
+    const authorization = req.headers?.authorization;
+    if (typeof authorization === "string" && authorization.startsWith("Bearer ")) {
+      try {
+        const authority = await createRunUploadPermissionStore().resolve(authorization.slice(7));
+        req.blobUploadAccess = { authority, kind: "run-upload" };
+        next();
+        return;
+      } catch (error: unknown) {
+        if (!(error instanceof RunUploadPermissionError)) {
+          return pdppError(res, 503, "temporarily_unavailable", "Blob upload authorization is unavailable");
+        }
+      }
+    }
+    return requireToken(req, res, () =>
+      requireOwner(req, res, () => {
+        req.blobUploadAccess = { kind: "owner" };
+        next();
+      })
+    );
+  };
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },
@@ -7664,7 +7767,8 @@ function buildRsApp(opts: ServerOpts = {}) {
         createRequestAcquisitionBatchStore() as unknown as Record<string, (...args: unknown[]) => unknown>
       ).markCommittedForConnection?.(connectorInstanceId, counts),
     pdppError,
-    persistContentAddressedBlob,
+    persistContentAddressedBlob: (input: Parameters<typeof persistContentAddressedBlob>[0]) =>
+      persistContentAddressedBlob({ ...input, stagingStore: runUploadStagingStore }),
     putSyncState,
     recordAcquisitionProvenance: (record: unknown) =>
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
@@ -7673,6 +7777,7 @@ function buildRsApp(opts: ServerOpts = {}) {
       ).recordRecordProvenance?.(record),
     rejectMutation,
     rejectState,
+    requireBlobUpload,
     requireClient,
     requireCoreEndpointToken,
     requireOwner,
@@ -7939,6 +8044,17 @@ function buildRsApp(opts: ServerOpts = {}) {
     setReferenceTraceId,
   };
   mountOwnerConnectionsList(app, ownerConnectionsContext as unknown as Parameters<typeof mountOwnerConnectionsList>[1]);
+  opts.bindingAdmissionBridge?.mount(app);
+  mountOwnerBindingAccessPolicy(app, {
+    pdppError,
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerBindingAccessPolicy>[1]);
+  mountOwnerBindingAuthority(app, {
+    pdppError,
+    requireOwner,
+    requireToken,
+  } as unknown as Parameters<typeof mountOwnerBindingAuthority>[1]);
 
   // PATCH /v1/owner/connections/:connectionId is the bearer-authed owner-agent
   // rename: a trusted local owner agent labels a connection (e.g. "the owner personal"
@@ -8450,6 +8566,9 @@ function buildRsApp(opts: ServerOpts = {}) {
     projectStorageDisplayName,
     requireOwner,
     requireToken,
+    resolveBrowserEnrollmentArtifact: createBrowserEnrollmentArtifactResolver(
+      opts.connectorInstallService ?? createConnectorInstallService({ ...installedConnectorManifestRegistration })
+    ),
     resolveResource: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitResource),
     uatConnectorAllowlist: parseUatConnectorAllowlist(process.env.PDPP_UAT_CONNECTOR_ALLOWLIST),
@@ -8679,10 +8798,42 @@ function buildRsApp(opts: ServerOpts = {}) {
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
 export async function startServer(opts: ServerOpts = {}) {
+  if (
+    opts.runUploadStagingGlobalMaxBytes !== null &&
+    opts.runUploadStagingGlobalMaxBytes !== undefined &&
+    (!Number.isSafeInteger(opts.runUploadStagingGlobalMaxBytes) || opts.runUploadStagingGlobalMaxBytes <= 0)
+  ) {
+    throw new TypeError("runUploadStagingGlobalMaxBytes must be a positive safe integer");
+  }
+  const bindingRuntimeConfig = opts.browserBindingAdmission === undefined
+    ? await readBrowserBindingRuntimeConfig()
+    : null;
+  const browserBindingOptions = opts.browserBindingAdmission ?? (bindingRuntimeConfig ? {
+    allocator: bindingRuntimeConfig.allocator,
+    credential: bindingRuntimeConfig.authorizer.credential,
+    policyIdentity: bindingRuntimeConfig.policyIdentity,
+    syncLifecycle: { approvalMaxAgeMs: bindingRuntimeConfig.approvalMaxAgeMs },
+  } : undefined);
   const introspectionCredentials = resolveIntrospectionCredentials(opts);
   const logger = opts.logger ?? buildLogger({ quiet: !!opts.quiet });
   const requestedAsPort = opts.asPort ?? AS_PORT;
   const requestedRsPort = opts.rsPort ?? RS_PORT;
+  if (
+    !Number.isSafeInteger(opts.runUploadStagingMaxBytes ?? 268_435_456) ||
+    (opts.runUploadStagingMaxBytes ?? 268_435_456) <= 0
+  ) {
+    throw new TypeError("runUploadStagingMaxBytes must be a positive safe integer");
+  }
+  const uploadWallClock =
+    process.env.PDPP_MAX_RUN_WALL_CLOCK_MS === undefined ? 14_400_000 : Number(process.env.PDPP_MAX_RUN_WALL_CLOCK_MS);
+  if (
+    opts.runUploadStagingGlobalMaxBytes !== null &&
+    (!Number.isSafeInteger(uploadWallClock) || uploadWallClock <= 0)
+  ) {
+    throw new TypeError(
+      "Run uploads require finite positive PDPP_MAX_RUN_WALL_CLOCK_MS; use explicit null upload configuration to disable child authority"
+    );
+  }
   const ignoreAmbientPublicUrls =
     opts.ignoreAmbientPublicUrls ??
     ((requestedAsPort === 0 || requestedRsPort === 0) &&
@@ -8744,8 +8895,12 @@ export async function startServer(opts: ServerOpts = {}) {
     ...(opts.postgresBootstrapLockTimeoutMs === undefined
       ? {}
       : { bootstrapLockTimeoutMs: opts.postgresBootstrapLockTimeoutMs }),
+    ...(opts.testOnlyAlreadyAdmittedPostgresChildAttachment === undefined
+      ? {}
+      : { testOnlyAlreadyAdmittedChildAttachment: opts.testOnlyAlreadyAdmittedPostgresChildAttachment }),
     log: (msg: string) => logger.info(msg),
   });
+  const runUploadLifetimeFactory = await initializeRunUploadIssuer(opts.runUploadStagingMaxBytes ?? 268_435_456);
   const uninstallRecoveryStore = createConnectorInstallStore();
   const uninstallDataDir = connectorLifecycleDataDir();
   await reconcileConnectorUninstalls(uninstallDataDir, uninstallRecoveryStore, removeConnectorActivation);
@@ -9053,6 +9208,18 @@ export async function startServer(opts: ServerOpts = {}) {
   // for Mode-A (in-process runtime) streaming registration. The buildAsApp
   // call below receives the same instance; routes are attached there as
   // before. See reference-implementation/server/streaming/run-target-registry.ts.
+  const bindingAdmission = browserBindingOptions ? createBrowserBindingAdmission(browserBindingOptions) : undefined;
+  if (browserBindingOptions?.syncLifecycle) {
+    const recovered = await reconcileProtectedBrowserResources({
+      allocator: new NekoBindingControlClient(browserBindingOptions.allocator),
+      deadline: Date.now() + browserBindingOptions.allocator.timeoutMs,
+      store: createConnectorBindingResourceStore(),
+    });
+    const held = recovered.filter((item) => item.status === "binding_cleanup_unverified").length;
+    if (held > 0) {
+      logger.warn({ held }, "Browser resources require verified cleanup before another sync");
+    }
+  }
   const resolvedBrowserSurfaceControllerOptions = await resolveNekoBrowserSurfaceControllerOptions();
   const browserSurfaceControllerOptions = {
     ...resolvedBrowserSurfaceControllerOptions,
@@ -9061,6 +9228,13 @@ export async function startServer(opts: ServerOpts = {}) {
       ? {}
       : { browserSurfaceReadinessProbe: opts.browserSurfaceReadinessProbe }),
   };
+  if (browserBindingOptions?.syncLifecycle && bindingAdmission) {
+    const configured = browserSurfaceControllerOptions as Record<string, unknown>;
+    if (!configured.browserSurfaceLeaseManager) {
+      throw new Error("Protected browser lease manager required");
+    }
+    Object.assign(configured, protectedBrowserSurfaceControllerOptions(bindingAdmission, browserBindingOptions, configured.browserSurfaceLeaseManager as Parameters<typeof protectedBrowserSurfaceControllerOptions>[2], Number(configured.browserSurfaceReadinessTimeoutMs ?? browserBindingOptions.allocator.timeoutMs)));
+  }
   const runTargetRegistry = createRunTargetRegistry({
     ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }),
     isNekoDescriptorApproved: (descriptor, context) =>
@@ -9133,10 +9307,9 @@ export async function startServer(opts: ServerOpts = {}) {
         await presentationTerminalBarrier.releaseLease(args);
       }
     },
-    markStaticSecretCredentialRejected:
-      buildControllerStaticSecretCredentialRejectionMarker() as import("../runtime/controller.ts").MarkStaticSecretCredentialRejected,
     resolveStaticSecretRunEnv:
       connectionScopedRunEnvResolver as import("../runtime/controller.ts").StaticSecretRunEnvResolver,
+    ...(opts.runUploadStagingGlobalMaxBytes === null ? {} : { runUploadLifetimeFactory }),
     runtimeContext,
     streamingTargetNonceHooks: {
       clearNonce: (args) => runTargetRegistry.clearNonce(args),
@@ -9507,6 +9680,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,
     asPublicUrl,
+    bindingAdmissionBridge: bindingAdmission,
     configuredProviderAuthConnectorKeys,
     controller,
     ownerLive: resolveOwnerLive(opts),
@@ -9544,6 +9718,8 @@ export async function startServer(opts: ServerOpts = {}) {
     rsIntrospectionCredentials: introspectionCredentials,
     rsIntrospectionEndpoint: opts.rsIntrospectionEndpoint ?? `http://${selfCallUrlHost}:${asPort}/introspect`,
     rsPublicUrl: configuredRsPublicUrl,
+    runUploadStagingGlobalMaxBytes:
+      opts.runUploadStagingGlobalMaxBytes === undefined ? 1_073_741_824 : opts.runUploadStagingGlobalMaxBytes,
     semanticRetrievalCapability: opts.semanticRetrievalCapability,
     // Semantic retrieval experimental extension knobs — see search-semantic.js
     // + the metadata route. Forwarded verbatim so test harnesses and operator
@@ -9685,6 +9861,7 @@ export async function startServer(opts: ServerOpts = {}) {
   });
   await schedulerManager.start();
   const startupBackfillAbortController = new AbortController();
+  const startupBackfillGeneration = currentStorageGeneration();
   const startupBackfillDone = manifestReconciliationDone
     .then(() =>
       collectRetrievalStartupBackfillManifests({
@@ -9694,6 +9871,7 @@ export async function startServer(opts: ServerOpts = {}) {
     )
     .then((manifests) =>
       scheduleRetrievalStartupBackfill({
+        generation: startupBackfillGeneration,
         logger,
         manifests,
         signal: startupBackfillAbortController.signal,
@@ -9877,6 +10055,7 @@ export async function startServer(opts: ServerOpts = {}) {
     abortStartupBackfill: (reason: unknown) => startupBackfillAbortController.abort(reason),
     asPort,
     asServer,
+    bindingAdmission,
     // Exposed for the CLI entrypoint and for callers that need to await
     // in-flight `runConnector` promises (`drainActiveRuns`, the watchdog,
     // `awaitRun`).
@@ -10401,7 +10580,9 @@ function createReferenceSchedulerManager({
               : ({} as Record<string, unknown>);
           // The direct controller adapter receives the terminal spine shape,
           // where connector errors are flattened. Reassemble the scheduler
-          // fields so a connector's retry contract remains authoritative.
+          // fields. `connector_error` is descriptive and never starts a retry; its
+          // presence stops one. `runtime_retryable` is the runtime's own verdict and
+          // is set only when no connector terminal error exists.
           let connectorError: Record<string, unknown> | null = null;
           if (terminalData.connector_error && typeof terminalData.connector_error === "object") {
             connectorError = terminalData.connector_error as Record<string, unknown>;

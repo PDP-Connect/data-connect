@@ -12,6 +12,7 @@ import { runConnector } from "../runtime/index.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // Regression coverage for the live runtime path (reference-implementation/runtime/index.ts)
 // used by every real connector run, as distinct from the standalone
@@ -141,29 +142,32 @@ function fakeAdmitRunConnection(
 // shape that discriminates it: one sibling that fully succeeds, one stream
 // that reports its own certified failure.
 function testManifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    display_name: "Runtime stream isolation test",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "sibling_a",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        name: "sibling_b",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Runtime stream isolation test",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "sibling_a",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          name: "sibling_b",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 type RuntimeManifest = NonNullable<Parameters<typeof runConnector>[0]["manifest"]> & {
@@ -173,18 +177,21 @@ type RuntimeManifest = NonNullable<Parameters<typeof runConnector>[0]["manifest"
 type RuntimeManifestStream = NonNullable<RuntimeManifest["streams"]>[number];
 
 function completeManifest(connectorId: string, streams: RuntimeManifestStream[]): RuntimeManifest {
-  return {
-    connector_id: connectorId,
-    display_name: "Runtime stream isolation test",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: streams.map((stream) => ({
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-      ...stream,
-    })),
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Runtime stream isolation test",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: streams.map((stream) => ({
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+        ...stream,
+      })),
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 function writeConnectorStub(tmpDir: string, script: string): string {
@@ -871,10 +878,9 @@ rl.on('line', (line) => {
       type: string;
     };
     assert.equal(replayStart.type, "START");
-    assert.ok(
-      replayStart.protocol_capabilities?.includes("DETAIL_COVERAGE_KEY_SETS"),
-      "START must advertise support before connectors emit empty_keys/unchanged_keys"
-    );
+    // START lists exactly what this runtime implements. DETAIL_COVERAGE_KEY_SETS is
+    // advisory and not advertised, so this connector reports hydrated keys only.
+    assert.deepEqual(replayStart.protocol_capabilities, ["OBSERVATION", "STREAM_EVIDENCE"]);
     const replayStartState = replayStart.state;
     assert.ok(
       !("sibling_b" in (replayStartState ?? {})),
@@ -945,18 +951,61 @@ test("runConnector withholds every staged cursor after a retryable SKIP_RESULT t
   }
 });
 
-test("runConnector still commits a stream whose SKIP_RESULT is not retryable (counterweight)", async () => {
+// Counterweight for the runtime's informational-skip classification. An explicit
+// `out_of_scope` report remains informational regardless of its recovery hint.
+// This fixture checks that classification; it does not prove the connector's
+// claim about the provider or the owner's requested scope.
+test("runConnector still commits a stream whose SKIP_RESULT is informational (counterweight)", async () => {
+  const result = await runSingleSkipCase("runtime-informational-skip-commits-cursor-test", {
+    message: "sibling_b is outside the requested collection scope",
+    reason: "out_of_scope",
+    recovery_hint: "not_retriable",
+    stream: "sibling_b",
+  });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 2);
+});
+
+// The `not_retriable` hint does not permit advancement. A non-informational
+// `not_available` skip with no durable continuation means sibling_b's rows were
+// not collected, so its cursor stays put even though the connector says the
+// source will never expose them. Only the informational reason above releases
+// the cursor. Hint and retryable flag are connector claims (Sections 5.5, 5.11).
+test("runConnector withholds a non-informational SKIP_RESULT cursor even when its hint says not_retriable", async () => {
+  const result = await runSingleSkipCase("runtime-permanent-skip-withholds-cursor-test", {
+    message: "provider never exposes this",
+    reason: "not_available",
+    recovery_hint: "not_retriable",
+    stream: "sibling_b",
+  });
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  const withheld = (result.known_gaps ?? []).filter((gap) => gap.kind === "checkpoint_withheld");
+  assert.deepEqual(
+    withheld.map((gap) => gap.stream),
+    ["sibling_b"],
+    "only the stream whose rows went uncollected is withheld"
+  );
+});
+
+/**
+ * Runs one connector that stages cursors for sibling_a and sibling_b, then
+ * emits `skip` for sibling_b on a successful DONE, and returns the run result.
+ */
+async function runSingleSkipCase(connectorId: string, skip: Record<string, unknown>): Promise<RunResult> {
   const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
-  const manifest = testManifest("runtime-permanent-skip-commits-cursor-test");
-  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-permanent-skip-"));
+  const manifest = testManifest(connectorId);
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-skip-case-"));
   const connectorPath = writeConnectorStub(
     tmpDir,
     `
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'sibling_b_cursor' } }) + '\\n');
-  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'not_available', message: 'provider never exposes this', recovery_hint: 'not_retriable' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', ...${JSON.stringify(skip)} }) + '\\n');
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
   rl.close();
   process.exit(0);
@@ -971,16 +1020,12 @@ test("runConnector still commits a stream whose SKIP_RESULT is not retryable (co
     });
     assert.equal(registerResp.status, 201);
     const ownerToken = await issueOwnerToken(asUrl);
-
-    const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
-    assert.equal(result.status, "succeeded");
-    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
-    assert.equal(result.checkpoint_summary?.state_streams_committed, 2);
+    return await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);
   }
-});
+}
 
 // The scheduler decides whether a failed run still counts toward back-off by
 // reading `connector_error.code` and `checkpoint_summary.commit_status` off the

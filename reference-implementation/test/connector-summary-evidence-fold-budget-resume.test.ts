@@ -51,7 +51,12 @@ import {
 } from "../server/connector-summary-read-model.ts";
 import type { ConnectorSummaryReconcileObservation } from "../server/connector-summary-reconcile-observability.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
+import {
+  closePostgresStorage,
+  getPostgresPool,
+  initPostgresStorage,
+  postgresQuery,
+} from "../server/postgres-storage.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 
 const NOW = "2026-07-17T00:00:00.000Z";
@@ -809,13 +814,45 @@ test("real PostgreSQL mutation: an expired fold stops its delayed participant ch
          BEFORE UPDATE OF stream_facts_event_seq ON connector_summary_evidence
          FOR EACH ROW EXECUTE FUNCTION ${functionName}()`
     );
-    const startedAt = Date.now();
-    const result = await foldConnectorSummaryStreamFacts(ids, { deadline: startedAt + 20, maxEvents: 500 });
-    const elapsedMs = Date.now() - startedAt;
+    const wallNow = Date.now;
+    const startedAt = wallNow();
+    const deadline = startedAt + 20;
+    let logicalNow = startedAt;
+    let checkpointWritesStarted = 0;
+    const pool = getPostgresPool();
+    const originalQuery = pool.query;
+    // Keep real reads inside the budget, then expire only after a real CAS
+    // update is dispatched. Read latency must not preempt this write-tail oracle.
+    // Proxy preserves every query overload, receiver, argument and result.
+    pool.query = new Proxy(originalQuery, {
+      apply(target, thisArg, args) {
+        const pending = Reflect.apply(target, thisArg, args);
+        const sql: unknown = args[0];
+        if (
+          typeof sql === "string" &&
+          sql.startsWith("UPDATE connector_summary_evidence") &&
+          sql.includes("stream_facts_event_seq = $3")
+        ) {
+          checkpointWritesStarted += 1;
+          logicalNow = deadline;
+        }
+        return pending;
+      },
+    });
+    let result: Awaited<ReturnType<typeof foldConnectorSummaryStreamFacts>>;
+    Date.now = () => logicalNow;
+    try {
+      result = await foldConnectorSummaryStreamFacts(ids, { deadline, maxEvents: 500 });
+    } finally {
+      Date.now = wallNow;
+      pool.query = originalQuery;
+    }
+    const elapsedMs = wallNow() - startedAt;
     assert.equal(result.eventsRead, 1);
     assert.equal(result.incomplete, true, "checkpoint-write expiry remains a resumable incomplete fold");
     assert.equal(result.resumeAfterSeq, 0, "the incomplete participant set retains its minimum durable checkpoint");
     assert.ok(elapsedMs < 750, "only one already-started 80ms checkpoint write may overshoot the deadline");
+    assert.equal(checkpointWritesStarted, 1, "exactly one real participant checkpoint update was admitted");
     const checkpointWrites = await postgresQuery(
       "SELECT COUNT(*)::int AS count FROM connector_summary_evidence WHERE connector_id = $1 AND stream_facts_event_seq = $2",
       ["c1_pg_budget", targetSeq]

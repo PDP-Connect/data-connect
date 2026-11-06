@@ -26,7 +26,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-
 import { RECOVERY_ACTIONS } from "../runtime/connector-gap-bounding.ts";
 import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import {
@@ -44,6 +43,7 @@ import {
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type TestServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -712,6 +712,13 @@ const MINIMAL_MANIFEST = {
   version: "1.0.0",
 };
 
+// Section 3.4: an INTERACTION.kind must be declared in capabilities.human_interaction.
+// Tests that emit INTERACTION use this manifest. Undeclared-kind refusal uses MINIMAL_MANIFEST.
+const HUMAN_INTERACTION_MANIFEST = {
+  ...MINIMAL_MANIFEST,
+  capabilities: { human_interaction: ["credentials", "otp", "manual_action"] },
+};
+
 function buildMultiStreamManifest(connectorId = "test-multi-stream") {
   return {
     ...MINIMAL_MANIFEST,
@@ -809,7 +816,6 @@ test("Collection Profile conformance", async (t) => {
       assert.deepEqual(captured.bindings, {
         browser: {},
         filesystem: {},
-        interactive: {},
         network: {},
       });
       assert.ok(!("config" in captured), "legacy START.config should be absent");
@@ -1818,78 +1824,86 @@ test("Collection Profile conformance", async (t) => {
     }
   });
 
-  await t.test("pre-progress ChatGPT failure persists actionable known gap metadata", async () => {
-    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-    const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort, {
-      ...MINIMAL_MANIFEST,
-      connector_id: "chatgpt",
-    });
-
-    const { connectorPath, cleanup } = createTestConnector([
-      {
-        error: {
-          code: "credential_rejected",
-          message:
-            "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: apiFetch got 401 on GET /conversation/abc (auth - not retryable)",
-          recovery_hint: "refresh_credentials",
-          retryable: false,
-        },
-        records_emitted: 0,
-        status: "failed",
-        type: "DONE",
-      },
-    ]);
-
-    try {
-      const result = await runTestConnector({
-        collectionMode: "full_refresh",
-        connectorId,
-        connectorPath,
-        manifest: MINIMAL_MANIFEST,
-        onInteraction: async () => ({}),
-        ownerToken,
-        persistState: true,
-        rsUrl: `http://localhost:${rsPort}`,
-        state: null,
+  // Oracle: Collection Profile Section 5.11. The DONE.error.recovery_hint is a
+  // connector claim. `refresh_credentials` never holds in this version, so the gap's
+  // action is `unknown`. The connector's own message stays visible (Section 5.11,
+  // last paragraph). Plausible defect caught: a connector hint becomes an owner
+  // prompt or runtime action. Backend: memory profile, child process.
+  await t.test(
+    "pre-progress ChatGPT failure keeps the connector message and gates its refresh_credentials hint to unknown",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, {
+        ...MINIMAL_MANIFEST,
+        connector_id: "chatgpt",
       });
 
-      assert.equal(result.status, "failed");
-      assert.equal(result.records_emitted, 0);
-      assert.notDeepEqual(result.known_gaps, [], "pre-progress failure must not persist empty known_gaps");
-      assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
-      const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
-      assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
-      assert.equal(runFailedGap.reason, "connector_reported_failed");
-      assert.equal(runFailedGap.recovery_hint?.action, "refresh_credentials");
-      // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-      assert.match(runFailedGap.message ?? "", /chatgpt_preprogress_failure: refresh_credentials:/);
+      const { connectorPath, cleanup } = createTestConnector([
+        {
+          error: {
+            code: "credential_rejected",
+            message:
+              "chatgpt_preprogress_failure: refresh_credentials: chatgpt_session_failed: apiFetch got 401 on GET /conversation/abc (auth - not retryable)",
+            recovery_hint: "refresh_credentials",
+            retryable: false,
+          },
+          records_emitted: 0,
+          status: "failed",
+          type: "DONE",
+        },
+      ]);
 
-      const asUrl = `http://localhost:${asPort}`;
-      const { body: runTimeline } = await fetchJson<TimelineBody>(
-        `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
-      );
-      const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-      assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
-      assert.equal(failedEvent.data.reason, "connector_reported_failed");
-      const failedKnownGaps = knownGapsOf(failedEvent);
-      assert.notDeepEqual(failedKnownGaps, [], "terminal timeline must include durable known gaps");
-      assert.equal(failedKnownGaps[0]?.recovery_hint?.action, "refresh_credentials");
-    } finally {
-      cleanup();
-      await closeServer(server);
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: MINIMAL_MANIFEST,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: null,
+        });
+
+        assert.equal(result.status, "failed");
+        assert.equal(result.records_emitted, 0);
+        assert.notDeepEqual(result.known_gaps, [], "pre-progress failure must not persist empty known_gaps");
+        assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
+        const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
+        assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
+        assert.equal(runFailedGap.reason, "connector_reported_failed");
+        assert.equal(runFailedGap.recovery_hint?.action, "unknown");
+        // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
+        assert.match(runFailedGap.message ?? "", /chatgpt_preprogress_failure: refresh_credentials:/);
+
+        const asUrl = `http://localhost:${asPort}`;
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
+        assert.equal(failedEvent.data.reason, "connector_reported_failed");
+        const failedKnownGaps = knownGapsOf(failedEvent);
+        assert.notDeepEqual(failedKnownGaps, [], "terminal timeline must include durable known gaps");
+        assert.equal(failedKnownGaps[0]?.recovery_hint?.action, "unknown");
+      } finally {
+        cleanup();
+        await closeServer(server);
+      }
     }
-  });
+  );
 
   await t.test(
-    "recovery_hint is a provider-neutral channel: an arbitrary connector id gets the same hint",
+    "recovery_hint is a provider-neutral channel: an arbitrary connector id is gated identically (manual_action_required -> unknown)",
     async () => {
-      // Proves the RI derives its recovery hint from the typed, manifest-neutral
-      // DONE.error.recovery_hint field alone — never from a connector's private
-      // `code`/message format. A connector id ChatGPT's normalizer has never
-      // seen ("acme-crm") gets the identical `manual_action_required` hint by
-      // declaring the same recovery_hint, with a `code` and message sharing
-      // nothing with ChatGPT's.
+      // Oracle: Section 5.11. `manual_action_required` never holds in this version,
+      // so the gate yields `unknown` for any connector id. Provider neutrality is
+      // still the property under test: a connector id ChatGPT's normalizer has never
+      // seen ("acme-crm"), with a `code` and message sharing nothing with ChatGPT's,
+      // must get the same gated result as ChatGPT's identical hint. Plausible defect
+      // caught: a provider-specific allowlist letting one connector's hint through.
       const server = await startServer({
         asPort: 0,
         dbPath: ":memory:",
@@ -1933,7 +1947,7 @@ test("Collection Profile conformance", async (t) => {
         assert.equal(result.status, "failed");
         const runFailedGap = result.known_gaps?.find((gap) => gap.kind === "run_failed");
         assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
-        assert.equal(runFailedGap.recovery_hint?.action, "manual_action_required");
+        assert.equal(runFailedGap.recovery_hint?.action, "unknown");
       } finally {
         cleanup();
         await closeServer(server);
@@ -2095,115 +2109,125 @@ test("Collection Profile conformance", async (t) => {
     );
   });
 
-  await t.test("pre-progress browser profile attach race remains runtime-retryable", async () => {
-    const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
-    const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort, {
-      ...MINIMAL_MANIFEST,
-      connector_id: "chatgpt",
-    });
-
-    const { connectorPath, cleanup } = createTestConnector([
-      {
-        error: {
-          message:
-            "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.",
-          retryable: false,
-        },
-        records_emitted: 0,
-        status: "failed",
-        type: "DONE",
-      },
-    ]);
-
-    try {
-      const result = await runTestConnector({
-        collectionMode: "full_refresh",
-        connectorId,
-        connectorPath,
-        manifest: MINIMAL_MANIFEST,
-        onInteraction: async () => ({}),
-        ownerToken,
-        persistState: true,
-        rsUrl: `http://localhost:${rsPort}`,
-        state: null,
+  // Oracle: Section 5.5 forbids inferring a connector-requested action from message
+  // text, and Section 5.11 says a connector's retryable claim is not runtime retry
+  // authority. This DONE.error is connector text ("Protocol error ... session
+  // closed") with no runtime record behind it, so the runtime must not retry from it.
+  // The runtime's own retry policy is covered by the structured-transport tests in
+  // scheduler.test.ts (`scheduler retries runtime ...`). Plausible defect caught: a
+  // substring match on connector text starting an automatic retry.
+  await t.test(
+    "pre-progress browser profile attach race in connector text is not a runtime retry (Section 5.5, 5.11)",
+    async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { asPort, rsPort } = server;
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, {
+        ...MINIMAL_MANIFEST,
+        connector_id: "chatgpt",
       });
 
-      assert.equal(result.status, "failed");
-      assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
-      const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
-      assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
-      assert.equal(runFailedGap.reason, "connector_reported_failed");
-      assert.equal(runFailedGap.recovery_hint?.action, "retry_by_runtime");
-      assert.equal(runFailedGap.recovery_hint?.retryable, true);
+      const { connectorPath, cleanup } = createTestConnector([
+        {
+          error: {
+            message:
+              "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.",
+            retryable: false,
+          },
+          records_emitted: 0,
+          status: "failed",
+          type: "DONE",
+        },
+      ]);
 
-      const asUrl = `http://localhost:${asPort}`;
-      const { body: runTimeline } = await fetchJson<TimelineBody>(
-        `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
-      );
-      const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
-      assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
-      const retryableKnownGaps = knownGapsOf(failedEvent);
-      assert.equal(retryableKnownGaps[0]?.recovery_hint?.action, "retry_by_runtime");
-      assert.equal(retryableKnownGaps[0]?.recovery_hint?.retryable, true);
-    } finally {
-      cleanup();
-      await closeServer(server);
+      try {
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: MINIMAL_MANIFEST,
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${rsPort}`,
+          state: null,
+        });
+
+        assert.equal(result.status, "failed");
+        assert.ok(result.known_gaps, "expected known_gaps on the terminal result");
+        const runFailedGap = result.known_gaps.find((gap) => gap.kind === "run_failed");
+        assert.ok(runFailedGap, `expected run_failed known gap, got ${JSON.stringify(result.known_gaps)}`);
+        assert.equal(runFailedGap.reason, "connector_reported_failed");
+        assert.equal(runFailedGap.recovery_hint?.action, "unknown");
+        assert.equal(runFailedGap.recovery_hint?.retryable, false);
+
+        const asUrl = `http://localhost:${asPort}`;
+        const { body: runTimeline } = await fetchJson<TimelineBody>(
+          `${asUrl}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+        );
+        const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
+        assert.ok(failedEvent, "expected a failedEvent timeline event to be present");
+        const retryableKnownGaps = knownGapsOf(failedEvent);
+        assert.equal(retryableKnownGaps[0]?.recovery_hint?.action, "unknown");
+        assert.equal(retryableKnownGaps[0]?.recovery_hint?.retryable, false);
+      } finally {
+        cleanup();
+        await closeServer(server);
+      }
     }
-  });
+  );
 
-  // Precedence matrix for DONE.error.recovery_hint vs. the runtime's
-  // CDP/browser-infrastructure text fallback (isRuntimeRetryableBrowserProfileError):
-  // a present, valid hint is authoritative and MUST win outright, even over
-  // message text that would otherwise match the runtime's own infrastructure
-  // heuristic. That heuristic is a fallback for an ABSENT hint only — see
-  // recoveryHintFromTerminalConnectorError in runtime/index.ts.
+  // Gate matrix for DONE.error.recovery_hint (Collection Profile Section 5.11). Oracle:
+  // the spec's predicate table. In this version only `not_retriable` and `unknown`
+  // hold, so every other hint, present or absent, gates to `unknown`. A connector's
+  // `retryable` flag and its message text never authorize an action or a retry.
+  // Plausible defects caught: (a) an explicit connector hint winning over the gate,
+  // (b) connector CDP/session text restoring an infrastructure retry, (c) a connector
+  // retryable flag starting an automatic retry. The runtime's own retry policy for
+  // runtime-observed failures is tested elsewhere (scheduler.test.ts). Backend:
+  // memory profile, child process per case.
   const SESSION_CLOSED_MESSAGE =
     "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.";
 
   const RECOVERY_HINT_PRECEDENCE_CASES = [
     {
       connectorErrorOverrides: { recovery_hint: "manual_action_required" },
-      expectedAction: "manual_action_required",
+      expectedAction: "unknown",
       expectedRetryable: false,
       message: "acme_crm_login_expired: session revoked",
-      name: "explicit manual_action_required hint wins over benign message text",
+      name: "explicit manual_action_required hint is an unapproved suggestion and gates to unknown over benign message text",
     },
     {
       connectorErrorOverrides: { recovery_hint: "refresh_credentials" },
-      expectedAction: "refresh_credentials",
+      expectedAction: "unknown",
       expectedRetryable: false,
       message: SESSION_CLOSED_MESSAGE,
-      name: "explicit refresh_credentials hint wins even when the message matches the runtime's CDP/session-closed infrastructure text",
+      name: "explicit refresh_credentials hint is not authorized and gates to unknown even when the message matches the runtime's CDP/session-closed infrastructure text",
     },
     {
       connectorErrorOverrides: { recovery_hint: "manual_action_required" },
-      expectedAction: "manual_action_required",
+      expectedAction: "unknown",
       expectedRetryable: false,
       message: SESSION_CLOSED_MESSAGE,
-      name: "explicit manual_action_required hint wins even when the message matches the runtime's CDP/session-closed infrastructure text",
+      name: "explicit manual_action_required hint is an unapproved suggestion and gates to unknown even when the message matches the runtime's CDP/session-closed infrastructure text",
     },
     {
       connectorErrorOverrides: {},
-      expectedAction: "retry_by_runtime",
-      expectedRetryable: true,
+      expectedAction: "unknown",
+      expectedRetryable: false,
       message: SESSION_CLOSED_MESSAGE,
-      name: "absent hint with the same CDP/session-closed text falls through to the runtime's retryable infrastructure default",
+      name: "absent hint with the same CDP/session-closed text gates to unknown: connector text never restores a runtime retry",
     },
     {
       connectorErrorOverrides: {},
-      expectedAction: "retry_by_runtime",
-      expectedRetryable: true,
+      expectedAction: "unknown",
+      expectedRetryable: false,
       message: "acme_crm_unexpected_shutdown: worker process exited",
-      name: "absent hint with an unrelated retryable failure still falls through to the runtime-retryable default",
+      name: "absent hint with a connector retryable:true claim gates to unknown: the claim never starts a retry",
       retryableFlag: true,
     },
     {
-      // Absent hint, retryable:false, and a message that matches neither the
-      // runtime's infrastructure text nor any of normalizeRecoveryHint's
-      // generic inference vocabulary: recoveryHintFromTerminalConnectorError
-      // returns null and buildKnownGap's own fail-closed inference yields the
-      // non-retryable `unknown` action — never a fabricated retry.
+      // Absent hint, retryable:false, and a message that matches no infrastructure
+      // text. The gate yields the non-retryable `unknown` action, never a retry.
       connectorErrorOverrides: {},
       expectedAction: "unknown",
       expectedRetryable: false,
@@ -2214,7 +2238,7 @@ test("Collection Profile conformance", async (t) => {
 
   for (const testCase of RECOVERY_HINT_PRECEDENCE_CASES) {
     // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-    await t.test(`recovery_hint precedence: ${testCase.name}`, async () => {
+    await t.test(`recovery_hint gate: ${testCase.name}`, async () => {
       const server = await startServer({
         asPort: 0,
         dbPath: ":memory:",
@@ -2803,11 +2827,17 @@ rl.on('line', (line) => {
         assert.equal(advancedEvents.length, 2);
         assert.deepEqual(
           new Set(stagedEvents.map((event) => eventCursorKey(event))),
-          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
+          new Set([
+            cursorEventKey("items", "cursor_items_success"),
+            cursorEventKey("other_items", "cursor_other_success"),
+          ])
         );
         assert.deepEqual(
           new Set(advancedEvents.map((event) => eventCursorKey(event))),
-          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
+          new Set([
+            cursorEventKey("items", "cursor_items_success"),
+            cursorEventKey("other_items", "cursor_other_success"),
+          ])
         );
         assert.deepEqual(
           advancedEvents.map((event) => event.data.state_streams_committed as number).sort((a, b) => a - b),
@@ -2943,6 +2973,8 @@ rl.on('line', (line) => {
               required: ["id"],
               type: "object",
             },
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
           {
             name: "other_items",
@@ -2955,6 +2987,8 @@ rl.on('line', (line) => {
               required: ["id"],
               type: "object",
             },
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
         ],
         version: "0.1.0",
@@ -3583,55 +3617,53 @@ rl.on('line', (line) => {
     }
   });
 
-  await t.test("runtime satisfies required interactive bindings and advertises them in START", async () => {
-    const manifestWithInteractiveBinding = {
-      ...MINIMAL_MANIFEST,
-      runtime_requirements: {
-        bindings: {
-          interactive: { required: true },
-        },
-      },
-    };
+  await t.test(
+    "START.bindings never advertises interactive, even when the manifest declares human_interaction",
+    async () => {
+      const manifestWithInteractiveBinding = {
+        ...MINIMAL_MANIFEST,
+        capabilities: { human_interaction: ["credentials"] },
+      };
 
-    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
-    const capturePath = join(tmpDir, "start.json");
-    const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
 
-    try {
-      const result = await runTestConnector({
-        // Bare runtime unit test: no server, no registered connector, an
-        // unreachable rsUrl. A pure-echo admission just needs to clear the
-        // gate so the START.bindings capture under test is reached.
-        admitRunConnection: fakeEchoAdmitRunConnection(),
-        collectionMode: "full_refresh",
-        connectorId: "test",
-        connectorPath,
-        manifest: manifestWithInteractiveBinding,
-        onInteraction: async () => ({
-          data: {},
-          request_id: "unused",
-          status: "success",
-          type: "INTERACTION_RESPONSE",
-        }),
-        ownerToken: "test",
-        persistState: true,
-        rsUrl: "http://localhost:9999",
-        state: null,
-      });
+      try {
+        const result = await runTestConnector({
+          // Bare runtime unit test: no server, no registered connector, an
+          // unreachable rsUrl. A pure-echo admission just needs to clear the
+          // gate so the START.bindings capture under test is reached.
+          admitRunConnection: fakeEchoAdmitRunConnection(),
+          collectionMode: "full_refresh",
+          connectorId: "test",
+          connectorPath,
+          manifest: manifestWithInteractiveBinding,
+          onInteraction: async () => ({
+            data: {},
+            request_id: "unused",
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          }),
+          ownerToken: "test",
+          persistState: true,
+          rsUrl: "http://localhost:9999",
+          state: null,
+        });
 
-      assert.equal(result.status, "succeeded");
-      const captured = JSON.parse(readFileSync(capturePath, "utf8"));
-      assert.deepEqual(captured.bindings, {
-        browser: {},
-        filesystem: {},
-        interactive: {},
-        network: {},
-      });
-    } finally {
-      cleanup();
-      rmSync(tmpDir, { force: true, recursive: true });
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.bindings, {
+          browser: {},
+          filesystem: {},
+          network: {},
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+      }
     }
-  });
+  );
 
   await t.test(
     "runtime omits interactive from START.bindings when interaction handling is explicitly disabled",
@@ -3714,7 +3746,10 @@ rl.on('line', (line) => {
       assert.equal(skippedEvent.data.message, "Platform returned 429");
       const skippedKnownGap = knownGapOf(skippedEvent);
       assert.equal(skippedKnownGap.kind, "skip_result");
-      assert.equal(skippedKnownGap.recovery_hint?.action, "retry_by_runtime");
+      // Section 5.5: an absent SKIP_RESULT.recovery_hint is not inferred from the
+      // connector's `rate_limited` reason or its message. Gated action: `unknown`
+      // (Section 5.11). The skip fact, message and reason are still recorded below.
+      assert.equal(skippedKnownGap.recovery_hint?.action, "unknown");
 
       const completedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.completed");
       assert.ok(completedEvent, "expected run.completed event");
@@ -4894,7 +4929,10 @@ rl.on('line', (line) => {
       assert.ok(itemsEntry.skipped, "skip fact recorded on the entry");
       const itemsSkipped = asRecord(itemsEntry.skipped);
       assert.equal(itemsSkipped.reason, "partial_export", "skip reason carried verbatim");
-      assert.equal(itemsSkipped.recovery_action, "retry_by_runtime", "normalized recovery action carried");
+      // The connector's `retry_by_runtime` hint is a suggestion. That action never
+      // holds in this version (Section 5.11 predicate table), so the carried action is
+      // `unknown`. The connector's hint is not an authorized runtime retry.
+      assert.equal(itemsSkipped.recovery_action, "unknown", "gated recovery action carried");
       // No coverage verdict: the runtime states the skip, the projection decides.
       assert.equal("coverage" in itemsEntry, false, "no coverage condition on a skipped entry");
       assert.equal("forward_disposition" in itemsEntry, false, "no forward_disposition on a skipped entry");
@@ -5631,7 +5669,7 @@ rl.on('line', (line) => {
   await t.test("runtime reports manual-action known gaps without persisting interaction responses", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-manual-gap-"));
@@ -5673,7 +5711,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async () => ({
           data: { otp: "123456", password: "supersecret" },
           request_id: "manual_login",
@@ -6678,7 +6716,7 @@ rl.on('line', (line) => {
   await t.test("INTERACTION round-trip allows connector to continue collecting", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     // Connector that emits INTERACTION, waits for response, then emits RECORD + DONE
@@ -6713,7 +6751,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -6803,7 +6841,7 @@ rl.on('line', (line) => {
   await t.test("resolved OTP assistance completes a pending interaction after page advancement", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const tmpDir = mkdtempSync(join(process.cwd(), ".scratch-otp-manual-"));
     const connectorPath = join(tmpDir, "connector.mjs");
     writeFileSync(
@@ -6834,7 +6872,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async () =>
           new Promise(() => {
             // Keep the interaction pending until the connector advances the browser page.
@@ -6854,7 +6892,7 @@ rl.on('line', (line) => {
   await t.test("late OTP assistance status is ignored after a console response", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-otp-late-status-"));
     const connectorPath = join(tmpDir, "connector.mjs");
     writeFileSync(
@@ -6884,7 +6922,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async (message: unknown) => ({
           data: { code: "123456" },
           request_id: (message as InteractionMessage).request_id,
@@ -6906,7 +6944,7 @@ rl.on('line', (line) => {
   await t.test("browser-surface-backed otp INTERACTION projects streamable assistance with secret input", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-interaction-browser-otp-"));
@@ -6951,7 +6989,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -7003,7 +7041,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -7434,7 +7472,7 @@ rl.on('line', (line) => {
   await t.test("runtime rejects connector output emitted while waiting for INTERACTION_RESPONSE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-output-"));
@@ -7481,7 +7519,7 @@ rl.on('line', (line) => {
             collectionMode: "full_refresh",
             connectorId,
             connectorPath,
-            manifest: MINIMAL_MANIFEST,
+            manifest: HUMAN_INTERACTION_MANIFEST,
             onInteraction: async () => new Promise(() => undefined),
             ownerToken,
             persistState: true,
@@ -7533,7 +7571,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-state-"));
@@ -7578,7 +7616,7 @@ rl.on('line', (line) => {
               collectionMode: "incremental",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7633,7 +7671,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-progress-"));
@@ -7678,7 +7716,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7729,7 +7767,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-skip-result-"));
@@ -7775,7 +7813,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7824,7 +7862,7 @@ rl.on('line', (line) => {
   await t.test("runtime rejects a second INTERACTION emitted while waiting for INTERACTION_RESPONSE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-overlap-"));
@@ -7872,7 +7910,7 @@ rl.on('line', (line) => {
             collectionMode: "full_refresh",
             connectorId,
             connectorPath,
-            manifest: MINIMAL_MANIFEST,
+            manifest: HUMAN_INTERACTION_MANIFEST,
             onInteraction: async () => new Promise(() => undefined),
             ownerToken,
             persistState: true,
@@ -7925,7 +7963,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-done-"));
@@ -7970,7 +8008,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -8023,7 +8061,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-invalid-jsonl-"));
@@ -8064,7 +8102,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -8116,7 +8154,7 @@ rl.on('line', (line) => {
   await t.test("runtime returns INTERACTION timeout responses when the handler does not answer in time", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-timeout-"));
@@ -8163,7 +8201,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -8202,7 +8240,7 @@ rl.on('line', (line) => {
   await t.test("runtime returns INTERACTION cancelled responses when the handler aborts", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-cancelled-"));
@@ -8249,7 +8287,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -8290,7 +8328,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-invalid-response-"));
@@ -8328,7 +8366,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
               onInteraction: async (message: unknown) => {
                 const msg = message as InteractionMessage;
@@ -8690,7 +8728,7 @@ rl.on('line', (line) => {
   });
 
   await t.test(
-    "runtime rejects INTERACTION when START.bindings omit interactive and records no interaction artifacts",
+    "runtime rejects INTERACTION whose kind the manifest does not declare and records no interaction artifacts",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -8742,7 +8780,10 @@ rl.on('line', (line) => {
             rejected = asRuntimeError(err);
             assert.equal(rejected.failure_reason, "connector_protocol_violation");
             // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-            assert.match(rejected.message, /START\.bindings omitted interactive/);
+            assert.match(
+              rejected.message,
+              /INTERACTION\.kind not declared in capabilities\.human_interaction: credentials/
+            );
             assert.equal(checkpointSummaryOf(rejected).records_flushed, 0);
             assert.equal(checkpointSummaryOf(rejected).buffered_records_dropped, 0);
             assert.equal(checkpointSummaryOf(rejected).state_streams_staged, 0);
@@ -8762,7 +8803,7 @@ rl.on('line', (line) => {
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(
           failedEvent,
-          "run.failed should be emitted when INTERACTION arrives without an advertised interactive binding"
+          "run.failed should be emitted when INTERACTION names a kind the manifest does not declare"
         );
         assert.equal(failedEvent.data.reason, "connector_protocol_violation");
         assert.equal(failedEvent.data.records_flushed, 0);
@@ -8912,7 +8953,10 @@ rl.on('line', (line) => {
       assert.equal(advancedEvents.length, 0);
       assert.deepEqual(
         new Set(stagedEvents.map((event) => eventCursorKey(event))),
-        new Set([cursorEventKey("items", "cursor_items_done_failed"), cursorEventKey("other_items", "cursor_other_done_failed")])
+        new Set([
+          cursorEventKey("items", "cursor_items_done_failed"),
+          cursorEventKey("other_items", "cursor_other_done_failed"),
+        ])
       );
 
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
@@ -8993,8 +9037,15 @@ rl.on('line', (line) => {
     }
   );
 
+  // Oracle: Section 5.8 (DONE.error shape) and the owner-visibility rule in Section
+  // 5.11 (the connector's own DONE.error.message stays visible with the diagnosis).
+  // The run fails as connector_protocol_violation. The bounded message is kept, the
+  // unsupported field's VALUE never reaches durable artifacts, and the connector's
+  // retryable claim gives no retry authority. Plausible defect caught: an invalid
+  // envelope's unsupported value (or its retryable:true) leaking into the terminal
+  // record or restarting the run. Backend: memory profile, child process.
   await t.test(
-    "DONE.error with unsupported fields is rejected as a protocol violation before terminal artifacts are recorded as connector failures",
+    "DONE.error with unsupported fields is a protocol violation: the bounded connector message stays visible, the unsupported value and retryable claim do not",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9033,7 +9084,10 @@ rl.on('line', (line) => {
             assert.equal(checkpointSummaryOf(capturedError).buffered_records_dropped, 0);
             assert.equal(checkpointSummaryOf(capturedError).commit_status, "not_committed");
             assert.equal(capturedError.terminal_reason, "connector_protocol_violation");
-            assert.equal(capturedError.connector_error, null);
+            // The bounded connector message stays visible with the diagnosis (Section 5.11).
+            assert.equal(capturedError.connector_error?.message, "rate limited");
+            // The connector's retryable:true is a claim with no retry authority.
+            assert.notEqual(capturedError.connector_error?.retryable, true);
             return true;
           }
         );
@@ -9047,13 +9101,13 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.records_flushed, 0);
         assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
+        // The connector's bounded message is durable diagnosis (Section 5.11).
+        assert.equal(failedEvent.data.connector_error_message, "rate limited");
+        assert.notEqual(failedEvent.data.connector_error_retryable, true);
+        // The unsupported field's value must never reach a durable artifact.
         assert.ok(
-          !("connector_error_message" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
-        );
-        assert.ok(
-          !("connector_error_retryable" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
+          !JSON.stringify(runTimeline).includes("upstream_rate_limit"),
+          "an unsupported DONE.error field's value must not enter durable artifacts"
         );
       } finally {
         cleanup();
@@ -9062,8 +9116,11 @@ rl.on('line', (line) => {
     }
   );
 
+  // Section 5.8: successful DONE cannot carry a terminal connector error. This
+  // contradiction is a protocol failure and must not be published as a valid
+  // connector error. Failed-DONE message preservation is tested separately.
   await t.test(
-    "DONE(succeeded) with terminal error details is rejected as a protocol violation before success artifacts are recorded",
+    "DONE(succeeded) with terminal error details is a protocol violation before success artifacts are recorded",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9120,14 +9177,8 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.records_flushed, 0);
         assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
-        assert.ok(
-          !("connector_error_message" in failedEvent.data),
-          "contradictory DONE(succeeded)+error details must not enter durable artifacts"
-        );
-        assert.ok(
-          !("connector_error_retryable" in failedEvent.data),
-          "contradictory DONE(succeeded)+error details must not enter durable artifacts"
-        );
+        assert.ok(!("connector_error_message" in failedEvent.data));
+        assert.ok(!("connector_error_retryable" in failedEvent.data));
       } finally {
         cleanup();
         await closeServer(server);
@@ -11184,25 +11235,26 @@ function testSourceIdForConnector(connectorId: string): string {
 }
 
 function withTestSourceDeclaration(manifest: ConnectorManifest): ConnectorManifest {
-  const streams = asArray(manifest.streams).map((stream) => {
-    const streamRecord = asRecord(stream);
-    return {
-      ...streamRecord,
-      selection: {
-        fields: true,
-        resources: true,
+  const declared = asRecord(
+    withFixtureSourceDeclaration(
+      {
+        ...manifest,
+        streams: asArray(manifest.streams).map((stream) => ({
+          ...asRecord(stream),
+          selection: { fields: true, resources: true },
+        })),
       },
-    };
-  });
+      {
+        sourceId: testSourceIdForConnector(manifest.connector_id),
+      }
+    )
+  );
   return {
     ...manifest,
     source_declaration: {
+      ...asRecord(declared.source_declaration),
       declaration_version: `collection-profile-test:${manifest.connector_id}:${manifest.version}`,
-      display: { name: manifest.display_name },
-      protocol_version: manifest.protocol_version,
       publisher: { id: "https://sources.example/publishers/collection-profile-tests" },
-      source: { id: testSourceIdForConnector(manifest.connector_id), kind: "connector" },
-      streams,
     },
   };
 }

@@ -15,6 +15,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,10 +25,13 @@ import { pathToFileURL } from "node:url";
 import type { BrowserSurface } from "@opendatalabs/remote-surface/leases";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import {
+  DockerEngineHttpClient,
   type DockerEngineRequestInit,
   type DockerEngineTransport,
+  type NekoBindingScope,
   NekoSurfaceAllocatorService,
   NekoSurfaceAllocatorServiceError,
+  type PreparedNekoReservation,
   type ProfileDirectoryStat,
   type ProfileFilesystem,
   readNekoSurfaceAllocatorOptionsFromEnv,
@@ -2812,4 +2816,721 @@ test("healthy storage: stop(surface_failed) still removes the container", async 
   } finally {
     cleanup();
   }
+});
+
+// Reservation protocol tests extend the existing Engine double with Docker's
+// create/inspect facts (Config, HostConfig, immutable image id, created state).
+// The oracle is the Engine API create -> inspect -> start ordering, not OS confinement.
+const RESERVATION_IMAGE = `sha256:${"a".repeat(64)}`;
+const BINDING_SCOPE: NekoBindingScope = {
+  connectionId: "connection-one",
+  connectorId: "chatgpt",
+  instanceKey: "browser.main",
+  ownerId: "owner-one",
+};
+class ReservationDocker extends FakeDocker {
+  imageId = RESERVATION_IMAGE;
+  networkId = "network-generation-one";
+  inspectOverrides: Record<string, unknown> = {};
+  beforeDelete?: () => Promise<void>;
+  override async requestJson(path: string, init: DockerEngineRequestInit = {}): Promise<unknown> {
+    if (path === "/info") {
+      return { ID: "fictional-engine-one" };
+    }
+    if (init.method === "DELETE" && this.beforeDelete !== undefined) {
+      await this.beforeDelete();
+    }
+    if (path.startsWith("/images/")) {
+      this.calls.push({ init: init as DockerCall["init"], path });
+      return { Id: this.imageId };
+    }
+    if (path === `/networks/${BASE_OPTIONS.network}`) {
+      this.calls.push({ init: init as DockerCall["init"], path });
+      return { Driver: "bridge", Id: this.networkId, Internal: false };
+    }
+    this.images.add(RESERVATION_IMAGE);
+    const value = await super.requestJson(path, init);
+    const match = path.match(REGEXP_6);
+    if (match?.[1] && typeof value === "object" && value !== null) {
+      const create = this.calls.findLast(
+        (call) =>
+          call.path === "/containers/create" && call.init.query?.name === this.containers.get(match[1] ?? "")?.name
+      );
+      const body = create?.init.body as Record<string, unknown> | undefined;
+      if (body !== undefined) {
+        const hostConfig = body.HostConfig as {
+          readonly PortBindings: Record<string, readonly { readonly HostIp?: string; readonly HostPort: string }[]>;
+        };
+        return {
+          ...value,
+          Config: { Env: body.Env, Healthcheck: body.Healthcheck, Hostname: body.Hostname, Labels: body.Labels },
+          Created: "2026-05-13T12:00:00Z",
+          HostConfig: {
+            ...hostConfig,
+            PortBindings: Object.fromEntries(
+              Object.entries(hostConfig.PortBindings).map(([port, bindings]) => [
+                port,
+                bindings.map((binding) => ({ HostIp: binding.HostIp ?? "", HostPort: binding.HostPort })),
+              ])
+            ),
+          },
+          Image: RESERVATION_IMAGE,
+          Mounts: [{ Source: (body.HostConfig as { Binds: string[] }).Binds[0], Type: "bind" }],
+          State: {
+            Running: this.containers.get(match[1])?.running === true,
+            Status: this.containers.get(match[1])?.running ? "running" : "created",
+          },
+          ...this.inspectOverrides,
+        };
+      }
+    }
+    return value;
+  }
+}
+function reservationHarness(authorize?: (value: PreparedNekoReservation) => Promise<void>) {
+  const docker = new ReservationDocker();
+  let time = BASE_OPTIONS.now().getTime();
+  let probes = 0;
+  const fs = recordingProfileFilesystem();
+  const service = new NekoSurfaceAllocatorService({
+    ...BASE_OPTIONS,
+    docker,
+    fetchImpl: () => {
+      probes += 1;
+      throw new Error("forbidden probe");
+    },
+    now: () => new Date(time),
+    profileFilesystem: fs,
+    ...(authorize === undefined ? {} : { authorizeAndRecordBindingActivation: authorize }),
+  });
+  const prepare = (scope = BINDING_SCOPE) =>
+    service.prepareBindingSurface({
+      ...scope,
+      expiresAt: BASE_OPTIONS.now().getTime() + 1000,
+      requestedOrigins: ["https://example.com"],
+    });
+  return {
+    docker,
+    expire: () => {
+      time += 1000;
+    },
+    fs,
+    prepare,
+    probes: () => probes,
+    service,
+  };
+}
+function reservationStarts(docker: FakeDocker): DockerCall[] {
+  return docker.calls.filter((call) => REGEXP_3.test(call.path));
+}
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+test("legacy causal baseline: ensure starts browser before returning, with no approval callback", async () => {
+  const docker = new FakeDocker();
+  const events: string[] = [];
+  const service = new NekoSurfaceAllocatorService({
+    ...BASE_OPTIONS,
+    docker,
+    fetchImpl: () => {
+      events.push("probe");
+      assert.equal(reservationStarts(docker).length, 1);
+      return Promise.resolve(new Response(JSON.stringify({ Browser: "Chromium" }), { status: 200 }));
+    },
+  });
+  await service.ensureSurface(REQUEST);
+  events.push("returned");
+  assert.equal(reservationStarts(docker).length, 1);
+  assert.deepEqual(events, ["probe", "probe", "returned"]);
+});
+
+test("prepare reserves actual never-started container facts with zero start, readiness, network mutations or reclamation", async () => {
+  const h = reservationHarness();
+  const d = await h.prepare();
+  assert.equal(d.phase, "PREPARED");
+  assert.equal(d.resource.containerId, onlyContainerId(h.docker));
+  assert.equal(h.docker.containers.get(d.resource.containerId)?.running, false);
+  assert.equal(d.access.imageId, RESERVATION_IMAGE);
+  assert.equal(d.access.networkId, h.docker.networkId);
+  assert.equal(reservationStarts(h.docker).length, 0);
+  assert.equal(h.probes(), 0);
+  assert.equal(
+    h.docker.calls.filter((call) => call.init.method === "DELETE" || NETWORK_MUTATION_PATH_RE.test(call.path)).length,
+    0
+  );
+  assert.deepEqual(
+    d.access.channels,
+    ["browser.navigate", "browser.connect"].map((name) => ({ coverage: "not_observable", name }))
+  );
+  assert.equal(Object.isFrozen(d.access.channels[0]), true);
+  assert.equal(Object.isFrozen(d.scope), true);
+  assert.equal(await h.service.readBindingReservation(d.reservationId, BINDING_SCOPE), d);
+  assert.equal(
+    h.fs.calls.some((call) => call.method === "write" || call.method === "unlink"),
+    false
+  );
+  assert.equal(JSON.stringify(d).includes("cdp_url"), false);
+});
+
+test("preparation accepts the Engine serialization of an unspecified host IP", async () => {
+  const h = reservationHarness();
+  const descriptor = await h.prepare();
+  assert.equal(await h.service.readBindingReservation(descriptor.reservationId, BINDING_SCOPE), descriptor);
+  assert.equal(reservationStarts(h.docker).length, 0);
+  assert.equal(h.probes(), 0);
+});
+
+test("reservation refuses a changed host binding IP before activation", async () => {
+  const h = reservationHarness(async () => undefined);
+  const descriptor = await h.prepare();
+  const { body } = findCreateCall(h.docker.calls, "/containers/create").init;
+  assert.ok(body);
+  h.docker.inspectOverrides = {
+    HostConfig: {
+      ...body.HostConfig,
+      PortBindings: Object.fromEntries(
+        Object.entries(body.HostConfig.PortBindings).map(([port, bindings]) => [
+          port,
+          bindings.map((binding) => ({ HostIp: "127.0.0.1", HostPort: binding.HostPort })),
+        ])
+      ),
+    },
+  };
+  await assert.rejects(h.service.activateBindingReservation(descriptor.reservationId, BINDING_SCOPE));
+  assert.equal(reservationStarts(h.docker).length, 0);
+});
+
+for (const key of ["ownerId", "connectionId", "instanceKey", "connectorId"] as const) {
+  test(`reservation refuses wrong ${key} for read, activation and cleanup`, async () => {
+    const h = reservationHarness(async () => undefined);
+    const d = await h.prepare();
+    const wrong = { ...BINDING_SCOPE, [key]: "wrong" };
+    await assert.rejects(h.service.readBindingReservation(d.reservationId, wrong));
+    await assert.rejects(h.service.activateBindingReservation(d.reservationId, wrong));
+    await assert.rejects(h.service.cancelBindingReservation(d.reservationId, wrong));
+    assert.equal(reservationStarts(h.docker).length, 0);
+    assert.equal(h.docker.containers.size, 1);
+  });
+}
+
+test("profile namespace separates owners, connections and binding instances", async () => {
+  const h = reservationHarness();
+  const first = await h.prepare();
+  await h.prepare({ ...BINDING_SCOPE, ownerId: "other-owner" });
+  await h.prepare({ ...BINDING_SCOPE, connectionId: "other-connection" });
+  // Third fixed port is now reserved; use a separate harness for instance identity.
+  const other = reservationHarness();
+  const second = await other.prepare({ ...BINDING_SCOPE, instanceKey: "browser.other" });
+  assert.notEqual(first.access.identity, second.access.identity);
+  const paths = h.docker.calls
+    .filter((call) => call.path === "/containers/create")
+    .map((call) => (call.init.body as DockerCreateContainerBody).Labels[`${LABEL}.profile_path`]);
+  assert.equal(new Set(paths).size, 3);
+});
+
+for (const scenario of ["absent", "denied", "persistence failure"] as const) {
+  test(`pre-start authorization/record gate: ${scenario} refuses before Docker start`, async () => {
+    const h = reservationHarness(scenario === "absent" ? undefined : () => Promise.reject(new Error(scenario)));
+    const d = await h.prepare();
+    await assert.rejects(h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+    assert.equal(reservationStarts(h.docker).length, 0);
+  });
+}
+
+test("authorization and durable record finish before the single start; duplicate activation loses", async () => {
+  const entered = barrier();
+  const done = barrier();
+  let records = 0;
+  const h = reservationHarness(async () => {
+    records += 1;
+    entered.release();
+    await done.promise;
+  });
+  const d = await h.prepare();
+  const activating = h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE);
+  await entered.promise;
+  assert.equal(reservationStarts(h.docker).length, 0);
+  await assert.rejects(h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+  done.release();
+  assert.deepEqual(await activating, { containerId: d.resource.containerId });
+  assert.equal(records, 1);
+  assert.equal(reservationStarts(h.docker).length, 1);
+  await assert.rejects(h.service.cancelBindingReservation(d.reservationId, BINDING_SCOPE));
+});
+
+test("TLA replay: cancel while authorization blocked cannot later start", async () => {
+  const entered = barrier();
+  const done = barrier();
+  const deleting = barrier();
+  const deleteDone = barrier();
+  const h = reservationHarness(async () => {
+    entered.release();
+    await done.promise;
+  });
+  h.docker.beforeDelete = async () => {
+    deleting.release();
+    await deleteDone.promise;
+  };
+  const d = await h.prepare();
+  const activating = h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE);
+  const rejected = assert.rejects(activating);
+  await entered.promise;
+  const cancelling = h.service.cancelBindingReservation(d.reservationId, BINDING_SCOPE);
+  await deleting.promise;
+  // Keep the stopped resource present: deletion must not mask a missing state guard.
+  done.release();
+  try {
+    await rejected;
+    assert.equal(reservationStarts(h.docker).length, 0);
+  } finally {
+    deleteDone.release();
+    await cancelling;
+  }
+  assert.equal(h.docker.containers.size, 0);
+});
+
+test("TLA replay: expiry during authorization refuses the persisted but stale resource", async () => {
+  const h = reservationHarness(() => {
+    h.expire();
+    return Promise.resolve();
+  });
+  const d = await h.prepare();
+  await assert.rejects(h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+  assert.equal(reservationStarts(h.docker).length, 0);
+});
+
+for (const scenario of ["image", "config", "network", "profile", "running", "foreign", "missing", "expired"] as const) {
+  test(`revalidation refuses changed ${scenario} without replacement or network mutation`, async () => {
+    const h = reservationHarness(async () => undefined);
+    const d = await h.prepare();
+    if (scenario === "image") {
+      h.docker.imageId = `sha256:${"b".repeat(64)}`;
+    }
+    if (scenario === "config") {
+      h.docker.inspectOverrides.HostConfig = { NetworkMode: "other" };
+    }
+    if (scenario === "network") {
+      h.docker.networkId = "recreated-network";
+    }
+    if (scenario === "profile") {
+      h.fs.stat = async () => ({ ...HEALTHY_DIRECTORY, ino: 999n });
+    }
+    if (scenario === "running") {
+      findContainer(h.docker, d.resource.containerId).running = true;
+    }
+    if (scenario === "foreign") {
+      h.docker.inspectOverrides.Config = { Labels: { foreign: "true" } };
+    }
+    if (scenario === "missing") {
+      h.docker.containers.delete(d.resource.containerId);
+    }
+    if (scenario === "expired") {
+      h.expire();
+    }
+    await assert.rejects(h.service.readBindingReservation(d.reservationId, BINDING_SCOPE));
+    await assert.rejects(h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+    assert.equal(reservationStarts(h.docker).length, 0);
+    assert.equal(h.docker.calls.filter((call) => call.path === "/containers/create").length, 1);
+    assert.equal(
+      h.docker.calls.some((call) => NETWORK_MUTATION_PATH_RE.test(call.path)),
+      false
+    );
+  });
+}
+
+test("legacy ensure/status/stop cannot bypass a reservation, including after allocator restart", async () => {
+  const h = reservationHarness();
+  const d = await h.prepare();
+  const create = findCreateCall(h.docker.calls, "/containers/create");
+  const labels = create.init.body?.Labels;
+  assert.ok(labels);
+  const request = {
+    connectorId: BINDING_SCOPE.connectorId,
+    profileKey: d.access.identity,
+    surfaceId: labels[`${LABEL}.surface_id`] ?? "",
+  };
+  const restarted = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker: h.docker, fetchImpl: readyFetch() });
+  await assert.rejects(restarted.ensureSurface(request));
+  await assert.rejects(restarted.getSurfaceStatus(request.surfaceId));
+  await assert.rejects(restarted.stopSurface({ reason: "operator", surfaceId: request.surfaceId }));
+  assert.deepEqual(await restarted.listSurfaces(), []);
+  await assert.rejects(restarted.readBindingReservation(d.reservationId, BINDING_SCOPE));
+  assert.equal(reservationStarts(h.docker).length, 0);
+  assert.equal(h.docker.containers.size, 1);
+});
+
+test("start-time port conflict refuses without retry, replacement, removal or altered port", async () => {
+  const h = reservationHarness(async () => undefined);
+  const d = await h.prepare();
+  h.docker.startFailurePorts.add(59_000);
+  await assert.rejects(h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+  assert.equal(reservationStarts(h.docker).length, 1);
+  assert.equal(h.docker.calls.filter((call) => call.path === "/containers/create").length, 1);
+  assert.equal(
+    h.docker.calls.some((call) => call.init.method === "DELETE"),
+    false
+  );
+  assert.equal(h.docker.containers.get(d.resource.containerId)?.running, false);
+});
+
+test("cleanup removes only exact unstarted reservation without force; retains profile and unrelated containers", async () => {
+  const h = reservationHarness();
+  const d = await h.prepare();
+  h.docker.addForeignContainer("foreign", { "other.owner": "someone-else" });
+  await h.service.cancelBindingReservation(d.reservationId, BINDING_SCOPE);
+  assert.equal(h.docker.containers.has("foreign"), true);
+  assert.equal(h.docker.containers.has(d.resource.containerId), false);
+  const deletes = h.docker.calls.filter((call) => call.init.method === "DELETE");
+  assert.deepEqual(
+    deletes.map((call) => ({ path: call.path, query: call.init.query })),
+    [{ path: `/containers/${d.resource.containerId}`, query: { force: "false", v: "false" } }]
+  );
+  assert.equal(
+    h.fs.calls.some((call) => call.method === "rmdir" || call.method === "unlink"),
+    false
+  );
+  await assert.rejects(h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+});
+
+test("cleanup refuses a running or changed resource; never stops or deletes it", async () => {
+  const h = reservationHarness();
+  const d = await h.prepare();
+  findContainer(h.docker, d.resource.containerId).running = true;
+  await assert.rejects(h.service.cancelBindingReservation(d.reservationId, BINDING_SCOPE));
+  assert.equal(
+    h.docker.calls.some((call) => call.init.method === "DELETE" || REGEXP_4.test(call.path)),
+    false
+  );
+});
+
+test("prepare race has one scope winner; existing resource cannot be adopted on restart", async () => {
+  const h = reservationHarness();
+  const results = await Promise.allSettled([h.prepare(), h.prepare()]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(h.docker.containers.size, 1);
+  const restarted = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker: h.docker });
+  await assert.rejects(
+    restarted.prepareBindingSurface({
+      ...BINDING_SCOPE,
+      expiresAt: BASE_OPTIONS.now().getTime() + 1000,
+      requestedOrigins: [],
+    })
+  );
+  assert.equal(h.docker.containers.size, 1);
+});
+
+test("real profile metadata: preparation retains an isolated private directory after cancellation", async (t) => {
+  const scratch = scratchRoot();
+  t.after(scratch.cleanup);
+  const docker = new ReservationDocker();
+  const service = new NekoSurfaceAllocatorService({ ...realFsOptions(scratch.root), docker });
+  const d = await service.prepareBindingSurface({
+    ...BINDING_SCOPE,
+    expiresAt: BASE_OPTIONS.now().getTime() + 1000,
+    requestedOrigins: [],
+  });
+  const create = findCreateCall(docker.calls, "/containers/create");
+  const path = create.init.body?.Labels[`${LABEL}.profile_path`];
+  assert.ok(path);
+  assert.equal(lstatSync(path).isDirectory(), true);
+  assert.equal(statSync(path).mode % 0o1000, 0o700);
+  await service.cancelBindingReservation(d.reservationId, BINDING_SCOPE);
+  assert.equal(lstatSync(path).isDirectory(), true);
+  assert.equal(reservationStarts(docker).length, 0);
+});
+
+test("unchanged access contract survives a new reservation generation without embedding private environment", async () => {
+  const h = reservationHarness();
+  const first = await h.prepare();
+  await h.service.cancelBindingReservation(first.reservationId, BINDING_SCOPE);
+  const second = await h.prepare();
+  assert.notEqual(first.reservationId, second.reservationId);
+  assert.notEqual(first.resource.containerId, second.resource.containerId);
+  assert.equal(first.access.identity, second.access.identity);
+  assert.equal(first.access.revision, second.access.revision);
+});
+
+for (const scenario of ["running", "foreign"] as const) {
+  test(`preparation refuses inspected ${scenario} resources rather than adopting or stopping them`, async () => {
+    const h = reservationHarness();
+    h.docker.inspectOverrides =
+      scenario === "running" ? { State: { Running: true, Status: "running" } } : { Config: { Labels: {} } };
+    await assert.rejects(h.prepare());
+    assert.equal(reservationStarts(h.docker).length, 0);
+    assert.equal(
+      h.docker.calls.some((call) => REGEXP_4.test(call.path) || call.init.method === "DELETE"),
+      false
+    );
+  });
+}
+
+test("legacy capacity allocation cannot reclaim reservation-marked stopped resources", async () => {
+  const h = reservationHarness();
+  const d = await h.prepare();
+  const container = findContainer(h.docker, d.resource.containerId);
+  container.state = "exited";
+  const ordinary = new NekoSurfaceAllocatorService({
+    ...BASE_OPTIONS,
+    docker: h.docker,
+    fetchImpl: readyFetch(),
+    webrtcHostPortEnd: BASE_OPTIONS.webrtcHostPortStart,
+  });
+  await assert.rejects(ordinary.ensureSurface(REQUEST));
+  assert.equal(h.docker.containers.has(d.resource.containerId), true);
+  assert.equal(
+    h.docker.calls.some((call) => call.init.method === "DELETE"),
+    false
+  );
+});
+
+test("reservation uses real Docker HTTP transport without start or readiness requests", async (t) => {
+  const scratch = scratchRoot();
+  t.after(scratch.cleanup);
+  const docker = new ReservationDocker();
+  const socketPath = join(scratch.root, "engine.sock");
+  const server = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? "/", "http://docker.invalid");
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const body = Buffer.concat(chunks).toString();
+      const value = await docker.requestJson(url.pathname, {
+        method: req.method ?? "GET",
+        query: Object.fromEntries(url.searchParams),
+        ...(body ? { body: JSON.parse(body) as unknown } : {}),
+      });
+      res.statusCode = 200;
+      if (url.pathname === "/containers/create") {
+        res.statusCode = 201;
+      }
+      if (req.method === "DELETE") {
+        res.statusCode = 204;
+      }
+      res.end(JSON.stringify(value));
+    } catch {
+      res.statusCode = 500;
+      res.end("fake Engine error");
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  t.after(() => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+  const service = new NekoSurfaceAllocatorService({
+    ...BASE_OPTIONS,
+    docker: new DockerEngineHttpClient({ socketPath }),
+    extraEnv: { PRIVATE_TEST_SECRET: "must-never-be-proposed" },
+    fetchImpl: () => {
+      throw new Error("forbidden readiness");
+    },
+  });
+  const d = await service.prepareBindingSurface({
+    ...BINDING_SCOPE,
+    expiresAt: BASE_OPTIONS.now().getTime() + 1000,
+    requestedOrigins: [],
+  });
+  assert.equal(d.resource.containerId, onlyContainerId(docker));
+  assert.equal(JSON.stringify(d).includes("must-never-be-proposed"), false);
+  assert.equal(JSON.stringify(d).includes("PRIVATE_TEST_SECRET"), false);
+  await assert.rejects(service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+  assert.equal(reservationStarts(docker).length, 0);
+  await service.cancelBindingReservation(d.reservationId, BINDING_SCOPE);
+  assert.equal(docker.containers.size, 0);
+});
+
+test("TLA replay: callback changes resource before record completion, so activation refuses", async () => {
+  const h = reservationHarness(() => {
+    h.docker.networkId = "replacement-network";
+    return Promise.resolve();
+  });
+  const d = await h.prepare();
+  await assert.rejects(h.service.activateBindingReservation(d.reservationId, BINDING_SCOPE));
+  assert.equal(reservationStarts(h.docker).length, 0);
+});
+
+for (const scenario of [
+  "missing owner",
+  "missing connection",
+  "missing instance",
+  "missing expiry",
+  "expired",
+  "credential origin",
+] as const) {
+  test(`prepare input refuses ${scenario} before Docker calls`, async () => {
+    const h = reservationHarness();
+    const scope = { ...BINDING_SCOPE };
+    if (scenario === "missing owner") {
+      scope.ownerId = "";
+    }
+    if (scenario === "missing connection") {
+      scope.connectionId = "";
+    }
+    if (scenario === "missing instance") {
+      scope.instanceKey = "";
+    }
+    let expiresAt = BASE_OPTIONS.now().getTime() + 1000;
+    if (scenario === "missing expiry") {
+      expiresAt = Number.NaN;
+    }
+    if (scenario === "expired") {
+      expiresAt = 0;
+    }
+    await assert.rejects(
+      h.service.prepareBindingSurface({
+        ...scope,
+        expiresAt,
+        requestedOrigins: scenario === "credential origin" ? ["https://token@example.com"] : [],
+      })
+    );
+    assert.equal(h.docker.calls.length, 0);
+  });
+}
+
+// r38 removal boundary: exact Engine ID; fake transport only, no daemon/profile deletion.
+test("recovery r41: restart removes exact issued generation, proves absence and preserves profile", async () => {
+  const h = reservationHarness();
+  const descriptor = await h.prepare();
+  const oldId = descriptor.resource.containerId;
+  const exactId = "e".repeat(64);
+  const container = h.docker.containers.get(oldId)!;
+  h.docker.containers.delete(oldId);
+  container.id = exactId;
+  container.running = true;
+  h.docker.containers.set(exactId, container);
+  const actual = (await h.docker.requestJson(`/containers/${exactId}/json`)) as Record<string, unknown>;
+  const { createHash } = await import("node:crypto");
+  const { canonicalBindingJson } = await import("../server/stores/binding-json.ts");
+  const hash = (v: unknown) => createHash("sha256").update(canonicalBindingJson(v)).digest("hex");
+  const { bindingResourceReference } = await import("../runtime/binding-resource-reference.ts");
+  const reference = bindingResourceReference({
+    version: 1,
+    ...descriptor.scope,
+    ...descriptor.resource,
+    reservationId: descriptor.reservationId,
+    runId: "fictional-run",
+    runGeneration: 1,
+    containerId: exactId,
+    generation: hash([exactId, actual.Created]),
+  });
+  const restarted = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker: h.docker });
+  const before = h.fs.calls.length;
+  const receipt = await restarted.recoverStoppedResource(reference, Date.now() + 5000);
+  assert.deepEqual(receipt.reference, reference);
+  assert.equal(receipt.disposition, "removed");
+  assert.equal(h.docker.containers.has(exactId), false);
+  const deletion = h.docker.calls.findLast(
+    (call) => call.path === `/containers/${exactId}` && call.init.method === "DELETE"
+  );
+  assert.deepEqual(deletion?.init.query, { force: "true", v: "false" });
+  assert.equal(h.docker.calls.at(-1)?.path, `/containers/${exactId}/json`);
+  assert.equal(h.fs.calls.length, before);
+  await h.docker.requestJson(`/containers/${exactId}/start`, { method: "POST" }).then(
+    () => assert.fail("deleted ID cannot start"),
+    () => undefined
+  );
+  assert.deepEqual(await restarted.recoverStoppedResource(reference, Date.now() + 5000), receipt);
+});
+
+test("recovery r41: changed/foreign exact object, deletion conflict and missing absence proof remain held", async () => {
+  const h = reservationHarness();
+  const d = await h.prepare();
+  const exactId = "d".repeat(64);
+  const old = h.docker.containers.get(d.resource.containerId)!;
+  h.docker.containers.delete(d.resource.containerId);
+  old.id = exactId;
+  h.docker.containers.set(exactId, old);
+  const { createHash } = await import("node:crypto");
+  const { canonicalBindingJson } = await import("../server/stores/binding-json.ts");
+  const hash = (v: unknown) => createHash("sha256").update(canonicalBindingJson(v)).digest("hex");
+  const actual = (await h.docker.requestJson(`/containers/${exactId}/json`)) as Record<string, unknown>;
+  const { bindingResourceReference } = await import("../runtime/binding-resource-reference.ts");
+  const ref = bindingResourceReference({
+    version: 1,
+    ...d.scope,
+    ...d.resource,
+    reservationId: d.reservationId,
+    runId: "fixture-run",
+    runGeneration: 1,
+    containerId: exactId,
+    generation: hash([exactId, actual.Created]),
+  });
+  const service = new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker: h.docker });
+  h.docker.inspectOverrides = { Created: "2026-11-03T01:00:00Z" };
+  await assert.rejects(service.recoverStoppedResource(ref, Date.now() + 5000));
+  assert.equal(
+    h.docker.calls.some((c) => c.init.method === "DELETE"),
+    false
+  );
+  h.docker.inspectOverrides = {};
+  h.docker.beforeDelete = () => {
+    throw new NekoSurfaceAllocatorServiceError("docker_http_error", "Docker DELETE returned HTTP 409");
+  };
+  await assert.rejects(service.recoverStoppedResource(ref, Date.now() + 5000));
+  assert.equal(h.docker.containers.has(exactId), true);
+  h.docker.beforeDelete = async () => {
+    h.docker.containers.get(exactId)!.running = false;
+  };
+  const transport: DockerEngineTransport = {
+    requestJson: async (path, init) => (init?.method === "DELETE" ? null : h.docker.requestJson(path, init)),
+  };
+  await assert.rejects(
+    new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker: transport }).recoverStoppedResource(
+      ref,
+      Date.now() + 5000
+    )
+  );
+  const malformed: DockerEngineTransport = {
+    requestJson: async (path) => (path === "/info" ? { ID: "fictional-engine-one" } : null),
+  };
+  await assert.rejects(
+    new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker: malformed }).recoverStoppedResource(
+      ref,
+      Date.now() + 5000
+    )
+  );
+  const misleading: DockerEngineTransport = {
+    requestJson: async (path) => {
+      if (path === "/info") return { ID: "fictional-engine-one" };
+      throw new NekoSurfaceAllocatorServiceError("docker_http_error", "Docker GET returned HTTP 500: private HTTP 404");
+    },
+  };
+  await assert.rejects(
+    new NekoSurfaceAllocatorService({ ...BASE_OPTIONS, docker: misleading }).recoverStoppedResource(
+      ref,
+      Date.now() + 5000
+    )
+  );
+  await assert.rejects(service.recoverStoppedResource(ref, Date.now() - 1));
+  await assert.rejects(service.recoverStoppedResource({ ...ref, deploymentId: "foreign" }, Date.now() + 5000));
+});
+
+test("repeat run r41: prepare activate stop dispose prepare retains profile and replaces exact container", async () => {
+  const h = reservationHarness(async () => undefined);
+  const first = await h.prepare();
+  await h.service.activateBindingReservation(first.reservationId, BINDING_SCOPE);
+  await h.service.stopBindingReservation(first.reservationId, BINDING_SCOPE);
+  assert.equal(h.docker.containers.has(first.resource.containerId), false);
+  assert.equal(
+    h.docker.calls.at(-1)?.path,
+    `/containers/${first.resource.containerId}/json`,
+    "stop ends with authoritative absence observation"
+  );
+  // Durable resource receipt is committed by the server before this metadata release.
+  h.service.disposeBindingReservation(first.reservationId, BINDING_SCOPE);
+  const second = await h.prepare();
+  assert.notEqual(second.reservationId, first.reservationId);
+  assert.notEqual(second.resource.containerId, first.resource.containerId);
+  assert.equal(second.access.profileIdentity, first.access.profileIdentity);
+  assert.equal(second.access.identity, first.access.identity);
+  assert.equal(h.docker.containers.get(second.resource.containerId)?.running, false);
+  assert.equal(
+    h.fs.calls.some((call) => call.method === "rmdir" || call.method === "unlink"),
+    false
+  );
+  await h.service.cancelBindingReservation(second.reservationId, BINDING_SCOPE);
 });

@@ -51,6 +51,7 @@
  */
 
 import assert from "node:assert/strict";
+import { withFixtureSourceDeclaration } from "./fixture-source-declaration.ts";
 
 interface AggregationRecord {
   data: Record<string, unknown>;
@@ -80,45 +81,48 @@ export const CONFORMANCE_STREAM_B = "accounts";
  * Minimal manifest. Two streams; no cursor field or query config required —
  * the harness only exercises listRowsForAggregation, not queryRecords.
  */
-export const CONFORMANCE_MANIFEST = {
-  connector_id: CONFORMANCE_CONNECTOR_ID,
-  display_name: "Aggregation Rows Conformance",
-  manifest_uri: `https://sources.example/${CONFORMANCE_CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  runtime_requirements: { bindings: { network: { required: false } } },
-  streams: [
-    {
-      name: CONFORMANCE_STREAM_A,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          amount: { type: "number" },
-          id: { type: "string" },
-          label: { type: ["string", "null"] },
+export const CONFORMANCE_MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: CONFORMANCE_CONNECTOR_ID,
+    display_name: "Aggregation Rows Conformance",
+    manifest_uri: `https://sources.example/${CONFORMANCE_CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    runtime_requirements: { bindings: { network: { required: false } } },
+    streams: [
+      {
+        name: CONFORMANCE_STREAM_A,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            amount: { type: "number" },
+            id: { type: "string" },
+            label: { type: ["string", "null"] },
+          },
+          required: ["id"],
+          type: "object",
         },
-        required: ["id"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-    {
-      name: CONFORMANCE_STREAM_B,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          id: { type: "string" },
-          name: { type: "string" },
+      {
+        name: CONFORMANCE_STREAM_B,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            id: { type: "string" },
+            name: { type: "string" },
+          },
+          required: ["id"],
+          type: "object",
         },
-        required: ["id"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONFORMANCE_CONNECTOR_ID}` }
+);
 
 /**
  * Run the aggregation-rows conformance suite against a driver.

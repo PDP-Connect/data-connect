@@ -23,11 +23,11 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { getRecordFieldWindow as getRecordFieldWindowUntyped, ingestRecord } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // `getRecordFieldWindow`'s `manifest` parameter carries a `null` default value
 // in its untyped JS declaration (server/records.js), which TS infers as the
@@ -56,32 +56,35 @@ function hasCodeAndHttpStatus(err: unknown): err is { code: unknown; httpStatus:
   return typeof err === "object" && err !== null && "code" in err && "httpStatus" in err;
 }
 
-const MANIFEST = {
-  connector_id: CONNECTOR_ID,
-  display_name: "Query not-found fixture",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "created_at",
-      cursor_field: "created_at",
-      name: STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          body: { type: "string" },
-          created_at: { format: "date-time", type: "string" },
-          id: { type: "string" },
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: CONNECTOR_ID,
+    display_name: "Query not-found fixture",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "created_at",
+        cursor_field: "created_at",
+        name: STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            body: { type: "string" },
+            created_at: { format: "date-time", type: "string" },
+            id: { type: "string" },
+          },
+          required: ["id"],
+          type: "object",
         },
-        required: ["id"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
       },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 const SEED = [
   {

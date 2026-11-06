@@ -7,7 +7,6 @@ import test from "node:test";
 import {
   __resetControllerInteractionStateForTests,
   createController,
-  type MarkStaticSecretCredentialRejected,
   type StaticSecretRunEnvResolver,
 } from "../runtime/controller.ts";
 import type { RuntimeRunConnectorOptions, RuntimeRunConnectorResult } from "../runtime/index.ts";
@@ -238,7 +237,6 @@ function freshDb(t: TestContext): void {
 function makeController(
   calls: RuntimeRunConnectorOptions[],
   overrides: {
-    markStaticSecretCredentialRejected?: MarkStaticSecretCredentialRejected;
     runConnectorImpl?: (opts: RuntimeRunConnectorOptions) => Promise<RuntimeRunConnectorResult>;
   } = {}
 ) {
@@ -323,7 +321,7 @@ test("a captured ChatGPT username/password credential is injected into the conne
   });
 });
 
-test("a connector credential_rejected terminal marks the injected stored credential rejected", async (t) => {
+test("a connector credential_rejected DONE does not invalidate a valid stored credential without runtime rejection proof", async (t) => {
   freshDb(t);
   seedConnectorInstance({
     connectorId: CHATGPT_CONNECTOR,
@@ -337,15 +335,25 @@ test("a connector credential_rejected terminal marks the injected stored credent
     now: "2026-06-01T12:00:00.000Z",
     ownerSubjectId: "owner_1",
     secret: JSON.stringify({
-      password: "stale chatgpt password",
+      password: "valid chatgpt password",
       username: "owner@example.com",
     }),
   });
 
   const calls: RuntimeRunConnectorOptions[] = [];
+  const markerCalls: (string | null)[] = [];
   const controller = makeController(calls, {
-    markStaticSecretCredentialRejected: async ({ connectorInstanceId, rejectedAt, reason }) => {
-      await captureStore().markRejected({ connectorInstanceId, reason, rejectedAt });
+    // A dynamic caller can still supply the retired option. The controller must
+    // ignore it; restoring the old call path must make this regression fail.
+    ...{
+      markStaticSecretCredentialRejected: async (input: {
+        connectorInstanceId: string;
+        reason: string | null;
+        rejectedAt: string;
+      }) => {
+        markerCalls.push(input.reason);
+        await store.markRejected(input);
+      },
     },
     runConnectorImpl: (opts) => {
       calls.push(opts);
@@ -364,18 +372,112 @@ test("a connector credential_rejected terminal marks the injected stored credent
     connectorInstanceId: "cin_chatgpt",
     manifest: CHATGPT_MANIFEST,
     ownerToken: "owner-token",
-    runId: "run_chatgpt_rejected",
+    runId: "run_chatgpt_connector_claim",
   });
   await controller.drainActiveRuns(1000);
 
   assert.equal(calls.length, 1);
   assert.deepEqual(at(calls, 0).staticSecretEnv, {
-    CHATGPT_PASSWORD: "stale chatgpt password",
+    CHATGPT_PASSWORD: "valid chatgpt password",
   });
+  // Section 5.10.2 / 5.11: DONE.error.code is a connector claim. Only a
+  // runtime-performed rejected submission can record a rejection, and this run
+  // has none, so the stored credential is not invalidated.
+  assert.deepEqual(markerCalls, [], "a connector claim must not invoke the retired rejection marker");
   const meta = await store.getMetadata("cin_chatgpt");
   assert.ok(meta, "expected credential metadata for cin_chatgpt");
-  assert.equal(meta.status, "rejected");
-  assert.equal(meta.rejectionReason, "provider rejected stored credential");
+  assert.equal(meta.status, "active");
+  assert.equal(meta.rejectionReason, null);
+});
+
+test("a credential the runtime store already rejected is never injected into the run (optional profile)", async (t) => {
+  freshDb(t);
+  seedConnectorInstance({
+    connectorId: CHATGPT_CONNECTOR,
+    connectorInstanceId: "cin_chatgpt",
+    ownerSubjectId: "owner_1",
+  });
+  const store = captureStore();
+  await store.capture({
+    connectorInstanceId: "cin_chatgpt",
+    credentialKind: "username_password",
+    now: "2026-06-01T12:00:00.000Z",
+    ownerSubjectId: "owner_1",
+    secret: JSON.stringify({
+      password: "stale chatgpt password",
+      username: "owner@example.com",
+    }),
+  });
+  await store.markRejected({
+    connectorInstanceId: "cin_chatgpt",
+    reason: "runtime lookup rejected the stored credential",
+    rejectedAt: "2026-06-01T12:05:00.000Z",
+  });
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls);
+  await controller.runNow(CHATGPT_CONNECTOR, {
+    connectorInstanceId: "cin_chatgpt",
+    manifest: CHATGPT_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_chatgpt_runtime_rejected",
+  });
+  await controller.drainActiveRuns(1000);
+
+  // The profile's credential is optional, so the runtime-owned lookup
+  // returns no env rather than the stale secret. The run proceeds without it.
+  assert.equal(calls.length, 1);
+  assert.equal(at(calls, 0).staticSecretEnv, null);
+});
+
+test("an owner re-capture replaces a rejected stored credential for the next run", async (t) => {
+  freshDb(t);
+  seedConnectorInstance({
+    connectorId: CHATGPT_CONNECTOR,
+    connectorInstanceId: "cin_chatgpt",
+    ownerSubjectId: "owner_1",
+  });
+  const store = captureStore();
+  await store.capture({
+    connectorInstanceId: "cin_chatgpt",
+    credentialKind: "username_password",
+    now: "2026-06-01T12:00:00.000Z",
+    ownerSubjectId: "owner_1",
+    secret: JSON.stringify({
+      password: "stale chatgpt password",
+      username: "owner@example.com",
+    }),
+  });
+  await store.markRejected({
+    connectorInstanceId: "cin_chatgpt",
+    reason: "runtime lookup rejected the stored credential",
+    rejectedAt: "2026-06-01T12:05:00.000Z",
+  });
+  await store.capture({
+    connectorInstanceId: "cin_chatgpt",
+    credentialKind: "username_password",
+    now: "2026-06-01T12:10:00.000Z",
+    ownerSubjectId: "owner_1",
+    secret: JSON.stringify({
+      password: "recaptured chatgpt password",
+      username: "owner@example.com",
+    }),
+  });
+
+  const calls: RuntimeRunConnectorOptions[] = [];
+  const controller = makeController(calls);
+  await controller.runNow(CHATGPT_CONNECTOR, {
+    connectorInstanceId: "cin_chatgpt",
+    manifest: CHATGPT_MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_chatgpt_recaptured",
+  });
+  await controller.drainActiveRuns(1000);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(at(calls, 0).staticSecretEnv, {
+    CHATGPT_PASSWORD: "recaptured chatgpt password",
+  });
 });
 
 test("a captured Amazon username/password credential is injected into the connector run", async (t) => {

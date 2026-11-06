@@ -329,3 +329,92 @@ test("cancelRun refuses a foreign owner's cancellation request and leaves the ru
 
   await controller.drainActiveRuns(1000).catch(() => undefined);
 });
+
+test("owner cancellation waits for pending upload issuance and its exact revoke fence", async (t) => {
+  freshDb(t);
+  const { RunUploadLifetime } = await import("../runtime/run-upload-lifetime.ts");
+  function gate<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+  const issuing = gate<void>();
+  const issued = gate<void>();
+  const revoking = gate<void>();
+  const revoked = gate<void>();
+  let exactRun = "";
+  let closeComplete = false;
+  const controller = createController({
+    admitRunConnection: fakeAdmitRunConnection(),
+    connectorPathResolver: () => "/unused/connector.js",
+    logger: { error: () => undefined, warn: () => undefined },
+    maxRunWallClockMs: 60_000,
+    runConnectorImpl: async (options) => {
+      if (!options.runUploadLifetime) {
+        throw new Error("missing upload lifetime");
+      }
+      await options.runUploadLifetime.issue({
+        connectionId: options.connectorInstanceId ?? "",
+        connectorId: options.connectorId,
+        manifestSnapshot: {},
+        ownerId: options.ownerSubjectId ?? "",
+        runId: options.runId ?? "",
+        selection: { streams: [], version: 1 },
+        sourceSnapshot: {},
+      });
+      throw new Error("late issue must never reach child");
+    },
+    runUploadLifetimeFactory: (scope) =>
+      new RunUploadLifetime(
+        async () => {
+          issuing.resolve();
+          await issued.promise;
+          return {
+            grant: {
+              ...scope,
+              associations: [],
+              generation: 1,
+              issuerEpoch: "e",
+              manifestSnapshot: {},
+              purpose: "blob-upload",
+              selectionIdentity: "s",
+              sourceSnapshot: {},
+            },
+            token: `ru_${"x".repeat(43)}`,
+          };
+        },
+        async (grant) => {
+          exactRun = grant.runId;
+          revoking.resolve();
+          await revoked.promise;
+          closeComplete = true;
+        }
+      ),
+    schedulerStore: createSchedulerStore(),
+  });
+  await controller.runNow(CONNECTOR_ID, {
+    connectorInstanceId: "cin_pending_upload",
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_pending_upload",
+  });
+  await issuing.promise;
+  await assert.rejects(controller.cancelRun("run_pending_upload", "foreign-owner"), REGEXP_OWNER_MISMATCH);
+  let responded = false;
+  const cancel = controller.cancelRun("run_pending_upload", "owner_local").then((result) => {
+    responded = true;
+    return result;
+  });
+  await Promise.resolve();
+  assert.equal(responded, false);
+  issued.resolve();
+  await revoking.promise;
+  assert.equal(responded, false);
+  revoked.resolve();
+  assert.equal((await cancel).status, "cancel_requested");
+  assert.equal(closeComplete, true);
+  assert.equal(exactRun, "run_pending_upload");
+  await controller.awaitRun("run_pending_upload");
+});

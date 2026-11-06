@@ -15,14 +15,12 @@ import { connectorInstallStatusFixture } from "./connector-install-fixtures.ts";
 
 const BROWSER_SESSION_DIR = new URL("../connect/browser-session/[connectorId]/", import.meta.url);
 
-// browser-connect-support.no-roster.test.ts reruns this file with the
-// optional conformance roster made unresolvable, as in a packaged console that
-// cannot load @pdpp/polyfill-connectors. Then no connector can add an account.
-const ROSTER_ABSENT = process.env.PDPP_TEST_SIMULATE_NO_CONNECTOR_ROSTER === "1";
-const CAN_ADD_ACCOUNT = !ROSTER_ABSENT;
+// The no-roster test reruns this file with the optional package absent.
+// Host-verified artifact evidence and generated scaffold metadata still apply.
+const CAN_ADD_ACCOUNT = true;
 
-test("the conformance roster is loaded exactly when this run expects it", () => {
-  assert.equal(isKnownScaffoldConnector("anthropic"), !ROSTER_ABSENT);
+test("known scaffold metadata remains available without the optional package", () => {
+  assert.equal(isKnownScaffoldConnector("anthropic"), true);
 });
 
 // Installed packages as the connector-install status route reports them. The
@@ -33,7 +31,14 @@ const installed: BindingSource[] = [
   { bindings: { browser: { available: true }, network: { available: true } }, connector_id: "reddit" },
   { bindings: { browser: { available: true } }, connector_id: "https://registry.pdpp.dev/connectors/amazon" },
   { bindings: { browser: { available: true } }, connector_id: "acme-shop" },
-];
+].map((source) => ({
+  ...source,
+  browser_enrollment_artifact: {
+    status: "verified",
+    trust: "signed-installed",
+    manifest: { connector_id: source.connector_id, runtime_requirements: { bindings: source.bindings } },
+  },
+}));
 
 function isBrowserBinding(source: BindingSource): boolean {
   return (

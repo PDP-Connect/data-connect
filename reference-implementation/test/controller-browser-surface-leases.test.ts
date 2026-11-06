@@ -3449,3 +3449,25 @@ test("refresh queued behind a release persists current authority with asynchrono
   assert.ok(newer.lease.fencing_token > first.lease.fencing_token);
   assert.equal(f.store.leases.get(first.lease.lease_id)?.status, "released");
 });
+
+// No allocator call is the oracle: a runtime-only guard would be too late.
+for (const triggerKind of ["manual", "scheduled"] as const) {
+  test(`required browser without protected admission refuses before legacy allocation (${triggerKind})`, async (t) => {
+    const allocator = createReadyAllocator();
+    const { controller, calls } = setup(t, { manager: createDynamicManager(), browserSurfaceAllocator: allocator });
+    const result = await controller.runNow("managed", {
+      manifest: { ...MANIFEST, runtime_requirements: { bindings: { browser: { required: true } } } },
+      ownerToken: "fixture",
+      triggerKind,
+      runId: `run-no-admission-${triggerKind}`,
+    });
+    assert.equal(result.status, "placement_refused");
+    assert.equal(result.placement_failure?.code, "binding_unavailable");
+    assert.equal(allocator.ensureRequests.length, 0);
+    assert.equal(calls.runConnector, 0);
+    const row = getDb()
+      .prepare("SELECT data_json FROM spine_events WHERE run_id = ? AND event_type = 'run.placement_refused'")
+      .get(result.run_id) as { data_json: string } | undefined;
+    assert.equal(JSON.parse(row?.data_json ?? "{}").placement_failure?.code, "binding_unavailable");
+  });
+}

@@ -1,6 +1,13 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  bindingResourceReference,
+  type BindingResourceReference,
+  type BindingResourceCleanupReceipt,
+} from "../runtime/binding-resource-reference.ts";
+
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { type BigIntStats, constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, rmdir, stat, unlink } from "node:fs/promises";
@@ -8,6 +15,7 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import type { AddressInfo } from "node:net";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
+import { readBrowserBindingRuntimeConfig } from "./browser-binding-runtime-config.ts";
 import {
   BROWSER_SURFACE_BACKEND_NEKO,
   type BrowserSurface,
@@ -16,6 +24,18 @@ import {
   type StopBrowserSurfaceRequest,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
+
+import {
+  BINDING_CONTROL_PREFIX,
+  type BindingActivationContext,
+  type BindingControlTarget,
+  bindingPermit,
+  controlAuthenticated,
+  postBindingControl,
+  readControlBody,
+  validateControlTarget,
+} from "../runtime/binding-control.ts";
+import { canonicalBindingJson } from "./stores/binding-json.ts";
 
 const DEFAULT_DOCKER_SOCKET_PATH = "/var/run/docker.sock";
 const DEFAULT_LABEL_NAMESPACE = "org.pdpp.reference.neko";
@@ -38,6 +58,8 @@ const PROBE_PREFIX = ".pdpp-allocator-probe-";
 const LEADING_SLASH_RE = /^\//;
 const TRAILING_SLASHES_RE = /\/+$/;
 const DOCKER_HTTP_404_RE = /\bHTTP 404\b/;
+const RESERVATION_SCOPE_RE = /^[a-zA-Z0-9_.:@-]{1,256}$/;
+const RESERVATION_IMAGE_RE = /^sha256:[a-f0-9]{64}$/;
 const DOCKER_PORT_BIND_RE =
   /\b(address already in use|port is already allocated|failed to bind host port|driver failed programming external connectivity)\b/i;
 
@@ -91,6 +113,7 @@ export interface DockerEngineRequestInit {
   readonly method?: string;
   readonly okStatuses?: readonly number[];
   readonly query?: Readonly<Record<string, string>>;
+  readonly signal?: AbortSignal | undefined;
 }
 
 // dev and ino are bigint: 64-bit inode numbers above 2^53 collapse to the same
@@ -148,6 +171,16 @@ interface ProfileRootIdentity {
 }
 
 export interface NekoSurfaceAllocatorServerOptions {
+  /** Service-internal trust boundary. Must resolve fresh owner policy and durably
+   * persist the run-bound before-egress authority record, or throw. No default.
+   * A test callback is not product authorization. Never expose this via HTTP.
+   */
+  readonly authorizeAndRecordBindingActivation?: (reservation: PreparedNekoReservation) => Promise<void>;
+  /** Default absent. Distinct operator service identity; never owner consent. */
+  readonly bindingControl?: {
+    readonly credential: string;
+    readonly authorizer: BindingControlTarget;
+  };
   readonly cdpBaseUrlTemplate: string;
   readonly cdpVersionPath?: string;
   readonly containerCdpPort?: number;
@@ -246,9 +279,13 @@ export class DockerEngineHttpClient implements DockerEngineTransport {
           method,
           path: requestPath,
           socketPath: this.#socketPath,
+          ...(init.signal ? { signal: init.signal } : {}),
         },
         (res) => {
           const chunks: Buffer[] = [];
+          if (init.signal) {
+            res.on("error", reject);
+          }
           res.on("data", (chunk: Buffer) => chunks.push(chunk));
           res.on("end", () => {
             const payload = Buffer.concat(chunks).toString("utf8");
@@ -305,13 +342,150 @@ export class NekoSurfaceAllocatorServiceError extends Error {
     | "port_capacity_exhausted"
     | "profile_path_invalid"
     | "profile_storage_unavailable"
-    | "readiness_failed";
+    | "readiness_failed"
+    | "reservation_refused";
 
   constructor(code: NekoSurfaceAllocatorServiceError["code"], message: string, options: { cause?: unknown } = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "NekoSurfaceAllocatorServiceError";
     this.code = code;
   }
+}
+
+export interface NekoBindingScope {
+  readonly connectionId: string;
+  readonly connectorId: string;
+  readonly instanceKey: string;
+  readonly ownerId: string;
+}
+
+/** Sanitized facts only. Resource generation is deliberately separate from the
+ * stable access contract; neither is an approval or a confinement attestation.
+ */
+export interface PreparedNekoReservation {
+  readonly access: {
+    readonly identity: string;
+    readonly revision: string;
+    readonly imageId: string;
+    readonly networkId: string;
+    readonly networkName: string;
+    readonly purpose: "Prepare an isolated browser profile for connector collection";
+    readonly consequentialActions: readonly string[];
+    readonly profileIdentity: string;
+    readonly launchConfigurationRevision: string;
+    readonly mechanism: "neko-docker-reservation";
+    readonly mechanismVersion: "1";
+    readonly requestedOrigins: readonly string[];
+    readonly effectiveReach: "unrestricted browser navigation and connections on configured Docker network after activation";
+    readonly remainingAmbientAccess: readonly string[];
+    readonly channels: readonly { readonly name: string; readonly coverage: "not_observable" }[];
+  };
+  readonly expiresAt: number;
+  readonly phase: "PREPARED";
+  readonly reservationId: string;
+  readonly resource: {
+    readonly allocatorId: string;
+    readonly deploymentId: string;
+    readonly bindingScopeIdentity: string;
+    readonly profileIdentity: string;
+    readonly containerId: string;
+    readonly generation: string;
+    readonly configurationRevision: string;
+  };
+  readonly scope: NekoBindingScope;
+}
+
+interface NekoReservationState {
+  context?: BindingActivationContext;
+  descriptor: PreparedNekoReservation;
+  networkRevision: string;
+  profilePath: string;
+  profileRevision: string;
+  rootIdentity: ProfileRootIdentity;
+  start?: Promise<void>;
+  startUnverified?: boolean;
+  state: "prepared" | "authorizing" | "starting" | "active" | "cancelled" | "failed" | "stopped";
+  stop?: Promise<void> | undefined;
+  stopRequested?: boolean;
+}
+
+function reservationRefused(): never {
+  throw new NekoSurfaceAllocatorServiceError("reservation_refused", "n.eko reservation refused");
+}
+
+function reservationConfigurationRevision(value: Record<string, unknown>): string {
+  const { Config, HostConfig, Image, Mounts } = value;
+  if (!isRecord(Config) || !isRecord(HostConfig) || typeof Image !== "string") reservationRefused();
+  return reservationHash({ Config, HostConfig, Image, Mounts });
+}
+
+function reservationHash(value: unknown): string {
+  const canonical = (item: unknown): unknown => {
+    if (typeof item === "bigint") {
+      return item.toString();
+    }
+    if (Array.isArray(item)) {
+      return item.map(canonical);
+    }
+    if (isRecord(item)) {
+      return Object.fromEntries(
+        Object.keys(item)
+          .sort((a, b) => a.localeCompare(b))
+          .map((key) => [key, canonical(item[key])])
+      );
+    }
+    return item;
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(canonical(value)))
+    .digest("hex");
+}
+
+function freezeReservation<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    for (const item of Object.values(value)) {
+      freezeReservation(item);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function parseNekoPreparation(
+  input: NekoBindingScope & {
+    readonly expiresAt: number;
+    readonly requestedOrigins: readonly string[];
+  },
+  now: number
+): { scope: NekoBindingScope; origins: string[]; expiresAt: number } {
+  const scope = {
+    connectionId: input.connectionId,
+    connectorId: input.connectorId,
+    instanceKey: input.instanceKey,
+    ownerId: input.ownerId,
+  };
+  for (const value of Object.values(scope)) {
+    if (typeof value !== "string" || !RESERVATION_SCOPE_RE.test(value)) {
+      reservationRefused();
+    }
+  }
+  const { expiresAt } = input;
+  if (
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= now ||
+    !Array.isArray(input.requestedOrigins) ||
+    input.requestedOrigins.length > 128
+  ) {
+    reservationRefused();
+  }
+  const origins = [...input.requestedOrigins];
+  for (const origin of origins) {
+    const parsed = new URL(origin);
+    if (!["https:", "http:"].includes(parsed.protocol) || parsed.origin !== origin) {
+      reservationRefused();
+    }
+  }
+  return { expiresAt, origins, scope };
 }
 
 export class NekoSurfaceAllocatorService {
@@ -344,10 +518,19 @@ export class NekoSurfaceAllocatorService {
       | "now"
     >;
   readonly #docker: DockerEngineTransport;
+  readonly #bindingSignal = new AsyncLocalStorage<AbortSignal>();
   #storageCheck: Promise<ProfileRootIdentity> | null = null;
+  readonly #reservations = new Map<string, NekoReservationState>();
+  readonly #reservedScopes = new Set<string>();
 
   constructor(options: NekoSurfaceAllocatorServerOptions) {
     assertAllocatorOptions(options);
+    if (options.bindingControl) {
+      validateControlTarget(options.bindingControl.authorizer);
+      if (!controlAuthenticated(`Bearer ${options.bindingControl.credential}`, options.bindingControl.credential)) {
+        reservationRefused();
+      }
+    }
     this.#options = {
       ...options,
       cdpVersionPath: options.cdpVersionPath ?? DEFAULT_CDP_VERSION_PATH,
@@ -361,11 +544,738 @@ export class NekoSurfaceAllocatorService {
       profileOwnerGid: options.profileOwnerGid ?? DEFAULT_NEKO_PROFILE_GID,
       profileOwnerUid: options.profileOwnerUid ?? DEFAULT_NEKO_PROFILE_UID,
     };
-    this.#docker =
+    const docker =
       options.docker ??
       new DockerEngineHttpClient(
         options.dockerSocketPath === undefined ? {} : { socketPath: options.dockerSocketPath }
       );
+    this.#docker = {
+      requestJson: (path, init = {}) =>
+        docker.requestJson(path, {
+          ...init,
+          ...(this.#bindingSignal.getStore() ? { signal: this.#bindingSignal.getStore() } : {}),
+        }),
+    };
+  }
+
+  /** Stopped-resource preparation. This does not call ensureSurface, start, readiness,
+   * network creation/migration, or port reclamation. Expiry is trusted policy input.
+   */
+  async prepareBindingSurface(
+    input: NekoBindingScope & {
+      readonly expiresAt: number;
+      readonly requestedOrigins: readonly string[];
+    }
+  ): Promise<PreparedNekoReservation> {
+    const { scope, origins, expiresAt } = parseNekoPreparation(input, this.#options.now().getTime());
+    const identity = reservationHash([this.#options.deploymentId, scope]);
+    if (this.#reservedScopes.has(identity)) {
+      reservationRefused();
+    }
+    this.#reservedScopes.add(identity);
+    // Keep the scope claimed on failure: an uncertain create must never be
+    // silently replaced. Restart also fails closed on the retained name.
+    const reservationId = randomUUID();
+    const request = { connectorId: scope.connectorId, profileKey: identity, surfaceId: `prepared-${identity}` };
+    const names = {
+      ...this.#resourceNames(request),
+      profilePath: `${this.#options.profileRoot.replace(TRAILING_SLASHES_RE, "")}/prepared-${identity}`,
+    };
+    const root = await this.#statProfileRoot();
+    const rootIdentity = { dev: root.dev, ino: root.ino };
+    const allocatorId = await this.#reservationAllocatorId();
+    const imageId = await this.#reservationImageId();
+    const network = await this.#reservationNetwork();
+    const existing = await this.#findOwnedContainer(request.surfaceId);
+    if (existing !== null) {
+      reservationRefused();
+    }
+    const containers = await this.#listOwnedContainers();
+    const used = new Set(containers.flatMap((item) => [...summaryHostPorts(item, this.#options.labelNamespace)]));
+    let port = this.#options.webrtcHostPortStart;
+    while (used.has(port) && port <= this.#options.webrtcHostPortEnd) {
+      port += 1;
+    }
+    if (port > this.#options.webrtcHostPortEnd) {
+      reservationRefused();
+    }
+    // A reserved leaf has a separate namespace from legacy profiles. Existing
+    // leaves are inspected only, never repaired/chowned or read for contents.
+    const fs = this.#options.profileFilesystem;
+    try {
+      await fs.mkdir(names.profilePath, { mode: PROFILE_DIRECTORY_MODE });
+      await this.#prepareProfileDirectory(names.profilePath, rootIdentity);
+    } catch (cause) {
+      if (errnoCode(cause) !== "EEXIST") {
+        throw cause;
+      }
+    }
+    const profileRevision = await this.#reservationProfile(names.profilePath, rootIdentity);
+    const labels = {
+      ...this.#labelsForRequest(request, names, port),
+      [`${this.#options.labelNamespace}.profile_identity`]: reservationHash([identity, profileRevision]),
+      [`${this.#options.labelNamespace}.reservation`]: reservationId,
+      [`${this.#options.labelNamespace}.binding_scope`]: identity,
+    };
+    const body = {
+      Env: this.#containerEnv(request, port),
+      ExposedPorts: {
+        [`${this.#options.containerHttpPort}/tcp`]: {},
+        [`${this.#options.containerCdpPort}/tcp`]: {},
+        [`${port}/tcp`]: {},
+        [`${port}/udp`]: {},
+      },
+      Healthcheck: this.#containerHealthcheck(),
+      HostConfig: {
+        Binds: [`${names.profilePath}:/home/user/.config/chromium`],
+        LogConfig: { Config: { "max-file": "5", "max-size": "10m" }, Type: "json-file" },
+        NetworkMode: this.#options.network,
+        PortBindings: {
+          [`${port}/tcp`]: [{ HostIp: "", HostPort: String(port) }],
+          [`${port}/udp`]: [{ HostIp: "", HostPort: String(port) }],
+        },
+      },
+      Hostname: names.containerName,
+      Image: imageId,
+      Labels: labels,
+    };
+    const created = await this.#docker.requestJson("/containers/create", {
+      body,
+      method: "POST",
+      okStatuses: [201],
+      query: { name: names.containerName },
+    });
+    const containerId = readCreatedContainerId(created);
+    const inspect = await this.#reservationInspect(containerId, reservationId, identity);
+    if (
+      inspect.Image !== imageId ||
+      !isRecord(inspect.HostConfig) ||
+      !isRecord(inspect.Config) ||
+      inspect.HostConfig.NetworkMode !== this.#options.network ||
+      reservationHash(inspect.HostConfig.Binds) !== reservationHash(body.HostConfig.Binds) ||
+      !isRecord(inspect.NetworkSettings) ||
+      !isRecord(inspect.NetworkSettings.Networks) ||
+      Object.keys(inspect.NetworkSettings.Networks).length !== 1 ||
+      !(this.#options.network in inspect.NetworkSettings.Networks)
+    ) {
+      reservationRefused();
+    }
+    const { Labels: _labels, ...actualConfig } = inspect.Config;
+    const launchConfigurationRevision = reservationHash({
+      Config: actualConfig,
+      HostConfig: inspect.HostConfig,
+      Image: inspect.Image,
+      Mounts: inspect.Mounts,
+    });
+    // Docker merges image defaults into Config. Check all supplied settings
+    // against inspect, and bind those resolved defaults into the access revision.
+    const actualEnv = inspect.Config.Env;
+    if (
+      !(Array.isArray(actualEnv) && body.Env.every((entry) => actualEnv.includes(entry))) ||
+      reservationHash(inspect.HostConfig.PortBindings) !== reservationHash(body.HostConfig.PortBindings) ||
+      reservationHash(inspect.Config.Healthcheck) !== reservationHash(body.Healthcheck)
+    ) {
+      reservationRefused();
+    }
+    const access = {
+      channels: ["browser.navigate", "browser.connect"].map((name) => ({ coverage: "not_observable" as const, name })),
+      consequentialActions: [
+        "Navigate and authenticate to sites",
+        "Read and modify browser profile data",
+        "Send requests to routable network destinations",
+      ],
+      effectiveReach:
+        "unrestricted browser navigation and connections on configured Docker network after activation" as const,
+      identity,
+      imageId,
+      launchConfigurationRevision,
+      mechanism: "neko-docker-reservation" as const,
+      mechanismVersion: "1" as const,
+      networkId: String(network.Id),
+      networkName: this.#options.network,
+      profileIdentity: reservationHash([identity, profileRevision]),
+      purpose: "Prepare an isolated browser profile for connector collection" as const,
+      remainingAmbientAccess: [
+        "No forced egress boundary or browser origin guard",
+        "Docker network peers, DNS and routable public/private destinations",
+        "Chromium profile read/write; image defaults and configured private environment",
+        "Published WebRTC TCP/UDP host port; network-peer HTTP/CDP access after activation",
+      ],
+      requestedOrigins: origins,
+      revision: reservationHash([imageId, network, profileRevision, launchConfigurationRevision, origins]),
+    };
+    const descriptor = freezeReservation({
+      access,
+      expiresAt,
+      phase: "PREPARED" as const,
+      reservationId,
+      resource: {
+        configurationRevision: reservationConfigurationRevision(inspect),
+        allocatorId,
+        deploymentId: this.#options.deploymentId,
+        bindingScopeIdentity: identity,
+        profileIdentity: access.profileIdentity,
+        containerId,
+        generation: reservationHash([containerId, inspect.Created]),
+      },
+      scope,
+    });
+    const record: NekoReservationState = {
+      descriptor,
+      networkRevision: reservationHash(network),
+      profilePath: names.profilePath,
+      profileRevision,
+      rootIdentity,
+      state: "prepared",
+    };
+    this.#reservations.set(reservationId, record);
+    await this.#revalidateReservation(record);
+    return descriptor;
+  }
+
+  /** Removal fences a delayed start: Engine starts exact IDs and removed IDs cannot be recreated.
+   * No reservation map, current approval, profile filesystem, or name lookup is needed.
+   * This assumes the configured daemon is authoritative; privileged outside writers are not confined.
+   */
+  async recoverStoppedResource(
+    input: BindingResourceReference,
+    deadline: number
+  ): Promise<BindingResourceCleanupReceipt> {
+    const reference = bindingResourceReference(input);
+    if (reference.deploymentId !== this.#options.deploymentId || !Number.isFinite(deadline) || deadline <= Date.now())
+      reservationRefused();
+    const signal = AbortSignal.timeout(Math.max(1, Math.ceil(deadline - Date.now())));
+    return await this.#bindingSignal.run(signal, async () => {
+      if (reference.allocatorId !== (await this.#reservationAllocatorId())) reservationRefused();
+      const path = `/containers/${encodeURIComponent(reference.containerId)}`;
+      const absent = Symbol("authoritative404");
+      const inspect = async (): Promise<unknown> => {
+        try {
+          return await this.#docker.requestJson(`${path}/json`);
+        } catch (error) {
+          // Match transport status framing, never a diagnostic body's incidental "HTTP 404".
+          const prefix = `Docker GET ${path}/json returned HTTP 404`;
+          if (
+            error instanceof NekoSurfaceAllocatorServiceError &&
+            error.code === "docker_http_error" &&
+            (error.message === prefix || error.message.startsWith(`${prefix}:`))
+          )
+            return absent;
+          throw error;
+        }
+      };
+      const value = await inspect();
+      if (value !== absent) {
+        if (
+          !(isRecord(value) && isRecord(value.Config) && isRecord(value.Config.Labels)) ||
+          value.Id !== reference.containerId ||
+          typeof value.Created !== "string" ||
+          reservationHash([value.Id, value.Created]) !== reference.generation ||
+          reservationConfigurationRevision(value) !== reference.configurationRevision ||
+          value.Config.Labels[`${this.#options.labelNamespace}.owner`] !== "pdpp-reference" ||
+          value.Config.Labels[`${this.#options.labelNamespace}.deployment_id`] !== reference.deploymentId ||
+          value.Config.Labels[`${this.#options.labelNamespace}.reservation`] !== reference.reservationId ||
+          value.Config.Labels[`${this.#options.labelNamespace}.binding_scope`] !== reference.bindingScopeIdentity ||
+          value.Config.Labels[`${this.#options.labelNamespace}.profile_identity`] !== reference.profileIdentity ||
+          reference.bindingScopeIdentity !==
+            reservationHash([
+              reference.deploymentId,
+              {
+                connectionId: reference.connectionId,
+                connectorId: reference.connectorId,
+                instanceKey: reference.instanceKey,
+                ownerId: reference.ownerId,
+              },
+            ])
+        )
+          reservationRefused();
+        // Dedicated path: 409 is a refusal, never proof. Preserve bind mounts and volumes.
+        await this.#docker.requestJson(path, {
+          method: "DELETE",
+          okStatuses: [204, 404],
+          query: { force: "true", v: "false" },
+        });
+        if ((await inspect()) !== absent) reservationRefused();
+      }
+      if (signal.aborted || Date.now() >= deadline) reservationRefused();
+      const retained = this.#reservations.get(reference.reservationId);
+      if (
+        retained &&
+        retained.descriptor.resource.containerId === reference.containerId &&
+        retained.descriptor.resource.generation === reference.generation
+      ) {
+        retained.stopRequested = true;
+        retained.state = "stopped";
+      }
+      // Durable receipt must be committed by the caller before any acquisition hold is released.
+      return Object.freeze({ version: 1, reference, disposition: "removed" });
+    });
+  }
+
+  async readBindingReservation(reservationId: string, scope: NekoBindingScope): Promise<PreparedNekoReservation> {
+    const record = this.#bindingReservation(reservationId, scope);
+    if (record.state !== "prepared") {
+      reservationRefused();
+    }
+    await this.#revalidateReservation(record);
+    if (record.state !== "prepared") {
+      reservationRefused();
+    }
+    return record.descriptor;
+  }
+
+  /** Local trusted callback or configured authenticated control exchange.
+   * Neither path starts until durable authorization succeeds.
+   */
+  async activateBindingReservation(
+    reservationId: string,
+    scope: NekoBindingScope,
+    context?: BindingActivationContext,
+    signal?: AbortSignal
+  ): Promise<{ containerId: string }> {
+    const record = this.#bindingReservation(reservationId, scope);
+    if (record.state !== "prepared") {
+      reservationRefused();
+    }
+    if (context) {
+      record.context = context;
+    }
+    record.state = "authorizing";
+    try {
+      await this.#revalidateReservation(record);
+      if (this.#options.bindingControl) {
+        if (!(context?.runId && Number.isFinite(context.deadline))) {
+          reservationRefused();
+        }
+        await this.#authorizeControl(record.descriptor, context, "authorize");
+      } else {
+        const authorize = this.#options.authorizeAndRecordBindingActivation;
+        if (authorize === undefined) {
+          reservationRefused();
+        }
+        await authorize(record.descriptor);
+      }
+      await this.#revalidateReservation(record);
+      if (this.#options.bindingControl && context) {
+        await this.#authorizeControl(record.descriptor, context, "check");
+      }
+      if (record.descriptor.expiresAt <= this.#options.now().getTime() || (context && context.deadline <= Date.now())) {
+        reservationRefused();
+      }
+      // Cancellation during either await must win before dispatching start.
+      if (record.state !== "authorizing" || signal?.aborted) {
+        reservationRefused();
+      }
+      record.state = "starting";
+      record.start = this.#startContainer(record.descriptor.resource.containerId);
+      try {
+        await record.start;
+      } catch (error) {
+        record.startUnverified = true;
+        throw error;
+      }
+      if (record.stopRequested || signal?.aborted) {
+        // Start has settled: a stop requested during dispatch must win.
+        await this.stopBindingReservation(reservationId, scope);
+        reservationRefused();
+      }
+      record.state = "active";
+      return { containerId: record.descriptor.resource.containerId };
+    } catch (cause) {
+      this.#failReservation(record);
+      throw cause;
+    }
+  }
+
+  async #authorizeControl(
+    reservation: PreparedNekoReservation,
+    context: BindingActivationContext,
+    action: "authorize" | "check" | "observe"
+  ): Promise<void> {
+    const control = this.#options.bindingControl;
+    if (!control) {
+      reservationRefused();
+    }
+    const permit = await postBindingControl(
+      control.authorizer,
+      action,
+      { reservation, ...context },
+      Math.min(context.deadline, reservation.expiresAt)
+    );
+    if (canonicalBindingJson(permit) !== canonicalBindingJson(bindingPermit(reservation, context))) {
+      reservationRefused();
+    }
+  }
+
+  /** Protected transport only; body scope is a lookup, never an authorization. */
+  async handleBindingControl(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    return await this.#bindingSignal.run(
+      AbortSignal.timeout(this.#options.bindingControl?.authorizer.timeoutMs ?? 30_000),
+      () => this.#handleBindingControl(req, res)
+    );
+  }
+
+  async #handleBindingControl(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const control = this.#options.bindingControl;
+    res.setHeader("Cache-Control", "no-store");
+    if (!control) {
+      sendJson(res, 404, { error: "not_found" });
+      return;
+    }
+    if (!controlAuthenticated(req.headers.authorization, control.credential)) {
+      sendJson(res, 401, { error: "control_unauthorized" });
+      return;
+    }
+    const disconnected = new AbortController();
+    res.once("close", () => disconnected.abort());
+    req.setTimeout(30_000, () => req.destroy());
+    try {
+      if (req.method !== "POST") {
+        reservationRefused();
+      }
+      const body = await readControlBody(req);
+      if (
+        !isRecord(body) ||
+        typeof body.deadline !== "number" ||
+        !Number.isFinite(body.deadline) ||
+        body.deadline <= Date.now() ||
+        body.deadline - Date.now() > 30_000
+      ) {
+        reservationRefused();
+      }
+      const parentSignal = this.#bindingSignal.getStore();
+      const deadlineSignal = AbortSignal.timeout(Math.max(1, Math.ceil(body.deadline - Date.now())));
+      this.#bindingSignal.enterWith(parentSignal ? AbortSignal.any([parentSignal, deadlineSignal]) : deadlineSignal);
+      const action = req.url?.slice(`${BINDING_CONTROL_PREFIX}/`.length);
+      if (action === "prepare") {
+        sendJson(
+          res,
+          200,
+          await this.prepareBindingSurface(
+            body.input as Parameters<NekoSurfaceAllocatorService["prepareBindingSurface"]>[0]
+          )
+        );
+        return;
+      }
+      if (action === "recover") {
+        sendJson(res, 200, await this.recoverStoppedResource(bindingResourceReference(body.reference), body.deadline));
+        return;
+      }
+      if (typeof body.reservationId !== "string" || !isRecord(body.scope)) {
+        reservationRefused();
+      }
+      const scope = body.scope as unknown as NekoBindingScope;
+      if (action === "read") {
+        sendJson(res, 200, await this.readBindingReservation(body.reservationId, scope));
+      } else if (action === "activate" && typeof body.runId === "string") {
+        sendJson(
+          res,
+          200,
+          await this.activateBindingReservation(
+            body.reservationId,
+            scope,
+            { deadline: body.deadline, runId: body.runId },
+            disconnected.signal
+          )
+        );
+      } else if (action === "status" && typeof body.runId === "string") {
+        sendJson(
+          res,
+          200,
+          await this.activeBindingStatus(body.reservationId, scope, { deadline: body.deadline, runId: body.runId })
+        );
+      } else if (action === "stop") {
+        await this.stopBindingReservation(body.reservationId, scope);
+        sendJson(res, 200, { reservationId: body.reservationId, stopped: true });
+      } else if (action === "dispose") {
+        this.disposeBindingReservation(body.reservationId, scope);
+        sendJson(res, 200, { disposed: true, reservationId: body.reservationId });
+      } else if (action === "cancel") {
+        await this.cancelBindingReservation(body.reservationId, scope);
+        sendJson(res, 200, { cancelled: true });
+      } else {
+        reservationRefused();
+      }
+    } catch {
+      sendJson(res, 409, { error: "binding_control_refused" });
+    }
+  }
+
+  async cancelBindingReservation(reservationId: string, scope: NekoBindingScope): Promise<void> {
+    const record = this.#bindingReservation(reservationId, scope);
+    if (["starting", "active", "cancelled"].includes(record.state)) {
+      reservationRefused();
+    }
+    record.state = "cancelled";
+    // Never force/remove an active container; never remove a profile. Changed
+    // resources remain stopped for explicit operator review, not adoption/recovery.
+    await this.#revalidateReservation(record, true);
+    await this.#docker.requestJson(`/containers/${encodeURIComponent(record.descriptor.resource.containerId)}`, {
+      method: "DELETE",
+      okStatuses: [204],
+      query: { force: "false", v: "false" },
+    });
+    await this.#verifyBindingResourceAbsent(record.descriptor.resource.containerId);
+    this.#reservations.delete(reservationId);
+    this.#reservedScopes.delete(record.descriptor.access.identity);
+  }
+
+  /** Access reduction uses immutable ownership only: no policy, image, network
+   * or profile availability is needed to close the exact old resource. */
+  get retainedBindingReservationCount(): number {
+    return this.#reservations.size;
+  }
+
+  /** Only discards stopped bookkeeping, never touches Engine resources. Unknown
+   * IDs are idempotent here; that is not a stopped/removed attestation. */
+  disposeBindingReservation(reservationId: string, scope: NekoBindingScope): void {
+    if (!this.#reservations.has(reservationId)) {
+      return;
+    }
+    const record = this.#bindingReservation(reservationId, scope);
+    if (record.state !== "stopped") {
+      reservationRefused();
+    }
+    this.#reservations.delete(reservationId);
+    this.#reservedScopes.delete(record.descriptor.access.identity);
+  }
+
+  async stopBindingReservation(reservationId: string, scope: NekoBindingScope): Promise<void> {
+    const record = this.#bindingReservation(reservationId, scope);
+    record.stopRequested = true;
+    if (record.state === "stopped") {
+      return;
+    }
+    if (record.stop) {
+      return await record.stop;
+    }
+    const stop = async () => {
+      if (record.start) {
+        await record.start.catch(() => undefined);
+      }
+      const inspect = await this.#ownedBindingInspect(record);
+      if ((inspect.State as Record<string, unknown>).Running === true) {
+        await this.#docker.requestJson(
+          `/containers/${encodeURIComponent(record.descriptor.resource.containerId)}/stop`,
+          { method: "POST", okStatuses: [204, 304] }
+        );
+      }
+      const after = await this.#ownedBindingInspect(record);
+      if ((after.State as Record<string, unknown>).Running !== false) {
+        reservationRefused();
+      }
+      // A failed start acknowledgment can still represent a daemon-side start
+      // in flight. Even a subsequent stopped observation cannot prove closure.
+      if (record.startUnverified) {
+        reservationRefused();
+      }
+      await this.#docker.requestJson(`/containers/${encodeURIComponent(record.descriptor.resource.containerId)}`, {
+        method: "DELETE",
+        okStatuses: [204],
+        query: { force: "false", v: "false" },
+      });
+      await this.#verifyBindingResourceAbsent(record.descriptor.resource.containerId);
+      record.state = "stopped";
+      // Keep the stable scope held until caller commits its durable receipt, then disposes.
+    };
+    record.stop = stop();
+    try {
+      await record.stop;
+    } catch (error) {
+      record.state = "failed";
+      // A new explicit stop may re-inspect this exact immutable handle. Never
+      // retry ambiguous start dispatch or adopt a resource by scope alone.
+      if (!record.startUnverified) {
+        record.stop = undefined;
+      }
+      throw error;
+    }
+  }
+
+  async #verifyBindingResourceAbsent(id: string): Promise<void> {
+    const path = `/containers/${encodeURIComponent(id)}/json`;
+    try {
+      await this.#docker.requestJson(path);
+    } catch (error) {
+      const prefix = `Docker GET ${path} returned HTTP 404`;
+      if (
+        error instanceof NekoSurfaceAllocatorServiceError &&
+        error.code === "docker_http_error" &&
+        (error.message === prefix || error.message.startsWith(`${prefix}:`))
+      )
+        return;
+      throw error;
+    }
+    reservationRefused();
+  }
+
+  async #ownedBindingInspect(record: NekoReservationState): Promise<Record<string, unknown>> {
+    const d = record.descriptor;
+    const value = await this.#docker.requestJson(`/containers/${encodeURIComponent(d.resource.containerId)}/json`);
+    if (
+      !(isRecord(value) && isRecord(value.Config) && isRecord(value.Config.Labels) && isRecord(value.State)) ||
+      value.Id !== d.resource.containerId ||
+      reservationHash([value.Id, value.Created]) !== d.resource.generation ||
+      reservationConfigurationRevision(value) !== d.resource.configurationRevision ||
+      value.Config.Labels[`${this.#options.labelNamespace}.reservation`] !== d.reservationId ||
+      value.Config.Labels[`${this.#options.labelNamespace}.binding_scope`] !== d.access.identity ||
+      value.Config.Labels[`${this.#options.labelNamespace}.deployment_id`] !== this.#options.deploymentId ||
+      value.Config.Labels[`${this.#options.labelNamespace}.owner`] !== "pdpp-reference"
+    ) {
+      reservationRefused();
+    }
+    return value;
+  }
+
+  async activeBindingStatus(reservationId: string, scope: NekoBindingScope, context: BindingActivationContext) {
+    const record = this.#bindingReservation(reservationId, scope);
+    if (record.state !== "active" || record.stopRequested || record.context?.runId !== context.runId) {
+      reservationRefused();
+    }
+    await this.#authorizeControl(record.descriptor, context, "observe");
+    const inspect = await this.#ownedBindingInspect(record);
+    if ((inspect.State as Record<string, unknown>).Running !== true || !isRecord(inspect.Config)) {
+      reservationRefused();
+    }
+    const { Labels: _labels, ...config } = inspect.Config;
+    if (
+      reservationHash({
+        Config: config,
+        HostConfig: inspect.HostConfig,
+        Image: inspect.Image,
+        Mounts: inspect.Mounts,
+      }) !== record.descriptor.access.launchConfigurationRevision
+    ) {
+      reservationRefused();
+    }
+    // Do not invoke legacy readiness, which can migrate networks. Protected
+    // status observes the authorized resource and never repairs its access.
+    const surface = await this.#surfaceFromInspect(inspect as unknown as DockerContainerInspect, {
+      readiness: { health: "starting", reason: "binding_readiness" },
+    });
+    const neko = await probeUrl(
+      this.#options.fetchImpl,
+      new URL(this.#options.nekoHealthPath, surface.stream_base_url),
+      this.#bindingSignal.getStore()
+    );
+    const cdp = await probeJson(
+      this.#options.fetchImpl,
+      joinUrlPath(surface.cdp_url, this.#options.cdpVersionPath),
+      this.#bindingSignal.getStore()
+    );
+    const final = await this.#ownedBindingInspect(record);
+    await this.#authorizeControl(record.descriptor, context, "observe");
+    if (
+      (final.State as Record<string, unknown>).Running !== true ||
+      record.state !== "active" ||
+      record.stopRequested
+    ) {
+      reservationRefused();
+    }
+    return {
+      reservationId,
+      resource: record.descriptor.resource,
+      surface: {
+        ...surface,
+        browser_generation_hash: record.descriptor.resource.generation,
+        health: neko && cdp.ok && looksLikeChromiumVersion(cdp.value) ? "ready" : "starting",
+      },
+    };
+  }
+
+  #failReservation(record: NekoReservationState): void {
+    if (!record.stopRequested && record.state !== "stopped") {
+      record.state = "failed";
+    }
+  }
+
+  #bindingReservation(id: string, scope: NekoBindingScope): NekoReservationState {
+    const record = this.#reservations.get(id);
+    if (record === undefined || reservationHash(scope) !== reservationHash(record.descriptor.scope)) {
+      reservationRefused();
+    }
+    return record;
+  }
+
+  async #reservationAllocatorId(): Promise<string> {
+    const info = await this.#docker.requestJson("/info");
+    if (!isRecord(info) || typeof info.ID !== "string" || !info.ID || info.ID.length > 256) reservationRefused();
+    return reservationHash([this.#options.labelNamespace, info.ID]);
+  }
+
+  async #reservationImageId(): Promise<string> {
+    const image = await this.#docker.requestJson(`/images/${encodeURIComponent(this.#options.image)}/json`);
+    if (!isRecord(image) || typeof image.Id !== "string" || !RESERVATION_IMAGE_RE.test(image.Id)) {
+      reservationRefused();
+    }
+    return image.Id;
+  }
+
+  async #reservationNetwork(): Promise<Record<string, unknown>> {
+    const value = await this.#docker.requestJson(`/networks/${encodeURIComponent(this.#options.network)}`);
+    if (!isRecord(value) || typeof value.Id !== "string" || value.Id.length === 0) {
+      reservationRefused();
+    }
+    const { Id, Driver, Internal, EnableIPv6, IPAM, Options, Labels, Scope } = value;
+    return { Driver, EnableIPv6, Id, Internal, IPAM, Labels, Options, Scope };
+  }
+
+  async #reservationProfile(path: string, root: ProfileRootIdentity): Promise<string> {
+    await this.#assertProfileRootUnchanged(root);
+    const value = await this.#options.profileFilesystem.stat(path, { follow: false });
+    this.#assertBrowserOwnedPrivateDirectory(value, path);
+    // Directory entry count changes during normal Chromium profile writes.
+    const { nlink: _nlink, ...identity } = value;
+    return reservationHash(identity);
+  }
+
+  async #reservationInspect(id: string, generation: string, identity: string): Promise<Record<string, unknown>> {
+    const value = await this.#docker.requestJson(`/containers/${encodeURIComponent(id)}/json`);
+    if (
+      !(isRecord(value) && isRecord(value.Config) && isRecord(value.Config.Labels) && isRecord(value.State)) ||
+      value.Id !== id ||
+      typeof value.Created !== "string" ||
+      !Number.isFinite(Date.parse(value.Created)) ||
+      value.State.Running !== false ||
+      value.State.Status !== "created" ||
+      value.Config.Labels[`${this.#options.labelNamespace}.reservation`] !== generation ||
+      value.Config.Labels[`${this.#options.labelNamespace}.binding_scope`] !== identity ||
+      value.Config.Labels[`${this.#options.labelNamespace}.deployment_id`] !== this.#options.deploymentId ||
+      value.Config.Labels[`${this.#options.labelNamespace}.owner`] !== "pdpp-reference"
+    ) {
+      reservationRefused();
+    }
+    const { Id, Created, Image, Name, Config, HostConfig, Mounts, NetworkSettings, State, RestartCount } = value;
+    return { Config, Created, HostConfig, Id, Image, Mounts, Name, NetworkSettings, RestartCount, State };
+  }
+
+  async #revalidateReservation(record: NekoReservationState, cleanup = false): Promise<void> {
+    const { descriptor } = record;
+    if (
+      !cleanup &&
+      (record.stopRequested || record.state === "cancelled" || descriptor.expiresAt <= this.#options.now().getTime())
+    ) {
+      reservationRefused();
+    }
+    const inspect = await this.#reservationInspect(
+      descriptor.resource.containerId,
+      descriptor.reservationId,
+      descriptor.access.identity
+    );
+    if (
+      reservationConfigurationRevision(inspect) !== descriptor.resource.configurationRevision ||
+      (await this.#reservationImageId()) !== descriptor.access.imageId ||
+      reservationHash(await this.#reservationNetwork()) !== record.networkRevision ||
+      (await this.#reservationProfile(record.profilePath, record.rootIdentity)) !== record.profileRevision
+    ) {
+      reservationRefused();
+    }
+    if (
+      !cleanup &&
+      (record.stopRequested || record.state === "cancelled" || descriptor.expiresAt <= this.#options.now().getTime())
+    ) {
+      reservationRefused();
+    }
   }
 
   async ensureSurface(request: SurfaceRequest): Promise<BrowserSurface> {
@@ -376,6 +1286,7 @@ export class NekoSurfaceAllocatorService {
     const rootIdentity = await this.assertProfileStorageReady();
     const existing = await this.#findOwnedContainer(request.surfaceId);
     if (existing !== null) {
+      this.#refuseReservedContainer(existing);
       this.#assertContainerMatchesRequest(existing, request);
       if (isInspectRunning(existing)) {
         // A running container is not automatically trustworthy. Docker's own
@@ -493,6 +1404,7 @@ export class NekoSurfaceAllocatorService {
     if (inspect === null) {
       return null;
     }
+    this.#refuseReservedContainer(inspect);
     const surface = await this.#surfaceFromInspect(inspect);
     if (!advertisesEnsureReplacement(inspect)) {
       return surface;
@@ -506,6 +1418,7 @@ export class NekoSurfaceAllocatorService {
     if (inspect === null) {
       return null;
     }
+    this.#refuseReservedContainer(inspect);
     await this.#docker.requestJson(`/containers/${encodeURIComponent(inspect.Id)}/stop`, {
       method: "POST",
       okStatuses: [204, 304, 404],
@@ -549,7 +1462,11 @@ export class NekoSurfaceAllocatorService {
 
   async listSurfaces(): Promise<BrowserSurface[]> {
     const containers = await this.#listOwnedContainers();
-    const surfaces = await Promise.all(containers.map((container) => this.#surfaceFromInspectId(container.Id)));
+    const surfaces = await Promise.all(
+      containers
+        .filter((container) => container.Labels?.[`${this.#options.labelNamespace}.reservation`] === undefined)
+        .map((container) => this.#surfaceFromInspectId(container.Id))
+    );
     return surfaces.sort((a, b) => a.surface_id.localeCompare(b.surface_id));
   }
 
@@ -1178,6 +2095,13 @@ export class NekoSurfaceAllocatorService {
   async #allocateHostPort(skippedPorts: ReadonlySet<number> = new Set()): Promise<number> {
     const containers = await this.#listOwnedContainers();
     const occupancy = collectHostPortOccupancy(containers, this.#options.labelNamespace);
+    for (const container of containers) {
+      if (container.Labels?.[`${this.#options.labelNamespace}.reservation`] !== undefined) {
+        for (const port of summaryHostPorts(container, this.#options.labelNamespace)) {
+          occupancy.used.add(port);
+        }
+      }
+    }
     for (let port = this.#options.webrtcHostPortStart; port <= this.#options.webrtcHostPortEnd; port += 1) {
       if (occupancy.used.has(port) || skippedPorts.has(port)) {
         continue;
@@ -1192,6 +2116,12 @@ export class NekoSurfaceAllocatorService {
       "port_capacity_exhausted",
       "no configured n.eko WebRTC host ports are available"
     );
+  }
+
+  #refuseReservedContainer(inspect: DockerContainerInspect): void {
+    if (inspect.Config?.Labels?.[`${this.#options.labelNamespace}.reservation`] !== undefined) {
+      reservationRefused();
+    }
   }
 
   #assertContainerMatchesRequest(inspect: DockerContainerInspect, request: SurfaceRequest): void {
@@ -1318,6 +2248,10 @@ export class NekoSurfaceAllocatorService {
 export function createNekoSurfaceAllocatorHttpHandler(service: NekoSurfaceAllocatorService) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     try {
+      if (req.url?.startsWith(`${BINDING_CONTROL_PREFIX}/`)) {
+        await service.handleBindingControl(req, res);
+        return;
+      }
       await routeAllocatorRequest(service, req, res);
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
@@ -1706,18 +2640,22 @@ function hasNetwork(inspect: DockerContainerInspect, network: string): boolean {
   return inspect.NetworkSettings?.Networks?.[network] !== undefined;
 }
 
-async function probeUrl(fetchImpl: FetchLike, url: URL): Promise<boolean> {
+async function probeUrl(fetchImpl: FetchLike, url: URL, signal?: AbortSignal): Promise<boolean> {
   try {
-    const response = await fetchImpl(url);
+    const response = await fetchImpl(url, signal ? { signal } : undefined);
     return response.ok;
   } catch {
     return false;
   }
 }
 
-async function probeJson(fetchImpl: FetchLike, url: URL): Promise<{ ok: boolean; value?: unknown }> {
+async function probeJson(
+  fetchImpl: FetchLike,
+  url: URL,
+  signal?: AbortSignal
+): Promise<{ ok: boolean; value?: unknown }> {
   try {
-    const response = await fetchImpl(url);
+    const response = await fetchImpl(url, signal ? { signal } : undefined);
     if (!response.ok) {
       return { ok: false };
     }
@@ -1895,7 +2833,14 @@ function readIntegerEnv(env: NodeJS.ProcessEnv, name: string, fallback: number):
 
 async function main(): Promise<void> {
   const options = readNekoSurfaceAllocatorOptionsFromEnv();
-  const server = await startNekoSurfaceAllocatorServer(options);
+  const binding = await readBrowserBindingRuntimeConfig();
+  const server = await startNekoSurfaceAllocatorServer({
+    ...options,
+    ...(binding ? { bindingControl: {
+      authorizer: binding.authorizer,
+      credential: binding.allocator.credential,
+    } } : {}),
+  });
   process.stdout.write(`n.eko surface allocator listening at ${server.url}\n`);
 }
 

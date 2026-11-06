@@ -13,6 +13,11 @@
 
 import { createHash } from "node:crypto";
 import {
+  assertPostgresRunUploadWithinTransaction,
+  copyRunUploadAuthority,
+  type RunUploadAuthority,
+} from "./stores/run-upload-permission-store.ts";
+import {
   buildLimitClampedWarning,
   clampRecordsPageLimit,
   enforceConnectionNarrowing,
@@ -69,6 +74,8 @@ import {
 } from "./storage-utils.ts";
 import { createPostgresConnectorInstanceStore } from "./stores/connector-instance-store.ts";
 import { advancePostgresDeviceIngestPrefix } from "./stores/device-exporter-store.ts";
+import { applyRetainedSizePromotionPostgres } from "./retained-size-read-model.ts";
+import { promotePostgresRunUploadRecord } from "./stores/run-upload-record-promotion.ts";
 import { markSearchIndexDirtyPostgres } from "./stores/search-index-dirty-store.ts";
 
 type JsonObject = Record<string, unknown>;
@@ -261,6 +268,7 @@ interface IngestRecord {
 
 interface IngestOptions {
   attemptContext?: DeviceAttemptContext | null;
+  authenticatedOwnerSubjectId?: string | undefined;
   deviceReservation?: JsonObject & { inputIndex: number };
   /** See RecordIngestOptions.requireConnectionAdmission in server/records.ts. */
   requireConnectionAdmission?: boolean;
@@ -271,6 +279,7 @@ interface IngestOptions {
 interface IngestOutcome {
   accepted: boolean;
   changed: boolean;
+  retainedSizeApplied?: boolean | undefined;
   retainedSizeDelta?: JsonObject;
   self_healed?: boolean;
   version?: number;
@@ -279,6 +288,7 @@ interface IngestOutcome {
 interface DurableIngestOutcome {
   kind: "noop" | "changed";
   op?: "upsert" | "delete";
+  retainedSizeApplied?: boolean;
   retainedSizeDelta?: JsonObject;
   selfHeal?: boolean;
   version?: number;
@@ -1978,6 +1988,29 @@ async function assertPostgresConnectorInstanceWritable(
   assertConnectorInstanceWritableStatus(row?.status ?? null, connectorInstanceId);
 }
 
+/** Settle blob and record accounting before the accepted transaction can commit. */
+async function settlePostgresStagedRecord(
+  client: PostgresTransactionClient,
+  input: Parameters<typeof promotePostgresRunUploadRecord>[1],
+  value: DurableIngestOutcome
+): Promise<void> {
+  const staged = await promotePostgresRunUploadRecord(client, input);
+  if (!(staged && value.retainedSizeDelta)) {
+    return;
+  }
+  const delta = value.retainedSizeDelta;
+  await applyRetainedSizePromotionPostgres(client, {
+    connectorId: input.connectorId,
+    connectorInstanceId: input.connectionId,
+    currentRecordJsonBytesDelta: Number(delta.currentRecordJsonBytesDelta),
+    recordCountDelta: Number(delta.recordCountDelta),
+    recordHistoryCountDelta: Number(delta.recordHistoryCountDelta),
+    recordHistoryJsonBytesDelta: Number(delta.recordHistoryJsonBytesDelta),
+    stream: input.record.stream,
+  });
+  value.retainedSizeApplied = true;
+}
+
 export async function postgresIngestRecord(
   storageTarget: StorageTarget,
   record: IngestRecord,
@@ -2023,6 +2056,20 @@ export async function postgresIngestRecord(
       }
       await assertPostgresRunStillAdmitted(client, options.runId, connectorInstanceId);
       const finishDurableOutcome = async (value: DurableIngestOutcome): Promise<DurableIngestOutcome> => {
+        if (op !== "delete" && options.runId) {
+          await settlePostgresStagedRecord(
+            client,
+            {
+              connectionId: connectorInstanceId,
+              connectorId: resolvedConnectorId,
+              ownerId: options.authenticatedOwnerSubjectId,
+              record,
+              recordKey,
+              runId: options.runId,
+            },
+            value
+          );
+        }
         if (options.deviceReservation) {
           await advancePostgresDeviceIngestPrefix(
             client,
@@ -2158,6 +2205,7 @@ export async function postgresIngestRecord(
     accepted: true,
     changed: true,
     ...(outcome.retainedSizeDelta ? { retainedSizeDelta: outcome.retainedSizeDelta } : {}),
+    retainedSizeApplied: outcome.retainedSizeApplied,
     ...(outcome.version === undefined ? {} : { version: outcome.version }),
   };
   if (outcome.selfHeal) {
@@ -3156,6 +3204,7 @@ async function deletePostgresRecordTailForPair(
 }
 
 interface BlobPersistArgs {
+  uploadAuthority?: RunUploadAuthority;
   connectorId: string;
   connectorInstanceId?: string | null;
   coordinatorOwnership?: ConnectorInstanceWriteOwnership | null;
@@ -3193,7 +3242,9 @@ export function postgresPersistContentAddressedBlob({
   jsonPath,
   coordinatorOwnership = null,
   requireConnectionAdmission,
+  uploadAuthority,
 }: BlobPersistArgs): Promise<BlobPersistResult> {
+  const authority = uploadAuthority === undefined ? undefined : copyRunUploadAuthority(uploadAuthority);
   const effectiveConnectorInstanceId = connectorInstanceId || resolveStorageConnectorInstanceId(null, connectorId);
   return withConnectorInstanceWrite(
     effectiveConnectorInstanceId,
@@ -3207,6 +3258,7 @@ export function postgresPersistContentAddressedBlob({
         stream,
         ...(jsonPath ? { jsonPath } : {}),
         ...(requireConnectionAdmission ? { requireConnectionAdmission } : {}),
+        ...(authority === undefined ? {} : { uploadAuthority: authority }),
       }),
     coordinatorOwnership ?? undefined
   );
@@ -3221,6 +3273,7 @@ async function postgresPersistContentAddressedBlobWithinFence({
   data,
   jsonPath = "@record",
   requireConnectionAdmission,
+  uploadAuthority,
 }: Omit<BlobPersistArgs, "coordinatorOwnership">): Promise<BlobPersistResult> {
   const effectiveConnectorInstanceId = connectorInstanceId || resolveStorageConnectorInstanceId(null, connectorId);
   const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
@@ -3240,6 +3293,15 @@ async function postgresPersistContentAddressedBlobWithinFence({
       // atomic with respect to a concurrent delete — see
       // assertPostgresConnectorInstanceWritable's header for the general
       // rationale. See harden-connector-instance-write-fence-transaction-native.
+      if (uploadAuthority !== undefined) {
+        await assertPostgresRunUploadWithinTransaction(client, uploadAuthority, {
+          connectorId,
+          connectionId: effectiveConnectorInstanceId,
+          stream,
+          recordKey,
+          jsonPath,
+        });
+      }
       if (requireConnectionAdmission) {
         await assertPostgresConnectorInstanceWritable(client, effectiveConnectorInstanceId);
       }

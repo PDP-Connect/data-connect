@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { validateManifestIcon } from "../server/connector-manifest-validation.ts";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -81,8 +82,9 @@ async function registerConnectorManifest(asUrl: string, manifest: unknown): Prom
 const SIMPLE_SVG = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 0z"/></svg>';
 
 function makeManifest(extra: Record<string, unknown> = {}) {
-  return {
-    connector_id: "https://registry.pdpp.test/connectors/icon-fixture",
+  return withFixtureSourceDeclaration({
+    connector_id: "icon-fixture",
+    connector_key: "icon-fixture",
     display_name: "Icon fixture",
     protocol_version: "0.1.0",
     streams: [
@@ -104,7 +106,7 @@ function makeManifest(extra: Record<string, unknown> = {}) {
     ],
     version: "0.1.0",
     ...extra,
-  };
+  });
 }
 
 test("manifest declaring a valid inline_svg icon is accepted", async () => {

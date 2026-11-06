@@ -44,6 +44,19 @@ import {
 } from "../server/web-push-notifications.ts";
 import { resolveCredentialFreeFixtureRunEnv } from "./helpers/credential-free-run-fixture.ts";
 
+// Test scaffolding only. The shipped seed declares `credentials` alone, while these
+// tests drive connectors that also emit otp and manual_action. Declaring them here
+// keeps the shipped seed unchanged and the undeclared-kind refusal intact elsewhere.
+function withTestHumanInteraction<T extends Record<string, unknown>>(manifest: T): T {
+  return {
+    ...manifest,
+    capabilities: {
+      ...((manifest.capabilities as Record<string, unknown> | undefined) ?? {}),
+      human_interaction: ["credentials", "otp", "manual_action"],
+    },
+  } as T;
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
 
@@ -264,7 +277,9 @@ interface ManifestLike {
 }
 
 function loadSpotifyManifest(): ManifestLike {
-  return JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8"));
+  return withTestHumanInteraction(
+    JSON.parse(readFileSync(join(REFERENCE_IMPL_DIR, "fixtures/seed-manifests/spotify.json"), "utf8"))
+  );
 }
 
 async function registerConnector(asUrl: string, manifest: ManifestLike): Promise<void> {

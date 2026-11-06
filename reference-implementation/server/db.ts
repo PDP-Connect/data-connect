@@ -2029,6 +2029,126 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_coverage_horizons_current
 CREATE INDEX IF NOT EXISTS idx_connector_coverage_horizons_instance
   ON connector_coverage_horizons(connector_instance_id);
 
+
+-- Runtime-local prepared access policy. Payloads are immutable; decisions never grant resources.
+CREATE TABLE IF NOT EXISTS connector_binding_access_heads (
+  connection_id TEXT PRIMARY KEY REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+  epoch INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  active_id TEXT
+);
+CREATE TABLE IF NOT EXISTS connector_binding_access_policies (
+  connection_id TEXT NOT NULL REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+  proposal_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  base_epoch INTEGER NOT NULL,
+  snapshot_digest TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  provenance_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('proposed', 'confirmed', 'rejected', 'superseded', 'withdrawn')),
+  acknowledgments_json TEXT,
+  confirmed_at TEXT,
+  PRIMARY KEY (connection_id, proposal_id),
+  UNIQUE (connection_id, revision)
+);
+
+CREATE TRIGGER IF NOT EXISTS connector_binding_access_owner_changed
+AFTER UPDATE OF owner_subject_id ON connector_instances
+WHEN OLD.owner_subject_id IS NOT NEW.owner_subject_id
+BEGIN
+  UPDATE connector_binding_access_policies SET status = 'withdrawn'
+    WHERE connection_id = NEW.connector_instance_id AND status IN ('proposed', 'confirmed');
+  UPDATE connector_binding_access_heads SET active_id = NULL, epoch = epoch + 1
+    WHERE connection_id = NEW.connector_instance_id;
+END;
+
+-- Resource debt deliberately has NO connection/authority FK: deletion cannot erase unresolved cleanup.
+CREATE TABLE IF NOT EXISTS connector_binding_resources (
+  intent_id TEXT PRIMARY KEY,
+  allocator_id TEXT NOT NULL,
+  deployment_id TEXT NOT NULL,
+  profile_identity TEXT NOT NULL,
+  connection_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  reference_json TEXT NOT NULL,
+  disposition TEXT NOT NULL CHECK (disposition IN ('unresolved', 'removed'))
+);
+CREATE INDEX IF NOT EXISTS connector_binding_resources_run
+  ON connector_binding_resources(connection_id, run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS connector_binding_resources_unresolved_profile
+  ON connector_binding_resources(allocator_id, deployment_id, profile_identity) WHERE disposition = 'unresolved';
+
+
+-- Live blob-upload permission, separate from flight/cleanup and immutable binding evidence.
+-- No cascade: retain the epoch/generation watermark after connection deletion (no resurrection).
+CREATE TABLE IF NOT EXISTS connector_run_upload_permissions (
+  connection_id TEXT PRIMARY KEY,
+  issuer_epoch TEXT NOT NULL,
+  generation BIGINT NOT NULL,
+  token_digest TEXT,
+  grant_json TEXT,
+  revoked INTEGER NOT NULL CHECK (revoked IN (0, 1))
+);
+
+-- Private transient uploads. Startup rotates upload epochs before admitting work and discards these rows.
+CREATE TABLE IF NOT EXISTS connector_run_upload_stages (
+  stage_id TEXT PRIMARY KEY,
+  blob_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  connector_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  issuer_epoch TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  stream TEXT NOT NULL,
+  record_key TEXT NOT NULL,
+  json_path TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  charge_bytes INTEGER NOT NULL CHECK (charge_bytes >= 0),
+  data BLOB NOT NULL,
+  UNIQUE (connection_id, run_id, issuer_epoch, generation, stream, record_key, json_path)
+);
+CREATE INDEX IF NOT EXISTS connector_run_upload_stages_run_budget
+  ON connector_run_upload_stages(connection_id, run_id, issuer_epoch, generation);
+
+-- Immutable initial trusted binding facts; runtime-local format, separate from terminal observations.
+-- No pruning; only an explicit connection deletion cascades these audit records.
+CREATE TABLE IF NOT EXISTS connector_binding_authority_runs (
+  owner_id TEXT NOT NULL,
+  connection_id TEXT NOT NULL REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL,
+  policy_identity TEXT NOT NULL,
+  record_version INTEGER NOT NULL,
+  recorded_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  PRIMARY KEY (connection_id, run_id)
+);
+
+-- Collection Profile v0.2.0 diagnostic record per completed run (data-connectors
+-- spec sections 5.10.3-5.10.4). Holds the runtime's ObservationSnapshot and
+-- Diagnosis as JSON and nothing else. server/stores/connector-observation-store.ts
+-- keeps at most 8 rows per connector_id, across its instances, and prunes in the
+-- write transaction. recorded_seq is the store's per-connector order, never a
+-- connector timestamp. Deleting a connection cascades its rows.
+CREATE TABLE IF NOT EXISTS connector_observation_runs (
+  connector_id          TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  run_id                TEXT NOT NULL,
+  recorded_seq          INTEGER NOT NULL,
+  record_version        INTEGER NOT NULL CHECK (record_version = 1),
+  recorded_at           TEXT NOT NULL,
+  payload_json          TEXT NOT NULL,
+  PRIMARY KEY (connector_id, connector_instance_id, run_id),
+  FOREIGN KEY(connector_instance_id) REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_observation_runs_seq
+  ON connector_observation_runs(connector_id, recorded_seq);
+
 -- Cross-invocation half of STREAM_EVIDENCE rule 5 ("at most one accepted
 -- STREAM_EVIDENCE per stream per run_id"): a durable record of every
 -- (run_id, stream) pair this runtime has ever accepted a STREAM_EVIDENCE

@@ -69,6 +69,7 @@ interface ParsedSvgTag {
   attrsExhaustive: boolean;
   closing: boolean;
   name: string;
+  selfClosing: boolean;
 }
 
 function parseSvgTag(raw: string): ParsedSvgTag | null {
@@ -77,7 +78,8 @@ function parseSvgTag(raw: string): ParsedSvgTag | null {
   if (closing) {
     body = body.slice(1).trim();
   }
-  if (body.endsWith("/")) {
+  const selfClosing = body.endsWith("/");
+  if (selfClosing) {
     body = body.slice(0, -1).trim();
   }
   const nameMatch = SVG_TAG_NAME_RE.exec(body);
@@ -93,12 +95,45 @@ function parseSvgTag(raw: string): ParsedSvgTag | null {
   while (match) {
     const [, rawAttrName, doubleQuoted, singleQuoted] = match;
     if (rawAttrName) {
-      attrs.set(rawAttrName.toLowerCase(), doubleQuoted ?? singleQuoted ?? "");
+      const attrName = rawAttrName.toLowerCase();
+      const attrValue = doubleQuoted ?? singleQuoted ?? "";
+      // Browsers retain the first duplicate and decode character references.
+      // Shape-only attributes need neither form, so reject duplicates and both escape forms before indexing.
+      if (attrs.has(attrName) || attrValue.includes("&") || attrValue.includes("\\")) {
+        return null;
+      }
+      attrs.set(attrName, attrValue);
     }
     match = SVG_ATTR_RE.exec(attrSource);
   }
   const attrsExhaustive = attrSource.replace(SVG_ATTR_RE, "").trim().length === 0;
-  return { attrs, attrsExhaustive, closing, name };
+  return { attrs, attrsExhaustive, closing, name, selfClosing };
+}
+
+function isAllowedSvgTag(tag: ParsedSvgTag | null): tag is ParsedSvgTag {
+  if (!tag?.attrsExhaustive) {
+    return false;
+  }
+  return (
+    SVG_ALLOWED_ELEMENTS.has(tag.name) &&
+    [...tag.attrs].every(
+      ([name, value]) => SVG_ALLOWED_ATTRIBUTES.has(name) && !SVG_ATTRIBUTE_VALUE_DENY_RE.test(value)
+    )
+  );
+}
+
+/** Consume one well-formed element, keeping the unmatched opening names. */
+function advanceSvgNesting(tag: ParsedSvgTag, openElements: string[]): boolean {
+  if (tag.closing) {
+    return !tag.selfClosing && tag.attrs.size === 0 && openElements.pop() === tag.name;
+  }
+  if (openElements.length === 0 && tag.name !== "svg") {
+    return false;
+  }
+  if (!tag.selfClosing) {
+    openElements.push(tag.name);
+  }
+  return true;
 }
 
 /**
@@ -113,33 +148,26 @@ export function sanitizeSvg(raw: string): string | null {
     return null;
   }
   SVG_TAG_RE.lastIndex = 0;
-  const tags: ParsedSvgTag[] = [];
+  const openElements: string[] = [];
   let sawSvgRoot = false;
   let cursor = 0;
   let match = SVG_TAG_RE.exec(svg);
   while (match) {
-    if (match.index !== cursor && svg.slice(cursor, match.index).includes("<")) {
+    const between = svg.slice(cursor, match.index);
+    if (between.includes("<") || (openElements.length === 0 && between.trim().length > 0)) {
       return null;
     }
     cursor = SVG_TAG_RE.lastIndex;
     const parsed = parseSvgTag(match[1] ?? "");
-    if (!parsed || !parsed.attrsExhaustive || !SVG_ALLOWED_ELEMENTS.has(parsed.name)) {
+    if (!isAllowedSvgTag(parsed)) {
       return null;
     }
-    for (const [attrName, attrValue] of parsed.attrs) {
-      if (!SVG_ALLOWED_ATTRIBUTES.has(attrName) || SVG_ATTRIBUTE_VALUE_DENY_RE.test(attrValue)) {
-        return null;
-      }
+    const startsRoot = !parsed.closing && openElements.length === 0;
+    if ((startsRoot && sawSvgRoot) || !advanceSvgNesting(parsed, openElements)) {
+      return null;
     }
-    if (parsed.name === "svg" && !parsed.closing) {
-      sawSvgRoot = true;
-    }
-    tags.push(parsed);
+    sawSvgRoot ||= startsRoot;
     match = SVG_TAG_RE.exec(svg);
   }
-  if (cursor < svg.length && svg.slice(cursor).includes("<")) {
-    return null;
-  }
-  const [rootTag] = tags;
-  return sawSvgRoot && rootTag?.name === "svg" && !rootTag.closing ? svg : null;
+  return sawSvgRoot && openElements.length === 0 && svg.slice(cursor).trim().length === 0 ? svg : null;
 }

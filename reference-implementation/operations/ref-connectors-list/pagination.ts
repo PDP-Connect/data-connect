@@ -12,8 +12,6 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEq
 import { resolveCredentialEncryptionKey } from "../../server/stores/credential-encryption.ts";
 
 export const CONNECTOR_SUMMARY_PAGE_LIMIT_MAX = 100;
-/** Accepted maximum for a repeated `connector_id` SET scope (R4/design doc "Minimal contract"). Same deliberate ceiling as the page size. */
-export const CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX = 100;
 const CONNECTOR_SUMMARY_CURSOR_VERSION = 1;
 const CONNECTOR_SUMMARY_CURSOR_PREFIX = "rcs1.";
 const CURSOR_IV_BYTES = 12;
@@ -45,9 +43,8 @@ export type ConnectorSummaryPageProfile = "identity_inventory" | "retained_count
 /**
  * A `connector_id` scope on the page request: `null` = unfiltered fleet
  * page (unchanged prior behavior); a single string = the original one-id
- * filter; a readonly array = the bounded repeated-value SET scope (design
- * doc "Minimal contract" — `?connector_id=A&connector_id=B&...`), 1..
- * {@link CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} canonical distinct ids.
+ * filter; a readonly array = a repeated-value set of canonical distinct ids
+ * (`?connector_id=A&connector_id=B&...`). Request bytes bound its size.
  */
 export type ConnectorIdScope = string | readonly string[] | null;
 
@@ -230,8 +227,6 @@ function parseSourcesVisibility(
  * single-id filter (not a set), so an existing single-id caller that happens
  * to be routed through array-producing middleware is unaffected.
  *
- * Design doc "Minimal contract": the accepted maximum is
- * {@link CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} distinct CANONICAL ids.
  * Deduplication happens AFTER canonicalization (`canonicalizeId`, supplied by
  * the host so this operation module never imports the connector-key
  * substrate) — a duplicate-after-canonicalization set is a typed invalid
@@ -258,12 +253,6 @@ function parseConnectorIdFilter(rawConnectorId: unknown, canonicalizeId: (id: st
     // A single-element repeated form is the single-id filter, byte-identical
     // request/cursor shape to the pre-existing `?connector_id=A` case.
     return rawConnectorId[0] as string;
-  }
-  if (rawConnectorId.length > CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX) {
-    throw new ConnectorSummaryPageRequestError(
-      "limit",
-      `connector_id set must contain at most ${CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} distinct canonical ids`
-    );
   }
   const canonical = (rawConnectorId as string[]).map(canonicalizeId);
   const distinct = new Set(canonical);

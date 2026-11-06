@@ -13,6 +13,7 @@
 // supported. Interactive browser setup remains owner-mediated in Console.
 
 import {
+  type BrowserEnrollmentArtifact,
   browserEnrollmentSupport,
   buildConnectionSetupPlan,
   isKnownScaffoldConnector,
@@ -38,6 +39,7 @@ interface AppLike {
 }
 
 interface ConnectorManifestLike {
+  readonly browser_enrollment_artifact?: BrowserEnrollmentArtifact;
   readonly capabilities?: {
     readonly auth?: {
       readonly deployment_config?: readonly string[] | null;
@@ -95,6 +97,10 @@ export interface MountOwnerConnectorTemplatesContext {
   ) => string | null;
   requireOwner: MiddlewareHandler;
   requireToken: MiddlewareHandler;
+  resolveBrowserEnrollmentArtifact?: (
+    key: string,
+    manifest: ConnectorManifestLike
+  ) => Promise<BrowserEnrollmentArtifact>;
   resolveResource: (req: unknown) => string;
   uatConnectorAllowlist?: ReadonlySet<string>;
   uatExposeUnlistedConnectors?: boolean;
@@ -358,6 +364,7 @@ function projectTemplate(
       (isDevelopment && isAllowlisted && isUatExposablePlan(plan, manifest, connectorKey, ctx.uatConnectorAllowlist)));
 
   return {
+    browser_enrollment_artifact: manifest.browser_enrollment_artifact,
     connection_count: connections.length,
     connections,
     connector_id: connectorKey,
@@ -390,7 +397,8 @@ async function collectConnectorTemplates(ctx: MountOwnerConnectorTemplatesContex
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
       const manifest = await ctx.getConnectorManifest(connectorKey);
       if (manifest) {
-        byConnectorKey.set(connectorKey, manifest);
+        const artifact = await ctx.resolveBrowserEnrollmentArtifact?.(connectorKey, manifest);
+        byConnectorKey.set(connectorKey, artifact ? { ...manifest, browser_enrollment_artifact: artifact } : manifest);
       }
     } catch {
       // A malformed registered manifest should not hide every other template

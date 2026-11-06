@@ -29,13 +29,26 @@ import {
   createBrowserSurfacePersistenceUnitOfWork,
 } from "../../server/stores/browser-surface-persistence-unit-of-work.ts";
 import type { BrowserSurfaceReplacementReceiptStore } from "../../server/stores/browser-surface-replacement-ledger-store.ts";
+import {
+  BrowserBindingOwnerActionRequired,
+  BrowserBindingPlacementRefused,
+  refuseBindingControl,
+} from "../binding-control.ts";
+import type { BindingAuthorityRecord } from "../binding-authority.ts";
+import { normalizeBindingDeclarations } from "../binding-declarations.ts";
+import { assertBindingAdmissionAvailable, requiresProtectedBindingAdmission } from "../run-binding-admission.ts";
 import { browserSurfaceLeaseEnv } from "../browser-surface-leases.ts";
 import {
   type BrowserSurfaceReadinessProbe,
   type BrowserSurfaceReadinessProbeResult,
   createMidWaitSurfaceLossDetector,
 } from "../browser-surface-readiness.ts";
-import type { ConnectorManifest, RunNowOptions, RunNowResult } from "../run-contracts.ts";
+import type {
+  ConnectorManifest,
+  ProtectedBrowserSurfaceLifecycle,
+  RunNowOptions,
+  RunNowResult,
+} from "../run-contracts.ts";
 import { readBrowserSurfaceProfileKey } from "./profile-key.ts";
 import { createReplacementLifecycleHooks } from "./replacement-lifecycle-hooks.ts";
 import { createWindowSettleReconciliation } from "./window-settle-reconciliation.ts";
@@ -143,6 +156,10 @@ interface ManagedSurfaceReady {
   readonly env: Record<string, string> | null;
   readonly kind: "ready";
   readonly lease: BrowserSurfaceLease | null;
+  readonly runtimeHandoff?: {
+    readonly beforeBrowserSurfaceHandoff: () => Promise<BindingAuthorityRecord | void>;
+    readonly observeBrowserSurfaceAuthority: () => Promise<void>;
+  };
 }
 
 type ManagedSurfaceAcquireResult = ManagedSurfaceEarlyReturn | ManagedSurfaceReady;
@@ -163,23 +180,13 @@ interface AllocatorSurfaceReconciliation {
 
 export interface BrowserSurfaceManagerDeps {
   readonly activeRunInteractions: Map<string, ActiveRunInteraction>;
-  readonly browserSurfaceAllocator: BrowserSurfaceAllocator | null;
   readonly beforeBrowserSurfaceLeaseEnsure?: (args: {
     /** The connection the run collects for (the lease's surface subject). */
     readonly connectionId: string | null;
     readonly runId: string;
     readonly surfaceId: string;
   }) => Promise<void> | void;
-  /**
-   * Resolves the host allocator's recorded start failure (code + message) for a
-   * run whose lease just went surface_failed, so the reason the remote-surface
-   * lease manager's bare `catch {}` swallows can still reach the spine event
-   * and the RunNowResult. Returns undefined when no structured failure is known
-   * (e.g. dynamic/local allocator mode, or a non-HTTP failure).
-   */
-  readonly describeBrowserSurfaceStartFailure?: (args: {
-    readonly runId: string;
-  }) => { readonly code: string; readonly message: string } | undefined;
+  readonly browserSurfaceAllocator: BrowserSurfaceAllocator | null;
   readonly browserSurfaceLeaseManager: BrowserSurfaceLeaseManager | null;
   readonly browserSurfaceLeaseStore: BrowserSurfaceLeaseStore | null;
   readonly browserSurfaceMidWaitPollIntervalMs: number | undefined;
@@ -190,11 +197,23 @@ export interface BrowserSurfaceManagerDeps {
   /** Delay between reclaim retry attempts. Defaults to 250ms. Tests inject 0. */
   readonly browserSurfaceReclaimRetryDelayMs?: number;
   readonly browserSurfaceReplacementReceiptStore: BrowserSurfaceReplacementReceiptStore | null;
+  /**
+   * Resolves the host allocator's recorded start failure (code + message) for a
+   * run whose lease just went surface_failed, so the reason the remote-surface
+   * lease manager's bare `catch {}` swallows can still reach the spine event
+   * and the RunNowResult. Returns undefined when no structured failure is known
+   * (e.g. dynamic/local allocator mode, or a non-HTTP failure).
+   */
+  readonly describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   readonly listPersistedActiveRuns: () => Promise<
     ReadonlyArray<{ readonly connector_instance_id?: string | null; readonly run_id: string }>
   >;
   readonly log: ControllerLogger;
   readonly pendingBrowserSurfaceLaunches: Map<string, RunNowOptions>;
+  readonly protectedBrowserLifecycle?: boolean;
+  readonly protectedLifecycle?: ProtectedBrowserSurfaceLifecycle | undefined;
   /**
    * Resolves the durable owner of an admitted connection when a process restart
    * has discarded the in-memory launch options. A persisted lease records the
@@ -221,12 +240,21 @@ export interface BrowserSurfaceManagerDeps {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export interface BrowserSurfaceManager {
+  acquireForRun: (ctx: ManagedSurfaceContext, signal: AbortSignal) => Promise<ManagedSurfaceAcquireResult>;
+
   /** Acquire (or queue/defer) a managed browser-surface lease for a run. */
   acquireManagedBrowserSurfaceForRun: (ctx: ManagedSurfaceContext) => Promise<ManagedSurfaceAcquireResult>;
   /** Cancel the browser-surface lease for a waiting/queued run. */
   cancelBrowserSurfaceRun: (runId: string) => Promise<BrowserSurfaceProjection | null>;
   /** Stop idle surfaces and promote any queued waiters. */
   cleanupIdleBrowserSurfaces: () => Promise<BrowserSurfaceProjection[]>;
+  closeProtectedRun: (ctx: {
+    connectorId: string;
+    connectorInstanceId: string;
+    runId: string;
+    traceContext: SpineTraceContext;
+    lease: BrowserSurfaceLease | null;
+  }) => Promise<void>;
   /** Emit a browser-surface lease spine event (used by respondToInteraction). */
   emitLeaseEvent: (
     eventType: string,
@@ -268,6 +296,10 @@ export interface BrowserSurfaceManager {
     runId: string,
     traceContext: SpineTraceContext
   ) => Promise<void>;
+  requestProtectedStop: (
+    ctx: { connectorId: string; connectorInstanceId: string; runId: string; traceContext: SpineTraceContext },
+    reconcile?: boolean
+  ) => Promise<void>;
   /**
    * Independent periodic sweep: reconciles surfaces against the allocator,
    * expires + promotes past-TTL waiting leases, and retries capacity-pressure
@@ -290,6 +322,7 @@ export interface BrowserSurfaceManager {
 export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): BrowserSurfaceManager {
   const {
     activeRunInteractions,
+    protectedBrowserLifecycle = false,
     browserSurfaceAllocator,
     beforeBrowserSurfaceLeaseEnsure,
     describeBrowserSurfaceStartFailure,
@@ -612,7 +645,9 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
           await hostAllocator.releaseRun(lease.run_id);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          log.warn?.(`[controller] failed to release host browser surface for abandoned run ${lease.run_id}: ${message}`);
+          log.warn?.(
+            `[controller] failed to release host browser surface for abandoned run ${lease.run_id}: ${message}`
+          );
         }
       }
     }
@@ -1569,7 +1604,10 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
   }
 
   function shouldRetryReadinessFailure(): boolean {
-    return Boolean(replacementAwareAllocator && browserSurfaceLeaseManager?.config.surfaceMode === "dynamic");
+    return (
+      !protectedBrowserLifecycle &&
+      Boolean(replacementAwareAllocator && browserSurfaceLeaseManager?.config.surfaceMode === "dynamic")
+    );
   }
 
   function requireBrowserSurfaceLeaseManager(): BrowserSurfaceLeaseManager {
@@ -1824,22 +1862,22 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     );
     const reconciled = browserSurfaceLeaseManager.reconcileAfterRestart({ activeRunIds, promoteQueued: false });
     await emitAndPersistReconciledLeases(reconciled.released, "run.browser_surface_released", {
+      boundRunIds,
       hydrateSurface: true,
       releaseHostRun: true,
-      boundRunIds,
     });
     await emitAndPersistReconciledLeases(reconciled.expired, "run.browser_surface_expired", {
+      boundRunIds,
       hydrateSurface: false,
       releaseHostRun: true,
-      boundRunIds,
     });
     await emitAndPersistReconciledLeases(reconciled.deferred, "run.browser_surface_deferred", {
       hydrateSurface: false,
     });
     await emitAndPersistReconciledLeases(reconciled.surfaceFailed, "run.browser_surface_failed", {
+      boundRunIds,
       hydrateSurface: true,
       releaseHostRun: true,
-      boundRunIds,
     });
     // The first pass preserves active leases. Restart reconciliation may now
     // have released a dead run's lease; refresh that newly idle surface before
@@ -2029,16 +2067,203 @@ export function createBrowserSurfaceManager(deps: BrowserSurfaceManagerDeps): Br
     };
   }
 
+  // Admission, current handoff and typed refusal belong to the resource protocol.
+  // The controller sees only ready/early-return and owns run bookkeeping.
+  async function acquireForRun(ctx: ManagedSurfaceContext, signal: AbortSignal): Promise<ManagedSurfaceAcquireResult> {
+    try {
+      const requirements = ctx.manifest.runtime_requirements as { bindings?: unknown } | undefined;
+      const instances = normalizeBindingDeclarations(requirements?.bindings);
+      const protectedPlacementAvailable =
+        deps.protectedLifecycle !== undefined &&
+        browserSurfaceLeaseManager?.isManagedConnector(ctx.connectorId) === true;
+      assertBindingAdmissionAvailable(instances, protectedPlacementAvailable);
+      // Optional unsupported declarations acquire no browser and receive a durable
+      // non-grant at the runtime gate. Never activate the legacy allocator for them.
+      if (instances.length > 0 && (!protectedPlacementAvailable || !requiresProtectedBindingAdmission(instances))) {
+        return { env: null, kind: "ready", lease: null };
+      }
+      const protectedLifecycle = instances.length > 0 ? deps.protectedLifecycle : undefined;
+      await protectedLifecycle?.admit({
+        connectionId: ctx.connectorInstanceId,
+        manifest: ctx.manifest,
+        runId: ctx.runId,
+      });
+      const result = browserSurfaceLeaseManager?.isManagedConnector(ctx.connectorId)
+        ? await acquireManagedBrowserSurfaceForRun(ctx)
+        : { env: null, kind: "ready" as const, lease: null };
+      if (result.kind === "early_return") {
+        await protectedLifecycle?.resolvePlacementFailure?.(ctx.runId);
+      }
+      if (result.kind === "ready" && protectedLifecycle) {
+        if (!result.lease?.surface_id) {
+          refuseBindingControl();
+        }
+        const lifecycle = protectedLifecycle;
+        const acquiredLease = result.lease;
+        const { runId } = ctx;
+        const surfaceId = result.lease.surface_id;
+        const beforeHandoff = () => lifecycle.handoff({ runId, signal, surfaceId });
+        await beforeHandoff();
+        // Repeat the same current-resource fence after asynchronous runtime
+        // setup, immediately before child spawn. The controller need not know
+        // which browser lifecycle supplies that fence.
+        const observeBrowserSurfaceAuthority = async () => {
+          // The protected allocator's status operation observes the active grant,
+          // independent of the startup budget and future-start approval withdrawal.
+          const actual = await browserSurfaceAllocator?.getSurfaceStatus(surfaceId);
+          const lease = browserSurfaceLeaseManager?.getLease(acquiredLease.lease_id);
+          if (
+            signal.aborted ||
+            actual?.health !== "ready" ||
+            lease?.status !== "leased" ||
+            lease.fencing_token !== acquiredLease.fencing_token ||
+            lease.surface_id !== surfaceId
+          ) {
+            refuseBindingControl();
+          }
+        };
+        return {
+          ...result,
+          runtimeHandoff: { beforeBrowserSurfaceHandoff: beforeHandoff, observeBrowserSurfaceAuthority },
+        };
+      }
+      return result;
+    } catch (error) {
+      const base = { run_id: ctx.runId, trace_id: ctx.traceContext.trace_id };
+      if (error instanceof BrowserBindingPlacementRefused) {
+        return {
+          kind: "early_return",
+          result: { ...base, placement_failure: error.failure, status: "placement_refused" },
+        };
+      }
+      if (error instanceof BrowserBindingOwnerActionRequired) {
+        return {
+          kind: "early_return",
+          result: { ...base, owner_action: error.action, status: "owner_action_required" },
+        };
+      }
+      throw error;
+    }
+  }
+
+  async function requestProtectedStop(
+    ctx: { connectorId: string; connectorInstanceId: string; runId: string; traceContext: SpineTraceContext },
+    reconcile = false
+  ): Promise<void> {
+    if (!deps.protectedLifecycle) {
+      return;
+    }
+    await emitSpineEvent({
+      actor_id: ctx.connectorId,
+      actor_type: "runtime",
+      data: {
+        connection_id: ctx.connectorInstanceId,
+        connector_instance_id: ctx.connectorInstanceId,
+        lifecycle: "cleanup_requested",
+      },
+      event_type: "run.browser_binding_cleanup",
+      object_id: ctx.runId,
+      object_type: "run",
+      run_id: ctx.runId,
+      scenario_id: ctx.traceContext.scenario_id,
+      status: "cleanup_requested",
+      trace_id: ctx.traceContext.trace_id,
+    });
+    try {
+      await deps.protectedLifecycle.release(ctx.runId, reconcile);
+    } catch (error) {
+      await emitSpineEvent({
+        actor_id: ctx.connectorId,
+        actor_type: "runtime",
+        data: {
+          connection_id: ctx.connectorInstanceId,
+          connector_instance_id: ctx.connectorInstanceId,
+          lifecycle: "cleanup_unverified",
+        },
+        event_type: "run.browser_binding_cleanup",
+        object_id: ctx.runId,
+        object_type: "run",
+        run_id: ctx.runId,
+        scenario_id: ctx.traceContext.scenario_id,
+        status: "cleanup_unverified",
+        trace_id: ctx.traceContext.trace_id,
+      });
+      throw error;
+    }
+  }
+
+  async function closeProtectedRun(ctx: {
+    connectorId: string;
+    connectorInstanceId: string;
+    runId: string;
+    traceContext: SpineTraceContext;
+    lease: BrowserSurfaceLease | null;
+  }): Promise<void> {
+    if (!deps.protectedLifecycle) {
+      return;
+    }
+    const lease = ctx.lease ?? browserSurfaceLeaseManager?.listLeases().find((item) => item.run_id === ctx.runId);
+    let stopped = false;
+    let lifecycle = "cleanup_unverified";
+    try {
+      await emitSpineEvent({
+        actor_id: ctx.connectorId,
+        actor_type: "runtime",
+        data: {
+          connection_id: ctx.connectorInstanceId,
+          connector_instance_id: ctx.connectorInstanceId,
+          lifecycle: "cleanup_requested",
+        },
+        event_type: "run.browser_binding_cleanup",
+        object_id: ctx.runId,
+        object_type: "run",
+        run_id: ctx.runId,
+        scenario_id: ctx.traceContext.scenario_id,
+        status: "cleanup_requested",
+        trace_id: ctx.traceContext.trace_id,
+      });
+      lifecycle = await deps.protectedLifecycle.release(ctx.runId);
+      stopped = true;
+    } finally {
+      await emitSpineEvent({
+        actor_id: ctx.connectorId,
+        actor_type: "runtime",
+        data: { connection_id: ctx.connectorInstanceId, connector_instance_id: ctx.connectorInstanceId, lifecycle },
+        event_type: "run.browser_binding_cleanup",
+        object_id: ctx.runId,
+        object_type: "run",
+        run_id: ctx.runId,
+        scenario_id: ctx.traceContext.scenario_id,
+        status: lifecycle,
+        trace_id: ctx.traceContext.trace_id,
+      });
+      if (lease?.surface_id && stopped) {
+        const invalidated = browserSurfaceLeaseManager?.invalidateSurface(lease.surface_id, { releaseLease: false });
+        if (invalidated?.surface) {
+          await browserSurfaceLeaseStore?.upsertSurface({ ...invalidated.surface, health: "unhealthy" });
+        }
+      }
+    }
+    if (lease?.status === "starting_surface" || lease?.status === "waiting_for_browser_surface") {
+      await cancelBrowserSurfaceRun(ctx.runId);
+    } else if (lease && !ctx.lease) {
+      await releaseLease(lease, ctx.connectorId, ctx.runId, ctx.traceContext);
+    }
+  }
+
   return {
+    acquireForRun,
     acquireManagedBrowserSurfaceForRun,
     cancelBrowserSurfaceRun,
     cleanupIdleBrowserSurfaces,
+    closeProtectedRun,
     emitLeaseEvent: emitBrowserSurfaceLeaseEvent,
     expireBrowserSurfaceWaits,
     promoteBrowserSurfaceLeasesAfterBoot,
     reconcileBrowserSurfaceLeasesAfterBoot,
     recycleAttachExhaustedManagedSurfaceAfterRun,
     releaseLease,
+    requestProtectedStop,
     sweepBrowserSurfaceLeases,
     wrapInteractionHandlerWithSurfaceLossDetection,
   };

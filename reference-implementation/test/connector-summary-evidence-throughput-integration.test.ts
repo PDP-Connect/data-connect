@@ -28,13 +28,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-
 import { registerConnector } from "../server/auth.ts";
 import { reconcileConnectorSummaryEvidence } from "../server/connector-summary-evidence-engine.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { deleteAllRecordsForConnector, ingestRecord } from "../server/records.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 const OWNER = "owner_local";
@@ -68,25 +68,28 @@ async function withTempDb<T>(fn: () => Promise<T>): Promise<T> {
 // A slug-shaped `connector_key` plus `manifest_uri` (the registry/document
 // provenance) is the real production shape for a non-first-party connector.
 function manifestFor(connectorKey: string, streams: readonly string[]) {
-  return {
-    capabilities: {
-      public_listing: { tier: "supported" },
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: {
+        public_listing: { tier: "supported" },
+      },
+      connector_id: connectorKey,
+      connector_key: connectorKey,
+      display_name: connectorKey,
+      manifest_uri: `https://test.pdpp.dev/connectors/${connectorKey}`,
+      protocol_version: "0.1.0",
+      streams: streams.map((name: string) => ({
+        coverage_strategy: "full_inventory",
+        name,
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
+      })),
+      version: "1.0.0",
     },
-    connector_id: connectorKey,
-    connector_key: connectorKey,
-    display_name: connectorKey,
-    manifest_uri: `https://test.pdpp.dev/connectors/${connectorKey}`,
-    protocol_version: "0.1.0",
-    streams: streams.map((name: string) => ({
-      coverage_strategy: "full_inventory",
-      name,
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    })),
-    version: "1.0.0",
-  };
+    { sourceId: `https://test.pdpp.dev/connectors/${connectorKey}` }
+  );
 }
 
 function seedInstance(connectorInstanceId: string, connectorId: string): void {

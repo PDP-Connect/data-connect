@@ -1412,7 +1412,7 @@ async function lexicalRecordsCountNonDeleted({
   return await getSearchIndexStore().recordsCountNonDeleted({ connectorInstanceId, stream });
 }
 
-async function resolveLexicalBackfillConnectorInstanceIds({
+export async function resolveLexicalBackfillConnectorInstanceIds({
   connectorId,
   manifest,
 }: {

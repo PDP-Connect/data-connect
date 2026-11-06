@@ -2921,7 +2921,7 @@ function deleteBackfillProgress({
 // can be current, removed from the manifest, or represented only by an
 // interrupted backfill row; all three need the same per-instance critical
 // section. The caller then holds one fence per instance, never two at once.
-async function resolveSemanticBackfillConnectorInstanceIds({
+export async function resolveSemanticBackfillConnectorInstanceIds({
   connectorId,
   manifest,
 }: {
@@ -4008,10 +4008,6 @@ async function rebuildSemanticBackfillInstance({
   await semanticRepairPhase("after-verification", scope);
   await assertSemanticBackfillManifestCurrent(connectorId, context.manifest);
   assertSemanticRepairBackend(scope);
-  log(
-    `[PDPP] Semantic index rebuild completed for ${connectorId} stream='${stream}' ` +
-      `(records=${recordsToScan}, indexed=${indexed})`
-  );
   await withConnectorInstanceWrite(connectorInstanceId, async () => {
     if (usePostgres) {
       await withPostgresBulkTransaction(
@@ -4053,6 +4049,10 @@ async function rebuildSemanticBackfillInstance({
       });
     }
   });
+  log(
+    `[PDPP] Semantic index rebuild completed for ${connectorId} stream='${stream}' ` +
+      `(records=${recordsToScan}, indexed=${indexed})`
+  );
   return rebuildingJob;
 }
 
@@ -4136,7 +4136,7 @@ async function backfillSemanticManifestStream({
     if (ids.length > 0) {
       log(
         `[PDPP] Semantic index: stream='${stream}' connector='${connectorId}' ` +
-          "no longer declares semantic_fields — dropping stale index + meta/progress"
+          "checking cleanup for stream without semantic_fields"
       );
       await deleteSemanticNonParticipatingStream({
         connectorInstanceIds: ids.filter((id) => id === fencedConnectorInstanceId),

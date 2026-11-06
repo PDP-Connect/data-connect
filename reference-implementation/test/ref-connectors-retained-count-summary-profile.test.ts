@@ -3,7 +3,7 @@
 
 /**
  * Dual-backend contract tests for the `retained_count_summary` named profile
- * and the bounded repeated `connector_id` SET scope on `listConnectorSummaryPage`
+ * and the repeated `connector_id` SET scope on `listConnectorSummaryPage`
  * / `parseConnectorSummaryPageRequest` (design doc add-source-perf-design-agy-
  * 0730.md; Fable ruling terminal-read-architecture-fable-0730.md §2 R4/R5, §3
  * G2/G4 — the Add Source fan-out removal).
@@ -27,8 +27,8 @@
  *      owner — exhausted traversal over a SET scope equals the independently
  *      enumerated owner-visible `connector_instances` intersected with the
  *      scope.
- *   5. N=0/1/25/100/101 request sizing: 101 distinct set members is a typed
- *      invalid request; N=100 is the accepted ceiling.
+ *   5. Set scopes accept more than 100 distinct ids, while empty sets and
+ *      canonical duplicates are typed invalid requests. Page size stays bounded.
  *   6. Pagination/security oracle: cursor scope/owner/set mismatch, mixing
  *      with `connection`, duplicate-after-canonicalization ids.
  *   7. Field parity to `detail`: for every returned id, this profile's fields
@@ -45,7 +45,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import Database from "./helpers/sqlite-driver.ts";
 import {
   ConnectorSummaryPageRequestError,
   decodeConnectorSummaryPageCursor,
@@ -75,6 +74,7 @@ import {
 } from "../server/stores/connector-instance-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
+import Database from "./helpers/sqlite-driver.ts";
 
 process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY ??= "retained-count-summary-profile test cursor key";
 
@@ -547,9 +547,7 @@ withBothBackends(
     await seedInstance({ connectorId: CONNECTOR_B, connectorInstanceId: "cin_rcs_sparse_b", displayName: "Sparse B" });
     // Dense FLEET is many CONNECTIONS under one registered connector TYPE —
     // the registered-connector catalog stays small (a few types), matching
-    // the design doc's model ("catalog is a fundamentally different, small,
-    // bounded cardinality from the owner's fleet size"); only connection
-    // count grows here.
+    // a fixed sparse scope; only the unrelated connection count grows here.
     await seedConnector(FLEET_CONNECTOR_ID);
     for (let i = 0; i < 1000; i += 1) {
       // biome-ignore lint/performance/noAwaitInLoops: fixture setup is intentionally sequential to avoid unique-key races.
@@ -576,13 +574,14 @@ withBothBackends(
 
 // ─── 4. Request/set-size validation ────────────────────────────────────────
 
-test("retained_count_summary profile: SET scope rejects >100 distinct ids, empty sets, and duplicates after canonicalization", () => {
+test("retained_count_summary profile: SET scope accepts large distinct sets and rejects empty sets and canonical duplicates", () => {
   const identity = (id: string) => id;
 
-  const oversized = Array.from({ length: 101 }, (_, i) => `connector-${i}`);
-  assert.throws(
-    () => parseConnectorSummaryPageRequest({ connector_id: oversized, limit: "100" }, OWNER_SUBJECT_ID, identity),
-    ConnectorSummaryPageRequestError
+  const largeScope = Array.from({ length: 101 }, (_, i) => `connector-${i}`);
+  assert.deepEqual(
+    parseConnectorSummaryPageRequest({ connector_id: largeScope, limit: "100" }, OWNER_SUBJECT_ID, identity)
+      ?.connectorId,
+    largeScope
   );
 
   assert.throws(
@@ -601,14 +600,14 @@ test("retained_count_summary profile: SET scope rejects >100 distinct ids, empty
     "two distinct raw ids that canonicalize to the same id must be rejected as a duplicate set"
   );
 
-  const atCeiling = Array.from({ length: 100 }, (_, i) => `connector-${i}`);
+  const hundredIds = Array.from({ length: 100 }, (_, i) => `connector-${i}`);
   const parsed = parseConnectorSummaryPageRequest(
-    { connector_id: atCeiling, limit: "100" },
+    { connector_id: hundredIds, limit: "100" },
     OWNER_SUBJECT_ID,
     identity
   );
   assert.ok(parsed);
-  assert.deepEqual(parsed.connectorId, atCeiling);
+  assert.deepEqual(parsed.connectorId, hundredIds);
 
   // A single-element repeated form collapses to the plain single-id filter —
   // byte-identical shape to `?connector_id=A`.

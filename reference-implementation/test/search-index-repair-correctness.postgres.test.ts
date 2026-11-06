@@ -17,15 +17,17 @@ import test from "node:test";
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
-import { ingestRecord, ingestRecords } from "../server/records.ts";
+import { drainConnectorInstanceIndexWorkForTests, ingestRecord, ingestRecords } from "../server/records.ts";
 import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
 import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
 import { configureSemanticBackend } from "../server/search-semantic.ts";
 import { recordSearchIndexDirtyFailure } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
-const manifestFor = (connectorId: string) => ({
+const manifestFor = (connectorId: string) => {
+  const manifest = {
   capabilities: { human_interaction: [] },
   connector_id: connectorId,
   display_name: connectorId,
@@ -50,7 +52,9 @@ const manifestFor = (connectorId: string) => ({
     },
   ],
   version: "0.1.0",
-});
+  };
+  return withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri });
+};
 
 const target = (connectorId: string, connectorInstanceId: string) => ({
   connector_id: connectorId,
@@ -246,14 +250,76 @@ if (POSTGRES_URL) {
     await registerConnector(manifestFor(connectorId));
     const TOTAL = 20_000;
     const medium = "lorem ipsum dolor sit amet ".repeat(8);
-    for (let start = 0; start < TOTAL; start += 500) {
-      const batch = Array.from({ length: 500 }, (_, i) =>
-        rec(`k${String(start + i).padStart(6, "0")}`, { subject: `${medium}${start + i}` })
-      );
-      // biome-ignore lint/performance/noAwaitInLoops: sequential fixture ingest in batches.
-      await ingestRecords(target(connectorId, instance), batch);
+    // Seed with one production ingest plus a direct write of the other 19,999 rows. Batched
+    // ingest of all 20k took ~73 s with no test output, and the runner kills a file that is
+    // silent for 120 s. The one ingest creates the instance namespace, version counter and dirty
+    // scope; the direct rows carry the values the ingest path writes (version = ingest order,
+    // same semantic_time, primary_key_text and cursor_value). Parity with the batched seed
+    // (canonical rows, change history, version counter, built lexical index) was checked by digest.
+    await ingestRecords(target(connectorId, instance), [rec("k000000", { subject: `${medium}0` })]);
+    await drainConnectorInstanceIndexWorkForTests();
+    await postgresQuery(
+      `INSERT INTO records (connector_id, connector_instance_id, stream, record_key, record_json, emitted_at, semantic_time, version, deleted, deleted_at, cursor_value, primary_key_text)
+       SELECT $1, $2, 'alpha', 'k' || lpad((g - 1)::text, 6, '0'),
+              jsonb_build_object('id', 'k' || lpad((g - 1)::text, 6, '0'), 'subject', $3 || (g - 1)::text),
+              $4, '', g, FALSE, NULL, NULL, 'k' || lpad((g - 1)::text, 6, '0')
+         FROM generate_series(2, $5::int) AS g`,
+      [connectorId, instance, medium, "2026-08-09T00:00:00.000Z", TOTAL]
+    );
+    await postgresQuery(
+      `INSERT INTO record_changes (connector_id, connector_instance_id, stream, record_key, version, record_json, emitted_at, deleted, deleted_at)
+       SELECT $1, $2, 'alpha', 'k' || lpad((g - 1)::text, 6, '0'), g,
+              jsonb_build_object('id', 'k' || lpad((g - 1)::text, 6, '0'), 'subject', $3 || (g - 1)::text),
+              $4, FALSE, NULL
+         FROM generate_series(2, $5::int) AS g`,
+      [connectorId, instance, medium, "2026-08-09T00:00:00.000Z", TOTAL]
+    );
+    await postgresQuery(
+      "UPDATE version_counter SET max_version = $3 WHERE connector_instance_id = $1 AND stream = $2",
+      [instance, "alpha", TOTAL]
+    );
+    const { rows: counts } = await postgresQuery<{ change_count: number; max_version: number; record_count: number }>(
+      `SELECT (SELECT count(*)::int FROM records WHERE connector_instance_id = $1 AND stream = 'alpha') AS record_count,
+              (SELECT count(*)::int FROM record_changes WHERE connector_instance_id = $1 AND stream = 'alpha') AS change_count,
+              (SELECT max_version::int FROM version_counter WHERE connector_instance_id = $1 AND stream = 'alpha') AS max_version`,
+      [instance]
+    );
+    assert.deepEqual(counts, [{ change_count: TOTAL, max_version: TOTAL, record_count: TOTAL }]);
+    const { rows: samples } = await postgresQuery<{
+      canonical: Record<string, unknown>;
+      change: Record<string, unknown>;
+      record_key: string;
+    }>(
+      `SELECT r.record_key, to_jsonb(r) - 'id' AS canonical, to_jsonb(c) AS change
+       FROM records r JOIN record_changes c USING (connector_instance_id, stream, version)
+       WHERE r.connector_instance_id = $1 AND r.stream = 'alpha' AND r.record_key = ANY($2::text[])
+       ORDER BY r.record_key`,
+      [instance, ["k000000", "k000001", "k019999"]]
+    );
+    assert.equal(samples.length, 3);
+    const [production] = samples;
+    assert.ok(production);
+    // The first row comes from production ingest. Only key, payload and version
+    // differ in the direct seed; compare every other stored field to that row.
+    for (const sample of samples.slice(1)) {
+      const offset = Number(sample.record_key.slice(1));
+      const recordJson = { id: sample.record_key, subject: `${medium}${offset}` };
+      assert.deepEqual(sample.canonical, {
+        ...production.canonical,
+        primary_key_text: sample.record_key,
+        record_json: recordJson,
+        record_key: sample.record_key,
+        version: offset + 1,
+      });
+      assert.deepEqual(sample.change, {
+        ...production.change,
+        record_json: recordJson,
+        record_key: sample.record_key,
+        version: offset + 1,
+      });
     }
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await postgresQuery("ANALYZE records");
+    await postgresQuery("ANALYZE record_changes");
     await postgresQuery("UPDATE search_index_dirty SET dirty = 1 WHERE connector_instance_id = $1", [instance]);
     await reconcileSearchIndexDirtyScope(await scopeOf(connectorId, instance)); // converge (build)
     assert.equal((await rows(instance)).length, TOTAL);

@@ -17,11 +17,9 @@ import { DatabaseSync } from "node:sqlite";
 import {
   type ConnectorProtocolCapability,
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
-  HOST_BLOB_CAPABILITY,
   isConnectorProtocolCapabilityArray,
   PERMANENT_DETAIL_GAP_REASON,
   RETRYABLE_DETAIL_GAP_REASONS,
-  STREAM_EVIDENCE_CAPABILITY,
   unsupportedRequiredProtocolCapabilities,
   validateRuntimeContinuationFact,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
@@ -34,6 +32,7 @@ import { resolveRunConnectorOptions } from "../server/connector-run-config.ts";
 import { readStoredCollectionScope } from "../server/local-collection-scope.ts";
 import { encodeKey } from "../server/records.ts";
 import { getDefaultCheckpointWithholdStore } from "../server/stores/checkpoint-withhold-store.ts";
+import { getDefaultConnectorObservationStore } from "../server/stores/connector-observation-store.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import type { ConnectorInstanceConfigStore } from "../server/stores/connector-instance-config-store.ts";
@@ -91,12 +90,21 @@ import { cursorAuditFact } from "./cursor-audit-fact.ts";
 import { describeCursorBandViolation, evaluateCursorBand } from "./cursor-band-contiguity.ts";
 import { declaredReasonTokensFor } from "./declared-reason-tokens.ts";
 import { createDetailGapPageReader, validateDetailGapsPageRequest } from "./detail-gap-paging.ts";
+import type { RunUploadLifetime } from "./run-upload-lifetime.ts";
+import { assertRecordWithinRunUploadSelection, snapshotRunUploadSelection } from "./run-upload-selection.ts";
 import {
   validateDoneError,
   validateDoneExitCode,
   validateDoneRecordsEmitted,
   validateDoneStatus,
 } from "./done-validators.ts";
+import {
+  collectionProfileDeclarationProblem,
+  readCollectionProfileDeclaration,
+  REFERENCE_COLLECTION_PROFILE_SUPPORT,
+} from "./collection-profile-support.ts";
+import type { DoneError } from "./done-validators.ts";
+import { createObservationRun, type RecoveryHintOrigin } from "./observations.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
 import {
@@ -125,6 +133,14 @@ import { assertValidRecordEnvelope } from "./record-message-validator.ts";
 import { classifyRecoveryGap } from "./recovery-decision.ts";
 import { DEFAULT_QUARANTINE_POLICY } from "./recovery-quarantine.ts";
 import { redactStderrTail } from "./stderr-redact.ts";
+import type { BindingAuthorityRecord } from "./binding-authority.ts";
+import { BrowserBindingPlacementRefused } from "./binding-control.ts";
+import { normalizeBindingDeclarations } from "./binding-declarations.ts";
+import {
+  admittedStartBindings,
+  assertBindingAdmissionAvailable,
+  recordUnprovidedBindings,
+} from "./run-binding-admission.ts";
 import type { StderrTail } from "./stderr-tail.ts";
 import { createStderrTailBuffer } from "./stderr-tail.ts";
 import { deriveTerminalReason } from "./terminal-reason.ts";
@@ -199,14 +215,6 @@ type ScopeByStream = Map<string, StreamScope>;
 interface AttachmentOutcome {
   object: string;
   [key: string]: unknown;
-}
-
-/** Runtime-advertised child bindings (Collection Profile START.bindings). */
-interface AvailableBindings {
-  browser: Record<string, never>;
-  filesystem: Record<string, never>;
-  interactive?: Record<string, never>;
-  network: Record<string, never>;
 }
 
 /** RS ingest response, after `readIngestResponse` proves the counters and receipt vector. */
@@ -507,6 +515,7 @@ export interface RuntimeBrowserSurfaceEnv {
 }
 
 export interface RuntimeRunConnectorOptions {
+  runUploadLifetime?: RunUploadLifetime;
   /**
    * Trusted run-creation admission. It must validate or materialize one exact
    * owner-owned configured instance before this runtime emits `run.started`.
@@ -521,6 +530,10 @@ export interface RuntimeRunConnectorOptions {
   /** Operator-authorized connector IDs that may receive ambient proxy aliases. */
   approvedProxyConnectorIds?: readonly string[];
   automationMode?: RuntimeRunAutomationMode | null;
+  /** Trusted final resource/fence check, after async launch preparation. */
+  beforeBrowserSurfaceHandoff?: () => Promise<BindingAuthorityRecord | void>;
+  /** Active-grant observation; must remain valid beyond the startup deadline. */
+  observeBrowserSurfaceAuthority?: () => Promise<void>;
   /**
    * Explicit browser-surface child env override for tests and integration
    * seams. Values here win over `browserSurfaceLease` fields.
@@ -809,42 +822,6 @@ function unregisterOwnedConnectorChild(pid: number | undefined): void {
   ownedConnectorChildPids.delete(pid);
 }
 
-function encodeScopeResourceKey(key: unknown): string {
-  return Array.isArray(key) ? JSON.stringify(key) : String(key);
-}
-
-function readStreamResourceField(manifestStream: ManifestStream | null | undefined): string | null {
-  const selection = manifestStream?.selection;
-  const field =
-    selection && typeof selection === "object" && !Array.isArray(selection) ? selection.resource_field : null;
-  return typeof field === "string" && field.length > 0 ? field : null;
-}
-
-function recordMatchesScopeResource(
-  resources: string[] | null | undefined,
-  key: unknown,
-  data: unknown,
-  manifestStream: ManifestStream | null | undefined
-): boolean {
-  if (!(Array.isArray(resources) && resources.length)) {
-    return true;
-  }
-  const allowed = new Set(resources.map(String));
-  if (allowed.has(encodeScopeResourceKey(key))) {
-    return true;
-  }
-  const resourceField = readStreamResourceField(manifestStream);
-  if (!(resourceField && data && typeof data === "object" && !Array.isArray(data))) {
-    return false;
-  }
-  const value = (data as Record<string, unknown>)[resourceField];
-  if (isNullish(value)) {
-    return false;
-  }
-  const resourceKey = Array.isArray(value) ? JSON.stringify(value.map(String)) : String(value);
-  return allowed.has(resourceKey);
-}
-
 function buildRunSourceDescriptor(
   connectorId: string,
   source?: RuntimeRunConnectorOptions["runSource"]
@@ -927,18 +904,6 @@ function buildScopeFields(
     streamScope.time_range && manifestStream?.consent_time_field ? [manifestStream.consent_time_field] : [];
 
   return appendUniqueFields(streamScope.fields, [...requiredFields, ...primaryKeyFields, ...timeRangeFields]);
-}
-
-function buildAvailableBindings(onInteraction: unknown): AvailableBindings {
-  // In this reference runtime, connectors run as local Node child processes
-  // with full filesystem access by virtue of being child processes. We
-  // advertise `filesystem` so file-based connectors can declare it as a
-  // required binding per the Collection Profile spec.
-  const bindings: AvailableBindings = { browser: {}, filesystem: {}, network: {} };
-  if (typeof onInteraction === "function") {
-    bindings.interactive = {};
-  }
-  return bindings;
 }
 
 // Strict, index-validating, oracle-tested parser (test/read-ingest-response-oracle.test.ts).
@@ -1212,6 +1177,9 @@ function buildConnectorExitFailureMessage({
  * chatgpt-ingest-and-assistance-failure-modes-2026-08-18.
  */
 function runTimeoutFailureMessage(terminalReason: string): string {
+  if (terminalReason === "binding_authority_lost") {
+    return "Binding authority is no longer available. The run was stopped; resource cleanup must be verified.";
+  }
   return terminalReason === "assistance_timed_out"
     ? "Run exceeded a connector assistance timeout."
     : "Run exceeded its scheduler wall-clock budget.";
@@ -1469,15 +1437,6 @@ function buildConnectorDiagnosticLinesData(
   };
 }
 
-function isRuntimeRetryableBrowserProfileError(message: unknown): boolean {
-  const text = typeof message === "string" ? message.toLowerCase() : "";
-  return (
-    (text.includes("network.setcachedisabled") && text.includes("session closed")) ||
-    (text.includes("target.attachtotarget") && text.includes("session closed")) ||
-    text.includes("internal server error, session closed")
-  );
-}
-
 function streamUnsupportedInDefaultScope(stream: ManifestStream | null | undefined): boolean {
   return stream?.availability?.state === "unsupported_in_mode";
 }
@@ -1688,7 +1647,7 @@ function buildStartScope(
   // `consent_time_field` matters: a stream with no such field has no
   // manifest-declared notion of "when" a row happened, so attaching a
   // `time_range` to it would assert a temporal scope the stream can neither
-  // define nor enforce (and the emission gate, `passesTimeRange`, only ever
+  // define nor enforce (and the RECORD admission selector only ever
   // checks a `consent_time_field` value in the first place — a non-temporal
   // stream given a `time_range` would have it silently ignored downstream
   // too, so omitting it here keeps the START message honest about which
@@ -1740,31 +1699,6 @@ function validateStateMessage(msg: ConnectorMessage, scopeByStream: ScopeByStrea
   if (!isNullish(msg.cursor) && (typeof msg.cursor !== "object" || Array.isArray(msg.cursor))) {
     throw new Error("Connector emitted invalid STATE.cursor: expected object or null");
   }
-}
-
-function passesTimeRange(
-  data: unknown,
-  timeRange: { since?: string | null; until?: string | null } | null | undefined,
-  consentTimeField: string | null | undefined
-): boolean {
-  if (!(timeRange && consentTimeField)) {
-    return true;
-  }
-  const value = (data as Record<string, unknown> | null | undefined)?.[consentTimeField];
-  if (!value) {
-    return false;
-  }
-  const timestamp = new Date(value as string).getTime();
-  if (Number.isNaN(timestamp)) {
-    return false;
-  }
-  if (timeRange.since && timestamp < new Date(timeRange.since).getTime()) {
-    return false;
-  }
-  if (timeRange.until && timestamp >= new Date(timeRange.until).getTime()) {
-    return false;
-  }
-  return true;
 }
 
 function requireOptionalNonEmptyString(value: unknown, fieldName: string): void {
@@ -2594,56 +2528,39 @@ export function buildBrowserSurfaceLaunchEnv({
 
 /**
  * Protocol capabilities this runtime implements, listed in
- * START.protocol_capabilities. It accepts DETAIL_COVERAGE empty_keys and
- * unchanged_keys, and validates STREAM_EVIDENCE. It has no BLOB transport and
- * no OBSERVATION handler, so it does not list them.
+ * START.protocol_capabilities. Key-set extension credit rules are not part of
+ * portable coverage, so DETAIL_COVERAGE_KEY_SETS is omitted: connectors use
+ * their negotiated base-profile fallback. BLOB is required and unsupported,
+ * so a connector requiring it is refused before spawn.
  */
-const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
-  DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
-  STREAM_EVIDENCE_CAPABILITY,
-];
+const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] =
+  REFERENCE_COLLECTION_PROFILE_SUPPORT.protocol_capabilities;
 
-/**
- * Declared capabilities this runtime starts a connector with although it does
- * not implement them. BLOB is a runtime-specific extension (Collection Profile
- * Section 7). chatgpt and anthropic declare it but emit BLOB only for an item
- * over the inline cap, so most of their runs never send one. Such a run
- * completes; a run that does send BLOB fails at that line as an unknown
- * message type. BLOB stays out of START until this runtime implements it.
- */
-const SPAWN_TOLERATED_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [HOST_BLOB_CAPABILITY];
+/** Type of a Collection Profile 0.2.0 OBSERVATION message (Section 5.10). */
+const OBSERVATION_MESSAGE_TYPE = "OBSERVATION";
+/** An unparseable line is an OBSERVATION only when its text names the type. */
+const OBSERVATION_TYPE_TEXT_RE = /"type"\s*:\s*"OBSERVATION"/;
+
+function isObservationMessage(value: unknown): boolean {
+  return typeof value === "object" && value !== null && (value as { type?: unknown }).type === OBSERVATION_MESSAGE_TYPE;
+}
 
 /**
  * Pre-spawn capability gate (Collection Profile Sections 3.4 and 4). An
  * absent `protocol_capabilities` declares none. A malformed list or an unknown
  * name fails closed, and so does a required capability this runtime does not
- * implement, except BLOB (see SPAWN_TOLERATED_PROTOCOL_CAPABILITIES). An
- * advisory capability never blocks the run.
+ * implement. An advisory capability never blocks the run.
  */
 function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
   const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;
   if (!isConnectorProtocolCapabilityArray(declared)) {
     throw new Error("Connector manifest protocol_capabilities must be an array of known capability names");
   }
-  const unsupported = unsupportedRequiredProtocolCapabilities(declared, [
-    ...RUNTIME_PROTOCOL_CAPABILITIES,
-    ...SPAWN_TOLERATED_PROTOCOL_CAPABILITIES,
-  ]);
+  const unsupported = unsupportedRequiredProtocolCapabilities(declared, RUNTIME_PROTOCOL_CAPABILITIES);
   if (unsupported.length > 0) {
     throw new Error(
       `Connector requires protocol capabilities this runtime does not support: ${unsupported.join(", ")}`
     );
-  }
-}
-
-function validateRequiredRuntimeBindings(
-  requiredBindings: Record<string, { required?: boolean }>,
-  availableBindings: AvailableBindings
-): void {
-  for (const [binding, req] of Object.entries(requiredBindings)) {
-    if (req.required && !(binding in availableBindings)) {
-      throw new Error(`Runtime cannot satisfy required binding: ${binding}`);
-    }
   }
 }
 
@@ -2717,18 +2634,6 @@ function buildManifestParentForeignKeysMap(
     }
   }
   return foreignKeysByStream;
-}
-
-/**
- * Whether the connector's manifest declares DETAIL_COVERAGE_KEY_SETS in its
- * `protocol_capabilities`. Only such a connector gets evidence-based crediting
- * of `hydrated_keys` (see `CoverageReport.hydratedKeysNeedEvidence`). The
- * capability is the connector's own declaration; the runtime never decides it
- * per source. A missing or malformed declaration reads as not declared.
- */
-function manifestDeclaresDetailCoverageKeySets(manifest: ConnectorManifest): boolean {
-  const capabilities = manifest.protocol_capabilities;
-  return Array.isArray(capabilities) && capabilities.includes(DETAIL_COVERAGE_KEY_SETS_CAPABILITY);
 }
 
 function openRuntimeTraceFile(traceDir: string | undefined, connectorId: string, runId: string): string | null {
@@ -2970,6 +2875,28 @@ function resolveStreamEvidenceRunRegistryStore(
 }
 
 export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<RuntimeRunConnectorResult> {
+  const closeUpload = () => {
+    opts.runUploadLifetime?.close().catch(() => undefined);
+  };
+  opts.cancelSignal?.addEventListener("abort", closeUpload, { once: true });
+  try {
+    const captured: RuntimeRunConnectorOptions = {
+      ...opts,
+      manifest: structuredClone(opts.manifest),
+      ...(opts.scope === undefined ? {} : { scope: structuredClone(opts.scope) }),
+      ...(opts.runSource === undefined ? {} : { runSource: structuredClone(opts.runSource) }),
+    };
+    if (opts.cancelSignal?.aborted) {
+      throw new Error("runConnector: run cancelled before admission");
+    }
+    return await runConnectorWithUploadLifetime(captured);
+  } finally {
+    opts.cancelSignal?.removeEventListener("abort", closeUpload);
+    await opts.runUploadLifetime?.close();
+  }
+}
+
+async function runConnectorWithUploadLifetime(opts: RuntimeRunConnectorOptions): Promise<RuntimeRunConnectorResult> {
   const defaultOnProgress =
     process.env.PDPP_RUNTIME_QUIET === "1"
       ? () => {
@@ -3053,16 +2980,58 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   });
   const resolvedConnectorInstanceId = admittedConnection.connectorInstanceId;
 
-  // Check binding requirements
-  const requiredBindings = manifest.runtime_requirements?.bindings || {};
-  const availableBindings = buildAvailableBindings(onInteraction);
-
-  validateRequiredRuntimeBindings(requiredBindings, availableBindings);
+  const bindingInstances = normalizeBindingDeclarations(manifest.runtime_requirements?.bindings);
+  assertBindingAdmissionAvailable(
+    bindingInstances,
+    opts.beforeBrowserSurfaceHandoff !== undefined && opts.observeBrowserSurfaceAuthority !== undefined
+  );
+  // Compute runId before spawn so it can be threaded into the child env
+  // alongside the streaming registration token. The traceContext is
+  // computed below alongside the rest of the run-scoped state.
+  // A cryptographically strong UUID keeps the fallback globally
+  // collision-resistant: run_id is the sole uniqueness key for the durable
+  // STREAM_EVIDENCE claim registry, and a millisecond-granularity fallback
+  // can collide across unrelated concurrent runs.
+  const spawnRunId = opts.runId || `run_${randomUUID()}`;
+  const bindingScope = {
+    connectionId: resolvedConnectorInstanceId,
+    ownerId: admittedConnection.ownerSubjectId,
+    runId: spawnRunId,
+  };
+  // Section 3.4: an INTERACTION.kind must be declared in capabilities.human_interaction.
+  const declaredHumanInteractionValues = (manifest as { capabilities?: { human_interaction?: unknown } }).capabilities
+    ?.human_interaction;
+  const declaredHumanInteraction: ReadonlySet<unknown> = new Set(
+    Array.isArray(declaredHumanInteractionValues) ? declaredHumanInteractionValues : []
+  );
+  const declarationProblem = collectionProfileDeclarationProblem(manifest as unknown as Record<string, unknown>);
+  if (declarationProblem !== null) {
+    throw new Error(`Connector manifest ${declarationProblem}`);
+  }
   validateRequiredProtocolCapabilities(manifest);
+  const profileDeclaration = readCollectionProfileDeclaration(manifest as unknown as Record<string, unknown>);
+  // A 0.2.0 manifest gets the strict DONE error shape (Section 5.8).
+  const strictDoneError = manifest.protocol_version === "0.2.0";
+  const observationRun = createObservationRun({
+    declared: profileDeclaration.observationDeclared,
+    descriptors: profileDeclaration.descriptors,
+  });
+  // Byte counts and parsed values belong to the transport, never wire fields.
+  const observationInputs = new WeakMap<ConnectorMessage, { value: unknown; serializedBytes: number }>();
 
   const explicitlyRequestedStreams = requestedRuntimeStreams(providedScope);
   const declaredCollectionScope = readStoredCollectionScope(state).scope;
   const startScope = buildStartScope(manifest, providedScope, declaredCollectionScope?.since ?? null);
+  const runUploadSelection = snapshotRunUploadSelection(startScope, manifest);
+  const uploadFacts = {
+    connectionId: resolvedConnectorInstanceId,
+    connectorId,
+    manifestSnapshot: structuredClone(manifest) as unknown as Record<string, unknown>,
+    ownerId: admittedConnection.ownerSubjectId,
+    runId: spawnRunId,
+    selection: runUploadSelection,
+    sourceSnapshot: structuredClone(buildRunSourceDescriptor(connectorId, requestedRunSource)),
+  };
   // The connection's owner-CONFIRMED connector configuration, read from the
   // propose/confirm revision spine. `resolveRunConnectorOptions` returns a
   // config only for a revision the store reports `active`; a `proposed`
@@ -3093,7 +3062,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   const manifestStateStreamByStream = buildManifestStateStreamMap(manifest);
   const manifestDetailParentStreamsByStream = buildManifestDetailParentStreamsMap(manifest);
   const manifestParentForeignKeysByStream = buildManifestParentForeignKeysMap(manifest);
-  const hydratedKeysNeedEvidence = manifestDeclaresDetailCoverageKeySets(manifest);
+  // This package extension keys its stronger proof rule on the connector's
+  // declaration. Omitting START advertisement does not waive that obligation.
+  const hydratedKeysNeedEvidence =
+    Array.isArray(manifest.protocol_capabilities) &&
+    manifest.protocol_capabilities.includes(DETAIL_COVERAGE_KEY_SETS_CAPABILITY);
   // `getDefaultConnectorDetailGapStore()` is declared `unknown` at its own
   // module boundary (that store has not been migrated yet), so the runtime
   // states the surface it actually drives here.
@@ -3111,15 +3084,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     opts.streamEvidenceRunRegistryStore
   );
   const checkpointWithholdStore = getDefaultCheckpointWithholdStore();
-
-  // Compute runId before spawn so it can be threaded into the child env
-  // alongside the streaming registration token. The traceContext is
-  // computed below alongside the rest of the run-scoped state.
-  // A cryptographically strong UUID keeps the fallback globally
-  // collision-resistant: run_id is the sole uniqueness key for the durable
-  // STREAM_EVIDENCE claim registry, and a millisecond-granularity fallback
-  // can collide across unrelated concurrent runs.
-  const spawnRunId = opts.runId || `run_${randomUUID()}`;
 
   const launchConfig = buildConnectorLaunchConfig({
     automationMode,
@@ -3160,29 +3124,62 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // as before. `detached` here only changes the process-GROUP topology, not
   // ownership of the handle. This is a Linux/Docker runtime (no Windows
   // support anywhere in the tree), so the POSIX process-group semantics hold.
+  const handoffAuthority = await opts.beforeBrowserSurfaceHandoff?.();
+  const bindingAuthority =
+    bindingInstances.length === 0
+      ? undefined
+      : (handoffAuthority ?? (await recordUnprovidedBindings(bindingScope, bindingInstances)));
+  const availableBindings =
+    bindingInstances.length === 0 ? {} : admittedStartBindings(bindingScope, bindingInstances, bindingAuthority);
+  const grantedBinding = bindingAuthority?.instances.find((instance) => instance.lifecycle === "granted");
+  const admittedBrowserSurfaceLaunchEnv =
+    bindingInstances.length === 0 ||
+    bindingAuthority?.instances.some((instance) => instance.kind === "browser" && instance.lifecycle === "granted")
+      ? browserSurfaceLaunchEnv
+      : {};
+  if (grantedBinding && !opts.observeBrowserSurfaceAuthority) {
+    throw new BrowserBindingPlacementRefused(
+      grantedBinding.instanceKey,
+      "Granted bindings require active authority observation",
+      "binding_unavailable"
+    );
+  }
+  if (cancelSignal?.aborted) {
+    throw new Error("runConnector: run cancelled before child handoff.");
+  }
+  const childUploadToken = await opts.runUploadLifetime?.issue(uploadFacts);
+  if (cancelSignal?.aborted) {
+    await opts.runUploadLifetime?.close();
+    throw new Error("runConnector: run cancelled during upload issuance");
+  }
+  const childEnv = composeConnectorChildEnvironment({
+    ...(approvedEnvironmentBindings ? { approvedBindings: approvedEnvironmentBindings } : {}),
+    approvedProxyConnectorIds: approvedProxyConnectorIds ?? [],
+    connectionEnv: {
+      allowedKeys: Object.keys(staticSecretLaunchEnv),
+      connectorId,
+      kind: "connection",
+      values: staticSecretLaunchEnv,
+    } satisfies ConnectorConnectionEnvironment,
+    connectorId,
+    explicitRunEnv: {
+      PDPP_CONNECTOR_ID: connectorId,
+      ...connectorInstanceEnv,
+      ...(childUploadToken ? { PDPP_OWNER_TOKEN: childUploadToken } : {}),
+      PDPP_RS_URL: rsUrl,
+      ...streamingRegistrationEnv,
+      ...admittedBrowserSurfaceLaunchEnv,
+      ...runAutomationEnv,
+    },
+    manifest,
+  });
+  // Values can arrive under arbitrary approved/static-secret aliases as well.
+  if (Object.values(childEnv).some((value) => value.includes(ownerToken))) {
+    throw new Error("Connector child environment contains parent owner authority");
+  }
   const proc = spawn(process.execPath, args, {
     detached: true,
-    env: composeConnectorChildEnvironment({
-      ...(approvedEnvironmentBindings ? { approvedBindings: approvedEnvironmentBindings } : {}),
-      approvedProxyConnectorIds: approvedProxyConnectorIds ?? [],
-      connectionEnv: {
-        allowedKeys: Object.keys(staticSecretLaunchEnv),
-        connectorId,
-        kind: "connection",
-        values: staticSecretLaunchEnv,
-      } satisfies ConnectorConnectionEnvironment,
-      connectorId,
-      explicitRunEnv: {
-        PDPP_CONNECTOR_ID: connectorId,
-        ...connectorInstanceEnv,
-        PDPP_OWNER_TOKEN: ownerToken,
-        PDPP_RS_URL: rsUrl,
-        ...streamingRegistrationEnv,
-        ...browserSurfaceLaunchEnv,
-        ...runAutomationEnv,
-      },
-      manifest,
-    }),
+    env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -3241,6 +3238,130 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // is the group leader because the child was spawned `detached`. It is
   // removed again in `cleanupChildHandles` on every terminal path.
   registerOwnedConnectorChild(proc.pid);
+
+  // Grant lifetime starts with the child, including asynchronous pre-START
+  // setup. The same process-group watchdog serves startup and active runs.
+  // Cancellation intent for this run. Owner cancellation records
+  // `run.cancel_requested` and terminals as `run.cancelled`; scheduler timeout
+  // records `run.failed` with `run_timed_out`. `ownerCancelForced` flips to true
+  // if the connector child ignored graceful termination and had to be SIGKILL'd.
+  let ownerCancelRequested = false;
+  let runTimedOut = false;
+  let ownerCancelForced = false;
+  const terminalStopRequested = (): boolean => ownerCancelRequested || runTimedOut;
+  let terminalEventRecorded = false;
+  const msgQueue: ConnectorMessage[] = [];
+  let cleanedUp = false;
+  let bindingObservationClosed = false;
+  let terminateTimer: NodeJS.Timeout | null = null;
+  let runtimeTimeoutReason: string | null = null;
+
+  function clearTerminateTimer() {
+    if (!terminateTimer) {
+      return;
+    }
+    clearTimeout(terminateTimer);
+    terminateTimer = null;
+  }
+
+  function terminateChild() {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      return;
+    }
+    // SIGTERM the WHOLE process group, not just the direct child PID, so a
+    // connector's grandchildren (browser helpers, shelled-out tools) are
+    // terminated with it rather than reparenting to PID 1.
+    terminateConnectorChildGroup("SIGTERM");
+
+    if (terminateTimer || proc.exitCode !== null || proc.signalCode !== null) {
+      return;
+    }
+    terminateTimer = setTimeout(() => {
+      terminateTimer = null;
+      if (proc.exitCode !== null || proc.signalCode !== null) {
+        return;
+      }
+      // The child ignored graceful termination within the window. Record the
+      // escalation so an owner-cancelled run terminals as `owner_cancel_forced`
+      // rather than `owner_cancelled`.
+      if (ownerCancelRequested) {
+        ownerCancelForced = true;
+      }
+      // Escalate to a group-wide SIGKILL: an unkillable grandchild can no
+      // longer keep the subtree alive after the connector leader is gone.
+      terminateConnectorChildGroup("SIGKILL");
+    }, 250);
+    terminateTimer.unref?.();
+  }
+
+  let bindingObservationTimer: ReturnType<typeof setTimeout> | undefined;
+  let bindingExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+  function stopForBindingAuthorityLoss(): void {
+    if (bindingObservationClosed || cleanedUp || terminalEventRecorded || terminalStopRequested()) {
+      return;
+    }
+    // Use the same stop/state-withhold path as the runtime watchdog.
+    // Cleanup is still unverified until the controller's release settles.
+    runTimedOut = true;
+    runtimeTimeoutReason = "binding_authority_lost";
+    msgQueue.length = 0;
+    terminateChild();
+  }
+  const bindingExpiresAt = Math.min(
+    ...(bindingAuthority?.instances.flatMap((instance) =>
+      instance.channels.flatMap((channel) => (channel.authorization ? [channel.authorization.expiresAt] : []))
+    ) ?? [])
+  );
+  function scheduleBindingGrantExpiry(): void {
+    if (
+      !Number.isFinite(bindingExpiresAt) ||
+      bindingObservationClosed ||
+      cleanedUp ||
+      terminalEventRecorded ||
+      terminalStopRequested()
+    ) {
+      return;
+    }
+    const remaining = bindingExpiresAt - Date.now();
+    if (remaining <= 0) {
+      stopForBindingAuthorityLoss();
+      return;
+    }
+    // Node timers clamp larger delays to 1 ms. Long grants re-arm at the
+    // maximum timer delay; a network observation cannot delay known expiry.
+    bindingExpiryTimer = setTimeout(scheduleBindingGrantExpiry, Math.min(remaining, 2_147_483_647));
+    bindingExpiryTimer.unref();
+  }
+  async function observeActiveBindingAuthority(): Promise<void> {
+    if (bindingObservationClosed || cleanedUp || terminalEventRecorded || terminalStopRequested()) {
+      return;
+    }
+    try {
+      await opts.observeBrowserSurfaceAuthority?.();
+      if (bindingAuthority) {
+        admittedStartBindings(bindingScope, bindingInstances, bindingAuthority);
+      }
+    } catch {
+      stopForBindingAuthorityLoss();
+      return;
+    }
+    if (!bindingObservationClosed && !cleanedUp && !terminalEventRecorded && !terminalStopRequested()) {
+      bindingObservationTimer = setTimeout(observeActiveBindingAuthority, 1000);
+      bindingObservationTimer.unref();
+    }
+  }
+  if (grantedBinding) {
+    scheduleBindingGrantExpiry();
+    bindingObservationTimer = setTimeout(observeActiveBindingAuthority, 1000);
+    bindingObservationTimer.unref();
+  }
+
+  const stopBindingObservation = () => {
+    bindingObservationClosed = true;
+    clearTimeout(bindingObservationTimer);
+    clearTimeout(bindingExpiryTimer);
+  };
+  childTerminalEvent.then(stopBindingObservation);
 
   // Closed-pipe defenses on the connector child stdio we own. Without
   // these, an EPIPE on `proc.stdin.write(...)` (child exited early) or on
@@ -3448,7 +3569,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     // reap the just-spawned connector group rather than leaking it, and drop
     // it from the parent-exit registry so a later exit can't re-signal a group
     // we already terminated.
-    terminateConnectorChildGroup("SIGTERM");
+    stopBindingObservation();
+    terminateChild();
     unregisterOwnedConnectorChild(proc.pid);
     // cleanupChildHandles does not exist yet, so release any leases a partial
     // claim already registered. A release failure must not mask `err`.
@@ -3690,16 +3812,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   let recordsPermanentlyRejected = 0;
   let finalStatus: RuntimeRunConnectorResult["status"] = "failed";
   let pendingInteraction: ConnectorMessage | null = null;
-  let terminalEventRecorded = false;
   let doneMessage: DoneMessageState | null = null;
-  // Cancellation intent for this run. Owner cancellation records
-  // `run.cancel_requested` and terminals as `run.cancelled`; scheduler timeout
-  // records `run.failed` with `run_timed_out`. `ownerCancelForced` flips to true
-  // if the connector child ignored graceful termination and had to be SIGKILL'd.
-  let ownerCancelRequested = false;
-  let runTimedOut = false;
-  let ownerCancelForced = false;
-  const terminalStopRequested = (): boolean => ownerCancelRequested || runTimedOut;
+  // DONE.error.basis (Section 5.8), used only for the owner diagnosis.
+  let doneBasis: readonly string[] = [];
+  // The DONE hint after the Section 5.11 gate. `unknown` unless authorized.
+  let doneRecoveryHint = "unknown";
   const knownGaps: Record<string, unknown>[] = [];
   // Streams whose batch ingest was rejected as not_found for a stream the runtime
   // already validated present in the manifest at START (transient manifest drift
@@ -3795,39 +3912,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     knownGaps.push(gap);
   }
 
-  /**
-   * A connector requests a recovery action only via `connector_error.recovery_hint`
-   * — the same closed vocabulary/shape as `SKIP_RESULT.recovery_hint`
-   * (validated on ingest by `validateDoneError`, so an invalid shape can never
-   * reach here). `code`/`message` are cause identity and free-form text; the
-   * RI never inspects either to choose an action.
-   *
-   * A present, validated hint is authoritative and wins outright — including
-   * over the runtime's own CDP/browser-infrastructure text match below. The
-   * text match exists only to give runtime infrastructure failures (a dead
-   * browser process, not connector logic) a sane default action when the
-   * connector declared no hint at all; it is a fallback for an ABSENT hint,
-   * never an override for a PRESENT one. `buildKnownGap` (via
-   * `normalizeRecoveryHint`) already fails closed on a missing/unrecognized
-   * hint by falling back to its own generic, vocabulary-based inference —
-   * this function does not need to duplicate that.
-   */
-  function recoveryHintFromTerminalConnectorError(
-    connectorError: ConnectorDoneError | null | undefined
-  ): string | { action?: string; retryable?: boolean } | null {
-    if (connectorError?.recovery_hint) {
-      return connectorError.recovery_hint;
-    }
-    const message = typeof connectorError?.message === "string" ? connectorError.message : "";
-    if (isRuntimeRetryableBrowserProfileError(message)) {
-      return "retry_by_runtime";
-    }
-    if (connectorError?.retryable === true) {
-      return "retry_by_runtime";
-    }
-    return null;
-  }
-
+  // Only a gated action reaches the generic gap builder. An explicit unknown
+  // prevents legacy message/code inference from authorizing connector advice.
   function buildKnownGapsForTerminal(
     reason: string | null = null,
     connectorError: ConnectorDoneError | null = null
@@ -3839,7 +3925,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           kind: "run_failed",
           message: connectorError?.message || null,
           reason: reason || "run_failed",
-          recoveryHint: recoveryHintFromTerminalConnectorError(connectorError),
+          recoveryHint: doneRecoveryHint,
         })
       );
     }
@@ -4241,8 +4327,8 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // is folded into RuntimeCollectionFact.considered/covered at terminal
   // collection-fact assembly (buildCollectionFacts) and never into
   // detailCoverageByStateStream, so it can never reach
-  // the coverage checks of decideCheckpointCommits. Its `unaccounted` count
-  // reaches that decision separately, as a reported omission.
+  // the coverage checks of decideCheckpointCommits. Its counts never gate
+  // checkpoint commits (Collection Profile Section 5.7).
   //
   // This is the single acceptance point for the cross-invocation half of
   // rule 5 ("at most one accepted STREAM_EVIDENCE per stream per run_id"):
@@ -4301,17 +4387,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     return claimResult.claim;
   }
 
-  // Omissions this run reported without a durable work item, in the shape
-  // decideCheckpointCommits takes. Gapped STREAM_EVIDENCE keys are durable
-  // DETAIL_GAPs, which START serves independently of cursors, so only
-  // unaccounted keys count.
+  // Only explicit SKIP_RESULT omissions gate commits. STREAM_EVIDENCE stays
+  // diagnostic even when its unaccounted count is nonzero (Section 5.7).
   function collectReportedOmissions(): ReportedOmission[] {
-    return [
-      ...skipOmissions,
-      ...[...streamEvidenceByStream]
-        .filter(([, evidence]) => evidence.unaccounted > 0)
-        .map(([stream]) => ({ source: "unaccounted_evidence" as const, stream })),
-    ];
+    return [...skipOmissions];
   }
 
   // A DETAIL_COVERAGE shortfall is a coverage GAP, not a protocol violation.
@@ -5003,56 +5082,13 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   }
 
   return new Promise((resolve, reject) => {
-    const msgQueue: ConnectorMessage[] = [];
     let processing = false;
-    let cleanedUp = false;
     let leaseAccountingPromise: Promise<unknown> | null = null;
     let queueDrainedResolve: (() => void) | null = null;
     let pendingInteractionViolationReject: ((err: Error) => void) | null = null;
     let pendingInteractionAutoResolve: ((response: InteractionResponse) => void) | null = null;
     let pendingInteractionAutoResolutionStatus: ConnectorMessage | null = null;
     const completedOtpInteractionRequestIds = new Set<string>();
-    let terminateTimer: NodeJS.Timeout | null = null;
-    let runtimeTimeoutReason: string | null = null;
-
-    function clearTerminateTimer() {
-      if (!terminateTimer) {
-        return;
-      }
-      clearTimeout(terminateTimer);
-      terminateTimer = null;
-    }
-
-    function terminateChild() {
-      if (proc.exitCode !== null || proc.signalCode !== null) {
-        return;
-      }
-      // SIGTERM the WHOLE process group, not just the direct child PID, so a
-      // connector's grandchildren (browser helpers, shelled-out tools) are
-      // terminated with it rather than reparenting to PID 1.
-      terminateConnectorChildGroup("SIGTERM");
-
-      if (terminateTimer || proc.exitCode !== null || proc.signalCode !== null) {
-        return;
-      }
-      terminateTimer = setTimeout(() => {
-        terminateTimer = null;
-        if (proc.exitCode !== null || proc.signalCode !== null) {
-          return;
-        }
-        // The child ignored graceful termination within the window. Record the
-        // escalation so an owner-cancelled run terminals as `owner_cancel_forced`
-        // rather than `owner_cancelled`.
-        if (ownerCancelRequested) {
-          ownerCancelForced = true;
-        }
-        // Escalate to a group-wide SIGKILL: an unkillable grandchild can no
-        // longer keep the subtree alive after the connector leader is gone.
-        terminateConnectorChildGroup("SIGKILL");
-      }, 250);
-      terminateTimer.unref?.();
-    }
-
     function clearAllAssistanceTimeouts() {
       for (const assistanceRequestId of [...assistanceTimeoutHandles.keys()]) {
         clearAssistanceTimeout(assistanceRequestId);
@@ -5137,6 +5173,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         return;
       }
       cleanedUp = true;
+      stopBindingObservation();
       clearTerminateTimer();
       clearAllAssistanceTimeouts();
       // Unconditional, swallows its own errors: a failed temp-file unlink must
@@ -5185,6 +5222,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
 
     async function rejectAfterLeaseAccounting(err: unknown): Promise<void> {
       cleanupChildHandles();
+      await persistObservationDiagnosis();
       try {
         await awaitLeaseAccounting();
       } catch (accountingErr) {
@@ -5260,8 +5298,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       err.failure_reason = failureReason;
       err.checkpoint_summary = checkpointSummary;
       err.terminal_reason = failureReason;
-      err.connector_error = null;
-      err.known_gaps = buildKnownGapsForTerminal(failureReason, null);
+      const invalidDoneMessage = (err as { connectorMessage?: string | null }).connectorMessage ?? null;
+      err.connector_error = invalidDoneMessage ? { message: invalidDoneMessage, retryable: null } : null;
+      err.known_gaps = buildKnownGapsForTerminal(failureReason, err.connector_error);
       const runtimeFailureMessage = runtimeAuthoredFailureMessage(err, null);
       const runtimeFailure = runtimeFailureDiagnostic(err);
       err.runtime_retryable = runtimeFailure?.retryable ?? null;
@@ -5273,7 +5312,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
             actor_id: connectorId,
             actor_type: "runtime",
             data: buildRunTerminalData({
-              connectorError: null,
+              connectorError: err.connector_error,
               failureMessage: runtimeFailureMessage,
               failureOrigin: runtimeFailureMessage ? "runtime" : null,
               ingestFailure: err.ingest_failure || null,
@@ -5591,15 +5630,22 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     async function handleDoneMessage(msg: ConnectorMessage): Promise<void> {
-      const invalidDoneStatus = validateDoneStatus(msg.status);
+      const invalidDoneStatus = validateDoneStatus(msg.status, strictDoneError);
       if (invalidDoneStatus) {
-        throw invalidDoneStatus;
+        throw invalidDoneEnvelope(invalidDoneStatus, msg);
       }
       const doneStatus = msg.status as DoneMessageState["status"];
-      const normalizedDoneError = validateDoneError(doneStatus, msg.error as Parameters<typeof validateDoneError>[1]);
-      if (normalizedDoneError instanceof Error) {
-        throw normalizedDoneError;
+      const validatedDoneError = validateDoneError(doneStatus, msg.error as Parameters<typeof validateDoneError>[1], {
+        strict: strictDoneError,
+        observationDeclared: profileDeclaration.observationDeclared,
+        hasEmittedId: (id) => observationRun.hasEmittedId(id),
+      });
+      if (validatedDoneError instanceof Error) {
+        throw invalidDoneEnvelope(validatedDoneError, msg);
       }
+      const normalizedDoneError = validatedDoneError === null ? null : withoutDoneBasis(validatedDoneError);
+      doneBasis = validatedDoneError?.basis ?? [];
+      doneRecoveryHint = gatedRecoveryHint(validatedDoneError?.recovery_hint ?? null, "done_error");
       finalStatus = doneStatus;
       doneMessage = {
         error: normalizedDoneError as ConnectorDoneError | null,
@@ -6010,34 +6056,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       onProgress({ ...msg, status: "recovered" });
     }
 
-    function validateRecordAdmission(
-      stream: string,
-      streamScope: StreamScope,
-      manifestStream: ManifestStream | null,
-      key: unknown,
-      data: unknown
-    ): void {
-      if (!recordMatchesScopeResource(streamScope.resources, key, data, manifestStream)) {
-        throw new Error(`Connector emitted RECORD outside declared resources for stream: ${stream}`);
-      }
-      if (Array.isArray(streamScope.fields) && data && typeof data === "object") {
-        const requiredFields = new Set(manifestStream?.schema?.required || []);
-        const allowedFields = new Set([...streamScope.fields, ...requiredFields]);
-        const extraFields = Object.keys(data).filter((field) => !allowedFields.has(field));
-        if (extraFields.length) {
-          throw new Error(
-            `Connector emitted RECORD with fields outside START.scope for stream '${stream}': ${extraFields.join(", ")}`
-          );
-        }
-      }
-      if (streamScope.time_range && data && typeof data === "object") {
-        const consentTimeField = manifestStream?.consent_time_field || null;
-        if (consentTimeField && !passesTimeRange(data, streamScope.time_range, consentTimeField)) {
-          throw new Error(`Connector emitted RECORD outside declared time_range for stream: ${stream}`);
-        }
-      }
-    }
-
     async function handleRecordMessage(msg: ConnectorMessage): Promise<void> {
       assertValidRecordEnvelope(msg);
       const { key, data, emitted_at, op } = msg;
@@ -6062,8 +6080,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         );
       }
 
-      const manifestStream = manifestByStream.get(stream) || null;
-      validateRecordAdmission(stream, streamScope, manifestStream, key, data);
+      assertRecordWithinRunUploadSelection(runUploadSelection, { stream, key, data });
 
       let streamBatch = recordBatch[stream];
       if (!streamBatch) {
@@ -6100,18 +6117,19 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         kind: "skip_result",
         message: (msg.message as string | undefined) || null,
         reason: (msg.reason as string | undefined) || null,
-        recoveryHint: msg.recovery_hint || null,
+        recoveryHint: gatedRecoveryHint(msg.recovery_hint ?? null, "skip_result"),
         scope: normalizeGapScope(msg),
         stream: skipStream,
         unsupportedInDefaultScope: streamUnsupportedInDefaultScope(skippedManifestStream),
       });
-      // A continuation is replayed by the committed cursor itself (the next
-      // slice starts at slice_end), so only a continuation-free omission
-      // withholds the checkpoint. A skip without a stream still omitted rows
-      // that some cursor owns; decideCheckpointCommits withholds them all.
+      // A continuation replays the omitted slice. Without one, retaining the
+      // cursor is a data-loss guard, independent of authorizing recovery: the
+      // connector's retryable flag, hint and prose do not decide this guard.
+      // Informational skips (for example an out-of-scope optional stream) do
+      // not claim an omission from the requested collection.
       if (msg.reason === "stream_collection_failed") {
         skipOmissions.push({ source: "stream_collection_failed", stream: skipStream });
-      } else if (continuation === null && (gap.recovery_hint as { retryable: boolean }).retryable) {
+      } else if (continuation === null && gap.severity !== "informational") {
         skipOmissions.push({ source: "retryable_skip", stream: skipStream });
       }
       appendKnownGap(gap);
@@ -6324,8 +6342,11 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const interactionRequestId = msg.request_id as string;
       const interactionTimeoutSeconds = msg.timeout_seconds as number | null | undefined;
       const interactionStream = (msg.stream as string | undefined) || null;
+      if (!declaredHumanInteraction.has(msg.kind)) {
+        throw new Error(`Connector emitted INTERACTION.kind not declared in capabilities.human_interaction: ${msg.kind}`);
+      }
       if (typeof onInteraction !== "function") {
-        throw new Error("Connector emitted INTERACTION but START.bindings omitted interactive");
+        throw new Error("Connector emitted INTERACTION but no interaction handler is configured");
       }
       if (pendingInteraction) {
         // Protocol violation
@@ -6376,7 +6397,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         actor_id: connectorId,
         actor_type: "runtime",
         data: buildAssistanceRequestedDataFromInteraction(msg, runSource, {
-          browserSurfaceAvailable: hasBrowserSurfaceStream(browserSurfaceLaunchEnv),
+          browserSurfaceAvailable: hasBrowserSurfaceStream(admittedBrowserSurfaceLaunchEnv),
         }),
         event_type: "run.assistance_requested",
         interaction_id: interactionRequestId,
@@ -6470,12 +6491,88 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       DETAIL_GAPS_PAGE_REQUEST: handleDetailGapsPageRequest,
       DONE: handleDoneMessage,
       INTERACTION: handleInteractionMessage,
+      OBSERVATION: handleObservationMessage,
       PROGRESS: handleProgressMessage,
       RECORD: handleRecordMessage,
       SKIP_RESULT: handleSkipResultMessage,
       STATE: handleStateMessage,
       STREAM_EVIDENCE: handleStreamEvidenceMessage,
     };
+
+    /**
+     * Section 5.11 gate for a connector hint. Only an authorized action reaches
+     * buildKnownGap. Every other hint becomes an explicit `unknown`, so no text
+     * inference runs. The connector's retryable flag and code never authorize.
+     */
+    function gatedRecoveryHint(hint: unknown, origin: RecoveryHintOrigin): string {
+      const action = typeof hint === "string" ? hint : (hint as { action?: unknown } | null)?.action;
+      if (typeof action !== "string") {
+        return "unknown";
+      }
+      return observationRun.gateRecoveryHint(action, origin).result === "authorized" ? action : "unknown";
+    }
+
+    function withoutDoneBasis(error: DoneError): Omit<DoneError, "basis"> {
+      const { basis: _basis, ...rest } = error;
+      return rest;
+    }
+
+    /** An invalid DONE keeps its bounded connector message visible on the run failure. */
+    function invalidDoneEnvelope(error: Error, msg: ConnectorMessage): Error {
+      // Only failed DONE can report a terminal connector error. A contradictory
+      // success envelope remains a runtime protocol violation, not that report.
+      const connectorMessage = msg.status === "failed"
+        ? boundConnectorErrorMessage((msg.error as { message?: unknown } | undefined)?.message)
+        : null;
+      return Object.assign(error, { connectorMessage });
+    }
+
+    function handleObservationMessage(msg: ConnectorMessage): Promise<void> {
+      // Accept, or reject and continue (Section 5.10). A rejection is recorded
+      // as a runtime defect and never fails the run. The raw line is not kept.
+      const input = observationInputs.get(msg);
+      if (!input) throw new Error("Missing runtime observation envelope");
+      observationInputs.delete(msg);
+      observationRun.accept(input.value, input.serializedBytes);
+      return Promise.resolve();
+    }
+
+    let observationDiagnosisWrite: Promise<void> | null = null;
+
+    /**
+     * The owner diagnostic record (Section 5.10 and 5.11), written once per run.
+     * The first settle point starts it, and every settle point awaits it, so the
+     * record exists before the caller's promise settles. I/O errors are reported as
+     * progress and never change the run's outcome.
+     */
+    function persistObservationDiagnosis(): Promise<void> {
+      observationDiagnosisWrite ??= getDefaultConnectorObservationStore()
+        .put({
+          connectorId,
+          connectorInstanceId: resolvedConnectorInstanceId,
+          diagnosis: observationRun.diagnose(doneBasis),
+          runId,
+          snapshot: observationRun.snapshot(),
+        })
+        .then(
+          () => undefined,
+          () => {
+            // Optional reporting must not turn a diagnostic write failure into
+            // a collection failure if the consumer also rejects progress.
+            try {
+              onProgress({ type: "observation_record_error" });
+            } catch {
+              // Keep the collection outcome.
+            }
+          }
+        );
+      return observationDiagnosisWrite;
+    }
+
+    async function rejectAfterDiagnosis(error: unknown): Promise<void> {
+      await persistObservationDiagnosis();
+      reject(error);
+    }
 
     async function handleMsg(msg: ConnectorMessage): Promise<void> {
       if (doneMessage) {
@@ -6497,12 +6594,38 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     }
 
     rl.on("line", (line) => {
-      writeTrace(line);
+      // Parse once. A line is an OBSERVATION by its parsed type, or by its text
+      // when it does not parse. Raw OBSERVATION lines are never traced, logged,
+      // spined or webhooked (Section 5.10).
+      let parsed: unknown;
+      let parseError: RuntimeRunError | null = null;
+      try {
+        parsed = JSON.parse(line);
+      } catch (caught) {
+        parseError = caught as RuntimeRunError;
+      }
+      const observation = parseError === null ? isObservationMessage(parsed) : OBSERVATION_TYPE_TEXT_RE.test(line);
+      if (!observation) {
+        writeTrace(line);
+      }
       if (!line.trim()) {
         return;
       }
+      if (observation) {
+        if (failPendingInteraction(new Error("Connector emitted OBSERVATION while waiting for INTERACTION_RESPONSE"))) {
+          return;
+        }
+        const envelope: ConnectorMessage = { type: OBSERVATION_MESSAGE_TYPE };
+        observationInputs.set(envelope, { value: parsed, serializedBytes: Buffer.byteLength(line, "utf8") });
+        msgQueue.push(envelope);
+        processNext().catch(rejectAfterDiagnosis);
+        return;
+      }
       try {
-        const msg = JSON.parse(line);
+        if (parseError !== null) {
+          throw parseError;
+        }
+        const msg = parsed as ConnectorMessage;
         if (resolvePendingOtpInteraction(msg)) {
           // The matching resolution releases the protocol gate immediately.
           // DONE can arrive on the next line before the async interaction
@@ -6513,7 +6636,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           return;
         }
         msgQueue.push(msg);
-        processNext().catch(reject);
+        processNext().catch(rejectAfterDiagnosis);
       } catch (caught) {
         const err = caught as RuntimeRunError;
         if (
@@ -6534,7 +6657,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           error: enriched,
           type: "__PARSE_ERROR__",
         });
-        processNext().catch(reject);
+        processNext().catch(rejectAfterDiagnosis);
       }
     });
 
@@ -6944,6 +7067,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       stderrTailDiagnostic: Record<string, unknown> | null
     ): Promise<void> {
       cleanupChildHandles();
+      await persistObservationDiagnosis();
       await awaitLeaseAccounting();
       const resolution = deriveClosedRunResolution(code);
       resolve(buildClosedRunResult({ code, resolution, stderrTailDiagnostic }));
@@ -7041,9 +7165,12 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // a child that echoes one into stderr leaks it the same way. Scoping to
       // what was actually injected keeps this a fact about the run rather than
       // a guess about the connector.
-      const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
-        (value): value is string => typeof value === "string" && value.length > 0
-      );
+      const runKnownSecrets = [
+        ...Object.values(staticSecretLaunchEnv),
+        ownerToken,
+        childUploadToken,
+        streamingRegistrationToken,
+      ].filter((value): value is string => typeof value === "string" && value.length > 0);
       if (stderrTailRaw.text) {
         onProgress({
           text: redactStderrTail(stderrTailRaw.text, { knownSecrets: runKnownSecrets }).text,
@@ -7133,6 +7260,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
           await processChildTerminalEvent(terminalEvent);
         } finally {
           cleanupChildHandles();
+          await persistObservationDiagnosis();
         }
       })
       .catch((error: unknown) => reject(error));

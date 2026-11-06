@@ -1577,6 +1577,7 @@ export function StreamSurface({
       <div className="pdpp-stream-orientation-shell mx-auto flex min-h-dvh w-full max-w-md flex-col items-stretch justify-center px-5 py-16">
         <OrientationCard
           buttonLabel="Open browser"
+          connectorId={connector?.connectorId}
           connectorIcon={connector?.icon}
           connectorName={connector?.displayName}
           isMinting={isMinting}
@@ -1622,6 +1623,7 @@ function WordmarkCorner() {
 
 interface OrientationCardProps {
   buttonLabel: string;
+  connectorId?: ConnectorContext["connectorId"];
   connectorIcon?: ConnectorContext["icon"];
   connectorName?: string;
   /** While the click handler is awaiting the mint POST. Disables the button + flips the label. */
@@ -1633,6 +1635,7 @@ interface OrientationCardProps {
 
 function OrientationCard({
   buttonLabel,
+  connectorId,
   connectorIcon,
   connectorName,
   isMinting,
@@ -1658,9 +1661,9 @@ function OrientationCard({
       className="flex flex-col gap-5 rounded-lg px-5 py-6 sm:px-6 sm:py-7"
       data-surface="human"
     >
-      {connectorName ? (
+      {connectorName && connectorId ? (
         <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
-          <ConnectorMark icon={connectorIcon} name={connectorName} />
+          <ConnectorMark connectorId={connectorId} icon={connectorIcon} name={connectorName} />
           {connectorName}
         </p>
       ) : null}
@@ -4855,7 +4858,12 @@ function BrowserSurface({
         onTransportMountedRef.current(null);
         onViewerMountedRef.current(null);
       }
-      viewer.unmount();
+      try {
+        // Permit synchronous SDK cleanup before retiring its transport.
+        viewer.unmount();
+      } finally {
+        transport.dispose();
+      }
     };
   }, [
     clipboardUrlRef,
@@ -5951,7 +5959,7 @@ export function ResolvedSurface({ connector, runId }: { connector: ConnectorCont
         >
           <p className="pdpp-body-lg text-foreground" id="stream-resolved-title">
             <span className="flex items-center gap-2">
-              <ConnectorMark icon={connector?.icon} name={subject} />
+              {connector ? <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={subject} /> : null}
               {subject} is back on it.
             </span>
           </p>
@@ -5998,7 +6006,7 @@ function UnsupportedSurface({
         >
           {connector ? (
             <p className="flex items-center gap-2 pdpp-eyebrow text-foreground">
-              <ConnectorMark icon={connector.icon} name={connector.displayName} />
+              <ConnectorMark connectorId={connector.connectorId} icon={connector.icon} name={connector.displayName} />
               {connector.displayName}
             </p>
           ) : null}

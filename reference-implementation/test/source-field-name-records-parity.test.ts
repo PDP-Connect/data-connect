@@ -3,7 +3,6 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
 import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import {
@@ -18,6 +17,7 @@ import {
   ingestRecord,
   queryRecords as queryRecordsUntyped,
 } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type ManifestLike = Record<string, unknown>;
 
@@ -117,59 +117,62 @@ function fixture(suffix: string) {
   const childStream = "children";
   const parentFields = ["id.with.dot", "event-time", 'say"when', "filter.key", "Unicode 名"];
   const childFields = ["child-id", "child.time", "時刻", "parent.id", 'child "quote"'];
-  const manifest: ManifestLike = {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: "Field-name records parity",
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        consent_time_field: 'say"when',
-        cursor_field: "event-time",
-        name: parentStream,
-        primary_key: ["id.with.dot"],
-        query: {
-          aggregations: { count: true },
-          expand: [{ default_limit: 10, max_limit: 10, name: "children" }],
-        },
-        relationships: [{ cardinality: "has_many", foreign_key: "parent.id", name: "children", stream: childStream }],
-        schema: {
-          properties: {
-            "event-time": { format: "date-time", type: "string" },
-            "filter.key": { type: "string" },
-            "id.with.dot": { type: "string" },
-            'say"when': { format: "date-time", type: "string" },
-            "Unicode 名": { type: "string" },
+  const manifest: ManifestLike = withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: "Field-name records parity",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          consent_time_field: 'say"when',
+          cursor_field: "event-time",
+          name: parentStream,
+          primary_key: ["id.with.dot"],
+          query: {
+            aggregations: { count: true },
+            expand: [{ default_limit: 10, max_limit: 10, name: "children" }],
           },
-          required: ["id.with.dot"],
-          type: "object",
-        },
-        selection: { fields: true, resources: false },
-        semantics: "mutable_state",
-      },
-      {
-        consent_time_field: "時刻",
-        cursor_field: "child.time",
-        name: childStream,
-        primary_key: ["child-id"],
-        schema: {
-          properties: {
-            'child "quote"': { type: "string" },
-            "child-id": { type: "string" },
-            "child.time": { format: "date-time", type: "string" },
-            "parent.id": { type: "string" },
-            時刻: { format: "date-time", type: "string" },
+          relationships: [{ cardinality: "has_many", foreign_key: "parent.id", name: "children", stream: childStream }],
+          schema: {
+            properties: {
+              "event-time": { format: "date-time", type: "string" },
+              "filter.key": { type: "string" },
+              "id.with.dot": { type: "string" },
+              'say"when': { format: "date-time", type: "string" },
+              "Unicode 名": { type: "string" },
+            },
+            required: ["id.with.dot"],
+            type: "object",
           },
-          required: ["child-id", "parent.id"],
-          type: "object",
+          selection: { fields: true, resources: false },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: false },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+        {
+          consent_time_field: "時刻",
+          cursor_field: "child.time",
+          name: childStream,
+          primary_key: ["child-id"],
+          schema: {
+            properties: {
+              'child "quote"': { type: "string" },
+              "child-id": { type: "string" },
+              "child.time": { format: "date-time", type: "string" },
+              "parent.id": { type: "string" },
+              時刻: { format: "date-time", type: "string" },
+            },
+            required: ["child-id", "parent.id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: false },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
   const grant = {
     streams: [
       {

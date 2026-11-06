@@ -53,6 +53,7 @@ declare module "fastify" {
 }
 
 import { publicManifests, referenceManifests } from "@pdpp/reference-contract";
+import { parseManifestJsonText } from "../runtime/binding-declarations.ts";
 import {
   applyRequestValidation,
   applyResponseValidation,
@@ -162,6 +163,30 @@ function loadQsParser(): QsParser {
 
 const localRequire = createRequire(import.meta.url);
 const qs = loadQsParser();
+
+/** Flat connector filters bypass qs's array and parameter count limits. */
+export function parseReferenceQuery(value: string): Record<string, unknown> {
+  const pairs = new URLSearchParams(value);
+  const connectorIds = pairs.getAll("connector_id");
+  // Keep every other pair's original encoding for qs, including malformed escapes.
+  const remaining = connectorIds.length
+    ? value
+        .split("&")
+        .filter((pair) => !new URLSearchParams(pair).has("connector_id"))
+        .join("&")
+    : value;
+  const parsed = qs.parse(remaining, { arrayLimit: 64, depth: 8 });
+  if (connectorIds.length > 0) {
+    // Preserve a malformed mixed flat/bracket scope as invalid input for the
+    // operation validator rather than silently choosing either representation.
+    if ([...pairs.keys()].some((key) => key.startsWith("connector_id["))) {
+      parsed.connector_id = { flat: connectorIds, nested: parsed.connector_id };
+    } else {
+      parsed.connector_id = connectorIds.length === 1 ? connectorIds[0] : connectorIds;
+    }
+  }
+  return parsed;
+}
 
 function canResolvePrettyTransport(): boolean {
   try {
@@ -352,7 +377,7 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
       // (filter[field][gte]=..., expand[]=..., expand_limit[rel]=...) per
       // Core §8. Depth bounded to 8 + arrayLimit 64 to close the DoS surface
       // that Express 5's default `simple` parser was tightening.
-      querystringParser: (str) => qs.parse(str, { arrayLimit: 64, depth: 8 }),
+      querystringParser: parseReferenceQuery,
     },
   });
 
@@ -436,13 +461,18 @@ function buildFastify({ loggerInstance }: { loggerInstance: FastifyBaseLogger })
   // payloads so routes like `POST /grants/:id/revoke` (no body, header still
   // JSON) reach their handlers instead of failing at the transport.
   fastify.removeContentTypeParser("application/json");
-  fastify.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+  // Routes whose body is a Collection Profile manifest also reject any repeated
+  // object key in the raw text, so last-wins cannot change what gets validated.
+  const duplicateKeyRejectingRoutes = new Set(["POST /connectors"]);
+  fastify.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
     if (!body) {
       done(null, {});
       return;
     }
     try {
-      done(null, JSON.parse(typeof body === "string" ? body : body.toString()));
+      const text = typeof body === "string" ? body : body.toString();
+      const routeKey = `${req.method} ${req.routeOptions?.url ?? ""}`;
+      done(null, duplicateKeyRejectingRoutes.has(routeKey) ? parseManifestJsonText(text) : JSON.parse(text));
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
       Object.assign(err, { statusCode: 400 });

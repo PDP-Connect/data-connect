@@ -47,12 +47,13 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { getDefaultSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const TEST_ENV_KEY = "TEST_AUTO_ENROLL_INSTANCE_KEY_TOKEN";
 const OWNER_SUBJECT_ID = "owner-under-test";
 
 function testManifest(): Record<string, unknown> {
-  return {
+  return withFixtureSourceDeclaration({
     capabilities: {
       auth: { kind: "env", required: [TEST_ENV_KEY] },
       public_listing: { tier: "supported" },
@@ -64,7 +65,8 @@ function testManifest(): Record<string, unknown> {
         recommended_mode: "automatic",
       },
     },
-    connector_id: "https://registry.pdpp.dev/connectors/test-auto-enroll-instance-key",
+    connector_id: "test-auto-enroll-instance-key",
+    connector_key: "test-auto-enroll-instance-key",
     display_name: "Test auto-enroll instance key",
     manifest_uri: "https://registry.pdpp.dev/connectors/test-auto-enroll-instance-key",
     protocol_version: "0.1.0",
@@ -79,7 +81,7 @@ function testManifest(): Record<string, unknown> {
       },
     ],
     version: "1.0.0",
-  };
+  });
 }
 
 function withTmpDb(fn: () => Promise<void>): () => Promise<void> {

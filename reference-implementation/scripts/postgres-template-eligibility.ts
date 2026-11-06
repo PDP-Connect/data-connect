@@ -27,6 +27,23 @@
  * here (or missing from both) fails the inventory test.
  */
 export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
+  // Application permission state and actual blob writer, not bootstrap observations.
+  "test/run-upload-permission-store.test.ts",
+  // Private transient upload staging and cross-transaction budget checks on seeded storage.
+  "test/run-upload-staging-store.test.ts",
+  // Real HTTP authorization over a runner-owned database; startup is setup, not the behavior under test.
+  "test/run-upload-http.test.ts",
+  // Record promotion uses seeded storage and real owner HTTP acceptance.
+  "test/run-upload-record-promotion.test.ts",
+  // Binding snapshot and owner HTTP behavior over real seeded databases, not bootstrap authority.
+  "test/connector-binding-access-policy-store.test.ts",
+  "test/owner-binding-access-policy-journey.test.ts",
+  "test/browser-binding-admission-journey.test.ts",
+  "test/connector-binding-authority-store.test.ts",
+  "test/owner-binding-authority-journey.test.ts",
+  // Same process-wire and durable diagnostic journeys on seeded SQLite/Postgres, not schema bootstrap.
+  "test/collection-profile-020.test.ts",
+  "test/collection-profile-owner-journey.test.ts",
   "test/accepted-provider-native-consent.test.ts",
   "test/acknowledged-loss-store-postgres.test.ts",
   "test/active-run-summary-zero-spine.test.ts",
@@ -50,6 +67,9 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-attention-store.test.ts",
   // Exercises install, lock and post-install repair behavior over seeded data, not schema bootstrap.
   "test/connector-install-postgres.test.ts",
+  // Install-to-registry journey over a fresh database: Postgres is a fixture for registration and reuse, not schema bootstrap.
+  "test/connector-install-registry-integration.test.ts",
+  "test/connector-install-sql-persistence.test.ts",
   "test/connector-instance-credential-revoke-postgres.test.ts",
   "test/connector-instance-delete-upsert-two-process-race.test.ts",
   "test/connector-instance-delete-vs-queued-write-fence.test.ts",
@@ -58,6 +78,10 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-instance-writer-paths.test.ts",
   "test/connector-maintenance-cursor-postgres-race.test.ts",
   "test/connector-manifest-revision-fence.test.ts",
+  // Uses Postgres as a fixture for the diagnostic run store's writes, retention and locking, not schema bootstrap.
+  "test/connector-observation-store.test.ts",
+  // Registration identity boundary: Postgres is a fixture for the connectors row and its persist guard.
+  "test/connector-source-identity-boundary.test.ts",
   "test/connector-summary-dirty-hooks.test.ts",
   "test/connector-summary-evidence-canonical-count-cancel-isolation.test.ts",
   "test/connector-summary-evidence-direct-write-source-revision-detection.test.ts",
@@ -245,6 +269,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/semantic-index-skip-unchanged-postgres.test.ts",
   // Exercises additive semantic input-identity migration and real publication.
   "test/semantic-startup-backfill-catches-crash-abandoned-record.test.ts",
+  // Starts the actual server over retained state.
+  "test/startup-backfill-durable-retry.test.ts",
   "test/spine-events-connector-instance-id-backfill.test.ts",
   "test/spine-source-boot-backfill.test.ts",
 ];

@@ -2693,3 +2693,19 @@ export const RETAINED_SIZE_LIMITS = Object.freeze({
   VALID_TOP_MEASURES: [...VALID_TOP_MEASURES],
   VALID_TOP_SCOPES: [...VALID_TOP_SCOPES],
 });
+
+/** Atomic participants: caller owns the durable record transaction. Errors roll it back. */
+export function applyRetainedSizePromotionSqlite(delta: RetainedSizeDelta): void {
+  const computedAt = nowIso();
+  upsertStreamRowSqlite(delta, computedAt);
+  upsertConnectionRowSqlite(delta, computedAt);
+  applyGlobalDeltaSqlite(delta, computedAt);
+  markTopRowsDirtySqlite(getDb(), "blob promotion changed retained-size ordering", computedAt);
+}
+export async function applyRetainedSizePromotionPostgres(client: PoolClient, delta: RetainedSizeDelta): Promise<void> {
+  const computedAt = nowIso();
+  await upsertStreamRowPostgres(client, delta, computedAt);
+  await upsertConnectionRowPostgres(client, delta, computedAt);
+  await applyGlobalDeltaPostgres(client, delta, computedAt);
+  await markTopRowsDirtyPostgres(client, "blob promotion changed retained-size ordering", computedAt);
+}

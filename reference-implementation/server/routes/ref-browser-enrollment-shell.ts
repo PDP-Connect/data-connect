@@ -30,7 +30,7 @@
 //     connectors are refused with a typed 409.
 //   - Browser-bound comes from the registered manifest's bindings
 //     (`browserEnrollmentSupport`, shared with the console). A known scaffold,
-//     or any connector when the conformance roster did not load, is refused
+//     or a connector without a verified current artifact, is refused
 //     with a typed 409.
 //   - Shells are invisible to every list/count/owner-console surface until enrollment
 //     captures source identity and flips the shell to `active`.
@@ -38,6 +38,7 @@
 import { randomBytes } from "node:crypto";
 
 import {
+  type BrowserEnrollmentArtifact,
   browserEnrollmentSupport,
   type ConnectorManifestLike,
   displayNameForConnector,
@@ -154,6 +155,10 @@ export interface MountRefBrowserEnrollmentShellContext {
   now?: () => string;
   pdppError: PdppErrorFn;
   requireOwnerSession: MiddlewareHandler;
+  resolveBrowserEnrollmentArtifact?: (
+    key: string,
+    manifest: ConnectorManifestLike
+  ) => Promise<BrowserEnrollmentArtifact>;
   resolveRegisteredConnectorManifest: (connectorId: string) => Promise<ConnectorManifestLike>;
   setReferenceTraceId: (res: RouteResponse, traceId: string) => void;
 }
@@ -276,7 +281,11 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
         // Reject unknown connector before doing anything else (404).
         const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
 
-        const support = browserEnrollmentSupport(connectorId, manifest);
+        const artifact = await ctx.resolveBrowserEnrollmentArtifact?.(connectorId, manifest);
+        const support = browserEnrollmentSupport(connectorId, {
+          ...manifest,
+          ...(artifact ? { browser_enrollment_artifact: artifact } : {}),
+        });
         if (!support.browserBound) {
           await emitShellAudit(ctx, req, res, {
             connectorId,
@@ -305,7 +314,7 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
             res,
             409,
             "connector_browser_setup_unavailable",
-            `Connector '${connectorId}' cannot add an account through browser setup: it is a known scaffold, or this server cannot load the connector conformance roster.`
+            `Connector '${connectorId}' cannot add an account through browser setup: it is a known scaffold, or its current installed or selected local artifact could not be verified.`
           );
           return;
         }

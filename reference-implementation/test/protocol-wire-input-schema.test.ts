@@ -123,3 +123,39 @@ test("accepts a well-formed viewport event and rejects one missing a required fi
 	assert.equal(parsed.width, 390);
 	assertRejected({ type: "viewport", width: 390 });
 });
+
+// These shapes are emitted by locked Remote Surface 1.6.0's real DOM controller
+// and IME bridge. Transport-only tests cannot detect their rejection at dispatch.
+test("accepts SDK physical keys and IME special keys without changing their payload", () => {
+  for (const input of [
+    { action: "keydown", code: "KeyA", key: "a", modifiers: [], type: "keyboard" },
+    { action: "keyup", code: "KeyA", key: "a", modifiers: ["Control", "Shift"], type: "keyboard" },
+    { action: "keydown", keysym: 65_288, type: "keyboard" },
+    { action: "keyup", keysym: 65_361, modifiers: ["Control"], type: "keyboard" },
+  ]) {
+    assert.equal(parseReferenceWireInputPayload(input), input);
+  }
+});
+
+test("keyboard schema rejects malformed SDK keys and modifiers", () => {
+  for (const payload of [
+    { modifiers: ["Super"] },
+    { modifiers: ["Control", "Control"] },
+    { modifiers: [{}] },
+    { modifiers: "Control" },
+    { keysym: -1 },
+    { keysym: 1.5 },
+    { keysym: 4_294_967_296 },
+    { keysym: { nested: 65_288 } },
+    {},
+  ]) {
+    assertRejected({
+      action: "keydown",
+      type: "keyboard",
+      ...(Object.keys(payload).length ? { key: "a" } : {}),
+      ...payload,
+    });
+  }
+  assertRejected({ action: "keydown", key: "a", modifiers: ["Super"], type: "keyboard" });
+  assertRejected({ action: "keydown", key: "a", modifiers: ["Control", "Control"], type: "keyboard" });
+});

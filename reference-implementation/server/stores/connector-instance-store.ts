@@ -207,11 +207,8 @@ export interface ConnectorIdentityPageBoundary {
  * narrows the SAME keyset page (identity, ordering, cursor tuple) to one
  * connector's connections — Add Source, manual upload, and grant discovery
  * enumerate all of one connector's connections without a fleet scan. A
- * readonly array is the bounded repeated-value SET scope (design doc
- * add-source-perf-design-agy-0730.md "Minimal contract"): 1..
- * {@link CONNECTOR_IDENTITY_PAGE_LIMIT_MAX} canonical distinct ids, letting a
- * single exhausted traversal answer "every connection across THESE N catalog
- * types" — the batched Add Source read, never a per-catalog-id fan-out.
+ * readonly array selects canonical distinct connector ids. Request bytes
+ * bound the filter size; the page limit bounds returned connections.
  */
 export interface ConnectorIdentityPageFilter {
   readonly connectorId?: string | readonly string[] | null;
@@ -256,7 +253,6 @@ function normalizeConnectorIdScope(
   if (connectorId.length === 1) {
     return { id: connectorId[0] as string, kind: "single" };
   }
-  assertConnectorIdentityPageLimit(connectorId.length);
   return { ids: connectorId, kind: "set" };
 }
 

@@ -2019,11 +2019,16 @@ test(
 // (`credential === null`) and IS browser-session-bound
 // (`browserSessionRepairCapable === true`): the durable connection-binding
 // authority in `credentialsValidCondition` (connection-health.ts) must win
-// over that generic message-text classification and route to browser-session
-// repair instead, per reference-connection-health's connection-binding-scoped
-// stored-credential-presence rule.
+// over that generic message-text classification, so the connection never routes
+// to stored-credential capture (reference-connection-health's connection-binding-
+// scoped stored-credential-presence rule). The 401 text and the refresh hint are
+// connector claims (Collection Profile Section 5.11). They are not runtime
+// proof, so they do not invalidate the connection or prompt browser-session
+// repair either. The typed-proof positive lives in
+// test/connection-health-acceptance.test.ts (`ref-control preserves exact typed
+// provider-proof dedupe`).
 test(
-  "ChatGPT-shaped browser_collector connection with no credential row: a generic credential_rejected reason still projects browser_session repair, never stored_credential (binding authority beats message text)",
+  "ChatGPT-shaped browser_collector connection with no credential row: connector 401 text without runtime proof projects no credential prompt and never stored_credential (binding authority beats message text)",
   withTmpDb(async () => {
     seedBrowserBoundStaticSecretConnector();
     await seedInstance({
@@ -2040,7 +2045,11 @@ test(
         attempt: 1,
         checkpointSummary: null,
         completedAt: NOW,
-        connectorError: null,
+        connectorError: {
+          code: "credential_rejected",
+          message: "The connector reports rejected credentials",
+          retryable: false,
+        },
         connectorId: CHATGPT_SHAPED_CONNECTOR_ID,
         connectorInstanceId: CHATGPT_SHAPED_INSTANCE_ID,
         failureReason: "connector_reported_failed",
@@ -2073,28 +2082,42 @@ test(
     assert.ok(scoped, "the browser_collector connection projects a summary");
 
     const credentials = scoped.connection_health.conditions?.find((c) => c.type === "CredentialsValid");
-    assert.equal(credentials?.status, "false");
+    // Section 5.11 negative. No runtime proof exists here (no durable rejection,
+    // no typed ProviderInvalidationProof), so the connector's 401 text and its
+    // refresh_credentials hint must not invalidate the connection or prompt repair.
+    assert.notEqual(
+      credentials?.status,
+      "false",
+      "a connector-claimed 401 without runtime proof must not project CredentialsValid:false"
+    );
     assert.notEqual(
       credentials?.reason,
       CONNECTION_CONDITION_REASONS.CREDENTIAL_REJECTED,
       "a definitive auth failure wrapped in session_failed must not collapse to credential_rejected"
     );
-    assert.equal(
+    assert.notEqual(
+      credentials?.remediation?.surface?.kind,
+      "stored_credential",
+      "browser-session-bound connection must never route to stored_credential capture"
+    );
+    assert.notEqual(
       credentials?.remediation?.surface?.kind,
       "browser_session",
-      "browser-session-bound connection must repair by session, never stored_credential capture"
+      "connector text alone must not prompt a browser-session repair (Section 5.11)"
     );
     assert.doesNotMatch(credentials?.message ?? "", REJECTED_PATTERN);
     assert.equal(
-      scoped.rendered_verdict.required_actions.find((action) => action.kind === "reauth")?.surface?.kind,
-      "browser_session"
+      scoped.rendered_verdict.required_actions.find((action) => action.kind === "reauth"),
+      undefined,
+      "no reauth action without runtime proof"
     );
+    assert.notEqual(scoped.connection_health.state, "healthy", "the failed run stays visible, not healthy");
+    assert.equal(scoped.source_binding_kind, "browser_collector", "the browser binding remains");
 
     // No prior attended-repair interaction was seeded (it timed out and
     // resolved/expired) and no run is currently active: the connection must
-    // read as idle-blocked, never as an in-progress "Collecting" state, and
-    // must carry exactly one reauth action — not a second, conflicting
-    // credential-capture action for the same failure.
+    // read as idle, never as an in-progress "Collecting" state, and must carry
+    // no reauth action from connector text alone.
     assert.equal(scoped.connection_health.axes.attention, "none", "no open attention after a timed-out repair");
     assert.equal(scoped.connection_health.badges.syncing, false, "no active run is in flight");
     assert.doesNotMatch(
@@ -2103,7 +2126,7 @@ test(
       "idle blocked connection must not claim active collection"
     );
     const reauthActions = scoped.rendered_verdict.required_actions.filter((action) => action.kind === "reauth");
-    assert.equal(reauthActions.length, 1, "exactly one reauth action — no conflicting stored-credential action too");
+    assert.equal(reauthActions.length, 0, "no reauth action from a connector claim without runtime proof");
   })
 );
 

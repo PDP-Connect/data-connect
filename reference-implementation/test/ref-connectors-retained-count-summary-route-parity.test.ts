@@ -10,7 +10,7 @@
  * Unlike `ref-connectors-retained-count-summary-profile.test.ts` (which calls
  * `listConnectorSummaryPage`/`getConnectorSummaryForRoute` directly), this
  * file goes through `fetch` against a live mounted server so the repeated
- * `connector_id` query-string parsing (Express's array-of-values behavior)
+ * `connector_id` query-string parsing (Fastify's flat-value query parsing)
  * and the route's profile/limit/cursor validation are proven end-to-end, not
  * assumed. Mirrors `ref-connectors-list-page-route-parity.test.ts`'s method.
  */
@@ -225,13 +225,24 @@ async function assertRouteSetScopeParity(asUrl: string): Promise<void> {
   assert.equal(revoked.status, "revoked");
   assert.ok(revoked.revoked_at);
 
-  // >100 distinct ids is a typed invalid request, over HTTP.
-  const oversized = Array.from({ length: 101 }, (_, i) => `connector-${i}`)
-    .map((id) => `connector_id=${encodeURIComponent(id)}`)
-    .join("&");
-  const oversizedResult = await getEnvelope(asUrl, `${oversized}&limit=100&profile=retained_count_summary`);
-  assert.equal(oversizedResult.status, 400, JSON.stringify(oversizedResult.body));
-  assert.equal(oversizedResult.body.error?.code, "invalid_request");
+  // Flat sets are bounded by request bytes, not connector count. Keep profile
+  // and limit AFTER the IDs to detect qs's default parameterLimit truncation.
+  for (const count of [64, 65, 101, 150, 1001]) {
+    const filterIds = [CONNECTOR_A, ...Array.from({ length: count - 1 }, (_, i) => i.toString(36))];
+    const query = filterIds.map((id) => `connector_id=${encodeURIComponent(id)}`).join("&");
+    // biome-ignore lint/performance/noAwaitInLoops: each size is a separate HTTP boundary assertion.
+    const result = await getEnvelope(asUrl, `${query}&limit=1&profile=retained_count_summary`);
+    assert.equal(result.status, 200, `${count}: ${JSON.stringify(result.body)}`);
+    assert.equal(result.body.data?.length, 1);
+    assert.equal(result.body.data?.[0]?.connector_id, CONNECTOR_A);
+    assert.equal(result.body.data?.[0]?.total_records, 0);
+  }
+  for (const shape of ["connector_id[x]=a", "connector_id=a&connector_id[x]=b", "connector_id=a&connector_id=a"]) {
+    // biome-ignore lint/performance/noAwaitInLoops: each malformed scope is asserted separately.
+    const result = await getEnvelope(asUrl, `${shape}&limit=100&profile=retained_count_summary`);
+    assert.equal(result.status, 400, JSON.stringify(result.body));
+    assert.equal(result.body.error?.code, "invalid_request");
+  }
 
   // connector_id SET mixed with `connection` is rejected (mutual exclusivity).
   const mixedResult = await getEnvelope(

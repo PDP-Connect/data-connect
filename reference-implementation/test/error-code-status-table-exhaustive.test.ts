@@ -118,6 +118,9 @@ const EXPECTED_CODE_TO_STATUS = {
   run_not_writable: 409,
   run_owner_mismatch: 403,
   run_terminal: 503,
+  run_upload_denied: 403,
+  run_upload_stage_conflict: 409,
+  run_upload_stage_limit: 429,
   source_webhook_event_conflict: 409,
   "source.authorization_details_invalid": 400,
   static_secret_binding_invalid: 409,
@@ -130,6 +133,7 @@ const EXPECTED_CODE_TO_STATUS = {
   static_secret_identity_unavailable: 503,
   static_secret_identity_unverified_replacement: 409,
   stream_not_declared: 404,
+  temporarily_unavailable: 503,
   unknown_field: 400,
   unsupported_version: 400,
 };

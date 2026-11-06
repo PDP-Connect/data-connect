@@ -4,6 +4,8 @@
 import { getConnectorManifest, listRegisteredConnectorIds } from "./auth.ts";
 import { lexicalIndexBackfillForManifest } from "./search.ts";
 import { getSemanticBackend, semanticIndexBackfillForManifest } from "./search-semantic.ts";
+import { queueStartupSearchIndexRetry } from "./startup-search-index-retry.ts";
+import { currentStorageGeneration } from "./storage-generation.ts";
 
 type LexicalBackfillManifest = NonNullable<Parameters<typeof lexicalIndexBackfillForManifest>[0]>["manifest"];
 type SemanticBackfillManifest = NonNullable<Parameters<typeof semanticIndexBackfillForManifest>[0]>["manifest"];
@@ -20,6 +22,7 @@ interface CollectBackfillManifestsOptions {
 }
 
 interface RunBackfillOptions {
+  generation?: number;
   logger: RetrievalLogger;
   manifests: RetrievalManifest[];
   signal?: AbortSignal | null;
@@ -61,6 +64,7 @@ export async function collectRetrievalStartupBackfillManifests({
 }
 
 export async function runRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
@@ -85,6 +89,7 @@ export async function runRetrievalStartupBackfill({
     try {
       logger.info({ connectorId }, "retrieval startup backfill connector started");
       await lexicalIndexBackfillForManifest({
+        generation,
         log: (message?: unknown) => logBackfillProgress(logger, message),
         manifest,
         signal,
@@ -92,6 +97,7 @@ export async function runRetrievalStartupBackfill({
       const semanticBackend = getSemanticBackend();
       if (semanticBackend?.available()) {
         await semanticIndexBackfillForManifest({
+          generation,
           log: (message?: unknown) => logBackfillProgress(logger, message),
           manifest,
           signal,
@@ -106,6 +112,11 @@ export async function runRetrievalStartupBackfill({
         return;
       }
       logger.warn({ connectorId, err }, "retrieval startup backfill failed for connector");
+      try {
+        await queueStartupSearchIndexRetry(manifest as never, generation);
+      } catch (queueError) {
+        logger.warn({ connectorId, err, queueError }, "retrieval startup backfill retry queue write failed");
+      }
     }
     await backfillAt(index + 1);
   }
@@ -118,6 +129,7 @@ export async function runRetrievalStartupBackfill({
 }
 
 export function scheduleRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
@@ -129,7 +141,7 @@ export function scheduleRetrievalStartupBackfill({
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill scheduled after AS/RS listen");
 
   return new Promise((resolve) => setImmediate(resolve))
-    .then(() => runRetrievalStartupBackfill({ logger, manifests, signal }))
+    .then(() => runRetrievalStartupBackfill({ generation, logger, manifests, signal }))
     .catch((err) => {
       // Abort-driven exits travel through this catch when the loop
       // re-throws an AbortError-like value before reaching the inner

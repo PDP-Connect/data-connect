@@ -136,6 +136,30 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Deletion tombstones prevent connection resurrection.",
   },
+  connector_binding_access_heads: {
+    classification: "backup_required",
+    reason: "Access policy epochs and the separate active decision must survive restore.",
+  },
+  connector_binding_access_policies: {
+    classification: "backup_required",
+    reason: "Prepared access descriptions and explicit owner decisions cannot be reconstructed.",
+  },
+  connector_binding_resources: {
+    classification: "backup_required",
+    reason: "Unresolved exact resource cleanup debt must survive deletion and restore.",
+  },
+  connector_run_upload_permissions: {
+    classification: "backup_required",
+    reason: "Retain upload permission watermarks until startup invalidation is implemented and has an executable restore/reconcile proof. Restored bearer authority must not become live automatically.",
+  },
+  connector_run_upload_stages: {
+    classification: "backup_required",
+    reason: "Retain private in-flight bytes until startup discard is implemented and has an executable restore/reconcile proof.",
+  },
+  connector_binding_authority_runs: {
+    classification: "backup_required",
+    reason: "Immutable per-run trusted binding snapshots cannot be reconstructed from current connection state.",
+  },
   connector_instances: {
     classification: "backup_required",
     reason: "Connection identity and configuration are core owner state.",
@@ -143,6 +167,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
   connector_maintenance_cursor: {
     classification: "backup_required",
     reason: "Maintenance sweep cursors can be retried after crash recovery.",
+  },
+  connector_observation_runs: {
+    classification: "backup_required",
+    reason:
+      "Collection Profile diagnostic record per completed run (runtime observation snapshot and diagnosis, bounded to 8 runs per connector). It is owner-visible evidence that cannot be rebuilt from connector state or records, so a restore that drops it loses the diagnosis of recent failed runs.",
   },
   connector_schedules: {
     classification: "backup_required",

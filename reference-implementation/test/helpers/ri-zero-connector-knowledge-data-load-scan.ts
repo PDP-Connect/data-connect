@@ -150,12 +150,19 @@ const MANIFEST_ROOTS = [
  * external state read at request time, never RI-committed source or
  * RI-committed JSON, so it was never a candidate for this allowlist either
  * (see `reference-implementation/server/version-disposition.ts`'s own module
- * doc comment). Left as an explicit empty Map (not deleted) so a future
- * legitimate RI-owned sibling registry has an obvious, documented place to
- * register — adding an entry here is a real security decision, same bar as
- * `SANCTIONED_GENERIC_DATA_READ_CALL_SITES` below.
+ * doc comment). The canonical Collection Profile observation schema is now
+ * registered for its exact runtime loader. It describes protocol shapes, not
+ * provider policy; the content check still rejects connector identity in it.
+ * Additional entries require the same review as the generic read sites below.
  */
-const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([]);
+const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["reference-implementation/runtime/observations.ts", new Set([
+    "reference-implementation/runtime/observation.schema.json",
+  ])],
+  ["reference-implementation/runtime/binding-declarations.ts", new Set([
+    "reference-implementation/runtime/connector-manifest.schema.json",
+  ])],
+]);
 
 const POLYFILL_MANIFEST_READ_SITE = 'reference-implementation/server/polyfill-manifest-reconcile.ts::readManifestJson::readFile(path, "utf8")';
 

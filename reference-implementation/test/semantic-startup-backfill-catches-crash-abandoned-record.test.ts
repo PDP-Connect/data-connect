@@ -1,9 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// Real storage regression for the durable-ingest/deferred-publication crash
-// window. Canonical and actual key/input identities, not row counts, establish
-// convergence. The matrix below exercises both SQLite implementations and PG.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -40,6 +37,10 @@ import {
   semanticIndexUpsert,
 } from "../server/search-semantic.ts";
 import { listDirtySearchIndexScopes } from "../server/stores/search-index-dirty-store.ts";
+// Real storage regression for the durable-ingest/deferred-publication crash
+// window. Canonical and actual key/input identities, not row counts, establish
+// convergence. The matrix below exercises both SQLite implementations and PG.
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function target(connectorInstanceId: string) {
   return {
@@ -57,36 +58,42 @@ function record(stream: string, key: string, subject: string) {
   };
 }
 
-const baseManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: "crash-gap",
-  display_name: "Crash gap probe",
-  manifest_uri: "https://registry.pdpp.dev/connectors/crash-gap",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "items",
-      primary_key: ["id"],
-      query: { search: {} },
-      schema: {
-        properties: { id: { type: "string" }, subject: { type: "string" } },
-        required: ["id", "subject"],
-        type: "object",
+const baseManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: "crash-gap",
+    display_name: "Crash gap probe",
+    manifest_uri: "https://registry.pdpp.dev/connectors/crash-gap",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        query: { search: {} },
+        schema: {
+          properties: { id: { type: "string" }, subject: { type: "string" } },
+          required: ["id", "subject"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/crash-gap" }
+);
 
-const semanticManifest = {
-  ...baseManifest,
-  streams: baseManifest.streams.map((stream) => ({
-    ...stream,
-    query: { search: { semantic_fields: ["subject"] } },
-  })),
-};
+const semanticManifest = withFixtureSourceDeclaration(
+  {
+    ...baseManifest,
+    streams: baseManifest.streams.map((stream) => ({
+      ...stream,
+      query: { search: { semantic_fields: ["subject"] } },
+    })),
+  },
+  { sourceId: baseManifest.manifest_uri }
+);
 
 /**
  * A real publisher in a separate Node process, therefore a separate
@@ -279,17 +286,20 @@ test("a 501-field manifest publishes bounded batches and restart embeds only the
   initDb(":memory:");
   const fields = Array.from({ length: 501 }, (_, index) => `field_${index}`);
   const properties = Object.fromEntries(fields.map((field) => [field, { type: "string" }]));
-  const manifest = {
-    ...semanticManifest,
-    connector_id: "semantic-field-batches",
-    streams: [
-      {
-        ...semanticManifest.streams[0],
-        query: { search: { semantic_fields: fields } },
-        schema: { properties: { id: { type: "string" }, ...properties }, type: "object" },
-      },
-    ],
-  };
+  const manifest = withFixtureSourceDeclaration(
+    {
+      ...semanticManifest,
+      connector_id: "semantic-field-batches",
+      streams: [
+        {
+          ...semanticManifest.streams[0],
+          query: { search: { semantic_fields: fields } },
+          schema: { properties: { id: { type: "string" }, ...properties }, type: "object" },
+        },
+      ],
+    },
+    { sourceId: baseManifest.manifest_uri }
+  );
   let calls = 0;
   const stub = makeStubBackend({ dimensions: 8 });
   configureSemanticBackend({
@@ -389,15 +399,18 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
         });
       const instance = `cin_identity_${kind.replaceAll("-", "_")}_${runId}_${++sequence}`;
       const connector = `identity-${kind}-${runId}-${sequence}`;
-      const manifest = {
-        ...semanticManifest,
-        connector_id: connector,
-        display_name: connector,
-        streams: ["items", "item_", "item%", "itemX"].map((name) => ({
-          ...required(semanticManifest.streams[0]),
-          name,
-        })),
-      };
+      const manifest = withFixtureSourceDeclaration(
+        {
+          ...semanticManifest,
+          connector_id: connector,
+          display_name: connector,
+          streams: ["items", "item_", "item%", "itemX"].map((name) => ({
+            ...required(semanticManifest.streams[0]),
+            name,
+          })),
+        },
+        { sourceId: baseManifest.manifest_uri }
+      );
       const inputs: string[] = [];
       const stub = makeStubBackend({ dimensions: 8 });
       const embedding = {
@@ -444,6 +457,13 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
       });
       async function repair(stream = "items") {
         await semanticIndexBackfillForManifest({
+          manifest: pinned(stream),
+          orphanStreamCleanup: false,
+        });
+      }
+      async function repairWithLog(stream: string, log: (message: string) => void) {
+        await semanticIndexBackfillForManifest({
+          log,
           manifest: pinned(stream),
           orphanStreamCleanup: false,
         });
@@ -505,6 +525,7 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
         vector,
         writes,
         pinned,
+        repairWithLog,
         childAttachment,
       };
     }
@@ -660,6 +681,123 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
             );
           })
       );
+
+    await t.test(
+      "nonparticipating zero-state repeated repairs report cleanup attempts without claiming stale data was dropped",
+      async () =>
+        fixture(async (f) => {
+          await f.ingest("k1", "ordinary record without semantic fields");
+          const noFields = {
+            ...f.manifest,
+            streams: f.manifest.streams
+              .filter((stream) => stream.name === "items")
+              .map((stream) => ({ ...stream, query: { search: {} } })),
+          };
+          await registerConnector(noFields, { backfillRetrievalIndexes: false });
+          const pinnedNoFields = { ...noFields, connector_instance_id: f.instance };
+          const logs: string[] = [];
+          await semanticIndexBackfillForManifest({
+            log: (message) => logs.push(message),
+            manifest: pinnedNoFields,
+            orphanStreamCleanup: false,
+          });
+          await semanticIndexBackfillForManifest({
+            log: (message) => logs.push(message),
+            manifest: pinnedNoFields,
+            orphanStreamCleanup: false,
+          });
+          assert.equal(logs.length, 2, "each repair says it checked cleanup");
+          assert.ok(logs.every((message) => message.includes("checking cleanup")));
+          assert.ok(logs.every((message) => !message.includes("dropping stale")));
+          assert.deepEqual(await f.rows(), [], "no semantic vectors are created for a nonparticipating stream");
+          assert.equal(
+            (
+              await f.sql("SELECT 1 FROM semantic_search_meta WHERE connector_instance_id = $1 AND stream = 'items'", [
+                f.instance,
+              ])
+            ).length,
+            0,
+            "zero-state cleanup does not create completion metadata"
+          );
+          assert.equal(
+            (
+              await f.sql(
+                "SELECT 1 FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND stream = 'items'",
+                [f.instance]
+              )
+            ).length,
+            0,
+            "zero-state cleanup does not create progress"
+          );
+        })
+    );
+
+    await t.test("completion log follows the final metadata and progress transaction", async () =>
+      fixture(async (f) => {
+        await f.ingest("k1", "completion transaction fault");
+        const completionLogs: string[] = [];
+        const failTrigger = "fail_semantic_completion_meta";
+        try {
+          if (kind === "postgres") {
+            await f.sql(
+              "CREATE OR REPLACE FUNCTION semantic_test_fail_completion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'completion metadata failure'; END $$"
+            );
+            await f.sql(
+              `CREATE TRIGGER ${failTrigger} BEFORE INSERT OR UPDATE ON semantic_search_meta FOR EACH ROW EXECUTE FUNCTION semantic_test_fail_completion()`
+            );
+          } else {
+            getDb().exec(
+              `CREATE TRIGGER ${failTrigger} BEFORE INSERT ON semantic_search_meta BEGIN SELECT RAISE(ABORT, 'completion metadata failure'); END;`
+            );
+          }
+          await assert.rejects(
+            f.repairWithLog("items", (message) => {
+              if (message.includes("Semantic index rebuild completed")) {
+                completionLogs.push(message);
+              }
+            }),
+            (error) => error instanceof Error && error.message.includes("completion metadata failure")
+          );
+          assert.equal(completionLogs.length, 0, "a failed final transaction cannot announce completion");
+          assert.equal(
+            (
+              await f.sql(
+                "SELECT 1 FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND stream = 'items'",
+                [f.instance]
+              )
+            ).length,
+            1,
+            "the failed final transaction retains progress for retry"
+          );
+        } finally {
+          if (kind === "postgres") {
+            await f.sql(`DROP TRIGGER IF EXISTS ${failTrigger} ON semantic_search_meta`);
+            await f.sql("DROP FUNCTION IF EXISTS semantic_test_fail_completion()");
+          } else {
+            getDb().exec(`DROP TRIGGER IF EXISTS ${failTrigger}`);
+          }
+        }
+        await f.repairWithLog("items", (message) => {
+          if (message.includes("Semantic index rebuild completed")) {
+            completionLogs.push(message);
+          }
+        });
+        assert.equal(completionLogs.length, 1, "successful retry emits one completion event");
+        assert.equal(
+          (
+            await f.sql(
+              "SELECT 1 FROM semantic_search_backfill_progress WHERE connector_instance_id = $1 AND stream = 'items'",
+              [f.instance]
+            )
+          ).length,
+          0,
+          "successful retry commits progress deletion"
+        );
+        const calls = f.inputs.length;
+        await f.repair("items");
+        assert.equal(f.inputs.length, calls, "unchanged second pass reuses committed input identities");
+      })
+    );
 
     await t.test(
       "legacy NULL trailing orphan/removed field/empty canonical stream are deleted, with wildcard and other-instance siblings intact",

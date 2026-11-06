@@ -5,7 +5,7 @@
  * Regenerates `server/generated/connector-registry.generated.ts` from the
  * shipped connector manifests (`packages/polyfill-connectors/manifests/*.json`,
  * `reference-implementation/fixtures/seed-manifests/*.json`) and the connector-owned
- * local-collector bundle registry (`@pdpp/polyfill-connectors/collectors`).
+ * local-collector bundle registry (`@pdpp/polyfill-connectors/collectors`) and conformance roster.
  *
  * Why this exists: `server/connector-key.ts` and `server/connection-setup-plan.ts`
  * are imported by `apps/console` (browser/edge bundling) and must stay free of
@@ -23,7 +23,7 @@
  * RI-authored connector knowledge, matching the same exemption manifests
  * themselves get.
  *
- * Every exported set here is derived from a manifest-declared fact:
+ * Exported sets come from manifest declarations or the package-owned registries:
  *   - firstPartyConnectorKeys: every manifest's connector_key (or the
  *     canonical slug of its connector_id)
  *   - nativeConnectorKeys: manifests using storage_binding.connector_id
@@ -41,6 +41,7 @@
  *   - browserBoundKeys: manifests declaring runtime_requirements.bindings.browser
  *   - providerAuthLifecycleProvenKeys: manifests declaring
  *     capabilities.proven.provider_auth_lifecycle === true
+ *   - knownScaffoldKeys: package-owned conformance exclusions retained for packaged runtimes
  *   - staticSecretLiveProvenKeys: manifests declaring
  *     capabilities.proven.static_secret_live.proven === true
  *
@@ -63,6 +64,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateLegacySourceBindings } from "./legacy-source-binding-validation.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const riRoot = resolve(scriptDir, "..");
@@ -93,9 +95,10 @@ interface ManifestLike {
 // to type-strip `.ts` files under `node_modules` — so it resolves the
 // package's real on-disk manifests directory via `import.meta.resolve` (pure
 // path resolution, not module loading) instead.
-function readPolyfillManifests(): { file: string; manifest: ManifestLike }[] {
+function readPolyfillManifests(approvedDirectory?: string): { file: string; manifest: ManifestLike }[] {
   const packageSrcDir = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));
-  const manifestsDir = process.env.PDPP_POLYFILL_MANIFESTS_DIR || resolve(packageSrcDir, "..", "manifests");
+  const manifestsDir =
+    approvedDirectory ?? process.env.PDPP_POLYFILL_MANIFESTS_DIR ?? resolve(packageSrcDir, "..", "manifests");
   const out: { file: string; manifest: ManifestLike }[] = [];
   for (const file of readdirSync(manifestsDir)) {
     if (!file.endsWith(".json")) {
@@ -139,7 +142,17 @@ function manifestKey(manifest: ManifestLike): string | null {
   return null;
 }
 
+const { KNOWN_SCAFFOLD_CONNECTORS } = await import("@pdpp/polyfill-connectors/connector-conformance-roster");
+const knownScaffoldKeys: string[] = [...KNOWN_SCAFFOLD_CONNECTORS];
+knownScaffoldKeys.sort((left, right) => {
+  if (left === right) {
+    return 0;
+  }
+  return left < right ? -1 : 1;
+});
 const polyfillManifests = readPolyfillManifests();
+const packageSrcDir = dirname(fileURLToPath(import.meta.resolve("@pdpp/polyfill-connectors/manifests")));
+const pinnedPolyfillManifests = readPolyfillManifests(resolve(packageSrcDir, "..", "manifests"));
 const referenceManifests = readReferenceManifests();
 
 // First-party connector keys: every polyfill manifest's canonical key.
@@ -278,6 +291,20 @@ const staticSecretLiveProvenKeys = polyfillManifests
   .filter((key): key is string => key !== null)
   .sort((a, b) => a.localeCompare(b));
 
+const legacySourceBindings = validateLegacySourceBindings(
+  pinnedPolyfillManifests.map(({ manifest, file }) => {
+    const key = manifest.connector_key;
+    const sourceId = manifest.connector_id;
+    if (typeof key !== "string") {
+      throw new Error(`Invalid pinned connector_key in ${file}`);
+    }
+    if (typeof sourceId !== "string") {
+      throw new Error(`Invalid pinned legacy connector_id in ${file}`);
+    }
+    return [key, sourceId] as const;
+  })
+);
+
 function jsonArrayLiteral(values: readonly string[]): string {
   return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
 }
@@ -286,6 +313,10 @@ function jsonObjectLiteral(record: Record<string, string>): string {
   const entries = Object.entries(record).sort(([a], [b]) => a.localeCompare(b));
   const lines = entries.map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`);
   return `{\n${lines.join("\n")}\n}`;
+}
+
+function jsonTupleArrayLiteral(values: readonly (readonly [string, string])[]): string {
+  return `[${values.map(([key, sourceId]) => `[${JSON.stringify(key)}, ${JSON.stringify(sourceId)}]`).join(", ")}]`;
 }
 
 const output = `// Copyright The PDP-Connect Contributors
@@ -305,6 +336,9 @@ const output = `// Copyright The PDP-Connect Contributors
 
 /** Every first-party manifest's canonical connector_key. */
 export const FIRST_PARTY_CONNECTOR_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(firstPartyConnectorKeys)});
+
+/** Known unconditional collect stubs from the pinned conformance roster. */
+export const KNOWN_SCAFFOLD_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(knownScaffoldKeys)});
 
 /** Native (storage_binding.connector_id) reference-fixture connector keys. */
 export const NATIVE_CONNECTOR_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(nativeConnectorKeys)});
@@ -328,6 +362,9 @@ export const PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS: readonly string[] = Object.fre
 
 /** Manifests declaring capabilities.proven.static_secret_live.proven === true. */
 export const STATIC_SECRET_LIVE_PROVEN_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(staticSecretLiveProvenKeys)});
+
+/** Reviewed historical source bindings derived from the pinned connector package. */
+export const LEGACY_FIRST_PARTY_SOURCE_ENTRIES: readonly (readonly [string, string])[] = Object.freeze((${jsonTupleArrayLiteral(legacySourceBindings)} as [string, string][]).map(([key, sourceId]) => Object.freeze([key, sourceId] as const)));
 `;
 
 if (process.argv[2]) {

@@ -10,7 +10,7 @@
  * decision is the shared `browserEnrollmentSupport` rule that the RI's
  * enrollment-shell route applies to the registered manifest, so the console
  * and the RI give the same answer. Known scaffolds stay excluded: they can
- * never collect. Without the conformance roster that rule adds no account.
+ * never collect. Host artifact evidence permits setup without the optional roster.
  *
  * The console must not gate this on a connector-key list. A key list cannot
  * know about a connector that the owner installed from the runtime catalog,
@@ -19,12 +19,14 @@
  */
 
 import {
+  type BrowserEnrollmentArtifact,
   type BrowserEnrollmentSupport,
   browserEnrollmentSupport,
   canonicalConnectorKey,
 } from "pdpp-reference-implementation/connection-setup-plan";
 
 export interface BindingSource {
+  readonly browser_enrollment_artifact?: BrowserEnrollmentArtifact;
   readonly connector_id: string;
   readonly connector_key?: string | null;
   readonly bindings: Readonly<Record<string, unknown>> | null | undefined;
@@ -49,6 +51,9 @@ export function browserConnectSupport(
     .map((source) =>
       browserEnrollmentSupport(key, {
         connector_id: source.connector_id,
+        ...(source.browser_enrollment_artifact
+          ? { browser_enrollment_artifact: source.browser_enrollment_artifact }
+          : {}),
         runtime_requirements: { bindings: source.bindings ?? null },
       })
     );

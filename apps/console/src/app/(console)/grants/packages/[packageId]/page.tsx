@@ -295,7 +295,8 @@ function ChildRow({
       <div className="pdpp-caption mt-1 text-muted-foreground">
         {connectorId ? (
           <ConnectorMark
-            className="mr-2 inline-block size-5 align-[-0.2em]"
+            spacing="after"
+            {...(child.source?.connector_id ? { connectorId: child.source.connector_id } : { sourceId: connectorId })}
             icon={connectorIcons[connectorId]}
             name={sourceLabel}
           />

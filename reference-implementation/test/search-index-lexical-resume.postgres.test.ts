@@ -25,6 +25,7 @@ import { lexicalIndexBackfillForManifest } from "../server/search.ts";
 import { reconcileSearchIndexDirtyScope } from "../server/search-index-reconcile.ts";
 import { configureSemanticBackend, makeStubBackend } from "../server/search-semantic.ts";
 import type { DirtySearchIndexScope } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
@@ -49,7 +50,7 @@ function streamDef(name: string, semantic: boolean) {
 }
 
 function manifestFor(connectorId: string, semantic: boolean) {
-  return {
+  const manifest = {
     capabilities: { human_interaction: [] },
     connector_id: connectorId,
     display_name: connectorId,
@@ -58,6 +59,7 @@ function manifestFor(connectorId: string, semantic: boolean) {
     streams: [streamDef("alpha", semantic), streamDef("beta", semantic)],
     version: "0.1.0",
   };
+  return withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri });
 }
 
 const target = (connectorId: string, connectorInstanceId: string) => ({
@@ -244,7 +246,9 @@ if (POSTGRES_URL) {
     // Cleanup is authorized by the published full manifest, not an omitted
     // stream in a caller-supplied subset.
     await registerConnector(
-      { ...manifestFor(connectorId, false), streams: manifest.streams },
+      withFixtureSourceDeclaration({ ...manifestFor(connectorId, false), streams: manifest.streams }, {
+        sourceId: `https://sources.example/${connectorId}`,
+      }),
       { backfillRetrievalIndexes: false }
     );
     await lexicalIndexBackfillForManifest({ manifest } as never);

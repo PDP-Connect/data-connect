@@ -261,7 +261,7 @@ export function ScheduleRow({ connectorIcon, summary, runsHref }: ScheduleRowPro
               className="pdpp-body relative font-medium text-foreground before:absolute before:-inset-3 before:content-[''] hover:underline"
               href={recordsHref}
             >
-              <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcon} name={displayName} />
+              <ConnectorMark spacing="after" connectorId={connectorKey} icon={connectorIcon} name={displayName} />
               {displayName}
             </Link>
             <div className="pdpp-caption mt-0.5 truncate font-mono text-muted-foreground">{connectorKey}</div>

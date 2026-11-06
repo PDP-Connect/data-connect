@@ -1588,7 +1588,7 @@ function StreamDoorLink({
   });
   return (
     <a className="rr-x-stream-door" href={streamHref}>
-      See all '{query}' records in <ConnectorMark className="mx-1 inline-block size-4 align-[-0.2em]" icon={connectorIcons[door.connectorId]} name={door.displayName} />{door.displayName} →
+      See all '{query}' records in <ConnectorMark spacing="around" connectorId={door.connectorId} icon={connectorIcons[door.connectorId]} name={door.displayName} />{door.displayName} →
     </a>
   );
 }
@@ -1610,7 +1610,7 @@ function StreamSeeAllLink({
   const totalLabel = typeof link.total === "number" ? ` - ${link.total.toLocaleString()} records` : "";
   return (
     <a className="rr-x-see-all" href={streamHref} title={link.stream}>
-      <ConnectorMark className="mr-1 inline-block size-4 align-[-0.2em]" icon={connectorIcons[link.connectorId]} name={link.displayName} />
+      <ConnectorMark spacing="after" connectorId={link.connectorId} icon={connectorIcons[link.connectorId]} name={link.displayName} />
       {link.displayName} - {humanizeFieldLabel(link.stream)}
       {totalLabel} - See all
     </a>
@@ -1658,7 +1658,7 @@ function FacetRow({
           title={label}
         >
           {leading}
-          {label}
+          <span className="rr-x-facet__label">{label}</span>
         </span>
         <span className="rr-x-facet__flag" />
         {/* Exact-or-"in view"-or-hidden. count===null OR 0 → hidden (item #8). */}
@@ -1742,7 +1742,7 @@ function ConnectionFacets({
           excluded={excluded.includes(c.connectionId)}
           key={c.connectionId}
           label={c.displayName}
-          leading={<ConnectorMark className="size-5 shrink-0" icon={connectorIcons[c.connectorId]} name={c.displayName} />}
+          leading={<ConnectorMark connectorId={c.connectorId} icon={connectorIcons[c.connectorId]} name={c.displayName} />}
           on={selected.includes(c.connectionId)}
           onToggle={() => onToggle(c.connectionId)}
           onToggleExclude={() => onToggleExclude(c.connectionId)}
@@ -1782,7 +1782,7 @@ function SourceFacetGroup({
     <details className="rr-x-source-group" open={forceOpen || hasActive}>
       <summary className="rr-x-source-group__summary">
         <span className="rr-x-source-group__name" title={group.displayName}>
-          <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorIcons[group.connectorId]} name={group.displayName} />
+          <ConnectorMark spacing="after" connectorId={group.connectorId} icon={connectorIcons[group.connectorId]} name={group.displayName} />
           {group.displayName}
         </span>
         {/* The source total is the SAME count KIND as each stream — loaded rows
@@ -2016,7 +2016,8 @@ function FeedRow({
                 `title` makes the full name recoverable on hover/long-press. */}
             <span className="rr-x-row__con" title={entry.connectionDisplayName ?? entry.connectorId}>
               <ConnectorMark
-                className="mr-1 inline-block size-4 align-[-0.2em]"
+                spacing="after"
+                connectorId={entry.connectorId}
                 icon={connectorIcons[entry.connectorId]}
                 name={entry.connectionDisplayName ?? entry.connectorId}
               />
@@ -2168,11 +2169,14 @@ function BurstRow({
       <div className="rr-x-burst__head">
         <span className="rr-x-burst__count">{loaded.toLocaleString()}</span>{" "}
         <span className="rr-x-burst__stream">
-          <ConnectorMark
-            className="mr-1 inline-block size-4 align-[-0.2em]"
-            icon={rep?.connectorId ? connectorIcons[rep.connectorId] : null}
-            name={rep?.connectionDisplayName ?? rep?.connectorId ?? "connector"}
-          />
+          {rep?.connectorId ? (
+            <ConnectorMark
+              spacing="after"
+              connectorId={rep.connectorId}
+              icon={connectorIcons[rep.connectorId]}
+              name={rep.connectionDisplayName ?? rep.connectorId}
+            />
+          ) : null}
           {streamLabel}
         </span>{" "}<span className="rr-x-burst__inview">in view</span>
       </div>

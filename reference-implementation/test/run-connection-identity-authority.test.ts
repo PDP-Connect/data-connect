@@ -5,9 +5,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Database from "./helpers/sqlite-driver.ts";
 import { emitSpineEvent, listSpineCorrelations, listSpineEventsPage } from "../lib/spine.ts";
+import { BrowserBindingPlacementRefused } from "../runtime/binding-control.ts";
+import { normalizeBindingDeclarations } from "../runtime/binding-declarations.ts";
+import { admittedStartBindings, recordUnprovidedBindings } from "../runtime/run-binding-admission.ts";
 import { runConnector } from "../runtime/index.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";
+import { seedBindingConnection } from "./helpers/binding-authority-fixture.ts";
+import { createConnectorBindingAuthorityStore } from "../server/stores/connector-binding-authority-store.ts";
 
 const RUN_START_WRITERS = [
   { eventType: "run.started", name: "manual", stamp: { boot_epoch: "boot-manual", seq: 1 } },
@@ -159,6 +164,54 @@ test("historical null spine identity remains readable and unknown", async () => 
     if (!rawClosed) {
       raw.close();
     }
+    closeDb();
+  }
+});
+
+test("direct runtime cannot turn admitted identity or an environment URL into required binding authority", async () => {
+  await assert.rejects(
+    () =>
+      runConnector({
+        admitRunConnection: async () => ({
+          connectorId: "reddit",
+          connectorInstanceId: "cin_actual",
+          ownerSubjectId: "owner_alice",
+        }),
+        connectorId: "reddit",
+        connectorInstanceId: "cin_actual",
+        ownerSubjectId: "owner_alice",
+        connectorPath: "/must/not/spawn.ts",
+        ownerToken: "fixture",
+        manifest: {
+          connector_id: "reddit",
+          streams: [],
+          runtime_requirements: { bindings: { browser: { required: true } } },
+        },
+        browserSurfaceEnv: { PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: "http://127.0.0.1:1" },
+      }),
+    (error) => error instanceof BrowserBindingPlacementRefused && error.failure.code === "binding_unavailable"
+  );
+});
+
+test("optional binding omissions persist real admitted scope without inventing a resource handle", async () => {
+  initDb(makeTemporaryDbPath("pdpp-optional-binding-authority-"));
+  try {
+    await seedBindingConnection("cin_optional", "owner_alice");
+    const scope = { connectionId: "cin_optional", ownerId: "owner_alice", runId: "run_optional" };
+    const instances = normalizeBindingDeclarations({ browser: { required: false }, network: { required: false } });
+    const record = await recordUnprovidedBindings(scope, instances);
+    const stored = await createConnectorBindingAuthorityStore().get(scope);
+    assert.deepEqual(stored?.record, record);
+    assert.deepEqual(
+      record.instances.map((instance) => [instance.lifecycle, instance.handleIdentity]),
+      [
+        ["optional_not_granted", undefined],
+        ["unsupported", undefined],
+      ]
+    );
+    assert.deepEqual(admittedStartBindings(scope, instances, record), {});
+    await assert.rejects(() => recordUnprovidedBindings({ ...scope, ownerId: "foreign" }, instances));
+  } finally {
     closeDb();
   }
 });

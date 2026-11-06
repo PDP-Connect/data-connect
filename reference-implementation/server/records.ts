@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-runtime.ts";
 /**
@@ -147,6 +148,8 @@ import {
 } from "./stores/connector-instance-store.ts";
 import { getDefaultConnectorStateStore } from "./stores/connector-state-store.ts";
 import { advanceSqliteDeviceIngestPrefix } from "./stores/device-exporter-store.ts";
+import { applyRetainedSizePromotionSqlite } from "./retained-size-read-model.ts";
+import { promoteSqliteRunUploadRecord } from "./stores/run-upload-record-promotion.ts";
 import { markSearchIndexDirtySqlite, recordSearchIndexDirtyEvidence } from "./stores/search-index-dirty-store.ts";
 
 export { resolveRecordIdentityForBinding } from "./connection-identity.ts";
@@ -202,6 +205,8 @@ interface AttemptContext {
 type DeviceReservation = Record<string, unknown> & { inputIndex: number };
 interface RecordIngestOptions {
   attemptContext?: AttemptContext;
+  /** Subject from verified owner authentication, never record/query data. */
+  authenticatedOwnerSubjectId?: string | undefined;
   coordinatorOwnership?: ConnectorInstanceWriteOwnership;
   deferIndexes?: boolean;
   deviceFinalInputIndex?: number;
@@ -247,6 +252,7 @@ type DurableIngestOutcome =
 interface RecordIngestOutcome {
   accepted: boolean;
   changed: boolean;
+  retainedSizeApplied?: boolean | undefined;
   retainedSizeDelta?: {
     connectorId: string;
     connectorInstanceId: string;
@@ -864,6 +870,7 @@ export class RecordIndexAdmissionError extends Error {
  * by construction, not a correctness bug.
  */
 const PERMANENT_INGEST_FAILURE_CODES: ReadonlySet<string> = new Set([
+  "run_upload_denied",
   "connector_instance_not_found",
   "connector_instance_not_writable",
   "invalid_record_identity",
@@ -1733,7 +1740,7 @@ export async function ingestRecords(
   storageTarget: RecordStorageTarget,
   records: readonly RecordEnvelope[],
   afterRecord?: RecordIngestAfterRecord,
-  options: Pick<RecordIngestOptions, "requireConnectionAdmission" | "runId"> = {}
+  options: Pick<RecordIngestOptions, "requireConnectionAdmission" | "runId" | "authenticatedOwnerSubjectId"> = {}
 ): Promise<RecordIngestBatchOutcome[]> {
   const coordinationConnectorId = connectorIdForStorageTarget(storageTarget);
   const coordinationInstanceId = resolveStorageConnectorInstanceId(storageTarget, coordinationConnectorId);
@@ -1747,7 +1754,8 @@ export async function ingestRecords(
       records,
       afterRecord,
       options.runId,
-      options.requireConnectionAdmission
+      options.requireConnectionAdmission,
+      options.authenticatedOwnerSubjectId
     );
     if (batch.changedRecords.length > 0) {
       // Fire-and-forget: the HTTP batch ack must not await derived index
@@ -1886,7 +1894,8 @@ async function ingestRecordsWithinCoordinator(
   records: readonly RecordEnvelope[],
   afterRecord?: RecordIngestAfterRecord,
   runId?: string | null,
-  requireConnectionAdmission?: boolean
+  requireConnectionAdmission?: boolean,
+  authenticatedOwnerSubjectId?: string | undefined
 ): Promise<IngestRecordsWithinCoordinatorResult> {
   const outcomes: Array<RecordIngestBatchOutcome | undefined> = new Array(records.length);
   const changedRecords: DeferredRecordIndex[] = [];
@@ -1894,6 +1903,7 @@ async function ingestRecordsWithinCoordinator(
   const loggingConnectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, loggingConnectorId);
   const perRecordOptions: RecordIngestOptions = {
     deferIndexes: true,
+    ...(authenticatedOwnerSubjectId ? { authenticatedOwnerSubjectId } : {}),
     // Re-verified inside EVERY record's own durable write transaction on
     // BOTH backends (Postgres: postgresIngestRecord's requireConnectionAdmission
     // handling, inside the transaction-scoped advisory lock; SQLite:
@@ -2065,6 +2075,9 @@ function toPostgresIngestOptions(options: RecordIngestOptions) {
     ...(options.deviceReservation ? { deviceReservation: options.deviceReservation } : {}),
     ...(options.requireConnectionAdmission ? { requireConnectionAdmission: options.requireConnectionAdmission } : {}),
     ...(options.runId ? { runId: options.runId } : {}),
+    ...(options.authenticatedOwnerSubjectId
+      ? { authenticatedOwnerSubjectId: options.authenticatedOwnerSubjectId }
+      : {}),
   };
 }
 
@@ -2086,6 +2099,7 @@ function isRetainedSizeDelta(value: unknown): value is NonNullable<RecordIngestO
 function toRecordIngestOutcome(outcome: {
   accepted: boolean;
   changed: boolean;
+  retainedSizeApplied?: boolean | undefined;
   retainedSizeDelta?: RecordData;
   self_healed?: boolean;
   version?: number;
@@ -2094,6 +2108,7 @@ function toRecordIngestOutcome(outcome: {
     accepted: outcome.accepted,
     changed: outcome.changed,
     ...(isRetainedSizeDelta(outcome.retainedSizeDelta) ? { retainedSizeDelta: outcome.retainedSizeDelta } : {}),
+    ...(outcome.retainedSizeApplied ? { retainedSizeApplied: true } : {}),
     ...(typeof outcome.self_healed === "boolean" ? { self_healed: outcome.self_healed } : {}),
     ...(typeof outcome.version === "number" ? { version: outcome.version } : {}),
   };
@@ -2112,7 +2127,9 @@ async function ingestPostgresRecord(
   if (isChangedRecordIngestOutcome(outcome)) {
     const { stream } = record;
     if (outcome.retainedSizeDelta) {
-      await applyRetainedSizeRecordDelta(outcome.retainedSizeDelta);
+      if (!outcome.retainedSizeApplied) {
+        await applyRetainedSizeRecordDelta(outcome.retainedSizeDelta);
+      }
     } else {
       await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
     }
@@ -2181,6 +2198,7 @@ interface HistoryPruneDeltas {
 }
 
 interface IngestDeltaArgs {
+  atomicRetainedSize?: boolean;
   connectorId: string;
   connectorInstanceId: string;
   consentTimeField: string | null;
@@ -2195,6 +2213,7 @@ interface IngestDeltaArgs {
 }
 
 function applyIngestRecordDeltas({
+  atomicRetainedSize,
   connectorId,
   connectorInstanceId,
   stream,
@@ -2222,7 +2241,7 @@ function applyIngestRecordDeltas({
     recordJsonBytesDelta: jsonBytesDelta,
     stream,
   });
-  applyRetainedSizeRecordDelta({
+  const retainedDelta = {
     connectorId,
     connectorInstanceId,
     currentRecordJsonBytesDelta: jsonBytesDelta,
@@ -2230,7 +2249,12 @@ function applyIngestRecordDeltas({
     recordHistoryCountDelta: 1 - prunedRowsForDelta,
     recordHistoryJsonBytesDelta: insertedChangeJsonBytes - prunedBytesForDelta,
     stream,
-  });
+  };
+  if (atomicRetainedSize) {
+    applyRetainedSizePromotionSqlite(retainedDelta);
+  } else {
+    applyRetainedSizeRecordDelta(retainedDelta);
+  }
 }
 
 function pruneRecordChangeHistory(
@@ -2318,7 +2342,22 @@ async function ingestSqliteRecord(
     if (options.requireConnectionAdmission) {
       assertSqliteConnectorInstanceWritableWithinTransaction(connectorInstanceId);
     }
+    let pendingRecordDelta: IngestDeltaArgs | undefined;
     const finishDurableOutcome = (value: DurableIngestOutcome): DurableIngestOutcome => {
+      let staged = false;
+      if (op !== "delete" && options.runId) {
+        staged = promoteSqliteRunUploadRecord({
+          connectionId: connectorInstanceId,
+          connectorId,
+          ownerId: options.authenticatedOwnerSubjectId,
+          record,
+          recordKey,
+          runId: options.runId,
+        });
+      }
+      if (pendingRecordDelta) {
+        applyIngestRecordDeltas({ ...pendingRecordDelta, atomicRetainedSize: staged });
+      }
       if (options.deviceReservation) {
         advanceSqliteDeviceIngestPrefix(options.deviceReservation, options.deviceReservation.inputIndex);
       }
@@ -2418,7 +2457,7 @@ async function ingestSqliteRecord(
       nextVersion,
       changeHistoryLimit
     );
-    applyIngestRecordDeltas({
+    pendingRecordDelta = {
       connectorId,
       connectorInstanceId,
       consentTimeField: options.attemptContext
@@ -2432,7 +2471,7 @@ async function ingestSqliteRecord(
       prunedRowsForDelta,
       recordJson,
       stream,
-    });
+    };
 
     crashPoint("ingest:before-commit");
     return finishDurableOutcome({ kind: "changed", op, selfHeal, version: nextVersion });

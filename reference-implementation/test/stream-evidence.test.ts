@@ -39,6 +39,7 @@ import {
 } from "../server/ref-control.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const NOT_STATE_STREAM_DECLARED_PATTERN = /which the manifest does not declare with a\s+static state_stream parent/;
 const OUTCOMES_SUM_MISMATCH_PATTERN = /outcomes.*do not sum to considered/i;
@@ -163,41 +164,44 @@ function fakeAdmitRunConnection(
  * stream used only for the manifest-shape rejection test.
  */
 function streamEvidenceManifest(connectorId: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: connectorId,
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "messages",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-      {
-        coverage_strategy: "checkpoint_window",
-        name: "message_bodies",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-        state_stream: "messages",
-      },
-      {
-        coverage_strategy: "parent_detail_accounting",
-        name: "message_attachments",
-        parent_streams: ["messages"],
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "0.1.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: connectorId,
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "messages",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+        {
+          coverage_strategy: "checkpoint_window",
+          name: "message_bodies",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+          state_stream: "messages",
+        },
+        {
+          coverage_strategy: "parent_detail_accounting",
+          name: "message_attachments",
+          parent_streams: ["messages"],
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
+        },
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 /**
@@ -908,10 +912,11 @@ test("DETAIL_COVERAGE naming a state_stream-declared stream is still rejected af
 
 // ── Unaccounted outcomes withhold the parent checkpoint ──
 
-// `outcomes.unaccounted` keys have no durable DETAIL_GAP, so nothing replays
-// them once the parent cursor moves past them. The parent checkpoint must stay
-// put so the next run re-collects them.
-test("STREAM_EVIDENCE with outcomes.unaccounted > 0 withholds the parent checkpoint", async () => {
+// Positive, non-gating control (Section 5.7: STREAM_EVIDENCE never gates a
+// checkpoint, including its `unaccounted` count). The shortfall is diagnostic:
+// the parent cursor commits, and the fact keeps the unaccounted count visible.
+// The mutation this would catch is a runtime that lets the evidence withhold.
+test("STREAM_EVIDENCE with outcomes.unaccounted > 0 does not gate the parent checkpoint, and the shortfall stays visible", async () => {
   const { server, asUrl, rsUrl, ownerToken } = await setupServer();
   try {
     const manifest = twoStreamManifest("stream-evidence-no-commit-gating");
@@ -949,15 +954,22 @@ test("STREAM_EVIDENCE with outcomes.unaccounted > 0 withholds the parent checkpo
         | undefined;
       assert.equal(
         checkpointSummary?.commit_status,
-        "not_committed",
-        "messages must not commit while message_bodies reports unaccounted keys"
+        "committed",
+        "messages commits: STREAM_EVIDENCE is diagnostic and never gates a checkpoint"
       );
-      assert.equal(checkpointSummary?.state_streams_committed, 0);
+      assert.equal(checkpointSummary?.state_streams_committed, 1);
       const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
         headers: { Authorization: `Bearer ${ownerToken}` },
       });
       const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
-      assert.ok(!("messages" in (stateBody.state ?? {})), "the parent cursor must not move past unaccounted keys");
+      assert.deepEqual(
+        stateBody.state?.messages,
+        { cursor: "messages-1" },
+        "the durable parent cursor moved although two keys are unaccounted"
+      );
+      const fact = factFor(result.run_id as string, "message_bodies") as unknown as RuntimeCollectionFact;
+      assert.equal(fact.considered, 3, "the connector's considered count is kept");
+      assert.equal(fact.covered, 1, "the unaccounted keys stay visible as uncovered in the fact");
     } finally {
       rmSync(tmpDir, { force: true, recursive: true });
     }

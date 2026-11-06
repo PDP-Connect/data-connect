@@ -24,6 +24,7 @@ import {
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
+import { type BindingAccessState, getBindingAccessState } from "../../lib/binding-access-client.ts";
 import {
   formatStreamCollectionFacts,
   indexCollectionReportByStream,
@@ -85,6 +86,7 @@ import {
 } from "./actions.ts";
 import { acknowledgeConnectionLossAction, confirmCoverageHorizonAction } from "./confirmation-actions.ts";
 import type { ConfigRevisionWire, ConnectionConfigWire } from "./connection-config-view-model.ts";
+import { ConnectionAccessReview } from "./connection-access-review.tsx";
 import { ConnectionConfiguration } from "./connection-configuration.tsx";
 import { ConnectionConfirmation } from "./connection-confirmation.tsx";
 import { ConnectionDangerZone } from "./connection-danger-zone.tsx";
@@ -138,6 +140,7 @@ function manualUploadHrefForConnection(
 }
 
 export interface ConnectorPageModel {
+  accessState?: BindingAccessState | null;
   activeRunId: string | null;
   /**
    * Per-stream collection facts derived from the connection summary's
@@ -478,7 +481,7 @@ async function loadConnectorPageModel(
   // `connectorInstanceIdForConnection` already falls back to `connection_id`,
   // so this is the concrete instance selector the config routes resolve.
   const configConnectionId = connectorInstanceId;
-  const [diagnostics, providerOrigin, configuration, configRevisions] = await Promise.all([
+  const [diagnostics, providerOrigin, configuration, configRevisions, accessState] = await Promise.all([
     loadConnectorDiagnostics(connectorId, connectorInstanceId),
     // Resolve the public origin to late-bind `<provider-url>` in remediation
     // command templates. Failure → null → the command fails closed (no broken
@@ -492,6 +495,7 @@ async function loadConnectorPageModel(
     // page for.
     getConnectionConfig(configConnectionId).catch(() => null),
     listConnectionConfigRevisions(configConnectionId).catch(() => []),
+    getBindingAccessState(configConnectionId).catch(() => null),
   ]);
   const { schedule } = diagnostics;
   const overview = toConnectorOverview(summary, streams);
@@ -549,6 +553,7 @@ async function loadConnectorPageModel(
 
   return {
     activeRunId: schedule?.active_run_id ?? null,
+    accessState,
     configRevisions,
     configuration,
     collectionFactsByStream,
@@ -693,6 +698,7 @@ function ConnectorPageView({
     activeRunId: scheduleActiveRunId,
     collectionFactsByStream,
     collectionOwnerActionByStream,
+    accessState,
     configRevisions,
     configuration,
     connectionHealth,
@@ -846,7 +852,7 @@ function ConnectorPageView({
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={manifest.icon} name={displayName} />
+            <ConnectorMark connectorId={connectorId} icon={manifest.icon} name={displayName} />
             {displayName}
             <RenameConnection
               connectionId={renameSelector}
@@ -953,6 +959,11 @@ function ConnectorPageView({
       </Section>
 
       <RecentRunsSection autoPausedBanner={autoPausedBanner} connectorId={connectorId} recentRuns={recentRuns} />
+
+      <ConnectionAccessReview
+        connectionId={connectorInstanceId ?? connectionId}
+        initialState={accessState ?? null}
+      />
 
       {/* Configuration belongs to the source, not to Deployment: this route
           already owns the connection's identity, health, coverage, streams and
@@ -1580,10 +1591,6 @@ function RecentRunsSection({
                   <IcTimestamp value={r.first_at} />
                   <span aria-hidden>·</span>
                   <span>{durationLabel(r.first_at, r.last_at)}</span>
-                  <span aria-hidden>·</span>
-                  <span>
-                    {r.event_count.toLocaleString()} event{r.event_count === 1 ? "" : "s"}
-                  </span>
                   {r.failure_reason ? (
                     <>
                       <span aria-hidden>·</span>

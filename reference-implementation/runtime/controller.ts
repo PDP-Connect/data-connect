@@ -29,9 +29,7 @@ import {
   projectBrowserSurfaceLease,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
-import { notifyNtfy } from "../server/polyfill-connectors-runtime.ts";
-import type { ManifestManagedConnectors } from "./browser-surface-leases.ts";
-import { getOne, referenceQueries } from "../lib/db.ts";
+import { getOne, iterateDynamicSqlAcknowledged, referenceQueries } from "../lib/db.ts";
 import { createTraceContext, emitSpineEvent, getRunTerminalStatus, type SpineTraceContext } from "../lib/spine.ts";
 import {
   approveOwnerDeviceAuthorization,
@@ -40,24 +38,30 @@ import {
   introspect,
   OWNER_TOKEN_TTL_MS,
 } from "../server/auth.ts";
+import {
+  type ConnectorInstallStore,
+  createConnectorInstallStore,
+  inspectActiveConnector,
+} from "../server/connector-install/index.ts";
+import {
+  createFileLocalConnectorSourceStore,
+  inspectActiveLocalConnectorSource,
+  type LocalConnectorSourceStore,
+} from "../server/connector-install/local-source.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import {
   assertConnectorLifecycleAvailable,
   connectorLifecycleDataDir,
   withConnectorLifecycleLock,
 } from "../server/connector-lifecycle-lock.ts";
-import { CONNECTOR_RUNTIME_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import {
   getConnectorSummaryEvidence,
   reconcileDirtyConnectorSummaryEvidence,
 } from "../server/connector-summary-read-model.ts";
+import { notifyNtfy } from "../server/polyfill-connectors-runtime.ts";
 import { isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
 import { getSyncState } from "../server/records.ts";
-import {
-  createFileLocalConnectorSourceStore,
-  inspectActiveLocalConnectorSource,
-  type LocalConnectorSourceStore,
-} from "../server/connector-install/local-source.ts";
+import { CONNECTOR_RUNTIME_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import type { BrowserSurfaceLeaseStore } from "../server/stores/browser-surface-lease-store.ts";
 import {
   type BrowserSurfaceReplacementReceiptStore,
@@ -80,6 +84,11 @@ import {
   type SourceWebhookRunReceipt,
 } from "../server/stores/scheduler-store.ts";
 import {
+  type BrowserBindingOwnerAction,
+  type BrowserBindingPlacementRefused,
+  refuseBindingControl,
+} from "./binding-control.ts";
+import {
   type BrowserSurfaceRuntimeInventorySnapshot,
   type BrowserSurfaceRuntimeSurfaceObservation,
   observeDynamicBrowserSurfaceRuntimeInventory,
@@ -90,13 +99,9 @@ import {
   type BrowserSurfaceReadinessProbe,
   createBrowserSurfaceManager,
 } from "./browser-surface/index.ts";
+import type { ManifestManagedConnectors } from "./browser-surface-leases.ts";
 import type { ConnectorEnvironmentBinding } from "./connector-child-environment.ts";
-import { runConnector } from "./index.ts";
-import {
-  type ConnectorInstallStore,
-  createConnectorInstallStore,
-  inspectActiveConnector,
-} from "../server/connector-install/index.ts";
+import { runConnector, type RuntimeRunConnectorOptions } from "./index.ts";
 import {
   classifyRecoveryGap,
   filterFreshPressureRows,
@@ -114,6 +119,7 @@ import {
   type RunAutomationMode,
   type RunTriggerKind,
 } from "./run-automation-policy.ts";
+import type { ProtectedBrowserSurfaceLifecycle } from "./run-contracts.ts";
 import { type SatisfactionEvidenceBag, satisfiedOwnerActions } from "./satisfaction-watcher.ts";
 import type { RunRecord } from "./scheduler.ts";
 import { type BackoffDecision, computeNextRunWithBackoff } from "./scheduler-backoff.ts";
@@ -290,8 +296,6 @@ export interface RunNowOptions {
    * `deriveCollectionState`.
    */
   fullRefresh?: boolean;
-  /** Atomically clear owner sync state with admission of this full-refresh run. */
-  resetState?: boolean;
   manifest?: ConnectorManifest;
   /** Authenticated subject used by the server admission boundary. */
   ownerSubjectId?: string;
@@ -299,6 +303,8 @@ export interface RunNowOptions {
   priorityClass?: "interactive" | "background";
   recoveryContinuationDepth?: number;
   recoveryOnly?: boolean;
+  /** Atomically clear owner sync state with admission of this full-refresh run. */
+  resetState?: boolean;
   resources?: Readonly<Record<string, readonly string[]>>;
   rsUrl?: string;
   /**
@@ -330,8 +336,14 @@ export interface RunNowResult {
    * reason is known.
    */
   readonly browser_surface_failure?: { readonly code: string; readonly message: string };
+  readonly owner_action?: BrowserBindingOwnerAction;
+  readonly placement_failure?: BrowserBindingPlacementRefused["failure"];
   readonly run_id: string;
-  readonly status?: "started" | BrowserSurfaceProjection["browser_surface_status"];
+  readonly status?:
+    | "placement_refused"
+    | "owner_action_required"
+    | "started"
+    | BrowserSurfaceProjection["browser_surface_status"];
   readonly trace_id: string;
   readonly trigger_kind?: RunTriggerKind;
 }
@@ -500,8 +512,8 @@ export type ConnectorPathResolver = (
 ) => Promise<string | null> | string | null;
 
 export interface ConnectorRunSource {
-  readonly connector_key?: string;
   readonly connector_id?: string;
+  readonly connector_key?: string;
   readonly id: string;
   readonly kind: string;
   readonly source_id?: string;
@@ -552,14 +564,6 @@ export interface ControllerOptions {
   }) => Promise<void> | void;
   /** Awaited before a managed surface lease becomes reusable after run cleanup. */
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
-  /**
-   * Resolves the host allocator's recorded start failure (code + message) for a
-   * run whose browser-surface lease just went surface_failed. Wired to the host
-   * allocator's `lastStartFailure` in host mode; undefined in dynamic/local mode.
-   */
-  describeBrowserSurfaceStartFailure?: (args: {
-    readonly runId: string;
-  }) => { readonly code: string; readonly message: string } | undefined;
   /**
    * Awaited before the runtime commits an interaction timeout. The reference
    * server uses this to restore (or retire) a presentation surface before a
@@ -615,23 +619,23 @@ export interface ControllerOptions {
   /** Injectable sleep for the reclaim retry delay. Defaults to setTimeout. Tests inject a synchronous no-op. */
   browserSurfaceSleep?: (ms: number) => Promise<void>;
   connectorPathResolver?: ConnectorPathResolver;
-  /** Separate developer-local source selection store. */
-  localConnectorSourceStore?: LocalConnectorSourceStore;
+  /**
+   * Resolves the host allocator's recorded start failure (code + message) for a
+   * run whose browser-surface lease just went surface_failed. Wired to the host
+   * allocator's `lastStartFailure` in host mode; undefined in dynamic/local mode.
+   */
+  describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   // Optional durable detail-gap store override; defaults to the configured
   // storage-backed singleton. The controller reads pending *source-pressure*
   // gaps from it so the schedule projection can surface `cooling_off` honestly
   // while a connection is governed by the cross-run source-pressure cooldown.
   // Tests substitute a fake to drive the projection without DB state.
   detailGapStore?: ConnectorDetailGapReadStore;
+  /** Separate developer-local source selection store. */
+  localConnectorSourceStore?: LocalConnectorSourceStore;
   logger?: ControllerLogger;
-  /**
-   * Optional credential lifecycle transition called after a connector run that
-   * actually used a stored static secret reports a definitive provider
-   * rejection. The controller owns the timing because it alone knows both
-   * facts: the per-run secret env was injected, and the terminal connector
-   * result carried `connector_error.code === "credential_rejected"`.
-   */
-  markStaticSecretCredentialRejected?: MarkStaticSecretCredentialRejected;
   /**
    * Maximum wall-clock milliseconds a single run may remain active before the
    * watchdog force-finalizes it with a `run.failed` (reason: `run_timed_out`).
@@ -650,6 +654,7 @@ export interface ControllerOptions {
   maxRunWallClockMs?: number;
   ownerClientId?: string;
   ownerSubjectId?: string;
+  protectedBrowserSurfaceLifecycle?: ProtectedBrowserSurfaceLifecycle;
   /** Resolves the persisted owner of an exact admitted connection after restart. */
   resolveOwnerSubjectIdForConnectorInstance?: (connectorInstanceId: string) => Promise<string | null>;
   /**
@@ -689,6 +694,7 @@ export interface ControllerOptions {
     selfCallRsUrl?: string | null;
     selfCallReferenceBaseUrl?: string | null;
   };
+  runUploadLifetimeFactory?: import("./run-upload-lifetime.ts").RunUploadLifetimeFactory;
   scheduler?: unknown;
   // Optional store override; defaults to the configured storage-backed singleton.
   // Tests use this to substitute fakes without touching module-scoped state.
@@ -774,15 +780,6 @@ export type StaticSecretRunEnvResolver = (args: {
   readonly connectorInstanceId: string;
   readonly ownerSubjectId: string;
 }) => Promise<Record<string, string> | null> | Record<string, string> | null;
-
-export type MarkStaticSecretCredentialRejected = (args: {
-  readonly connectorId: string;
-  readonly connectorInstanceId: string;
-  readonly ownerSubjectId: string;
-  readonly reason: string | null;
-  readonly rejectedAt: string;
-  readonly runId: string;
-}) => Promise<void> | void;
 
 export interface Controller {
   autoResumeSatisfiedActions: (input: AutoResumeSatisfiedActionsInput) => Promise<AutoResumeSatisfiedActionsResult>;
@@ -875,6 +872,18 @@ export interface Controller {
   getBrowserSurfaceRuntimeManagement: (connectorId: string) => BrowserSurfaceRuntimeManagement;
   getPendingInteraction: (runId: string) => PendingInteractionProjection | null;
   getSchedule: (connectorId: string, options?: ConnectorInstanceOptions) => Promise<ScheduleApi | null>;
+  /**
+   * Presence-only answer to "would `runNow` find an implementation for these
+   * connectors?" — the same local-source → install → path-resolver order
+   * `runNow` uses, without starting a run or hashing install bytes. Lets owner
+   * summaries say a connector is not installed before the owner taps Sync.
+   * Batched so a summary page costs one install-store read, not one per row,
+   * and read-only so a summary GET stays write-free. Optional so test doubles
+   * that never project summaries need not supply it.
+   */
+  inspectConnectorImplementations?: (
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ) => Promise<ReadonlyMap<string, ConnectorImplementationState>>;
   isNeedsHuman: (connectorId: string, options?: ConnectorInstanceOptions) => boolean;
   issueRuntimeOwnerToken: (ownerSubjectId?: string) => Promise<string>;
   listBrowserSurfaceRunProjections: () => BrowserSurfaceRunProjection[];
@@ -907,18 +916,6 @@ export interface Controller {
   ) => Promise<BrowserSurfaceRuntimeSurfaceObservation>;
   promoteBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
   reconcileBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
-  /**
-   * Presence-only answer to "would `runNow` find an implementation for these
-   * connectors?" — the same local-source → install → path-resolver order
-   * `runNow` uses, without starting a run or hashing install bytes. Lets owner
-   * summaries say a connector is not installed before the owner taps Sync.
-   * Batched so a summary page costs one install-store read, not one per row,
-   * and read-only so a summary GET stays write-free. Optional so test doubles
-   * that never project summaries need not supply it.
-   */
-  inspectConnectorImplementations?: (
-    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
-  ) => Promise<ReadonlyMap<string, ConnectorImplementationState>>;
   respondToInteraction: (runId: string, input?: RunInteractionResponseInput) => RunInteractionAck;
   runNow: (connectorId: string, options?: RunNowOptions) => Promise<RunNowResult>;
   setScheduleEnabled: (
@@ -1462,9 +1459,7 @@ export async function resolveActiveInstallFirstConnectorPath(
   if (active.status === "invalid") {
     throw new Error(`Active connector install is invalid for ${connectorId}: ${active.reason}`);
   }
-  return active.status === "active"
-    ? active.path
-    : resolveDefaultConnectorPath(connectorId, manifest);
+  return active.status === "active" ? active.path : resolveDefaultConnectorPath(connectorId, manifest);
 }
 
 // Reset cached manifest/path discovery. Tests rewrite manifest files on
@@ -2550,8 +2545,20 @@ export function createController(opts: ControllerOptions = {}): Controller {
   // installs the default HTTP probe; tests opt in only when they exercise
   // probe behavior. This keeps the readiness gate from running against
   // a fake n.eko url in every controller test.
+  const configuredReadinessProbe = opts.browserSurfaceReadinessProbe ?? null;
   const browserSurfaceReadinessProbe: BrowserSurfaceReadinessProbe | null =
-    opts.browserSurfaceReadinessProbe === undefined ? null : opts.browserSurfaceReadinessProbe;
+    opts.protectedBrowserSurfaceLifecycle && configuredReadinessProbe
+      ? {
+          probe: async (surface) => {
+            try {
+              const result = await configuredReadinessProbe.probe(surface);
+              return result.ok ? result : { ...result, detail: "Protected browser readiness failed" };
+            } catch {
+              return refuseBindingControl();
+            }
+          },
+        }
+      : configuredReadinessProbe;
   // biome-ignore lint/style/useDestructuring: Explicit property or positional access documents this compatibility boundary.
   const browserSurfaceMidWaitPollIntervalMs = opts.browserSurfaceMidWaitPollIntervalMs;
   const runConnectorImpl = opts.runConnectorImpl || runConnector;
@@ -2585,6 +2592,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
     return 14_400_000; // 4 hour default (>2x longest observed legitimate run)
   })();
+  if (opts.runUploadLifetimeFactory && (!Number.isSafeInteger(maxRunWallClockMs) || maxRunWallClockMs <= 0)) {
+    throw new Error("Run upload issuance requires a finite positive maxRunWallClockMs");
+  }
+  const uploadLifetimes = new Map<string, import("./run-upload-lifetime.ts").RunUploadLifetime>();
   const pendingBrowserSurfaceLaunches = new Map<string, RunNowOptions>();
   const activeRunTraceContexts = new Map<string, SpineTraceContext>();
   // Per-run owner-cancel controllers, keyed by run_id. `runNow` creates one
@@ -2860,6 +2871,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
     listPersistedActiveRuns,
     log,
     pendingBrowserSurfaceLaunches,
+    protectedBrowserLifecycle: Boolean(opts.protectedBrowserSurfaceLifecycle),
+    protectedLifecycle: opts.protectedBrowserSurfaceLifecycle,
     resolveOwnerSubjectIdForConnectorInstance: async (connectorInstanceId) =>
       (await opts.resolveOwnerSubjectIdForConnectorInstance?.(connectorInstanceId)) ?? null,
     scheduleRun(connectorId, options, onFailure) {
@@ -3270,6 +3283,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly connectorId: string;
     readonly connectorInstanceId: string;
     readonly key: string;
+    readonly ownerSubjectId: string;
     readonly runId: string;
     readonly resetState?: boolean;
     readonly sourceWebhookEvent?: SourceWebhookRunEvent;
@@ -3277,7 +3291,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly startedAt: string;
     readonly traceContext: SpineTraceContext;
   }): Promise<
-    | { readonly kind: "admitted"; readonly streamingNonce: string | null }
+    | { readonly cancellation: AbortController; readonly kind: "admitted"; readonly streamingNonce: string | null }
     | { readonly kind: "replay"; readonly receipt: SourceWebhookRunReceipt }
   > {
     // Advance the fencing token only after the durable gate accepts the row.
@@ -3323,15 +3337,13 @@ export function createController(opts: ControllerOptions = {}): Controller {
         return { kind: "replay", receipt: replayReceipt };
       }
       inserted = true;
-    } else {
-      if (input.resetState) {
-        if (!schedulerStore.resetStateAndUpsertActiveRun) {
-          throw new ControllerError("Atomic source reset is unavailable.", "reset_state_unavailable");
-        }
-        inserted = await schedulerStore.resetStateAndUpsertActiveRun(activeRun);
-      } else {
-        inserted = await persistActiveRun(activeRun);
+    } else if (input.resetState) {
+      if (!schedulerStore.resetStateAndUpsertActiveRun) {
+        throw new ControllerError("Atomic source reset is unavailable.", "reset_state_unavailable");
       }
+      inserted = await schedulerStore.resetStateAndUpsertActiveRun(activeRun);
+    } else {
+      inserted = await persistActiveRun(activeRun);
     }
     if (inserted === false) {
       throw new ControllerError(`Connector already has an active run: ${input.runId}`, "run_already_active", {
@@ -3352,7 +3364,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connector_id: input.connectorId,
       pending: null,
     });
-    return { kind: "admitted", streamingNonce: mintStreamingRegistrationNonce(input.runId) };
+    const streamingNonce = mintStreamingRegistrationNonce(input.runId);
+    const cancellation = new AbortController();
+    if (opts.protectedBrowserSurfaceLifecycle) {
+      // Protected preparation can await owner policy or allocator I/O before a
+      // lease exists. Cancellation must be addressable as soon as admission is
+      // registered; legacy runs register it only after acquiring their surface.
+      protectedRunIds.add(input.runId);
+      activeRunCancellations.set(input.runId, { abort: cancellation, ownerSubjectId: input.ownerSubjectId });
+    }
+    return { cancellation, kind: "admitted", streamingNonce };
   }
 
   function clearStreamingNonceForRun(runId: string): void {
@@ -3381,7 +3402,29 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
   }
 
-  async function finalizeRunCleanup(input: {
+  const protectedCleanups = new Map<string, Promise<void>>();
+  const protectedRunIds = new Set<string>();
+  function finalizeRunCleanup(input: Parameters<typeof performRunCleanup>[0]): Promise<void> {
+    if (!opts.protectedBrowserSurfaceLifecycle) {
+      return performRunCleanup(input);
+    }
+    const existing = protectedCleanups.get(input.runId);
+    if (existing) {
+      return existing;
+    }
+    const pending = performRunCleanup(input);
+    protectedCleanups.set(input.runId, pending);
+    pending.then(
+      () => {
+        protectedCleanups.delete(input.runId);
+        protectedRunIds.delete(input.runId);
+      },
+      () => undefined
+    );
+    return pending;
+  }
+
+  async function performRunCleanup(input: {
     readonly browserSurfaceLease: BrowserSurfaceLease | null;
     readonly connectorId: string;
     readonly connectorInstanceId: string;
@@ -3406,6 +3449,15 @@ export function createController(opts: ControllerOptions = {}): Controller {
       settledRunIds.add(input.runId);
       return;
     }
+    await uploadLifetimes.get(input.runId)?.close();
+    uploadLifetimes.delete(input.runId);
+    await browserSurface.closeProtectedRun({
+      connectorId: input.connectorId,
+      connectorInstanceId: input.connectorInstanceId,
+      lease: input.browserSurfaceLease,
+      runId: input.runId,
+      traceContext: input.traceContext,
+    });
     // Clear the watchdog timer for this run so a normal completion that beats
     // the deadline never fires the watchdog afterwards.
     const watchdogTimer = activeRunWatchdogTimers.get(input.runId);
@@ -3435,10 +3487,14 @@ export function createController(opts: ControllerOptions = {}): Controller {
     try {
       activeRunTraceContexts.delete(input.runId);
       activeRunCancellations.delete(input.runId);
-      clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
-      });
+      if (opts.protectedBrowserSurfaceLifecycle) {
+        await clearPersistedActiveRun(input.connectorInstanceId, input.runId);
+      } else {
+        clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
+        });
+      }
       try {
         await opts.beforeRunCleanup?.({ runId: input.runId });
       } catch (err) {
@@ -3453,9 +3509,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
           const message = err instanceof Error ? err.message : String(err);
           log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
         }
-        await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+        await browserSurface.releaseLease(
+          input.browserSurfaceLease,
+          input.connectorId,
+          input.runId,
+          input.traceContext
+        );
       }
       resolveCancelledInteraction(input.runId);
+      await opts.protectedBrowserSurfaceLifecycle?.retire?.(input.runId);
+      protectedRunIds.delete(input.runId);
     } finally {
       // Keep shutdown drain tracking until lease release has been persisted.
       activeRunPromises.delete(input.runId);
@@ -3480,7 +3543,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (!existing) {
       return;
     }
-    const isStale = settledRunIds.has(existing.run_id) || !activeRunPromises.has(existing.run_id);
+    const isStale =
+      !protectedRunIds.has(existing.run_id) &&
+      (settledRunIds.has(existing.run_id) || !activeRunPromises.has(existing.run_id));
     if (isStale) {
       log.warn?.(
         `[controller] reclaiming stale activeRuns entry for ${existing.connector_id} (run_id=${existing.run_id}); allowing new run`
@@ -3532,6 +3597,18 @@ export function createController(opts: ControllerOptions = {}): Controller {
       return;
     }
     const existingConnectorInstanceId = existing.connector_instance_id ?? existing.connector_id;
+    if (opts.protectedBrowserSurfaceLifecycle) {
+      const sql =
+        "SELECT status FROM spine_events WHERE run_id = ? AND event_type = 'run.browser_binding_cleanup' ORDER BY event_seq DESC LIMIT 1";
+      const closure = isPostgresStorageBackend()
+        ? (await postgresQuery<{ status: string }>(sql.replace("?", "$1"), [existing.run_id])).rows[0]
+        : [...iterateDynamicSqlAcknowledged<{ status: string }>(sql, [existing.run_id])][0];
+      if (!(closure && ["stopped", "not_acquired"].includes(closure.status))) {
+        throw new ControllerError("Protected browser cleanup remains unverified", "run_already_active", {
+          runId: existing.run_id,
+        });
+      }
+    }
     if (await runAlreadyTerminal(existing.run_id, existingConnectorInstanceId)) {
       log.warn?.(
         `[controller] reclaiming stale controller_active_runs row for ${existing.connector_id} ` +
@@ -4030,9 +4107,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (connectors.length === 0) {
       return states;
     }
-    const installed = new Set(
-      (await activeConnectorInstallStore.listActive()).map((record) => record.connectorId)
-    );
+    const installed = new Set((await activeConnectorInstallStore.listActive()).map((record) => record.connectorId));
     // Developer-local sources are rare; skip the per-connector selection
     // lookup entirely when none are registered.
     const hasLocalSources = (await localSourceStore.list()).length > 0;
@@ -4060,7 +4135,11 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     options: RunNowOptions,
     key: string
-  ): Promise<{ readonly connectorPath: string; readonly manifest: ConnectorManifest; readonly runSource?: ConnectorRunSource }> {
+  ): Promise<{
+    readonly connectorPath: string;
+    readonly manifest: ConnectorManifest;
+    readonly runSource?: ConnectorRunSource;
+  }> {
     await assertNotSourcePressureCoolingOff(connectorId, options);
 
     const activeLocalSource = await inspectActiveLocalConnectorSource(localSourceStore, connectorId);
@@ -4071,7 +4150,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
     }
     const activeInstall =
-      activeLocalSource.status === "none" ? await inspectActiveConnector(activeConnectorInstallStore, connectorId) : null;
+      activeLocalSource.status === "none"
+        ? await inspectActiveConnector(activeConnectorInstallStore, connectorId)
+        : null;
     if (activeInstall?.status === "invalid") {
       throw new ControllerError(
         `Active connector install is invalid for ${connectorId}: ${activeInstall.reason}`,
@@ -4082,8 +4163,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
       activeLocalSource.status === "active"
         ? (activeLocalSource.record.manifest as ConnectorManifest)
         : activeInstall?.status === "active"
-        ? activeInstall.record.manifest as ConnectorManifest
-        : options.manifest ?? (await getConnectorManifest(connectorId));
+          ? (activeInstall.record.manifest as ConnectorManifest)
+          : (options.manifest ?? (await getConnectorManifest(connectorId)));
     if (!manifest) {
       throw new ControllerError(`Unknown connector: ${connectorId}`, "not_found");
     }
@@ -4100,8 +4181,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
       activeLocalSource.status === "active"
         ? activeLocalSource.path
         : activeInstall?.status === "active"
-        ? activeInstall.path
-        : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
+          ? activeInstall.path
+          : await Promise.resolve(resolveConnectorPath(connectorId, manifest, options));
     if (!connectorPath) {
       throw new ControllerError(
         `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
@@ -4112,9 +4193,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     return {
       connectorPath,
       manifest,
-      ...(activeLocalSource.status === "active"
-        ? { runSource: { ...activeLocalSource.source, id: connectorId } }
-        : {}),
+      ...(activeLocalSource.status === "active" ? { runSource: { ...activeLocalSource.source, id: connectorId } } : {}),
     };
   }
 
@@ -4295,9 +4374,6 @@ export function createController(opts: ControllerOptions = {}): Controller {
           ownerSubjectId: runOwnerSubjectId,
         })
       : null;
-    // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-    const usedStaticSecret = Boolean(staticSecretEnv && Object.keys(staticSecretEnv).length > 0);
-
     // State must be read from the connection-instance namespace, not by
     // caller convention. `getSyncState` keys storage off the *storage target*
     // (its first argument); a bare `connectorId` string falls back to the
@@ -4331,6 +4407,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connectorId: admittedConnectorId,
       connectorInstanceId,
       key,
+      ownerSubjectId: runOwnerSubjectId,
       runId,
       ...(options.resetState ? { resetState: true } : {}),
       ...(sourceWebhookEvent ? { sourceWebhookEvent, sourceWebhookOwnerSubjectId: runOwnerSubjectId } : {}),
@@ -4340,22 +4417,52 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (bookkeeping.kind === "replay") {
       return sourceWebhookReceiptRunHandle(bookkeeping.receipt);
     }
-    const { streamingNonce } = bookkeeping;
+    const { cancellation, streamingNonce } = bookkeeping;
+    const uploadLifetime = opts.runUploadLifetimeFactory?.({
+      connectionId: connectorInstanceId,
+      connectorId: admittedConnectorId,
+      expiresAt: Date.parse(startedAt) + maxRunWallClockMs,
+      ownerId: runOwnerSubjectId,
+      runId,
+    });
+    if (uploadLifetime) {
+      uploadLifetimes.set(runId, uploadLifetime);
+    }
     let browserSurfaceLease: BrowserSurfaceLease | null = null;
     let browserSurfaceEnv: Record<string, string> | null = null;
+    let browserSurfaceHandoff:
+      | Pick<RuntimeRunConnectorOptions, "beforeBrowserSurfaceHandoff" | "observeBrowserSurfaceAuthority">
+      | undefined;
     try {
-      const acquireResult = browserSurfaceLeaseManager?.isManagedConnector(connectorId)
-        ? await browserSurface.acquireManagedBrowserSurfaceForRun({
-            automationMetadata,
-            connectorId,
-            connectorInstanceId,
-            manifest,
-            options,
-            runId,
-            traceContext,
-          })
-        : { env: null, kind: "ready" as const, lease: null };
+      const acquireResult = await browserSurface.acquireForRun(
+        { automationMetadata, connectorId, connectorInstanceId, manifest, options, runId, traceContext },
+        cancellation.signal
+      );
       if (acquireResult.kind === "early_return") {
+        if (
+          acquireResult.result.status === "placement_refused" ||
+          acquireResult.result.status === "owner_action_required"
+        ) {
+          await emitSpineEvent({
+            actor_id: connectorId,
+            actor_type: "runtime",
+            data: {
+              connection_id: connectorInstanceId,
+              connector_instance_id: connectorInstanceId,
+              ...(acquireResult.result.placement_failure
+                ? { placement_failure: acquireResult.result.placement_failure }
+                : {}),
+              ...(acquireResult.result.owner_action ? { owner_action: acquireResult.result.owner_action } : {}),
+            },
+            event_type: `run.${acquireResult.result.status}`,
+            object_id: runId,
+            object_type: "run",
+            run_id: runId,
+            scenario_id: traceContext.scenario_id,
+            status: acquireResult.result.status,
+            trace_id: traceContext.trace_id,
+          });
+        }
         await finalizeRunCleanup({
           browserSurfaceLease: null,
           connectorId,
@@ -4368,6 +4475,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
       }
       browserSurfaceLease = acquireResult.lease;
       browserSurfaceEnv = acquireResult.env;
+      browserSurfaceHandoff = acquireResult.runtimeHandoff;
     } catch (err) {
       await finalizeRunCleanup({
         browserSurfaceLease: null,
@@ -4387,9 +4495,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // Per-run owner-cancel controller. Aborting this signal requests
     // cancellation of only this run; the runtime cooperatively terminates the
     // connector child. Cleared in finalizeRunCleanup when the run settles.
-    const cancellation = new AbortController();
-    activeRunCancellations.set(runId, { abort: cancellation, ownerSubjectId: runOwnerSubjectId });
-
+    if (!opts.protectedBrowserSurfaceLifecycle) {
+      activeRunCancellations.set(runId, { abort: cancellation, ownerSubjectId: runOwnerSubjectId });
+    }
     const connectorDisplayName = readManifestDisplayName(manifest) ?? connectorId;
     const baseInteractionHandler = (interaction: unknown) =>
       brokerInteraction(runId, connectorId, readRuntimeInteraction(interaction), {
@@ -4448,6 +4556,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     const runPromise = Promise.resolve()
       .then(() =>
         runConnectorImpl({
+          ...(uploadLifetime ? { runUploadLifetime: uploadLifetime } : {}),
           admitRunConnection: async (candidate) => {
             await Promise.resolve();
             if (
@@ -4477,6 +4586,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
           ...(scopedResources ? { scope: { streams: scopedResources } } : {}),
           automationMode: automationMetadata.automation_mode ?? null,
           browserSurfaceEnv,
+          ...browserSurfaceHandoff,
           cancelSignal: cancellation.signal,
           collectionMode,
           onInteraction: interactionHandler,
@@ -4528,28 +4638,6 @@ export function createController(opts: ControllerOptions = {}): Controller {
             runId,
             traceContext,
           });
-        }
-        if (
-          usedStaticSecret &&
-          result?.connector_error?.code === "credential_rejected" &&
-          opts.markStaticSecretCredentialRejected
-        ) {
-          try {
-            await opts.markStaticSecretCredentialRejected({
-              connectorId,
-              connectorInstanceId,
-              ownerSubjectId: runOwnerSubjectId,
-              reason: typeof result.connector_error.message === "string" ? result.connector_error.message : null,
-              rejectedAt: nowIso(),
-              runId,
-            });
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            log.warn?.(
-              `[controller] failed to mark stored credential rejected for ${connectorId} ` +
-                `(connection=${connectorInstanceId}, run_id=${runId}): ${message}`
-            );
-          }
         }
         return result;
       })
@@ -4606,14 +4694,20 @@ export function createController(opts: ControllerOptions = {}): Controller {
         }
       })
       .finally(async () => {
-        await finalizeRunCleanup({
-          browserSurfaceLease,
-          connectorId,
-          connectorInstanceId,
-          key,
-          runId,
-          traceContext,
-        });
+        try {
+          await finalizeRunCleanup({ browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext });
+        } catch (error) {
+          if (!opts.protectedBrowserSurfaceLifecycle) {
+            throw error;
+          }
+          const timer = activeRunWatchdogTimers.get(runId);
+          if (timer) {
+            clearTimeout(timer);
+          }
+          activeRunWatchdogTimers.delete(runId);
+          log.warn?.("[controller] protected browser cleanup unverified; run remains fenced");
+          return;
+        }
         // A run that SUCCEEDED answered whatever the human was needed for.
         // Clear the gate on proven success, whatever triggered the run.
         //
@@ -4864,14 +4958,50 @@ export function createController(opts: ControllerOptions = {}): Controller {
         }
       );
     }
+    const active = [...activeRuns.values()].find((candidateRun) => candidateRun.run_id === runId);
+    const trace = activeRunTraceContexts.get(runId);
+    const requestOwnedStop = (reconcile = false) =>
+      active && trace
+        ? browserSurface.requestProtectedStop(
+            {
+              connectorId: active.connector_id,
+              connectorInstanceId: active.connector_instance_id,
+              runId,
+              traceContext: trace,
+            },
+            reconcile
+          )
+        : opts.protectedBrowserSurfaceLifecycle?.release(runId, reconcile);
     if (cancellation.abort.signal.aborted) {
-      // Cancellation already requested for this run; the abort is idempotent.
+      // An admitted owner may explicitly reconcile failed exact-handle cleanup.
+      await uploadLifetimes.get(runId)?.close();
+      await requestOwnedStop(true);
+      const cleanup = protectedCleanups.get(runId);
+      if (cleanup) {
+        await cleanup.catch(() => undefined);
+        const entry = [...activeRuns.entries()].find(([, candidateActive]) => candidateActive.run_id === runId);
+        const traceContext = activeRunTraceContexts.get(runId);
+        if (entry && traceContext) {
+          protectedCleanups.delete(runId);
+          await finalizeRunCleanup({
+            browserSurfaceLease: null,
+            connectorId: entry[1].connector_id,
+            connectorInstanceId: entry[1].connector_instance_id,
+            key: entry[0],
+            runId,
+            traceContext,
+          });
+        }
+      }
+
       return { run_id: runId, status: "cancel_requested" };
     }
     // Abort only this run's signal. The runtime's abort listener emits
     // run.cancel_requested and terminates the connector child; the terminal
     // run.cancelled event lands when the child exits.
     cancellation.abort.abort();
+    await uploadLifetimes.get(runId)?.close();
+    await requestOwnedStop();
     return { run_id: runId, status: "cancel_requested" };
   }
 
@@ -4918,7 +5048,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // is the in-scope const from createController's options; exposing it makes
     // server/index.ts's scheduler seam + isManagedConnector predicate live.
     browserSurfaceLeaseManager,
-    cancelBrowserSurfaceRun: (runId: string) => browserSurface.cancelBrowserSurfaceRun(runId),
+    cancelBrowserSurfaceRun: async (runId: string) => {
+      await opts.protectedBrowserSurfaceLifecycle?.release(runId);
+      return await browserSurface.cancelBrowserSurfaceRun(runId);
+    },
     cancelRun,
     cleanupIdleBrowserSurfaces: () => browserSurface.cleanupIdleBrowserSurfaces(),
     clearNeedsHuman,
@@ -4932,9 +5065,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     getBrowserSurfaceRuntimeManagement: browserSurfaceRuntimeManagement,
     getPendingInteraction,
     getSchedule,
+    inspectConnectorImplementations,
     isNeedsHuman: (connectorId: string, options: ConnectorInstanceOptions = {}) =>
       needsHumanAttention.has(runtimeKey(connectorId, options.connectorInstanceId)),
-    inspectConnectorImplementations,
     issueRuntimeOwnerToken,
     listBrowserSurfaceRunProjections,
     listSchedules,

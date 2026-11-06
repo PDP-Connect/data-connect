@@ -19,6 +19,7 @@ import { ingestRecord } from "../server/records.ts";
 import { __setLexicalBackfillPhaseHookForTest } from "../server/search.ts";
 import { runSearchIndexDirtyReconcileRound } from "../server/search-index-reconcile.ts";
 import { countDirtySearchIndexScopes, isSearchIndexScopeDirty } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
@@ -36,7 +37,7 @@ function record(stream: string, key: string, subject: string) {
 }
 
 function manifestFor(connectorId: string) {
-  return {
+  const manifest = {
     capabilities: { human_interaction: [] },
     connector_id: connectorId,
     manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
@@ -58,6 +59,7 @@ function manifestFor(connectorId: string) {
       },
     ],
   };
+  return withFixtureSourceDeclaration(manifest, { sourceId: manifest.manifest_uri });
 }
 
 if (POSTGRES_URL) {

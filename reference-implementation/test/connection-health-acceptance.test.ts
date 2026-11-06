@@ -532,12 +532,17 @@ test("acceptance 7.1: expired prompt does not heal unresolved session-readiness 
     schedule: { enabled: true },
   });
 
-  assertHeadline(snap, "blocked");
-  assert.equal(snap.reason_code, "session_required");
+  // Oracle: Section 5.11. The connector's session-required text and its
+  // refresh_credentials hint are claims, so they cannot raise a browser-session
+  // reconnect prompt. The invariant this test protects is unchanged: an expired
+  // prompt must not heal the run, so the connection stays degraded, not healthy.
+  assertHeadline(snap, "degraded");
+  assert.equal(snap.reason_code, "connector_reported_failed");
   assert.equal(snap.axes.attention, "none");
   assert.equal(
-    snap.conditions?.find((c) => c.type === "CredentialsValid")?.remediation?.surface?.kind,
-    "browser_session"
+    snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false"),
+    undefined,
+    "an expired prompt must not create a browser-session reconnect condition from connector text"
   );
 });
 
@@ -1210,12 +1215,14 @@ test("acceptance 7.3: no manifest policy keeps the prior complete behaviour inta
 
 // ─── §10-C: a flattened auth failure must surface as a credential prompt ──────
 
-test("§10-C: a failed run whose known_gap is an auth 401 (flattened to a generic reason) drives a credential prompt, not a silent failure", () => {
-  // The live ChatGPT case: a terminal 401 is reported as the GENERIC
-  // `connector_reported_failed`, but the auth signal survives in the gap's
-  // `recovery_hint.action` + message. `firstDegradingKnownGapReason` must
-  // surface a credential reason so the headline routes to a reconnect path
-  // (and the §10-F escalation push) instead of a silent generic failure.
+test("§10-C: a connector-authored 401 in a flattened failed run does not drive a credential prompt (Section 5.11)", () => {
+  // Oracle: Collection Profile Section 5.11. The `refresh_credentials` hint and the
+  // "apiFetch got 401" text are connector claims. Neither proves a credential was
+  // rejected, and neither unlocks a reconnect prompt. Plausible defect caught: the
+  // projection re-derives a credential reason from connector text, which
+  // re-creates the prompt the contract removed. The run stays not-healthy with its
+  // generic reason. The owner sign-in route is separate (see the sign-in note in
+  // the report). Required backend: none (pure projection).
   const run = failedRun({
     failure_reason: "connector_reported_failed",
     known_gaps: [
@@ -1235,20 +1242,23 @@ test("§10-C: a failed run whose known_gap is an auth 401 (flattened to a generi
     lastSuccessfulRun: null,
     schedule: { enabled: true },
   });
-  // The credential signal is recovered: the connection is NOT silently
-  // generic-failed. It surfaces a credentials condition that drives the
-  // owner-facing reconnect path (the same `isCredentialReason` gate the
-  // dashboard reads for its "Reconnect" CTA).
   assert.notEqual(snap.state, "healthy");
+  assert.equal(snap.reason_code, "connector_reported_failed");
   const credentialCondition = snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false");
-  assert.ok(
+  assert.equal(
     credentialCondition,
-    `expected a CredentialsValid:false condition (reconnect prompt), got conditions: ${JSON.stringify(snap.conditions?.map((c) => `${c.type}:${c.status}`))}`
+    undefined,
+    `a connector-authored 401 must not produce a CredentialsValid:false prompt, got conditions: ${JSON.stringify(snap.conditions?.map((c) => `${c.type}:${c.status}`))}`
   );
-  assert.equal(credentialCondition.remediation?.action, "refresh_credentials");
 });
 
-test("§10-C: a browser-capable idle ChatGPT session-required gap projects session repair", () => {
+test("§10-C: a connector-authored session-required gap does not project session repair without runtime proof (Section 5.11)", () => {
+  // Oracle: Section 5.11. "chatgpt_session_required" text and a `refresh_credentials`
+  // hint are connector claims. The browser-session repair authority is a typed
+  // runtime provider proof (ProviderInvalidationProof), not this text. Plausible
+  // defect caught: idle browser-capable connections get a reconnect prompt from
+  // connector text alone. Positive typed-proof authority is covered by the
+  // `ref-control preserves exact typed provider-proof dedupe` test in this file.
   const run = chatGptSessionRequiredRun();
   const snap = projectConnectorSummaryConnectionHealth({
     browserSessionRepairCapable: true,
@@ -1268,12 +1278,12 @@ test("§10-C: a browser-capable idle ChatGPT session-required gap projects sessi
   });
 
   const credentialCondition = snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false");
-  assert.ok(credentialCondition, "session-required gap should produce a reconnect condition");
-  assert.equal(credentialCondition.reason, "session_required");
-  assert.equal(credentialCondition.remediation?.action, "refresh_credentials");
-  assert.equal(credentialCondition.remediation?.surface?.kind, "browser_session");
-  assert.equal(credentialCondition.remediation?.target, "browser_session");
-  assert.equal(credentialCondition.message, "The authenticated browser session is not active.");
+  assert.equal(
+    credentialCondition,
+    undefined,
+    "a connector-authored session-required gap must not produce a reconnect condition without runtime proof"
+  );
+  assert.notEqual(snap.state, "healthy");
 });
 
 test("§10-C: ref-control preserves exact typed provider-proof dedupe", () => {
@@ -1447,13 +1457,14 @@ test("§10-C control: a login-flow stall with a competing manual_action gap does
   );
 });
 
-test("§10-C control: a genuine 401/403 auth failure still drives a credential prompt EVEN alongside a competing manual_action gap", () => {
-  // Evidence-specific guard against over-correction: a competing
-  // manual_action gap must defer to a DEFINITIVE credential-rejection signal
-  // (401/403/authentication_error/credential_rejected/invalid_token), never
-  // suppress one. This is the control the memory/task instruction calls for —
-  // do not broadly suppress authentication_error or credential reasons when
-  // current credentials are actually invalid.
+test("§10-C control: a connector-authored 401 does not drive a prompt beside a competing manual_action gap; a durable runtime rejection still does (Section 5.11)", () => {
+  // Oracle: Section 5.11. The "apiFetch got 401" text is a connector claim against a
+  // present, unrejected stored credential, so it must not raise a prompt. The
+  // positive control is the runtime's own durable rejection
+  // (`credential.rejected: true`). That is runtime evidence, and it must still
+  // raise the prompt beside the competing manual_action gap. Plausible defect
+  // caught in the first half: connector text re-creating a rejection. Caught in
+  // the second half: over-suppressing a real rejection.
   const run = failedRun({
     failure_reason: "connector_reported_failed",
     known_gaps: [
@@ -1483,11 +1494,25 @@ test("§10-C control: a genuine 401/403 auth failure still drives a credential p
     schedule: { enabled: true },
   });
   const credentialCondition = snap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false");
-  assert.ok(
+  assert.equal(
     credentialCondition,
-    "a definitive 401 signal must still drive a credential prompt even alongside a competing manual_action gap"
+    undefined,
+    "a connector-authored 401 must not drive a credential prompt against a present, unrejected credential"
   );
-  assert.equal(credentialCondition.remediation?.action, "refresh_credentials");
+
+  const rejectedSnap = projectConnectorSummaryConnectionHealth({
+    credential: { capable: true, present: true, rejected: true },
+    freshness: FRESH,
+    lastRun: run,
+    lastSuccessfulRun: null,
+    schedule: { enabled: true },
+  });
+  const rejectedCondition = rejectedSnap.conditions?.find((c) => c.type === "CredentialsValid" && c.status === "false");
+  assert.ok(
+    rejectedCondition,
+    "a durable runtime credential rejection must still drive a prompt even alongside a competing manual_action gap"
+  );
+  assert.equal(rejectedCondition.remediation?.action, "refresh_credentials");
 });
 
 test("stale skip regression: a scheduler-generated attention-skip's own error text must not manufacture a credential_rejected condition for a present, unrejected credential", () => {

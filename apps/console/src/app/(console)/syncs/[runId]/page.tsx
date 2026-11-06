@@ -218,11 +218,14 @@ export default async function RunDetailPage({
   // Keep the label visible even when this timeline window has no connection id.
   const connectorLabel = (
     <>
-      <ConnectorMark
-        className="mr-2 inline-block size-5 align-[-0.2em]"
-        icon={connectorManifest?.icon}
-        name={connectorName}
-      />
+      {connectorId ? (
+        <ConnectorMark
+          spacing="after"
+          connectorId={connectorId}
+          icon={connectorManifest?.icon}
+          name={connectorName}
+        />
+      ) : null}
       {connectorId}
     </>
   );

@@ -12,7 +12,9 @@
 // (`mutation.requested`, `mutation.completed`, `mutation.rejected`,
 // `state.requested`, `state.served`/`state.updated`, `state.rejected`),
 // response-envelope shape, status codes, and error→HTTP mapping are all
-// unchanged.
+// unchanged by that extraction. Blob uploads now additionally accept a
+// purpose-bound run permission through their dedicated injected authorizer;
+// that permission is never classified as an owner token.
 //
 // Route registration order mirrors `buildRsApp` in `server/index.js`:
 //   1. POST /v1/blobs              — unconditional (always mounted)
@@ -87,12 +89,18 @@ import {
 } from "../../operations/rs-records-ingest/index.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import { HOSTED_INGEST_MAX_LINE_BYTES } from "../hosted-ingest-limits.ts";
+import type { RunUploadAuthority } from "../stores/run-upload-permission-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
+
+export type BlobUploadAccess =
+  | { readonly kind: "owner" }
+  | { readonly authority: RunUploadAuthority; readonly kind: "run-upload" };
 
 // Express-shaped surface, structurally typed to avoid pulling in the
 // transport's `.js` ambient types.
 
 interface RouteRequest {
+  blobUploadAccess?: BlobUploadAccess;
   readonly body?: unknown;
   readonly headers: Readonly<Record<string, unknown>>;
   readonly params: Readonly<Record<string, string>>;
@@ -236,10 +244,12 @@ async function ingestRecordClassified(
   ctx: MountRsMutationContext,
   namespace: ConnectorNamespaceLike,
   record: Record<string, unknown>,
-  runId: string | null
+  runId: string | null,
+  authenticatedOwnerSubjectId: string | undefined
 ): Promise<unknown> {
   try {
     return await ctx.ingestRecord(ctx.storageTargetForConnectorNamespace(namespace), record, {
+      authenticatedOwnerSubjectId,
       requireConnectionAdmission: Boolean(namespace.connectorInstanceId),
       runId,
     });
@@ -431,14 +441,22 @@ export interface MountRsMutationContext {
   readonly ingestRecord: (
     target: StorageTargetLike,
     record: unknown,
-    options?: { requireConnectionAdmission?: boolean; runId?: string | null }
+    options?: {
+      requireConnectionAdmission?: boolean;
+      runId?: string | null;
+      authenticatedOwnerSubjectId?: string | undefined;
+    }
   ) => Promise<unknown>;
   /** Optional common-path batch capability; hosts without it use the ordered fallback. */
   readonly ingestRecords?: (
     target: StorageTargetLike,
     records: readonly unknown[],
     afterRecord?: (record: unknown, outcome: unknown) => Promise<void>,
-    options?: { requireConnectionAdmission?: boolean; runId?: string | null }
+    options?: {
+      requireConnectionAdmission?: boolean;
+      runId?: string | null;
+      authenticatedOwnerSubjectId?: string | undefined;
+    }
   ) => Promise<readonly unknown[]>;
   readonly insertOrReplayRecordRejection?: (input: {
     auditActorId: string;
@@ -488,6 +506,7 @@ export interface MountRsMutationContext {
     mimeType: string;
     jsonPath?: string;
     data: Buffer;
+    uploadAccess: BlobUploadAccess;
   }) => Promise<unknown>;
   readonly putSyncState: (target: StorageTargetLike, map: unknown, args: unknown) => Promise<unknown>;
   readonly recordAcquisitionProvenance?: (record: {
@@ -509,6 +528,7 @@ export interface MountRsMutationContext {
     ctx: StateContext,
     err: Error & { code?: string; trace_id?: string; scenario_id?: string }
   ) => Promise<unknown>;
+  readonly requireBlobUpload: MiddlewareHandler;
   readonly requireClient: MiddlewareHandler;
   readonly requireCoreEndpointToken: MiddlewareHandler;
   readonly requireOwner: MiddlewareHandler;
@@ -522,7 +542,7 @@ export interface MountRsMutationContext {
   readonly resolveOwnerConnectorNamespace: (
     req: RouteRequest,
     connectorId: string,
-    opts?: { allowStatuses?: readonly string[]; connectorInstanceId?: string | null }
+    opts?: { allowStatuses?: readonly string[]; connectorInstanceId?: string | null; ownerSubjectId?: string | null }
   ) => Promise<ConnectorNamespaceLike>;
 
   // Capability: resolve a connector manifest by id
@@ -554,7 +574,7 @@ function insertHostedRejectionReceipt(
   if (!ctx.insertOrReplayRecordRejection) {
     throw new Error("hosted rejection receipt persistence is not configured");
   }
-  const ownerSubjectId = ctx.getOwnerTokenSubjectId?.(req) ?? req.tokenInfo?.subject_id;
+  const ownerSubjectId = ctx.getOwnerTokenSubjectId?.(req) ?? req.tokenInfo?.subject_id ?? undefined;
   if (!ownerSubjectId) {
     throw new Error("owner-token subject is not available for rejection receipt persistence");
   }
@@ -579,7 +599,8 @@ function insertHostedRejectionReceipt(
 // POST /v1/blobs
 //
 // Blob-upload semantics live in the canonical `rs.blobs.upload` operation
-// (operations/rs-blobs-upload). This route is a host adapter: it owns auth,
+// (operations/rs-blobs-upload). This route is a host adapter: it owns dedicated
+// owner-or-run-upload authorization,
 // request id, response writing, and concrete capability wiring. It MUST NOT
 // recompute query/Content-Type validation, manifest visibility, or response
 // envelope shaping locally. The host wires the existing
@@ -589,18 +610,36 @@ export function mountRsBlobsUpload(app: AppLike, ctx: MountRsMutationContext): v
   app.post(
     "/v1/blobs",
     { contract: "uploadBlob" },
-    ctx.requireToken,
-    ctx.requireOwner,
+    ctx.requireBlobUpload,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
+        const uploadAccess = req.blobUploadAccess;
+        if (!uploadAccess) {
+          throw Object.assign(new Error("Blob upload authorization required"), { code: "run_upload_denied" });
+        }
+        const runGrant = uploadAccess.kind === "run-upload" ? uploadAccess.authority.grant : null;
         const connectorInstanceId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_instance_id);
-        const resolveStorageNamespace = (connectorId: string) =>
-          connectorInstanceId
+        const resolveStorageNamespace = (connectorId: string) => {
+          if (runGrant) {
+            if (
+              canonicalizeConnectorId(connectorId) !== runGrant.connectorId ||
+              (connectorInstanceId && connectorInstanceId !== runGrant.connectionId)
+            ) {
+              throw Object.assign(new Error("Run upload permission denied"), { code: "run_upload_denied" });
+            }
+            return ctx.resolveOwnerConnectorNamespace(req, runGrant.connectorId, {
+              allowStatuses: ["active", "draft"],
+              connectorInstanceId: runGrant.connectionId,
+              ownerSubjectId: runGrant.ownerId,
+            });
+          }
+          return connectorInstanceId
             ? ctx.resolveOwnerConnectorNamespace(req, connectorId, {
                 allowStatuses: ["active", "draft"],
                 connectorInstanceId,
               })
             : ctx.resolveOwnerConnectorNamespace(req, connectorId);
+        };
         let manifestCache: {
           streams?: Array<{ name?: string | null }> | null;
         } | null = null;
@@ -626,6 +665,7 @@ export function mountRsBlobsUpload(app: AppLike, ctx: MountRsMutationContext): v
               mimeType,
               recordKey,
               stream,
+              uploadAccess,
             }) as ReturnType<BlobsUploadDependencies["persistBlob"]>;
           },
         };
@@ -1160,6 +1200,7 @@ export function mountRsRecordsIngest(app: AppLike, ctx: MountRsMutationContext):
     // Absent for owner/API ingestion that has no run concept — the fence is
     // opt-in and those callers are unaffected.
     const runId = ctx.resolveSingleConnectorIdQueryValue(req.query.run_id);
+    const authenticatedOwnerSubjectId = ctx.getOwnerTokenSubjectId?.(req) ?? req.tokenInfo?.subject_id ?? undefined;
     // parseLines is imported inside executeRecordsIngest; the line-count for
     // the mutation context must be computed here using the same parser.
     // Index.js imported `parseLines as parseIngestLines` from the operation
@@ -1204,7 +1245,7 @@ export function mountRsRecordsIngest(app: AppLike, ctx: MountRsMutationContext):
         },
         ingestRecord: async (cid: string, _cin: string | null, record: Record<string, unknown>) => {
           const namespace = storageNamespace ?? (await resolveAdmittedNamespace(cid, _cin));
-          const result = await ingestRecordClassified(ctx, namespace, record, runId);
+          const result = await ingestRecordClassified(ctx, namespace, record, runId, authenticatedOwnerSubjectId);
           if (ctx.getLatestAcquisitionBatchForConnection && namespace.connectorInstanceId) {
             acquisitionBatchPromise ??= Promise.resolve(
               ctx.getLatestAcquisitionBatchForConnection(namespace.connectorInstanceId)
@@ -1226,7 +1267,7 @@ export function mountRsRecordsIngest(app: AppLike, ctx: MountRsMutationContext):
           return insertHostedRejectionReceipt(ctx, req, input, namespace, runId, mutationContext.traceId);
         },
         markAcceptedRecordRejectionsStale: async (input) => {
-          const ownerSubjectId = ctx.getOwnerTokenSubjectId?.(req) ?? req.tokenInfo?.subject_id;
+          const ownerSubjectId = ctx.getOwnerTokenSubjectId?.(req) ?? req.tokenInfo?.subject_id ?? undefined;
           if (!(ctx.markAcceptedRecordRejectionsStale && ownerSubjectId)) {
             return;
           }
@@ -1282,7 +1323,11 @@ export function mountRsRecordsIngest(app: AppLike, ctx: MountRsMutationContext):
                   ctx.storageTargetForConnectorNamespace(namespace),
                   records,
                   afterRecord,
-                  { requireConnectionAdmission: Boolean(namespace.connectorInstanceId), runId }
+                  {
+                    authenticatedOwnerSubjectId,
+                    requireConnectionAdmission: Boolean(namespace.connectorInstanceId),
+                    runId,
+                  }
                 );
                 return mapBatchIngestOutcomes(records, outcomes);
               },

@@ -233,22 +233,15 @@ test("T1+T2: scheduled managed-connector run calls runManagedConnectorViaControl
   }
 });
 
-test("T2c: scheduled managed connector retries runtime-retryable terminal known gaps before recording failure", async () => {
+test("T2c: scheduled managed connector retries a runtime-owned retryable verdict before recording failure", async () => {
+  // Positive control. The verdict is the runtime's own (`runtime_retryable`),
+  // and the run has no connector terminal error. The scheduler must retry it.
   const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-retry-"));
   try {
     const connectorPath = writeDummyConnector(tmpDir);
     const connectorId = "chatgpt";
     const completedRuns: RunRecord[] = [];
     const controllerCalls: number[] = [];
-    const runtimeGap = {
-      kind: "run_failed",
-      message:
-        "chatgpt_preprogress_failure: runtime_exception: could not open browser profile: Protocol error (Network.setCacheDisabled): Internal server error, session closed.",
-      reason: "connector_reported_failed",
-      recovery_hint: { action: "retry_by_runtime", retryable: true },
-      severity: "actionable",
-      stream: null,
-    };
 
     const scheduler = createScheduler({
       connectors: [
@@ -270,11 +263,12 @@ test("T2c: scheduled managed connector retries runtime-retryable terminal known 
         controllerCalls.push(Date.now());
         if (controllerCalls.length === 1) {
           return {
-            // Runtime evidence, not a connector verdict: no connector_error.retryable
-            // marker, so the structured retry_by_runtime known_gap below decides.
-            connector_error: { message: String(runtimeGap.message) },
-            known_gaps: [runtimeGap],
+            // Runtime-owned verdict only. The adapter sets runtime_retryable when
+            // no connector terminal error exists, so connector_error is null here.
+            connector_error: null,
+            known_gaps: [],
             run_id: "run-runtime-race-001",
+            runtime_retryable: true,
             status: "failed",
             trace_id: "trace-runtime-race-001",
           };
@@ -306,14 +300,143 @@ test("T2c: scheduled managed connector retries runtime-retryable terminal known 
   }
 });
 
-test("T2d: a definitive session_required failure is NOT retried even with maxRetries>0 (no three-attempt burst)", async () => {
-  // Regression for the live steady-state burst: a scheduled ChatGPT run that
-  // fails with session_required must stop after ONE attempt. The gap here is
-  // deliberately shaped so the GENERIC retry classifier would retry it — it
-  // carries no `retryable: false` marker and no non-retryable failure/terminal
-  // reason — so the ONLY thing preventing a burst is the owner-auth-repair gate
-  // added to routeScheduledManagedRun. Removing that gate makes this fail with
-  // controllerCalls.length === 3.
+test("T2c-neg: a connector's own retry claim never starts a managed retry (no runtime verdict)", async () => {
+  // Negative control. `connector_error.retryable: true` and a retry_by_runtime
+  // known gap are connector claims. Section 5.11 says they never start a retry,
+  // and the runtime sets no `runtime_retryable` for this run. Exactly one attempt.
+  const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-claim-"));
+  try {
+    const connectorPath = writeDummyConnector(tmpDir);
+    const connectorId = "chatgpt";
+    const completedRuns: RunRecord[] = [];
+    const controllerCalls: number[] = [];
+    const connectorClaimGap = {
+      kind: "run_failed",
+      message: "chatgpt_preprogress_failure: runtime_exception: could not open browser profile.",
+      reason: "connector_reported_failed",
+      recovery_hint: { action: "retry_by_runtime", retryable: true },
+      severity: "actionable",
+      stream: null,
+    };
+
+    const scheduler = createScheduler({
+      connectors: [
+        {
+          connectorId,
+          connectorInstanceId: connectorId,
+          connectorPath,
+          intervalMs: 25,
+          manifest: BACKGROUND_SAFE_MANIFEST,
+          maxRetries: 2,
+          ownerSubjectId: "owner-managed",
+          ownerToken: "owner-token",
+        },
+      ],
+      onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+      onRunComplete: (record) => completedRuns.push(record),
+      rsUrl: "http://localhost.invalid",
+      runManagedConnectorViaController: () => {
+        controllerCalls.push(Date.now());
+        return {
+          connector_error: { message: String(connectorClaimGap.message), retryable: true },
+          known_gaps: [connectorClaimGap],
+          run_id: `run-connector-claim-${controllerCalls.length}`,
+          status: "failed",
+          trace_id: "trace-connector-claim",
+        };
+      },
+    });
+
+    try {
+      scheduler.start();
+      await waitFor(() => completedRuns.length >= 1, 5000);
+      scheduler.stop();
+
+      assert.equal(controllerCalls.length, 1, "a connector retry claim must not start a managed retry");
+      const [record] = completedRuns;
+      assert.ok(record, "a completed run record was captured");
+      assert.equal(record.status, "failed");
+      assert.equal(record.attempt, 1);
+    } finally {
+      scheduler.stop();
+    }
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+  }
+});
+
+test("T2e: a runtime-owned non-retryable verdict stops the managed scheduler retry with no connector error (seam propagation)", async () => {
+  // Causal seam test for the managed path. The managed adapter (server/index.ts)
+  // reports the runtime's own retry verdict as `runtime_retryable` whenever no
+  // connector terminal error exists. routeScheduledManagedRun must forward that
+  // verdict to shouldRetryRunFailure. Without the forward, a runtime `false`
+  // is dropped and the generic classifier retries a run the runtime already
+  // marked non-retryable. Seeded fault: remove the `runtime_retryable` field
+  // from the routeScheduledManagedRun call. The controller is called 3 times
+  // and this test fails on `3 !== 1`.
+  const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-runtime-verdict-"));
+  try {
+    const connectorPath = writeDummyConnector(tmpDir);
+    const connectorId = "chatgpt";
+    const completedRuns: RunRecord[] = [];
+    const controllerCalls: number[] = [];
+
+    const scheduler = createScheduler({
+      connectors: [
+        {
+          connectorId,
+          connectorInstanceId: connectorId,
+          connectorPath,
+          intervalMs: 25,
+          manifest: BACKGROUND_SAFE_MANIFEST,
+          maxRetries: 2,
+          ownerSubjectId: "owner-managed",
+          ownerToken: "owner-token",
+        },
+      ],
+      onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+      onRunComplete: (record) => completedRuns.push(record),
+      rsUrl: "http://localhost.invalid",
+      runManagedConnectorViaController: () => {
+        controllerCalls.push(Date.now());
+        return {
+          // No connector terminal error: the runtime's own verdict is the only
+          // retry signal, and it says do not retry.
+          connector_error: null,
+          known_gaps: [],
+          run_id: `run-runtime-nonretryable-${controllerCalls.length}`,
+          runtime_retryable: false,
+          status: "failed",
+          trace_id: "trace-runtime-nonretryable",
+        };
+      },
+    });
+
+    try {
+      scheduler.start();
+      await waitFor(() => completedRuns.length >= 1, 5000);
+      scheduler.stop();
+
+      assert.equal(controllerCalls.length, 1, "a runtime non-retryable verdict must not be retried by the scheduler");
+      const [record] = completedRuns;
+      assert.ok(record, "a completed run record was captured");
+      assert.equal(record.status, "failed");
+      assert.equal(record.attempt, 1, "terminal record should be the first and only attempt");
+    } finally {
+      scheduler.stop();
+    }
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+  }
+});
+
+test("T2d: a connector-claimed session_required failure is NOT retried and does NOT authorize owner repair", async () => {
+  // Negative control for Section 5.11. The run carries only a connector error
+  // (`connector_error`) whose text says session_required. There is no runtime
+  // verdict, no runtime failure reason and no runtime-authorized gap action. A
+  // connector error stops the scheduler retry (one attempt, no burst), and the
+  // connector's text must not mark the connection for owner repair. The
+  // runtime-recorded interaction control is the T2f test below.
   const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-authburst-"));
   try {
     const connectorPath = writeDummyConnector(tmpDir);
@@ -323,13 +446,12 @@ test("T2d: a definitive session_required failure is NOT retried even with maxRet
     const controllerCalls: number[] = [];
     const sessionGap = {
       kind: "run_failed",
-      // session_required message → managedRunRequiresOwnerAuthRepair === true.
+      // This text is a connector claim and authorizes no owner-repair action.
       message: "chatgpt_preprogress_failure: session_required: ChatGPT session is not active.",
       reason: "connector_reported_failed",
       severity: "actionable",
       stream: null,
-      // No recovery_hint.retryable marker → the generic classifier does NOT see
-      // this as non-retryable on its own.
+      // No runtime verdict or runtime-authorized recovery action exists.
     };
 
     const scheduler = createScheduler({
@@ -353,7 +475,7 @@ test("T2d: a definitive session_required failure is NOT retried even with maxRet
       runManagedConnectorViaController: () => {
         controllerCalls.push(Date.now());
         return {
-          // No connector_error.retryable:false — the classifier would retry.
+          // The terminal connector error stops retries, regardless of its text.
           connector_error: { message: String(sessionGap.message) },
           known_gaps: [sessionGap],
           run_id: `run-session-required-${controllerCalls.length}`,
@@ -374,7 +496,84 @@ test("T2d: a definitive session_required failure is NOT retried even with maxRet
       assert.ok(authRecord, "a completed run record was captured");
       assert.equal(authRecord.status, "failed");
       assert.equal(authRecord.attempt, 1, "terminal record should be the first and only attempt");
-      assert.equal(needsHuman.has(connectorInstanceId), true, "owner repair must be flagged");
+      assert.equal(
+        needsHuman.has(connectorInstanceId),
+        false,
+        "a connector-claimed session_required text must not authorize owner repair"
+      );
+    } finally {
+      scheduler.stop();
+    }
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+  }
+});
+
+test("T2f: a runtime-recorded cancelled credential interaction stops after one attempt and marks owner repair", async () => {
+  // Scheduler boundary control using the gap produced by
+  // runtime/index.ts::recordInteractionRecoveryGap after the owner cancels a
+  // credential interaction. This is not a connector recovery hint approved by
+  // the Section 5.11 gate, and it does not claim rejected credentials. This
+  // fixture tests consumption of a runtime-owned interaction result; it does
+  // not exercise the interaction handler end to end.
+  const tmpDir = mkdtempSync(join(tmpdir(), "sched-managed-runtime-auth-"));
+  try {
+    const connectorPath = writeDummyConnector(tmpDir);
+    const connectorInstanceId = "cin_chatgpt_runtime_auth";
+    const needsHuman = new Set();
+    const completedRuns: RunRecord[] = [];
+    const controllerCalls: number[] = [];
+    const runtimeAuthGap = {
+      kind: "interaction_required",
+      message: null,
+      reason: "interaction_cancelled",
+      recovery_hint: { action: "refresh_credentials" },
+      severity: "actionable",
+      stream: null,
+    };
+
+    const scheduler = createScheduler({
+      connectors: [
+        {
+          connectorId: "chatgpt",
+          connectorInstanceId,
+          connectorPath,
+          intervalMs: 25,
+          manifest: BACKGROUND_SAFE_MANIFEST,
+          maxRetries: 2,
+          ownerSubjectId: "owner-managed",
+          ownerToken: "owner-token",
+        },
+      ],
+      isNeedsHuman: (_connectorId, instanceId) => needsHuman.has(instanceId),
+      markNeedsHuman: (_connectorId, instanceId) => needsHuman.add(instanceId),
+      onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+      onRunComplete: (record) => completedRuns.push(record),
+      rsUrl: "http://localhost.invalid",
+      runManagedConnectorViaController: () => {
+        controllerCalls.push(Date.now());
+        return {
+          connector_error: null,
+          known_gaps: [runtimeAuthGap],
+          run_id: `run-runtime-auth-${controllerCalls.length}`,
+          runtime_retryable: false,
+          status: "failed",
+          trace_id: "trace-runtime-auth",
+        };
+      },
+    });
+
+    try {
+      scheduler.start();
+      await waitFor(() => completedRuns.length >= 1, 5000);
+      scheduler.stop();
+
+      assert.equal(controllerCalls.length, 1, "a runtime-classified owner-auth failure must not be retried");
+      const [record] = completedRuns;
+      assert.ok(record, "a completed run record was captured");
+      assert.equal(record.status, "failed");
+      assert.equal(record.attempt, 1, "terminal record should be the first and only attempt");
+      assert.equal(needsHuman.has(connectorInstanceId), true, "runtime-authorized owner repair must be flagged");
     } finally {
       scheduler.stop();
     }
@@ -1250,3 +1449,78 @@ test("T9: non-managed connector with no routing seam still uses runConnector (de
     rmSync(tmpDir, { force: true, recursive: true });
   }
 });
+
+for (const status of ["owner_action_required", "placement_refused"]) {
+  test(`runtime ${status} pauses scheduled dispatch without credential repair or retries`, async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "sched-binding-r28-"));
+    const needsHuman = new Set<string>();
+    const records: RunRecord[] = [];
+    let calls = 0;
+    const scheduler = createScheduler({
+      connectors: [
+        {
+          connectorId: "chatgpt",
+          connectorInstanceId: "binding-paused",
+          connectorPath: writeDummyConnector(tmpDir),
+          intervalMs: 25,
+          manifest: BACKGROUND_SAFE_MANIFEST,
+          maxRetries: 3,
+          ownerSubjectId: "owner-managed",
+          ownerToken: "fictional-owner",
+        },
+      ],
+      isNeedsHuman: (_connectorId, instanceId) => needsHuman.has(instanceId ?? ""),
+      markNeedsHuman: (_connectorId, instanceId) => {
+        needsHuman.add(instanceId ?? "");
+      },
+      onInteraction: async () => ({ accepted: true, status: "cancelled" }),
+      onRunComplete: (record) => {
+        records.push(record);
+      },
+      rsUrl: "http://localhost.invalid",
+      runManagedConnectorViaController: () => {
+        calls += 1;
+        return { run_id: "binding-runtime", status, trace_id: "binding-trace" };
+      },
+    });
+    try {
+      scheduler.start();
+      await waitFor(() => records.length >= 2, 5000);
+      assert.equal(calls, 1, "runtime placement/owner action cannot dispatch automatic retry churn");
+      assert.equal(records[0]?.status, "skipped");
+      assert.equal(JSON.stringify(records).includes("refresh_credentials"), false);
+      assert.equal(needsHuman.has("binding-paused"), true);
+    } finally {
+      scheduler.stop();
+      rmSync(tmpDir, { force: true, recursive: true });
+    }
+  });
+}
+
+for (const status of ["owner_action_required", "placement_refused"]) {
+  test(`managed adapter preserves runtime ${status} without waiting for a nonexistent child`, async () => {
+    let waits = 0;
+    const runner = createRunManagedConnectorViaController({
+      awaitRun: () => {
+        waits += 1;
+        return Promise.resolve("succeeded");
+      },
+      browserSurfaceLeaseManager: { isManagedConnector: () => true },
+      getActiveRun: () => null,
+      isNeedsHuman: () => false,
+      issueRuntimeOwnerToken: async () => "fictional-owner",
+      markNeedsHuman: () => undefined,
+      runNow: () => Promise.resolve({ run_id: "binding-runtime", status, trace_id: "binding-trace" }),
+    });
+    assert.ok(runner);
+    const result = await runner("chatgpt", {
+      connectorInstanceId: "binding",
+      ownerSubjectId: "owner",
+      ownerToken: "fictional-owner",
+      priorityClass: "background",
+      triggerKind: "scheduled",
+    });
+    assert.equal(result?.status, status);
+    assert.equal(waits, 0);
+  });
+}

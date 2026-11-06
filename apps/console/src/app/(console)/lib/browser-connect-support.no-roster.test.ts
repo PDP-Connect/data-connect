@@ -42,7 +42,7 @@ test("browser-connect-support.test.ts passes without the conformance roster", ()
     }
   );
   assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
-  assert.match(child.stdout, /^ok \d+ - the conformance roster is loaded exactly when this run expects it$/m);
+  assert.match(child.stdout, /^ok \d+ - known scaffold metadata remains available without the optional package$/m);
   assert.match(child.stdout, /^ok \d+ - a known scaffold stays browser-bound but cannot add an account$/m);
   assert.match(child.stdout, /^# fail 0$/m);
 });

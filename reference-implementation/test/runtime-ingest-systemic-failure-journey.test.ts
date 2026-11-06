@@ -12,6 +12,7 @@ import { startServer } from "../server/index.ts";
 import { __setIngestFaultHookForTest } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 const SYSTEMIC_PUBLIC_RE = /transient storage error|ingest_batch_storage_error/;
 
@@ -43,27 +44,30 @@ async function fetchJson(url: string, init?: RequestInit): Promise<{ body: unkno
 }
 
 function manifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    connector_key: connectorId,
-    display_name: "Runtime systemic failure journey",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: {
-          properties: { id: { type: "string" }, value: { type: "string" } },
-          required: ["id"],
-          type: "object",
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      connector_key: connectorId,
+      display_name: "Runtime systemic failure journey",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: {
+            properties: { id: { type: "string" }, value: { type: "string" } },
+            required: ["id"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${connectorId}` }
+  );
 }
 
 function runtimeManifest(connectorId: string): Parameters<typeof runConnector>[0]["manifest"] {

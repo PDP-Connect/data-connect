@@ -22,7 +22,7 @@ const MAX_INPUT_COORDINATE = 32_768;
 const MAX_INPUT_STRING_LENGTH = 512;
 const MAX_WIRE_SEQ = Number.MAX_SAFE_INTEGER;
 
-type FieldKind = "string" | "number" | "boolean";
+type FieldKind = "string" | "number" | "boolean" | "modifiers";
 
 interface FieldSpec {
   readonly kind: FieldKind;
@@ -70,11 +70,12 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
       action: { enum: new Set(["keydown", "keyup"]), kind: "string" },
       code: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
       key: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+      keysym: { kind: "number", max: 4_294_967_295, min: 0 },
       location: { kind: "number", max: 3, min: 0 },
-      modifiers: { kind: "number", max: 0b1111, min: 0 },
+      modifiers: { kind: "modifiers", max: 0b1111, min: 0 },
       repeat: { kind: "boolean" },
     },
-    required: new Set(["action", "key"]),
+    required: new Set(["action"]),
   },
   mouse: {
     fields: {
@@ -166,7 +167,25 @@ function invalidInput(): Error & { code: string } {
   return error;
 }
 
+function validateKeyboardModifiers(value: unknown): void {
+  if (Array.isArray(value)) {
+    const allowed = new Set<unknown>(["Alt", "Control", "Meta", "Shift"]);
+    if (value.length > 4 || new Set(value).size !== value.length || !value.every((item) => allowed.has(item))) {
+      throw invalidInput();
+    }
+    return;
+  }
+  // Preserve the legacy numeric-mask wire contract.
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 0b1111) {
+    throw invalidInput();
+  }
+}
+
 function validateField(key: string, value: unknown, spec: FieldSpec): void {
+  if (spec.kind === "modifiers") {
+    validateKeyboardModifiers(value);
+    return;
+  }
   if (spec.kind === "boolean") {
     if (typeof value !== "boolean") {
       throw invalidInput();
@@ -212,13 +231,20 @@ export function parseReferenceWireInputPayload(value: unknown): Record<string, u
     if (!fieldSpec) {
       throw invalidInput();
     }
-    // Every allowed field must be a primitive matching its declared kind;
-    // nested objects/arrays (e.g. `{ x: { nested: "x" } }`) are rejected
-    // before dispatch rather than silently passed through.
+    // Fields must match their declared kind; only keyboard modifiers admit
+    // a bounded array of named SDK modifiers. Nested values remain invalid.
     validateField(key, input[key], fieldSpec);
   }
   for (const key of spec.required) {
     if (!(key in input)) {
+      throw invalidInput();
+    }
+  }
+  if (input.type === "keyboard") {
+    if (typeof input.key !== "string" && typeof input.keysym !== "number") {
+      throw invalidInput();
+    }
+    if (typeof input.keysym === "number" && !Number.isInteger(input.keysym)) {
       throw invalidInput();
     }
   }
