@@ -92,3 +92,9 @@ test("rejects CSS escapes before a presentation attribute reaches the browser", 
     assert.equal(sanitizeSvg(svg), null, svg);
   }
 });
+
+// No shipped or simple-icons mark uses <defs>, and its only useful children
+// (gradients, clip paths) are not allowed elements, so it stays out.
+test("rejects <defs>", () => {
+  assert.equal(sanitizeSvg('<svg viewBox="0 0 24 24"><defs><path d="M0 0z"/></defs></svg>'), null);
+});

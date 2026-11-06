@@ -25,7 +25,6 @@ const SVG_ALLOWED_ELEMENTS = new Set([
   "polyline",
   "polygon",
   "title",
-  "defs",
 ]);
 const SVG_ALLOWED_ATTRIBUTES = new Set([
   "viewbox",
@@ -58,6 +57,9 @@ const SVG_ALLOWED_ATTRIBUTES = new Set([
   "transform",
 ]);
 const SVG_ATTRIBUTE_VALUE_DENY_RE = /javascript:|data:|url\(/i;
+// Measured against the marks this renders: the bundled connector corpus tops out
+// at about 3.4 KB, and 32 of simple-icons' ~3,470 marks exceed 10 KB (the
+// largest is ~54 KB), which fall back to the monogram.
 const SVG_MAX_LENGTH = 10_000;
 
 const SVG_TAG_RE = /<([^>]*)>/g;
@@ -139,7 +141,9 @@ function advanceSvgNesting(tag: ParsedSvgTag, openElements: string[]): boolean {
 /**
  * A strict ALLOWLIST of shape-only SVG elements/attributes (reject anything
  * not explicitly permitted), a required bare `<svg>` root, and a denylist of
- * `javascript:`/`data:`/`url()` substrings inside any attribute value.
+ * `javascript:`/`data:`/`url()` substrings inside any attribute value. Text
+ * between elements (such as a `<title>`'s caption) is kept verbatim: it is
+ * inert, and only text outside the root element is rejected.
  * Returns the trimmed SVG on success, or null on any violation.
  */
 export function sanitizeSvg(raw: string): string | null {
