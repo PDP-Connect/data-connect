@@ -184,15 +184,34 @@ export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
 }
 
 /**
- * Whether account setup has no action for this disposition and tier. The
- * answer does not depend on package state: installing a package makes the
- * existing setup path reachable but never creates one, so an entry for which
- * this is true is not installable either. Entries without a `registrationStatus`
+ * A browser connector's account setup comes from its package. Before the
+ * reference has registered it there is no verdict (the page builds such entries
+ * from the manifest alone), and a verdict of `install` or `repair` names the
+ * package as the next step; the server then decides whether the connector can
+ * run. Any other verdict says installing cannot help. Only an offered tier
+ * qualifies: a development or undeclared tier is never an add offer.
+ */
+function browserSetupAwaitsPackage(entry: ConnectorCatalogEntry): boolean {
+  if (entry.modality !== "browser_bound" || (entry.publicTier !== "supported" && entry.publicTier !== "preview")) {
+    return false;
+  }
+  if (entry.readiness) {
+    return entry.readiness.action === "install" || entry.readiness.action === "repair";
+  }
+  return entry.registrationStatus !== "registered";
+}
+
+/**
+ * Whether account setup has no action for this disposition and tier, and no
+ * package step can create one. For most dispositions installing a package makes
+ * an existing setup path reachable but never creates one, so an entry for which
+ * this is true is not installable either. A browser connector is the exception:
+ * see {@link browserSetupAwaitsPackage}. Entries without a `registrationStatus`
  * (manifest-only entries, the ones that precede their package) are judged on
- * disposition and tier alone.
+ * disposition and tier alone, except for that case.
  */
 export function sourceSetupRowIsUnavailable(entry: ConnectorCatalogEntry): boolean {
-  return sourceSetupAction(entry) === null;
+  return sourceSetupAction(entry) === null && !browserSetupAwaitsPackage(entry);
 }
 
 /** The owner-facing status label + tone for first-account setup. */

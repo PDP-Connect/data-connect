@@ -87,6 +87,8 @@ const UNAVAILABLE_TRUE = /data-row-unavailable="true"/;
 const UNAVAILABLE_DISCLOSURE = /data-testid="unavailable-connectors-disclosure"/;
 const BROWSER_SETUP_LINK = /href="\/connect\/browser-session\//;
 const INSTALL_OR_BROWSER_SETUP = />Install<\/button>|href="\/connect\/browser-session\//;
+const NOT_INSTALLABLE = /Not installable: no setup path is available here\./;
+const INSTALL_DISABLED = /data-testid="connector-install-disabled"/;
 const HOST_BLOCK = /Host blocked: Browser unavailable here\./;
 const CANNOT_ADD_HERE = /1 connector cannot be added here/;
 const PLATFORM_COPY = /not available on this platform/;
@@ -158,6 +160,42 @@ test("a published, uninstalled browser connector offers Install and is never 'No
   assert.match(html, UNAVAILABLE_FALSE);
 });
 
+// A browser connector's setup path comes from its package: before the reference
+// has registered it there is no verdict, and installing is the step that lets
+// the server decide. The page builds such entries from the manifest alone.
+test("a manifest-only browser connector with a published package offers Install, not 'Not installable'", async () => {
+  const { registrationStatus: _omitted, ...manifestOnly } = unregisteredBrowser;
+  const entry = { ...manifestOnly, readiness: null };
+  const html = await render(false, entry, browserPackage);
+  assert.match(html, INSTALL_BUTTON);
+  assert.doesNotMatch(html, NOT_INSTALLABLE);
+  assert.match(html, UNAVAILABLE_FALSE);
+
+  // While the package catalog is busy the offer is unknown, which is not "cannot install".
+  const busy = await render(true, entry, browserPackage);
+  assert.doesNotMatch(busy, INSTALL_BUTTON);
+  assert.doesNotMatch(busy, NOT_INSTALLABLE);
+  assert.match(busy, UNKNOWN_PACKAGE);
+});
+
+test("installing is not offered when the verdict says installing cannot make the connector runnable", async () => {
+  for (const [reason, action] of [
+    ["not_implemented", "unavailable"],
+    ["host_requirement_unmet", "configure"],
+    ["not_browser_bound", "unavailable"],
+  ] as const) {
+    const html = await render(false, { ...unregisteredBrowser, readiness: verdict(reason, action) }, browserPackage);
+    assert.doesNotMatch(html, INSTALL_BUTTON, reason);
+    assert.match(html, NOT_INSTALLABLE, reason);
+  }
+});
+
+test("a development-tier manifest-only browser connector is not offered for install", async () => {
+  const { registrationStatus: _omitted, ...manifestOnly } = unregisteredBrowser;
+  const html = await render(false, { ...manifestOnly, publicTier: "development", readiness: null }, browserPackage);
+  assert.doesNotMatch(html, INSTALL_BUTTON);
+});
+
 test("a verdict that blocks setup shows its reason and offers no account setup", async () => {
   const [installed] = parseConnectorInstallStatusResponse(connectorInstallStatusFixture).data;
   assert.ok(installed);
@@ -186,7 +224,6 @@ const DISPOSITIONS_WITHOUT_SETUP_PATH = [
   "unknown_unsupported",
   "browser_bound_runbook",
 ] as const;
-const NOT_INSTALLABLE = /Not installable: no setup path is available here\./;
 
 for (const disposition of DISPOSITIONS_WITHOUT_SETUP_PATH) {
   test(`${disposition} never offers an install control and sorts into the collapsed footer`, async () => {
@@ -194,6 +231,9 @@ for (const disposition of DISPOSITIONS_WITHOUT_SETUP_PATH) {
       ...unregisteredBrowser,
       disposition,
       ownerActionable: undefined,
+      // For a browser-bound connector the disposition alone no longer decides:
+      // the server's verdict does, and this one says installing cannot help.
+      readiness: verdict("not_implemented", "unavailable"),
       supportState: "unsupported",
     };
     for (const busy of [false, true]) {
@@ -294,7 +334,11 @@ test("after installation account setup appears only when the setup planner suppo
     catalog: { ...browserPackage.catalog, digest: installed.digest },
     installed: { ...installed, connector_id: "new-browser" },
   };
-  const stillBlocked = await render(false, unregisteredBrowser, lifecycle);
+  const stillBlocked = await render(
+    false,
+    { ...unregisteredBrowser, readiness: verdict("host_requirement_unmet", "configure") },
+    lifecycle
+  );
   assert.doesNotMatch(stillBlocked, INSTALL_OR_BROWSER_SETUP);
   assert.match(stillBlocked, UNAVAILABLE_TRUE);
 
