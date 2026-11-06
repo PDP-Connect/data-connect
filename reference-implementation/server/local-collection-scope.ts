@@ -25,6 +25,7 @@
 
 import type { CollectionScope } from "@pdpp/reference-contract/evidence";
 import { collectionScopeFingerprint, normalizeCollectionScope } from "@pdpp/reference-contract/evidence";
+import { canonicalOwnerWindowSince } from "../runtime/owner-time-window.ts";
 
 /**
  * Reserved `connector_state.stream` key holding the connection's declared
@@ -111,6 +112,20 @@ export function readStoredCollectionScope(state: Readonly<Record<string, unknown
 }
 
 /**
+ * Rewrite a legacy `since` (a full-date, or a date-time with no offset) to the
+ * RFC 3339 instant the runtime already reads it as, so every save leaves the
+ * canonical form. The rendered bounds do not change. See
+ * `runtime/owner-time-window.ts`.
+ */
+function canonicalSince(scope: CollectionScope | null): CollectionScope | null {
+  if (!scope?.since) {
+    return scope;
+  }
+  const since = canonicalOwnerWindowSince(scope.since);
+  return since === scope.since ? scope : { ...scope, since };
+}
+
+/**
  * Build the durable envelope for a newly-declared scope.
  *
  * `declaredAt` is injected rather than read from a clock so this stays a total
@@ -120,7 +135,7 @@ export function buildStoredCollectionScope(
   scope: CollectionScope | null | undefined,
   declaredAt: string
 ): StoredCollectionScope {
-  const normalized = normalizeCollectionScope(scope);
+  const normalized = canonicalSince(normalizeCollectionScope(scope));
   return {
     declared_at: declaredAt,
     fingerprint: collectionScopeFingerprint(normalized),
