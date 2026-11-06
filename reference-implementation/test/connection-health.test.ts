@@ -2137,7 +2137,7 @@ test("outbox axis: blocked status with no dead letters is a state-read stall", (
 });
 
 test("outbox axis: blocked status with a small open backlog, zero dead letters, zero pending, and a fresh heartbeat is idle (bounded-debris carve-out)", () => {
-  // Reproduces cin_992b0c94cebeb3066ba42a6e (workstation / Signal Desktop):
+  // Reproduces cin_7c3e1d5a9b2f4086d1e0a3c7 (workstation / Signal Desktop):
   // collection genuinely succeeded (6,448 records, all batches accepted,
   // evidence fresh), but a single superseded-attempt gap-notification row
   // left backlog_open=1 behind. That row already uploaded successfully
@@ -2193,7 +2193,7 @@ test("outbox axis: a small open backlog does NOT get the debris carve-out when t
 });
 
 // Owner-reported 2026-08-27 on /sources: the Signal source (connection
-// cin_992b0c94cebeb3066ba42a6e, local_device on host "workstation") rendered
+// cin_7c3e1d5a9b2f4086d1e0a3c7, local_device on host "workstation") rendered
 // "Can't collect · Freshness has not been measured yet." The connector was
 // never broken — it had accepted 7,780 records across 18 ingest batches, every
 // one HTTP 201, last at 2026-08-22T01:00:17Z. What changed is that the

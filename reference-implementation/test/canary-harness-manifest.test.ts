@@ -21,7 +21,7 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { greppedCountInImage } from "../scripts/canary/collectors.ts";
 import { buildRunArgs, parseInspect, rollbackContainerName } from "../scripts/canary/container-spec.ts";
-import { redact, renderRunArgs, resolveProbeUrl } from "../scripts/canary/deploy-canary.ts";
+import { probeOriginProblem, redact, renderRunArgs, resolveProbeUrl } from "../scripts/canary/deploy-canary.ts";
 import { deriveEnv, parseEnvEntries, toDockerEnvArgs } from "../scripts/canary/env-derivation.ts";
 import {
   type CheckOutcome,
@@ -692,4 +692,12 @@ test("resolveProbeUrl resolves a manifest path against the operator origin and r
   assert.equal(resolveProbeUrl("https://other.example.org/x", undefined), "https://other.example.org/x");
   assert.throws(() => resolveProbeUrl("/owner/login", undefined), /PDPP_CANARY_ORIGIN is not set/);
   assert.throws(() => resolveProbeUrl("/owner/login", ""), /PDPP_CANARY_ORIGIN is not set/);
+});
+
+test("probeOriginProblem flags a relative http_health path without an origin, before any deploy step", () => {
+  const checks = [{ kind: "http_health", url: "/owner/login" }, { kind: "log_pattern" }] as never;
+  assert.match(probeOriginProblem(checks, undefined) ?? "", /PDPP_CANARY_ORIGIN/);
+  assert.equal(probeOriginProblem(checks, "https://pdpp.example.com"), null);
+  assert.equal(probeOriginProblem([{ kind: "http_health", url: "https://x.example.org/" }] as never, undefined), null);
+  assert.equal(probeOriginProblem([{ kind: "log_pattern" }] as never, undefined), null);
 });

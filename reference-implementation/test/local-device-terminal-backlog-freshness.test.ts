@@ -217,7 +217,7 @@ test("idle branch: a heartbeat within the lease still anchors freshness", () => 
 
 // ── requiredCoverageEvidenceIsAuthoritative: outbox gate ────────────────────
 //
-// Live production evidence (2026-08-28, connection cin_2de5ede05c8cc8d45935c414,
+// Live production evidence (2026-08-28, connection cin_0a1b2c3d4e5f60718293a4b5,
 // connector claude-code, the SAME source this file's dead-letter-carve-out
 // fixture models): axes.coverage = "retryable_gap", axes.outbox = "stalled"
 // (dead_letter: 1, backlog_open: 1 -- still unresolved from the 2026-08-22

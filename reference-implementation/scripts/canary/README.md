@@ -33,6 +33,12 @@ node reference-implementation/scripts/canary/deploy-canary.ts \
 so a misconfigured invocation refuses rather than targeting some other
 instance. A check whose environment is incomplete fails; it never guesses.
 
+Every manifest with an `http_health` check also needs `PDPP_CANARY_ORIGIN`,
+because the check's `url` is a path resolved against it. This covers manifests
+with no `connector_run` check. `deploy-canary.ts` checks this right after the
+manifest is parsed and exits `2` before the build, the artifact check, or any
+container action, so a missing origin never reaches a deploy.
+
 Exit code is `0` on pass or dry run, `1` on any blocking failure, artifact
 mismatch, or manifest rejection.
 

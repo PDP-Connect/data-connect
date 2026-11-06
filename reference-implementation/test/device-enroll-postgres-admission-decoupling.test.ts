@@ -1448,17 +1448,17 @@ test("D8 (Postgres): retrying against a legacy completed binding whose connector
         const ownerSubjectId = "owner_local";
         const legacyDeviceId = "dexp_b07c56a6e71de9ae";
         const legacySourceInstanceId = "dsrc_fbff3caefba6c972";
-        // The exact live id: today's makeConnectorInstanceId formula
+        // The id today's makeConnectorInstanceId formula
         // deterministically computes this SAME id for (owner_local, codex,
         // local_device, {kind:'local_device', local_binding_name:'example-host'})
         // — reproducing the real coincidental PK collision, not a synthetic
         // stand-in id chosen to force a failure.
-        const legacyConnectorInstanceId = "cin_da9889ea09f0132af33c2f4e";
+        const legacyConnectorInstanceId = "cin_692296f79e18777b46283ee6";
         // The legacy source_binding_key: a hash of the OLDER, larger binding
         // shape {kind, device_id, local_binding_name, source_instance_id} —
         // distinct from today's {kind, local_binding_name}-only key, which is
         // exactly why the ON CONFLICT target cannot find this row.
-        const legacySourceBindingKey = "6432f1862f0447383db425ceb4aef3b65fadb1c3c86645bd262629742581984d";
+        const legacySourceBindingKey = "be48e3b8e227d3c850ecb8cdc5ca383c63e952a4e514dd360098cf366c1fb0e2";
         const now = new Date().toISOString();
 
         await postgresQuery(
@@ -1623,8 +1623,8 @@ test("D9 (Postgres): restart coalesces an exact post-enrollment legacy/stable du
       const ownerSubjectId = "owner_local";
       const deviceId = "dexp_3fab667e951ed1d7";
       const sourceInstanceId = "dsrc_83b8eae8f40c5b86";
-      const canonicalId = "cin_da9889ea09f0132af33c2f4e";
-      const legacyId = "cin_ed74ea9b5c76cb51d2665a63";
+      const canonicalId = "cin_692296f79e18777b46283ee6";
+      const legacyId = "cin_8fcf440c24dbce9f7d34e9e7";
       const fullBinding = {
         device_id: deviceId,
         kind: "local_device",

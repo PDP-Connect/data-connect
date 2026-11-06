@@ -5,7 +5,7 @@
  * Proof-of-concept oracle for the failure-diagnosability design note
  * (`design-notes/failure-diagnosability-2026-08-18.md`), incident 4.
  *
- * Production 2026-08-18: HEB connection `cin_c875ca3ec8b6ce2c283a4288` failed
+ * Production 2026-08-18: HEB connection `cin_9d2b4f6a8c0e1357b9d1f3a5` failed
  * with `connector_error_json = {"code": null, "message":
  * "heb_session_failed: [REDACTED]", "retryable": false}`. The actual cause was
  * the literal string `[REDACTED]`.

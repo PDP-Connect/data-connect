@@ -2009,7 +2009,7 @@ test(
   })
 );
 
-// Live wedge regression (janedoe, cin_e4ab231c7d49b8f59e4c80ed): after an
+// Live wedge regression (janedoe, cin_3f6a8c1e5d9b2047a6c0e8d4): after an
 // attended browser-session repair times out, the next scheduled run's
 // DOM/API auth probe reports a definitive auth failure (401/unauthorized)
 // wrapped in ChatGPT's `_session_failed` terminal-error prefix. The known-gap
