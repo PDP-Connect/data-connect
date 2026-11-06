@@ -233,3 +233,26 @@ test(
 		assert.equal(await reauthSurface(), undefined);
 	}),
 );
+
+test(
+	"deleting the connection removes its proofs",
+	withTmpDb(async () => {
+		await seedConnection(SIGN_IN_PATTERN);
+		await appendRun("failed", "run_del");
+		await writer(SIGN_IN_URL, SIGN_IN_PATTERN, "failed", "run_del");
+		assert.ok(
+			(await getDefaultProviderInvalidationProofStore().load(INSTANCE_ID))
+				.proof,
+		);
+		getDb()
+			.prepare(
+				"DELETE FROM connector_instances WHERE connector_instance_id = ?",
+			)
+			.run(INSTANCE_ID);
+		assert.equal(
+			(await getDefaultProviderInvalidationProofStore().load(INSTANCE_ID))
+				.proof,
+			null,
+		);
+	}),
+);

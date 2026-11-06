@@ -2548,7 +2548,8 @@ CREATE TABLE IF NOT EXISTS provider_invalidation_proofs (
   provider      TEXT NOT NULL,
   observed_at   TEXT NOT NULL,
   repaired_at   TEXT,
-  PRIMARY KEY (connection_id, run_id)
+  PRIMARY KEY (connection_id, run_id),
+  FOREIGN KEY(connection_id) REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE
 );
 
 -- Durable scheduling cursors for bounded, periodic maintenance sweeps
