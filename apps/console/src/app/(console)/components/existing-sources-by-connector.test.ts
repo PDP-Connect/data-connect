@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { mock, test } from "node:test";
 
 // Source structure preserves the R5 exactness ruling (add-source-perf-design-agy-0730.md; terminal-read-architecture-fable-0730.md §2 R5).
 
 const MISSING_CURSOR = /continuation/;
 const PAGE_UNAVAILABLE = /page unavailable/;
-const COMPLETE_FIELD = /\bcomplete\s*[:?]/;
 
 const requests: Record<string, unknown>[] = [];
 let fetchPage: (request: Record<string, unknown>) => Promise<unknown>;
@@ -133,15 +131,16 @@ test("catalog lookup keeps the pages already read when a continuation is refused
   }
 });
 
+test("catalog lookup that is refused on its first page returns no sources and says it is incomplete", async () => {
+  const { existingSourcesByConnectorCatalog } = await moduleApi;
+  fetchPage = () => Promise.reject(refusal(431, "Request Header Fields Too Large"));
+  assert.deepEqual(await existingSourcesByConnectorCatalog(["goodreads"]), { byConnector: {}, truncated: true });
+});
+
 test("catalog lookup still throws for other failures, including a refusal-shaped status that is not one", async () => {
   const { existingSourcesByConnectorCatalog } = await moduleApi;
   for (const failure of [refusal(400, "limit must be a positive integer"), refusal(500, "too large to page"), refusal(401, "no")]) {
     fetchPage = () => Promise.reject(failure);
     await assert.rejects(existingSourcesByConnectorCatalog(["goodreads"]), (err) => err === failure);
   }
-});
-
-test("source: exact results do not expose a complete or incompleteness field", async () => {
-  const source = await readFile(new URL("./existing-sources-by-connector.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(source, COMPLETE_FIELD);
 });

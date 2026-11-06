@@ -82,13 +82,11 @@ export default async function AddSourcePage({ searchParams }: { searchParams: Pr
       installCatalogTransientlyUnavailable = installSnapshot?.catalogUnavailableReason === "transient_busy";
       installCatalogBusySnapshotId = installCatalogTransientlyUnavailable ? randomUUID() : null;
       localSources = installSnapshot?.localSources ? [...installSnapshot.localSources] : [];
-      // EXACT per-connector existing-sources lookup — one `GET
-      // /_ref/connections?connector_id=` call per catalog entry (bounded by
-      // the registered connector-type catalog size, a few dozen, never by
-      // fleet size). Replaces the rejected one-arbitrary-fleet-page
-      // `complete`/`existingSourcesIncomplete` stopgap entirely: each
-      // connector's existing-sources list is exact by construction, so
-      // the only incompleteness is a refused continuation page, `truncated`.
+      // Existing sources come from one walk of the owner's connections:
+      // ceil(owner connections / 100) sequential `GET /_ref/connectors`
+      // requests, then a selection by catalog connector. The cost follows the
+      // owner's connection count, not the catalog size. A refused continuation
+      // page leaves the rows read so far and sets `truncated`.
       ({ byConnector: existingSourcesByConnector, truncated: existingSourcesTruncated } =
         await existingSourcesByConnectorCatalog(catalog.map((entry) => entry.connectorKey)));
     } catch (err) {
