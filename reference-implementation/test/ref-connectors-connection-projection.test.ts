@@ -2023,7 +2023,7 @@ test(
 // repair instead, per reference-connection-health's connection-binding-scoped
 // stored-credential-presence rule.
 test(
-  "ChatGPT-shaped browser_collector connection with no credential row: a generic credential_rejected reason still projects browser_session repair, never stored_credential (binding authority beats message text)",
+  "ChatGPT-shaped browser_collector connection with no credential row: a connector-reported 401 gap routes to no credential repair, neither stored_credential nor browser_session (Section 5.11)",
   withTmpDb(async () => {
     seedBrowserBoundStaticSecretConnector();
     await seedInstance({
@@ -2072,38 +2072,37 @@ test(
     const scoped = await getConnectorSummaryForRoute(CHATGPT_SHAPED_INSTANCE_ID);
     assert.ok(scoped, "the browser_collector connection projects a summary");
 
+    // Collection Profile Section 5.11: the `refresh_credentials` hint and the
+    // "apiFetch got 401" text in the gap are connector claims. Neither proves a
+    // credential was rejected, and this connection has no runtime credential
+    // rejection, so no credential repair of either kind is projected. The gap
+    // still shows as a failed run and as a coverage gap.
     const credentials = scoped.connection_health.conditions?.find((c) => c.type === "CredentialsValid");
-    assert.equal(credentials?.status, "false");
+    assert.equal(credentials?.status, "unknown");
+    assert.equal(credentials?.reason, CONNECTION_CONDITION_REASONS.CREDENTIALS_NOT_PROBED);
+    assert.equal(credentials?.remediation, null, "a connector-reported 401 must not route to any credential repair");
     assert.notEqual(
       credentials?.reason,
       CONNECTION_CONDITION_REASONS.CREDENTIAL_REJECTED,
-      "a definitive auth failure wrapped in session_failed must not collapse to credential_rejected"
+      "a connector-reported 401 must not collapse to credential_rejected"
     );
     assert.equal(
-      credentials?.remediation?.surface?.kind,
-      "browser_session",
-      "browser-session-bound connection must repair by session, never stored_credential capture"
+      scoped.connection_health.conditions?.find((c) => c.type === "CollectionSucceeded")?.status,
+      "false",
+      "the failed run is still reported"
     );
-    assert.doesNotMatch(credentials?.message ?? "", REJECTED_PATTERN);
     assert.equal(
-      scoped.rendered_verdict.required_actions.find((action) => action.kind === "reauth")?.surface?.kind,
-      "browser_session"
+      scoped.rendered_verdict.required_actions.filter((action) => action.kind === "reauth").length,
+      0,
+      "no reauth action is derived from connector text"
     );
-
-    // No prior attended-repair interaction was seeded (it timed out and
-    // resolved/expired) and no run is currently active: the connection must
-    // read as idle-blocked, never as an in-progress "Collecting" state, and
-    // must carry exactly one reauth action — not a second, conflicting
-    // credential-capture action for the same failure.
-    assert.equal(scoped.connection_health.axes.attention, "none", "no open attention after a timed-out repair");
+    assert.equal(scoped.connection_health.axes.attention, "none", "no open attention");
     assert.equal(scoped.connection_health.badges.syncing, false, "no active run is in flight");
     assert.doesNotMatch(
       scoped.rendered_verdict.progress.headline,
       COLLECTING_PATTERN,
-      "idle blocked connection must not claim active collection"
+      "an idle connection must not claim active collection"
     );
-    const reauthActions = scoped.rendered_verdict.required_actions.filter((action) => action.kind === "reauth");
-    assert.equal(reauthActions.length, 1, "exactly one reauth action — no conflicting stored-credential action too");
   })
 );
 
