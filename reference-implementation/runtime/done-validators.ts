@@ -27,6 +27,7 @@ interface DoneErrorInput {
 }
 
 interface DoneError {
+  basis?: string[];
   code?: string;
   message: string;
   recovery_hint?: string | { action: string; retryable?: boolean };
@@ -80,9 +81,22 @@ export function validateDoneStatus(status: unknown): Error | null {
 
 const DONE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
+function isValidObservationBasis(
+  basis: unknown,
+  observations: { declared: boolean; hasConnectorId: (id: string) => boolean } | undefined
+): basis is string[] {
+  return (
+    observations?.declared === true &&
+    Array.isArray(basis) &&
+    basis.length <= 64 &&
+    basis.every((id) => typeof id === "string" && observations.hasConnectorId(id))
+  );
+}
+
 export function validateDoneError(
   status: DoneStatus | unknown,
-  error: DoneErrorInput | null | undefined
+  error: DoneErrorInput | null | undefined,
+  observations?: { declared: boolean; hasConnectorId: (id: string) => boolean }
 ): DoneError | Error | null {
   // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
   if (error == null) {
@@ -95,10 +109,16 @@ export function validateDoneError(
     return new Error("Connector emitted invalid DONE.error: expected object");
   }
   const unsupportedFields = Object.keys(error).filter(
-    (field) => field !== "message" && field !== "retryable" && field !== "code" && field !== "recovery_hint"
+    (field) =>
+      field !== "message" && field !== "retryable" && field !== "code" && field !== "recovery_hint" && field !== "basis"
   );
   if (unsupportedFields.length) {
     return new Error(`Connector emitted invalid DONE.error: unsupported fields ${unsupportedFields.join(", ")}`);
+  }
+  if ("basis" in error && !isValidObservationBasis(error.basis, observations)) {
+    return new Error(
+      "Connector emitted invalid DONE.error.basis: expected earlier accepted connector observation ids and declared OBSERVATION"
+    );
   }
   // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
   if (error.code != null && (typeof error.code !== "string" || !DONE_ERROR_CODE_RE.test(error.code))) {
@@ -117,6 +137,7 @@ export function validateDoneError(
   return {
     ...(error.code ? { code: error.code } : {}),
     message: error.message.trim(),
+    ...(Array.isArray(error.basis) ? { basis: [...error.basis] as string[] } : {}),
     // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
     ...(error.recovery_hint == null
       ? {}
