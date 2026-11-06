@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { createAutostartStore } from "../server/autostart-store.ts";
+import { createAutostartStore, isCommandFileName } from "../server/autostart-store.ts";
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "autostart-store-"));
@@ -18,8 +18,8 @@ async function commands(dir: string): Promise<Array<{ commandId: string; desired
   const path = join(dir, "autostart-commands");
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const names = await readdir(path).catch(() => []);
-    if (names.filter(name => name.endsWith(".json")).length >= 2) {
-      return Promise.all(names.filter(name => name.endsWith(".json"))
+    if (names.filter(isCommandFileName).length >= 2) {
+      return Promise.all(names.filter(isCommandFileName)
         .map(async name => JSON.parse(await readFile(join(path, name), "utf8"))));
     }
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -78,17 +78,22 @@ test("stale result cannot satisfy a new request and timeout leaves its command",
 
 test("failed native result is rejected for that command", async () => {
   await withTempDir(async dir => {
-    const store = createAutostartStore(dir, () => undefined, { pollIntervalMs: 5, timeoutMs: 500 });
+    // onWrite fires once the command file has been renamed into place, so wait for
+    // that event instead of polling the directory, which also lists the store's
+    // in-flight "<id>.json.<uuid>.tmp" staging file.
+    let published!: () => void;
+    const wasPublished = new Promise<void>(resolve => { published = resolve; });
+    // The outcome here is driven by the result file, not by the clock, so the
+    // timeout is only a backstop against a hang. A tight one fails on a starved
+    // runner before the test gets to write the result.
+    const store = createAutostartStore(dir, published, { pollIntervalMs: 5, timeoutMs: 60_000 });
     const request = store.requestChange(true);
-    const path = join(dir, "autostart-commands");
-    let commandId = "";
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const files = await readdir(path).catch(() => []);
-      if (files.length) { commandId = files[0]!.replace(".json", ""); break; }
-      await new Promise(resolve => setTimeout(resolve, 5));
-    }
-    assert.ok(commandId);
-    await answer(dir, commandId, true, false, "permission denied");
+    // If publishing fails, onWrite never fires; the request's own rejection then
+    // fails the test here instead of leaving it hanging.
+    await Promise.race([wasPublished, request]);
+    const files = (await readdir(join(dir, "autostart-commands"))).filter(isCommandFileName);
+    assert.equal(files.length, 1);
+    await answer(dir, files[0]!.replace(".json", ""), true, false, "permission denied");
     await assert.rejects(request, /permission denied/);
   });
 });
