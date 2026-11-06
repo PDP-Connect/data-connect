@@ -368,24 +368,28 @@ async function resolveOwnerActionEvidence(
   }
 }
 
+/** The controller as `getConnectorSummaryForRoute` consumes it. */
+type EscalationController = Parameters<typeof getConnectorSummaryForRoute>[1];
+
+/** The logger as `fanoutEscalationWebPush` consumes it. */
+type EscalationLogger = NonNullable<Parameters<typeof fanoutEscalationWebPush>[0]["log"]>;
+
 interface EscalationProjection {
   readonly connectionUrl: string;
   readonly connectorDisplayName: string;
+  /** `null` when no verdict is available; the push is then not verdict-gated. */
   readonly renderedVerdict: object | null;
 }
 
 async function projectEscalation(
   connectorId: string,
   connectorInstanceId: string,
-  controller: Controller,
-  logger: Logger
+  controller: EscalationController,
+  logger: EscalationLogger
 ): Promise<EscalationProjection> {
   const routeId = connectorInstanceId || connectorId;
   try {
-    const summary = await getConnectorSummaryForRoute(
-      routeId,
-      controller as unknown as Parameters<typeof getConnectorSummaryForRoute>[1]
-    );
+    const summary = await getConnectorSummaryForRoute(routeId, controller);
     if (summary) {
       return {
         connectionUrl: `/sources/${encodeURIComponent(summary.connection_id || routeId)}`,
@@ -396,11 +400,65 @@ async function projectEscalation(
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.warn(
-      `[scheduler] verdict projection failed for escalation ${connectorId}/${routeId}; suppressing push: ${message}`
+    logger.warn?.(
+      `[scheduler] verdict projection failed for escalation ${connectorId}/${routeId}; delivering the push without a verdict: ${message}`
     );
   }
   return { connectionUrl: "/deployment", connectorDisplayName: connectorId, renderedVerdict: null };
+}
+
+interface EscalationDeliveryDeps {
+  readonly controller: EscalationController;
+  readonly logger: EscalationLogger;
+  readonly ownerSubjectId: unknown;
+  /** Test seam; defaults to the controller-backed verdict projection. */
+  readonly project?: typeof projectEscalation;
+  readonly webPushConfig: NonNullable<Parameters<typeof fanoutEscalationWebPush>[0]["config"]>;
+  readonly webPushSubscriptionStore: NonNullable<Parameters<typeof fanoutEscalationWebPush>[0]["store"]>;
+}
+
+// §10-F: push escalation on transition into human-required state.
+// Fires ONCE per streak/flag (dedup lives in the scheduler runtime maps
+// announcedBlockedClass + notifiedNeedsHumanSkips). Errors are swallowed
+// so a push delivery failure never crashes the scheduler loop.
+//
+// The one consumer of the scheduler's escalation callback: both scheduler
+// wirings (this factory's manager and the one `startServer` builds) install it,
+// so the `shouldDeliver` re-check below holds in production.
+export function createEscalationDelivery({
+  controller,
+  logger,
+  ownerSubjectId,
+  project = projectEscalation,
+  webPushConfig,
+  webPushSubscriptionStore,
+}: EscalationDeliveryDeps): NonNullable<SchedulerOptions["onHumanRequiredStateEscalation"]> {
+  return async ({ connectorId, connectorInstanceId, reason, shouldDeliver }) => {
+    const projection = await project(connectorId, connectorInstanceId, controller, logger);
+    // The projection awaited: the scheduler may have been stopped or the
+    // schedule disabled since the escalation was raised.
+    if (shouldDeliver && !(await shouldDeliver())) {
+      return "dropped";
+    }
+    try {
+      await fanoutEscalationWebPush({
+        config: webPushConfig,
+        connectionUrl: projection.connectionUrl,
+        connectorDisplayName: projection.connectorDisplayName,
+        log: logger,
+        ownerSubjectId,
+        reason,
+        store: webPushSubscriptionStore,
+        // Without a verdict the push is not gated on one (an explicit `null`
+        // would make the fan-out suppress it).
+        ...(projection.renderedVerdict === null ? {} : { renderedVerdict: projection.renderedVerdict }),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn?.(`[scheduler] §10-F escalation push failed for ${connectorId} (${reason}): ${message}`);
+    }
+    return undefined;
+  };
 }
 
 type ConnectorPathResolver = (
@@ -489,6 +547,8 @@ export function createRunManagedConnectorViaController(
     if (handle.status && SURFACE_UNAVAILABLE_HANDLE_STATUSES.includes(handle.status)) {
       return handle as Awaited<ReturnType<NonNullable<SchedulerOptions["runManagedConnectorViaController"]>>>;
     }
+    // From here the run exists: whatever ends it is the outcome of an attempt.
+    opts.onStarted?.();
     // Run was dispatched (status "started"). Await its real terminal
     // outcome so the scheduler records the true succeeded/failed status
     // and its failure-streak / back-off machinery fires correctly.
@@ -821,24 +881,13 @@ export function createReferenceSchedulerManager({
       // Fires ONCE per streak/flag (dedup lives in the scheduler runtime maps
       // announcedBlockedClass + notifiedNeedsHumanSkips). Errors are swallowed
       // so a push delivery failure never crashes the scheduler loop.
-      onHumanRequiredStateEscalation: async ({ connectorId, connectorInstanceId, reason }) => {
-        const projection = await projectEscalation(connectorId, connectorInstanceId, controller, logger);
-        try {
-          await fanoutEscalationWebPush({
-            config: webPushConfig,
-            connectionUrl: projection.connectionUrl,
-            connectorDisplayName: projection.connectorDisplayName,
-            log: logger,
-            ownerSubjectId,
-            reason,
-            renderedVerdict: projection.renderedVerdict,
-            store: webPushSubscriptionStore,
-          });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          logger.warn(`[scheduler] §10-F escalation push failed for ${connectorId} (${reason}): ${message}`);
-        }
-      },
+      onHumanRequiredStateEscalation: createEscalationDelivery({
+        controller: controller as unknown as EscalationController,
+        logger,
+        ownerSubjectId,
+        webPushConfig,
+        webPushSubscriptionStore,
+      }),
       onInteraction: async (interaction: unknown) => {
         const interactionRecord: Interaction = isRecord(interaction) ? interaction : {};
         const connectorDisplayName = interactionDisplayName(interactionRecord);

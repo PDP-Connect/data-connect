@@ -29,7 +29,9 @@ import {
 } from "./run-automation-policy.ts";
 import { createRunLogger, NOOP_RUN_BASE_LOGGER } from "./run-logger.ts";
 import { createDispatchGovernor } from "./scheduler/dispatch-governor.ts";
-import { createPreRunGate } from "./scheduler/pre-run-gate.ts";
+import { automaticDispatchStillValid, bindDispatchEscalation } from "./scheduler/dispatch-guard.ts";
+import { createEscalationLedger } from "./scheduler/escalation-ledger.ts";
+import { createPreRunGate, type EndingGateDecision } from "./scheduler/pre-run-gate.ts";
 import { createRunExecutor } from "./scheduler/run-executor.ts";
 import { resolveNonNegativeMsOrInfinity } from "./scheduler-config.ts";
 import { isTerminalGrantFailure, type TerminalReason } from "./scheduler-retry-classifier.ts";
@@ -170,7 +172,7 @@ function resolveDispatchLivenessCeilingMs(value: number | undefined, envValue: s
   );
 }
 
-/** Sentinel distinguishing "the deadline elapsed" from any real `GateOutcome`. */
+/** Sentinel distinguishing "the deadline elapsed" from any real `GateDecision`. */
 const DISPATCH_LIVENESS_TIMEOUT = Symbol("dispatch-liveness-timeout");
 
 /**
@@ -417,6 +419,12 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
   const runtime = buildRuntime();
   let hydrationStarted = false;
+  // Stop epoch: `stop()` aborts it and `start()` installs a fresh one. Every
+  // automatic dispatch captures the signal current at its tick, so a dispatch
+  // that was already past a gate (source-pressure probe, preflight, state,
+  // credentials) when the scheduler was stopped or replaced is dropped instead
+  // of launching a run against a schedule the owner may since have disabled.
+  let dispatchEpoch = new AbortController();
 
   function logRunHistoryPersistFailure(record: RunRecord, message: string): void {
     createRunLogger(baseLogger, {
@@ -490,10 +498,27 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     runtime.notifiedDisabledGrantFailures.delete(connectorInstanceId);
   }
 
+  const readScheduleEnabled = schedulerStore?.getSchedule
+    ? async (connectorInstanceId: string) =>
+        (await schedulerStore.getSchedule?.(connectorInstanceId))?.enabled === true
+    : undefined;
+
+  const dispatchStillValid = (signal: AbortSignal | undefined, connectorInstanceId: string): Promise<boolean> =>
+    automaticDispatchStillValid(signal, readScheduleEnabled, connectorInstanceId);
+
+  // Escalations come from the governor and the pre-run gate while they apply an
+  // automatic dispatch's decision, each with the epoch signal that dispatch
+  // captured at its tick. The handler's own `shouldDeliver` re-check (called
+  // right before its push) covers a stop or disable during its own awaits.
+  const raiseDispatchEscalation = bindDispatchEscalation(onHumanRequiredStateEscalation, dispatchStillValid);
+
+  const escalationLedger = createEscalationLedger();
+
   const preRunGate = createPreRunGate({
+    escalationLedger,
     hasUnresolvedAttention,
     isNeedsHuman,
-    onHumanRequiredStateEscalation,
+    onHumanRequiredStateEscalation: raiseDispatchEscalation,
     readinessChecker,
     recordAndNotify,
     runtime,
@@ -522,12 +547,79 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     runtime,
     schedulerStore,
     setState,
+    ...(readScheduleEnabled ? { readScheduleEnabled } : {}),
   });
+
+  // Settles a gate decision that ends the dispatch. A skip is a side effect of
+  // the dispatch, so it is committed (recorded, announce-once state marked,
+  // escalation raised) only while the dispatch is still valid: scheduler epoch
+  // not aborted AND schedule still enabled in the store. A dropped skip leaves
+  // no trace, and the next valid tick decides it afresh. A manual run is the
+  // owner's own request and is never gated.
+  async function settleGateDecision(
+    decision: EndingGateDecision,
+    key: string,
+    dispatchSignal: AbortSignal | undefined,
+    isManual: boolean
+  ): Promise<RunRecord | null> {
+    if (decision.kind === "silent" && !decision.commit) {
+      return null;
+    }
+    if (!isManual && !(await dispatchStillValid(dispatchSignal, key))) {
+      return null;
+    }
+    if (decision.kind === "silent") {
+      decision.commit?.();
+      return null;
+    }
+    return decision.commit();
+  }
+
+  // The gate's injected callbacks (readinessChecker, getState) have no built-in
+  // timeout and nothing can cancel them, so on timeout we just stop awaiting:
+  // `executeRun`'s `finally` still clears `activeRuns` normally. The abandoned
+  // gate can still resolve later, but it only ever returns a decision (see
+  // `GateDecision`): it records nothing, marks no skip as announced and raises
+  // no escalation itself. Nobody awaits or commits that late decision, so a late
+  // resolution cannot trigger a second emission or launch.
+  async function runBoundedPreflight(
+    schedule: ConnectorSchedule,
+    key: string,
+    automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
+    dispatchSignal: AbortSignal | undefined
+  ): Promise<"proceed" | RunRecord | null> {
+    const preflight = await raceDispatchLivenessDeadline(
+      preRunGate.runAutomaticPreflight(schedule, key, automationPolicy, dispatchSignal),
+      schedulerDispatchLivenessCeilingMs
+    );
+    if (dispatchSignal?.aborted) {
+      return null;
+    }
+    if (preflight !== DISPATCH_LIVENESS_TIMEOUT) {
+      if (preflight.kind !== "proceed") {
+        return settleGateDecision(preflight, key, dispatchSignal, false);
+      }
+      // Resets of announce-once state are applied only for a dispatch that is
+      // still valid and whose evaluation was not abandoned.
+      if (preflight.commit) {
+        if (!(await dispatchStillValid(dispatchSignal, key))) {
+          return null;
+        }
+        preflight.commit();
+      }
+      return "proceed";
+    }
+    // Recording the wedge is a side effect of the dispatch: skip it when the
+    // schedule was disabled while the gate was stuck.
+    return (await dispatchStillValid(dispatchSignal, key))
+      ? recordAndNotify(dispatchWedgedRecord(schedule.connectorId, schedule.connectorInstanceId))
+      : null;
+  }
 
   async function executeRun(
     schedule: ConnectorSchedule,
     isManual = false,
-    options: { recoveryOnly?: boolean } = {}
+    options: { dispatchSignal?: AbortSignal; recoveryOnly?: boolean } = {}
   ): Promise<RunRecord | null> {
     const { connectorId, connectorInstanceId, manifest, grantAccessMode = "continuous" } = schedule;
     if (!connectorInstanceId) {
@@ -548,30 +640,21 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
     try {
       if (!isManual) {
-        // The gate's injected callbacks (readinessChecker, getState) have
-        // no built-in timeout and nothing can cancel them, so on timeout we
-        // just stop awaiting: `finally` below still clears `activeRuns`
-        // normally, and the abandoned promise is never awaited again by
-        // anyone, so a late resolution cannot trigger a second emission or
-        // launch.
-        const preflight = await raceDispatchLivenessDeadline(
-          preRunGate.runAutomaticPreflight(schedule, key, automationPolicy),
-          schedulerDispatchLivenessCeilingMs
-        );
-        if (preflight === DISPATCH_LIVENESS_TIMEOUT) {
-          return recordAndNotify(dispatchWedgedRecord(connectorId, connectorInstanceId));
-        }
+        const preflight = await runBoundedPreflight(schedule, key, automationPolicy, options.dispatchSignal);
         if (preflight !== "proceed") {
           return preflight;
         }
       }
       const grantDecision = preRunGate.gateGrantState(connectorId, connectorInstanceId, grantAccessMode);
-      if (grantDecision !== "proceed") {
-        return grantDecision;
+      if (grantDecision.kind !== "proceed") {
+        return await settleGateDecision(grantDecision, key, options.dispatchSignal, isManual);
       }
       // Not deadlined: `launchRun` owns its own much longer connector-attempt
       // watchdog (`maxRunWallClockMs`, hours-scale) once actually launched.
-      return await runExecutor.launchRun(schedule, isManual, automationPolicy, { recoveryOnly });
+      return await runExecutor.launchRun(schedule, isManual, automationPolicy, {
+        recoveryOnly,
+        ...(options.dispatchSignal ? { dispatchSignal: options.dispatchSignal } : {}),
+      });
     } finally {
       runtime.activeRuns.delete(key);
     }
@@ -582,6 +665,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       return;
     }
     runtime.running = true;
+    dispatchEpoch = new AbortController();
     Promise.resolve()
       .then(hydratePersistence)
       .then(() => {
@@ -599,6 +683,51 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       });
   }
 
+  // Applies the governor's tick and emits its lifecycle events and skip record,
+  // and reports whether the tick ends here (the dispatch was dropped or a skip
+  // was emitted). These outputs are side effects of the dispatch, so they need
+  // the schedule to be still enabled in the store, and committing the tick is
+  // what marks its announce-once state and raises its escalation: a dropped tick
+  // marks and raises nothing. A tick with nothing to emit needs no durable read.
+  async function emitGovernorOutputs(
+    signal: AbortSignal,
+    schedule: ConnectorSchedule,
+    dispatch: Awaited<ReturnType<typeof dispatchGovernor.evaluateBackoffDispatch>>
+  ): Promise<boolean> {
+    const hasOutputs = dispatch.eventsToEmit.length > 0 || dispatch.skipToEmit !== null;
+    if (hasOutputs && !(await dispatchStillValid(signal, runtimeKey(schedule)))) {
+      return true;
+    }
+    const emission = dispatch.commit();
+    // Emit transition markers (back_off.started, gave_up) before
+    // the audit skip so the dashboard sees the lifecycle event
+    // ordering: "streak detected → cooling_off pill renders →
+    // (maybe) blocked pill renders → audit skip explains why we
+    // went quiet". Each entry is one-shot per streak so the
+    // history doesn't drown in duplicates on every tick.
+    //
+    // `recordAndNotify` runs the `onRunComplete` observer synchronously, and an
+    // observer may stop the scheduler. Each record is therefore emitted only while
+    // the epoch is still live, and the records left over are released: their
+    // announce-once state is unmarked so a later valid tick announces them.
+    const pending = [...emission.eventsToEmit, ...(emission.skipToEmit ? [emission.skipToEmit] : [])];
+    for (const [index, record] of pending.entries()) {
+      if (signal.aborted) {
+        emission.release(pending.slice(index));
+        return true;
+      }
+      // One-shot back-off announcement. We record + persist + notify
+      // exactly like other skip records so the UI/audit can see why
+      // the connector went quiet. We do NOT executeRun in this case
+      // because by definition the back-off window has not elapsed.
+      recordAndNotify(record);
+    }
+    if (emission.skipToEmit) {
+      return true;
+    }
+    return false;
+  }
+
   const dispatchGovernor = createDispatchGovernor({
     getForwardEvidenceDebt,
     getLastSuccessfulRunAt,
@@ -606,7 +735,8 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     getSourcePressureGaps,
     hasLegacySchedulerEventMarker: async (...args: Parameters<HasLegacySchedulerEventMarkerHandler>) =>
       (await schedulerStore?.hasLegacySchedulerEventMarker?.(...args)) ?? false,
-    onHumanRequiredStateEscalation,
+    escalationLedger,
+    onHumanRequiredStateEscalation: raiseDispatchEscalation,
     runtime,
   });
 
@@ -636,34 +766,26 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       if (runtime.activeRuns.has(runtimeKey(schedule))) {
         return;
       }
+      const dispatchSignal = dispatchEpoch.signal;
       let dispatch: Awaited<ReturnType<typeof dispatchGovernor.evaluateBackoffDispatch>>;
       try {
-        dispatch = await dispatchGovernor.evaluateBackoffDispatch(schedule, Date.now());
+        dispatch = await dispatchGovernor.evaluateBackoffDispatch(schedule, Date.now(), dispatchSignal);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[scheduler] failed to evaluate back-off for ${schedule.connectorId}: ${message}`);
         return;
       }
-      const { eligible, recoveryOnly, skipToEmit, eventsToEmit } = dispatch;
-      // Emit transition markers (back_off.started, gave_up) before
-      // the audit skip so the dashboard sees the lifecycle event
-      // ordering: "streak detected → cooling_off pill renders →
-      // (maybe) blocked pill renders → audit skip explains why we
-      // went quiet". Each entry is one-shot per streak so the
-      // history doesn't drown in duplicates on every tick.
-      for (const event of eventsToEmit) {
-        recordAndNotify(event);
+      // The governor's source-pressure probe is async: the scheduler may have
+      // been stopped or replaced while it was pending. Drop the tick silently.
+      if (dispatchSignal.aborted) {
+        return;
       }
-      if (skipToEmit) {
-        // One-shot back-off announcement. We record + persist + notify
-        // exactly like other skip records so the UI/audit can see why
-        // the connector went quiet. We do NOT executeRun in this case
-        // because by definition the back-off window has not elapsed.
-        recordAndNotify(skipToEmit);
+      const { eligible, recoveryOnly } = dispatch;
+      if (await emitGovernorOutputs(dispatchSignal, schedule, dispatch)) {
         return;
       }
       if (eligible) {
-        executeRun(schedule, false, { recoveryOnly }).catch(() => {
+        executeRun(schedule, false, { dispatchSignal, recoveryOnly }).catch(() => {
           // Errors are already surfaced into the run record via onRunComplete;
           // swallow here so the scheduler loop doesn't bubble an unhandled
           // rejection out of the interval callback.
@@ -708,6 +830,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
       return;
     }
     runtime.running = false;
+    dispatchEpoch.abort();
     for (const timer of runtime.timers) {
       clearInterval(timer);
     }

@@ -13,6 +13,7 @@ import { createScheduler, type Scheduler } from "../runtime/scheduler.ts";
 import type { RunCancellationRegistration, RunRecord } from "../runtime/scheduler-domain-types.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { createSqliteSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { seedEnabledSchedule } from "./helpers/seed-enabled-schedule.ts";
 
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/scheduler-direct-liveness";
 const CONNECTOR_INSTANCE_ID = "cin_scheduler_direct_liveness";
@@ -92,6 +93,7 @@ test("direct scheduled run persists active liveness until terminal", async (t) =
   const connector = writePausedConnector();
   initDb(dbPath);
   const schedulerStore = createSqliteSchedulerStore();
+  await seedEnabledSchedule(schedulerStore, CONNECTOR_ID, CONNECTOR_INSTANCE_ID);
   let scheduler: Scheduler | null = null;
 
   t.after(() => {
@@ -171,6 +173,7 @@ test("direct scheduled run cancellation registers by run id and terminals as can
   const connector = writePausedConnector();
   initDb(dbPath);
   const schedulerStore = createSqliteSchedulerStore();
+  await seedEnabledSchedule(schedulerStore, CONNECTOR_ID, CONNECTOR_INSTANCE_ID);
   const completedRuns: RunRecord[] = [];
   const unregistered: string[] = [];
   let scheduler: Scheduler | null = null;
@@ -271,6 +274,7 @@ test("direct scheduled run skips without spawning a child when durable active-ru
   const connector = writePausedConnector();
   initDb(dbPath);
   const schedulerStore = createSqliteSchedulerStore();
+  await seedEnabledSchedule(schedulerStore, CONNECTOR_ID, CONNECTOR_INSTANCE_ID);
   let scheduler: Scheduler | null = null;
 
   await schedulerStore.upsertActiveRun({

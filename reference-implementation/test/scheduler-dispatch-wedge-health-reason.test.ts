@@ -47,6 +47,7 @@ import { getConnectorSummaryForRoute } from "../server/ref-control.ts";
 import { getDefaultSchedulerStore } from "../server/stores/scheduler-store.ts";
 import { dedicatedPostgresTestUrl } from "./helpers/dedicated-postgres-test-url.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
+import { seedEnabledSchedule } from "./helpers/seed-enabled-schedule.ts";
 import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";
 
 const POSTGRES_URL = dedicatedPostgresTestUrl(process.env.PDPP_TEST_POSTGRES_URL);
@@ -189,6 +190,8 @@ async function waitFor(condition: () => Promise<boolean> | boolean, timeoutMs: n
 async function runOneWedgeThroughDefaultStore(connectorId: string, connectorInstanceId: string): Promise<void> {
   const completedRuns: RunRecord[] = [];
   let scheduler: Scheduler | null = null;
+  // Recording the wedge needs the schedule to be enabled in the durable store.
+  await seedEnabledSchedule(getDefaultSchedulerStore(), connectorId, connectorInstanceId);
   try {
     scheduler = createScheduler({
       admitRunConnection: ({ connectorId: cid, connectorInstanceId: iid, ownerSubjectId }) =>

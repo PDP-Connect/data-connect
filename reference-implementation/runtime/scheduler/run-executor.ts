@@ -39,6 +39,7 @@ import {
   type RunTriggerKind,
 } from "../run-automation-policy.ts";
 import { createRunLogger, NOOP_RUN_BASE_LOGGER, type RunBaseLogger } from "../run-logger.ts";
+import { automaticDispatchStillValid } from "./dispatch-guard.ts";
 import type {
   ConnectorSchedule,
   GetStateHandler,
@@ -104,6 +105,13 @@ export interface RunExecutorDeps {
   persistLastRunTime: (connectorId: string, connectorInstanceId: string, lastRunTimeMs: number) => void;
   recordAndNotify: (record: RunRecord) => RunRecord;
   recordAndNotifyAwaited?: (record: RunRecord) => Promise<RunRecord>;
+  /**
+   * Reads the schedule's CURRENT `enabled` flag from the durable store (not the
+   * copy captured when the scheduler was built). Final admission of an
+   * automatic launch refuses when this is false (disabled or deleted) or when
+   * the read fails. Absent when the store has no schedule table.
+   */
+  readScheduleEnabled?: (connectorInstanceId: string) => Promise<boolean>;
   referenceBaseUrl: string | null;
   registerRunCancellation: RegisterRunCancellationHandler | null | undefined;
   resolveStaticSecretRunEnv: ResolveStaticSecretRunEnv | null;
@@ -120,12 +128,25 @@ export interface RunExecutorDeps {
 // ─── Public interface ─────────────────────────────────────────────────────────
 
 export interface RunExecutor {
-  launchRun: (
-    schedule: ConnectorSchedule,
-    isManual: boolean,
-    automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
-    options?: { recoveryOnly?: boolean }
-  ) => Promise<RunRecord>;
+  /**
+   * Without a `dispatchSignal` a launch always yields a run record. With one, an
+   * automatic launch whose signal aborts (scheduler stopped or replaced) or
+   * whose schedule is no longer enabled resolves `null`: dropped, no run.
+   */
+  launchRun: {
+    (
+      schedule: ConnectorSchedule,
+      isManual: boolean,
+      automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
+      options?: { recoveryOnly?: boolean }
+    ): Promise<RunRecord>;
+    (
+      schedule: ConnectorSchedule,
+      isManual: boolean,
+      automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
+      options: { dispatchSignal: AbortSignal; recoveryOnly?: boolean }
+    ): Promise<RunRecord | null>;
+  };
 }
 
 // ─── Local helpers (pure — no runtime dep) ───────────────────────────────────
@@ -746,6 +767,13 @@ function controllerRunNowDeferReason(err: unknown): string | null {
   return null;
 }
 
+/**
+ * `routeScheduledManagedRun` result for a dispatch that was invalidated before
+ * the controller started a run. Not `null`: that means "not a managed connector",
+ * and sends the dispatch to the direct route.
+ */
+const MANAGED_DISPATCH_DROPPED = Symbol("managed-dispatch-dropped");
+
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
 export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
@@ -762,14 +790,15 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     onInteraction,
     onRunComplete,
     persistLastRunTime,
+    readScheduleEnabled,
     recordAndNotify,
     recordAndNotifyAwaited,
     referenceBaseUrl,
     registerRunCancellation,
     resolveStaticSecretRunEnv,
     rsUrl,
-    runtime,
     runManagedConnectorViaController,
+    runtime,
     schedulerStore,
     setState,
   } = deps;
@@ -901,6 +930,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
   // out keeps `runWithRetries` a short state machine.
   type AttemptOutcome =
     | { kind: "done"; record: RunRecord }
+    // The dispatch was invalidated before the connector started: no attempt ran.
+    | { kind: "dropped" }
     | { kind: "give-up"; error: RunConnectorError | null }
     | { kind: "retry"; error: RunConnectorError };
 
@@ -1120,7 +1151,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
   async function runSingleAttempt(
     schedule: ConnectorSchedule,
     call: RunConnectorCall,
-    attempt: number
+    attempt: number,
+    stillAdmitted: () => Promise<boolean>
   ): Promise<AttemptOutcome> {
     const { maxRetries = 2 } = schedule;
     const startedAt = nowIso();
@@ -1128,6 +1160,12 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     const { watchdog } = lease;
 
     try {
+      // Lease acquisition awaits the durable store, so the scheduler may have
+      // been stopped or the schedule disabled meanwhile. This is the last await
+      // before the connector starts; `finally` releases the lease on a drop.
+      if (!(await stillAdmitted())) {
+        return { kind: "dropped" };
+      }
       if (!lease.admitted) {
         return {
           kind: "done",
@@ -1207,22 +1245,41 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     return failRecord;
   }
 
-  async function runWithRetries(schedule: ConnectorSchedule, call: RunConnectorCall): Promise<RunRecord> {
+  // `admission` is the automatic-dispatch guard: it is consulted before every
+  // attempt (the first and each retry, after the back-off sleep) and again after
+  // the attempt's lease is acquired. A dispatch dropped before any attempt ran
+  // resolves `null` and records nothing; one dropped between retries records the
+  // failure of the attempt that did run.
+  async function runWithRetries(
+    schedule: ConnectorSchedule,
+    call: RunConnectorCall,
+    admission: { dispatchSignal: AbortSignal | undefined; stillAdmitted: () => Promise<boolean> }
+  ): Promise<RunRecord | null> {
     const { maxRetries = 2 } = schedule;
     let attempt = 0;
     let lastError: RunConnectorError | null = null;
 
     while (attempt <= maxRetries) {
-      if (!runtime.running) {
+      // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
+      if (!(runtime.running && (await admission.stillAdmitted()))) {
         break;
       }
       // biome-ignore lint/style/noIncrementDecrement: The explicit counter update preserves this loop’s evaluation order.
       attempt++;
 
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
-      const outcome = await runSingleAttempt(schedule, buildAttemptCall(schedule, call, attempt), attempt);
+      const outcome = await runSingleAttempt(
+        schedule,
+        buildAttemptCall(schedule, call, attempt),
+        attempt,
+        admission.stillAdmitted
+      );
       if (outcome.kind === "done") {
         return outcome.record;
+      }
+      if (outcome.kind === "dropped") {
+        attempt -= 1;
+        break;
       }
       lastError = outcome.error;
       if (outcome.kind === "give-up") {
@@ -1231,6 +1288,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       await sleep(backoffDelayMs(attempt));
     }
 
+    if (attempt === 0 && admission.dispatchSignal) {
+      return null;
+    }
     return finalizeExhaustedFailure(schedule, lastError, attempt);
   }
 
@@ -1308,8 +1368,13 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     connectorInstanceId: string,
     ownerToken: string,
     ownerSubjectId: string,
-    options: { maxRetries?: number; recoveryOnly?: boolean } = {}
-  ): Promise<RunRecord | null> {
+    options: {
+      dispatchSignal?: AbortSignal;
+      maxRetries?: number;
+      recoveryOnly?: boolean;
+      stillAdmitted: () => Promise<boolean>;
+    }
+  ): Promise<RunRecord | typeof MANAGED_DISPATCH_DROPPED | null> {
     const maxRetries =
       options.maxRetries !== undefined && Number.isFinite(options.maxRetries)
         ? Math.max(0, Math.trunc(options.maxRetries))
@@ -1321,10 +1386,14 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       attempt++;
       const startedAt = nowIso();
       let runNowResult: Awaited<ReturnType<RunManagedConnectorViaController>>;
+      let runStarted = false;
       try {
         // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
         runNowResult = await via(connectorId, {
           connectorInstanceId,
+          onStarted: () => {
+            runStarted = true;
+          },
           ownerSubjectId,
           ownerToken,
           priorityClass: "background",
@@ -1334,6 +1403,14 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           triggerKind: "scheduled",
         });
       } catch (err) {
+        // A rejection before the controller started a run is a no-start outcome of
+        // this dispatch, not the outcome of an attempt. The controller call was
+        // pending while the owner may have stopped the scheduler or disabled the
+        // schedule, so recording it (and advancing the cadence) needs the dispatch
+        // to be valid still. A run that did start is an attempt and is recorded.
+        if (!runStarted && !(await options.stillAdmitted())) {
+          return MANAGED_DISPATCH_DROPPED;
+        }
         const deferReason = controllerRunNowDeferReason(err);
         if (deferReason) {
           return recordAndNotify(buildBrowserSurfaceUnavailableSkip(connectorId, deferReason, connectorInstanceId));
@@ -1350,6 +1427,11 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       }
 
       if (runNowResult.status && BROWSER_SURFACE_UNAVAILABLE_STATUSES.has(runNowResult.status)) {
+        // No run was started (see `BROWSER_SURFACE_UNAVAILABLE_STATUSES`): the
+        // skip is a side effect of the dispatch and needs it to be valid still.
+        if (!(await options.stillAdmitted())) {
+          return MANAGED_DISPATCH_DROPPED;
+        }
         return recordAndNotify(
           buildBrowserSurfaceUnavailableSkip(connectorId, runNowResult.status, connectorInstanceId)
         );
@@ -1365,8 +1447,16 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           terminal_reason: runNowResult.terminal_reason || null,
         })
       ) {
-        await sleep(backoffDelayMs(attempt));
-        continue;
+        // A stopped or replaced scheduler, or a schedule disabled meanwhile,
+        // must not start another run: record the attempt that already ran
+        // instead of retrying. The guard runs after the sleep, with no await
+        // between it and the next `via` call.
+        if (!options.dispatchSignal?.aborted) {
+          await sleep(backoffDelayMs(attempt));
+          if (await options.stillAdmitted()) {
+            continue;
+          }
+        }
       }
 
       persistLastRunTime(connectorId, connectorInstanceId, Date.now());
@@ -1400,39 +1490,43 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
   // login credential exists; the connector can still reuse/repair the browser
   // session according to its automation policy.
   //
-  // Returns EITHER the resolved env OR a terminal RunRecord (`earlyReturn`) that
-  // launchRun must hand to recordAndNotify. Behavior-preserving extraction: the
-  // resolver call, persistLastRunTime, isManual/ownerRepairCode branching,
-  // markNeedsHuman, and both record builders are moved verbatim; recordAndNotify
-  // is still invoked exactly once by launchRun on the returned record.
+  // Returns EITHER the resolved env OR the resolver's failure. launchRun applies
+  // the failure (`recordCredentialFailure`) only after its final admission guard,
+  // and hands the resulting record to recordAndNotify exactly once.
   async function resolveLaunchCredentials(
     connectorId: string,
     connectorInstanceId: string,
-    ownerSubjectId: string,
-    isManual: boolean
-  ): Promise<{ env: Record<string, string> | null } | { earlyReturn: RunRecord }> {
+    ownerSubjectId: string
+  ): Promise<{ env: Record<string, string> | null } | { failure: unknown }> {
     if (!resolveStaticSecretRunEnv) {
       return { env: null };
     }
     try {
       return { env: await resolveStaticSecretRunEnv({ connectorId, connectorInstanceId, ownerSubjectId }) };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      persistLastRunTime(connectorId, connectorInstanceId, Date.now());
-      const ownerRepairCode = ownerRepairCredentialCode(err);
-      if (!isManual && ownerRepairCode) {
-        markNeedsHuman(connectorId, connectorInstanceId);
-        return {
-          earlyReturn: buildCredentialResolutionOwnerActionSkip(
-            connectorId,
-            ownerRepairCode,
-            message,
-            connectorInstanceId
-          ),
-        };
-      }
-      return { earlyReturn: buildCredentialResolutionFailure(connectorId, message, connectorInstanceId) };
+      // Pure: the lookup may have been abandoned by a stop or disable, so the
+      // caller applies the failure's side effects only after its final guard.
+      return { failure: err };
     }
+  }
+
+  // Applies the side effects of a credential failure (cadence stamp, needs-human
+  // flag) and builds its record. Synchronous, so no guard can drop the dispatch
+  // between the effects.
+  function recordCredentialFailure(
+    connectorId: string,
+    connectorInstanceId: string,
+    isManual: boolean,
+    err: unknown
+  ): RunRecord {
+    const message = err instanceof Error ? err.message : String(err);
+    persistLastRunTime(connectorId, connectorInstanceId, Date.now());
+    const ownerRepairCode = ownerRepairCredentialCode(err);
+    if (!isManual && ownerRepairCode) {
+      markNeedsHuman(connectorId, connectorInstanceId);
+      return buildCredentialResolutionOwnerActionSkip(connectorId, ownerRepairCode, message, connectorInstanceId);
+    }
+    return buildCredentialResolutionFailure(connectorId, message, connectorInstanceId);
   }
 
   async function admitScheduledRunConnection(
@@ -1501,30 +1595,52 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     schedule: ConnectorSchedule,
     isManual: boolean,
     automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
-    options: { recoveryOnly?: boolean } = {}
-  ): Promise<RunRecord> {
+    options: { dispatchSignal?: AbortSignal; recoveryOnly?: boolean } = {}
+  ): Promise<RunRecord | null> {
     const { connectorId, connectorInstanceId = connectorId, ownerSubjectId } = schedule;
     if (typeof ownerSubjectId !== "string" || ownerSubjectId.trim().length === 0) {
-      return Promise.resolve(
-        recordAndNotify(
-          buildCredentialResolutionFailure(
-            connectorId,
-            "scheduler ownerSubjectId is required and must be nonblank",
-            connectorInstanceId
-          )
-        )
+      const failure = buildCredentialResolutionFailure(
+        connectorId,
+        "scheduler ownerSubjectId is required and must be nonblank",
+        connectorInstanceId
+      );
+      // A configuration fault, but still a record written by the dispatch: an
+      // automatic one writes it only while it is valid.
+      return scheduledLaunchAdmitted(schedule, isManual, options.dispatchSignal).then((admitted) =>
+        admitted ? recordAndNotify(failure) : null
       );
     }
     return launchRunWithValidatedOwner(schedule, isManual, automationPolicy, options);
+  }
+
+  // Final admission of an AUTOMATIC launch, run immediately before the run is
+  // created or the controller is called. The dispatch is refused when the
+  // scheduler was stopped/replaced while it was awaiting, or when the
+  // schedule's CURRENT durable `enabled` flag is false (disabled or deleted) or
+  // unreadable. Manual runs are never gated: the owner asked for them now.
+  function scheduledLaunchAdmitted(
+    schedule: ConnectorSchedule,
+    isManual: boolean,
+    signal: AbortSignal | undefined
+  ): Promise<boolean> {
+    if (isManual) {
+      return Promise.resolve(true);
+    }
+    return automaticDispatchStillValid(signal, readScheduleEnabled, schedule.connectorInstanceId ?? schedule.connectorId);
   }
 
   async function launchRunWithValidatedOwner(
     schedule: ConnectorSchedule,
     isManual: boolean,
     automationPolicy: ReturnType<typeof projectRunAutomationPolicy>,
-    options: { recoveryOnly?: boolean } = {}
-  ): Promise<RunRecord> {
+    options: { dispatchSignal?: AbortSignal; recoveryOnly?: boolean } = {}
+  ): Promise<RunRecord | null> {
     const recoveryOnly = options.recoveryOnly === true;
+    const dispatchSignal = options.dispatchSignal;
+    // Each await below is a gap in which the scheduler may be stopped or
+    // replaced; an invalidated automatic dispatch is dropped with no run, no
+    // record and no retry.
+    const stillAdmitted = (): Promise<boolean> => scheduledLaunchAdmitted(schedule, isManual, dispatchSignal);
     const {
       connectorId,
       connectorInstanceId = connectorId,
@@ -1540,12 +1656,20 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       await admitScheduledRunConnection(connectorId, connectorInstanceId, ownerSubjectId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return recordAndNotify(buildRunAdmissionFailure(connectorId, message, connectorInstanceId));
+      return (await stillAdmitted())
+        ? recordAndNotify(buildRunAdmissionFailure(connectorId, message, connectorInstanceId))
+        : null;
+    }
+    if (!(await stillAdmitted())) {
+      return null;
     }
 
-    const credentials = await resolveLaunchCredentials(connectorId, connectorInstanceId, ownerSubjectId, isManual);
-    if ("earlyReturn" in credentials) {
-      return recordAndNotify(credentials.earlyReturn);
+    const credentials = await resolveLaunchCredentials(connectorId, connectorInstanceId, ownerSubjectId);
+    if (!(await stillAdmitted())) {
+      return null;
+    }
+    if ("failure" in credentials) {
+      return recordAndNotify(recordCredentialFailure(connectorId, connectorInstanceId, isManual, credentials.failure));
     }
     const staticSecretEnv = credentials.env;
 
@@ -1555,6 +1679,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       isManual,
       currentRunIdBox
     );
+    if (!(await stillAdmitted())) {
+      return null;
+    }
 
     // ── Restart-race guard: managed connector with no routing seam → DEFER ────
     //
@@ -1608,7 +1735,10 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     // from within the scheduler. Both guards stay intact.
     if (runManagedConnectorViaController && !isManual) {
       // Null return means connector is not managed — fall through to runWithRetries.
-      const managedRunOptions: { maxRetries?: number; recoveryOnly?: boolean } = { recoveryOnly };
+      const managedRunOptions: Parameters<typeof routeScheduledManagedRun>[5] = { recoveryOnly, stillAdmitted };
+      if (dispatchSignal) {
+        managedRunOptions.dispatchSignal = dispatchSignal;
+      }
       if (schedule.maxRetries !== undefined) {
         managedRunOptions.maxRetries = schedule.maxRetries;
       }
@@ -1620,6 +1750,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         ownerSubjectId,
         managedRunOptions
       );
+      if (managed === MANAGED_DISPATCH_DROPPED) {
+        return null;
+      }
       if (managed !== null) {
         return managed;
       }
@@ -1651,8 +1784,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       state,
       staticSecretEnv,
       triggerKind: automationPolicy.trigger_kind,
-    });
+    }, { dispatchSignal, stillAdmitted });
   }
 
-  return { launchRun };
+  return { launchRun: launchRun as RunExecutor["launchRun"] };
 }
