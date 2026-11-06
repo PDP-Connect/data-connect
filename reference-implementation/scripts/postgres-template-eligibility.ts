@@ -245,6 +245,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/semantic-index-skip-unchanged-postgres.test.ts",
   // Exercises additive semantic input-identity migration and real publication.
   "test/semantic-startup-backfill-catches-crash-abandoned-record.test.ts",
+  // Starts the actual server over retained state.
+  "test/startup-backfill-durable-retry.test.ts",
   "test/spine-events-connector-instance-id-backfill.test.ts",
   "test/spine-source-boot-backfill.test.ts",
 ];

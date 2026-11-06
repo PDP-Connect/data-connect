@@ -78,7 +78,7 @@ function flattenErrors(error: unknown): unknown[] {
   return error instanceof AggregateError ? error.errors.flatMap(flattenErrors) : [error];
 }
 
-async function closeHttpServer(server: HttpServer): Promise<void> {
+export async function closeHttpServer(server: HttpServer): Promise<void> {
   const errors: unknown[] = [];
   for (const closeConnections of [server.closeIdleConnections, server.closeAllConnections]) {
     if (!closeConnections) continue;
