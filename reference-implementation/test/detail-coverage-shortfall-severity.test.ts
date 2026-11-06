@@ -230,14 +230,12 @@ const MANIFEST = withFixtureSourceDeclaration(
 );
 
 /**
- * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. The manifest
- * declaration alone makes a hydrated key need an accepted detail record for it:
- * the runtime derives that requirement from the manifest, not from START. The
- * canned connectors below never see the extension in START, so they follow the
- * base hydrated_keys fallback. MANIFEST, which does not declare the extension,
- * credits a hydrated key by assertion. The runtime's manifest validation
- * requires protocol_version 0.2.0 for a manifest that declares the extension.
- * That is a package rule, not canonical Collection Profile text.
+ * The same connector, declaring DETAIL_COVERAGE_KEY_SETS. The runtime does not
+ * implement the extension and leaves it out of START, so a connector that
+ * declares it follows the base hydrated_keys rule, and the declaration changes
+ * no coverage decision. The runtime's manifest validation requires
+ * protocol_version 0.2.0 for a manifest that declares the extension. That is a
+ * package rule, not canonical Collection Profile text.
  */
 const KEY_SETS_MANIFEST = {
   ...MANIFEST,
@@ -958,10 +956,11 @@ test("an accepted retry after DETAIL_COVERAGE credits a key whose first attempt 
 });
 
 // A 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS. START omits the extension,
-// so the connector sends only base hydrated_keys. The declaration still requires an
-// accepted record of the detail stream for each hydrated key, so an unrecorded
-// hydrated key is not credited. The parent stays put.
-test("a 0.2.0 key-set manifest withholds a hydrated key with no accepted record for it", async (t) => {
+// so the connector sends only base hydrated_keys. Section 5.6 credits a hydrated
+// declaration with no accepted record behind it, and the runtime adds no
+// rule of its own for a manifest that declares the extension. A parent with no
+// detail records (an empty parent) therefore commits.
+test("a 0.2.0 key-set manifest credits a hydrated key with no accepted record for it (Section 5.6)", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -972,14 +971,17 @@ test("a 0.2.0 key-set manifest withholds a hydrated key with no accepted record 
     [holdingsCoverage({ considered: 1, covered: 1, hydrated_keys: ["K"], required_keys: ["K"] })],
     KEY_SETS_MANIFEST
   );
-  assert.equal(result.checkpoint_summary?.state_streams_committed, 0);
-  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 0);
-  const coverageGap = (result.known_gaps ?? []).find((gap) => gap.reason === "detail_coverage_incomplete");
-  assert.match(String(coverageGap?.message ?? ""), HOLDINGS_STATE_STREAM_PATTERN);
+  assert.equal(result.checkpoint_summary?.state_streams_committed, 1);
+  assert.equal(terminalCoveredFor(result.run_id as string, "activity"), 1);
+  assert.equal(
+    (result.known_gaps ?? []).some((gap) => gap.reason === "detail_coverage_incomplete"),
+    false,
+    "no shortfall is reported"
+  );
 });
 
-// The positive control for the declaration rule above: the same declaring
-// manifest, with an accepted activity record for K, credits K and commits.
+// The same declaring manifest, with an accepted activity record for K, also
+// credits K and commits.
 test("a 0.2.0 key-set manifest commits a hydrated key backed by an accepted record for it", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1003,10 +1005,9 @@ test("a 0.2.0 key-set manifest commits a hydrated key backed by an accepted reco
   );
 });
 
-// A connector without DETAIL_COVERAGE_KEY_SETS may list a key with no detail
-// record (an account with no transactions) as hydrated. Crediting it by
-// evidence would stall that connector's cursor every run, so it keeps the
-// crediting it had before the capability: the declaration credits the key.
+// A connector may list a key with no detail record (an account with no
+// transactions) as hydrated. Crediting it by evidence would stall that
+// connector's cursor every run, so the declaration credits the key.
 test("without DETAIL_COVERAGE_KEY_SETS, a hydrated key with no record still commits the parent and counts as covered", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1117,14 +1118,14 @@ test("a checkpoint withheld for the same reason on consecutive runs is reported 
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  // K is hydrated with no accepted record: the declaration does not credit it, a coverage shortfall each run.
-  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
+  // K is required and not hydrated, and no gap covers it: a coverage shortfall each run.
+  const unproven = [holdingsCoverage({ required_keys: ["K"] })];
 
   const streaks: (number | null)[] = [];
   let last: RuntimeRunConnectorResult | null = null;
   for (let run = 0; run < 3; run += 1) {
     // biome-ignore lint/performance/noAwaitInLoops: the streak is defined by run order.
-    last = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+    last = await runHoldings(server, ownerToken, unproven);
     const [event, ...rest] = withheldEvents(last.run_id as string);
     assert.ok(event);
     assert.equal(rest.length, 0);
@@ -1140,13 +1141,12 @@ test("a checkpoint withheld for the same reason on consecutive runs is reported 
   const committed = await runHoldings(
     server,
     ownerToken,
-    [activityRecord("K", { id: "K" }), holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })],
-    KEY_SETS_MANIFEST
+    [activityRecord("K", { id: "K" }), holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })]
   );
   assert.equal(committed.checkpoint_summary?.state_streams_committed, 1);
   assert.deepEqual(withheldEvents(committed.run_id as string), []);
 
-  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  const again = await runHoldings(server, ownerToken, unproven);
   const [event] = withheldEvents(again.run_id as string);
   assert.ok(event);
   assert.equal(event.consecutive_runs, 1, "a commit ends the streak");
@@ -1173,9 +1173,9 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
-  // K is hydrated with no accepted record, so holdings is withheld on each of these runs.
-  const unproven = [holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] })];
-  await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  // K is required and not hydrated, so holdings is withheld on each of these runs.
+  const unproven = [holdingsCoverage({ required_keys: ["K"] })];
+  await runHoldings(server, ownerToken, unproven);
   const originalFetch = globalThis.fetch;
   const puts: string[] = [];
   const mocked = t.mock.method(globalThis, "fetch", async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -1194,7 +1194,7 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
     [
       { data: { id: "H" }, emitted_at: RECORD_AT, key: "H", stream: "holdings", type: "RECORD" },
       activityRecord("T", { id: "T" }),
-      // K has an accepted record, so holdings commits first; the injected failure is on the activity PUT.
+      // K is hydrated, so holdings commits first; the injected failure is on the activity PUT.
       activityRecord("K", { id: "K" }),
       holdingsCoverage({ hydrated_keys: ["K"], required_keys: ["K"] }),
       { cursor: { page: "2" }, stream: "holdings", type: "STATE" },
@@ -1202,13 +1202,12 @@ test("successful cursor resets its streak when the next cursor PUT fails", async
       { records_emitted: 3, status: "succeeded", type: "DONE" },
     ],
     undefined,
-    ["holdings", "activity"],
-    KEY_SETS_MANIFEST
+    ["holdings", "activity"]
   );
   mocked.mock.restore();
   assert.deepEqual(puts, ["holdings", "activity"]);
   assert.ok(attempt.thrown || attempt.result?.status === "failed");
-  const again = await runHoldings(server, ownerToken, unproven, KEY_SETS_MANIFEST);
+  const again = await runHoldings(server, ownerToken, unproven);
   assert.equal(withheldEvents(again.run_id as string)[0]?.consecutive_runs, 1);
 });
 
@@ -1288,10 +1287,9 @@ const UNPROVEN_HYDRATED_KEY = [
 ];
 
 // The 0.2.0 key-set manifest registers, passes the pre-spawn gate, and starts. START
-// omits the extension, so the connector sends base hydrated_keys. The declaration
-// still needs an accepted record for K, which this run does not supply: K is
-// withheld.
-test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and withholds an unrecorded hydrated key", async (t) => {
+// omits the extension, so the connector sends base hydrated_keys. The run supplies no
+// accepted record for K, and the hydrated declaration credits it anyway.
+test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and credits an unrecorded hydrated key", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
   const ownerToken = await registerAndAuthorize(server);
@@ -1307,8 +1305,8 @@ test("a 0.2.0 manifest declaring DETAIL_COVERAGE_KEY_SETS registers, starts, and
   assert.ok(start, "the connector received START");
   assert.deepEqual(start.protocol_capabilities, ["OBSERVATION", "STREAM_EVIDENCE"], "START omits the keyset advisory");
   assert.equal(result?.status, "succeeded");
-  assert.equal(result?.checkpoint_summary?.state_streams_committed, 0, "the unrecorded hydrated key is not credited");
-  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 0);
+  assert.equal(result?.checkpoint_summary?.state_streams_committed, 1, "the hydrated declaration credits the key");
+  assert.equal(terminalCoveredFor(result?.run_id as string, "activity"), 1);
 });
 
 // A 0.1.0 manifest does not declare the package extension, so a hydrated declaration
