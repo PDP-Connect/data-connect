@@ -1,6 +1,6 @@
 {
   "generated_from": {
-    "repo_root": "/home/tnunamak/.tmp/hone-quality-0823/reference-implementation",
+    "repo_root": "reference-implementation",
     "repo_sha": "60612118bfd2171fdccfc0a1dcf29fefd7d88484",
     "window": "6 months ago",
     "cog_threshold": 5,

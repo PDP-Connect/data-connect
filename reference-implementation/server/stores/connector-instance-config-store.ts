@@ -9,15 +9,12 @@
  * et al.): container env is state outside git, dies on redeploy, and
  * carries no author.
  *
- * Design history: an earlier draft of this module wrote one mutable row
- * per (connector_instance_id, key). An adversarial design review
- * (~/.tmp/reorg-0814/CONFIG-REDTEAM-CODEX.md, 2026-08-22) showed that shape
- * still permits the exact incident it exists to fix: an agent holding the
- * owner's bearer token can submit a well-typed, fully-attributed
+ * One mutable row per (connector_instance_id, key) still permits an agent
+ * holding the owner's bearer token to submit a well-typed, fully-attributed
  * collection-shaping value, and "well-typed and attributed to an agent" is
- * not the same as "the owner chose this." The review's required
- * invariant, adopted here: a run consumes collection-shaping configuration
- * only from an immutable, authenticated-owner-subject-confirmed revision.
+ * not the same as "the owner chose this." A run therefore consumes
+ * collection-shaping configuration only from an immutable,
+ * authenticated-owner-subject-confirmed revision.
  * Every collection_scope write, regardless of its provenance origin, starts
  * proposed; only authenticated owner-subject confirmation moves it to
  * `active`.
