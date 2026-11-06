@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import test from "node:test";
-
+import { emitSpineEvent } from "../lib/spine.ts";
 import {
 	__resetControllerInteractionStateForTests,
 	createController,
@@ -124,6 +124,7 @@ async function freshDb(t: TestContext): Promise<void> {
 }
 
 interface RecorderCall {
+	readonly isCurrent: (() => boolean) | undefined;
 	readonly activeRunIdAtCall: string | null;
 	readonly runId: string;
 	readonly status: string | null | undefined;
@@ -134,14 +135,16 @@ function makeController(
 	impl: () => Promise<RuntimeRunConnectorResult>,
 	maxRunWallClockMs: number,
 	store: SchedulerStore,
+	hold?: () => Promise<void>,
 ) {
 	const controller = createController({
 		admitRunConnection: admit(),
 		connectorPathResolver: () => "/tmp/connector.js",
 		logger: { error: () => undefined, warn: () => undefined },
 		maxRunWallClockMs,
-		recordSignInProof: (_deps, input) => {
+		recordSignInProof: async (_deps, input) => {
 			calls.push({
+				isCurrent: input.isCurrent,
 				activeRunIdAtCall:
 					controller.getActiveRun(CONNECTOR_ID, {
 						connectorInstanceId: INSTANCE_ID,
@@ -149,7 +152,8 @@ function makeController(
 				runId: input.runId,
 				status: input.status,
 			});
-			return Promise.resolve("none");
+			await hold?.();
+			return "none";
 		},
 		runConnectorImpl: impl,
 		schedulerStore: store,
@@ -175,9 +179,14 @@ test("the watchdog captures failure evidence while the run still owns its slot",
 	);
 	await controller.runNow(CONNECTOR_ID, runOptions("run_wd"));
 	await new Promise((resolve) => setTimeout(resolve, 300).unref());
-	assert.deepEqual(calls, [
-		{ activeRunIdAtCall: "run_wd", runId: "run_wd", status: "failed" },
-	]);
+	assert.deepEqual(
+		calls.map(({ activeRunIdAtCall, runId, status }) => ({
+			activeRunIdAtCall,
+			runId,
+			status,
+		})),
+		[{ activeRunIdAtCall: "run_wd", runId: "run_wd", status: "failed" }],
+	);
 });
 
 test("a rejected run captures failure evidence while the run still owns its slot", async (t) => {
@@ -191,9 +200,14 @@ test("a rejected run captures failure evidence while the run still owns its slot
 	);
 	await controller.runNow(CONNECTOR_ID, runOptions("run_rej"));
 	await controller.drainActiveRuns(1000);
-	assert.deepEqual(calls, [
-		{ activeRunIdAtCall: "run_rej", runId: "run_rej", status: "failed" },
-	]);
+	assert.deepEqual(
+		calls.map(({ activeRunIdAtCall, runId, status }) => ({
+			activeRunIdAtCall,
+			runId,
+			status,
+		})),
+		[{ activeRunIdAtCall: "run_rej", runId: "run_rej", status: "failed" }],
+	);
 });
 
 test("a late succeeded result from a reclaimed run cannot clear a newer run's proof", async (t) => {
@@ -225,7 +239,11 @@ test("a late succeeded result from a reclaimed run cannot clear a newer run's pr
 	releases[0]?.({ records_emitted: 0, status: "succeeded" });
 	await new Promise((resolve) => setTimeout(resolve, 50).unref());
 
-	assert.equal(calls.length, 0, "the reclaimed run must not reach the recorder");
+	assert.equal(
+		calls.length,
+		0,
+		"the reclaimed run must not reach the recorder",
+	);
 	assert.deepEqual(
 		(await getDefaultProviderInvalidationProofStore().load(INSTANCE_ID))
 			.repairedProofKeys,
@@ -238,5 +256,69 @@ test("a late succeeded result from a reclaimed run cannot clear a newer run's pr
 		calls.map((call) => [call.runId, call.status]),
 		[["run_new", "succeeded"]],
 		"the current run still records its own result",
+	);
+});
+
+test("a run reaching two terminal paths records evidence once, and a held capture sees itself superseded", async (t) => {
+	await freshDb(t);
+	const store = schedulerStore();
+	const calls: RecorderCall[] = [];
+	let openGate: () => void = () => undefined;
+	const gate = new Promise<void>((resolve) => {
+		openGate = resolve;
+	});
+	let rejectRun: (err: Error) => void = () => undefined;
+	const first = makeController(
+		calls,
+		() =>
+			new Promise<RuntimeRunConnectorResult>((_resolve, reject) => {
+				rejectRun = reject;
+			}),
+		20,
+		store,
+		() => gate,
+	);
+	await first.runNow(CONNECTOR_ID, runOptions("run_a"));
+	// The watchdog fires and its capture is held open; the run promise then
+	// rejects, reaching a second terminal path for the same run.
+	await new Promise((resolve) => setTimeout(resolve, 200).unref());
+	rejectRun(new Error("late rejection"));
+	await new Promise((resolve) => setTimeout(resolve, 100).unref());
+	assert.equal(calls.length, 1, "only one terminal path may capture per run");
+	openGate();
+	await first.drainActiveRuns(1000);
+	await new Promise((resolve) => setTimeout(resolve, 100).unref());
+	const isCurrent = calls[0]?.isCurrent;
+	assert.ok(isCurrent, "the recorder is given a post-await currency check");
+	assert.equal(isCurrent(), false, "a released run is no longer current");
+});
+
+test("a watchdog on a run that already completed does not record failure evidence", async (t) => {
+	await freshDb(t);
+	const calls: RecorderCall[] = [];
+	const controller = makeController(
+		calls,
+		async () => {
+			await emitSpineEvent({
+				actor_id: CONNECTOR_ID,
+				actor_type: "runtime",
+				data: { connector_instance_id: INSTANCE_ID },
+				event_type: "run.completed",
+				object_id: "run_done",
+				object_type: "run",
+				run_id: "run_done",
+				status: "completed",
+			});
+			return new Promise<RuntimeRunConnectorResult>(() => undefined);
+		},
+		20,
+		schedulerStore(),
+	);
+	await controller.runNow(CONNECTOR_ID, runOptions("run_done"));
+	await new Promise((resolve) => setTimeout(resolve, 300).unref());
+	assert.equal(
+		calls.filter((call) => call.status === "failed").length,
+		0,
+		"no failure evidence for a run that already succeeded",
 	);
 });

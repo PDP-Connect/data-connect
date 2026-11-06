@@ -1145,6 +1145,9 @@ const runWatchdogSettlements = new Map<string, { promise: Promise<void>; resolve
 // Growth is bounded by the number of distinct connector_instance keys ever
 // admitted, not by run count.
 const runGenerations = new Map<string, number>();
+// Runs whose terminal sign-in evidence capture has been claimed. The first
+// terminal path to reach a run owns the capture; later paths skip it.
+const signInProofClaimedRuns = new Set<string>();
 // Keyed by run_id. Interaction broker state is intentionally in-memory:
 // dashboard-submitted values satisfy the current live run only and are never
 // persisted to `.env.local`, SQLite config/state, or spine event payloads.
@@ -3406,9 +3409,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly runId: string;
     readonly status: string | null | undefined;
   }): Promise<void> {
-    if (activeRuns.get(input.key)?.run_id !== input.runId || runGenerations.get(input.key) !== input.generation) {
+    const stillCurrent = () =>
+      activeRuns.get(input.key)?.run_id === input.runId && runGenerations.get(input.key) === input.generation;
+    if (!stillCurrent() || signInProofClaimedRuns.has(input.runId)) {
       return;
     }
+    signInProofClaimedRuns.add(input.runId);
     try {
       const surfaceId = input.browserSurfaceLease?.surface_id;
       const cdpUrl = surfaceId ? (browserSurfaceLeaseManager?.getSurface(surfaceId)?.cdp_url ?? null) : null;
@@ -3418,6 +3424,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
           cdpUrl,
           connectionId: input.connectorInstanceId,
           connectorId: input.connectorId,
+          isCurrent: stillCurrent,
           manifest: input.manifest,
           nowIso: nowIso(),
           runId: input.runId,
@@ -3438,6 +3445,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly runId: string;
     readonly traceContext: SpineTraceContext;
   }): Promise<void> {
+    signInProofClaimedRuns.delete(input.runId);
     // Idempotency guard: the watchdog and the run's own .finally() can both
     // call finalizeRunCleanup. Only the first call does real work; subsequent
     // calls are silent no-ops. We detect "already finalized" by checking
@@ -4251,7 +4259,10 @@ export function createController(opts: ControllerOptions = {}): Controller {
           const emitMessage = emitErr instanceof Error ? emitErr.message : String(emitErr);
           log.warn?.(`[controller] watchdog: failed to emit run_timed_out terminal for ${runId}: ${emitMessage}`);
         }
-        // Capture terminal evidence while the lease is still held.
+        // Capture terminal evidence while the lease is still held, under the
+        // run's actual terminal status (a run that already completed must not
+        // record failure evidence).
+        const terminalStatus = await getRunTerminalStatus(runId).catch(() => null);
         await recordSignInProofForRun({
           browserSurfaceLease,
           connectorId,
@@ -4260,7 +4271,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
           key,
           manifest,
           runId,
-          status: "failed",
+          status: terminalStatus === "completed" ? "succeeded" : (terminalStatus ?? "failed"),
         });
         await finalizeRunCleanup({ browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext });
       };
