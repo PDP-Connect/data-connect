@@ -222,6 +222,20 @@ export function resolveProbeUrl(url: string, origin: string | undefined): string
   return new URL(url, origin).toString();
 }
 
+/**
+ * Returns an error message when an `http_health` check needs
+ * `PDPP_CANARY_ORIGIN` and it is unset, else null. `main` calls this before
+ * the build, so a missing origin stops the run before any image or container
+ * action instead of surfacing mid-deploy.
+ */
+export function probeOriginProblem(
+  checks: ReadonlyArray<{ readonly kind: string; readonly url?: string }>,
+  origin: string | undefined
+): string | null {
+  const needsOrigin = checks.some((check) => check.kind === "http_health" && !URL.canParse(check.url ?? ""));
+  return needsOrigin && !origin ? "PDPP_CANARY_ORIGIN is required: an http_health check uses a relative path" : null;
+}
+
 async function collectMetric(
   manifest: CanaryManifest,
   check: CanaryManifest["checks"][number],
@@ -620,6 +634,11 @@ async function main(): Promise<number> {
   }
   const startedAt = new Date();
   const manifest = parseManifest(JSON.parse(readFileSync(resolve(args.manifest), "utf8")) as unknown);
+  const originProblem = probeOriginProblem(manifest.checks, process.env.PDPP_CANARY_ORIGIN);
+  if (originProblem) {
+    console.error(originProblem);
+    return 2;
+  }
   const ref = args.ref ?? "HEAD";
   const image = `${manifest.imageRepo}:${manifest.imageTag}`;
 

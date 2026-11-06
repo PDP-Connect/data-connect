@@ -4303,7 +4303,7 @@ export function deriveOutboxAxisFromHeartbeat(
  * `blocked` heartbeat with no dead letters used to classify
  * `state_read_failed` REGARDLESS of heartbeat age, and that cause renders
  * "The server cannot read the collector's last state from that host." For
- * `cin_992b0c94cebeb3066ba42a6e` that sentence was simply false — the server
+ * `cin_7c3e1d5a9b2f4086d1e0a3c7` that sentence was simply false — the server
  * had read the host's state fine (a `blocked` heartbeat plus 22 outbox rows,
  * all `succeeded`, 7,780 records accepted across 18 batches at HTTP 201). What
  * had actually happened is that the collector on that machine stopped checking

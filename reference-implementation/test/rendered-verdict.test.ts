@@ -1077,7 +1077,7 @@ test("channel: stalled outbox state-read block asks for re-run, not dead-letter 
 });
 
 test("freshness: stalled local-device outbox with prior ingest evidence names the last known collection, not a false never-measured claim", () => {
-  // A local-device connection (Signal-shape: workstation/cin_992b0c94cebeb3066ba42a6e)
+  // A local-device connection (Signal-shape: workstation/cin_7c3e1d5a9b2f4086d1e0a3c7)
   // whose outbox is stalled loses its heartbeat-derived freshness anchor by
   // design (a stall must never read `fresh`), so `axes.freshness` reads
   // `unknown` even though the device ingested real data days before the
