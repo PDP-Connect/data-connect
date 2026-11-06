@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ConnectorIconLike } from "@pdpp/brand-react";
-import { sanitizeSvg } from "./sanitize-svg.ts";
+import { sanitizeSvg } from "@pdpp/brand-react/sanitize-svg";
 
 /**
  * The `generic` layer of `pickDisplayMark` (resolve-manifest-display-mark.ts):

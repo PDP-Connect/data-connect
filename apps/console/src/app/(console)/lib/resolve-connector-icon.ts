@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ConnectorIconLike } from "@pdpp/brand-react";
+import { hexColorOrNull } from "@pdpp/brand-react/hex-color";
 import iconCorpus from "./connector-icons/sanitized-assets.json" with { type: "json" };
-import { sanitizeSvg } from "./sanitize-svg.ts";
+import { sanitizeSvg } from "@pdpp/brand-react/sanitize-svg";
 
-const HEX_COLOR = /^#[0-9a-f]{6}$/iu;
 const URI_SCHEME = /^[a-z][a-z\d+.-]*:/iu;
 const REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
 const TRAILING_SLASH = /\/$/u;
@@ -45,18 +45,13 @@ export function validatedConnectorIcon(
   if (!svg) {
     return null;
   }
-  const color = typeof icon.color === "string" && HEX_COLOR.test(icon.color) ? icon.color : undefined;
-  const candidateBackground = icon.backgroundColor ?? declaredBackground;
-  const backgroundColor =
-    typeof candidateBackground === "string" && HEX_COLOR.test(candidateBackground) ? candidateBackground : undefined;
+  const color = hexColorOrNull(icon.color);
+  const backgroundColor = hexColorOrNull(icon.backgroundColor ?? declaredBackground);
   return { ...(color ? { color } : {}), ...(backgroundColor ? { backgroundColor } : {}), kind: "inline_svg", svg };
 }
 
 function corpusIcon(entry: CorpusEntry): ConnectorIconLike | null {
-  return validatedConnectorIcon(
-    { backgroundColor: entry.background_color, kind: "inline_svg", svg: entry.svg },
-    entry.background_color
-  );
+  return validatedConnectorIcon({ backgroundColor: entry.background_color, kind: "inline_svg", svg: entry.svg });
 }
 
 const BUNDLED_ICONS_BY_IDENTITY = new Map<string, ConnectorIconLike>();

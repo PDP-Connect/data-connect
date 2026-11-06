@@ -96,5 +96,5 @@ export function catalogEntryIcon(
   entry: { readonly connectorKey: string; readonly icon?: ConnectorIconLike | null },
   icons: ConnectorIconMap
 ): ConnectorIconLike | null {
-  return icons[connectorLookupKey(entry.connectorKey)] ?? entry.icon ?? null;
+  return icons[connectorLookupKey(entry.connectorKey)] ?? validatedConnectorIcon(entry.icon) ?? null;
 }

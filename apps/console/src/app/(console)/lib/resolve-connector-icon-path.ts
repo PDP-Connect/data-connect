@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import type { ConnectorIconLike } from "@pdpp/brand-react";
-import { sanitizeSvg } from "./sanitize-svg.ts";
+import { sanitizeSvg } from "@pdpp/brand-react/sanitize-svg";
 
 /**
  * Server-only counterpart to resolve-connector-icon.ts's inline_svg

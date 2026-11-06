@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { sanitizeSvg } from "../src/app/(console)/lib/sanitize-svg.ts";
+import { sanitizeSvg } from "@pdpp/brand-react/sanitize-svg";
 
 const REPOSITORY = "PDP-Connect/data-connectors";
 const REVISION = "23aee3aaeafad3a804d504e8614763f7845add60";

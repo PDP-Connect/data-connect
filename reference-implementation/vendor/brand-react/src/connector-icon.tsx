@@ -16,6 +16,8 @@
  */
 import type { CSSProperties } from "react";
 import { Monogram } from "./data-row.tsx";
+import { hexColorOrNull } from "./hex-color.ts";
+import { sanitizeSvg } from "./sanitize-svg.ts";
 import "./connector-icon.css";
 
 export interface ConnectorIconLike {
@@ -39,24 +41,28 @@ interface ConnectorIconProps {
   name: string;
 }
 
-function isRenderableInlineSvgIcon(icon: ConnectorIconLike): icon is ConnectorIconLike & { svg: string } {
-  return icon.kind === "inline_svg" && typeof icon.svg === "string" && icon.svg.trim().length > 0;
+/** The allowlisted markup of an `inline_svg` icon, or null when it is absent or unsafe. */
+function safeInlineSvg(icon: ConnectorIconLike): string | null {
+  return icon.kind === "inline_svg" && typeof icon.svg === "string" ? sanitizeSvg(icon.svg) : null;
 }
 
-// Callers validate SVG markup with the server manifest allowlist or the
-// console's shape-only SVG allowlist before passing it to this primitive.
+// Callers validate SVG markup too, but this is the last step before
+// dangerouslySetInnerHTML, so the shape-only allowlist runs here again.
 export function ConnectorIcon({ icon, name, className }: ConnectorIconProps) {
   const cls = ["pdpp-connector-icon", className].filter(Boolean).join(" ");
-  if (icon && isRenderableInlineSvgIcon(icon)) {
+  const svg = icon ? safeInlineSvg(icon) : null;
+  if (icon && svg) {
+    const color = hexColorOrNull(icon.color);
+    const backgroundColor = hexColorOrNull(icon.backgroundColor);
     return (
       <span
         aria-hidden="true"
         className={cls}
-        // biome-ignore lint/security/noDangerouslySetInnerHtml: callers apply the shape-only SVG allowlist before rendering.
-        dangerouslySetInnerHTML={{ __html: icon.svg }}
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: `svg` passed the shape-only SVG allowlist just above.
+        dangerouslySetInnerHTML={{ __html: svg }}
         style={
-          icon.color || icon.backgroundColor
-            ? ({ color: icon.color ?? undefined, backgroundColor: icon.backgroundColor ?? undefined } as CSSProperties)
+          color || backgroundColor
+            ? ({ color: color ?? undefined, backgroundColor: backgroundColor ?? undefined } as CSSProperties)
             : undefined
         }
       />
