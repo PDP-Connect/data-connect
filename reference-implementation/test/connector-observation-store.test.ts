@@ -140,7 +140,10 @@ function observedRun(tag: string): {
   }
   return {
     diagnosis: run.diagnose([`${tag}-auth`, `${tag}-expect`]),
-    snapshot: run.snapshot(),
+    snapshot: {
+      ...run.snapshot(),
+      connector_suggestions: [{ action: "refresh_credentials", attribution: "connector", origin: "done_error" }],
+    },
   };
 }
 
@@ -630,6 +633,41 @@ async function contractValidationAndLimit(harness: Harness): Promise<void> {
     snapshot: { defects: [], truncated: false },
   } as unknown as ConnectorObservationRunInput;
   await expectStoreError(storeOf().put(missingFacts), "record_invalid", "a snapshot without facts is rejected");
+  await inOrder(
+    [
+      { action: "refresh_credentials", attribution: "runtime", origin: "done_error" },
+      { action: "arbitrary_action", attribution: "connector", origin: "done_error" },
+      { action: "refresh_credentials", attribution: "connector", origin: "arbitrary_origin" },
+      { action: "refresh_credentials", attribution: "connector", message: "private text", origin: "done_error" },
+    ],
+    (suggestion) => {
+      const input = runInput(c, i, "invalid-suggestion");
+      return expectStoreError(
+        storeOf().put({
+          ...input,
+          snapshot: { ...input.snapshot, connector_suggestions: [suggestion] },
+        } as unknown as ConnectorObservationRunInput),
+        "record_invalid",
+        "only closed connector-attributed suggestion fields may be persisted"
+      );
+    }
+  );
+  const excessiveSuggestions = runInput(c, i, "excessive-suggestions");
+  await expectStoreError(
+    storeOf().put({
+      ...excessiveSuggestions,
+      snapshot: {
+        ...excessiveSuggestions.snapshot,
+        connector_suggestions: Array.from({ length: 17 }, () => ({
+          action: "refresh_credentials",
+          attribution: "connector",
+          origin: "done_error",
+        })),
+      },
+    } as unknown as ConnectorObservationRunInput),
+    "record_invalid",
+    "suggestion storage is bounded by the sixteen portable action and origin pairs"
+  );
   assert.equal(await harness.rowCount(c), CAP, "rejected records do not change the stored rows");
 
   assert.equal((await storeOf().list({ connectorId: c, limit: 100 })).length, CAP, "list limit clamps to 8");

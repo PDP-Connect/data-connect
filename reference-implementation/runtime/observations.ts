@@ -6,7 +6,7 @@
 //
 // Normative sources: data-connectors docs spec sections 3.8 (diagnostic
 // descriptors), 5.10 (OBSERVATION facts, provenance, retirement, limits) and
-// 5.11 (diagnosis). The wire grammar is the
+// 5.11 (diagnosis and the recovery-hint gate). The wire grammar is the
 // canonical JSON Schema `observation.schema.json` beside this file, a byte
 // copy of data-connectors blob 8d9384d1f0827647e62e1914e8cac81d809034b3. The
 // schema cannot express the checks below, so this module adds them:
@@ -22,6 +22,7 @@
 
 import { Ajv2020, type ValidateFunction } from "ajv/dist/2020.js";
 
+import { RECOVERY_ACTIONS } from "./connector-gap-bounding.ts";
 import observationSchema from "./observation.schema.json" with { type: "json" };
 
 // ---------------------------------------------------------------------------
@@ -108,9 +109,41 @@ export type RuntimeDefect =
       readonly class: "protocol_violation";
       readonly reason: ObservationRejectReason;
       readonly count: number;
+    }
+  | {
+      readonly id: string;
+      readonly class: "hint_unsupported";
+      readonly count: number;
     };
 
+/** The portable recovery actions of Collection Profile Section 5.5. */
+export type PortableRecoveryAction =
+  | "retry_by_runtime"
+  | "retry_on_connector_upgrade"
+  | "refresh_credentials"
+  | "manual_action_required"
+  | "update_selector"
+  | "upstream_unblock"
+  | "not_retriable"
+  | "unknown";
+
+/** Where a connector hint came from. */
+export type RecoveryHintOrigin = "skip_result" | "done_error";
+
+/**
+ * A connector hint the Section 5.11 gate did not authorize. It is shown only
+ * as the connector's attributed suggestion. The record holds closed values
+ * only: no free text, code, or retryable flag from the connector.
+ */
+export interface ConnectorSuggestion {
+  readonly action: PortableRecoveryAction;
+  readonly attribution: "connector";
+  readonly origin: RecoveryHintOrigin;
+}
+
 export interface ObservationSnapshot {
+  /** Present only when at least one hint was not authorized. */
+  readonly connector_suggestions?: readonly ConnectorSuggestion[];
   readonly defects: readonly RuntimeDefect[];
   readonly facts: readonly ObservedFact[];
   readonly truncated: boolean;
@@ -126,6 +159,11 @@ export interface Diagnosis {
   /** Other in-scope supporting facts, in record order. */
   readonly contributing: readonly string[];
 }
+
+export type HintGateOutcome =
+  | { readonly result: "authorized" }
+  | { readonly result: "blocked"; readonly reason: "truncated" }
+  | { readonly result: "unsupported" };
 
 export interface ObservationLimits {
   /** Serialized bytes per OBSERVATION. Must be at least 2048. */
@@ -162,6 +200,12 @@ export interface ObservationRun {
    */
   acceptWire: (parse: WireParse, serializedBytes: number) => AcceptOutcome;
   diagnose: (basis?: readonly string[]) => Diagnosis;
+  /**
+   * Section 5.11 gate for one connector hint. `authorized` means the runtime
+   * may act on the action. Any other result means the hint is shown only as
+   * the connector's suggestion, and the caller must not act on it.
+   */
+  gateRecoveryHint: (action: string, origin: RecoveryHintOrigin) => HintGateOutcome;
   /**
    * True when the connector emitted this id earlier in the run, whether the
    * fact was accepted or rejected. The ledger is bounded by the fact limit.
@@ -210,6 +254,9 @@ export function isRuntimeDefect(value: unknown): value is RuntimeDefect {
   const defect = value as Record<string, unknown>;
   if (!(Number.isSafeInteger(defect.count) && (defect.count as number) >= 1)) {
     return false;
+  }
+  if (defect.class === "hint_unsupported") {
+    return hasOnlyKeys(defect, ["id", "class", "count"]) && defect.id === HINT_UNSUPPORTED_ID;
   }
   return (
     defect.class === "protocol_violation" &&
@@ -260,6 +307,11 @@ const RUNTIME_FACT_TYPES: ReadonlySet<unknown> = new Set(["credential_submission
 
 const CATEGORY_ORDER = ["auth_rejected", "expectation_mismatch"] as const;
 
+// Hints the Section 5.11 gate holds in this version. Every other hint, portable
+// or not, is unsupported.
+const HINTS_THAT_HOLD: ReadonlySet<string> = new Set(["not_retriable", "unknown"]);
+
+const HINT_UNSUPPORTED_ID = "runtime:connector_defect:hint_unsupported";
 const PROTOCOL_VIOLATION_ID_PREFIX = "runtime:connector_defect:protocol_violation:";
 
 // ---------------------------------------------------------------------------
@@ -427,6 +479,9 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
   const discardedIds = new Set<string>();
   let idLedgerOverflowed = false;
   const defects = new Map<string, RuntimeDefect>();
+  // Keyed by origin and action. The key space is closed (2 origins x 8
+  // actions), so the record is bounded without a cap.
+  const suggestions = new Map<string, ConnectorSuggestion>();
   let truncated = false;
   let windowStart: number | undefined;
   let windowCount = 0;
@@ -436,6 +491,16 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
     const previous = defects.get(id);
     const count = previous?.class === "protocol_violation" ? previous.count + 1 : 1;
     defects.set(id, { class: "protocol_violation", count, id, reason });
+  }
+
+  function recordHintUnsupported(): void {
+    const previous = defects.get(HINT_UNSUPPORTED_ID);
+    const count = previous?.class === "hint_unsupported" ? previous.count + 1 : 1;
+    defects.set(HINT_UNSUPPORTED_ID, {
+      class: "hint_unsupported",
+      count,
+      id: HINT_UNSUPPORTED_ID,
+    });
   }
 
   function reject(reason: ObservationRejectReason, limitHit: boolean): AcceptOutcome {
@@ -562,10 +627,16 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
   }
 
   function snapshot(): ObservationSnapshot {
+    const connectorSuggestions = [...suggestions.values()];
     return Object.freeze({
       defects: [...defects.values()].map((defect) => Object.freeze({ ...defect })),
       facts: facts.map((stored) => Object.freeze({ ...stored.fact, retired: stored.retired })),
       truncated,
+      ...(connectorSuggestions.length > 0
+        ? {
+            connector_suggestions: Object.freeze(connectorSuggestions.map((s) => Object.freeze({ ...s }))),
+          }
+        : {}),
     });
   }
 
@@ -601,11 +672,40 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
     };
   }
 
+  function recordSuggestion(action: string, origin: RecoveryHintOrigin): void {
+    if (!isPortableAction(action)) {
+      return;
+    }
+    const key = `${origin}:${action}`;
+    if (!suggestions.has(key)) {
+      suggestions.set(key, { action, attribution: "connector", origin });
+    }
+  }
+
+  function gateRecoveryHint(action: string, origin: RecoveryHintOrigin): HintGateOutcome {
+    if (!HINTS_THAT_HOLD.has(action)) {
+      recordSuggestion(action, origin);
+      if (input.declared) {
+        recordHintUnsupported();
+      }
+      return { result: "unsupported" };
+    }
+    if (truncated) {
+      recordSuggestion(action, origin);
+      if (input.declared) {
+        recordHintUnsupported();
+      }
+      return { reason: "truncated", result: "blocked" };
+    }
+    return { result: "authorized" };
+  }
+
   return {
     accept,
     acceptLine,
     acceptWire,
     diagnose,
+    gateRecoveryHint,
     hasEmittedId,
     idLedgerOverflowed: () => idLedgerOverflowed,
     snapshot,
@@ -649,6 +749,10 @@ function findingOf(fact: ConnectorFact, scope: DeclaredScope): Category | undefi
     case "wait_expired":
       return undefined;
   }
+}
+
+function isPortableAction(value: string): value is PortableRecoveryAction {
+  return RECOVERY_ACTIONS.has(value);
 }
 
 function isRuntimeFactType(value: unknown): boolean {
