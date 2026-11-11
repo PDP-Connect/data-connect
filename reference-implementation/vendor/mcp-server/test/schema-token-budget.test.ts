@@ -363,8 +363,8 @@ test("default schema is an index: drops field capability detail but keeps connec
   );
   assert.deepEqual(structuredContent.data.field_capability_legend, {
     t: "declared type",
-    eq: "exact filter supported",
-    r: "range filter operators",
+    eq: "exact filter supported (owner tokens only; app tokens get 400)",
+    r: "range filter operators (owner tokens only; app tokens get 400)",
     lex: "lexical search field",
     sem: "semantic search field",
     a: "aggregation capabilities",
@@ -486,8 +486,8 @@ test("default schema requests the REST compact view when the RS supports it", as
   const structuredContent = schemaStructuredContent(result);
   assert.deepEqual(structuredContent.data.field_capability_legend, {
     t: "declared type",
-    eq: "exact filter supported",
-    r: "range filter operators",
+    eq: "exact filter supported (owner tokens only; app tokens get 400)",
+    r: "range filter operators (owner tokens only; app tokens get 400)",
     lex: "lexical search field",
     sem: "semantic search field",
     a: "aggregation capabilities",
