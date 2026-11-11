@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { delimiter, join } from "node:path";
 import { after as afterTest, test } from "node:test";
 
@@ -2440,6 +2441,8 @@ interface CollectorHarnessOptions {
   /** Per-heartbeat status overrides. Entries are consumed in request order. */
   heartbeatStatuses?: number[];
   ingestFailureMode?: "always-400" | "always-503";
+  /** Called on every ingest-batch request before it is answered. */
+  onIngest?: () => void;
   priorState?: Record<string, unknown> | null;
   /** When set, the GET state endpoint returns this status instead of 200. */
   stateReadStatus?: number;
@@ -2488,6 +2491,8 @@ interface CollectorHarness {
     records?: Array<{ data?: Record<string, unknown> }>;
     [k: string]: unknown;
   }>;
+  /** Replace the server's persisted state, as an owner state reset does. */
+  setPersistedState: (state: Record<string, unknown>) => void;
   stateOps: Array<{ body: unknown; method: string }>;
   terminalCommits: Record<string, unknown>[];
   url: string;
@@ -2630,6 +2635,7 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
       return;
     }
     if (url.includes("/ingest-batches")) {
+      options.onIngest?.();
       if (options.ingestFailureMode === "always-503") {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: "synthetic_unavailable" } }));
@@ -2669,6 +2675,9 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
     gapRecoveries,
     heartbeats,
     ingestedBatches,
+    setPersistedState: (state: Record<string, unknown>) => {
+      persistedState = { ...state };
+    },
     stateOps,
     terminalCommits,
     url: `http://127.0.0.1:${address.port}`,
@@ -3042,6 +3051,1310 @@ test("runCollectorConnector caps one first-backfill scan without losing queued w
     assert.deepEqual(largerBudgetRetry.flushedState, {
       messages: "must-not-commit",
     });
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector resumes a scan larger than one run's batch budget until every file is covered", async () => {
+  // A walk over more files than one run's batch budget can hold. The
+  // connector checkpoints after each file, the way the protocol asks
+  // ("emit STATE periodically"), and resumes from that checkpoint. Each run
+  // must commit the last checkpoint it reached, and the next run must scan
+  // again from there, so the walk converges without a larger budget.
+  const fileCount = 6;
+  const recordsPerFile = 3;
+  const batchSize = 2;
+  const maxEnqueuedBatchesPerRun = 4;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const resumeAt = start.state?.messages?.files_done ?? 0;
+        for (let f = resumeAt; f < ${fileCount}; f++) {
+          for (let r = 0; r < ${recordsPerFile}; r++) {
+            process.stdout.write(JSON.stringify({
+              type: "RECORD",
+              stream: "messages",
+              key: "f" + f + "-r" + r,
+              data: { id: "f" + f + "-r" + r },
+              emitted_at: new Date().toISOString(),
+            }) + "\\n");
+          }
+          process.stdout.write(JSON.stringify({
+            type: "STATE",
+            stream: "messages",
+            cursor: { files_done: f + 1 },
+          }) + "\\n");
+        }
+        process.stdout.write(JSON.stringify({
+          type: "DONE",
+          status: "succeeded",
+          records_emitted: ${fileCount * recordsPerFile},
+        }) + "\\n");
+      `,
+    });
+    const runOnce = (runId: string) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-resumable-walk",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-resumable-walk",
+      });
+
+    // Each run covers at least one more file, so the walk needs at most one
+    // run per file. Stop as soon as a run finishes.
+    const results: Awaited<ReturnType<typeof runOnce>>[] = [];
+    for (let run = 1; run <= fileCount && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each run resumes from the checkpoint the previous run committed.
+      results.push(await runOnce(`run-resumable-walk-${run}`));
+    }
+
+    const ingestedKeys = new Set(
+      harness.ingestedBatches.flatMap((batch) => (batch.records ?? []).map((record) => String(record.data?.id)))
+    );
+    const expectedKeys = Array.from({ length: fileCount }, (_, f) =>
+      Array.from({ length: recordsPerFile }, (__, r) => `f${f}-r${r}`)
+    ).flat();
+    assert.deepEqual(
+      [...ingestedKeys].sort(),
+      [...expectedKeys].sort(),
+      `every file reaches the server within ${fileCount} runs`
+    );
+    for (const result of results) {
+      assert.ok(result.enqueuedBatches <= maxEnqueuedBatchesPerRun, "no run exceeds the per-run batch budget");
+    }
+    assert.equal(results[0]?.scanBudgetExceeded, true);
+    assert.deepEqual(
+      results[0]?.flushedState,
+      { messages: { files_done: 2 } },
+      "a budget-stopped run commits the last checkpoint whose records are acknowledged"
+    );
+    assert.equal(
+      results.some((result) => result.skippedScanForBacklog),
+      false,
+      "a budget stop that committed a checkpoint must not block the next scan"
+    );
+    const last = results.at(-1);
+    assert.equal(last?.scanBudgetExceeded, false);
+    assert.equal(last?.done?.status, "succeeded");
+    assert.deepEqual(last?.flushedState, { messages: { files_done: fileCount } });
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector commits a finished stream at a budget stop and replays an uncheckpointed tail at most once", async () => {
+  // The shape of a connector that checkpoints one stream, then walks a second
+  // stream with a single trailing STATE. The budget stops it inside the second
+  // stream. The first stream's checkpoint covers only acknowledged records, so
+  // it commits. That may free budget for the second stream, so one retry runs.
+  // When the retry stops again from the same cursor, later retries are
+  // skipped, even though the first stream's cursor (a fresh fetched_at)
+  // changes on every run.
+  const batchSize = 2;
+  const maxEnqueuedBatchesPerRun = 2;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        for (let i = 0; i < 2; i++) {
+          emit({ type: "RECORD", stream: "sessions", key: "s-" + i, data: { id: "s-" + i }, emitted_at: new Date().toISOString() });
+        }
+        emit({ type: "STATE", stream: "sessions", cursor: { fetched_at: new Date().toISOString() } });
+        emit({ type: "RECORD", stream: "coverage_diagnostics", key: "sessions", data: { store: "sessions", status: "collected", stream: "sessions" }, emitted_at: new Date().toISOString() });
+        emit({ type: "STATE", stream: "coverage_diagnostics", cursor: { fetched_at: new Date().toISOString() } });
+        for (let i = 0; i < 10; i++) {
+          emit({ type: "RECORD", stream: "messages", key: "m-" + i, data: { id: "m-" + i }, emitted_at: new Date().toISOString() });
+        }
+        emit({ type: "STATE", stream: "messages", cursor: { done: true } });
+        emit({ type: "DONE", status: "succeeded", records_emitted: 12 });
+      `,
+    });
+    const runOnce = (runId: string) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-uncheckpointed-tail",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["sessions", "messages", "coverage_diagnostics"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-uncheckpointed-tail",
+      });
+
+    const first = await runOnce("run-uncheckpointed-tail-1");
+    assert.equal(first.scanBudgetExceeded, true);
+    assert.deepEqual(
+      Object.keys(first.flushedState ?? {}),
+      ["sessions"],
+      "only the finished stream commits; coverage evidence needs a finished pass"
+    );
+    const ingestedAfterFirst = harness.ingestedBatches.length;
+
+    const retry = await runOnce("run-uncheckpointed-tail-2");
+    assert.equal(retry.skippedScanForBacklog, false, "a committed checkpoint earns one retry");
+    assert.equal(retry.scanBudgetExceeded, true);
+    assert.equal(harness.ingestedBatches.length, ingestedAfterFirst * 2);
+
+    const replay = await runOnce("run-uncheckpointed-tail-3");
+    assert.equal(replay.skippedScanForBacklog, true, "a second stop from the same cursor must not replay again");
+    assert.equal(replay.enqueuedBatches, 0);
+    assert.equal(harness.ingestedBatches.length, ingestedAfterFirst * 2);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector keeps retrying while each budget stop commits a finished stream", async () => {
+  // Three streams walked in order, each checkpointed at its end, and each
+  // skipped once its checkpoint is committed. Every stop lands inside the
+  // next stream, whose own cursor has not moved yet, but each commit frees
+  // budget for it. The walk must finish rather than be skipped as a replay.
+  const batchSize = 2;
+  const maxEnqueuedBatchesPerRun = 4;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        for (const [stream, count] of [["sessions", 6], ["messages", 6], ["attachments", 4]]) {
+          if (start.state?.[stream]?.done) continue;
+          for (let i = 0; i < count; i++) {
+            emit({ type: "RECORD", stream, key: stream + "-" + i, data: { id: stream + "-" + i }, emitted_at: new Date().toISOString() });
+          }
+          emit({ type: "STATE", stream, cursor: { done: true } });
+        }
+        emit({ type: "DONE", status: "succeeded", records_emitted: 16 });
+      `,
+    });
+    const runOnce = (runId: string) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-freed-budget",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["sessions", "messages", "attachments"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-freed-budget",
+      });
+
+    const first = await runOnce("run-freed-budget-1");
+    assert.equal(first.scanBudgetExceeded, true);
+    assert.deepEqual(first.flushedState, { sessions: { done: true } });
+
+    const second = await runOnce("run-freed-budget-2");
+    assert.equal(second.skippedScanForBacklog, false, "the committed stream freed budget, so the tail gets a retry");
+    assert.equal(second.scanBudgetExceeded, true);
+    assert.deepEqual(second.flushedState, { messages: { done: true } });
+
+    const third = await runOnce("run-freed-budget-3");
+    assert.equal(third.skippedScanForBacklog, false, "a stop from a new starting point earns its own retry");
+    assert.equal(third.done?.status, "succeeded");
+    assert.deepEqual(third.flushedState, { attachments: { done: true } });
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector resumes an interleaved walk whose second stream rides the first stream's checkpoint", async () => {
+  // Each file emits A(n), STATE A=n, then B(n); the connector resumes from A.
+  // B has no STATE of its own, so every stop leaves B unfinished, yet each run
+  // moves the walk forward. Progress is judged by where the walk resumes, so
+  // later runs must not be skipped as replays.
+  const fileCount = 6;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        for (let n = (start.state?.a?.n ?? 0) + 1; n <= ${fileCount}; n++) {
+          emit({ type: "RECORD", stream: "a", key: "a" + n, data: { id: "a" + n }, emitted_at: new Date().toISOString() });
+          emit({ type: "STATE", stream: "a", cursor: { n } });
+          emit({ type: "RECORD", stream: "b", key: "b" + n, data: { id: "b" + n }, emitted_at: new Date().toISOString() });
+        }
+        emit({ type: "DONE", status: "succeeded", records_emitted: ${fileCount * 2} });
+      `,
+    });
+    const results: Awaited<ReturnType<typeof runCollectorConnector>>[] = [];
+    for (let run = 1; run <= fileCount && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      results.push(
+        // biome-ignore lint/performance/noAwaitInLoops: each run resumes from the checkpoint the previous run committed.
+        await runCollectorConnector({
+          baseUrl: harness.url,
+          batchSize: 1,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-interleaved-walk",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["a", "b"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { maxEnqueuedBatchesPerRun: 4 },
+          queuePath,
+          runId: `run-interleaved-walk-${run}`,
+          sourceInstanceId: "src-interleaved-walk",
+        })
+      );
+    }
+    const ingestedKeys = new Set(
+      harness.ingestedBatches.flatMap((batch) => (batch.records ?? []).map((record) => String(record.data?.id)))
+    );
+    const expectedKeys = Array.from({ length: fileCount }, (_, i) => [`a${i + 1}`, `b${i + 1}`]).flat();
+    assert.deepEqual([...ingestedKeys].sort(), expectedKeys.sort(), "every file reaches the server");
+    assert.equal(
+      results.some((result) => result.skippedScanForBacklog),
+      false,
+      "a walk that moves forward is never skipped as a replay"
+    );
+    assert.equal(results.at(-1)?.done?.status, "succeeded");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector does not count a re-stamped checkpoint as progress while another stream never checkpoints", async () => {
+  // The connector ignores its cursor. It emits A, B, then a STATE for A whose
+  // only change is a fresh fetched_at, then more records. The A cursor changes
+  // every run but the walk resumes at the same record, so after one retry the
+  // runner must stop scanning.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        const record = (stream, key) => emit({ type: "RECORD", stream, key, data: { id: key }, emitted_at: new Date().toISOString() });
+        record("a", "a1");
+        record("b", "b1");
+        emit({ type: "STATE", stream: "a", cursor: { fetched_at: new Date().toISOString() + Math.random() } });
+        for (let i = 2; i < 6; i++) record("a", "a" + i);
+        emit({ type: "STATE", stream: "b", cursor: { done: true } });
+        emit({ type: "DONE", status: "succeeded", records_emitted: 6 });
+      `,
+    });
+    const results: Awaited<ReturnType<typeof runCollectorConnector>>[] = [];
+    for (let run = 1; run <= 5; run += 1) {
+      results.push(
+        // biome-ignore lint/performance/noAwaitInLoops: each run starts from the state the previous run left.
+        await runCollectorConnector({
+          baseUrl: harness.url,
+          batchSize: 1,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-restamped-checkpoint",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["a", "b"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { maxEnqueuedBatchesPerRun: 3 },
+          queuePath,
+          runId: `run-restamped-checkpoint-${run}`,
+          sourceInstanceId: "src-restamped-checkpoint",
+        })
+      );
+    }
+    assert.deepEqual(
+      results.map((result) => result.skippedScanForBacklog),
+      [false, false, true, true, true],
+      "one retry, then no replay"
+    );
+    assert.equal(harness.ingestedBatches.length, 6, "two scans of three batches each");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector counts new records in a stream another STATE does not cover as progress", async () => {
+  // Each run emits a constant A record, a new B record, STATE A=n, then a
+  // constant A record, and stops there. The records after the STATE are the
+  // same every run; only B, which A's STATE does not cover, shows the walk
+  // moving. Clearing every stream at a STATE would hide that and skip run 3.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        const record = (stream, key) => emit({ type: "RECORD", stream, key, data: { id: key }, emitted_at: new Date().toISOString() });
+        const n = (start.state?.a?.n ?? 0) + 1;
+        if (n <= 4) {
+          record("a", "a-head");
+          record("b", "b" + n);
+          emit({ type: "STATE", stream: "a", cursor: { n } });
+          record("a", "a-tail");
+          record("a", "a-more");
+        }
+        emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
+      `,
+    });
+    const results: Awaited<ReturnType<typeof runCollectorConnector>>[] = [];
+    for (let run = 1; run <= 5 && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      results.push(
+        // biome-ignore lint/performance/noAwaitInLoops: each run resumes from the checkpoint the previous run committed.
+        await runCollectorConnector({
+          baseUrl: harness.url,
+          batchSize: 1,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-per-stream-progress",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["a", "b"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { maxEnqueuedBatchesPerRun: 3 },
+          queuePath,
+          runId: `run-per-stream-progress-${run}`,
+          sourceInstanceId: "src-per-stream-progress",
+        })
+      );
+    }
+    assert.equal(
+      results.some((result) => result.skippedScanForBacklog),
+      false,
+      "a stream that moves forward is progress"
+    );
+    assert.equal(results.at(-1)?.done?.status, "succeeded");
+    const ingestedKeys = new Set(
+      harness.ingestedBatches.flatMap((batch) => (batch.records ?? []).map((record) => String(record.data?.id)))
+    );
+    for (const key of ["b1", "b2", "b3", "b4"]) {
+      assert.ok(ingestedKeys.has(key), `${key} reaches the server`);
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector keeps resuming when repeated metadata keys follow each checkpoint", async () => {
+  // Each step emits A(n), STATE A=n, then B and C records whose keys repeat
+  // every run (key "header"). The budget stops each run on C, so every stop
+  // leaves the same uncovered B and C keys, yet A advances each run. Only a
+  // record no earlier run queued proves progress, and A(n) is one.
+  const steps = 4;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        const record = (stream, key) => emit({ type: "RECORD", stream, key, data: { id: stream + "-" + key }, emitted_at: new Date().toISOString() });
+        for (let n = (start.state?.a?.n ?? 0) + 1; n <= ${steps}; n++) {
+          record("a", "a" + n);
+          emit({ type: "STATE", stream: "a", cursor: { n } });
+          record("b", "header");
+          record("c", "header");
+        }
+        emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
+      `,
+    });
+    const results: Awaited<ReturnType<typeof runCollectorConnector>>[] = [];
+    for (let run = 1; run <= steps + 1 && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      results.push(
+        // biome-ignore lint/performance/noAwaitInLoops: each run resumes from the checkpoint the previous run committed.
+        await runCollectorConnector({
+          baseUrl: harness.url,
+          batchSize: 1,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-repeated-header-keys",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["a", "b", "c"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { maxEnqueuedBatchesPerRun: 3 },
+          queuePath,
+          runId: `run-repeated-header-keys-${run}`,
+          sourceInstanceId: "src-repeated-header-keys",
+        })
+      );
+    }
+    assert.equal(
+      results.some((result) => result.skippedScanForBacklog),
+      false,
+      "a run that queues a new record made progress"
+    );
+    assert.equal(results.at(-1)?.done?.status, "succeeded");
+    const ingestedKeys = new Set(
+      harness.ingestedBatches.flatMap((batch) => (batch.records ?? []).map((record) => String(record.data?.id)))
+    );
+    for (let n = 1; n <= steps; n++) {
+      assert.ok(ingestedKeys.has(`a-a${n}`), `a${n} reaches the server`);
+    }
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector reopens a blocked scan when the connector is updated in place", async () => {
+  // The same entrypoint path, new bytes: the start key must see the build, or
+  // an updated connector could never retry a scan an older build wedged.
+  const batchSize = 2;
+  const maxEnqueuedBatchesPerRun = 2;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const script = `
+      let buf = "";
+      await new Promise((r) => process.stdin.on("data", (c) => {
+        buf += c;
+        if (buf.includes("\\n")) r();
+      }));
+      for (let i = 0; i < 10; i++) {
+        process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-" + i, data: { id: "m-" + i }, emitted_at: new Date().toISOString() }) + "\\n");
+      }
+      process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 10 }) + "\\n");
+    `;
+    const fixture = await writeFixtureConnector({ script });
+    const runOnce = (runId: string) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-updated-in-place",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-updated-in-place",
+      });
+
+    assert.equal((await runOnce("run-updated-in-place-1")).scanBudgetExceeded, true);
+    assert.equal((await runOnce("run-updated-in-place-2")).skippedScanForBacklog, true, "same build: blocked");
+
+    await writeFile(fixture, `${await readFile(fixture, "utf8")}\n// connector build 2\n`);
+    const updated = await runOnce("run-updated-in-place-3");
+    assert.equal(updated.skippedScanForBacklog, false, "a new build gets a fresh attempt");
+    assert.equal(updated.scanBudgetExceeded, true);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector treats a full rescan after a complete pass as new work", async () => {
+  // A complete pass ends the scan's record history. A later rescan of the
+  // same records (here an updated connector resuming from a fresh cursor
+  // field) must count them as new, or it would wedge after its first stop.
+  const fileCount = 6;
+  const recordsPerFile = 3;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        for (let f = start.state?.messages?.files_done ?? 0; f < ${fileCount}; f++) {
+          for (let r = 0; r < ${recordsPerFile}; r++) {
+            emit({ type: "RECORD", stream: "messages", key: "f" + f + "-r" + r, data: { id: "f" + f + "-r" + r }, emitted_at: new Date().toISOString() });
+          }
+          emit({ type: "STATE", stream: "messages", cursor: { files_done: f + 1 } });
+        }
+        emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
+      `,
+    });
+    const runOnce = (runId: string, maxEnqueuedBatchesPerRun: number) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize: 2,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-rescan-after-pass",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-rescan-after-pass",
+      });
+
+    // The first pass also spans several budget stops, so its records are seen.
+    const firstPass: Awaited<ReturnType<typeof runOnce>>[] = [];
+    for (let run = 1; run <= fileCount && firstPass.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each run resumes from the checkpoint the previous run committed.
+      firstPass.push(await runOnce(`run-rescan-first-pass-${run}`, 4));
+    }
+    assert.equal(firstPass[0]?.scanBudgetExceeded, true);
+    assert.equal(firstPass.at(-1)?.done?.status, "succeeded", "the first pass completes");
+    const identityDb = new DatabaseSync(queuePath);
+    try {
+      const row = identityDb
+        .prepare("SELECT COUNT(*) AS n FROM local_device_scan_record_identity WHERE source_instance_id = ?")
+        .get("src-rescan-after-pass") as { n: number };
+      assert.equal(row.n, 0, "a complete pass drops the scan's record identities");
+    } finally {
+      identityDb.close();
+    }
+
+    await writeFile(fixture, (await readFile(fixture, "utf8")).replaceAll("files_done", "rescan_done"));
+    const results: Awaited<ReturnType<typeof runOnce>>[] = [];
+    for (let run = 1; run <= fileCount && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each run resumes from the checkpoint the previous run committed.
+      results.push(await runOnce(`run-rescan-after-pass-${run}`, 4));
+    }
+    assert.equal(results[0]?.scanBudgetExceeded, true);
+    assert.equal(
+      results.some((result) => result.skippedScanForBacklog),
+      false,
+      "the rescan resumes instead of wedging"
+    );
+    assert.equal(results.at(-1)?.done?.status, "succeeded");
+  } finally {
+    await harness.close();
+  }
+});
+
+const RESUMABLE_FILE_WALK = `
+  let buf = "";
+  await new Promise((r) => process.stdin.on("data", (c) => {
+    buf += c;
+    if (buf.includes("\\n")) r();
+  }));
+  const start = JSON.parse(buf.split("\\n")[0]);
+  const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+  for (let f = start.state?.messages?.files_done ?? 0; f < 6; f++) {
+    for (let r = 0; r < 3; r++) {
+      emit({ type: "RECORD", stream: "messages", key: "f" + f + "-r" + r, data: { id: "f" + f + "-r" + r }, emitted_at: new Date().toISOString() });
+    }
+    emit({ type: "STATE", stream: "messages", cursor: { files_done: f + 1 } });
+  }
+  emit({ type: "DONE", status: "succeeded", records_emitted: 18 });
+`;
+
+test("runCollectorConnector resumes when a progressing stop dies before its checkpoint commits", async () => {
+  // Run 1 stops at the budget and is killed while draining, so its checkpoint
+  // never reaches the server. Run 2 replays the same records from the same
+  // state; they must still count as new, because no run whose checkpoint
+  // landed had queued them, or the walk would wedge.
+  const controller = new AbortController();
+  let abortOnIngest = true;
+  const harness = await startCollectorHarness({
+    onIngest: () => {
+      if (abortOnIngest) {
+        abortOnIngest = false;
+        controller.abort();
+      }
+    },
+    priorState: {},
+  });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({ script: RESUMABLE_FILE_WALK });
+    const runOnce = (runId: string, abortSignal?: AbortSignal) =>
+      runCollectorConnector({
+        ...(abortSignal ? { abortSignal } : {}),
+        baseUrl: harness.url,
+        batchSize: 2,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-killed-before-checkpoint",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { leaseMs: 200, maxEnqueuedBatchesPerRun: 4, retryBackoffMs: 1 },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-killed-before-checkpoint",
+      });
+
+    await assert.rejects(runOnce("run-killed-before-checkpoint-1", controller.signal));
+    const results: Awaited<ReturnType<typeof runOnce>>[] = [];
+    for (let run = 2; run <= 8 && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: each run waits out the aborted run's leases, then resumes.
+      await new Promise((resolveWait) => setTimeout(resolveWait, 400));
+      results.push(await runOnce(`run-killed-before-checkpoint-${run}`));
+    }
+    const ingestedKeys = new Set(
+      harness.ingestedBatches.flatMap((batch) => (batch.records ?? []).map((record) => String(record.data?.id)))
+    );
+    assert.equal(ingestedKeys.size, 18, "the walk finishes after the killed run");
+    assert.equal(results.at(-1)?.done?.status, "succeeded");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector resumes a walk whose checkpoint stream emits no records of its own", async () => {
+  // Records go to `messages`; the cursor rides a separate `cursor` checkpoint
+  // stream that never emits a RECORD. A STATE after any record of the run
+  // covers that record, so it commits and the walk advances.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        for (let n = start.state?.cursor?.n ?? 0; n < 20; n++) {
+          emit({ type: "RECORD", stream: "messages", key: "m" + n, data: { id: "m" + n }, emitted_at: new Date().toISOString() });
+          if ((n + 1) % 2 === 0) emit({ type: "STATE", stream: "cursor", cursor: { n: n + 1 } });
+        }
+        emit({ type: "DONE", status: "succeeded", records_emitted: 20 });
+      `,
+    });
+    const results: Awaited<ReturnType<typeof runCollectorConnector>>[] = [];
+    for (let run = 1; run <= 8 && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+      results.push(
+        // biome-ignore lint/performance/noAwaitInLoops: each run resumes from the checkpoint the previous run committed.
+        await runCollectorConnector({
+          baseUrl: harness.url,
+          batchSize: 1,
+          connector: {
+            args: [fixture],
+            command: "node",
+            connector_id: "fixture-recordless-checkpoint-stream",
+            protocol_capabilities: [],
+            runtime_requirements: { bindings: {} },
+            streams: ["messages", "cursor"],
+          },
+          deviceId: "device-1",
+          deviceToken: "device-token",
+          executionRoot: TEST_EXECUTION_ROOT,
+          outboxPolicy: { maxEnqueuedBatchesPerRun: 4 },
+          queuePath,
+          runId: `run-recordless-checkpoint-stream-${run}`,
+          sourceInstanceId: "src-recordless-checkpoint-stream",
+        })
+      );
+    }
+    const ingestedKeys = new Set(
+      harness.ingestedBatches.flatMap((batch) => (batch.records ?? []).map((record) => String(record.data?.id)))
+    );
+    assert.equal(ingestedKeys.size, 20, "every record reaches the server");
+    assert.equal(results.at(-1)?.done?.status, "succeeded");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector completes a pass that fills the batch budget exactly", async () => {
+  // Three records at batch size 2 make exactly two batches, the budget. The
+  // connector then ends with DONE, so nothing exceeded the budget: the pass is
+  // complete, not a budget stop.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        for (let i = 0; i < 3; i++) {
+          emit({ type: "RECORD", stream: "messages", key: "k" + i, data: { id: "k" + i }, emitted_at: new Date().toISOString() });
+        }
+        emit({ type: "STATE", stream: "messages", cursor: { done: true } });
+        emit({ type: "DONE", status: "succeeded", records_emitted: 3 });
+      `,
+    });
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      batchSize: 2,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "fixture-exact-budget-pass",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      outboxPolicy: { maxEnqueuedBatchesPerRun: 2 },
+      queuePath,
+      runId: "run-exact-budget-pass",
+      sourceInstanceId: "src-exact-budget-pass",
+    });
+    assert.equal(result.scanBudgetExceeded, false);
+    assert.equal(result.done?.status, "succeeded");
+    assert.equal(result.enqueuedBatches, 2);
+    assert.deepEqual(result.flushedState, { messages: { done: true } });
+  } finally {
+    await harness.close();
+  }
+});
+
+const TEN_FILE_WALK = `
+  let buf = "";
+  await new Promise((r) => process.stdin.on("data", (c) => {
+    buf += c;
+    if (buf.includes("\\n")) r();
+  }));
+  const start = JSON.parse(buf.split("\\n")[0]);
+  const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+  for (let f = start.state?.messages?.files_done ?? 0; f < 10; f++) {
+    for (let r = 0; r < 2; r++) {
+      emit({ type: "RECORD", stream: "messages", key: "f" + f + "-r" + r, data: { id: "f" + f + "-r" + r }, emitted_at: new Date().toISOString() });
+    }
+    emit({ type: "STATE", stream: "messages", cursor: { files_done: f + 1 } });
+  }
+  emit({ type: "DONE", status: "succeeded", records_emitted: 20 });
+`;
+
+function budgetRun(input: {
+  connectorId: string;
+  fixture: string;
+  harness: CollectorHarness;
+  queuePath: string;
+  runId: string;
+  streams: string[];
+}) {
+  return runCollectorConnector({
+    baseUrl: input.harness.url,
+    batchSize: 2,
+    connector: {
+      args: [input.fixture],
+      command: "node",
+      connector_id: input.connectorId,
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: {} },
+      streams: input.streams,
+    },
+    deviceId: "device-1",
+    deviceToken: "device-token",
+    executionRoot: TEST_EXECUTION_ROOT,
+    outboxPolicy: { maxEnqueuedBatchesPerRun: 2 },
+    queuePath: input.queuePath,
+    runId: input.runId,
+    sourceInstanceId: `src-${input.connectorId}`,
+  });
+}
+
+async function runUntilDone(
+  start: number,
+  limit: number,
+  runOnce: (runId: string) => ReturnType<typeof runCollectorConnector>
+): Promise<Awaited<ReturnType<typeof runCollectorConnector>>[]> {
+  const results: Awaited<ReturnType<typeof runCollectorConnector>>[] = [];
+  for (let run = start; run <= limit && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: each run starts from the state the previous run left.
+    results.push(await runOnce(`run-${run}`));
+  }
+  return results;
+}
+
+test("runCollectorConnector resumes a walk after the owner resets the connection state", async () => {
+  // After a budget stop commits files_done=2, the owner resets the state to
+  // {}. The walk restarts and re-queues records the earlier chain saw; they
+  // must count as new, and its checkpoints must reach the server again.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({ script: TEN_FILE_WALK });
+    const runOnce = (runId: string) =>
+      budgetRun({ connectorId: "fixture-state-reset", fixture, harness, queuePath, runId, streams: ["messages"] });
+    assert.equal((await runOnce("run-before-reset")).scanBudgetExceeded, true);
+    harness.setPersistedState({});
+    const results = await runUntilDone(1, 12, runOnce);
+    assert.equal(results.at(-1)?.done?.status, "succeeded", "the walk finishes after a reset");
+    assert.equal(
+      results.some((result) => result.skippedScanForBacklog),
+      false
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector resumes a change feed whose keys repeat with new versions", async () => {
+  // Keys a-d repeat with new data while the cursor advances. A new version of
+  // a record is new data, so the feed must finish.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        const keys = ["a", "b", "c", "d", "a", "b", "c", "d", "a", "b", "c", "d", "e", "f", "g", "h"];
+        for (let p = start.state?.feed?.pos ?? 0; p < keys.length; p++) {
+          emit({ type: "RECORD", stream: "feed", key: keys[p], data: { id: keys[p], v: p }, emitted_at: new Date().toISOString() });
+          emit({ type: "STATE", stream: "feed", cursor: { pos: p + 1 } });
+        }
+        emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
+      `,
+    });
+    const results = await runUntilDone(1, 10, (runId) =>
+      budgetRun({ connectorId: "fixture-change-feed", fixture, harness, queuePath, runId, streams: ["feed"] })
+    );
+    assert.equal(results.at(-1)?.done?.status, "succeeded", "the change feed finishes");
+    const versions = new Set(
+      harness.ingestedBatches.flatMap((batch) => (batch.records ?? []).map((record) => JSON.stringify(record.data)))
+    );
+    assert.equal(versions.size, 16, "every version reaches the server");
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector resumes when an updated connector restarts its walk", async () => {
+  // A new build with a new cursor field re-walks from the start, re-queuing
+  // records the old build's chain saw. The new chain must count them as new.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({ script: TEN_FILE_WALK });
+    const runOnce = (runId: string) =>
+      budgetRun({ connectorId: "fixture-restarted-walk", fixture, harness, queuePath, runId, streams: ["messages"] });
+    await runOnce("run-old-build-1");
+    await runOnce("run-old-build-2");
+    await writeFile(fixture, (await readFile(fixture, "utf8")).replaceAll("files_done", "files_done_v2"));
+    const results = await runUntilDone(1, 12, runOnce);
+    assert.equal(results.at(-1)?.done?.status, "succeeded", "the new build's walk finishes");
+  } finally {
+    await harness.close();
+  }
+});
+
+for (const [label, evidence] of [
+  ["a failed stream", '{ type: "SKIP_RESULT", stream: "messages", reason: "stream_collection_failed", message: "partial" }'],
+  ["a detail gap", '{ type: "DETAIL_GAP", stream: "messages", state_stream: "threads", key: "m1", reason: "fetch_failed" }'],
+  [
+    "detail coverage",
+    '{ type: "DETAIL_COVERAGE", stream: "messages", state_stream: "threads", required_keys: ["m1"], hydrated_keys: [], gap_keys: ["m1"] }',
+  ],
+] as const) {
+  test(`runCollectorConnector commits no checkpoint at a budget stop after ${label}`, async () => {
+    // Detail evidence means a checkpoint may cover records that were not
+    // collected, and the runner cannot tell which (here the parent `threads`
+    // checkpoint covers `messages`). The stop commits nothing.
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const queuePath = await tempQueuePath();
+      const fixture = await writeFixtureConnector({
+        script: `
+          let buf = "";
+          await new Promise((r) => process.stdin.on("data", (c) => {
+            buf += c;
+            if (buf.includes("\\n")) r();
+          }));
+          const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+          const record = (stream, key) => emit({ type: "RECORD", stream, key, data: { id: key }, emitted_at: new Date().toISOString() });
+          record("sessions", "s1");
+          emit({ type: "STATE", stream: "sessions", cursor: { done: true } });
+          record("threads", "t1");
+          emit(${evidence});
+          emit({ type: "STATE", stream: "threads", cursor: { n: 1 } });
+          for (let i = 2; i < 10; i++) record("other", "o" + i);
+          emit({ type: "DONE", status: "succeeded", records_emitted: 0 });
+        `,
+      });
+      const result = await budgetRun({
+        connectorId: `fixture-unproven-detail-${label.replaceAll(" ", "-")}`,
+        fixture,
+        harness,
+        queuePath,
+        runId: "run-unproven-detail",
+        streams: ["sessions", "threads", "messages", "other"],
+      });
+      assert.equal(result.scanBudgetExceeded, true);
+      assert.equal(result.flushedState, null, "no STATE commits after unproven detail");
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+const STATELESS_REPLAY = `
+  let buf = "";
+  await new Promise((r) => process.stdin.on("data", (c) => {
+    buf += c;
+    if (buf.includes("\\n")) r();
+  }));
+  const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+  for (let i = 0; i < 20; i++) {
+    emit({ type: "RECORD", stream: "messages", key: "m" + i, data: { id: "m" + i }, emitted_at: new Date().toISOString() });
+    emit({ type: "STATE", stream: "messages", cursor: { fetched_at: new Date().toISOString() + Math.random() } });
+  }
+  emit({ type: "DONE", status: "succeeded", records_emitted: 20 });
+`;
+
+for (const [label, script, limit] of [
+  ["stops a replay", STATELESS_REPLAY, 15],
+  ["finishes a walk", TEN_FILE_WALK, 40],
+] as const) {
+  test(`runCollectorConnector ${label} when each checkpoint lands in a later run's drain`, async () => {
+    // A one-row drain per pass cannot reach the stop's checkpoint before the
+    // run ends, so the checkpoint is acknowledged by a later run's pre-scan
+    // drain. Identities must become seen at that acknowledgement.
+    const harness = await startCollectorHarness({ priorState: {} });
+    try {
+      const queuePath = await tempQueuePath();
+      const fixture = await writeFixtureConnector({ script });
+      const results: Awaited<ReturnType<typeof runCollectorConnector>>[] = [];
+      for (let run = 1; run <= limit && results.at(-1)?.done?.status !== "succeeded"; run += 1) {
+        results.push(
+          // biome-ignore lint/performance/noAwaitInLoops: each run drains what the previous run left.
+          await runCollectorConnector({
+            baseUrl: harness.url,
+            batchSize: 2,
+            connector: {
+              args: [fixture],
+              command: "node",
+              connector_id: "fixture-late-checkpoint",
+              protocol_capabilities: [],
+              runtime_requirements: { bindings: {} },
+              streams: ["messages"],
+            },
+            deviceId: "device-1",
+            deviceToken: "device-token",
+            executionRoot: TEST_EXECUTION_ROOT,
+            outboxPolicy: { drainBatchSize: 1, maxDrainIterations: 1, maxEnqueuedBatchesPerRun: 2 },
+            queuePath,
+            runId: `run-late-checkpoint-${run}`,
+            sourceInstanceId: "src-late-checkpoint",
+          })
+        );
+      }
+      const scans = results.filter((result) => result.enqueuedBatches > 0).length;
+      if (script === STATELESS_REPLAY) {
+        assert.ok(scans <= 2, `a replay scans at most twice; scanned ${scans} times`);
+      } else {
+        assert.equal(results.at(-1)?.done?.status, "succeeded", "the walk finishes");
+      }
+    } finally {
+      await harness.close();
+    }
+  });
+}
+
+test("runCollectorConnector stops a replay again after the budget is raised", async () => {
+  // A replay is blocked at budget 2. Raising the budget to 4 earns a new
+  // attempt, but once that attempt stops as a replay, later budget-4 runs
+  // must be skipped too.
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    // Records only, with STATE at the very end: a stop commits nothing, so
+    // every stop leaves the same starting state.
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const emit = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+        for (let n = 0; n < 20; n++) {
+          emit({ type: "RECORD", stream: "messages", key: "k" + n, data: { id: "k" + n }, emitted_at: new Date().toISOString() });
+        }
+        emit({ type: "STATE", stream: "messages", cursor: { done: true } });
+        emit({ type: "DONE", status: "succeeded", records_emitted: 20 });
+      `,
+    });
+    const runOnce = (runId: string, maxEnqueuedBatchesPerRun: number) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize: 2,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-raised-budget",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-raised-budget",
+      });
+    const scans: boolean[] = [];
+    for (const [run, budget] of [[1, 2], [2, 2], [3, 2], [4, 4], [5, 4], [6, 4], [7, 4]] as const) {
+      // biome-ignore lint/performance/noAwaitInLoops: each run starts from the state the previous run left.
+      const result = await runOnce(`run-raised-budget-${run}`, budget);
+      scans.push(result.enqueuedBatches > 0);
+    }
+    assert.deepEqual(
+      scans,
+      [true, false, false, true, false, false, false],
+      "one scan per budget, then the replay is blocked"
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector stops retrying once a resumed scan stalls inside one unit larger than the budget", async () => {
+  // Two small files checkpoint, then a third file alone is larger than the
+  // budget and has no checkpoint inside it. Run 1 commits the first two files.
+  // Run 2 resumes, but stops inside the large file without a new checkpoint;
+  // its only STATE re-stamps the resume cursor before any record. Run 3 would
+  // replay run 2 exactly, so it must be skipped.
+  const batchSize = 2;
+  const maxEnqueuedBatchesPerRun = 4;
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        const start = JSON.parse(buf.split("\\n")[0]);
+        const sizes = [2, 2, 20];
+        const resumeAt = start.state?.messages?.files_done ?? 0;
+        // Re-stamp the resume cursor before walking. It covers no new record,
+        // so it must not count as progress.
+        process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: { fetched_at: new Date().toISOString(), files_done: resumeAt } }) + "\\n");
+        for (let f = resumeAt; f < sizes.length; f++) {
+          for (let r = 0; r < sizes[f]; r++) {
+            process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "f" + f + "-r" + r, data: { id: "f" + f + "-r" + r }, emitted_at: new Date().toISOString() }) + "\\n");
+          }
+          process.stdout.write(JSON.stringify({ type: "STATE", stream: "messages", cursor: { files_done: f + 1 } }) + "\\n");
+        }
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 24 }) + "\\n");
+      `,
+    });
+    const runOnce = (runId: string) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: "fixture-oversized-unit",
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId: "src-oversized-unit",
+      });
+
+    const first = await runOnce("run-oversized-unit-1");
+    assert.equal(first.scanBudgetExceeded, true);
+    assert.deepEqual(first.flushedState, { messages: { files_done: 2 } });
+
+    const resumed = await runOnce("run-oversized-unit-2");
+    assert.equal(resumed.skippedScanForBacklog, false, "the committed checkpoint moved the walk forward");
+    assert.equal(resumed.scanBudgetExceeded, true);
+    assert.equal(resumed.flushedState, null, "no checkpoint inside the oversized file");
+    const ingestedAfterResume = harness.ingestedBatches.length;
+
+    const stalled = await runOnce("run-oversized-unit-3");
+    assert.equal(stalled.skippedScanForBacklog, true, "a retry from the stalled checkpoint would replay run 2");
+    assert.equal(harness.ingestedBatches.length, ingestedAfterResume);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector lets a scan-budget stop recorded before resume tracking scan once more", async () => {
+  // An outbox written by an older runner holds a scan-budget gap with no
+  // record of which streams it left uncheckpointed. That runner discarded
+  // staged STATE, so the row cannot prove the next scan would replay it. One
+  // scan runs; if it stops again, its own row restores the guard.
+  const batchSize = 2;
+  const maxEnqueuedBatchesPerRun = 2;
+  const connectorId = "fixture-legacy-budget-gap";
+  const sourceInstanceId = "src-legacy-budget-gap";
+  const harness = await startCollectorHarness({ priorState: {} });
+  try {
+    const queuePath = await tempQueuePath();
+    const seed = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      seed.enqueue({
+        id: buildLocalDeviceOutboxId({
+          kind: "gap",
+          parts: [connectorId, sourceInstanceId, "policy_budget", null, null],
+          sourceInstanceId,
+        }),
+        kind: "gap",
+        payload: {
+          connectorId,
+          details: `enqueued ${maxEnqueuedBatchesPerRun} batches >= run batch limit ${maxEnqueuedBatchesPerRun}`,
+          firstSeenAt: new Date().toISOString(),
+          nextAttemptBackoffMs: 60_000,
+          reason: "policy_budget",
+          retryable: true,
+          sourceInstanceId,
+        },
+        sourceInstanceId,
+      });
+    } finally {
+      seed.close();
+    }
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        for (let i = 0; i < 10; i++) {
+          process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-" + i, data: { id: "m-" + i }, emitted_at: new Date().toISOString() }) + "\\n");
+        }
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 10 }) + "\\n");
+      `,
+    });
+    const runOnce = (runId: string) =>
+      runCollectorConnector({
+        baseUrl: harness.url,
+        batchSize,
+        connector: {
+          args: [fixture],
+          command: "node",
+          connector_id: connectorId,
+          protocol_capabilities: [],
+          runtime_requirements: { bindings: {} },
+          streams: ["messages"],
+        },
+        deviceId: "device-1",
+        deviceToken: "device-token",
+        executionRoot: TEST_EXECUTION_ROOT,
+        outboxPolicy: { maxEnqueuedBatchesPerRun },
+        queuePath,
+        runId,
+        sourceInstanceId,
+      });
+
+    const first = await runOnce("run-legacy-budget-gap-1");
+    assert.equal(first.skippedScanForBacklog, false);
+    assert.equal(first.scanBudgetExceeded, true);
+
+    const second = await runOnce("run-legacy-budget-gap-2");
+    assert.equal(second.skippedScanForBacklog, true);
   } finally {
     await harness.close();
   }
@@ -4560,6 +5873,9 @@ async function startTogglableHarness(options: {
     gapRecoveries,
     heartbeats,
     ingestedBatches,
+    setPersistedState: (state: Record<string, unknown>) => {
+      persistedState = { ...state };
+    },
     stateOps,
     terminalCommits,
     url: `http://127.0.0.1:${address.port}`,
