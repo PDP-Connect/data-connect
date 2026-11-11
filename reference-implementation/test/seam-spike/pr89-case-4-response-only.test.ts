@@ -84,9 +84,9 @@ test("captured introspection context enforces the response-only request matrix w
         url: `${harness.rsUrl}/v1/streams/top_artists/records?connection_id=account-b`,
       },
       {
-        code: "unknown_field",
+        code: "field_not_granted",
         name: "field",
-        status: 400,
+        status: 403,
         url: `${harness.rsUrl}/v1/streams/top_artists/records?fields=private_note`,
       },
     ] as const;

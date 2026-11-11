@@ -32,6 +32,7 @@ import { executeRsDiscoveryIndex } from "../../operations/rs-discovery-index/ind
 import {
   executeRsProtectedResourceMetadata,
   type RsProtectedResourceMetadataClientEventSubscriptionsCapability,
+  type RsProtectedResourceMetadataClientRangeFiltersCapability,
   type RsProtectedResourceMetadataHybridCapability,
   type RsProtectedResourceMetadataLexicalCapability,
   type RsProtectedResourceMetadataSemanticCapability,
@@ -116,6 +117,7 @@ export function mountAsRoot(app: AppLike, ctx: MountAsRootContext): void {
 export interface MountAsAuthorizationServerMetadataContext {
   buildAuthorizationServerMetadata: (input: AsAuthorizationServerMetadataBuilderInput) => unknown;
   cimdEnabled?: boolean;
+  clientRangeFiltersProfiles?: () => readonly string[];
   dynamicClientRegistrationEnabled: boolean;
   publicClientMetadataForAuthorizationServer: (clients: unknown[]) => readonly AsAuthorizationServerPublicClient[];
   rejectUntrustedMetadataHost: (
@@ -147,6 +149,7 @@ export function mountAsAuthorizationServerMetadata(app: AppLike, ctx: MountAsAut
       executeAsAuthorizationServerMetadata(
         {
           cimdEnabled: ctx.cimdEnabled === true,
+          clientRangeFiltersProfiles: ctx.clientRangeFiltersProfiles?.() ?? [],
           dynamicClientRegistrationEnabled: ctx.dynamicClientRegistrationEnabled,
           issuer,
           preRegisteredPublicClients: ctx.publicClientMetadataForAuthorizationServer(
@@ -284,6 +287,7 @@ export interface MountRsProtectedResourceMetadataContext {
     options?: unknown
   ) => boolean;
   resolveClientEventSubscriptionsCapability: () => RsProtectedResourceMetadataClientEventSubscriptionsCapability | null;
+  resolveClientRangeFiltersCapability?: () => RsProtectedResourceMetadataClientRangeFiltersCapability | null;
   resolveExplicitIssuer: () => string | null;
   resolveHybridCapabilityOverride: () => RsProtectedResourceMetadataHybridCapability | null;
   resolveLexicalCapability: () => RsProtectedResourceMetadataLexicalCapability | null;
@@ -343,6 +347,9 @@ export function mountRsProtectedResourceMetadata(app: AppLike, ctx: MountRsProte
         // pass `clientEventSubscriptionsSupported: false`. See
         // openspec/changes/add-client-event-subscriptions/.
         resolveClientEventSubscriptionsCapability: ctx.resolveClientEventSubscriptionsCapability,
+        ...(ctx.resolveClientRangeFiltersCapability
+          ? { resolveClientRangeFiltersCapability: ctx.resolveClientRangeFiltersCapability }
+          : {}),
         resolveHybridCapabilityOverride: ctx.resolveHybridCapabilityOverride,
         resolveLexicalCapability: ctx.resolveLexicalCapability,
         resolveSemanticCapability: ctx.resolveSemanticCapability,
