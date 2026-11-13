@@ -10,7 +10,7 @@
 - `page.tsx`: `/settings` route and page composition.
 - `developer-mode-setting.tsx`: client-side developer-mode toggle.
 - `developer-mode.invariants.test.ts`: persistence and surface-gating checks.
-- `remote-access-setting.tsx`: desktop-only Off / My devices only / Public URL
+- `remote-access-setting.tsx`: desktop-only Off / Local network (LAN) / Public URL
   control and owner-password gate.
 - `remote-access.ts`: origin validation, reachability fields, and browser-safe
   remote-access types.

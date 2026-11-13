@@ -208,7 +208,7 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
               res,
               400,
               "remote_access_config_invalid",
-              "My devices only requires a detected LAN network interface, and none was found.",
+              "Local network (LAN) access requires a detected LAN network interface, and none was found.",
               null
             )
             return
