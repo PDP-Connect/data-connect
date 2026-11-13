@@ -391,12 +391,12 @@ function isPrivateLanHost(hostname: string): boolean {
 function validateMyDevicesOnlyConfig(config: RemoteAccessConfig): { ok: true; config: RemoteAccessConfig } | InvalidOrigin {
   const lanHost = config.my_devices_only?.lan_host?.trim()
   if (!lanHost) {
-    return { ok: false, message: "My devices only requires a detected LAN address." }
+    return { ok: false, message: "Local network (LAN) access requires a detected LAN address." }
   }
   if (!isPrivateLanHost(lanHost)) {
     return {
       ok: false,
-      message: "My devices only requires a private network address; the detected address is not on a private range.",
+      message: "Local network (LAN) access requires a private network address; the detected address is not on a private range.",
     }
   }
   const port = config.console_port
