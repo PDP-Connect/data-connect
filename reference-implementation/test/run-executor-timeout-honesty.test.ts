@@ -27,7 +27,7 @@
 // is covered only by the single real-timer test at the end of this file.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -170,12 +170,15 @@ interface ManualWatchdogTimers {
   armedDelayMs: () => number | null;
   /** Runs the single armed timer's callback, as if its delay had elapsed. */
   fire: () => void;
+  /** Stop this attempt, including a watchdog that has not been armed yet. */
+  terminate: () => void;
   timers: WatchdogTimers;
 }
 
 function manualWatchdogTimers(): ManualWatchdogTimers {
   const armed = new Map<number, { callback: () => void; ms: number }>();
   let nextId = 0;
+  let terminating = false;
   return {
     armedDelayMs: () => {
       assert.ok(armed.size <= 1, `the watchdog arms at most one timer at a time, got ${armed.size}`);
@@ -190,8 +193,19 @@ function manualWatchdogTimers(): ManualWatchdogTimers {
       armed.delete(id);
       timer.callback();
     },
+    terminate: () => {
+      terminating = true;
+      const callbacks = [...armed.values()];
+      armed.clear();
+      for (const timer of callbacks) timer.callback();
+    },
     timers: {
       setTimeout: (callback, ms) => {
+        if (terminating) {
+          // Let watchdog construction finish before aborting its attempt.
+          queueMicrotask(callback);
+          return () => {};
+        }
         nextId += 1;
         const id = nextId;
         armed.set(id, { callback, ms });
@@ -203,8 +217,8 @@ function manualWatchdogTimers(): ManualWatchdogTimers {
   };
 }
 
-async function waitFor(condition: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + WAIT_FOR_TIMEOUT_MS;
+async function waitFor(condition: () => boolean, what: string, timeoutMs = WAIT_FOR_TIMEOUT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!condition()) {
     if (Date.now() > deadline) {
       assert.fail(`timed out waiting for ${what}`);
@@ -252,7 +266,7 @@ rl.on("line", (line) => {
   if (${hang ? "true" : "false"}) {
     // Never send DONE, never exit — only the scheduler watchdog can end this
     // run. The marker tells the test every message has been written.
-    writeFileSync(${JSON.stringify(sentMarker)}, "");
+    writeFileSync(${JSON.stringify(sentMarker)}, String(process.pid));
     setInterval(() => {}, 1000);
   } else {
     process.stdout.write(JSON.stringify({ records_emitted: records.length, status: "succeeded", type: "DONE" }) + "\\n");
@@ -456,20 +470,36 @@ function localOnlyPhaseLatched(): boolean {
  */
 async function runHangingConnectorUntilWatchdogFires(
   ctx: { ownerToken: string; rsUrl: string; tmpDir: string },
-  recordCount: number
+  recordCount: number,
+  options: {
+    watchdog?: ManualWatchdogTimers;
+    wait?: typeof waitFor;
+    onLaunch?: (pending: ReturnType<ReturnType<typeof makeHarness>>) => void;
+  } = {}
 ) {
-  const watchdog = manualWatchdogTimers();
+  const watchdog = options.watchdog ?? manualWatchdogTimers();
+  const wait = options.wait ?? waitFor;
   const launchRun = makeHarness(freshRuntime(), ctx.rsUrl, WALL_CLOCK_BUDGET_MS, watchdog.timers);
   const pending = launchRun(
     schedule(writeConnector(ctx.tmpDir, recordCount, true), ctx.ownerToken),
     false,
     SCHEDULED_POLICY
   );
-  await waitFor(() => existsSync(join(ctx.tmpDir, CONNECTOR_SENT_MARKER)), "the connector to write all its messages");
-  await waitFor(() => ingestedRecordCount() === recordCount, `${recordCount} records to be durably ingested`);
-  const armedDelayMs = watchdog.armedDelayMs();
-  watchdog.fire();
-  return { armedDelayMs, record: await pending };
+  // Observe early rejection while readiness is still being polled.
+  void pending.catch(() => {});
+  try {
+    options.onLaunch?.(pending);
+    await wait(() => existsSync(join(ctx.tmpDir, CONNECTOR_SENT_MARKER)), "the connector to write all its messages");
+    await wait(() => ingestedRecordCount() === recordCount, `${recordCount} records to be durably ingested`);
+    const armedDelayMs = watchdog.armedDelayMs();
+    watchdog.fire();
+    return { armedDelayMs, record: await pending };
+  } finally {
+    // A readiness/assertion failure must not leave the child or launch behind.
+    // Termination is latched even if launch has not armed its watchdog yet.
+    watchdog.terminate();
+    await pending.catch(() => {});
+  }
 }
 
 test(
@@ -693,3 +723,77 @@ test(
     assert.equal(record.terminalReason, "run_timed_out");
   })
 );
+
+for (const failingWait of [1, 2]) {
+  test(
+    `hanging helper settles and reaps its child when wait ${failingWait} fails`,
+    withServerAndTmpDir(async (ctx) => {
+      const watchdog = manualWatchdogTimers();
+      let pending: ReturnType<ReturnType<typeof makeHarness>> | undefined;
+      let settled = false;
+      let originalError: unknown;
+      let waits = 0;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = runHangingConnectorUntilWatchdogFires(ctx, 1, {
+          watchdog,
+          onLaunch: (launch) => {
+            pending = launch;
+            void launch.then(
+              () => {
+                settled = true;
+              },
+              () => {
+                settled = true;
+              }
+            );
+          },
+          wait: async (condition, what) => {
+            waits += 1;
+            if (waits !== failingWait) return waitFor(condition, what);
+            // Ensure the failure exercises a live child, not merely startup.
+            await waitFor(() => existsSync(join(ctx.tmpDir, CONNECTOR_SENT_MARKER)), "the child PID marker");
+            try {
+              await waitFor(() => false, "an intentionally unmet condition", 20);
+            } catch (error) {
+              originalError = error;
+              throw error;
+            }
+          },
+        });
+        const bounded = Promise.race([
+          result,
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("helper cleanup did not settle within 10 seconds")), 10_000);
+          }),
+        ]);
+        await assert.rejects(bounded, (error: unknown) => {
+          assert.ok(originalError instanceof Error, "the injected wait must fail");
+          assert.equal(error, originalError, "cleanup must preserve the original error object");
+          return true;
+        });
+        assert.equal(settled, true, "the launch must settle before the helper rejects");
+        const pid = Number(readFileSync(join(ctx.tmpDir, CONNECTOR_SENT_MARKER), "utf8"));
+        assert.ok(Number.isSafeInteger(pid) && pid > 0);
+        assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "the connector child must no longer exist");
+      } finally {
+        if (deadline !== undefined) clearTimeout(deadline);
+        // Keep the regression safe even when run against the broken helper.
+        watchdog.terminate();
+        await pending?.catch(() => {});
+      }
+    })
+  );
+}
+
+test("manual cleanup terminates a watchdog armed after cleanup began", async () => {
+  const watchdog = manualWatchdogTimers();
+  watchdog.terminate();
+  let fired = false;
+  watchdog.timers.setTimeout(() => {
+    fired = true;
+  }, WALL_CLOCK_BUDGET_MS);
+  await Promise.resolve();
+  assert.equal(fired, true);
+  assert.equal(watchdog.armedDelayMs(), null);
+});
