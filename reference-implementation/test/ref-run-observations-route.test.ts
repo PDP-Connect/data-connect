@@ -149,7 +149,7 @@ async function invoke(
     },
   };
   const req = { params: { runId }, query };
-  let nextCalled = false;
+  let nextCalled: boolean;
   const runMiddleware = (fn: Handler) =>
     fn(req, response, () => {
       nextCalled = true;
