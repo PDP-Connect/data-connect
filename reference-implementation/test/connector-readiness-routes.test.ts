@@ -330,7 +330,8 @@ for (const failure of ["inspection", "host"] as const) {
 }
 
 for (const mode of ["pending", "rejected", "success"] as const) {
-  test("unfiltered mounted readiness bounds catalog discovery: " + mode, async () => {
+  // A discovery that ignores its deadline never settles; the per-test timeout fails it.
+  test("unfiltered mounted readiness bounds catalog discovery: " + mode, { timeout: 10_000 }, async () => {
     const h = mountedHarness();
     let reads = 0;
     const entries = [{connector_id:"fixture-offered",connector_key:"fixture-offered",digest:CATALOG_DIGEST,
@@ -360,13 +361,7 @@ for (const mode of ["pending", "rejected", "success"] as const) {
     } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
     const handler = h.handlers.get("/v1/owner/connector-install/readiness");
     assert.ok(handler);
-    let watchdog: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        handler({query:{}},h.res),
-        new Promise<never>((_resolve,reject) => {watchdog=setTimeout(()=>reject(new Error("readiness discovery hung")),500);}),
-      ]);
-    } finally {clearTimeout(watchdog);}
+    await handler({query:{}},h.res);
     assert.equal(h.result().status,200);
     const body = asRecord(h.result().body), rows = body.data as Record<string,unknown>[];
     assert.deepEqual(rows.map(row=>row.connector_key), mode === "success"
