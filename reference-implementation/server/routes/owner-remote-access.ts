@@ -172,6 +172,11 @@ function isRemoteAccessConfigShaped(value: unknown): value is RemoteAccessConfig
   )
 }
 
+function withoutSealedCredentials(config: RemoteAccessConfig) {
+  const { ngrok_authtoken_sealed: _ngrok, cloudflare_tunnel_token_sealed: _cloudflare, ...publicConfig } = config
+  return publicConfig
+}
+
 export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccessContext): void {
   const guarded = [ctx.requireToken, ctx.requireOwner] as const
 
@@ -180,7 +185,7 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
     ...guarded,
     async (_req: RouteRequest, res: RouteResponse) => {
       try {
-        res.json({ data: await ctx.store.load(), object: "remote_access_config" })
+        res.json({ data: withoutSealedCredentials(await ctx.store.load()), object: "remote_access_config" })
       } catch (err) {
         ctx.handleError(res, err)
       }
@@ -287,9 +292,7 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
           return
         }
         const saved = await ctx.store.save(toSave);
-        // Never echo the sealed (or plaintext) credential back to the console.
-        const { ngrok_authtoken_sealed: _sealed, cloudflare_tunnel_token_sealed: _cfSealed, ...safeSaved } = saved
-        res.json({ data: safeSaved, object: "remote_access_config" })
+        res.json({ data: withoutSealedCredentials(saved), object: "remote_access_config" })
       } catch (err) {
         if (err instanceof Error) {
           ctx.pdppError(res, 400, "remote_access_config_invalid", err.message, null)
@@ -331,8 +334,7 @@ export function mountOwnerRemoteAccess(app: AppLike, ctx: MountOwnerRemoteAccess
           return
         }
         const saved = await ctx.store.save({ ...current, console_port: port })
-        const { ngrok_authtoken_sealed: _sealed, cloudflare_tunnel_token_sealed: _cfSealed, ...safeSaved } = saved
-        res.json({ data: safeSaved, object: "remote_access_config" })
+        res.json({ data: withoutSealedCredentials(saved), object: "remote_access_config" })
       } catch (err) {
         if (err instanceof Error) {
           ctx.pdppError(res, 400, "remote_access_config_invalid", err.message, null)
