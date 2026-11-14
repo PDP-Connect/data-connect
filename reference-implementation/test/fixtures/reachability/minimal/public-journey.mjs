@@ -11,7 +11,7 @@ import { createServiceVerifier } from "@tnunamak/gozar"
 import { createEffectFixtures } from "../../../../../scripts/reachability/effect-fixtures.ts"
 import { createEffectFixtureHost } from "../../../../../scripts/reachability/testing-effects.mjs"
 
-class SecretBackend {
+export class SecretBackend {
   records = new Map()
   async put({ scopeId, bytes }) {
     const handle = randomUUID()

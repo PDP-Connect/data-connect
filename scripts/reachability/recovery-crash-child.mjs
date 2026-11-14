@@ -9,7 +9,8 @@ async function main() {
 	const fixture = await createPreparedFixture(process.argv[2], {
 		usage: process.argv[3] ?? "attached",
 	});
-	// Trusted test descriptor contains no credential or handle. It is not Gozar state.
+	// Trusted test descriptor contains no credential bytes or secret handle.
+	// The original public request permits same-key recovery after a killed caller.
 	await writeFile(
 		join(fixture.root, "recovery-descriptor.json"),
 		JSON.stringify({
@@ -19,6 +20,7 @@ async function main() {
 			root: fixture.registry.root,
 			identity: fixture.factoryOptions.identity,
 			hostCapabilities: fixture.factoryOptions.hostCapabilities,
+			request: fixture.request,
 		}),
 		{ mode: 0o600 },
 	);
@@ -55,7 +57,7 @@ async function main() {
 		const record = await operations.read(pending.operationId);
 		if (record.stage === "unknown-possibly-live") {
 			clearInterval(monitor);
-			process.send?.({ stage: "start-failed", reason: record.failureCode });
+			process.send?.({ stage: "start-failed", reason: record.failureCode, operationId: pending.operationId });
 		}
 	}, 30);
 }

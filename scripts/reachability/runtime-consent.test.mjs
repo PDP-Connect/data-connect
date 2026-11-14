@@ -14,9 +14,7 @@ test("runtime consent drift withdraws publication, and initial-only proof offers
 	});
 	const abort = new AbortController();
 	try {
-		const review = await fixture.api.call(`/drafts/${fixture.draftId}/review`, {
-			usage: "attached",
-		});
+		const review = await fixture.api.call(`/drafts/${fixture.draftId}/review`, { usage: "attached" });
 		const operation = await fixture.api.call("/operations", {
 			reviewId: review.id,
 			kind: "route",
@@ -28,16 +26,18 @@ test("runtime consent drift withdraws publication, and initial-only proof offers
 		do {
 			state = await fixture.api.call(`/operations/${operation.operationId}`);
 			if (state.stage !== "applying") break;
-			await new Promise((resolve) => setTimeout(resolve, 20));
+			await new Promise(resolve => setTimeout(resolve, 20));
 		} while (Date.now() < deadline);
 		assert.equal(state.stage, "settled");
-		const route = (
-			await fixture.gozar.listRoutes({
-				home: fixture.home,
-				owner: fixture.owner,
-			})
-		).routes.find((route) => route.operationId === operation.operationId);
-		assert.ok(route?.published);
+		// Keep the real host intent/handle path, then establish proof explicitly
+		// through the idempotent public call and current status, not enumeration.
+		assert.equal(fixture.request.wait, "verified");
+		const exposed = await fixture.gozar.expose({ ...fixture.request, operationId: operation.operationId });
+		assert.equal(exposed.verification.status, "verified", "Drift needs verified initial expose proof");
+		assert.equal(exposed.published, exposed.origin);
+		const route = await fixture.gozar.routeStatus({ home: fixture.home, handle: exposed.handle });
+		assert.equal(route.verification.status, "verified", "Drift needs current initial status proof");
+		assert.equal(route.published, exposed.origin);
 		const watch = fixture.gozar.watchRoutes({
 			home: fixture.home,
 			handle: route.handle,
@@ -86,6 +86,36 @@ test("runtime consent drift withdraws publication, and initial-only proof offers
 	}
 });
 
+test("owned enumeration projects current verified publication and proof without renewing evidence", {
+	timeout: 30000,
+}, async () => {
+	const fixture = await createPreparedFixture(undefined, { fixture: "unknown" });
+	let failure;
+	try {
+		const exposed = await fixture.gozar.expose(fixture.request);
+		assert.equal(exposed.verification.status, "verified");
+		const current = await fixture.gozar.routeStatus({ home: fixture.home, handle: exposed.handle });
+		assert.equal(current.verification.status, "verified");
+		assert.equal(current.published, current.origin);
+		assert.ok(current.published);
+		const { readFile } = await import("node:fs/promises");
+		const { join } = await import("node:path");
+		const events = join(fixture.registry.root, "providers", fixture.request.providerId, "events.jsonl");
+		const before = await readFile(events, "utf8");
+		const listed = (await fixture.gozar.listRoutes({ home: fixture.home, owner: fixture.owner })).routes
+			.filter(route => route.operationId === exposed.operationId);
+		assert.equal(listed.length, 1, "Known operation must remain enumerable");
+		assert.equal(await readFile(events, "utf8"), before, "Enumeration must not run provider proof or lifecycle effects");
+		assert.deepEqual(listed[0].handle, current.handle);
+		assert.equal(listed[0].published, current.published, "Enumeration must retain known current publication, not bare null");
+		assert.deepEqual(listed[0].verification, current.verification, "Enumeration must retain current proof metadata without fabricating evidence");
+	} catch (error) {
+		failure = error;
+	} finally {
+		await completeFixture(fixture, failure);
+	}
+});
+
 for (const usage of ["attached", "session", "durable"]) {
 	test(`${usage}: fresh same-generation consent rechecks the current route`, {
 		timeout: 30000,
@@ -98,6 +128,10 @@ for (const usage of ["attached", "session", "durable"]) {
 		try {
 			const route = await fixture.start();
 			assert.equal(route.verification.status, "verified");
+			assert.equal(route.published, route.origin);
+			const initial = await fixture.gozar.routeStatus({ home: fixture.home, handle: route.handle });
+			assert.equal(initial.verification.status, "verified", "Re-consent needs a current initial proof");
+			assert.equal(initial.published, route.origin);
 			await fixture.registry.setRuntimeCost("paid");
 			const changed = await fixture.gozar
 				.routeStatus({ home: fixture.home, handle: route.handle })

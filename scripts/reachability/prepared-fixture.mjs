@@ -19,6 +19,8 @@ import { FixtureSecretBackend } from "../../reference-implementation/test/fixtur
 import { prepareDraft } from "./journey-support.mjs";
 import { createOwnerHttpFixture } from "./owner-http-fixture.mjs";
 import { createUnknownRegistry } from "./unknown-registry.mjs";
+import { createEffectFixtures } from "./effect-fixtures.ts";
+import { createEffectFixtureHost } from "./testing-effects.mjs";
 
 export async function createPreparedFixture(root, options = {}) {
 	const disk = await statfs(process.cwd());
@@ -53,13 +55,20 @@ export async function createPreparedFixture(root, options = {}) {
 		hostCapabilities,
 		identity,
 	};
-	const gozar = createGozar(factoryOptions);
+	const effects = usageKind === "attached" ? null : createEffectFixtures();
+	const harness = effects ? await createEffectFixtureHost(factoryOptions, effects.effects) : null;
+	const gozar = harness?.gozar ?? createGozar(factoryOptions);
 	const verifyService = createServiceVerifier();
 	const app = http.createServer((request, response) => {
 		if (!verifyService(request, response)) response.end("fixture application");
 	});
 	app.listen(0, "127.0.0.1");
 	await once(app, "listening");
+	if (effects) {
+		const data = JSON.parse(await readFile(new URL("../../reference-implementation/test/fixtures/reachability/minimal/consent-effects.json", import.meta.url), "utf8"));
+		for (const origin of data["network/fetch"].proxyOrigins)
+			effects.registerOwnedProxy(origin, `127.0.0.1:${app.address().port}`);
+	}
 	const home = join(root, "gozar"),
 		owner = "fixture-owner",
 		canary = randomBytes(32).toString("hex");
@@ -179,6 +188,8 @@ export async function createPreparedFixture(root, options = {}) {
 			} catch {
 				clean = false;
 			}
+			try { await harness?.close(); } catch { clean = false; }
+			await effects?.close();
 			await api.close();
 			app.closeAllConnections();
 			app.close();
