@@ -689,7 +689,9 @@ const CHATGPT_0_1_0_MANIFEST = {
     modality: "static_secret",
   },
 };
-const { setup: _removedSetup, ...CHATGPT_0_2_5_MANIFEST } = CHATGPT_0_1_0_MANIFEST;
+const CHATGPT_0_2_5_MANIFEST = Object.fromEntries(
+  Object.entries(CHATGPT_0_1_0_MANIFEST).filter(([key]) => key !== "setup")
+) as Omit<typeof CHATGPT_0_1_0_MANIFEST, "setup">;
 
 test(
   "chatgpt 0.2.5 stops injecting a credential sealed under 0.1.0, leaves it stored, and does not fail the run",
