@@ -1298,8 +1298,12 @@ function startupTicketRetryDelayMs(attempt: number): number {
   return Math.min(STARTUP_TICKET_RETRY_MAX_MS, STARTUP_TICKET_RETRY_BASE_MS * 2 ** attempt);
 }
 
-/** Waits `ms`; resolves false at once if `signal` aborts first. */
-function sleepUnlessAborted(ms: number, signal: AbortSignal | null): Promise<boolean> {
+/**
+ * Waits `ms`; resolves false at once if `signal` aborts first. The timer is
+ * unref'd: this is background retry, and a retry that outlives its owner (a
+ * caller that never aborts the signal) must not hold the process open.
+ */
+export function sleepUnlessAborted(ms: number, signal: AbortSignal | null): Promise<boolean> {
   if (signal?.aborted) {
     return Promise.resolve(false);
   }
@@ -1312,6 +1316,7 @@ function sleepUnlessAborted(ms: number, signal: AbortSignal | null): Promise<boo
       signal?.removeEventListener("abort", onAbort);
       resolve(true);
     }, ms);
+    timer.unref();
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }

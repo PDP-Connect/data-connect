@@ -9,7 +9,7 @@ import pino from "pino";
 import { registerConnector } from "../server/auth.ts";
 import { withConnectorInstanceControlPlaneWrite } from "../server/connector-instance-write-coordinator.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import { startServer } from "../server/index.ts";
+import { sleepUnlessAborted, startServer } from "../server/index.ts";
 import { LocalTransformerExecutorError } from "../server/local-transformer-executor.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { createAlreadyAdmittedTestDatabaseChildAttachment } from "../server/postgres-test-database-guard.ts";
@@ -725,6 +725,23 @@ test("a ticket write that keeps failing does not fail startup, and shutdown stop
     // that ignored the abort would hang here until the test timeout.
     await run.finish();
   }
+});
+
+test("the startup ticket backoff timer does not keep the process alive and stops on abort", async (t) => {
+  const realSetTimeout = globalThis.setTimeout;
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  t.mock.method(globalThis, "setTimeout", ((...args: Parameters<typeof setTimeout>) => {
+    const timer = realSetTimeout(...args);
+    timers.push(timer);
+    return timer;
+  }) as typeof setTimeout);
+  const controller = new AbortController();
+  const longBackoffMs = 60_000;
+  const sleeping = sleepUnlessAborted(longBackoffMs, controller.signal);
+  assert.equal(timers.length, 1, "one backoff timer is armed");
+  assert.equal(timers[0]?.hasRef(), false, "a leaked retry loop must not hold the process open");
+  controller.abort();
+  assert.equal(await sleeping, false, "abort ends the wait at once");
 });
 
 test("a malformed retained semantic scope key does not stop the startup ticket", async () => {
