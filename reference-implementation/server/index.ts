@@ -95,8 +95,8 @@ import {
   withConnectorLifecycleLock,
 } from "./connector-lifecycle-lock.ts";
 import { createFileLocalConnectorSourceStore } from "./connector-install/local-source.ts";
-import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-access-store.ts";
-import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
+import { remoteAccessConfigPath } from "./remote-access-store.ts";
+import { ownerPasswordManagedByDesktop } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
@@ -391,6 +391,8 @@ import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./rout
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
+import { ReachabilityOperations } from "./reachability/operations.ts";
+import { mountOwnerReachability, type OwnerReachabilityContext } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import { mountOwnerLiveAs, mountOwnerLiveRs } from "./routes/owner-live.ts";
@@ -810,6 +812,8 @@ interface MutationContext {
 }
 
 interface ServerOpts {
+  /** Trusted host injects one long-lived reachability service and its usage policy. */
+  reachability?: Pick<OwnerReachabilityContext, "service" | "usage">;
   acceptedCollectorProtocolVersions?: readonly string[];
   /** Internal onboarding handoff. This value is never accepted from the PAR request. */
   acceptedProviderNativeRevision?: {
@@ -8504,21 +8508,25 @@ function buildRsApp(opts: ServerOpts = {}) {
       }),
   } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
 
-  // Owner-authenticated HTTP routes for both remote-access providers
-  // (config read/write/inspect). See routes/owner-remote-access.ts for the
-  // full rationale, including how ngrok's authtoken handoff and native
-  // tunnel supervision stay split across this route and the Tauri host.
+  // RS owner routes authenticate explicit bearer credentials. Cookie-only
+  // mutations are not admitted here; the session-side facade checks CSRF pairs.
+  const requireReachabilityMutationCsrf = (req: ReqLike, res: ResLike, next: () => void) => {
+    if (!/^Bearer\s+\S+$/i.test(String(req.headers?.authorization ?? ""))) {
+      pdppError(res, 403, "csrf_required", "Cookie mutations require the owner session CSRF guard.");
+      return;
+    }
+    next();
+  };
+  // One long-lived service is injected by the trusted host supervisor.
+  mountOwnerReachability(app, {
+    service: opts.reachability?.service ?? null,
+    operations: new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
+    usage: opts.reachability?.usage ?? (() => { throw Object.assign(new Error("unsupported"), { code: "unsupported" }); }),
+    requireToken, requireOwner, requireCsrf: requireReachabilityMutationCsrf,
+  } as unknown as Parameters<typeof mountOwnerReachability>[1]);
   mountOwnerRemoteAccess(app, {
-    contract: reachabilityContract,
-    handleError,
-    pdppError,
-    requireOwner,
-    requireToken,
-    ownerPasswordOwnerSet: () =>
-      ownerPasswordOwnerSet(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
-    store: createRemoteAccessConfigStore(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), () =>
-      resolveOwnerLive(opts).bump("remote-access")
-    ),
+    service: opts.reachability?.service ?? null,
+    requireToken, requireOwner, requireCsrf: requireReachabilityMutationCsrf,
   } as unknown as Parameters<typeof mountOwnerRemoteAccess>[1]);
 
   // Owner-authenticated HTTP routes for the generic desktop app-config blob

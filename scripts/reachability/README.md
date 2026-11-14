@@ -1,18 +1,27 @@
-# Reachability release preflight
+# Remote access release gate
 
-This is incomplete release-gate scaffolding. It does not implement Remote access.
+The gate uses a checksummed package archive, the actual owner HTTP routes, a long-lived service and the public controller boundary. It never uses a registry publish or real provider accounts.
 
-Install only a checksummed local tarball:
+Restore project dependencies with Node from `.nvmrc` and `npm ci --allow-git=root`, then build the workspace dependencies required by the reference server. Install the artifact after dependency restoration:
 
 ```sh
-GOZAR_TARBALL=/path/to/package.tgz GOZAR_TARBALL_SHA256=<sha256> node scripts/reachability/install-tarball.mjs
-GOZAR_COVERAGE_MATRIX=/path/to/coverage-matrix.json node --test scripts/reachability/contract-preflight.test.mjs
+GOZAR_TARBALL=/path/to/package.tgz \
+GOZAR_TARBALL_SHA256=<full-sha256> \
+GOZAR_SOURCE_SHA=<full-source-revision> \
+GOZAR_COVERAGE_MATRIX=/path/to/coverage-matrix.json \
+PLAYWRIGHT_BROWSERS_PATH=/path/to/shared-browser-cache \
+PLAYWRIGHT_EXECUTABLE_PATH=/path/to/existing/chromium \
+node scripts/reachability/run-release.mjs
 ```
 
-The installer checks the checksum before invoking installation and refuses installation without disk headroom above 100 GB. It does not change the dependency manifest or lockfile. Repeat after dependency restoration. Dependency lifecycle scripts are disabled for this artifact preflight; normal project gates still need their normal build setup.
+The installer checks integrity before installing into an isolated dependency prefix. It does not change dependency manifests or lockfiles. It requires headroom above the 100 GB disk floor. The runner checks disk before each step, keeps every registered provider/usage pair in the matrix and fails on missing coverage. Browser steps require 110 GB free. They use the existing cache and never download a browser.
 
-The preflight writes all declared executable provider/usage pairs as blocked. It fails on absent embedding methods, and continues to fail until the actual owner HTTP/controller/browser integration exists. It cannot certify a release.
+`testing-effects.mjs` is the only effects-harness seam. `effect-fixtures.ts` imports the published request/result unions. Its handlers match exact kind/operation pairs. Fixture outputs live in neutral fixture assets; network proof requests reach the actual owned local gate. Long-running spawn fixtures create harmless children and retain their own resource ledger. Credentials are transient and excluded from arguments, environment, diagnostics and browser responses.
 
-`testing-effects.mjs` is the only harness seam. Callers supply an array of `{kind, operation, handle}` entries using the published operation vocabulary. No provider dispatch or unknown-effect fallback is permitted.
+`release-journey.test.mjs` exercises the real owner HTTP service. Separate suites cover draft rotation, locked custody, public recovery, runtime consent, pending initial streaming proof and installer refusals. `contract-preflight.test.mjs` checks export availability only. It cannot certify a lifecycle result.
 
-Setup and route approvals are distinct contracts. Setup has no route token or query fields; route approval requires a fresh exact catalog. The two mismatch tests and approval cards remain to be implemented. See the root blocker record.
+Run browser journeys through `e2e/harness.mjs --reachability reachability.spec.ts` and `--reachability-stream reachability-stream.spec.ts`. They require the existing private network/PID namespace. A fixture run cannot certify external account entitlement or internet reachability.
+
+The controller suites use the resource governor without a user namespace because this artifact rejects the namespace's unmapped root owner. The browser harness keeps its required isolation and therefore fails before launch on that artifact. A forced test-process exit handles the missing factory shutdown API only after public route cleanup attempts; retained cleanup uncertainty remains a failure.
+
+Normal checks remain required: reference `PDPP_TEST_PROFILE=memory-default npm test`, console `npm test`, both packages' type checks and lint, and a console production build. See `BLOCKERS.md` for unresolved acceptance items. The production supervisor must supply identity, host capabilities, secret custody and listener/password policy through `createReachabilityService`; the Tauri keychain and supervisor bridges are follow-ons.

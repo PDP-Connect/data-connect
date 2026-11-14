@@ -1,0 +1,53 @@
+{
+  "draftId": "draft-one",
+  "scopeId": "scope-one",
+  "baseRevision": "revision-base",
+  "configuration": {
+    "revision": "revision-one",
+    "scopeId": "scope-one",
+    "values": {},
+    "credentials": {},
+    "inputRequirements": [],
+    "actions": [
+      {
+        "id": "orchid.configure",
+        "kind": "provide-value",
+        "label": "Configure residence",
+        "digest": "action-one",
+        "disclosure": {
+          "revision": "disclosure-one",
+          "text": "Residence disclosure",
+          "links": []
+        },
+        "consent": {
+          "consentFactsDigest": "consent-one",
+          "scope": {
+            "kind": "setup",
+            "registryId": "registry-one",
+            "scopeId": "scope-one",
+            "providerId": "fixture-orchid",
+            "configurationRevision": "revision-one",
+            "draftId": "draft-one",
+            "actionId": "orchid.configure",
+            "disclosureRevision": "disclosure-one",
+            "actionDigest": "action-one"
+          },
+          "facts": [],
+          "disclosures": {
+            "action": {
+              "id": "orchid.configure",
+              "kind": "provide-value",
+              "label": "Configure residence",
+              "digest": "action-one",
+              "disclosure": {
+                "revision": "disclosure-one",
+                "text": "Residence disclosure",
+                "links": []
+              }
+            }
+          }
+        }
+      }
+    ]
+  }
+}

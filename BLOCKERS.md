@@ -1,37 +1,37 @@
-# Remote access integration blockers
+# Remote access release blockers
 
-Implementation is incomplete. The existing Remote access screen and server remain in place. The artifact preflight is deliberately failing; it is not the requested HTTP/controller/browser integration test.
+Evidence artifact: source `0637743a2c8d7a76a9251b18c3b3f31f2bd9e190`, SHA-256 `b00a7ea71b42b1d08fdf58f3e431a4da238416c90b8c0fac976ed6328c8c5ac3`.
 
-## Installed artifact lacks embedding methods
+The integration is not release-ready. The owner HTTP service, generic screen and release suites are implemented, but the combined gate fails. No live accounts or external exposure were used. The matrix and command output are external evidence artifacts named in the implementation report.
 
-Source pin: `ca786f98465a5b4d6d230c42a2cc14f2c0119995`.
-Tarball SHA-256: `98edab7a030f75e500ef09342cba28257a0131e0d965c127787d5577d146dbd6`.
+## Public-boundary observations
 
-Exact call: `const api = createGozar()` from the installed package's public root.
-Input: no options (default trusted registry).
-Expected: the factory exposes all frozen public embedding methods.
-Actual: `typeof api[name]` is `undefined` for `listProviders`, `beginConfigurationDraft`, `commitConfigurationDraft`, `discardConfigurationDraft`, `storeSecret` and `discardSecret`.
-No method is emulated by the host.
+1. **Proof boot identity.** Call `createGozar({manifest, root, identity:{instanceId:I, bootId:B}, secretBackend, hostCapabilities})`, configure through a draft, then `expose({...query, operationId:O, wait:'verified', approval})`. Expected: the verified subject carries the trusted controller incarnation supplied by the supervisor, with a public way to obtain/register a replacement incarnation. Actual: attached results carry the same instance but a different boot ID. The common journey reaches status, stop and cleanup, then fails `proof_boot_identity_mismatch`. The same failure occurs for real HTTPS execution and both extension fixtures. No host code adopts a boot ID from a provider message or silently substitutes one.
 
-The preflight reads the installed manifest and definition data to account for 13 declared executable provider/usage pairs. This is a blocked artifact audit, not a substitute for enumeration through `listProviders` or lifecycle execution.
+2. **Session execution and durable proof.** For admitted HTTPS session rows, call `expose` with fresh route consent, a host operation ID and a bounded session lifetime. Some operations remain applying beyond the fixture's observation deadline; public cleanup remains uncertain. These are failures, not proof that the runtime is absent. For two durable rows, `ensureRoute` returns an unverified view. The full journey requires verified, current proof. The effects fixtures use published unions and the actual owned gate. A fixture defect and an artifact defect remain possible; these observations do not identify a root cause.
 
-## Effects harness and vocabulary
+3. **Owner-kept execution.** Some declared HTTP(S) rows still return `setup_required` after the generic setup path. One durable result lacks the operation identity needed to find it in owner state. External owner-kept proof/subject integration is also listed as incomplete in the artifact receipt. These rows cannot receive an executable pass or a refusal-only release waiver.
 
-The published signature is `createTestingGozar({effects, ...createGozarOptions}) -> {gozar,events,close}`. The local seam uses only that public export and passes effect fixtures as exact kind/operation entries. The integrated tarball and operation vocabulary have not arrived. No real-adapter effects have run.
+4. **Detect-only admission.** The two raw-stream entries have detect-only inventory data and no candidate tokens. `expose` with non-authoritative approval refuses with `consent_unknown`, with zero observed effects. The negative test expects an explicit `unsupported` refusal for the detect-only kind and therefore remains failing. They stay in the detect-only scope category; no execution pass is inferred.
 
-## Disk floor
+5. **Recovery and retained records.** The five attached and five durable recovery checks pass through public enumeration/status/close, including a killed caller before host handle persistence. Session recovery fails. Some rejected operations retain records whose public close reports `route_not_found`; cleanup is unconfirmed and the testing harness can fail to close the retained handle. The gate retains this debt and records the harness failure separately.
 
-Available disk fell from 107,000,811,520 bytes at entry to 98,764,771,328 bytes. The dependency installation was terminated. Builds, browser installation and normal gates were stopped. Only artifacts made by this lane are removed during closeout.
+6. **Consent changes.** Attached same-generation re-consent and runtime withdrawal with initial-only proof pass. Session and durable re-consent do not complete the required journey. Changing only a fixture's consent-fact data causes the old approval to be refused as `artifact_integrity_failed` rather than the expected `consent_changed`; retained cleanup also fails. Fresh-row rendering in the actual screen is not proven.
 
-## Work still required
+7. **Artifact execution.** An offered install action with `installer.execute` denied returns `unsupported` without execution. With execution permitted and a deliberately wrong artifact hash, `runSetupAction` returns `unsupported`, not `artifact_integrity_failed`. The shipped public factory/testing unions do not expose an artifact executor for supplying the test bytes. The hash-mismatch path is blocked; no private executor hook is used. `Action` still omits the frozen artifact/effects fields, so the sole temporary type extension remains in `install-artifact-types.ts`.
 
-- Node service, real host secret backend seam and detached controller/canary test.
-- Owner HTTP API, authentication/CSRF integration and allowlist projections, including the existing GET config leak.
-- Generic Remote access screen and deletion of replaced provider code.
-- Separate setup-scope and route-scope approval cards.
-- Both kind-mismatch zero-effect tests against the installed controller.
-- Fixture unknown-provider DOM journey; source/bundle independence scan.
-- Full lifecycle tests, runtime consent withdrawal, proof subject fencing, revision/rotation tests, installer integrity and cleanup recovery.
-- Normal reference and console tests, typecheck and lint.
+## Browser and host integration
 
-No acceptance item above is claimed proven. The artifact preflight must be replaced or completed when the real owner journey exists; its final assertion prevents an artifact-only check from becoming a false release pass.
+Both browser journeys are attempted through the required isolated owner-journey harness. Startup fails at `listProviders({home, owner})`: the namespace maps the root directory's owner to an unmapped UID, and the package rejects that ancestor as an unsafe state path. The browser is never launched. The harness's network/PID isolation and the package's path checks remain intact. The controller-level pending initial stream plus concurrent status/watch negative passes outside that namespace, under the resource governor; it does not prove the screen assertion.
+
+Production startup exposes the owner routes but requires the trusted supervisor to inject one `ReachabilityService`. The factory and host settings/secret bridge types exist. The default launcher has not wired the Tauri keychain, controller-incarnation registration or listener/password/port supervisor bridge. Missing host services report unavailable rather than inventing capabilities. This is an integration gap, not a completed production rollout.
+
+The broader wrong-subject and late-completion negative matrix is not certified. There is no inferred pass for wrong instance, target, generation or controller restart. The release receipt also lists old callers/schema/CLI, binding projections and documentation as incomplete.
+
+## Repository checks
+
+Console tests, reference/console type checks, the console build, focused reducer/projection checks, the effects type check and source/built-browser identifier scan pass in recorded runs. The normal reference suite reports one unrelated failure because its browser revision is absent from the shared cache. No browser is downloaded.
+
+Normal lint fails. It reports existing source/generated-artifact findings and findings in the new code, including archive-installed dependency declarations and style rules. Those findings are not waived by the controller results. The production screen journey, remaining subject negatives and lint must pass before release.
+
+Follow-ons retained by scope: the Tauri keychain bridge, crash-safe legacy-file migration and deletion of native provider modules after migration. Pairing/attach is separate. The old provider-specific console controls and server mutation implementation are removed; the one legacy importer and native modules remain.

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process"
 import { createRequire } from "node:module"
 import { randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile, statfs } from "node:fs/promises"
 import { createServer, Socket } from "node:net"
 import { createInterface } from "node:readline"
 import { homedir, tmpdir } from "node:os"
@@ -49,6 +49,7 @@ export function cleanEnvironment(env = process.env) {
         "LC_ALL",
         "TEST_TMPDIR",
         "PLAYWRIGHT_BROWSERS_PATH",
+        "PLAYWRIGHT_EXECUTABLE_PATH",
       ].includes(name)
     )
   )
@@ -250,8 +251,10 @@ async function waitReady(url, child, signal) {
 }
 
 async function startStack({ root, launch, signal }, args) {
+  const reachabilityMode = args.includes("--reachability-stream") ? "stream" : args.includes("--reachability") ? "unknown" : null
+  args = args.filter(arg => !["--reachability", "--reachability-stream"].includes(arg))
   const data = join(root, "data")
-  await mkdir(data)
+  await mkdir(data, { mode: 0o700 })
   const nonce = randomBytes(24).toString("hex")
   const password = randomBytes(32).toString("hex")
   await writeFile(join(data, MARKER), nonce, { mode: 0o600 })
@@ -274,7 +277,7 @@ async function startStack({ root, launch, signal }, args) {
     AS_PORT: String(asPort),
     RS_PORT: String(rsPort),
   }
-  const reference = launch(["--import", "tsx", "server/index.ts"], {
+  const reference = launch(["--import", "tsx", ...(reachabilityMode ? [join(repo, "scripts/reachability/reference-fixture.mjs"), reachabilityMode] : ["server/index.ts"])], {
     cwd: join(repo, "reference-implementation"),
     extraEnv: shared,
   })
@@ -291,6 +294,10 @@ async function startStack({ root, launch, signal }, args) {
   const consoleOptions = {
     cwd: join(repo, "apps/console"),
     extraEnv: { ...shared, NEXT_TELEMETRY_DISABLED: "1" },
+  }
+  if (reachabilityMode) {
+    const disk = await statfs(repo)
+    if (disk.bavail * disk.bsize < 110_000_000_000) throw new Error("NOT RUN (disk): browser build requires 110 GB free")
   }
   const buildStarted = performance.now()
   const build = launch([next, "build", "--webpack"], consoleOptions)

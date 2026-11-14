@@ -34,7 +34,9 @@
     "./operations/rs-records-delete": "./operations/rs-records-delete/index.ts",
     "./operations/rs-records-ingest": "./operations/rs-records-ingest/index.ts",
     "./operations/rs-protected-resource-metadata": "./operations/rs-protected-resource-metadata/index.ts",
-    "./operations/ref-dataset-summary": "./operations/ref-dataset-summary/index.ts"
+    "./operations/ref-dataset-summary": "./operations/ref-dataset-summary/index.ts",
+    "./reachability-projection": "./server/reachability/projection.ts",
+    "./reachability-host-settings": "./server/reachability/host-settings.ts"
   },
   "bin": {
     "pdpp": "./cli/index.ts"

@@ -1,0 +1,163 @@
+import { completeFixture } from "./journey-support.mjs";
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createPreparedFixture } from "./prepared-fixture.mjs";
+
+test("runtime consent drift withdraws publication, and initial-only proof offers only stop", {
+	timeout: 60000,
+}, async () => {
+	const fixture = await createPreparedFixture(undefined, {
+		runtimeObservations: true,
+	});
+	const abort = new AbortController();
+	try {
+		const review = await fixture.api.call(`/drafts/${fixture.draftId}/review`, {
+			usage: "attached",
+		});
+		const operation = await fixture.api.call("/operations", {
+			reviewId: review.id,
+			kind: "route",
+			consentFactsDigest: review.candidate.consentFactsDigest,
+			acknowledgeDisconnect: true,
+		});
+		const deadline = Date.now() + 20000;
+		let state;
+		do {
+			state = await fixture.api.call(`/operations/${operation.operationId}`);
+			if (state.stage !== "applying") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		} while (Date.now() < deadline);
+		assert.equal(state.stage, "settled");
+		const route = (
+			await fixture.gozar.listRoutes({
+				home: fixture.home,
+				owner: fixture.owner,
+			})
+		).routes.find((route) => route.operationId === operation.operationId);
+		assert.ok(route?.published);
+		const watch = fixture.gozar.watchRoutes({
+			home: fixture.home,
+			handle: route.handle,
+			signal: abort.signal,
+		});
+		const changed = (async () => {
+			for await (const event of watch)
+				if (event.type === "consent_changed") return event;
+			throw new Error("No runtime consent change event");
+		})();
+		changed.catch(() => {});
+		await fixture.registry.setRuntimeCost("paid");
+		let current;
+		try {
+			current = await fixture.gozar.routeStatus({
+				home: fixture.home,
+				handle: route.handle,
+			});
+		} catch (error) {
+			assert.equal(error.code, "consent_changed");
+			current = error.route;
+		}
+		assert.ok(current);
+		assert.equal(current.published, null);
+		assert.notEqual(current.verification.status, "verified");
+		const event = await Promise.race([
+			changed,
+			new Promise((_, reject) =>
+				setTimeout(() => reject(new Error("Consent watch timed out")), 8000),
+			),
+		]);
+		assert.equal(event.route.published, null);
+		const refused = await fixture.api.request(
+			`/routes/${route.handle.id}/review`,
+			{ generation: route.handle.generation },
+		);
+		assert.equal(refused.error?.code, "proof_refresh_unsupported");
+		const host = await fixture.api.call("/state");
+		const safe = host.routes.find((item) => item.handle.id === route.handle.id);
+		assert.equal(safe.published, null);
+		assert.deepEqual(safe.actions, ["stop"]);
+		assert.equal(host.reasons[route.handle.id], "proof_refresh_unsupported");
+	} finally {
+		abort.abort();
+		await fixture.close();
+	}
+});
+
+for (const usage of ["attached", "session", "durable"]) {
+	test(`${usage}: fresh same-generation consent rechecks the current route`, {
+		timeout: 30000,
+	}, async () => {
+		const fixture = await createPreparedFixture(undefined, {
+			fixture: "unknown",
+			usage,
+			runtimeObservations: true,
+		});
+		try {
+			const route = await fixture.start();
+			assert.equal(route.verification.status, "verified");
+			await fixture.registry.setRuntimeCost("paid");
+			const changed = await fixture.gozar
+				.routeStatus({ home: fixture.home, handle: route.handle })
+				.catch((error) => error.route);
+			assert.equal(changed.published, null);
+			const review = await fixture.gozar.reviewRouteConsent({
+				home: fixture.home,
+				handle: route.handle,
+			});
+			assert.equal(review.scope.kind, "route");
+			assert.ok(review.facts);
+			assert.ok(review.disclosures);
+			const refreshed = await fixture.gozar.approveRouteConsent({
+				home: fixture.home,
+				handle: route.handle,
+				approvalToken: review.approvalToken,
+				consentFactsDigest: review.consentFactsDigest,
+			});
+			assert.deepEqual(refreshed.handle, route.handle);
+			assert.equal(refreshed.verification.status, "verified");
+			assert.equal(refreshed.published, refreshed.origin);
+		} finally {
+			await fixture.close();
+		}
+	});
+}
+
+test("a data-only consent row invalidates the earlier route approval", {
+	timeout: 30000,
+}, async () => {
+	const fixture = await createPreparedFixture(undefined, {
+		fixture: "unknown",
+	});
+	let failure;
+	try {
+		const { readFile, writeFile } = await import("node:fs/promises");
+		const { join } = await import("node:path");
+		const path = join(
+			fixture.registry.root,
+			fixture.registry.manifest.providers[0].definition,
+		);
+		const definition = JSON.parse(await readFile(path, "utf8"));
+		definition.adapter.facts.push(fixture.registry.addedFact);
+		await writeFile(path, JSON.stringify(definition));
+		await assert.rejects(fixture.start(), { code: "consent_changed" });
+		const fresh = (await fixture.gozar.catalogRoutes(fixture.request))
+			.candidates[0];
+		assert.notEqual(
+			fresh.consentFactsDigest,
+			fixture.request.approval.consentFactsDigest,
+		);
+		assert.ok(
+			fresh.consent.facts.some(
+				(fact) =>
+					fact.id === fixture.registry.addedFact.id &&
+					fact.value === fixture.registry.addedFact.value,
+			),
+		);
+	} catch (error) {
+		failure = error;
+	} finally {
+		await completeFixture(fixture, failure);
+	}
+});

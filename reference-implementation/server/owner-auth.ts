@@ -217,6 +217,7 @@ export interface OwnerAuthPlaceholder {
     req: AuthRequest
   ) => Promise<{ credentialRevision?: string | null; sessionIdHash?: string } | null>;
   renderCsrfField: (token: string) => string;
+  requireCookieMutationCsrf: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
   requireCsrf: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => void;
   requireOwnerSession: (req: AuthRequest, res: AuthResponse, next: AuthNextFunction) => Promise<void>;
   readonly subjectId: string;
@@ -1146,13 +1147,9 @@ export function createOwnerAuthPlaceholder({
     );
   }
 
-  function requireCsrf(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
+  function requireCsrfPair(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
     if (!(enabled && csrfSecret)) {
       // Owner-auth disabled — no session, no CSRF surface to protect.
-      next();
-      return;
-    }
-    if (!shouldRequireCsrf(req)) {
       next();
       return;
     }
@@ -1166,6 +1163,15 @@ export function createOwnerAuthPlaceholder({
       return;
     }
     next();
+  }
+
+  function requireCsrf(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
+    if (!shouldRequireCsrf(req)) { next(); return; }
+    requireCsrfPair(req, res, next);
+  }
+
+  function requireCookieMutationCsrf(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): void {
+    requireCsrfPair(req, res, next);
   }
 
   function extractCsrfFormToken(req: AuthRequest): string {
@@ -1500,6 +1506,7 @@ export function createOwnerAuthPlaceholder({
     },
     renderCsrfField: renderCsrfHiddenField,
     requireCsrf,
+    requireCookieMutationCsrf,
     requireOwnerSession,
     subjectId: resolvedSubjectId,
   };
