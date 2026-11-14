@@ -233,7 +233,9 @@ export interface BrowserEnrollmentReadinessResolver {
     registeredManifest?: object | null
   ) => Promise<BrowserEnrollmentReadiness>;
   /** One catalog read for the whole list. */
-  resolveMany: (connectorKeys: readonly string[]) => Promise<readonly BrowserEnrollmentReadiness[]>;
+  resolveMany: (connectorKeys: readonly string[], catalog?: readonly ConnectorCatalogEntry[] | null) => Promise<readonly BrowserEnrollmentReadiness[]>;
+  /** A bounded observation shared with discovery; null means unavailable, not empty. */
+  readCatalog?: () => Promise<readonly ConnectorCatalogEntry[] | null>;
 }
 
 type CatalogRead = () => Promise<readonly ConnectorCatalogEntry[] | null>;
@@ -284,6 +286,13 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
   }
 }
 
+export function readReadinessCatalog(
+  read: () => Promise<readonly ConnectorCatalogEntry[]>,
+  timeoutMs = CATALOG_READ_TIMEOUT_MS
+): Promise<readonly ConnectorCatalogEntry[] | null> {
+  return withTimeout(Promise.resolve().then(read).catch(() => null), timeoutMs);
+}
+
 export function createBrowserEnrollmentReadinessResolver(deps: {
   readonly installService: Pick<ConnectorInstallService, "catalog" | "inspectSelected">;
   /**
@@ -325,9 +334,11 @@ export function createBrowserEnrollmentReadinessResolver(deps: {
     connectorKey: string,
     readCatalog: CatalogRead,
     reuseHostResult: boolean,
-    heldManifest: object | null | undefined
+    heldManifest: object | null | undefined,
+    rememberBrowserBound: (value: boolean) => void
   ): Promise<BrowserEnrollmentReadiness> => {
     const artifact = await deps.installService.inspectSelected(connectorKey);
+    if (artifact.status === "active") rememberBrowserBound(isBrowserBound(artifact.manifest));
     const host =
       artifact.status === "active" && isBrowserBound(artifact.manifest) && !declaresNoCollection(artifact.manifest)
         ? await hostFor(connectorKey, artifact, reuseHostResult)
@@ -357,15 +368,21 @@ export function createBrowserEnrollmentReadinessResolver(deps: {
     heldManifest?: object | null
   ): Promise<BrowserEnrollmentReadiness> => {
     const connectorKey = canonicalConnectorKey(rawKey) ?? rawKey;
+    let selectedBrowserBound: boolean | undefined;
     try {
-      return await resolveUnchecked(connectorKey, readCatalog, reuseHostResult, heldManifest);
+      return await resolveUnchecked(connectorKey, readCatalog, reuseHostResult, heldManifest,
+        (value) => {selectedBrowserBound = value;});
     } catch (error) {
+      let hint = heldManifest;
+      if (selectedBrowserBound === undefined && hint === undefined) {
+        try {hint = await deps.registeredManifest?.(connectorKey);} catch {hint = null;}
+      }
       return projectBrowserEnrollmentReadiness({
         artifact: { reason: messageOf(error), status: "inspection_failed" },
         catalog: "not_consulted",
         catalogBrowserBound: null,
         connectorKey,
-        hintBrowserBound: false,
+        hintBrowserBound: selectedBrowserBound ?? isBrowserBound(hint ?? null),
         host: null,
       });
     }
@@ -374,10 +391,7 @@ export function createBrowserEnrollmentReadinessResolver(deps: {
   const catalogReader = (): CatalogRead => {
     let pending: Promise<readonly ConnectorCatalogEntry[] | null> | undefined;
     return () => {
-      pending ??= withTimeout(
-        deps.installService.catalog().catch(() => null),
-        catalogTimeoutMs
-      );
+      pending ??= readReadinessCatalog(() => deps.installService.catalog(), catalogTimeoutMs);
       return pending;
     };
   };
@@ -385,8 +399,9 @@ export function createBrowserEnrollmentReadinessResolver(deps: {
   return {
     resolve: (connectorKey, registeredManifest) =>
       resolveWith(connectorKey, catalogReader(), false, registeredManifest),
-    resolveMany: (connectorKeys) => {
-      const readCatalog = catalogReader();
+    readCatalog: () => catalogReader()(),
+    resolveMany: (connectorKeys, catalog) => {
+      const readCatalog = catalog === undefined ? catalogReader() : async () => catalog;
       return Promise.all(connectorKeys.map((connectorKey) => resolveWith(connectorKey, readCatalog, true)));
     },
   };

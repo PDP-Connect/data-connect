@@ -1,6 +1,32 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+test("inspection failure retains held and registered browser identity without admission", async () => {
+  const installService = {catalog: async () => [], inspectSelected: async () => {throw new Error("store unavailable");}};
+  const resolver = createBrowserEnrollmentReadinessResolver({
+    installService, registeredManifest: async () => browserManifest("acme-shop"),
+  });
+  for (const result of [await resolver.resolve("acme-shop"), await resolver.resolve("acme-shop", browserManifest("acme-shop"))]) {
+    assert.equal(result.browser_bound, true);
+    assert.equal(result.action, "retry");
+    assert.equal(result.reason, "inspection_unavailable");
+    assert.notEqual(result.action, "connect");
+  }
+});
+
+test("host probe failure retains selected browser artifact over a nonbrowser hint", async () => {
+  const resolver = createBrowserEnrollmentReadinessResolver({
+    installService: {catalog: async () => [], inspectSelected: async () => activeArtifact()},
+    checkHost: async () => {throw new Error("probe unavailable");},
+  });
+  const result = await resolver.resolve("acme-shop", {runtime_requirements:{bindings:NETWORK_BINDINGS}});
+  assert.equal(result.browser_bound, true);
+  assert.equal(result.action, "retry");
+  assert.equal(result.reason, "inspection_unavailable");
+  assert.equal(result.host, "not_evaluated");
+});
+
+
 /**
  * The browser-setup readiness projection, over real install and local-source
  * stores. Each test states one row of the state table in

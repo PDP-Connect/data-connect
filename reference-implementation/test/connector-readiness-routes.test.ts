@@ -14,9 +14,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
-import { createConnectorInstallService } from "../server/connector-install/index.ts";
+import { type ConnectorInstallService, createConnectorInstallService } from "../server/connector-install/index.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
+import { createBrowserEnrollmentReadinessResolver } from "../server/connector-readiness.ts";
 import { startServer } from "../server/index.ts";
+import type { MiddlewareHandler } from "../server/routes/_route-contract.ts";
+import { mountOwnerConnectorInstall } from "../server/routes/owner-connector-install.ts";
+import { mountRefBrowserEnrollmentShell } from "../server/routes/ref-browser-enrollment-shell.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { createBrowserArtifactFixtures, setBrowserHostCapability } from "./helpers/browser-artifact-fixtures.ts";
 import { closeTestServer } from "./helpers/close-test-server.ts";
@@ -267,3 +271,109 @@ test("enforcement rechecks at action time: an artifact that breaks after the lis
     assert.match(String(asRecord(shell.body.error).message), /artifact_invalid/);
   });
 });
+
+function mountedHarness() {
+  const handlers = new Map<string, (...args: unknown[]) => unknown>();
+  const app = {
+    get(path: string, ...args: unknown[]) {handlers.set(path, args.at(-1) as (...args: unknown[]) => unknown); return app;},
+    post(path: string, ...args: unknown[]) {handlers.set(path, args.at(-1) as (...args: unknown[]) => unknown); return app;},
+  };
+  let status = 200, body: unknown;
+  const res = {
+    status(value: number) {status = value; return res;},
+    json(value: unknown) {body = value; return res;},
+    getHeader() {return undefined;},
+    setHeader() {},
+  };
+  return {app, res, handlers, result: () => ({status, body})};
+}
+
+for (const failure of ["inspection", "host"] as const) {
+  test("mounted shell refuses retryably after " + failure + " failure without creating a shell", async () => {
+    const h = mountedHarness();
+    const manifest = {connector_id:"fixture-browser",runtime_requirements:{bindings:{browser:{required:true}}}};
+    const readinessResolver = createBrowserEnrollmentReadinessResolver({
+      installService:{
+        catalog: async () => [],
+        inspectSelected: async () => {
+          if (failure === "inspection") throw new Error("inspection unavailable");
+          return {status:"active", source:"installed", digest:CATALOG_DIGEST, version:"1.0.0", manifest};
+        },
+      },
+      checkHost: async () => {throw new Error("probe unavailable");},
+    });
+    let stores = 0;
+    mountRefBrowserEnrollmentShell(h.app, {
+      canonicalConnectorKey: value => value ?? null,
+      resolveRegisteredConnectorManifest: async () => manifest,
+      readinessResolver,
+      requireOwnerSession: (() => {}) as unknown as MiddlewareHandler,
+      getOwnerSubjectId: () => "fixture-owner",
+      createRequestConnectorInstanceStore: () => {stores++; throw new Error("must not create store");},
+      createTraceContext: () => ({request_id:"request",scenario_id:"scenario",trace_id:"trace"}),
+      ensureRequestId: () => "request",
+      setReferenceTraceId: () => {},
+      emitSpineEvent: async () => {},
+      pdppError: (_res, status, code, message) => h.res.status(status).json({error:{code,message}}),
+      handleError: (_res, error) => {throw error;},
+    });
+    const handler = h.handlers.get("/_ref/connectors/:connectorId/browser-enrollment-shell");
+    assert.ok(handler);
+    await handler({params:{connectorId:"fixture-browser"}},h.res);
+    const result = h.result();
+    assert.equal(result.status,409);
+    const error = asRecord(asRecord(result.body).error);
+    assert.equal(error.code,"connector_browser_setup_unavailable");
+    assert.match(String(error.message),/inspection_unavailable/);
+    assert.equal(stores,0);
+  });
+}
+
+for (const mode of ["pending", "rejected", "success"] as const) {
+  test("unfiltered mounted readiness bounds catalog discovery: " + mode, async () => {
+    const h = mountedHarness();
+    let reads = 0;
+    const entries = [{connector_id:"fixture-offered",connector_key:"fixture-offered",digest:CATALOG_DIGEST,
+      config_digest:CATALOG_DIGEST,version:"1.0.0",latest:true,tier:"development" as const,
+      bindings:{browser:{required:true}}}];
+    const service = {
+      catalog: async () => {
+        reads++;
+        if (mode === "pending") return await new Promise<typeof entries>(() => {});
+        if (mode === "rejected") throw new Error("catalog unavailable");
+        return entries;
+      },
+      installedConnectorIds: async () => ["fixture-installed"],
+      listLocalSources: async () => [{connectorKey:"fixture-local"}],
+      inspectSelected: async (key: string) => key === "fixture-offered" ? {status:"none" as const} : ({
+        status:"active" as const,source:key === "fixture-local" ? "developer_local" as const : "installed" as const,
+        digest:CATALOG_DIGEST,version:"1.0.0",manifest:{runtime_requirements:{bindings:{browser:{required:true}}}},
+      }),
+    } as unknown as ConnectorInstallService;
+    const readinessResolver = createBrowserEnrollmentReadinessResolver({
+      installService:service,catalogTimeoutMs:10,checkHost:async () => ({ready:true}),
+    });
+    mountOwnerConnectorInstall(h.app, {
+      service, readinessResolver,
+      handleError: (_res: unknown,error: unknown) => {throw error;},
+      pdppError: () => {throw new Error("unexpected request rejection");},
+    } as unknown as Parameters<typeof mountOwnerConnectorInstall>[1]);
+    const handler = h.handlers.get("/v1/owner/connector-install/readiness");
+    assert.ok(handler);
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        handler({query:{}},h.res),
+        new Promise<never>((_resolve,reject) => {watchdog=setTimeout(()=>reject(new Error("readiness discovery hung")),500);}),
+      ]);
+    } finally {clearTimeout(watchdog);}
+    assert.equal(h.result().status,200);
+    const body = asRecord(h.result().body), rows = body.data as Record<string,unknown>[];
+    assert.deepEqual(rows.map(row=>row.connector_key), mode === "success"
+      ? ["fixture-installed","fixture-local","fixture-offered"] : ["fixture-installed","fixture-local"]);
+    assert.ok(rows.filter(row=>row.connector_key!=="fixture-offered").every(row=>row.action==="connect"));
+    if (mode === "success") assert.equal(rows.find(row=>row.connector_key==="fixture-offered")?.action,"install");
+    assert.equal(body.catalog_available,mode==="success");
+    assert.equal(reads,1,"discovery and projection share one bounded catalog observation");
+  });
+}

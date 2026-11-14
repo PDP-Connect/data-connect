@@ -7,7 +7,7 @@ import type {
   ConnectorInstallService,
 } from "../connector-install/index.ts";
 import type { LocalConnectorSourceRecord } from "../connector-install/local-source.ts";
-import { type BrowserEnrollmentReadinessResolver, toReadinessWire } from "../connector-readiness.ts";
+import { type BrowserEnrollmentReadinessResolver, readReadinessCatalog, toReadinessWire } from "../connector-readiness.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 
 interface Request {
@@ -85,9 +85,11 @@ function queryList(req: Request, key: string): string[] {
 const MAX_READINESS_CONNECTORS = 50;
 
 /** Every connector an owner could be offered browser setup for: published, installed or developer-local. */
-async function readinessCandidateKeys(service: ConnectorInstallService): Promise<string[]> {
-  const [catalog, installed, local] = await Promise.all([
-    service.catalog().catch(() => []),
+async function readinessCandidateKeys(
+  service: ConnectorInstallService,
+  catalog: readonly ConnectorCatalogEntry[] | null
+): Promise<string[]> {
+  const [installed, local] = await Promise.all([
     (service.installedConnectorIds?.() ?? service.status().then((records) => records.map((r) => r.connectorId))).catch(
       () => []
     ),
@@ -95,7 +97,7 @@ async function readinessCandidateKeys(service: ConnectorInstallService): Promise
   ]);
   return [
     ...new Set([
-      ...catalog.map((entry) => entry.connector_id),
+      ...(catalog ?? []).map((entry) => entry.connector_id),
       ...installed,
       ...local.map((record) => record.connectorKey),
     ]),
@@ -290,9 +292,12 @@ export function mountOwnerConnectorInstall(
         );
         return;
       }
-      const keys = requested.length > 0 ? requested : await readinessCandidateKeys(options.service);
+      const catalog = requested.length > 0 ? undefined
+        : await (options.readinessResolver.readCatalog?.() ?? readReadinessCatalog(() => options.service.catalog()));
+      const keys = requested.length > 0 ? requested : await readinessCandidateKeys(options.service, catalog ?? null);
       res.json({
-        data: (await options.readinessResolver.resolveMany(keys)).map(toReadinessWire),
+        ...(requested.length === 0 ? {catalog_available: catalog !== null} : {}),
+        data: (await options.readinessResolver.resolveMany(keys, catalog)).map(toReadinessWire),
         object: "connector_browser_enrollment_readiness",
       });
     } catch (error) {
