@@ -116,12 +116,36 @@ async function freshDb(t: TestContext): Promise<void> {
 		status: "active",
 		updatedAt: NOW,
 	});
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	t.after(() => t.mock.timers.reset());
 	const keepAlive = setInterval(() => undefined, 10);
 	t.after(() => {
 		clearInterval(keepAlive);
 		__resetControllerInteractionStateForTests();
 		closeDb();
 	});
+}
+
+async function waitFor(predicate: () => boolean, label: string): Promise<void> {
+	const deadline = Date.now() + 5000;
+	while (!predicate()) {
+		assert.ok(Date.now() < deadline, `Timed out waiting for ${label}`);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+}
+
+async function waitForRelease(controller: ReturnType<typeof createController>): Promise<void> {
+	await waitFor(
+		() => controller.getActiveRun(CONNECTOR_ID, { connectorInstanceId: INSTANCE_ID }) === null,
+		"run release",
+	);
+	// Allow the cleanup barrier following slot removal to finish before draining.
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	let drained = false;
+	const completion = controller.drainActiveRuns(1000);
+	void completion.then(() => { drained = true; }, () => { drained = true; });
+	await waitFor(() => drained, "completed cleanup");
+	assert.equal((await completion).timedOut, 0);
 }
 
 interface RecorderCall {
@@ -179,7 +203,8 @@ test("the watchdog captures failure evidence while the run still owns its slot",
 		schedulerStore(),
 	);
 	await controller.runNow(CONNECTOR_ID, runOptions("run_wd"));
-	await new Promise((resolve) => setTimeout(resolve, 300).unref());
+	t.mock.timers.tick(20);
+	await waitForRelease(controller);
 	assert.deepEqual(
 		calls.map(({ activeRunIdAtCall, runId, status }) => ({
 			activeRunIdAtCall,
@@ -200,7 +225,7 @@ test("a rejected run captures failure evidence while the run still owns its slot
 		schedulerStore(),
 	);
 	await controller.runNow(CONNECTOR_ID, runOptions("run_rej"));
-	await controller.drainActiveRuns(1000);
+	await waitForRelease(controller);
 	assert.deepEqual(
 		calls.map(({ activeRunIdAtCall, runId, status }) => ({
 			activeRunIdAtCall,
@@ -223,7 +248,8 @@ test("a late succeeded result from a reclaimed run cannot clear a newer run's pr
 	const first = makeController(calls, hanging, 20, store);
 	const second = makeController(calls, hanging, UNREACHABLE_BUDGET_MS, store);
 	await first.runNow(CONNECTOR_ID, runOptions("run_old"));
-	await new Promise((resolve) => setTimeout(resolve, 300).unref());
+	t.mock.timers.tick(20);
+	await waitForRelease(first);
 	await second.runNow(CONNECTOR_ID, runOptions("run_new"));
 
 	// A valid, unrepaired proof for the newer run's failure.
@@ -238,7 +264,7 @@ test("a late succeeded result from a reclaimed run cannot clear a newer run's pr
 	calls.length = 0;
 
 	releases[0]?.({ records_emitted: 0, status: "succeeded" });
-	await new Promise((resolve) => setTimeout(resolve, 50).unref());
+	await new Promise<void>((resolve) => setImmediate(resolve));
 
 	assert.equal(
 		calls.length,
@@ -252,7 +278,7 @@ test("a late succeeded result from a reclaimed run cannot clear a newer run's pr
 	);
 
 	releases[1]?.({ records_emitted: 0, status: "succeeded" });
-	await second.drainActiveRuns(1000);
+	await waitForRelease(second);
 	assert.deepEqual(
 		calls.map((call) => [call.runId, call.status]),
 		[["run_new", "succeeded"]],
@@ -268,6 +294,7 @@ test("a run reaching two terminal paths records evidence once, and a held captur
 	const gate = new Promise<void>((resolve) => {
 		openGate = resolve;
 	});
+	t.after(() => openGate());
 	let rejectRun: (err: Error) => void = () => undefined;
 	const first = makeController(
 		calls,
@@ -282,13 +309,14 @@ test("a run reaching two terminal paths records evidence once, and a held captur
 	await first.runNow(CONNECTOR_ID, runOptions("run_a"));
 	// The watchdog fires and its capture is held open; the run promise then
 	// rejects, reaching a second terminal path for the same run.
-	await new Promise((resolve) => setTimeout(resolve, 200).unref());
+	t.mock.timers.tick(20);
+	await waitFor(() => calls.length === 1, "watchdog recorder entry");
 	rejectRun(new Error("late rejection"));
-	await new Promise((resolve) => setTimeout(resolve, 100).unref());
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	assert.equal(calls.length, 1, "only one terminal path may capture per run");
 	openGate();
-	await first.drainActiveRuns(1000);
-	await new Promise((resolve) => setTimeout(resolve, 100).unref());
+	await waitForRelease(first);
+	assert.equal(calls.length, 1, "both settled terminal paths share one capture");
 	const isCurrent = calls[0]?.isCurrent;
 	assert.ok(isCurrent, "the recorder is given a post-await currency check");
 	assert.equal(isCurrent(), false, "a released run is no longer current");
@@ -297,6 +325,7 @@ test("a run reaching two terminal paths records evidence once, and a held captur
 test("a watchdog on a run that already completed does not record failure evidence", async (t) => {
 	await freshDb(t);
 	const calls: RecorderCall[] = [];
+	let terminalEmitted = false;
 	const controller = makeController(
 		calls,
 		async () => {
@@ -310,13 +339,16 @@ test("a watchdog on a run that already completed does not record failure evidenc
 				run_id: "run_done",
 				status: "completed",
 			});
+			terminalEmitted = true;
 			return new Promise<RuntimeRunConnectorResult>(() => undefined);
 		},
 		20,
 		schedulerStore(),
 	);
 	await controller.runNow(CONNECTOR_ID, runOptions("run_done"));
-	await new Promise((resolve) => setTimeout(resolve, 300).unref());
+	await waitFor(() => terminalEmitted, "completed spine event");
+	t.mock.timers.tick(20);
+	await waitForRelease(controller);
 	assert.equal(
 		calls.filter((call) => call.status === "failed").length,
 		0,
@@ -333,9 +365,15 @@ async function persistedProofSurvivesCompetingTerminalPath(
 	const gate = new Promise<void>((resolve) => {
 		openGate = resolve;
 	});
+	t.after(() => openGate());
+	let recorderEntered = false;
+	let watchdogFired = false;
+	let rejectionSeen = false;
+	let proofBeforeCleanup = false;
 	// The real recorder, with only its DevTools read held open and answering
 	// with a page that matches the manifest's sign-in pattern.
 	const fetchImpl = (async () => {
+		recorderEntered = true;
 		await gate;
 		return new Response(
 			JSON.stringify([
@@ -348,7 +386,14 @@ async function persistedProofSurvivesCompetingTerminalPath(
 	const controller = createController({
 		admitRunConnection: admit(),
 		connectorPathResolver: () => "/tmp/connector.js",
-		logger: { error: () => undefined, warn: () => undefined },
+		logger: {
+			error: () => { rejectionSeen = true; },
+			warn: () => { watchdogFired = true; },
+		},
+		beforeRunCleanup: async () => {
+			const loaded = await getDefaultProviderInvalidationProofStore().load(INSTANCE_ID);
+			proofBeforeCleanup = loaded.proof?.evidence_id === "run_race";
+		},
 		maxRunWallClockMs: 20,
 		recordSignInProof: (deps, input) =>
 			recordSignInProofAfterRun(
@@ -364,17 +409,21 @@ async function persistedProofSurvivesCompetingTerminalPath(
 	});
 	await controller.runNow(CONNECTOR_ID, runOptions("run_race"));
 	if (first === "watchdog") {
-		await new Promise((resolve) => setTimeout(resolve, 200).unref());
+		t.mock.timers.tick(20);
+		await waitFor(() => recorderEntered, "watchdog recorder entry");
 		rejectRun(new Error("late rejection"));
+		await waitFor(() => rejectionSeen, "competing rejection");
 	} else {
 		resolveRun({ records_emitted: 0, status: "failed" });
-		await new Promise((resolve) => setTimeout(resolve, 200).unref());
+		await waitFor(() => recorderEntered, "result recorder entry");
+		t.mock.timers.tick(20);
+		await waitFor(() => watchdogFired, "competing watchdog");
 	}
-	await new Promise((resolve) => setTimeout(resolve, 100).unref());
-	// Release the DevTools read only now, after the competing path ran.
+	// Neither path may release the run while the proof read is held.
+	assert.ok(controller.getActiveRun(CONNECTOR_ID, { connectorInstanceId: INSTANCE_ID }));
 	openGate();
-	await controller.drainActiveRuns(2000);
-	await new Promise((resolve) => setTimeout(resolve, 100).unref());
+	await waitForRelease(controller);
+	assert.equal(proofBeforeCleanup, true, "proof persisted before cleanup begins");
 	const loaded =
 		await getDefaultProviderInvalidationProofStore().load(INSTANCE_ID);
 	assert.equal(
