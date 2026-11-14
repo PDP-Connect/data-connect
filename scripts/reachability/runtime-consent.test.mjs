@@ -2,6 +2,7 @@ import { completeFixture } from "./journey-support.mjs";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { createPreparedFixture } from "./prepared-fixture.mjs";
 
@@ -70,7 +71,7 @@ test("runtime consent drift withdraws publication, and initial-only proof offers
 		]);
 		assert.equal(event.route.published, null);
 		const refused = await fixture.api.request(
-			`/routes/${route.handle.id}/review`,
+			`/routes/${encodeURIComponent(route.handle.id)}/review`,
 			{ generation: route.handle.generation },
 		);
 		assert.equal(refused.error?.code, "proof_refresh_unsupported");
@@ -130,7 +131,7 @@ test("a data-only consent row invalidates the earlier route approval", {
 	const fixture = await createPreparedFixture(undefined, {
 		fixture: "unknown",
 	});
-	let failure;
+	let failure, freshFixture;
 	try {
 		const { readFile, writeFile } = await import("node:fs/promises");
 		const { join } = await import("node:path");
@@ -141,9 +142,13 @@ test("a data-only consent row invalidates the earlier route approval", {
 		const definition = JSON.parse(await readFile(path, "utf8"));
 		definition.adapter.facts.push(fixture.registry.addedFact);
 		await writeFile(path, JSON.stringify(definition));
-		await assert.rejects(fixture.start(), { code: "consent_changed" });
-		const fresh = (await fixture.gozar.catalogRoutes(fixture.request))
-			.candidates[0];
+		const starts = await fixture.startCount();
+		await assert.rejects(fixture.start(), { code: "artifact_integrity_failed" });
+		assert.equal(await fixture.startCount(), starts, "An old registry approval causes zero provider starts");
+		freshFixture = await createPreparedFixture(undefined, { fixture: "unknown", addedFacts: [fixture.registry.addedFact] });
+		const freshFactory = freshFixture.gozar;
+		const fresh = (await freshFactory.catalogRoutes(freshFixture.request)).candidates[0];
+		assert.equal(await readFile(join(fixture.registry.root, "providers", fixture.request.providerId, "index.mjs"), "utf8"), await readFile(join(freshFixture.registry.root, "providers", freshFixture.request.providerId, "index.mjs"), "utf8"), "Only declared data changes between registry deployments");
 		assert.notEqual(
 			fresh.consentFactsDigest,
 			fixture.request.approval.consentFactsDigest,
@@ -155,9 +160,26 @@ test("a data-only consent row invalidates the earlier route approval", {
 					fact.value === fixture.registry.addedFact.value,
 			),
 		);
+		await assert.rejects(freshFactory.expose({
+			...freshFixture.request, operationId: randomUUID(),
+			approval: { ...freshFixture.request.approval, candidateToken: fresh.candidateToken, disclosureRevision: fresh.disclosure.revision, consentFactsDigest: fixture.request.approval.consentFactsDigest },
+		}), { code: "consent_mismatch" });
+		assert.equal(await freshFixture.startCount(), 0, "A fresh token does not authorize the previous digest");
+		const latest = (await freshFactory.catalogRoutes(freshFixture.request)).candidates[0];
+		const route = await freshFactory.expose({
+			...freshFixture.request, operationId: randomUUID(),
+			approval: { kind: "route", candidateToken: latest.candidateToken, disclosureRevision: latest.disclosure.revision, consentFactsDigest: latest.consentFactsDigest },
+		});
+		assert.equal(route.verification.status, "verified");
+		assert.equal(route.published, route.origin);
+		const closed = await freshFactory.closeRoute({ home: freshFixture.home, handle: route.handle, mode: "remove" });
+		assert.equal(closed.cleanup.state, "confirmed");
 	} catch (error) {
 		failure = error;
 	} finally {
+		if (freshFixture) {
+			try { await freshFixture.close(); } catch (error) { failure = failure ? new AggregateError([failure, error], "New-fact assertions and fresh cleanup failed") : error; }
+		}
 		await completeFixture(fixture, failure);
 	}
 });

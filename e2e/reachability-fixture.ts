@@ -18,13 +18,15 @@ export async function ownedReachabilityPlan() {
 		),
 	};
 }
-export async function prepareReachability(page: Page, canary: string) {
+export async function prepareReachability(page: Page, canary: string, login = true) {
 	const { plan } = await ownedReachabilityPlan();
+	if (login) {
 	await page.goto("/owner/login?return_to=%2Fsettings");
 	await page
 		.getByLabel("Owner password")
 		.fill(process.env.E2E_OWNER_PASSWORD ?? "");
 	await page.getByRole("button", { name: "Sign in", exact: true }).click();
+	}
 	await page.goto("/settings");
 	const surface = page.getByRole("region", {
 		name: "Remote access",
@@ -40,7 +42,7 @@ export async function prepareReachability(page: Page, canary: string) {
 		const field = surface.getByLabel(new RegExp(input.label));
 		const card = surface
 			.getByRole("region", { name: "Setup approval", exact: true })
-			.filter({ has: field });
+			.filter({ has: page.getByLabel(new RegExp(input.label)) });
 		await field.fill(
 			input.secret
 				? canary

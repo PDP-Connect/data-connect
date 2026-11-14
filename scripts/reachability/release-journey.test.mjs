@@ -17,7 +17,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { createGozar } from "@tnunamak/gozar";
+import { createGozar, createServiceVerifier } from "@tnunamak/gozar";
 import { FixtureSecretBackend } from "../../reference-implementation/test/fixtures/reachability/secret-backend.ts";
 import { createEffectFixtures } from "./effect-fixtures.ts";
 import {
@@ -71,9 +71,10 @@ async function assertNoCanary(root, canary) {
 	}
 }
 async function application() {
-	const app = http.createServer((_request, response) =>
-		response.end("fixture application"),
-	);
+	const verifyService = createServiceVerifier();
+	const app = http.createServer((request, response) => {
+		if (!verifyService(request, response)) response.end("fixture application");
+	});
 	app.listen(0, "127.0.0.1");
 	await once(app, "listening");
 	return {
@@ -132,8 +133,10 @@ async function commonJourney(
 	backend,
 	canary,
 	identity,
+	effects,
 ) {
 	const app = await application();
+	effects?.registerOwnedProxy("https://fixture.invalid", app.target);
 	const query = {
 		schemaVersion: 1,
 		home: join(root, "gozar"),
@@ -275,7 +278,7 @@ async function commonJourney(
 		assert.ok(
 			watched.routes.some((item) => item.handle.id === route.handle.id),
 		);
-		await api.call(`/routes/${route.handle.id}/check`, {
+		await api.call(`/routes/${encodeURIComponent(route.handle.id)}/check`, {
 			generation: route.handle.generation,
 		});
 		const currentInventory = await api.call("/catalog");
@@ -305,14 +308,14 @@ async function commonJourney(
 			edit.configuration = next;
 			assert.equal(
 				(
-					await api.call(`/routes/${route.handle.id}/check`, {
+					await api.call(`/routes/${encodeURIComponent(route.handle.id)}/check`, {
 						generation: route.handle.generation,
 					})
 				).handle.id,
 				route.handle.id,
 			);
 		}
-		const stopping = await api.call(`/routes/${route.handle.id}/stop`, {
+		const stopping = await api.call(`/routes/${encodeURIComponent(route.handle.id)}/stop`, {
 			generation: route.handle.generation,
 			acknowledgeDisconnect: true,
 		});
@@ -326,7 +329,7 @@ async function commonJourney(
 				first.cleanup.nextAction,
 				"Cleanup debt must retain its retry action",
 			);
-			const retry = await api.call(`/routes/${route.handle.id}/stop`, {
+			const retry = await api.call(`/routes/${encodeURIComponent(route.handle.id)}/stop`, {
 				generation: route.handle.generation,
 				acknowledgeDisconnect: true,
 			});
@@ -394,7 +397,7 @@ test("every inventory provider/usage pair is accounted for through the owner HTT
 		{ secretBackend: backend, hostCapabilities: capabilities, identity },
 		effects.effects,
 	);
-	let retainEvidence = false;
+	let retainEvidence = false, completed = false;
 	try {
 		const inventory = await harness.gozar.listProviders({
 			home: join(root, "discovery"),
@@ -531,6 +534,7 @@ test("every inventory provider/usage pair is accounted for through the owner HTT
 					caseBackend,
 					randomBytes(32).toString("hex"),
 					caseIdentity,
+					caseEffects,
 				);
 				row.result = "pass";
 			} catch (error) {
@@ -572,6 +576,10 @@ test("every inventory provider/usage pair is accounted for through the owner HTT
 				}
 				await caseEffects.close();
 			}
+			if (row.result === "pass" && (row.cleanup === "unconfirmed" || row.harnessClose)) {
+				row.result = "fail";
+				row.reason = row.harnessClose ?? "cleanup_debt";
+			}
 			await persist();
 		}
 		assert.ok(
@@ -584,11 +592,14 @@ test("every inventory provider/usage pair is accounted for through the owner HTT
 			),
 			"Release blocked: see provider/usage matrix",
 		);
+		completed = true;
 	} finally {
 		await persist();
+		let harnessFailure;
 		try {
 			await bounded(harness.close());
 		} catch (error) {
+			harnessFailure = error;
 			matrix.push({
 				result: "fail",
 				stage: "harness-close",
@@ -596,7 +607,9 @@ test("every inventory provider/usage pair is accounted for through the owner HTT
 			});
 		}
 		await effects.close();
+		await persist();
 		if (!retainEvidence) await rm(root, { recursive: true, force: true });
+		if (completed && harnessFailure) throw harnessFailure;
 	}
 });
 

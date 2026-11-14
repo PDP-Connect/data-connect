@@ -54,7 +54,8 @@
     "trialOutput": "https://fixture.lhr.life\n",
     "publicArgs": ["funnel"],
     "privateArgs": ["serve"],
-    "httpsPrefix": "--https="
+    "httpsPrefix": "--https=",
+    "startupOutput": "Press Ctrl+C to exit.\n"
   },
   "artifact/fetch": {
     "content": "fixture prerequisite bytes"

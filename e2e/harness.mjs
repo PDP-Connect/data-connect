@@ -363,14 +363,17 @@ export async function runInSandbox(args, wrapper = SANDBOX) {
     throw new Error(
       `${wrapper[0]} is missing, and the E2E harness supports no other isolation. No servers started.`
     )
+  const ownedRoot = wrapper === SANDBOX && args.some(arg => ["--reachability", "--reachability-stream"].includes(arg))
   const child = spawn(
     wrapper[0],
-    [...wrapper.slice(1), process.execPath, ...args],
+    ownedRoot
+      ? ["--isolate", "cgroup", "--", process.execPath, join(here, "owned-root-sandbox.mjs"), "--", process.execPath, ...args]
+      : [...wrapper.slice(1), process.execPath, ...args],
     {
       detached: true,
       stdio: ["ignore", "inherit", "inherit", "pipe"],
       // Fail before any launch if cgroup or bwrap enforcement is missing.
-      env: { ...process.env, TEST_SANDBOX_REQUIRE: "1" },
+      env: { ...process.env, TEST_SANDBOX_REQUIRE: "1", ...(ownedRoot ? { TEST_SANDBOX_NET: "host" } : {}) },
     }
   )
   const channel = child.stdio[3]

@@ -25,7 +25,13 @@ test("unknown registry data drives the actual setup, review, apply and stop scre
 			"utf8",
 		),
 	);
-	const surface = await prepareReachability(page, canary);
+	let surface = await prepareReachability(page, canary);
+	const control = async (path, method = "GET") => {
+		const response = await fetch(`${plan.controlOrigin}${path}`, { method, headers: { authorization: `Bearer ${plan.controlToken}` } });
+		expect(response.ok).toBe(true);
+		return response.json();
+	};
+	const before = await control("/fixture-state");
 	const review = surface.getByRole("region", {
 		name: "Route consent",
 		exact: true,
@@ -47,11 +53,12 @@ test("unknown registry data drives the actual setup, review, apply and stop scre
 	await review.getByRole("checkbox").check();
 	await review.getByRole("button", { name: "Apply reachability" }).click();
 	await expect(
-		surface.getByText("consent_changed", { exact: true }),
+		surface.getByText("artifact_integrity_failed", { exact: true }),
 	).toBeVisible();
-	await surface
-		.getByRole("button", { name: "Review route", exact: true })
-		.click();
+	expect((await control("/fixture-state")).starts).toBe(before.starts);
+	await control("/reload-registry", "POST");
+	await page.evaluate(() => sessionStorage.clear());
+	surface = await prepareReachability(page, canary, false);
 	const fresh = surface.getByRole("region", {
 		name: "Route consent",
 		exact: true,
@@ -74,6 +81,6 @@ test("unknown registry data drives the actual setup, review, apply and stop scre
 		.getByRole("button", { name: "Stop reachability", exact: true })
 		.click();
 	await expect(
-		surface.getByText("Cleanup: confirmed", { exact: true }),
+		surface.getByText(/(?:^|· )Cleanup: confirmed$/),
 	).toBeVisible();
 });

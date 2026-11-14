@@ -5,6 +5,7 @@ import { type ChildProcess, spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { readFileSync } from "node:fs"
 import net from "node:net"
+import http from "node:http"
 import tls from "node:tls"
 import type {
   JsonValue,
@@ -63,6 +64,7 @@ type FixtureData = {
     publicArgs: string[]
     privateArgs: string[]
     httpsPrefix: string
+    startupOutput: string
   }
   "artifact/fetch": { content: string }
   "artifact/execute": { result: ArtifactEffectResult }
@@ -185,8 +187,16 @@ export function createEffectFixtures({
     const parsed = new URL(endpoint)
     const origin = `${parsed.protocol}//${parsed.host}`
     const item = origins.get(origin)
-    if (!item || !item.present) unsupported()
-    return item
+    if (item?.present) return item
+    // Service verification checks both the proxy and its exact local target.
+    // Only targets already registered by a present owned effect are admitted.
+    if (parsed.protocol === "http:") {
+      const host = parsed.hostname.replace(/^\[|\]$/g, "")
+      const port = Number(parsed.port || "80")
+      const owned = [...listeners.values()].find(listener => listener.present && listener.target.host === host && listener.target.port === port)
+      if (owned) return owned
+    }
+    unsupported()
   }
   const effects = [
     effect<Extract<ProcessEffectRequest, { operation: "detect" }>["input"]>(
@@ -276,7 +286,7 @@ export function createEffectFixtures({
         if (!longRunning) return sourceOutput(args)
         const data = fixtureData["spawn/run"]
         let item: Listener,
-          output = ""
+          output: string
         const handle = randomUUID()
         if (data.trialArgs.every((arg: string) => args.includes(arg))) {
           const redirect = args[args.indexOf(data.trialArgs[0]) + 1]
@@ -303,6 +313,7 @@ export function createEffectFixtures({
             unsupported()
           ;(serveConfig.Foreground ??= {})[handle] = config
           item = register(`https://${authority}`, proxy)
+          output = data.startupOutput
         }
         // An actual harmless child supplies a verifiable PID and birth identity.
         const child = spawn(
@@ -312,6 +323,11 @@ export function createEffectFixtures({
         )
         if (!child.pid) unsupported()
         children.set(handle, { child, listener: item })
+        child.once("exit", () => {
+          item.present = false
+          delete serveConfig.Foreground?.[handle]
+          syncConfig()
+        })
         return {
           stdout: output,
           stderr: "",
@@ -431,29 +447,40 @@ export function createEffectFixtures({
         )
         target.pathname = request.pathname
         target.search = request.search
-        const response = await fetch(target, {
-          method,
-          headers,
-          signal,
-          redirect: "error",
+        const response = await new Promise<{ status: number; headers: Record<string, string>; bytes: Buffer; chunks: { data: string; delayMs: number }[] }>((resolve, reject) => {
+          const requestHeaders = { ...headers, host: headers.host ?? headers.Host ?? request.host }
+          const upstream = http.request(target, { method, headers: requestHeaders, signal }, reply => {
+            const chunks: Buffer[] = []
+            const observedChunks: { data: string; delayMs: number }[] = []
+            let lastAt = performance.now()
+            let length = 0
+            reply.on("data", (chunk: Buffer) => {
+              length += chunk.length
+              if (length > 4 * 1024 * 1024) upstream.destroy(new Error("Fixture response exceeded its bound"))
+              else {
+                const at = performance.now()
+                chunks.push(chunk)
+                observedChunks.push({ data: chunk.toString("base64"), delayMs: at - lastAt })
+                lastAt = at
+              }
+            })
+            reply.once("error", reject)
+            reply.once("end", () => resolve({ status: reply.statusCode ?? 500, headers: Object.fromEntries(Object.entries(reply.headers).filter((row): row is [string, string | string[]] => row[1] !== undefined).map(([key, value]) => [key, Array.isArray(value) ? value.join(", ") : value])), bytes: Buffer.concat(chunks), chunks: observedChunks }))
+          })
+          upstream.once("error", reject)
+          upstream.end()
         })
-        const body = Buffer.from(await response.arrayBuffer())
+        const body = response.bytes
         const stream =
-          response.headers.get("content-type")?.split(";")[0] ===
+          response.headers["content-type"]?.split(";")[0] ===
           "text/event-stream"
         if (stream) initialStreamSeen = true
         return {
           status: response.status,
-          headers: Object.fromEntries(response.headers),
-          chunks: [
-            {
-              data: (stream && failInitialStream
-                ? body.subarray(0, 1)
-                : body
-              ).toString("base64"),
-              delayMs: stream ? streamDelayMs : 0,
-            },
-          ],
+          headers: response.headers,
+          chunks: stream && failInitialStream
+            ? [{ data: body.subarray(0, 1).toString("base64"), delayMs: streamDelayMs + (response.chunks[0]?.delayMs ?? 0) }]
+            : response.chunks.map((chunk, index) => ({ ...chunk, delayMs: chunk.delayMs + (stream && index === 0 ? streamDelayMs : 0) })),
         }
       }
     ),
@@ -525,6 +552,7 @@ export function createEffectFixtures({
   ]
   return {
     effects,
+    registerOwnedProxy: (origin: string, target: string) => { register(origin, target) },
     get initialStreamSeen() {
       return initialStreamSeen
     },

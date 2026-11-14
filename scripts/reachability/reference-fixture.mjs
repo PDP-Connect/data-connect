@@ -3,7 +3,7 @@
 // Explicit e2e entrypoint. Never imported by the production server.
 import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, statfs, writeFile } from "node:fs/promises";
+import { mkdir, statfs, writeFile, readFile } from "node:fs/promises";
 import http from "node:http";
 import { join } from "node:path";
 import { createGozar } from "@tnunamak/gozar";
@@ -27,7 +27,7 @@ if (target.hostname !== "127.0.0.1")
 const mode = process.argv[2] ?? "unknown";
 if (!["unknown", "stream"].includes(mode))
 	throw new Error("Unknown fixture mode");
-const home = join(data, "reachability-home");
+let home = join(data, "reachability-home");
 await mkdir(home, { recursive: true, mode: 0o700 });
 const backend = new FixtureSecretBackend(),
 	identity = { instanceId: randomUUID(), bootId: randomUUID() };
@@ -40,7 +40,7 @@ const hostCapabilities = Object.fromEntries(
 		"runtime.durable",
 	].map((id) => [id, { known: true, value: id !== "privilege.elevate" }]),
 );
-const registry =
+let registry =
 	mode === "unknown"
 		? await createUnknownRegistry(join(data, "reachability-registry"))
 		: null;
@@ -54,7 +54,7 @@ const harness = effects
 			effects.effects,
 		)
 	: null;
-const gozar =
+let gozar =
 	mode === "stream"
 		? harness.gozar
 		: createGozar({
@@ -101,9 +101,10 @@ const query = {
 		protocols: mode === "stream" ? ["sse"] : [],
 	},
 };
-const service = new ReachabilityService(gozar, {
+function makeService(currentGozar, currentQuery) {
+return new ReachabilityService(currentGozar, {
 	evidenceSource: "synthetic",
-	query,
+	query: currentQuery,
 	identity,
 	hostCapabilities,
 	prepare: async () => {
@@ -114,6 +115,19 @@ const service = new ReachabilityService(gozar, {
 	},
 	acknowledgeDisconnect: async () => {},
 });
+}
+let service = makeService(gozar, query);
+const ownerService = new Proxy({}, { get(_target, key) {
+  const value = service[key];
+  return typeof value === "function" ? value.bind(service) : value;
+} });
+const retired = [];
+async function fixtureStarts(currentRegistry) {
+  try {
+    const content = await readFile(join(currentRegistry.root, "providers", currentRegistry.specification.id, "events.jsonl"), "utf8");
+    return content.split("\n").filter(Boolean).map(line => JSON.parse(line)).filter(event => event.event === "start").length;
+  } catch (error) { if (error.code === "ENOENT") return 0; throw error; }
+}
 const controlToken = randomBytes(32).toString("hex");
 const controls = http.createServer(async (request, response) => {
 	if (request.headers.authorization !== `Bearer ${controlToken}`) {
@@ -121,6 +135,28 @@ const controls = http.createServer(async (request, response) => {
 		return;
 	}
 	try {
+        if (request.url === "/fixture-state" && registry) {
+            response.setHeader("content-type", "application/json");
+            response.end(JSON.stringify({ starts: await fixtureStarts(registry) }));
+            return;
+        }
+        if (request.url === "/reload-registry" && request.method === "POST" && registry) {
+            if (await fixtureStarts(registry) !== 0) throw new Error("A fixture with started resources cannot be replaced");
+            const next = await createUnknownRegistry(join(data, "reachability-registry-next"), { addedFacts: [registry.addedFact] });
+            const moduleAt = current => join(current.root, "providers", current.specification.id, "index.mjs");
+            if (await readFile(moduleAt(next), "utf8") !== await readFile(moduleAt(registry), "utf8")) throw new Error("A new fact must not change adapter code");
+            service.closeObservers();
+            retired.push({ gozar, home });
+            registry = next;
+            home = join(data, "reachability-home-next");
+            await mkdir(home, { recursive: true, mode: 0o700 });
+            gozar = createGozar({ manifest: next.manifest, root: next.root, secretBackend: backend, identity, hostCapabilities });
+            await gozar.listProviders({ home, owner: "fixture-owner" });
+            service = makeService(gozar, { ...query, home });
+            response.setHeader("content-type", "application/json");
+            response.end(JSON.stringify({ reloaded: true, starts: 0 }));
+            return;
+        }
 		if (request.url !== "/concurrent-observations") {
 			response.writeHead(404).end();
 			return;
@@ -191,7 +227,7 @@ await writeFile(
 	{ mode: 0o600 },
 );
 const servers = await startServer({
-	reachability: { service, usage: () => ({ kind: "attached" }) },
+	reachability: { service: ownerService, usage: () => ({ kind: "attached" }) },
 	quiet: true,
 });
 let closing = false;

@@ -16,7 +16,7 @@ const unknownSpecification = JSON.parse(
 );
 export async function createUnknownRegistry(
 	dir,
-	{ runtimeObservations = false, fixture = "unknown", kinds } = {},
+	{ runtimeObservations = false, fixture = "unknown", kinds, addedFacts = [] } = {},
 ) {
 	const specification =
 		fixture === "non-http"
@@ -33,6 +33,7 @@ export async function createUnknownRegistry(
 	const { addedFact, ...options } = specification;
 	const registry = await fakeRegistry({
 		...options,
+		facts: [...(options.facts ?? []), ...addedFacts],
 		...(kinds ? { kinds } : {}),
 		dir,
 	});

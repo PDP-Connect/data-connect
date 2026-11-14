@@ -14,7 +14,7 @@ import {
 import http from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createGozar } from "@tnunamak/gozar";
+import { createGozar, createServiceVerifier } from "@tnunamak/gozar";
 import { FixtureSecretBackend } from "../../reference-implementation/test/fixtures/reachability/secret-backend.ts";
 import { prepareDraft } from "./journey-support.mjs";
 import { createOwnerHttpFixture } from "./owner-http-fixture.mjs";
@@ -54,9 +54,10 @@ export async function createPreparedFixture(root, options = {}) {
 		identity,
 	};
 	const gozar = createGozar(factoryOptions);
-	const app = http.createServer((_request, response) =>
-		response.end("fixture application"),
-	);
+	const verifyService = createServiceVerifier();
+	const app = http.createServer((request, response) => {
+		if (!verifyService(request, response)) response.end("fixture application");
+	});
 	app.listen(0, "127.0.0.1");
 	await once(app, "listening");
 	const home = join(root, "gozar"),

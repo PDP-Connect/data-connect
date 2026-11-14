@@ -188,6 +188,23 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     };
   }, [operation, request]);
 
+  useEffect(() => {
+    if (!operation || operation.stage === "applying") {
+      return;
+    }
+    let active = true;
+    void request("/state").then((result) => {
+      if (!active) return;
+      if (result.ok) {
+        setState(result.data as State);
+        setStale(false);
+      } else {
+        setStale(true);
+      }
+    });
+    return () => { active = false; };
+  }, [operation, request]);
+
   const provider = inventory?.providers.find((item) => choiceKey(item, usage) === selected);
   const providers = [...(inventory?.providers ?? [])].sort(
     (a, b) =>

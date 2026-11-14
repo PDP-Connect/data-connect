@@ -24,18 +24,18 @@ test('closing a historical route never stops or changes the current route', { ti
   }
   try {
     const first = await start(); assert.ok(first);
-    await operation(`/routes/${first.handle.id}/stop`, { generation: first.handle.generation, acknowledgeDisconnect: true });
+    await operation(`/routes/${encodeURIComponent(first.handle.id)}/stop`, { generation: first.handle.generation, acknowledgeDisconnect: true });
     const second = await start(); assert.ok(second); assert.notEqual(second.handle.id, first.handle.id);
     const before = await fixture.api.call('/state');
     assert.equal(before.lifecycle.handle.id, second.handle.id);
-    await operation(`/routes/${first.handle.id}/stop`, { generation: first.handle.generation, acknowledgeDisconnect: true });
+    await operation(`/routes/${encodeURIComponent(first.handle.id)}/stop`, { generation: first.handle.generation, acknowledgeDisconnect: true });
     const after = await fixture.api.call('/state');
     assert.equal(after.lifecycle.handle.id, second.handle.id);
     assert.equal(after.lifecycle.phase, before.lifecycle.phase);
     const current = after.routes.find(route => route.handle.id === second.handle.id);
     assert.equal(current.published, second.origin);
     assert.notEqual(current.cleanup.state, 'confirmed');
-    await operation(`/routes/${second.handle.id}/stop`, { generation: second.handle.generation, acknowledgeDisconnect: true });
+    await operation(`/routes/${encodeURIComponent(second.handle.id)}/stop`, { generation: second.handle.generation, acknowledgeDisconnect: true });
   } finally { await fixture.close(); }
 });
 
