@@ -238,7 +238,19 @@ async function commonJourney(
 		assert.equal(route.published, route.origin);
 		assert.equal(route.verification.subject.instanceId, identity.instanceId);
 		if (route.verification.subject.bootId !== identity.bootId)
-			violations.push("proof_boot_identity_mismatch");
+			violations.push({ code: "proof_boot_identity_mismatch", field: "verification.subject.bootId", expected: identity.bootId, actual: route.verification.subject.bootId });
+		// Continue the independent journey assertions after recording violations.
+		// The host never adjusts library generations.
+		for (const [field, actual] of [
+			["handle.generation", route.handle.generation],
+			["verification.subject.handleGeneration", route.verification.subject.handleGeneration],
+		]) {
+			try {
+				assert.equal(actual, 1, `Fresh route ${field} must be 1`);
+			} catch {
+				violations.push({ code: "initial_route_generation_mismatch", field, expected: 1, actual });
+			}
+		}
 		assert.equal(route.verification.subject.target, query.target);
 		assert.equal(
 			route.verification.subject.handleGeneration,
@@ -347,10 +359,13 @@ async function commonJourney(
 			);
 		await assertNoCanary(query.home, canary);
 		if (violations.length)
-			throw Object.assign(new Error(violations.join(",")), {
-				code: violations[0],
+			throw Object.assign(new Error(violations.map((item) => item.code).join(",")), {
+				code: violations.find((item) => item.code === "initial_route_generation_mismatch")?.code ?? violations[0].code,
+				violations,
 				expectedIdentity: identity,
 				actualSubject: route.verification.subject,
+				actualHandle: route.handle,
+				generationAssertions: { handle: route.handle.generation === 1, subject: route.verification.subject.handleGeneration === 1 },
 			});
 	} finally {
 		backend.locked = false;
@@ -399,6 +414,12 @@ test("every inventory provider/usage pair is accounted for through the owner HTT
 			);
 			for (const usage of (data.adapter ?? data).supportedKinds)
 				declared.push({ providerId: entry.id, usage });
+		}
+		for (const provider of inventory.providers) {
+			for (const [usage, observation] of Object.entries(provider.availability)) {
+				if (observation.state !== "unsupported" && !declared.some((pair) => pair.providerId === provider.providerId && pair.usage === usage))
+					declared.push({ providerId: provider.providerId, usage });
+			}
 		}
 		matrix.push(
 			...declared.map((pair) => ({
@@ -519,6 +540,9 @@ test("every inventory provider/usage pair is accounted for through the owner HTT
 				row.diagnostics = error.diagnostics ?? null;
 				row.expectedIdentity = error.expectedIdentity;
 				row.actualSubject = error.actualSubject;
+				row.actualHandle = error.actualHandle;
+				row.generationAssertions = error.generationAssertions;
+				row.violations = error.violations;
 				row.detail = error.code === "ERR_ASSERTION" ? error.message : null;
 			} finally {
 				try {
@@ -619,6 +643,10 @@ test("unknown provider uses the same owner HTTP path and current draft snapshots
 	} catch (error) {
 		row.result = "fail";
 		row.reason = safeError(error);
+		row.violations = error.violations;
+		row.actualSubject = error.actualSubject;
+		row.actualHandle = error.actualHandle;
+		row.generationAssertions = error.generationAssertions;
 		throw error;
 	} finally {
 		await persist();
@@ -672,6 +700,10 @@ test("generic non-HTTP extension remains executable independently of real-adapte
 	} catch (error) {
 		row.result = "fail";
 		row.reason = safeError(error);
+		row.violations = error.violations;
+		row.actualSubject = error.actualSubject;
+		row.actualHandle = error.actualHandle;
+		row.generationAssertions = error.generationAssertions;
 		throw error;
 	} finally {
 		await persist();

@@ -88,8 +88,10 @@ test("product source and the browser bundle remain independent of registry ident
 	)
 		.trim()
 		.split("\n");
+	const deleted = new Set(execFileSync("git", ["ls-files", "--deleted"], { cwd: root, encoding: "utf8" }).trim().split("\n"));
 	for (const path of files) {
 		if (
+			deleted.has(path) ||
 			!/\.(?:ts|tsx|js|mjs)$/.test(path) ||
 			path.includes("/fixtures/") ||
 			path === "reference-implementation/server/legacy-remote-access-import.ts"

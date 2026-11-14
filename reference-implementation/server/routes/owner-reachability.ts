@@ -198,6 +198,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   get("/events", async () => {
     const state = service().state();
     return {
+      evidenceSource: state.evidenceSource,
       lifecycle: state.lifecycle,
       reasons: state.reasons,
       routes: state.routes.map(projectRoute),
@@ -215,6 +216,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         stage: record.stage,
       }));
     return {
+      evidenceSource: state.evidenceSource,
       lifecycle: state.lifecycle,
       operations,
       reasons: state.reasons,

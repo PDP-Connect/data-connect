@@ -70,6 +70,7 @@ if (results[0].exitCode === 0) {
 		"scripts/reachability/initial-proof.test.mjs",
 		"scripts/reachability/host-route-history.test.mjs",
 		"scripts/reachability/install-boundary.test.mjs",
+		"scripts/reachability/sdk-refusal.test.mjs",
 	]);
 	for (const [flag, spec] of [
 		["--reachability", "reachability.spec.ts"],

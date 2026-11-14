@@ -67,6 +67,7 @@ test("unknown registry data drives the actual setup, review, apply and stop scre
 	await expect(
 		surface.getByRole("heading", { name: /^verified$/i }),
 	).toBeVisible();
+	await expect(surface.getByText(/^Synthetic fixture proof: verified/)).toBeVisible();
 	expect(await surface.textContent()).not.toContain(canary);
 	await surface.getByLabel(/remote change may disconnect/).check();
 	await surface

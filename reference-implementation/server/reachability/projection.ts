@@ -10,7 +10,6 @@ import type {
   Candidate as RouteCandidate,
   Action as SetupAction,
 } from "@tnunamak/gozar";
-import type { InstallArtifactAction } from "./install-artifact-types.ts";
 
 type RuntimeConsentReview = Awaited<ReturnType<typeof import("@tnunamak/gozar").reviewRouteConsent>>;
 type ProviderList = Awaited<ReturnType<typeof import("@tnunamak/gozar").listProviders>>;
@@ -74,7 +73,7 @@ function disclosure(input: SetupAction["disclosure"]) {
     text: input.text,
   };
 }
-export function projectAction(action: InstallArtifactAction) {
+export function projectAction(action: SetupAction) {
   const snapshot = action.consent;
   const scope = snapshot?.scope;
   return {

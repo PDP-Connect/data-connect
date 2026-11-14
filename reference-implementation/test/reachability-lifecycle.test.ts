@@ -109,3 +109,14 @@ test('a new apply does not carry the stopped route handle into its pending attem
   assert.equal(applied.state.handle, null);
   assert.equal(applied.state.operationId, 'operation-next');
 });
+
+test("a missing ownership record retains cleanup debt even after an earlier confirmation", () => {
+  for (const stopTombstone of [false, true]) {
+    const missing = reduceLifecycle(
+      { ...state("reconciling"), cleanup: "confirmed", stopTombstone },
+      { observed: "absent", type: "reconcile" }
+    )
+    assert.equal(missing.state.cleanup, "unconfirmed")
+    assert.notEqual(missing.state.phase, "off")
+  }
+})

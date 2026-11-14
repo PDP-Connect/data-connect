@@ -216,12 +216,12 @@ allow(["reconciling", "unknown"], "reconcile", (state, event) => {
   if (state.stopTombstone) {
     return accept(
       state,
-      { evidence: "unknown", phase: "stopping" },
+      { evidence: "unknown", phase: "stopping", ...(event.observed === "absent" ? { cleanup: "unconfirmed" as const } : {}) },
       state.handle ? ["withdraw-publication", "close-route"] : ["withdraw-publication", "recover-operation"]
     );
   }
   if (!state.handle && state.operationId) {
-    return accept(state, { evidence: "unknown", phase: "unknown", reason: "unknown-possibly-live" }, [
+    return accept(state, { evidence: "unknown", phase: "unknown", reason: "unknown-possibly-live", cleanup: "unconfirmed" }, [
       "recover-operation",
     ]);
   }
@@ -229,7 +229,7 @@ allow(["reconciling", "unknown"], "reconcile", (state, event) => {
     return accept(state, { evidence: "unknown", phase: "unknown", reason: "observation-failed" });
   }
   if (event.observed === "absent") {
-    return accept(state, { evidence: "unknown", phase: "unknown", reason: "route-absent" });
+    return accept(state, { evidence: "unknown", phase: "unknown", reason: "route-absent", cleanup: "unconfirmed" });
   }
   if (event.observed === "present" && state.handle) {
     return accept(state, { evidence: "checking", phase: "checking" }, ["observe-route"]);

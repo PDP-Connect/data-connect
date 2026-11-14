@@ -31,6 +31,7 @@ type Operation = {
 };
 type Review = { id: string; kind: "route"; candidate: ReturnType<typeof projectCandidate> };
 type State = {
+  evidenceSource?: "synthetic" | null;
   operations?: Operation[];
   lifecycle?: {
     handle: Route["handle"] | null;
@@ -185,7 +186,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
       active = false;
       clearInterval(timer);
     };
-  }, [operation?.operationId, operation?.stage, request]);
+  }, [operation, request]);
 
   const provider = inventory?.providers.find((item) => choiceKey(item, usage) === selected);
   const providers = [...(inventory?.providers ?? [])].sort(
@@ -272,6 +273,9 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         </p>
       ) : null}
       {stale ? <p role="status">Current observations are unavailable. Changes are disabled.</p> : null}
+      {state.lifecycle?.cleanup === "unconfirmed" ? (
+        <p role="status">Cleanup remains unconfirmed. An unavailable ownership record does not establish absence.</p>
+      ) : null}
       <section aria-label="Host settings" className="grid gap-3">
         <h3 className="pdpp-label">This instance</h3>
         {Object.entries(capabilities).map(([id, observation]) => (
@@ -624,7 +628,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
               {route.binding.target.known ? route.binding.target.value : `Unknown: ${route.binding.target.reason}`}
             </p>
             <p className="pdpp-caption">
-              Proof: {route.verification.status} · {route.verification.vantage} ·{" "}
+              {state.evidenceSource === "synthetic" ? "Synthetic fixture proof" : "Proof"}: {route.verification.status} · {route.verification.vantage} ·{" "}
               {route.verification.observedAt ?? "Unknown check time"}
             </p>
             <p className="pdpp-caption">

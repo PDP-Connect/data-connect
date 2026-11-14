@@ -7,7 +7,7 @@ import type {
 } from "pdpp-reference-implementation/reachability-projection";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type Fact = ReturnType<typeof projectFact>;
 type Action = ReturnType<typeof projectAction>;
@@ -205,12 +205,17 @@ export function RuntimeRouteConsentCard({
   onApprove: (approval: { kind: "route"; consentFactsDigest: string }) => void;
 }) {
   const [approvedDigest, setApprovedDigest] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
   const valid =
     review.scope?.kind === "route" &&
     review.facts !== undefined &&
     review.disclosures !== undefined &&
     review.disclosures !== null &&
-    Date.parse(review.expiresAt) > Date.now();
+    Date.parse(review.expiresAt) > now;
   return (
     <section aria-label="Runtime route consent" className="grid gap-4 rounded-lg border p-4">
       <h3 className="pdpp-label">Review changed reachability</h3>

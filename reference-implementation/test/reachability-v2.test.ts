@@ -8,6 +8,8 @@ import { readConfigurationDraft } from "../server/reachability/draft-read.ts";
 import { ConfigurationDraftSession, configurationFromSetup } from "../server/reachability/drafts.ts";
 import { hostCapability, observationText, routePresentation } from "../server/reachability/presentation.ts";
 import { createHostSecretBackend } from "../server/reachability/secret-backend.ts";
+import { projectRoute } from "../server/reachability/projection.ts";
+import { fakeRouteScenarios } from "@tnunamak/gozar/testing";
 import fixture from "./fixtures/reachability/configuration.json" with { type: "json" };
 
 const draft = fixture as Draft;
@@ -159,3 +161,18 @@ test("host journal records intent before effects and marks a lost reply unknown,
     await rm(root, { force: true, recursive: true });
   }
 });
+
+test("route projections retain required proof and cleanup keys, including unknown observations", () => {
+  for (const route of fakeRouteScenarios()) {
+    const projected = projectRoute(route)
+    assert.equal(Object.hasOwn(projected.verification, "subject"), true)
+    assert.equal(Object.hasOwn(projected.verification, "observedAt"), true)
+    assert.equal(Object.hasOwn(projected.cleanup, "nextAction"), true)
+    assert.deepEqual(projected.verification.subject, route.verification.subject)
+    assert.equal(
+      projected.verification.observedAt,
+      route.verification.observedAt
+    )
+    assert.equal(projected.cleanup.state, route.cleanup.state)
+  }
+})

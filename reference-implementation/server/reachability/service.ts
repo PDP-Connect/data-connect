@@ -31,6 +31,7 @@ export type HostPolicy = {
   identity: import("@tnunamak/gozar").HostIdentity;
   hostCapabilities: import("@tnunamak/gozar").HostCapabilities;
   hostSettings?: HostSettingsBridge;
+  evidenceSource?: "synthetic";
   prepare: (input: { usage: Query["usage"]; reach: string; transport: string }) => Promise<void>;
   acknowledgeDisconnect: (acknowledged: boolean) => Promise<void>;
 };
@@ -87,6 +88,7 @@ export class ReachabilityService {
       }
     }
     return {
+      evidenceSource: this.host.evidenceSource ?? null,
       lifecycle: {
         handle: this.lifecycle.handle ? { id: this.lifecycle.handle.id, generation: this.lifecycle.handle.generation, kind: this.lifecycle.handle.kind } : null,
         cleanup: this.lifecycle.cleanup,

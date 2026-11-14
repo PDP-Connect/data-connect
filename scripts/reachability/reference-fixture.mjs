@@ -102,6 +102,7 @@ const query = {
 	},
 };
 const service = new ReachabilityService(gozar, {
+	evidenceSource: "synthetic",
 	query,
 	identity,
 	hostCapabilities,

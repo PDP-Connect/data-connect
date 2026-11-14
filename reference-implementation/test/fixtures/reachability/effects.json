@@ -5,10 +5,17 @@
         "args": ["status", "--json", "--peers=false"],
         "output": "node-status"
       },
-      { "args": ["serve", "status", "--json"], "output": "serve-config" },
+      {
+        "args": ["serve", "status", "--json"],
+        "output": "serve-config"
+      },
       {
         "args": ["-V"],
-        "result": { "stdout": "", "stderr": "OpenSSH_9.9p1\n", "exitCode": 0 }
+        "result": {
+          "stdout": "",
+          "stderr": "OpenSSH_9.9p1\n",
+          "exitCode": 0
+        }
       },
       {
         "args": ["--version"],
@@ -48,5 +55,14 @@
     "publicArgs": ["funnel"],
     "privateArgs": ["serve"],
     "httpsPrefix": "--https="
+  },
+  "artifact/fetch": {
+    "content": "fixture prerequisite bytes"
+  },
+  "artifact/execute": {
+    "result": { "executed": true, "exitCode": 0 }
+  },
+  "sdk-listener/open": {
+    "safeFailureCode": "provider_unavailable"
   }
 }

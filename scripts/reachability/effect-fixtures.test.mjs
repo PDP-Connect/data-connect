@@ -165,3 +165,77 @@ test("process fixture accepts a transient credential but rejects argv/env copies
 		/process metadata/,
 	);
 });
+
+test("SDK open returns only a typed safe failure code when the fixture declines", async () => {
+  const canary = randomBytes(32).toString("hex")
+  const fixture = createEffectFixtures({ sdkOpenFailure: true })
+  const result = await operation(
+    fixture,
+    "sdk-listener",
+    "open"
+  )({
+    options: {
+      addr: "127.0.0.1:1",
+      authtoken: canary,
+    },
+  })
+  assert.deepEqual(result, { error: { code: "provider_unavailable" } })
+  assert.equal(fixture.credentialSeen, false)
+  assert.deepEqual(fixture.ledger(), [])
+  assert.ok(
+    !JSON.stringify({ result, ledger: fixture.ledger() }).includes(canary)
+  )
+  await fixture.close()
+})
+
+test("default HTTPS ports map proof requests to the same actual local gate", async () => {
+  const witness = randomBytes(32).toString("hex")
+  const gate = http.createServer((_request, response) => response.end(witness))
+  gate.listen(0, "127.0.0.1")
+  await once(gate, "listening")
+  const fixture = createEffectFixtures()
+  try {
+    const { readFile } = await import("node:fs/promises")
+    const data = JSON.parse(
+      await readFile(
+        new URL(
+          "../../reference-implementation/test/fixtures/reachability/effects.json",
+          import.meta.url
+        ),
+        "utf8"
+      )
+    )
+    const written = await operation(
+      fixture,
+      "local-api",
+      "request"
+    )({
+      path: data["local-api/request"].configPath,
+      method: "POST",
+      headers: { "If-Match": "0" },
+      body: {
+        Web: {
+          "fixture.invalid:443": {
+            Handlers: {
+              "/": { Proxy: `http://127.0.0.1:${gate.address().port}` },
+            },
+          },
+        },
+      },
+    })
+    assert.equal(written.status, 200)
+    const result = await operation(
+      fixture,
+      "network",
+      "fetch"
+    )({ url: "https://fixture.invalid/proof", method: "GET", headers: {} })
+    assert.equal(
+      Buffer.from(result.chunks[0].data, "base64").toString(),
+      witness
+    )
+  } finally {
+    await fixture.close()
+    gate.close()
+    await once(gate, "close")
+  }
+})
