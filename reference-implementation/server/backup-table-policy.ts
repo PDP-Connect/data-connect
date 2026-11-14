@@ -144,6 +144,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Maintenance sweep cursors can be retried after crash recovery.",
   },
+  connector_observation_runs: {
+    classification: "backup_required",
+    reason:
+      "Collection Profile diagnostic record per completed run (runtime observation snapshot and diagnosis, bounded to 8 runs per connector). It is owner-visible evidence that cannot be rebuilt from connector state or records, so a restore that drops it loses the diagnosis of recent failed runs.",
+  },
   connector_schedules: {
     classification: "backup_required",
     reason: "Collection schedules are durable owner configuration.",

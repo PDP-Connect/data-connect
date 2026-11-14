@@ -2799,6 +2799,23 @@ async function bootstrapPostgresSchemaOnce({
       CREATE INDEX IF NOT EXISTS idx_pg_connector_coverage_horizons_instance
         ON connector_coverage_horizons(connector_instance_id);
 
+      -- Collection Profile v0.2.0 diagnostic record per completed run. See the
+      -- matching SQLite DDL comment in server/db.ts (connector_observation_runs).
+      -- The store keeps 8 rows per connector_id and prunes in its write transaction.
+      CREATE TABLE IF NOT EXISTS connector_observation_runs (
+        connector_id TEXT NOT NULL,
+        connector_instance_id TEXT NOT NULL REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL,
+        recorded_seq BIGINT NOT NULL,
+        record_version INTEGER NOT NULL CHECK (record_version = 1),
+        recorded_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (connector_id, connector_instance_id, run_id)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pg_connector_observation_runs_seq
+        ON connector_observation_runs(connector_id, recorded_seq);
+
       -- Cross-invocation STREAM_EVIDENCE duplicate registry — see the
       -- matching SQLite DDL comment in server/db.ts
       -- (stream_evidence_run_registry) for the full rationale. Primary key

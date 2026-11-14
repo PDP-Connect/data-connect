@@ -15,6 +15,7 @@
 // runtime state, secret handling, or grant/scope enforcement.
 
 import { isValidRecoveryHintShape } from "./connector-gap-bounding.ts";
+import { isObservationIdSyntax } from "./observations.ts";
 
 type DoneStatus = "succeeded" | "failed" | "cancelled";
 
@@ -23,14 +24,16 @@ interface DoneErrorInput {
   message?: string;
   recovery_hint?: unknown;
   retryable?: boolean | null;
+  basis?: unknown;
   [key: string]: unknown;
 }
 
-interface DoneError {
+export interface DoneError {
   code?: string;
   message: string;
   recovery_hint?: string | { action: string; retryable?: boolean };
   retryable: boolean | null;
+  basis?: readonly string[];
 }
 
 interface DoneMessage {
@@ -71,8 +74,8 @@ export function validateDoneRecordsEmitted(
   return null;
 }
 
-export function validateDoneStatus(status: unknown): Error | null {
-  if (status === "succeeded" || status === "failed" || status === "cancelled") {
+export function validateDoneStatus(status: unknown, portable = false): Error | null {
+  if (status === "succeeded" || status === "failed" || (!portable && status === "cancelled")) {
     return null;
   }
   return new Error(`Connector emitted invalid DONE status: ${status}`);
@@ -80,12 +83,41 @@ export function validateDoneStatus(status: unknown): Error | null {
 
 const DONE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
+/**
+ * What the run's protocol state lets a DONE error say. `strict` is the
+ * Collection Profile 0.2.0 shape: a failed DONE carries an error and a boolean
+ * `retryable`. The legacy default keeps the 0.1 shape.
+ */
+export interface DoneErrorContract {
+  readonly strict: boolean;
+  readonly observationDeclared: boolean;
+  /** True when the connector emitted this OBSERVATION id earlier in the run. */
+  readonly hasEmittedId: (id: string) => boolean;
+  /**
+   * True when the runtime's bounded id ledger refused ids. A cited id missing
+   * from the ledger may then still have been emitted, so it cannot be proven
+   * false.
+   */
+  readonly idLedgerOverflowed: boolean;
+}
+
+const LEGACY_DONE_ERROR_CONTRACT: DoneErrorContract = {
+  strict: false,
+  observationDeclared: false,
+  hasEmittedId: () => false,
+  idLedgerOverflowed: false,
+};
+
 export function validateDoneError(
   status: DoneStatus | unknown,
-  error: DoneErrorInput | null | undefined
+  error: DoneErrorInput | null | undefined,
+  contract: DoneErrorContract = LEGACY_DONE_ERROR_CONTRACT
 ): DoneError | Error | null {
   // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
   if (error == null) {
+    if (contract.strict && status === "failed") {
+      return new Error("Connector emitted invalid DONE: failed status requires DONE.error");
+    }
     return null;
   }
   if (status === "succeeded") {
@@ -95,7 +127,8 @@ export function validateDoneError(
     return new Error("Connector emitted invalid DONE.error: expected object");
   }
   const unsupportedFields = Object.keys(error).filter(
-    (field) => field !== "message" && field !== "retryable" && field !== "code" && field !== "recovery_hint"
+    (field) =>
+      field !== "message" && field !== "retryable" && field !== "code" && field !== "recovery_hint" && field !== "basis"
   );
   if (unsupportedFields.length) {
     return new Error(`Connector emitted invalid DONE.error: unsupported fields ${unsupportedFields.join(", ")}`);
@@ -107,12 +140,19 @@ export function validateDoneError(
   if (typeof error.message !== "string" || !error.message.trim()) {
     return new Error("Connector emitted invalid DONE.error.message: expected non-empty string");
   }
+  if (contract.strict && typeof error.retryable !== "boolean") {
+    return new Error("Connector emitted invalid DONE.error.retryable: expected boolean");
+  }
   // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
   if (error.retryable != null && typeof error.retryable !== "boolean") {
     return new Error("Connector emitted invalid DONE.error.retryable: expected boolean");
   }
   if (!isValidRecoveryHintShape(error.recovery_hint)) {
     return new Error("Connector emitted invalid DONE.error.recovery_hint");
+  }
+  const basis = validateDoneBasis(error.basis, contract);
+  if (basis instanceof Error) {
+    return basis;
   }
   return {
     ...(error.code ? { code: error.code } : {}),
@@ -122,5 +162,42 @@ export function validateDoneError(
       ? {}
       : { recovery_hint: error.recovery_hint as NonNullable<DoneError["recovery_hint"]> }),
     retryable: error.retryable ?? null,
+    ...(basis === undefined ? {} : { basis }),
   };
+}
+
+/**
+ * Section 5.8: `basis` is OPTIONAL, needs a declared OBSERVATION capability,
+ * and cites only ids the connector emitted in this run. Invalid-but-emitted
+ * ids count as emitted. Returns the ids, undefined when absent, or an Error.
+ * After the id ledger overflowed, an id missing from it is dropped instead of
+ * rejected: the runtime cannot show it was never emitted. The drop cannot
+ * change the diagnosis. Every accepted fact keeps its id in the ledger, so a
+ * dropped id names no stored fact and a basis the runtime cannot verify
+ * authorizes nothing.
+ */
+function validateDoneBasis(basis: unknown, contract: DoneErrorContract): readonly string[] | undefined | Error {
+  if (basis === undefined) {
+    return undefined;
+  }
+  if (!contract.observationDeclared) {
+    return new Error("Connector emitted DONE.error.basis without declaring OBSERVATION");
+  }
+  if (!Array.isArray(basis)) {
+    return new Error("Connector emitted invalid DONE.error.basis: expected array of observation ids");
+  }
+  const verified: string[] = [];
+  for (const id of basis) {
+    if (!isObservationIdSyntax(id)) {
+      return new Error("Connector emitted DONE.error.basis with a value that is not a valid OBSERVATION id");
+    }
+    if (contract.hasEmittedId(id)) {
+      verified.push(id);
+    } else if (!contract.idLedgerOverflowed) {
+      return new Error("Connector emitted DONE.error.basis citing an OBSERVATION id it did not emit");
+    }
+  }
+  // The emitted-id ledger bounds unique citations. Duplicate citations add no
+  // diagnosis authority and need not expand the stored record.
+  return [...new Set(verified)];
 }

@@ -1290,8 +1290,8 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
     [["DETAIL_COVERAGE_KEY_SETS", "FORGED"], UNKNOWN_CAPABILITY_PATTERN, null],
     ["DETAIL_COVERAGE_KEY_SETS", UNKNOWN_CAPABILITY_PATTERN, null],
     [null, UNKNOWN_CAPABILITY_PATTERN, null],
-    [["OBSERVATION"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
-    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], UNSUPPORTED_CAPABILITY_PATTERN, "OBSERVATION"],
+    [["OBSERVATION"], null, null],
+    [["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "BLOB"], null, null],
     [["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"], null, null],
   ];
   for (const [protocolCapabilities, rejection, unsupported] of cases) {
@@ -1319,7 +1319,8 @@ test("the pre-spawn gate rejects unknown and unsupported required capabilities a
 
 // START.protocol_capabilities lists what this runtime implements (Section
 // 5.1): it accepts empty_keys/unchanged_keys and it validates STREAM_EVIDENCE.
-// It does not implement BLOB or OBSERVATION, so it does not list them.
+// It also accepts OBSERVATION (Section 5.10). It does not implement BLOB, so it
+// does not list it.
 test("START advertises the protocol capabilities this runtime implements, to every connector", async (t) => {
   const server = await typedStartServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
   t.after(() => closeServer(server));
@@ -1333,7 +1334,7 @@ test("START advertises the protocol capabilities this runtime implements, to eve
       holdingsRun([holdingsCoverage({ empty_keys: ["K"], required_keys: ["K"] })])
     );
     assert.equal(thrown, null);
-    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "STREAM_EVIDENCE"]);
+    assert.deepEqual(start?.protocol_capabilities, ["DETAIL_COVERAGE_KEY_SETS", "OBSERVATION", "STREAM_EVIDENCE"]);
   }
 });
 

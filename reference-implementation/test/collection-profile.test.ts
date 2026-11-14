@@ -8993,8 +8993,15 @@ rl.on('line', (line) => {
     }
   );
 
+  // Oracle: Section 5.8 (DONE.error shape) and the owner-visibility rule in Section
+  // 5.11 (the connector's own DONE.error.message stays visible with the diagnosis).
+  // The run fails as connector_protocol_violation. The bounded message is kept, the
+  // unsupported field's VALUE never reaches durable artifacts, and the connector's
+  // retryable claim gives no retry authority. Plausible defect caught: an invalid
+  // envelope's unsupported value (or its retryable:true) leaking into the terminal
+  // record or restarting the run. Backend: memory profile, child process.
   await t.test(
-    "DONE.error with unsupported fields is rejected as a protocol violation before terminal artifacts are recorded as connector failures",
+    "DONE.error with unsupported fields is a protocol violation: the bounded connector message stays visible, the unsupported value and retryable claim do not",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9033,7 +9040,10 @@ rl.on('line', (line) => {
             assert.equal(checkpointSummaryOf(capturedError).buffered_records_dropped, 0);
             assert.equal(checkpointSummaryOf(capturedError).commit_status, "not_committed");
             assert.equal(capturedError.terminal_reason, "connector_protocol_violation");
-            assert.equal(capturedError.connector_error, null);
+            // The bounded connector message stays visible with the diagnosis (Section 5.11).
+            assert.equal(capturedError.connector_error?.message, "rate limited");
+            // The connector's retryable:true is a claim with no retry authority.
+            assert.notEqual(capturedError.connector_error?.retryable, true);
             return true;
           }
         );
@@ -9047,13 +9057,13 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.records_flushed, 0);
         assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
+        // The connector's bounded message is durable diagnosis (Section 5.11).
+        assert.equal(failedEvent.data.connector_error_message, "rate limited");
+        assert.notEqual(failedEvent.data.connector_error_retryable, true);
+        // The unsupported field's value must never reach a durable artifact.
         assert.ok(
-          !("connector_error_message" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
-        );
-        assert.ok(
-          !("connector_error_retryable" in failedEvent.data),
-          "unsupported DONE.error fields must not enter durable artifacts"
+          !JSON.stringify(runTimeline).includes("upstream_rate_limit"),
+          "an unsupported DONE.error field's value must not enter durable artifacts"
         );
       } finally {
         cleanup();
@@ -9062,8 +9072,11 @@ rl.on('line', (line) => {
     }
   );
 
+  // Section 5.8: successful DONE cannot carry a terminal connector error. This
+  // contradiction is a protocol failure and must not be published as a valid
+  // connector error. Failed-DONE message preservation is tested separately.
   await t.test(
-    "DONE(succeeded) with terminal error details is rejected as a protocol violation before success artifacts are recorded",
+    "DONE(succeeded) with terminal error details is a protocol violation before success artifacts are recorded",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -9120,14 +9133,8 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.records_flushed, 0);
         assert.equal(failedEvent.data.buffered_records_dropped, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
-        assert.ok(
-          !("connector_error_message" in failedEvent.data),
-          "contradictory DONE(succeeded)+error details must not enter durable artifacts"
-        );
-        assert.ok(
-          !("connector_error_retryable" in failedEvent.data),
-          "contradictory DONE(succeeded)+error details must not enter durable artifacts"
-        );
+        assert.ok(!("connector_error_message" in failedEvent.data));
+        assert.ok(!("connector_error_retryable" in failedEvent.data));
       } finally {
         cleanup();
         await closeServer(server);
