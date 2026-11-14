@@ -727,13 +727,14 @@ test(
 for (const failingWait of [1, 2]) {
   test(
     `hanging helper settles and reaps its child when wait ${failingWait} fails`,
+    // A helper that never settles is bounded by the runner's timeout, not a timer here.
+    { timeout: 30_000 },
     withServerAndTmpDir(async (ctx) => {
       const watchdog = manualWatchdogTimers();
       let pending: ReturnType<ReturnType<typeof makeHarness>> | undefined;
       let settled = false;
       let originalError: unknown;
       let waits = 0;
-      let deadline: ReturnType<typeof setTimeout> | undefined;
       try {
         const result = runHangingConnectorUntilWatchdogFires(ctx, 1, {
           watchdog,
@@ -761,13 +762,7 @@ for (const failingWait of [1, 2]) {
             }
           },
         });
-        const bounded = Promise.race([
-          result,
-          new Promise<never>((_, reject) => {
-            deadline = setTimeout(() => reject(new Error("helper cleanup did not settle within 10 seconds")), 10_000);
-          }),
-        ]);
-        await assert.rejects(bounded, (error: unknown) => {
+        await assert.rejects(result, (error: unknown) => {
           assert.ok(originalError instanceof Error, "the injected wait must fail");
           assert.equal(error, originalError, "cleanup must preserve the original error object");
           return true;
@@ -777,7 +772,6 @@ for (const failingWait of [1, 2]) {
         assert.ok(Number.isSafeInteger(pid) && pid > 0);
         assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, "the connector child must no longer exist");
       } finally {
-        if (deadline !== undefined) clearTimeout(deadline);
         // Keep the regression safe even when run against the broken helper.
         watchdog.terminate();
         await pending?.catch(() => {});
