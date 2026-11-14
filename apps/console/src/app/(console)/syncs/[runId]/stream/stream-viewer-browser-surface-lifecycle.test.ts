@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { JSDOM } from "jsdom";
-import { act, createElement, StrictMode, useEffect, useRef } from "react";
+import { act, createElement, Fragment, StrictMode, useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   type MountBrowserSurfaceViewerOptions,
@@ -333,16 +333,22 @@ test("a stale cleanup disposes only its own mount and leaves the newer mount liv
 });
 
 function Harness({ h, version }: { h: ReturnType<typeof makeHarness>; version: number }) {
-  const nodeRef = useRef<HTMLDivElement | null>(null);
+  const [node, setNode] = useState<HTMLDivElement | null>(null);
+  const setNodeRef = useCallback((element: HTMLDivElement | null) => setNode(element), []);
+  return createElement(
+    Fragment,
+    null,
+    createElement("div", { ref: setNodeRef }),
+    node ? createElement(ViewerEffect, { h, node, version }) : null
+  );
+}
+
+function ViewerEffect({ h, node, version }: { h: ReturnType<typeof makeHarness>; node: HTMLDivElement; version: number }) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: `version` stands in for any dependency change that remounts the viewer.
   useEffect(() => {
-    const node = nodeRef.current;
-    if (!node) {
-      return;
-    }
     return mountBrowserSurfaceViewer(h.options({ node }));
-  }, [h, version]);
-  return createElement("div", { ref: nodeRef });
+  }, [h, node, version]);
+  return null;
 }
 
 test("React StrictMode mount, cleanup and remount leaves exactly one live viewer and transport", async () => {
