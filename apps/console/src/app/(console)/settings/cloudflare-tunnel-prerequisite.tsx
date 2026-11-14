@@ -401,7 +401,7 @@ export function nextConnectionStatus(
     }
     const origin = outcome.config.fields.PDPP_REFERENCE_ORIGIN
     const display = originVerificationDisplay(outcome.config, nowSeconds)
-    if (origin && display.reading.kind === "reaches_this_console" && !display.agentExited) {
+    if (origin && display.reading.kind === "reaches_this_console" && outcome.config.origin_verified?.agent === "running") {
       return { phase: "connected", origin }
     }
   }

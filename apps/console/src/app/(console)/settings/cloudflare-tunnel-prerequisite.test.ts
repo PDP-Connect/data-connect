@@ -3,9 +3,11 @@
 
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
-import test from "node:test"
+import { mock, test } from "node:test"
 import { fileURLToPath } from "node:url"
-import { createElement } from "react"
+import { JSDOM } from "jsdom"
+import { act, createElement } from "react"
+import { createRoot } from "react-dom/client"
 import { renderToStaticMarkup } from "react-dom/server"
 import {
   CLOUDFLARE_TUNNEL_POLL_FETCH_FAILED_REASON,
@@ -15,7 +17,7 @@ import {
   nextConnectionStatus,
 } from "./cloudflare-tunnel-prerequisite.tsx"
 import { OriginVerificationStatus } from "./origin-verification-status.tsx"
-import { offRemoteAccessConfig } from "./remote-access.ts"
+import { offRemoteAccessConfig, originVerificationDisplay, type RemoteAccessConfig } from "./remote-access.ts"
 
 // The exact tunnel ID from Tim's own real Cloudflare dashboard tunnel
 // ("DataConnect Testing"), confirmed live 2026-09-21 -- using a real,
@@ -128,6 +130,7 @@ test("a saved origin is not a verified connection and still times out", () => {
   const config = {
     ...offRemoteAccessConfig(),
     posture: "public_url" as const,
+    provider: "cloudflare_tunnel" as const,
     fields: { ...offRemoteAccessConfig().fields, PDPP_REFERENCE_ORIGIN: "saved-origin" },
   }
   assert.deepEqual(nextConnectionStatus({ kind: "config", config }, 4000), {
@@ -238,10 +241,126 @@ test("an exited agent never renders a current verified claim", () => {
   assert.match(markup, /process has since stopped/)
 })
 
-test("steady-state summary labels saved addresses and uses current verification", async () => {
-  const source = await readFile(new URL("./remote-access-setting.tsx", import.meta.url), "utf8")
-  assert.match(source, /Saved address:/)
-  assert.match(source, /originVerificationDisplay\(config, nowSeconds\)/)
-  assert.match(source, /clearInterval\(timer\)/)
-  assert.doesNotMatch(source, /status.phase !== "idle"/)
+function verifiedConfig(): RemoteAccessConfig {
+  return {
+    ...offRemoteAccessConfig(),
+    posture: "public_url",
+    provider: "cloudflare_tunnel",
+    fields: { ...offRemoteAccessConfig().fields, PDPP_REFERENCE_ORIGIN: "saved-origin" },
+    origin_verified: {
+      origin: "saved-origin", checked_at: 1000, stale_after: 150,
+      outcome: { kind: "reaches_this_console" },
+      binding: { kind: "owner_maintained", where_to_set: "the dashboard", action_url: null },
+      agent: "running",
+    },
+  }
+}
+
+for (const [label, agent] of [
+  ["missing", undefined], ["null", null], ["stopped", "stopped"],
+] as const) {
+  test(`Cloudflare rejects a fresh proof with a ${label} agent`, () => {
+    const config = verifiedConfig()
+    assert.ok(config.origin_verified)
+    if (agent === undefined) delete config.origin_verified.agent
+    else config.origin_verified.agent = agent
+    assert.deepEqual(nextConnectionStatus({ kind: "config", config }, 4000, 1000), {
+      phase: "connecting", elapsedSeconds: 4,
+    })
+  })
+  test(`Cloudflare shows historical proof with a ${label} agent`, () => {
+    const config = verifiedConfig()
+    assert.ok(config.origin_verified)
+    if (agent === undefined) delete config.origin_verified.agent
+    else config.origin_verified.agent = agent
+    const markup = renderToStaticMarkup(createElement(OriginVerificationStatus, {
+      consolePort: null, origin: "saved-origin", display: originVerificationDisplay(config, 1000),
+    }))
+    assert.doesNotMatch(markup, /this address reaches this DataConnect/)
+    assert.match(markup, /verified earlier/)
+  })
+}
+
+test("supervised ngrok proof requires a running agent", () => {
+  for (const agent of [undefined, null, "stopped", "exited", "running"] as const) {
+    const config = verifiedConfig()
+    config.provider = "ngrok"
+    assert.ok(config.origin_verified)
+    if (agent === undefined) delete config.origin_verified.agent
+    else config.origin_verified.agent = agent
+    assert.equal(originVerificationDisplay(config, 1000).reading.kind,
+      agent === "running" ? "reaches_this_console" : "agent_unconfirmed")
+  }
+})
+
+test("owner-operated proxies preserve fresh verification without an agent", () => {
+  for (const agent of [undefined, null]) {
+    const config = verifiedConfig()
+    config.provider = "user_supplied_origin"
+    assert.ok(config.origin_verified)
+    if (agent === undefined) delete config.origin_verified.agent
+    else config.origin_verified.agent = agent
+    const markup = renderToStaticMarkup(createElement(OriginVerificationStatus, {
+      consolePort: null, origin: "saved-origin", display: originVerificationDisplay(config, 1000),
+    }))
+    assert.match(markup, /this address reaches this DataConnect/)
+  }
+})
+
+test("mounted verification expires without a config update and clears its interval on unmount", async (t) => {
+  const dom = new JSDOM("<!doctype html><html><body></body></html>")
+  const globals = { window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true }
+  const previous = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  for (const [key, value] of Object.entries(globals)) {
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+  }
+  const config = verifiedConfig()
+  const data = { config, effectiveConsolePort: null, stableConsolePort: null, ownerPasswordOwnerSet: true,
+    inspection: { availability: "available", authentication: "not_required" } }
+  const live = mock.module(new URL("../components/live-provider.tsx", import.meta.url).href, {
+    namedExports: { LiveReadAt: () => null, useLiveQuery: () => ({ data, dataUpdatedAt: 0, isError: false }) },
+  })
+  const unusedAction = async () => { throw new Error("Unexpected server action") }
+  const actions = mock.module(new URL("./remote-access-actions.ts", import.meta.url).href, {
+    namedExports: { loadRemoteAccessStateAction: unusedAction, restartAfterOwnerPasswordSetAction: unusedAction,
+      requestOwnerPasswordWindowAction: unusedAction, setConsolePortAction: unusedAction, setRemoteAccessConfigAction: unusedAction },
+  })
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1000_000 })
+  const intervals = t.mock.method(globalThis, "setInterval")
+  const clears = t.mock.method(globalThis, "clearInterval")
+  const container = dom.window.document.createElement("div")
+  const root = createRoot(container)
+  let unmounted = false
+  try {
+    const { RemoteAccessSetting } = await import("./remote-access-setting.tsx")
+    await act(async () => root.render(createElement(RemoteAccessSetting)))
+    assert.match(container.textContent ?? "", /this address reaches this DataConnect/)
+    assert.match(container.textContent ?? "", /Saved address:/)
+    await act(async () => t.mock.timers.tick(150_000))
+    assert.match(container.textContent ?? "", /this address reaches this DataConnect/)
+    await act(async () => t.mock.timers.tick(1000))
+    assert.doesNotMatch(container.textContent ?? "", /this address reaches this DataConnect/)
+    assert.match(container.textContent ?? "", /Not checked since/)
+    assert.equal(data.config, config)
+    assert.equal(intervals.mock.callCount(), 1)
+    const intervalCall = intervals.mock.calls[0]
+    assert.ok(intervalCall)
+    const timer = intervalCall.result
+    await act(async () => root.unmount())
+    unmounted = true
+    assert.ok(clears.mock.calls.some(call => call.arguments[0] === timer), "verification interval must be cleared")
+  } finally {
+    if (!unmounted) await act(async () => root.unmount())
+    intervals.mock.restore()
+    clears.mock.restore()
+    t.mock.timers.reset()
+    live.restore()
+    actions.restore()
+    dom.window.close()
+    for (const [key, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else Reflect.deleteProperty(globalThis, key)
+    }
+  }
 })

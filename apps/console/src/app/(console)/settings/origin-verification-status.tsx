@@ -36,9 +36,11 @@ export function OriginVerificationStatus({
         <p className="pdpp-caption text-foreground" role="status">
           Verified at {checkedTime(reading.checkedAt)}: this address reaches this DataConnect.
         </p>
-      ) : reading.kind === "reaches_this_console" ? (
+      ) : reading.kind === "reaches_this_console" || reading.kind === "agent_unconfirmed" ? (
         <p className="pdpp-caption text-muted-foreground" role="status">
-          This address was verified earlier, but the tunnel process has since stopped.
+          {agentExited
+            ? "This address was verified earlier, but the tunnel process has since stopped."
+            : "This address was verified earlier, but the tunnel process is not confirmed running."}
         </p>
       ) : reading.kind === "reaches_something_else" ? (
         <p className="pdpp-caption text-destructive" role="alert">
