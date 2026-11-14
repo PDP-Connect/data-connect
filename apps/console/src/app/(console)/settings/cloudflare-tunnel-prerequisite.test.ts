@@ -5,12 +5,16 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import {
   CLOUDFLARE_TUNNEL_POLL_FETCH_FAILED_REASON,
   CLOUDFLARE_TUNNEL_POLL_TIMEOUT_REASON,
+  CloudflareTunnelConnectionBanner,
   decodeCloudflareTunnelToken,
   nextConnectionStatus,
 } from "./cloudflare-tunnel-prerequisite.tsx"
+import { OriginVerificationStatus } from "./origin-verification-status.tsx"
 import { offRemoteAccessConfig } from "./remote-access.ts"
 
 // The exact tunnel ID from Tim's own real Cloudflare dashboard tunnel
@@ -120,15 +124,53 @@ test("rejects a whole install command pasted instead of just the token", () => {
   assert.equal(result.ok, false)
 })
 
-test("nextConnectionStatus reports connected once the config gains a real origin", () => {
+test("a saved origin is not a verified connection and still times out", () => {
   const config = {
     ...offRemoteAccessConfig(),
-    fields: { ...offRemoteAccessConfig().fields, PDPP_REFERENCE_ORIGIN: "https://vault.example.com" },
+    posture: "public_url" as const,
+    fields: { ...offRemoteAccessConfig().fields, PDPP_REFERENCE_ORIGIN: "saved-origin" },
   }
   assert.deepEqual(nextConnectionStatus({ kind: "config", config }, 4000), {
-    phase: "connected",
-    origin: "https://vault.example.com",
+    phase: "connecting", elapsedSeconds: 4,
   })
+  assert.deepEqual(nextConnectionStatus({ kind: "config", config }, 45_000), {
+    phase: "failed", reason: CLOUDFLARE_TUNNEL_POLL_TIMEOUT_REASON,
+  })
+})
+
+test("connected requires a fresh matching proof and a running agent", () => {
+  const now = 1000
+  const config = {
+    ...offRemoteAccessConfig(),
+    posture: "public_url" as const,
+    fields: { ...offRemoteAccessConfig().fields, PDPP_REFERENCE_ORIGIN: "saved-origin" },
+    origin_verified: {
+      origin: "saved-origin", checked_at: now, stale_after: 150,
+      outcome: { kind: "reaches_this_console" as const },
+      binding: { kind: "owner_maintained" as const, where_to_set: "the dashboard", action_url: null },
+      agent: "running" as const,
+    },
+  }
+  assert.deepEqual(nextConnectionStatus({ kind: "config", config }, 4000, now), {
+    phase: "connected", origin: "saved-origin",
+  })
+  assert.deepEqual(nextConnectionStatus({ kind: "config", config }, 4000, now + 151), {
+    phase: "connecting", elapsedSeconds: 4,
+  })
+  for (const change of [
+    { origin: "previous-origin" },
+    { checked_at: now - 151 },
+    { agent: "exited" as const },
+    { outcome: { kind: "unreachable" as const, reason: "No response" } },
+    { outcome: { kind: "reaches_something_else" as const, status: 404 } },
+  ]) {
+    assert.deepEqual(nextConnectionStatus({
+      kind: "config", config: { ...config, origin_verified: { ...config.origin_verified, ...change } },
+    }, 4000, now), { phase: "connecting", elapsedSeconds: 4 })
+  }
+  assert.deepEqual(nextConnectionStatus({
+    kind: "config", config: { ...config, tunnel_error: "Stopped" },
+  }, 4000, now), { phase: "failed", reason: "Stopped" })
 })
 
 test("nextConnectionStatus reports the real tunnel_error the moment it appears, before the timeout", () => {
@@ -174,4 +216,32 @@ test("the tunnel walkthrough URL is only ever a link target, never unclickable t
     assert.match(source, /href=\{CLOUDFLARE_TUNNEL_SETUP_URL\}/, `${file} must link the walkthrough`)
     assert.doesNotMatch(source, /(?<!=)\{\s*CLOUDFLARE_TUNNEL_SETUP_URL\s*\}/, `${file} prints the URL as text`)
   }
+})
+
+test("verified connection copy is explicit", () => {
+  const markup = renderToStaticMarkup(createElement(CloudflareTunnelConnectionBanner, {
+    status: { phase: "connected", origin: "saved-origin" },
+  }))
+  assert.match(markup, /Verified connection/)
+  assert.doesNotMatch(markup, /Whether this/)
+})
+
+test("an exited agent never renders a current verified claim", () => {
+  const markup = renderToStaticMarkup(createElement(OriginVerificationStatus, {
+    consolePort: null, origin: "saved-origin",
+    display: {
+      reading: { kind: "reaches_this_console", checkedAt: 1000 },
+      binding: null, agentExited: true,
+    },
+  }))
+  assert.doesNotMatch(markup, /this address reaches this DataConnect/)
+  assert.match(markup, /process has since stopped/)
+})
+
+test("steady-state summary labels saved addresses and uses current verification", async () => {
+  const source = await readFile(new URL("./remote-access-setting.tsx", import.meta.url), "utf8")
+  assert.match(source, /Saved address:/)
+  assert.match(source, /originVerificationDisplay\(config, nowSeconds\)/)
+  assert.match(source, /clearInterval\(timer\)/)
+  assert.doesNotMatch(source, /status.phase !== "idle"/)
 })

@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { OpenExternalLink } from "@/app/(console)/components/open-external-link.tsx"
 import type { CloudflareTunnelInspection, RemoteAccessInspection } from "./remote-access.ts"
-import type { RemoteAccessConfig } from "./remote-access.ts"
+import { originVerificationDisplay, type RemoteAccessConfig } from "./remote-access.ts"
 
 /**
  * A decoded Cloudflare tunnel token, or the specific reason decoding failed.
@@ -349,16 +349,8 @@ export function CloudflareTunnelTokenStatus({ token }: { token: string }) {
 }
 
 /**
- * `connecting | connected | failed`, grounded in the same real signal
- * `start()` (`src-tauri/src/remote_access_cloudflare.rs`) already watches
- * cloudflared's stdout for: "Registered tunnel connection". Exists because
- * the alternative -- what this option had until now -- is the exact failure
- * mode Tim flagged: after saving, the settings page shows "Waiting for the
- * provider to report an address…" and NEVER checks again unless the owner
- * manually reloads the page (confirmed by reading `RemoteAccessSetting`'s
- * load effect: it runs once, on mount, with no polling). That single-shot
- * spinner is what stalled Tim for hours on the ngrok path; this exists so
- * Cloudflare does not repeat it.
+ * Connection states require a fresh proof that the saved address reaches
+ * this console. A saved address alone is configuration, not live evidence.
  */
 export type CloudflareTunnelConnectionStatus =
   | { phase: "idle" }
@@ -381,14 +373,14 @@ const POLL_INTERVAL_MS = 2000
 const POLL_TIMEOUT_MS = 45_000
 
 export const CLOUDFLARE_TUNNEL_POLL_TIMEOUT_REASON =
-  "cloudflared did not report a connection within the expected time. Check the Cloudflare dashboard for this tunnel's status, and that the token and hostname you saved both belong to it."
+  "The public address was not verified within the expected time. Check the Cloudflare dashboard for this tunnel's status, and that the token and hostname you saved both belong to it."
 export const CLOUDFLARE_TUNNEL_POLL_FETCH_FAILED_REASON =
   "Could not check the tunnel's status. Reload this page to try again."
 
 /**
  * The pure decision `useCloudflareTunnelConnectionStatus`'s polling loop
  * makes on every tick, split out so the branching (tunnel_error wins, then
- * a real origin, then a timeout check, then keep waiting) is testable
+ * a fresh matching origin proof, then a timeout check, then keep waiting) is testable
  * without a DOM or fake timers -- the loop itself (the `setTimeout`
  * recursion, the `AbortController`-style generation guard against a stale
  * poll updating state after `start()` was called again or the component
@@ -398,16 +390,18 @@ export const CLOUDFLARE_TUNNEL_POLL_FETCH_FAILED_REASON =
  */
 export function nextConnectionStatus(
   outcome:
-    | { kind: "config"; config: Pick<RemoteAccessConfig, "tunnel_error" | "fields"> }
+    | { kind: "config"; config: RemoteAccessConfig }
     | { kind: "fetch-failed" },
-  elapsedMs: number
+  elapsedMs: number,
+  nowSeconds = Math.floor(Date.now() / 1000)
 ): CloudflareTunnelConnectionStatus {
   if (outcome.kind === "config") {
     if (outcome.config.tunnel_error) {
       return { phase: "failed", reason: outcome.config.tunnel_error }
     }
     const origin = outcome.config.fields.PDPP_REFERENCE_ORIGIN
-    if (origin) {
+    const display = originVerificationDisplay(outcome.config, nowSeconds)
+    if (origin && display.reading.kind === "reaches_this_console" && !display.agentExited) {
       return { phase: "connected", origin }
     }
   }
@@ -483,9 +477,7 @@ export function useCloudflareTunnelConnectionStatus(
 
 /**
  * Renders `CloudflareTunnelConnectionStatus` -- the connecting / connected /
- * failed surface this option previously had no equivalent of, grounded in
- * `start()`'s real "Registered tunnel connection" signal via the polling
- * loop above, not a guess or a timer alone.
+ * failed surface, grounded in a fresh matching origin-proof reading.
  */
 export function CloudflareTunnelConnectionBanner({
   status,
@@ -503,14 +495,10 @@ export function CloudflareTunnelConnectionBanner({
     )
   }
   if (status.phase === "connected") {
-    // Only the tunnel is claimed here. Whether the hostname leads to this
-    // DataConnect is decided by the route in Cloudflare's dashboard, which
-    // DataConnect does not control; `OriginVerificationStatus` reports it.
     return (
       <p className="pdpp-caption text-foreground" role="status">
-        Tunnel connected for{" "}
-        <span className="select-all break-all font-mono">{status.origin}</span>. Whether this
-        address reaches DataConnect is shown below.
+        Verified connection for{" "}
+        <span className="select-all break-all font-mono">{status.origin}</span>. This address reaches this DataConnect.
       </p>
     )
   }
