@@ -132,6 +132,7 @@ const UNLISTED_STREAMS = [
     name: "items",
     primary_key: ["id"],
     schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+    selection: { fields: true, resources: true },
     semantics: "append_only",
   },
 ];

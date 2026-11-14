@@ -26,7 +26,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-
 import { RECOVERY_ACTIONS } from "../runtime/connector-gap-bounding.ts";
 import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import {
@@ -44,6 +43,7 @@ import {
   createSqliteConnectorInstanceStore,
 } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type TestServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -712,6 +712,13 @@ const MINIMAL_MANIFEST = {
   version: "1.0.0",
 };
 
+// Section 3.4: an INTERACTION.kind must be declared in capabilities.human_interaction.
+// Tests that emit INTERACTION use this manifest. Undeclared-kind refusal uses MINIMAL_MANIFEST.
+const HUMAN_INTERACTION_MANIFEST = {
+  ...MINIMAL_MANIFEST,
+  capabilities: { human_interaction: ["credentials", "otp", "manual_action"] },
+};
+
 function buildMultiStreamManifest(connectorId = "test-multi-stream") {
   return {
     ...MINIMAL_MANIFEST,
@@ -809,7 +816,6 @@ test("Collection Profile conformance", async (t) => {
       assert.deepEqual(captured.bindings, {
         browser: {},
         filesystem: {},
-        interactive: {},
         network: {},
       });
       assert.ok(!("config" in captured), "legacy START.config should be absent");
@@ -2803,11 +2809,17 @@ rl.on('line', (line) => {
         assert.equal(advancedEvents.length, 2);
         assert.deepEqual(
           new Set(stagedEvents.map((event) => eventCursorKey(event))),
-          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
+          new Set([
+            cursorEventKey("items", "cursor_items_success"),
+            cursorEventKey("other_items", "cursor_other_success"),
+          ])
         );
         assert.deepEqual(
           new Set(advancedEvents.map((event) => eventCursorKey(event))),
-          new Set([cursorEventKey("items", "cursor_items_success"), cursorEventKey("other_items", "cursor_other_success")])
+          new Set([
+            cursorEventKey("items", "cursor_items_success"),
+            cursorEventKey("other_items", "cursor_other_success"),
+          ])
         );
         assert.deepEqual(
           advancedEvents.map((event) => event.data.state_streams_committed as number).sort((a, b) => a - b),
@@ -2943,6 +2955,8 @@ rl.on('line', (line) => {
               required: ["id"],
               type: "object",
             },
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
           {
             name: "other_items",
@@ -2955,6 +2969,8 @@ rl.on('line', (line) => {
               required: ["id"],
               type: "object",
             },
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
         ],
         version: "0.1.0",
@@ -3583,55 +3599,53 @@ rl.on('line', (line) => {
     }
   });
 
-  await t.test("runtime satisfies required interactive bindings and advertises them in START", async () => {
-    const manifestWithInteractiveBinding = {
-      ...MINIMAL_MANIFEST,
-      runtime_requirements: {
-        bindings: {
-          interactive: { required: true },
-        },
-      },
-    };
+  await t.test(
+    "START.bindings never advertises interactive, even when the manifest declares human_interaction",
+    async () => {
+      const manifestWithInteractiveBinding = {
+        ...MINIMAL_MANIFEST,
+        capabilities: { human_interaction: ["credentials"] },
+      };
 
-    const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
-    const capturePath = join(tmpDir, "start.json");
-    const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-interactive-binding-capture-"));
+      const capturePath = join(tmpDir, "start.json");
+      const { connectorPath, cleanup } = createStartCaptureConnector(capturePath);
 
-    try {
-      const result = await runTestConnector({
-        // Bare runtime unit test: no server, no registered connector, an
-        // unreachable rsUrl. A pure-echo admission just needs to clear the
-        // gate so the START.bindings capture under test is reached.
-        admitRunConnection: fakeEchoAdmitRunConnection(),
-        collectionMode: "full_refresh",
-        connectorId: "test",
-        connectorPath,
-        manifest: manifestWithInteractiveBinding,
-        onInteraction: async () => ({
-          data: {},
-          request_id: "unused",
-          status: "success",
-          type: "INTERACTION_RESPONSE",
-        }),
-        ownerToken: "test",
-        persistState: true,
-        rsUrl: "http://localhost:9999",
-        state: null,
-      });
+      try {
+        const result = await runTestConnector({
+          // Bare runtime unit test: no server, no registered connector, an
+          // unreachable rsUrl. A pure-echo admission just needs to clear the
+          // gate so the START.bindings capture under test is reached.
+          admitRunConnection: fakeEchoAdmitRunConnection(),
+          collectionMode: "full_refresh",
+          connectorId: "test",
+          connectorPath,
+          manifest: manifestWithInteractiveBinding,
+          onInteraction: async () => ({
+            data: {},
+            request_id: "unused",
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          }),
+          ownerToken: "test",
+          persistState: true,
+          rsUrl: "http://localhost:9999",
+          state: null,
+        });
 
-      assert.equal(result.status, "succeeded");
-      const captured = JSON.parse(readFileSync(capturePath, "utf8"));
-      assert.deepEqual(captured.bindings, {
-        browser: {},
-        filesystem: {},
-        interactive: {},
-        network: {},
-      });
-    } finally {
-      cleanup();
-      rmSync(tmpDir, { force: true, recursive: true });
+        assert.equal(result.status, "succeeded");
+        const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+        assert.deepEqual(captured.bindings, {
+          browser: {},
+          filesystem: {},
+          network: {},
+        });
+      } finally {
+        cleanup();
+        rmSync(tmpDir, { force: true, recursive: true });
+      }
     }
-  });
+  );
 
   await t.test(
     "runtime omits interactive from START.bindings when interaction handling is explicitly disabled",
@@ -5631,7 +5645,7 @@ rl.on('line', (line) => {
   await t.test("runtime reports manual-action known gaps without persisting interaction responses", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-manual-gap-"));
@@ -5673,7 +5687,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async () => ({
           data: { otp: "123456", password: "supersecret" },
           request_id: "manual_login",
@@ -6678,7 +6692,7 @@ rl.on('line', (line) => {
   await t.test("INTERACTION round-trip allows connector to continue collecting", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     // Connector that emits INTERACTION, waits for response, then emits RECORD + DONE
@@ -6713,7 +6727,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -6803,7 +6817,7 @@ rl.on('line', (line) => {
   await t.test("resolved OTP assistance completes a pending interaction after page advancement", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const tmpDir = mkdtempSync(join(process.cwd(), ".scratch-otp-manual-"));
     const connectorPath = join(tmpDir, "connector.mjs");
     writeFileSync(
@@ -6834,7 +6848,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async () =>
           new Promise(() => {
             // Keep the interaction pending until the connector advances the browser page.
@@ -6854,7 +6868,7 @@ rl.on('line', (line) => {
   await t.test("late OTP assistance status is ignored after a console response", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-otp-late-status-"));
     const connectorPath = join(tmpDir, "connector.mjs");
     writeFileSync(
@@ -6884,7 +6898,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         onInteraction: async (message: unknown) => ({
           data: { code: "123456" },
           request_id: (message as InteractionMessage).request_id,
@@ -6906,7 +6920,7 @@ rl.on('line', (line) => {
   await t.test("browser-surface-backed otp INTERACTION projects streamable assistance with secret input", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-interaction-browser-otp-"));
@@ -6951,7 +6965,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -7003,7 +7017,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -7434,7 +7448,7 @@ rl.on('line', (line) => {
   await t.test("runtime rejects connector output emitted while waiting for INTERACTION_RESPONSE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-output-"));
@@ -7481,7 +7495,7 @@ rl.on('line', (line) => {
             collectionMode: "full_refresh",
             connectorId,
             connectorPath,
-            manifest: MINIMAL_MANIFEST,
+            manifest: HUMAN_INTERACTION_MANIFEST,
             onInteraction: async () => new Promise(() => undefined),
             ownerToken,
             persistState: true,
@@ -7533,7 +7547,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-state-"));
@@ -7578,7 +7592,7 @@ rl.on('line', (line) => {
               collectionMode: "incremental",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7633,7 +7647,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-progress-"));
@@ -7678,7 +7692,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7729,7 +7743,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-skip-result-"));
@@ -7775,7 +7789,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -7824,7 +7838,7 @@ rl.on('line', (line) => {
   await t.test("runtime rejects a second INTERACTION emitted while waiting for INTERACTION_RESPONSE", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-overlap-"));
@@ -7872,7 +7886,7 @@ rl.on('line', (line) => {
             collectionMode: "full_refresh",
             connectorId,
             connectorPath,
-            manifest: MINIMAL_MANIFEST,
+            manifest: HUMAN_INTERACTION_MANIFEST,
             onInteraction: async () => new Promise(() => undefined),
             ownerToken,
             persistState: true,
@@ -7925,7 +7939,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-done-"));
@@ -7970,7 +7984,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -8023,7 +8037,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-blocked-invalid-jsonl-"));
@@ -8064,7 +8078,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               onInteraction: async () => new Promise(() => undefined),
               ownerToken,
               persistState: true,
@@ -8116,7 +8130,7 @@ rl.on('line', (line) => {
   await t.test("runtime returns INTERACTION timeout responses when the handler does not answer in time", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-timeout-"));
@@ -8163,7 +8177,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -8202,7 +8216,7 @@ rl.on('line', (line) => {
   await t.test("runtime returns INTERACTION cancelled responses when the handler aborts", async () => {
     const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
     const { asPort, rsPort } = server;
-    const { ownerToken, connectorId } = await setupConnector(server, asPort);
+    const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
     const asUrl = `http://localhost:${asPort}`;
 
     const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-cancelled-"));
@@ -8249,7 +8263,7 @@ rl.on('line', (line) => {
         collectionMode: "full_refresh",
         connectorId,
         connectorPath,
-        manifest: MINIMAL_MANIFEST,
+        manifest: HUMAN_INTERACTION_MANIFEST,
         // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
         onInteraction: async (message: unknown) => {
           const msg = message as InteractionMessage;
@@ -8290,7 +8304,7 @@ rl.on('line', (line) => {
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
-      const { ownerToken, connectorId } = await setupConnector(server, asPort);
+      const { ownerToken, connectorId } = await setupConnector(server, asPort, HUMAN_INTERACTION_MANIFEST);
       const asUrl = `http://localhost:${asPort}`;
 
       const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-test-int-invalid-response-"));
@@ -8328,7 +8342,7 @@ rl.on('line', (line) => {
               collectionMode: "full_refresh",
               connectorId,
               connectorPath,
-              manifest: MINIMAL_MANIFEST,
+              manifest: HUMAN_INTERACTION_MANIFEST,
               // biome-ignore lint/suspicious/useAwait: localized test assertion preserves its explicit contract.
               onInteraction: async (message: unknown) => {
                 const msg = message as InteractionMessage;
@@ -8690,7 +8704,7 @@ rl.on('line', (line) => {
   });
 
   await t.test(
-    "runtime rejects INTERACTION when START.bindings omit interactive and records no interaction artifacts",
+    "runtime rejects INTERACTION whose kind the manifest does not declare and records no interaction artifacts",
     async () => {
       const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
       const { asPort, rsPort } = server;
@@ -8742,7 +8756,10 @@ rl.on('line', (line) => {
             rejected = asRuntimeError(err);
             assert.equal(rejected.failure_reason, "connector_protocol_violation");
             // biome-ignore lint/performance/useTopLevelRegex: localized test assertion preserves its explicit contract.
-            assert.match(rejected.message, /START\.bindings omitted interactive/);
+            assert.match(
+              rejected.message,
+              /INTERACTION\.kind not declared in capabilities\.human_interaction: credentials/
+            );
             assert.equal(checkpointSummaryOf(rejected).records_flushed, 0);
             assert.equal(checkpointSummaryOf(rejected).buffered_records_dropped, 0);
             assert.equal(checkpointSummaryOf(rejected).state_streams_staged, 0);
@@ -8762,7 +8779,7 @@ rl.on('line', (line) => {
         const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
         assert.ok(
           failedEvent,
-          "run.failed should be emitted when INTERACTION arrives without an advertised interactive binding"
+          "run.failed should be emitted when INTERACTION names a kind the manifest does not declare"
         );
         assert.equal(failedEvent.data.reason, "connector_protocol_violation");
         assert.equal(failedEvent.data.records_flushed, 0);
@@ -8912,7 +8929,10 @@ rl.on('line', (line) => {
       assert.equal(advancedEvents.length, 0);
       assert.deepEqual(
         new Set(stagedEvents.map((event) => eventCursorKey(event))),
-        new Set([cursorEventKey("items", "cursor_items_done_failed"), cursorEventKey("other_items", "cursor_other_done_failed")])
+        new Set([
+          cursorEventKey("items", "cursor_items_done_failed"),
+          cursorEventKey("other_items", "cursor_other_done_failed"),
+        ])
       );
 
       const failedEvent = (runTimeline.data || []).find((event) => event.event_type === "run.failed");
@@ -11191,25 +11211,26 @@ function testSourceIdForConnector(connectorId: string): string {
 }
 
 function withTestSourceDeclaration(manifest: ConnectorManifest): ConnectorManifest {
-  const streams = asArray(manifest.streams).map((stream) => {
-    const streamRecord = asRecord(stream);
-    return {
-      ...streamRecord,
-      selection: {
-        fields: true,
-        resources: true,
+  const declared = asRecord(
+    withFixtureSourceDeclaration(
+      {
+        ...manifest,
+        streams: asArray(manifest.streams).map((stream) => ({
+          ...asRecord(stream),
+          selection: { fields: true, resources: true },
+        })),
       },
-    };
-  });
+      {
+        sourceId: testSourceIdForConnector(manifest.connector_id),
+      }
+    )
+  );
   return {
     ...manifest,
     source_declaration: {
+      ...asRecord(declared.source_declaration),
       declaration_version: `collection-profile-test:${manifest.connector_id}:${manifest.version}`,
-      display: { name: manifest.display_name },
-      protocol_version: manifest.protocol_version,
       publisher: { id: "https://sources.example/publishers/collection-profile-tests" },
-      source: { id: testSourceIdForConnector(manifest.connector_id), kind: "connector" },
-      streams,
     },
   };
 }

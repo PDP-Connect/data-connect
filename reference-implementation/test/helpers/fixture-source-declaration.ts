@@ -7,11 +7,10 @@ const FIXTURE_PUBLISHER = "https://publishers.pdpp.test/fixtures";
 
 /**
  * Test-only. Gives a fixture manifest an explicit, validated source declaration computed from its own
- * final content, so registration uses the fixture's authored source identity instead of inferring one from
- * the manifest's `connector_id` or `manifest_uri`. The default identity is the fixture's own
- * (`https://fixtures.pdpp.test/sources/<slug>`), not a production identity; pass `sourceId` to pin another.
- * Always recomputed from the content it is given, so a manifest derived by spreading another fixture never
- * keeps a declaration for content it no longer has.
+ * final content, so a first registration of a fixture key with no reviewed legacy mapping goes through the
+ * Core route. The source identity is the fixture's own (`https://fixtures.pdpp.test/sources/<slug>`), not a
+ * production identity. Always recomputed from the content it is given, so a manifest derived by spreading
+ * another fixture never keeps a declaration for content it no longer has.
  */
 export function withFixtureSourceDeclaration<T extends object>(manifest: T, options: { sourceId?: string } = {}): T {
   const content = Object.fromEntries(

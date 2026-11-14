@@ -22,8 +22,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
+import { BindingDeclarationError, parseManifestJsonText } from "../../runtime/binding-declarations.ts";
+import { snapshotSourceDeclaration } from "../source-declaration.ts";
 import {
   assertConnectorLifecycleAvailable,
   clearConnectorLifecycleUninstalled,
@@ -48,6 +51,7 @@ const CORE_MODULE = "@opendatalabs/data-connectors-tools/installer-core";
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]*$/;
+const SOURCE_DECLARATION_PATH = "source-declaration.json";
 const MANIFEST_REQUEST = /\/manifests\/(sha256:[0-9a-f]{64})$/;
 const BLOB_REQUEST = /\/blobs\/(sha256:[0-9a-f]{64})$/;
 
@@ -64,6 +68,11 @@ export interface ConnectorInstallRecord {
   readonly manifestSha256: string;
   readonly provenancePath: string;
   readonly provenanceSha256: string;
+  /**
+   * Digest of the verified `source-declaration.json` sidecar. Absent on legacy records: those keep their
+   * retained registry identity, and their sidecar bytes are never read as trusted.
+   */
+  readonly sourceDeclarationSha256?: string;
   readonly registry: "ghcr.io";
   readonly repository: string;
   readonly root: string;
@@ -420,7 +429,8 @@ function assertStoredRecordMetadata(active: ConnectorInstallRecord): void {
     active.repository !== `pdp-connect/connector/${active.connectorId}` ||
     active.manifestPath !== "profile/collection-profile.json" ||
     active.entrypointPath !== "dist/collection-profile.mjs" ||
-    active.provenancePath !== "provenance.json"
+    active.provenancePath !== "provenance.json" ||
+    (active.sourceDeclarationSha256 !== undefined && !DIGEST.test(active.sourceDeclarationSha256))
   ) {
     throw new Error("Active connector record is invalid.");
   }
@@ -572,6 +582,22 @@ export async function resolveActiveConnectorPath(
   });
 }
 
+/**
+ * Parses a Collection Profile from the text on disk. A repeated object key is rejected, as on the HTTP and
+ * local-source paths: `JSON.parse` alone keeps the last value and the repeat is gone before registration. The
+ * error names no key or path, because the profile text is not trusted and an install error reaches the owner.
+ */
+function parseProfileText(text: string): unknown {
+  try {
+    return parseManifestJsonText(text);
+  } catch (error) {
+    if (error instanceof BindingDeclarationError) {
+      throw new Error("Connector profile repeats an object key.", { cause: error });
+    }
+    throw new Error("Connector profile is not valid JSON.", { cause: error });
+  }
+}
+
 function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDir?: string): ConnectorInstallRecord {
   assertStoredRecordMetadata(active);
   const normalizedRoot = resolve(root);
@@ -586,12 +612,63 @@ function verifyStoredRecord(root: string, active: ConnectorInstallRecord, dataDi
   if (!manifestFile) {
     throw new Error("Active connector manifest path is invalid.");
   }
-  const manifest = JSON.parse(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
+  const manifest = parseProfileText(readFileSync(manifestFile, "utf8")) as Record<string, unknown>;
   const manifestKey = canonicalManifestKey(manifest);
   if (manifestKey !== active.connectorId) {
     throw new Error("Active connector manifest identity does not match its record.");
   }
-  return { ...active, manifest, root: normalizedRoot };
+  return {
+    ...active,
+    manifest: withVerifiedSourceDeclaration(normalizedRoot, active, manifest),
+    root: normalizedRoot,
+  };
+}
+
+/**
+ * Binds the verified Core source declaration to the profile manifest that registration reads. Only a
+ * record that carries the sidecar digest may supply it, so a legacy record (no digest) keeps its
+ * retained registry identity and its sidecar bytes are never trusted.
+ */
+function withVerifiedSourceDeclaration(
+  root: string,
+  active: ConnectorInstallRecord,
+  manifest: Record<string, unknown>
+): Record<string, unknown> {
+  if (active.sourceDeclarationSha256 === undefined) {
+    return manifest;
+  }
+  const file = confinedFile(root, SOURCE_DECLARATION_PATH);
+  if (!file || lstatSync(file).size > MAX_CONFIG_BYTES || sha256(file) !== active.sourceDeclarationSha256) {
+    throw new Error("Active source declaration bytes failed integrity verification.");
+  }
+  const declaration = snapshotSourceDeclaration(JSON.parse(readFileSync(file, "utf8")));
+  if (manifest.source_declaration !== undefined && !isDeepStrictEqual(manifest.source_declaration, declaration)) {
+    throw new Error(
+      "Connector profile embeds a source declaration that conflicts with the verified source declaration."
+    );
+  }
+  return { ...manifest, source_declaration: declaration };
+}
+
+/**
+ * The sidecar digest when a source declaration file is present; undefined only when it is genuinely absent
+ * (ENOENT). Any other inspection error propagates: an unreadable sidecar is not a legacy root.
+ */
+function sourceDeclarationDigestOf(root: string): string | undefined {
+  const path = join(root, SOURCE_DECLARATION_PATH);
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+  const file = confinedFile(root, SOURCE_DECLARATION_PATH);
+  if (!file || lstatSync(file).size > MAX_CONFIG_BYTES) {
+    throw new Error("Verified source declaration is invalid.");
+  }
+  return sha256(file);
 }
 
 function assertCatalogEntry(entry: ConnectorCatalogEntry, connectorId: string, digest?: string): void {
@@ -611,7 +688,35 @@ function assertCatalogEntry(entry: ConnectorCatalogEntry, connectorId: string, d
   }
 }
 
-function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): ConnectorInstallRecord {
+/**
+ * A pinned install must carry exactly the sidecar its installer core verified. Absence and any other digest are
+ * refusals; no pinned digest means a legacy install, which accepts no sidecar check here.
+ */
+function assertPinnedSourceDeclaration(observed: string | undefined, pinned: string | undefined): void {
+  if (pinned === undefined) {
+    return;
+  }
+  if (!DIGEST.test(pinned)) {
+    throw new Error("Pinned source declaration digest is invalid.");
+  }
+  if (observed === undefined) {
+    throw new Error("Verified source declaration is missing for a pinned install.");
+  }
+  if (observed !== pinned) {
+    throw new Error("Verified source declaration does not match installer-core verification.");
+  }
+}
+
+/**
+ * Reads a root into an install record. `pinnedSourceDeclarationSha256` is the digest the pinned installer core
+ * verified: the sidecar must then exist and match it, and the record takes that digest as its authority. Without
+ * it (legacy installers), the sidecar is optional and its digest is observed from the staged bytes.
+ */
+function readVerifiedRecord(
+  root: string,
+  entry: ConnectorCatalogEntry,
+  pinnedSourceDeclarationSha256?: string
+): ConnectorInstallRecord {
   const manifestPath = "profile/collection-profile.json";
   const entrypointPath = "dist/collection-profile.mjs";
   const provenancePath = "provenance.json";
@@ -628,12 +733,15 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
   if (lstatSync(manifestFile).size > MAX_CONFIG_BYTES) {
     throw new Error("Connector profile exceeds the 1 MiB RI limit.");
   }
-  const manifest: unknown = JSON.parse(readFileSync(manifestFile, "utf8"));
+  const manifest: unknown = parseProfileText(readFileSync(manifestFile, "utf8"));
   if (!manifest || typeof manifest !== "object") {
     throw new Error("Connector profile is invalid.");
   }
   const manifestRecord = manifest as Record<string, unknown>;
   const manifestKey = canonicalManifestKey(manifestRecord);
+  const observedSourceDeclarationSha256 = sourceDeclarationDigestOf(root);
+  assertPinnedSourceDeclaration(observedSourceDeclarationSha256, pinnedSourceDeclarationSha256);
+  const sourceDeclarationSha256 = pinnedSourceDeclarationSha256 ?? observedSourceDeclarationSha256;
   if (manifestKey !== entry.connector_key) {
     throw new Error("Connector profile identity does not match the catalog target.");
   }
@@ -654,6 +762,7 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
     manifestSha256: sha256(manifestFile),
     provenancePath,
     provenanceSha256: sha256(provenanceFile),
+    ...(sourceDeclarationSha256 === undefined ? {} : { sourceDeclarationSha256 }),
     registry: "ghcr.io",
     repository: `pdp-connect/connector/${entry.connector_key}`,
     root,
@@ -704,12 +813,37 @@ async function reuseExistingInstall(
   return verified;
 }
 
+/**
+ * A pinned installer reports the config digest it verified and the digest of the source-declaration bytes it
+ * verified. The staged install must then carry exactly those bytes; a missing or different sidecar is refused.
+ */
+interface PinnedInstallResult {
+  readonly configDigest: string;
+  readonly sourceDeclarationSha256: string;
+}
+
+type InstallArtifactResult =
+  | string
+  | PinnedInstallResult
+  // biome-ignore lint/suspicious/noConfusingVoidType: Test fixtures may use synchronous installers.
+  | void;
+
+/** Legacy installers report a config digest string or nothing; the sidecar digest is then optional. */
 type InstallArtifact = (
   root: string,
   entry: ConnectorCatalogEntry,
   signal: AbortSignal
-  // biome-ignore lint/suspicious/noConfusingVoidType: Test fixtures may use synchronous installers.
-) => Promise<string | void> | string | void;
+) => Promise<InstallArtifactResult> | InstallArtifactResult;
+
+function installResultOf(result: InstallArtifactResult): {
+  readonly configDigest?: string;
+  readonly sourceDeclarationSha256?: string;
+} {
+  if (typeof result === "string") {
+    return { configDigest: result };
+  }
+  return result ? { configDigest: result.configDigest, sourceDeclarationSha256: result.sourceDeclarationSha256 } : {};
+}
 
 async function installStagedEntry(options: {
   readonly connectorId: string;
@@ -726,15 +860,16 @@ async function installStagedEntry(options: {
   const staged = join(transaction, "next");
   let published = false;
   try {
-    const discoveredConfigDigest = await options.installArtifact(staged, options.entry, options.signal);
+    const installed = installResultOf(await options.installArtifact(staged, options.entry, options.signal));
     options.signal.throwIfAborted();
-    const verifiedEntry = discoveredConfigDigest
-      ? { ...options.entry, config_digest: discoveredConfigDigest }
+    const verifiedEntry = installed.configDigest
+      ? { ...options.entry, config_digest: installed.configDigest }
       : options.entry;
     assertCatalogEntry(verifiedEntry, options.connectorId, options.entry.digest);
-    const record = readVerifiedRecord(staged, verifiedEntry);
+    const record = readVerifiedRecord(staged, verifiedEntry, installed.sourceDeclarationSha256);
     renameSync(staged, options.root);
     published = true;
+    crashPoint("connector-install:after-publish");
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
@@ -895,19 +1030,10 @@ export function createConnectorInstallService(options: {
           );
         } else {
           // A crash can leave the published directory between rename and the
-          // active-record commit. Do not delete a valid retained root only
-          // because its active record is missing.
-          try {
-            readVerifiedRecord(root, entry);
-            throw new Error("Connector digest root already exists without a matching active record.");
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message === "Connector digest root already exists without a matching active record."
-            ) {
-              throw error;
-            }
-          }
+          // active-record commit. No record means no retained verification: hashing
+          // the bytes found here into a new record would make whatever is on disk the
+          // verified bytes. The leftover is removed and the install below takes the
+          // bytes from the verified artifact again.
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
             throw new Error("Connector digest root already exists without a matching active record.");
@@ -1395,7 +1521,7 @@ async function installPinnedArtifact(
   root: string,
   entry: ConnectorCatalogEntry,
   signal: AbortSignal
-): Promise<string> {
+): Promise<PinnedInstallResult> {
   const core = await loadPinnedCore();
   const abortableFetch: FetchLike = (input, init) =>
     fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
@@ -1485,7 +1611,10 @@ async function installPinnedArtifact(
     );
   }
   normalizeCoreInstallLayout(root, entry.connector_id, verifiedSourceDeclaration);
-  return configDigest;
+  return {
+    configDigest,
+    sourceDeclarationSha256: `sha256:${createHash("sha256").update(verifiedSourceDeclaration).digest("hex")}`,
+  };
 }
 
 export function normalizeCoreInstallLayout(
