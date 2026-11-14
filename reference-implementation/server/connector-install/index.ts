@@ -592,9 +592,9 @@ function parseProfileText(text: string): unknown {
     return parseManifestJsonText(text);
   } catch (error) {
     if (error instanceof BindingDeclarationError) {
-      throw new Error("Connector profile repeats an object key.");
+      throw new Error("Connector profile repeats an object key.", { cause: error });
     }
-    throw new Error("Connector profile is not valid JSON.");
+    throw new Error("Connector profile is not valid JSON.", { cause: error });
   }
 }
 
