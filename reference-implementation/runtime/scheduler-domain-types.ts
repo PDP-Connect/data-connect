@@ -375,6 +375,7 @@ export type HumanRequiredStateEscalationHandler = (info: {
  * through to the direct runConnector path unchanged.
  */
 interface ManagedConnectorRun {
+  readonly browser_surface_failure?: { readonly code: string; readonly message: string };
   readonly checkpoint_summary?: Record<string, unknown> | null;
   readonly connector_error?: ConnectorError | null;
   readonly failure_reason?: string | null;
