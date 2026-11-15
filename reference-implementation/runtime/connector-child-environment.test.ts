@@ -688,6 +688,28 @@ test("manifest-declared local path overrides cross the child boundary without am
   assert.equal(env.SECRET, undefined);
 });
 
+test("a local path override cannot select a server-owned or proxy variable", () => {
+  const env = compose(
+    {
+      runtime_requirements: {
+        local_paths: {
+          home_env_override: "PDPP_DATABASE_URL",
+          paths: [{ env_override: "HTTP_PROXY" }, { env_override: "pdpp_owner_password" }],
+        },
+      },
+    },
+    {
+      HTTP_PROXY: "http://proxy.invalid:3128",
+      PDPP_DATABASE_URL: "postgres://example.invalid/synthetic",
+      PDPP_OWNER_PASSWORD: "synthetic-secret",
+    }
+  );
+  assert.equal(env.PDPP_DATABASE_URL, undefined);
+  assert.equal(env.HTTP_PROXY, undefined);
+  assert.equal(env.PDPP_OWNER_PASSWORD, undefined);
+  assert.equal(env.pdpp_owner_password, undefined);
+});
+
 test("a connector receives a neighbor's namespaced key only from its own namespace", () => {
   const manifest = {
     runtime_requirements: {
