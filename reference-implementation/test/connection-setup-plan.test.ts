@@ -541,7 +541,7 @@ test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) surfa
 test("iMessage is a supported local_collector_enroll connector, not proof-gated", async () => {
   // iMessage reads chat.db via node:sqlite (no native module), so it ships in
   // the published @pdpp/local-collector bundle like Claude Code/Codex and is
-  // registered in SUPPORTED_LOCAL_COLLECTOR_CONNECTORS — the enroll path
+  // declared proven in its manifest — the enroll path
   // must reflect that, not the older filesystem-shaped-but-unproven state.
   const connectorId = "imessage";
   const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
@@ -557,7 +557,7 @@ test("google_takeout's committed manifest classifies as local_collector_enroll (
   // Google Takeout reads an already-extracted GOOGLE_TAKEOUT_DIR from the
   // local filesystem it runs on — exactly the local-collector shape, not a
   // browser-upload or provider-API connector. It is now bundled into
-  // @pdpp/local-collector (SUPPORTED_LOCAL_COLLECTOR_CONNECTORS), so it must
+  // @pdpp/local-collector (its manifest claims `proven.local_collector`), so it must
   // classify as the proven, actionable disposition, not the unproven
   // `local_collector_unproven` disposition a filesystem-shaped connector
   // gets before it ships in that bundle (see the synthetic-manifest test
@@ -573,7 +573,7 @@ test("google_takeout's committed manifest classifies as local_collector_enroll (
 
 test("Apple Photos and Google Messages are supported local_collector_enroll connectors, not proof-gated", async () => {
   // Both now ship in the published @pdpp/local-collector bundle
-  // (LOCAL_COLLECTOR_DEFINITIONS + SUPPORTED_LOCAL_COLLECTOR_CONNECTORS +
+  // (LOCAL_COLLECTOR_DEFINITIONS + a `proven.local_collector` claim +
   // tsconfig.build.json packaging), so Add Source must surface the guided
   // enroll path, not the proof-gated "classified but not advertised" state.
   // Real device/account proof (a macOS Photos.app export; a gmcli-paired

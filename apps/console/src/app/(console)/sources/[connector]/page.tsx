@@ -41,7 +41,8 @@ import {
   summarizeStreakDots,
   syncActionIdleLabel,
 } from "../../lib/connection-evidence.ts";
-import { isBrowserBoundConnector, isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
+import { browserConnectSupport } from "../../lib/browser-connect-support.ts";
+import { isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
 import { connectorInstallKey, isConnectorNotInstalled } from "../../lib/connector-implementation.ts";
 import { connectorRunSummaryId, isActiveConnectorRunSummaryStatus } from "../../lib/connector-run-summary-status.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
@@ -757,14 +758,17 @@ function ConnectorPageView({
   // (e.g. a ChatGPT connection that logs in via SSO through the browser). Only a
   // connection that is NOT browser-session-bound routes to static-secret capture.
   // The connection binding wins over the connector-level static-secret capability
-  // and `isBrowserBoundConnector` facts.
+  // and the manifest's browser-binding fact.
   const sessionBound = isBrowserSessionBoundConnection(sourceBindingKind);
   const staticSecretCapture = staticSecretCredentialCaptureFromManifest(manifest);
   const repairConnectionId = connectorInstanceId ?? connectionId;
   const storedCredentialUpdateHref =
     staticSecretCapture === null ? null : updateCredentialHref(connectorId, repairConnectionId);
+  const manifestBrowserBound = browserConnectSupport(connectorId, [
+    { bindings: manifest?.runtime_requirements?.bindings, connector_id: connectorId },
+  ]).browserBound;
   const browserSessionRepairHref =
-    sessionBound || isBrowserBoundConnector(connectorId)
+    sessionBound || manifestBrowserBound
       ? browserSessionReconnectHref(connectorId, repairConnectionId)
       : null;
   const credentialUpdateHref = resolveCredentialUpdateHref({

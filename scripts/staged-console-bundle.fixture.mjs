@@ -28,7 +28,7 @@ module.exports = webpackRequire
  * for the process cwd (the fixed runtime), or an absolute file path (the
  * build-time `import.meta.url` webpack wrote into the shipped bundle).
  * `predicate` is the roster predicate the module exports: "supported"
- * (isSupportedBrowserCollectorConnector) or "scaffold"
+ * (a predicate that accepts the production-ready connector) or "scaffold"
  * (isKnownScaffoldConnector).
  */
 export function writeConsoleServerBundle(

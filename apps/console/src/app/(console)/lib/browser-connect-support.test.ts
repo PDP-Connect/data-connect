@@ -9,7 +9,6 @@ import {
   isKnownScaffoldConnector,
 } from "pdpp-reference-implementation/connection-setup-plan";
 import { type BindingSource, browserConnectSupport } from "./browser-connect-support.ts";
-import { isSupportedBrowserCollectorConnector } from "./connection-modality.ts";
 import { parseConnectorInstallStatusResponse } from "./connector-install-contract.ts";
 import { connectorInstallStatusFixture } from "./connector-install-fixtures.ts";
 
@@ -54,9 +53,7 @@ test("every installed browser-bound connector can add an account", () => {
   }
 });
 
-test("an installed browser-bound connector outside the old key list can add an account", () => {
-  // The old console gate read a connector-key list, which rejected this one.
-  assert.equal(isSupportedBrowserCollectorConnector("acme-shop"), false);
+test("an installed browser-bound connector that no shipped manifest names can add an account", () => {
   assert.equal(browserConnectSupport("acme-shop", installed).canAddAccount, CAN_ADD_ACCOUNT);
 });
 

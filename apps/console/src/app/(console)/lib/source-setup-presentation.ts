@@ -76,8 +76,7 @@ export function sourceSetupContext(entry: ConnectorCatalogEntry): string | null 
  * capture: the dashboard's browser-session page is a real, dedicated setup
  * path for these regardless of whether the
  * connector has cleared the separate manual-browser-collector proof roster
- * (`isSupportedBrowserCollectorConnector`) that `owner_actionable` is gated
- * on server-side. That roster answers "has a human proven this exact
+ * that `owner_actionable` is gated on server-side. That roster answers "has a human proven this exact
  * connector's live collection," a fact orthogonal to "does this dashboard
  * have a setup path for it" -- so this predicate, not `isOwnerActionableEntry`,
  * is what a row's setup-path fact must key on.

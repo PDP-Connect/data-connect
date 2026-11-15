@@ -9,16 +9,10 @@ import {
   type StaticSecretFieldType,
   CONFORMANCE_ROSTER_LOADED,
   KNOWN_SCAFFOLD_CONNECTORS,
-  PRODUCTION_READY_CONNECTORS,
   credentialValidationMode,
 } from "./polyfill-connectors-runtime.ts";
 import type { CredentialValidationMode } from "./polyfill-connectors-runtime.ts";
 import { legacyLocalAliasMap } from "./connector-key.ts";
-import {
-  BROWSER_BOUND_KEYS,
-  LEGACY_LOCAL_ALIASES,
-  LOCAL_COLLECTOR_PROVEN_KEYS,
-} from "./generated/connector-registry.generated.ts";
 
 export type ConnectorIntentModality = "local_collector" | "browser_bound" | "api_network" | "unknown";
 
@@ -316,54 +310,6 @@ export interface ConnectionSetupPlan {
   readonly validationMode: CredentialValidationMode;
 }
 
-// The enrollment-key (bundle-directory-id) form of every manifest declaring
-// capabilities.proven.local_collector === true. LEGACY_LOCAL_ALIASES is
-// generated from LOCAL_COLLECTOR_DEFINITIONS (the connector package's own
-// local-collector bundle registry) keyed by bundle id -> canonical manifest
-// key; inverting it here (rather than re-deriving from canonical keys
-// forward) means a local-collector connector whose bundle id already equals
-// its canonical key still resolves correctly. See
-// connector-registry.generated.ts.
-const CANONICAL_TO_ENROLLMENT_KEY: Readonly<Record<string, string>> = Object.freeze(
-  Object.fromEntries(
-    Object.entries(LEGACY_LOCAL_ALIASES).map(([enrollmentKey, canonicalKey]) => [canonicalKey, enrollmentKey])
-  )
-);
-
-export const SUPPORTED_LOCAL_COLLECTOR_CONNECTORS: readonly string[] = Object.freeze(
-  LOCAL_COLLECTOR_PROVEN_KEYS.map((canonicalKey) => CANONICAL_TO_ENROLLMENT_KEY[canonicalKey] ?? canonicalKey)
-);
-
-export type SupportedLocalCollectorConnector = (typeof SUPPORTED_LOCAL_COLLECTOR_CONNECTORS)[number];
-
-// Every manifest declaring a runtime_requirements.bindings.browser binding —
-// see connector-registry.generated.ts. Equivalent to filtering the manifest
-// set through classifyConnectorIntentModality === "browser_bound", expressed
-// as generated data so this module (imported by apps/console; must stay
-// node:fs-free) never hand-copies the connector-id list.
-export const BROWSER_BOUND_CONNECTORS: readonly string[] = BROWSER_BOUND_KEYS;
-
-export type BrowserBoundConnector = (typeof BROWSER_BOUND_CONNECTORS)[number];
-
-/**
- * Browser enrollment is available when the shipped manifest/runtime pair is
- * both browser-bound and production-ready. The conformance roster is the
- * connector package's authority for the latter: it is checked against
- * an owner-visible lifecycle tier and each entry names a real collection
- * oracle. Deriving this intersection keeps a scaffold such as Anthropic out
- * without maintaining a second browser setup allowlist.
- */
-export type SupportedBrowserCollectorConnector = Extract<
-  BrowserBoundConnector,
-  keyof typeof PRODUCTION_READY_CONNECTORS
->;
-
-export const SUPPORTED_BROWSER_COLLECTOR_CONNECTORS: readonly SupportedBrowserCollectorConnector[] = Object.freeze(
-  BROWSER_BOUND_CONNECTORS.filter((connector): connector is SupportedBrowserCollectorConnector =>
-    Object.hasOwn(PRODUCTION_READY_CONNECTORS, connector)
-  )
-);
-
 /**
  * Whether this connector key names a KNOWN scaffold: manifest ships,
  * registers, and validates, but its `collect()` is an unconditional
@@ -577,36 +523,11 @@ export function expectedStaticSecretCredentialKind(
   return staticSecretCredentialCaptureFromManifest(manifest)?.kind ?? null;
 }
 
-export function isSupportedLocalCollectorConnector(
-  connectorId: string | null | undefined
-): connectorId is SupportedLocalCollectorConnector {
-  return (
-    typeof connectorId === "string" &&
-    (SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as readonly string[]).includes(enrollmentKeyForCanonicalKey(connectorId))
-  );
-}
-
-export function isSupportedBrowserCollectorConnector(
-  connectorId: string | null | undefined
-): connectorId is SupportedBrowserCollectorConnector {
-  return (
-    typeof connectorId === "string" &&
-    (SUPPORTED_BROWSER_COLLECTOR_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorId))
-  );
-}
-
 export function isStaticSecretConnector(
   connectorId: string | null | undefined,
   manifest?: ConnectorManifestLike | null
 ): boolean {
   return typeof connectorId === "string" && expectedStaticSecretCredentialKind(connectorId, manifest) !== null;
-}
-
-export function isBrowserBoundConnector(connectorId: string | null | undefined): boolean {
-  return (
-    typeof connectorId === "string" &&
-    (BROWSER_BOUND_CONNECTORS as readonly string[]).includes(canonicalConnectorKey(connectorId))
-  );
 }
 
 export interface BrowserEnrollmentSupport {

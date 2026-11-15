@@ -32,13 +32,12 @@
  *     bundle definition's own `connector_id` (the npm-package directory name,
  *     necessarily snake_case) against its manifest's canonical `connector_key`
  *     — an alias entry exists only where the two differ
- *   - localCollectorProvenKeys: manifests declaring
- *     capabilities.proven.local_collector === true, ordered by
- *     LOCAL_COLLECTOR_DEFINITIONS's own connector_id iteration order (the
- *     connector package's documented supported public order), not
- *     alphabetically — the enrollment UI's connector picker renders in this
- *     order
- *   - browserBoundKeys: manifests declaring runtime_requirements.bindings.browser
+ *
+ * The generator also fails when a manifest claims
+ * capabilities.proven.local_collector without a LOCAL_COLLECTOR_DEFINITIONS
+ * entry, or the reverse. Setup, the console and the local collector read that
+ * claim from the manifest at run time; this check keeps it honest for the
+ * vendored connectors.
  *
  * Takes one optional CLI arg: an output path to write to instead of the
  * tracked `server/generated/connector-registry.generated.ts` (used by the
@@ -194,11 +193,7 @@ for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
   legacyLocalAliases[bundleId] = canonicalKey ?? bundleId;
 }
 
-// Local-collector proven keys: capabilities.proven.local_collector === true,
-// ordered by LOCAL_COLLECTOR_DEFINITIONS's own connector_id iteration order
-// (the connector package's documented supported public order), not
-// alphabetically — this order is consumed by the enrollment UI's connector
-// picker and must match its pinned COLLECTOR_RUN_CONNECTORS literal.
+// Manifests claiming capabilities.proven.local_collector === true, by key.
 const provenManifestsByKey = new Map(
   polyfillManifests
     .filter(({ manifest }) => manifest.capabilities?.proven?.local_collector === true)
@@ -207,14 +202,10 @@ const provenManifestsByKey = new Map(
 );
 
 // Fail loud on either direction of drift between "manifests claiming the
-// local_collector proof" and "LOCAL_COLLECTOR_DEFINITIONS entries" — walking
-// LOCAL_COLLECTOR_DEFINITIONS below (to get the canonical order) silently
-// drops a proven manifest that has no matching definition entry unless this
-// is checked explicitly first: that manifest never appears in the walk's
-// input at all, so there is nothing downstream that would notice its
-// disappearance. A contributor who ships a proven manifest without wiring
-// its LocalCollectorDefinition (or vice versa) must see CI fail here, not a
-// connector silently missing from the enrollment picker.
+// local_collector proof" and "LOCAL_COLLECTOR_DEFINITIONS entries". A
+// contributor who ships a proven manifest without wiring its
+// LocalCollectorDefinition (or vice versa) must see CI fail here, not a
+// connector offered for enrollment that has no collector code to run.
 const definitionKeysByBundleId = new Map(
   LOCAL_COLLECTOR_DEFINITIONS.map((definition) => {
     const manifest = manifestByBundleSlug.get(definition.connector_id);
@@ -246,19 +237,6 @@ if (definitionsWithoutAProvenManifest.length > 0) {
       "be removed from LOCAL_COLLECTOR_DEFINITIONS."
   );
 }
-
-const localCollectorProvenKeys = LOCAL_COLLECTOR_DEFINITIONS.map((definition) => {
-  const manifest = manifestByBundleSlug.get(definition.connector_id);
-  const canonicalKey = manifest ? manifestKey(manifest) : null;
-  return canonicalKey && provenManifestsByKey.has(canonicalKey) ? canonicalKey : null;
-}).filter((key): key is string => key !== null);
-
-// Browser-bound keys: runtime_requirements.bindings.browser present.
-const browserBoundKeys = polyfillManifests
-  .filter(({ manifest }) => Object.hasOwn(manifest.runtime_requirements?.bindings ?? {}, "browser"))
-  .map(({ manifest }) => manifestKey(manifest))
-  .filter((key): key is string => key !== null)
-  .sort((a, b) => a.localeCompare(b));
 
 function jsonArrayLiteral(values: readonly string[]): string {
   return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
@@ -298,12 +276,6 @@ export const NATIVE_CONNECTOR_KEYS: readonly string[] = Object.freeze(${jsonArra
  * each connector's manifest-declared connector_key.
  */
 export const LEGACY_LOCAL_ALIASES: Readonly<Record<string, string>> = Object.freeze(${jsonObjectLiteral(legacyLocalAliases)});
-
-/** Manifests declaring capabilities.proven.local_collector === true. */
-export const LOCAL_COLLECTOR_PROVEN_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(localCollectorProvenKeys)});
-
-/** Manifests declaring a runtime_requirements.bindings.browser binding. */
-export const BROWSER_BOUND_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(browserBoundKeys)});
 `;
 
 if (process.argv[2]) {

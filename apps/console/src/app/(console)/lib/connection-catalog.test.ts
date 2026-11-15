@@ -615,7 +615,7 @@ test("requested-connector reachability: Google Takeout is bundled into @pdpp/loc
   // Google Takeout Photos reads an already-extracted GOOGLE_TAKEOUT_DIR on the
   // local filesystem — exactly the local-collector shape (runs on the machine
   // that has the extracted archive), not a browser-upload connector. It is
-  // bundled into @pdpp/local-collector's SUPPORTED_LOCAL_COLLECTOR_CONNECTORS,
+  // bundled into @pdpp/local-collector (its manifest claims `proven.local_collector`),
   // so it must classify as the proven, actionable local-collector disposition.
   const manifests = await loadCommittedManifests();
   const catalog = buildConnectorCatalog(manifests);

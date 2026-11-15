@@ -1,16 +1,14 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-import { isBrowserBoundConnector } from "pdpp-reference-implementation/connection-setup-plan";
 import { type BindingSource, type BrowserConnectSupport, browserConnectSupport } from "./browser-connect-support.ts";
 import { listConnectorInstallStatus } from "./connector-install-client.ts";
 import { listConnectorManifests } from "./rs-client.ts";
 
 /**
  * Browser-session support for the routes under `/connect/browser-session`.
- * Binding sources are installed packages and local manifests. A connector whose
- * bundled manifest is browser-bound keeps the routes for repair of an existing
- * connection, even when no package or manifest is readable.
+ * Binding sources are installed packages and local manifests; both carry the
+ * connector's own `runtime_requirements.bindings`.
  */
 export async function loadBrowserConnectSupport(connectorId: string): Promise<BrowserConnectSupport> {
   const [installed, manifests] = await Promise.all([
@@ -25,6 +23,5 @@ export async function loadBrowserConnectSupport(connectorId: string): Promise<Br
       connector_key: manifest.connector_key,
     })),
   ];
-  const support = browserConnectSupport(connectorId, sources);
-  return { ...support, browserBound: support.browserBound || isBrowserBoundConnector(connectorId) };
+  return browserConnectSupport(connectorId, sources);
 }

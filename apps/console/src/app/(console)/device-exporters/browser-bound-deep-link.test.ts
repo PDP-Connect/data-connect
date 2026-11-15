@@ -31,10 +31,11 @@ function read(relPath: string): Promise<string> {
 
 const PAGE_PATH = "apps/console/src/app/(console)/device-exporters/page.tsx";
 
-const USES_CLASSIFIER = /\bisBrowserBoundConnector\b/;
-const IMPORTS_FROM_MODALITY = /from "\.\.\/lib\/connection-modality\.ts"/;
+const USES_BINDING_SUPPORT = /\(await loadBrowserConnectSupport\(requestedConnector\)\)\.browserBound/;
+const IMPORTS_BINDING_SUPPORT = /from "\.\.\/lib\/load-browser-connect-support\.ts"/;
 const DEFAULT_ONLY_LOCAL_COLLECTOR =
-  /const defaultConnectorId = isSupportedLocalCollectorConnector\(requestedConnector\) \? requestedConnector : undefined/;
+  /const defaultConnectorId = resolveLocalCollectorEnrollmentKey\(collectorTemplates, requestedConnector\)/;
+const KEY_LIST_CLASSIFIERS = /\bisBrowserBoundConnector\b|\bisSupportedLocalCollectorConnector\b/;
 const DOES_NOT_USE_SUPPORTED_BROWSER_CLASSIFIER = /\bisSupportedBrowserCollectorConnector\b/;
 const RENDERS_NOTICE = /browserBoundRequest\s*\?\s*\(?\s*<BrowserBoundEnrollmentNotice/;
 const PENDING_BROWSER_TITLE = /Browser setup not available yet/;
@@ -43,12 +44,13 @@ const ADD_SOURCE_LINK = /href="\/sources\/add"[\s\S]{0,120}>\s*Add source\s*<\/L
 const CONNECT_APPS_LINK = /href="\/connect"[\s\S]{0,120}>\s*Connect apps\s*<\/Link>/;
 const FORBIDDEN_MONOREPO_COPY = /PDPP monorepo checkout|generated monorepo commands|Manual browser setup/;
 
-test("page classifies a browser-bound deep-link via the shared modality classifier (no scattered key checks)", async () => {
+test("page classifies a browser-bound deep-link from the connector's own bindings (no key list)", async () => {
   const src = await read(PAGE_PATH);
-  // Browser-bound detection must still come from the shared setup classifier, but
-  // the normal enrollment form only admits packaged local collectors.
-  assert.match(src, USES_CLASSIFIER, "page must use the shared isBrowserBoundConnector classifier");
-  assert.match(src, IMPORTS_FROM_MODALITY, "browser-bound symbols must come from the shared source of truth");
+  // Browser-bound detection reads the connector's binding through the shared
+  // loader, but the normal enrollment form only admits packaged local collectors.
+  assert.match(src, USES_BINDING_SUPPORT, "page must read the browser-bound fact from loadBrowserConnectSupport");
+  assert.match(src, IMPORTS_BINDING_SUPPORT, "the binding loader must be the shared one");
+  assert.doesNotMatch(src, KEY_LIST_CLASSIFIERS, "page must not gate on a connector key list");
   assert.doesNotMatch(
     src,
     DOES_NOT_USE_SUPPORTED_BROWSER_CLASSIFIER,

@@ -33,9 +33,10 @@ const REQUIRED_CONSOLE_CONNECTOR_SPECIFIERS = [
   `${PACKAGE_PREFIX}static-secret-credential-capture`,
   `${PACKAGE_PREFIX}credential-probe`,
 ]
-// A production-ready browser connector. isSupportedBrowserCollectorConnector
-// must accept it; that is the gate the owner hit ("Adding a new Reddit source
-// is not available here").
+// A production-ready browser connector. A bundled roster predicate that
+// reports it as supported (and every known scaffold as not) proves the roster
+// loaded; the owner once hit "Adding a new Reddit source is not available here"
+// when it did not.
 const SUPPORTED_BROWSER_CONNECTOR = "reddit"
 const RESULT_PREFIX = "[check-staged-console-connectors] result "
 
@@ -95,9 +96,9 @@ async function probe(serverDirectory, stageRoot) {
   // Webpack mangles export names in a production build and drops exports the
   // console does not use, so the roster predicate is found by behaviour: a
   // one-argument export that accepts the supported connector and rejects every
-  // known scaffold (isSupportedBrowserCollectorConnector), or the reverse
-  // (isKnownScaffoldConnector). isBrowserBoundConnector accepts both kinds, and
-  // without the roster neither predicate matches.
+  // known scaffold, or the reverse (isKnownScaffoldConnector, the one the
+  // console bundle uses today). A predicate that accepts both kinds does not
+  // read the roster, and without the roster neither predicate matches.
   const candidates = []
   for (const id of moduleIds) {
     for (const value of Object.values(webpackRequire(id))) {
@@ -128,7 +129,7 @@ async function probe(serverDirectory, stageRoot) {
   const rosterPredicate = candidates.some(predicate =>
     matches(predicate, true, false)
   )
-    ? "isSupportedBrowserCollectorConnector"
+    ? "supportedBrowserConnectorPredicate"
     : candidates.some(predicate => matches(predicate, false, true))
       ? "isKnownScaffoldConnector"
       : null
@@ -144,7 +145,7 @@ async function probe(serverDirectory, stageRoot) {
  * Throws unless the staged console under `stageRoot` resolves the connector
  * package modules it needs from inside the stage, reads a non-empty
  * PRODUCTION_READY_CONNECTORS, and a bundled roster predicate answers from
- * the roster: isSupportedBrowserCollectorConnector accepts "reddit", or
+ * the roster: one accepts "reddit" and rejects every known scaffold, or
  * isKnownScaffoldConnector accepts every known scaffold.
  */
 export function assertStagedConsoleConnectors({
@@ -187,7 +188,7 @@ export function assertStagedConsoleConnectors({
   }
   if (!result.rosterPredicate) {
     problems.push(
-      `no bundled roster predicate answers from the roster: neither isSupportedBrowserCollectorConnector(${JSON.stringify(SUPPORTED_BROWSER_CONNECTOR)}) nor isKnownScaffoldConnector matches the staged roster`
+      `no bundled roster predicate answers from the roster: neither a supported-connector predicate for ${JSON.stringify(SUPPORTED_BROWSER_CONNECTOR)} nor isKnownScaffoldConnector matches the staged roster`
     )
   }
   if (problems.length > 0) {

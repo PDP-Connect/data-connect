@@ -45,11 +45,10 @@
  *    capabilities.proven.local_collector=true with no matching
  *    LOCAL_COLLECTOR_DEFINITIONS entry (packages/polyfill-connectors/src/
  *    collector-registry.ts) must make the generator throw, not silently drop
- *    the claim. Before this guard, LOCAL_COLLECTOR_PROVEN_KEYS is derived by
- *    walking the fixed LOCAL_COLLECTOR_DEFINITIONS array, so a proven
- *    manifest outside that array was structurally invisible to the
- *    computation — no error, no drift, no CI signal. This test reproduces
- *    that exact scenario against the real generator, but points it at an
+ *    the claim. Without this guard a proven manifest outside the fixed
+ *    LOCAL_COLLECTOR_DEFINITIONS array would be offered for enrollment with no
+ *    collector code behind it — no error, no drift, no CI signal. This test
+ *    reproduces that scenario against the real generator, but points it at an
  *    isolated scratch manifests directory (seeded with a copy of every real
  *    polyfill manifest plus the probe) via PDPP_POLYFILL_MANIFESTS_DIR,
  *    rather than writing the probe into the real, shared
@@ -76,18 +75,14 @@ import {
 } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey, isConnectorKey } from "../server/connector-key.ts";
 import {
-  BROWSER_BOUND_KEYS,
   FIRST_PARTY_CONNECTOR_KEYS,
   LEGACY_LOCAL_ALIASES,
-  LOCAL_COLLECTOR_PROVEN_KEYS,
   NATIVE_CONNECTOR_KEYS,
 } from "../server/generated/connector-registry.generated.ts";
 
 const trackedRegistry = {
-  BROWSER_BOUND_KEYS,
   FIRST_PARTY_CONNECTOR_KEYS,
   LEGACY_LOCAL_ALIASES,
-  LOCAL_COLLECTOR_PROVEN_KEYS,
   NATIVE_CONNECTOR_KEYS,
 };
 
@@ -161,7 +156,7 @@ test("the generator throws (does not silently drop the claim) when a manifest de
           stdio: "pipe",
         }),
       OMISSION_PROBE_KEY_RE,
-      "generator must fail loud on a local_collector-proven manifest with no LOCAL_COLLECTOR_DEFINITIONS entry, not silently omit it from LOCAL_COLLECTOR_PROVEN_KEYS"
+      "generator must fail loud on a local_collector-proven manifest with no LOCAL_COLLECTOR_DEFINITIONS entry, not silently accept a proof claim that has no collector code"
     );
   } finally {
     rmSync(scratchDir, { force: true, recursive: true });
@@ -221,8 +216,7 @@ test("counterweight: a custom third-party connector_id, unknown to every generat
   );
 
   // A third-party browser-bound connector: classification must come from
-  // runtime_requirements.bindings.browser, not from BROWSER_BOUND_CONNECTORS
-  // naming this id.
+  // runtime_requirements.bindings.browser, not from a connector key list.
   const browserBound = buildConnectionSetupPlan({
     connectorKey: thirdPartyId,
     manifest: customManifest(thirdPartyId, { browser: { required: true } }),
