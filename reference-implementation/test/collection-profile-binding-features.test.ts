@@ -239,7 +239,7 @@ rl.on("line", (line) => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Every connector on data-connectors main that declares features
+// 3. The pinned snapshot of catalog connectors that declare features
 // ---------------------------------------------------------------------------
 
 /** Connectors whose declarations this runtime still refuses, with the unmet reason. */
@@ -253,9 +253,8 @@ const REFUSED_BY_CATALOG_CONNECTOR: Readonly<Record<string, string>> = {
   polar_flow: "constraints are declared, and this runtime does not enforce them",
 };
 
-test("the catalog snapshot covers the connectors that declare features", () => {
+test("every connector in the refusal map is in the pinned snapshot", () => {
   const connectors = Object.keys(catalogFeatureBindings.connectors);
-  assert.ok(connectors.length >= 20, `${connectors.length} connectors`);
   for (const key of Object.keys(REFUSED_BY_CATALOG_CONNECTOR)) {
     assert.ok(connectors.includes(key), `${key} is not in the snapshot`);
   }

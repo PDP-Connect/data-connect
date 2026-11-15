@@ -16,8 +16,8 @@
  *  - page_navigation: the page URL changes to the test page.
  *  - page_script_evaluation: a script reads a global the page's own script set,
  *    which only the page's main world can see.
- *  - page_condition_wait: the condition was false when the wait began, and the
- *    wait resolves only after the server releases the page.
+ *  - page_condition_wait: the wait stays pending while the server withholds the
+ *    page, and resolves only after the server releases it.
  *  - page_content_read: the content holds text that script wrote after load.
  *  - same_origin_page_fetch: the server sees a same-origin fetch that carries
  *    the page's own cookie.
@@ -29,7 +29,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { createRequire } from "node:module";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
@@ -60,6 +59,7 @@ interface Observations {
   readonly pageFetch: { cookie: string | null; secFetchSite: string | null };
   readonly readyBeforeWait: boolean;
   readonly readyAfterWait: boolean;
+  readonly settledBeforeRelease: boolean;
   readonly title: string;
   readonly url: string;
 }
@@ -90,6 +90,7 @@ let server: Server;
 let origin: string;
 let cdpUrl: string;
 let closeBrowser: () => Promise<void>;
+let profileDir: string;
 const seen: SeenRequest[] = [];
 let released = false;
 
@@ -98,16 +99,19 @@ function header(request: IncomingMessage, name: string): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const probe = createNetServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const address = probe.address();
-      const port = typeof address === "object" && address !== null ? address.port : 0;
-      probe.close(() => resolve(port));
-    });
-  });
+/** Chromium picks its own debugging port and records it in the profile directory. */
+async function readDevtoolsPort(profileDir: string): Promise<number> {
+  const file = join(profileDir, "DevToolsActivePort");
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (existsSync(file)) {
+      const port = Number.parseInt(readFileSync(file, "utf8").split("\n")[0] ?? "", 10);
+      if (Number.isInteger(port) && port > 0) {
+        return port;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Chromium wrote no DevToolsActivePort in ${profileDir}`);
 }
 
 before(async () => {
@@ -137,14 +141,20 @@ before(async () => {
   origin = `http://127.0.0.1:${typeof address === "object" && address !== null ? address.port : 0}`;
 
   // Stands in for a managed browser surface: a Chromium with a CDP endpoint.
-  const port = await freePort();
-  const browser = await chromium.launch({ args: [`--remote-debugging-port=${port}`], headless: true });
-  cdpUrl = `http://127.0.0.1:${port}`;
-  closeBrowser = () => browser.close();
+  profileDir = mkdtempSync(join(tmpdir(), "pdpp-binding-features-profile-"));
+  const context = await chromium.launchPersistentContext(profileDir, {
+    args: ["--remote-debugging-port=0"],
+    headless: true,
+  });
+  closeBrowser = () => context.close();
+  cdpUrl = `http://127.0.0.1:${await readDevtoolsPort(profileDir)}`;
 });
 
 after(async () => {
   await closeBrowser?.();
+  if (profileDir) {
+    rmSync(profileDir, { force: true, recursive: true });
+  }
   await new Promise<void>((resolve) => server?.close(() => resolve()));
   closeDb();
 });
@@ -207,9 +217,16 @@ rl.on("line", async (line) => {
     // evaluate(script, arg, options, isolatedContext): the last argument false runs in the page's main world.
     const inMainWorld = (script) => page.evaluate(script, undefined, undefined, false);
     const mainWorldGlobal = await inMainWorld("window.__pageGlobal ?? null");
+    // Start the wait while the server still withholds the page. A wait that did not
+    // wait would settle at once, so it must still be pending after a pause.
+    const waiting = page.waitForFunction("window.__ready === true", undefined, { timeout: 10000 });
+    const settledBeforeRelease = await Promise.race([
+      waiting.then(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), 300)),
+    ]);
     const readyBeforeWait = await inMainWorld("window.__ready === true");
     await fetch(${JSON.stringify(`${origin}/api/release`)});
-    await page.waitForFunction("window.__ready === true", undefined, { timeout: 10000 });
+    await waiting;
     const readyAfterWait = await inMainWorld("window.__ready === true");
     const content = await page.content();
 
@@ -226,6 +243,7 @@ rl.on("line", async (line) => {
       pageFetch,
       readyAfterWait,
       readyBeforeWait,
+      settledBeforeRelease,
       title,
       url,
     }));
@@ -292,6 +310,7 @@ test("a connector requiring every advertised feature spawns and uses each one ag
     // page_script_evaluation
     assert.equal(observed.mainWorldGlobal, "set by the page's own script");
     // page_condition_wait
+    assert.equal(observed.settledBeforeRelease, false, "the wait stayed pending while the condition was false");
     assert.equal(observed.readyBeforeWait, false, "the condition was not yet true when the wait began");
     assert.equal(observed.readyAfterWait, true);
     // page_content_read

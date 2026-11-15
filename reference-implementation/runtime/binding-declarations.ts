@@ -335,8 +335,7 @@ export function normalizeBindingDeclarations(bindings: unknown): readonly Bindin
  *     seam. The connector's own library would do that work in-process, and a
  *     download from a remote managed surface is not exercised here.
  *   - `page_input`, `cookie_read`, `page_response_observation` and
- *     `host_cookie_jar_request`: no connector declares them, and nothing here
- *     exercises them yet.
+ *     `host_cookie_jar_request`: nothing here exercises them yet.
  */
 export interface BindingSupport {
   readonly constraintKinds: ReadonlySet<string>;
