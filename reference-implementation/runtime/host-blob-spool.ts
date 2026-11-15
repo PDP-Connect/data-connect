@@ -98,7 +98,15 @@ const READ_CHUNK_BYTES = 1_048_576;
  * connector owns the directory's contents and can also rename it and leave a
  * symlink at the old name, which would point a later open or unlink outside the
  * spool. O_NOFOLLOW guards only the last path component, so the directory is
- * checked before the open and again before the unlink.
+ * checked before the open, after it and before the unlink.
+ *
+ * These checks catch a directory replaced before or during a read. They do not
+ * close the race: a connector that swaps the directory between a check and the
+ * next call, and swaps it back, can still point that call outside. That is not
+ * a privilege boundary today, because connectors run as child processes of the
+ * runtime under the same user and can read or delete those files themselves.
+ * If connectors are ever sandboxed, open and unlink must be bound to a retained
+ * directory descriptor instead.
  */
 function assertSpoolDirectoryUnchanged(spool: HostBlobSpool, stream: string): void {
   let current: ReturnType<typeof lstatSync>;
@@ -142,8 +150,8 @@ export function readVerifiedSpoolBlob(
   let bytes: Buffer;
   try {
     const stat = fstatSync(fd);
-    // Re-check after the open: a swap between the first check and the open
-    // would leave the directory changed now.
+    // Re-check after the open: a directory swapped before the open and left in
+    // place is refused here.
     assertSpoolDirectoryUnchanged(spool, message.stream);
     if (!stat.isFile() || stat.size !== message.size_bytes) {
       throw new Error(`BLOB for stream '${message.stream}' does not match its spool file size`);
