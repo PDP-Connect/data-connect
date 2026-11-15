@@ -642,7 +642,10 @@ function declaredLocalPathValues(
   const out: Record<string, string> = {};
   for (const rawKey of keys) {
     const key = name(rawKey);
-    if (!key || reserved(key)) {
+    // A path override names a variable the connector may read from the parent
+    // environment. It must not name one the server owns or one that carries
+    // proxy authority, which only an operator binding may grant.
+    if (!key || reserved(key) || proxyKey(key) || isServerOwnedEnvironmentKey(key)) {
       continue;
     }
     const value = sourceValue(source, key, platform);
