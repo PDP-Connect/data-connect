@@ -2,10 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { chdir } from "node:process";
+// biome-ignore lint/correctness/noUnresolvedImports: Biome's Node module registry does not yet recognize node:sqlite; Node and tsc resolve the built-in module.
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { parseArgs, resolveInspectionOptions } from "../bin/pdpp-local-collector.ts";
 import {
@@ -231,7 +243,11 @@ test("the same source resolves to the same state across cwd and install roots", 
 test("a queue file named with the legacy underscore connector id is renamed once, with its sidecars; a new device gets the hyphen name", () => {
   withTempRoot("pdpp-durable-state-underscore-", (root) => {
     const stateRoot = join(root, "state");
-    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
     const underscorePath = canonicalCollectorQueuePath({
       connectorId: "claude_code",
       sourceInstanceId: SOURCE_A,
@@ -264,35 +280,109 @@ test("a queue file named with the legacy underscore connector id is renamed once
   });
 });
 
-test("the SQLite sidecars of an underscore-named queue move with it", () => {
-  withTempRoot("pdpp-durable-state-underscore-sidecar-", (root) => {
+function enqueueRow(outbox: LocalDeviceOutbox, id: string): void {
+  outbox.enqueue({ id, kind: "record_batch", payload: { id }, sourceInstanceId: SOURCE_A });
+}
+
+/** Put a queue in WAL mode, so committed rows can sit in the `-wal` file. */
+function useWriteAheadLog(path: string): void {
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA journal_mode=WAL");
+  } finally {
+    db.close();
+  }
+}
+
+test("rows that exist only in an underscore-named queue's write-ahead log survive the rename", () => {
+  withTempRoot("pdpp-durable-state-underscore-wal-", (root) => {
     const stateRoot = join(root, "state");
-    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
     const underscorePath = canonicalCollectorQueuePath({
       connectorId: "claude_code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
-    seedOutbox(underscorePath, SOURCE_A);
-    // Empty sidecars are valid to SQLite, so the moved queue still opens.
-    for (const suffix of ["-wal", "-shm"]) {
-      writeFileSync(`${underscorePath}${suffix}`, "");
+    seedOutbox(underscorePath, SOURCE_A, "row-1");
+    useWriteAheadLog(underscorePath);
+    // A second row committed to the log only. Copying the files while the writer is open
+    // reproduces the state a crashed or killed collector leaves behind.
+    const writer = new LocalDeviceOutbox({ path: underscorePath });
+    const crashed = join(root, "crashed.sqlite");
+    try {
+      enqueueRow(writer, "row-2");
+      assert.ok(statSync(`${underscorePath}-wal`).size > 0, "the new row is in the log, not the main file");
+      copyFileSync(underscorePath, crashed);
+      copyFileSync(`${underscorePath}-wal`, `${crashed}-wal`);
+    } finally {
+      writer.close();
     }
+    rmSync(underscorePath);
+    for (const suffix of ["-wal", "-shm"]) {
+      rmSync(`${underscorePath}${suffix}`, { force: true });
+    }
+    mkdirSync(dirname(underscorePath), { recursive: true });
+    copyFileSync(crashed, underscorePath);
+    copyFileSync(`${crashed}-wal`, `${underscorePath}-wal`);
+
     assert.equal(
       resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
       hyphenPath
     );
-    for (const suffix of ["", "-wal", "-shm"]) {
-      assert.equal(existsSync(`${underscorePath}${suffix}`), false);
-      assert.equal(existsSync(`${hyphenPath}${suffix}`), true);
+    assert.equal(existsSync(underscorePath), false);
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      assert.equal(existsSync(`${underscorePath}${suffix}`), false, `no ${suffix} is left under the old name`);
     }
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 2, "the row that was only in the log moved with the queue");
+  });
+});
+
+test("an underscore-named queue held open by a running collector is not renamed", () => {
+  withTempRoot("pdpp-durable-state-underscore-held-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(underscorePath, SOURCE_A, "row-1");
+    useWriteAheadLog(underscorePath);
+    const running = new LocalDeviceOutbox({ path: underscorePath });
+    try {
+      enqueueRow(running, "row-2");
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+      assert.equal(existsSync(hyphenPath), false, "a queue a live process holds is not moved");
+      assert.equal(existsSync(underscorePath), true);
+    } finally {
+      running.close();
+    }
+    assert.equal(sourceSummary(underscorePath, SOURCE_A), 2, "no row was lost");
+    // Once the collector has exited, the next resolve moves it.
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 2);
   });
 });
 
 test("an underscore-named queue beside a hyphen-named one is left alone; the hyphen one wins", () => {
   withTempRoot("pdpp-durable-state-underscore-both-", (root) => {
     const stateRoot = join(root, "state");
-    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const hyphenPath = canonicalCollectorQueuePath({
+      connectorId: "claude-code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
     const underscorePath = canonicalCollectorQueuePath({
       connectorId: "claude_code",
       sourceInstanceId: SOURCE_A,
@@ -603,7 +693,10 @@ for (const [label, hookName] of [
       assert.ok(stderr.includes(canonicalPath), "warning names the canonical path");
       assert.match(stderr, /--queue/);
       assert.match(stderr, /1 pending/);
-      assert.equal(readdirSync(dirname(canonicalPath)).some((name) => name.endsWith(".tmp")), false);
+      assert.equal(
+        readdirSync(dirname(canonicalPath)).some((name) => name.endsWith(".tmp")),
+        false
+      );
       assert.equal(existsSync(`${canonicalPath}.handoff.lock`), false);
     });
   });

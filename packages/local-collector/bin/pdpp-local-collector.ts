@@ -2349,12 +2349,17 @@ function safeProfileFileName(name: string): string {
  * manifest keys. A profile named after its connector used the underscore
  * spelling (`claude_code.env`); the same profile is now `claude-code.env`.
  * For each bundled connector this renames the underscore-named file to the
- * hyphen name, or removes it when a hyphen-named file already exists (that
- * one is the current profile). A second run finds nothing to do. Nothing
- * reads or deletes an underscore-named file anywhere else: lookup, `connect`'s
- * overwrite guard, `logout` and discovery all see only the hyphen name. The
- * rename keeps the file's contents and mode, so a stored device token keeps
- * working. Operator-chosen profile names are never touched.
+ * hyphen name. The filename alone does not authorize that: an operator may
+ * have chosen `claude_code` as the name of a profile for another connector, so
+ * a file whose `PDPP_COLLECTOR_CONNECTOR` names a different connector is left
+ * alone. When a hyphen-named file already exists, the underscore-named file is
+ * removed only if it is byte-identical to it (a duplicate); a different file
+ * is left in place and reported, because it may hold another device's token.
+ * A second run finds nothing to do. Nothing reads an underscore-named file
+ * anywhere else: lookup, `connect`'s overwrite guard, `logout` and discovery
+ * all see only the hyphen name. The rename keeps the file's contents and
+ * mode, so a stored device token keeps working. Operator-chosen profile names
+ * are never touched.
  */
 function migrateLegacyProfileFiles(profileDir: string): void {
   for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
@@ -2367,11 +2372,20 @@ function migrateLegacyProfileFiles(profileDir: string): void {
     if (!existsSync(legacyPath)) {
       continue;
     }
+    const legacyContents = readFileSync(legacyPath, "utf8");
+    const namedConnector = parseCollectorProfileEnv(legacyContents).PDPP_COLLECTOR_CONNECTOR?.trim();
+    if (namedConnector && namedConnector.replaceAll("_", "-") !== current) {
+      continue;
+    }
     const currentPath = join(profileDir, `${current}.env`);
-    if (existsSync(currentPath)) {
+    if (!existsSync(currentPath)) {
+      renameSync(legacyPath, currentPath);
+    } else if (readFileSync(currentPath, "utf8") === legacyContents) {
       rmSync(legacyPath);
     } else {
-      renameSync(legacyPath, currentPath);
+      process.stderr.write(
+        `Profile ${legacyPath} differs from ${currentPath}; leaving it in place. Remove it if it is stale.\n`
+      );
     }
   }
 }

@@ -2309,49 +2309,65 @@ test("ingest-batches refuses an old connector id as an unknown connector", async
       batch,
       authHeaders(device.device_token)
     );
-    assert.ok(current.status < 300, `the current key is accepted, got ${current.status}: ${JSON.stringify(current.body)}`);
+    assert.ok(
+      current.status < 300,
+      `the current key is accepted, got ${current.status}: ${JSON.stringify(current.body)}`
+    );
   });
 });
 
 test("terminal-collection refuses an old connector id as an unknown connector", async () => {
   await withServer(async ({ asUrl }) => {
     const device = await enrollDevice(asUrl, "laptop-retired-collection", "claude-code");
+    const url = `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-collection`;
+    // A body that is valid in every respect except the connector id.
+    const body = {
+      connector_id: "claude-code",
+      run_id: "run-retired-1",
+      source_instance_id: device.source_instance_id,
+      streams: [{ coverage_statuses: ["collected"], stream: "sessions" }],
+    };
 
-    const retired = await postJson(
-      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-collection`,
-      {
-        connector_id: "claude_code",
-        run_id: "run-retired-1",
-        source_instance_id: device.source_instance_id,
-        streams: [],
-      },
-      authHeaders(device.device_token)
-    );
+    const retired = await postJson(url, { ...body, connector_id: "claude_code" }, authHeaders(device.device_token));
     assertOldConnectorIdRefused(retired);
+
+    const current = await postJson(url, body, authHeaders(device.device_token));
+    assert.equal(
+      current.status,
+      201,
+      `the same body with the current key is accepted: ${JSON.stringify(current.body)}`
+    );
   });
 });
 
-test("terminal-run-commits refuses an old connector id as an unknown connector", async () => {
+test("terminal-run-commits refuses an old connector id as an unknown connector and commits nothing", async () => {
   await withServer(async ({ asUrl }) => {
     const device = await enrollDevice(asUrl, "laptop-retired-commit", "claude-code");
+    const url = `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-run-commits`;
+    // A body that is valid in every respect except the connector id.
+    const body = {
+      collection_boundary: "unscoped",
+      commit_id: "commit-retired-1",
+      connector_id: "claude-code",
+      connector_instance_id: device.connector_instance_id,
+      device_id: device.device_id,
+      run_id: "run-retired-1",
+      source_instance_id: device.source_instance_id,
+      state_delta: {},
+      terminal_facts: [{ coverage_statuses: ["collected"], stream: "sessions" }],
+      version: 1,
+    };
 
-    const retired = await postJson(
-      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-run-commits`,
-      {
-        collection_boundary: "unscoped",
-        commit_id: "commit-retired-1",
-        connector_id: "claude_code",
-        connector_instance_id: device.connector_instance_id,
-        device_id: device.device_id,
-        run_id: "run-retired-1",
-        source_instance_id: device.source_instance_id,
-        state_delta: {},
-        terminal_facts: [],
-        version: 1,
-      },
-      authHeaders(device.device_token)
-    );
+    const retired = await postJson(url, { ...body, connector_id: "claude_code" }, authHeaders(device.device_token));
     assertOldConnectorIdRefused(retired);
+
+    // Had the refused request stored its commit, this same commit id would now be a replay or a conflict.
+    const current = await postJson(url, body, authHeaders(device.device_token));
+    assert.equal(
+      current.status,
+      201,
+      `the same body with the current key is a first commit: ${JSON.stringify(current.body)}`
+    );
   });
 });
 
