@@ -18,6 +18,7 @@
 //   DONE failed                     | flushed         | NO           | run.failed (after the flush)
 //   DONE failed, flush itself fails | dropped, counted| NO           | run.failed, connector error stays primary,
 //                                   |                 |              | flush failure recorded as ingest_failure
+//   DONE succeeded, flush fails     | dropped, counted| NO           | run.failed (unchanged: run fails, no success claim)
 //   DONE cancelled (connector)      | dropped         | NO           | run.failed
 //   owner cancel / run timeout      | dropped         | NO           | run.cancelled / run.failed
 //   exit without DONE               | dropped         | NO           | run.failed
@@ -376,4 +377,35 @@ test("exit without DONE: buffered records stay dropped (unchanged)", async (t) =
   assert.equal(ingested.length, 0);
   assert.equal(stateCommits.length, 0);
   assertNoIngestAfterTerminal(events);
+});
+
+test("DONE failed with nothing buffered: no extra ingest, STATE still not committed", async (t) => {
+  // STATE flushes the stream, so the DONE-time flush has nothing to send.
+  const { events, ingested, outcome, stateCommits } = await runScenario(t, {
+    exitCode: 1,
+    messages: [...records(ORDERS, 3), { cursor: { offset: 1 }, stream: ORDERS, type: "STATE" }, done("failed", 3)],
+    runId: "run_failed_done_flush_empty_buffer",
+  });
+
+  assert.equal(outcome?.status, "failed");
+  assert.equal(ingested.length, 3, "records are ingested exactly once");
+  assert.equal(stateCommits.length, 0);
+  assertNoIngestAfterTerminal(events);
+  assert.equal(terminalData(events, "run.failed").buffered_records_dropped, 0);
+});
+
+test("DONE succeeded with a failing flush: the run fails and STATE is not committed (unchanged)", async (t) => {
+  const { events, outcome, outcomeError, stateCommits } = await runScenario(t, {
+    exitCode: 0,
+    failIngest: true,
+    messages: [...records(ORDERS, 3), done("succeeded", 3)],
+    runId: "run_failed_done_flush_succeeded_flush_fails",
+  });
+
+  assert.equal(outcome, null, "a succeeded run whose flush fails does not resolve");
+  assert.equal((outcomeError as { failure_reason?: unknown } | null)?.failure_reason, "authentication_error");
+  assert.equal(stateCommits.length, 0);
+  assertNoIngestAfterTerminal(events);
+  assert.ok(events.some((e) => e.event_type === "run.failed"));
+  assert.ok(!events.some((e) => e.event_type === "run.completed"));
 });
