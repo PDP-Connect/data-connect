@@ -100,6 +100,36 @@ test("falsifiability: the scanner detects a synthetic hardcoded-identity violati
   }
 });
 
+test("falsifiability: the historical-id exemption covers one file and one rule", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const file = join(dir, "synthetic-retired.ts");
+    const source = [
+      'export const OLD = { gmail: "slack" };',
+      'export const URL_FOR_OLD = "https://oauth2.example-provider.com/token";',
+      "",
+    ].join("\n");
+    writeFileSync(file, source);
+    const keys = new Set(["gmail", "slack"]);
+    const elsewhere = scanFile(file, "reference-implementation/server/not-the-retired-ids-file.ts", keys, repoRoot);
+    assert.ok(
+      elsewhere.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      "an identity literal in any other file must still be flagged"
+    );
+    const exempt = scanFile(file, "reference-implementation/server/retired-connector-ids.ts", keys, repoRoot);
+    assert.ok(
+      !exempt.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      "the retired-ids file is exempt from the identity-literal rule"
+    );
+    assert.ok(
+      exempt.some((v) => v.rule === "hardcoded-provider-endpoint-url"),
+      "the exemption must not silence any other rule in that file"
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("falsifiability: the scanner detects a synthetic provider-endpoint violation", () => {
   const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
   try {
