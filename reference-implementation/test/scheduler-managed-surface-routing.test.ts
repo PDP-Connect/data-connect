@@ -555,8 +555,17 @@ for (const details of [false, true]) {
       const completedRuns: RunRecord[] = [];
       let controllerCalls = 0;
       let humanCalls = 0;
+      const persistedLastRuns: string[] = [];
+      const schedulerStore = {
+        ...anchorStore("chatgpt", 0),
+        listLastRunTimes: () => [],
+        upsertLastRunTime: (instanceId: string) => {
+          persistedLastRuns.push(instanceId);
+        },
+      };
 
       const scheduler = createScheduler({
+        schedulerStore,
         connectors: [
           {
             connectorId: "chatgpt",
@@ -614,6 +623,7 @@ for (const details of [false, true]) {
         );
         assert.equal(controllerCalls, 1, "surface failures must not retry");
         assert.equal(humanCalls, 0, "surface failures must not mark authentication repair");
+        assert.deepEqual(persistedLastRuns, ["chatgpt"], "a failed start counts as an attempt, so the next tick waits the interval");
       } finally {
         scheduler.stop();
       }
