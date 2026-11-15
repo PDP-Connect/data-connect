@@ -665,7 +665,6 @@ import {
   type WebPushConfig,
   type WebPushSubscriptionStore,
 } from "./web-push-notifications.ts";
-import { unknownConnectorMessage } from "./retired-connector-ids.ts";
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
@@ -3523,7 +3522,7 @@ async function resolveRegisteredConnectorManifest(connectorId: string) {
   }
   const manifest = await getConnectorManifest(connectorId);
   if (!manifest) {
-    throw Object.assign(new Error(unknownConnectorMessage(connectorId)), {
+    throw Object.assign(new Error(`Unknown connector: ${connectorId}`), {
       code: "not_found",
     });
   }

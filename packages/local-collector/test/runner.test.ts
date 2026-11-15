@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -1161,100 +1161,72 @@ test("writeLocalCollectorProfile writes a profile .env that findLocalCollectorPr
   assert.equal(profile.source_instance_id, "dsrc_setup");
 });
 
-test("a legacy underscore-named profile still resolves for a hyphenated connector; writes use the hyphen name and remove nothing", () => {
-  const profileDir = tempDirSync();
-  const legacyPath = writeLocalCollectorProfile({
+function writeProfile(profileDir: string, name: string, deviceToken: string, sourceInstanceId: string): string {
+  return writeLocalCollectorProfile({
     baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
-    deviceId: "device-old",
-    deviceToken: "token-old",
-    name: "claude_code",
+    connectorId: name,
+    deviceId: `device-${deviceToken}`,
+    deviceToken,
+    name,
     profileDir,
-    sourceInstanceId: "dsrc_old",
+    sourceInstanceId,
   });
-  assert.equal(legacyPath, join(profileDir, "claude_code.env"));
+}
 
-  // Only the legacy file exists: lookup by the connector's key reads it.
+test("a legacy underscore-named profile is renamed once to the hyphen name, keeping its contents and mode", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  assert.equal(legacyPath, join(profileDir, "claude_code.env"));
+  const body = readFileSync(legacyPath, "utf8");
+
+  // Any profile lookup runs the migration; the credential survives under the new name.
   const byName = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" });
+  const currentPath = join(profileDir, "claude-code.env");
   assert.equal(byName.matches.length, 1);
-  assert.equal(byName.matches[0]?.path, legacyPath);
+  assert.equal(byName.matches[0]?.path, currentPath);
   assert.equal(byName.matches[0]?.source_instance_id, "dsrc_old");
+  assert.equal(existsSync(legacyPath), false, "the legacy file is gone after the rename");
+  assert.equal(readFileSync(currentPath, "utf8"), body);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(currentPath).mode & 0o777, 0o600);
+  }
   assert.equal(findLocalCollectorProfiles({ profileDir, sourceInstanceId: "dsrc_old" }).matches.length, 1);
 
-  // A refreshed credential is written under the hyphen name; the legacy file stays.
-  const freshPath = writeLocalCollectorProfile({
-    baseUrl: "https://pdpp.example.com",
-    connectorId: "claude-code",
-    deviceId: "device-new",
-    deviceToken: "token-new",
-    name: "claude-code",
-    profileDir,
-    sourceInstanceId: "dsrc_new",
-  });
-  assert.equal(freshPath, join(profileDir, "claude-code.env"));
-  assert.equal(existsSync(legacyPath), true);
-  const afterWrite = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" });
-  assert.equal(afterWrite.matches.length, 1);
-  assert.equal(afterWrite.matches[0]?.path, freshPath);
-  // The hyphen-named file supersedes the legacy one when profiles are listed.
-  assert.deepEqual(
-    findLocalCollectorProfiles({ profileDir }).matches.map((match) => match.path),
-    [freshPath]
-  );
-
-  // Logout of a connector with only a legacy file removes that file.
-  const onlyLegacyDir = tempDirSync();
-  writeLocalCollectorProfile({
-    baseUrl: "https://pdpp.example.com",
-    connectorId: "claude_code",
-    deviceId: "device-old",
-    deviceToken: "token-old",
-    name: "claude_code",
-    profileDir: onlyLegacyDir,
-    sourceInstanceId: "dsrc_old",
-  });
-  const removal = removeLocalCollectorProfile({ name: "claude-code", profileDir: onlyLegacyDir });
-  assert.equal(removal.removed, true);
-  assert.equal(removal.path, join(onlyLegacyDir, "claude_code.env"));
+  // A second run has nothing to do.
+  assert.equal(findLocalCollectorProfiles({ profileDir }).matches.length, 1);
+  assert.equal(readFileSync(currentPath, "utf8"), body);
 });
 
-test("logout removes the hyphen-named profile and its legacy twin, so the legacy credential does not come back", () => {
+test("a legacy underscore-named profile beside a hyphen-named one is dropped; the hyphen one wins", () => {
   const profileDir = tempDirSync();
-  for (const [name, deviceToken] of [
-    ["claude_code", "token-old"],
-    ["claude-code", "token-new"],
-  ] as const) {
-    writeLocalCollectorProfile({
-      baseUrl: "https://pdpp.example.com",
-      connectorId: name,
-      deviceId: `device-${deviceToken}`,
-      deviceToken,
-      name,
-      profileDir,
-      sourceInstanceId: "dsrc_both",
-    });
-  }
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  const matches = findLocalCollectorProfiles({ profileDir }).matches;
+  assert.deepEqual(
+    matches.map((match) => match.path),
+    [currentPath]
+  );
+  assert.equal(matches[0]?.source_instance_id, "dsrc_new");
+  assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
+});
+
+test("logout removes a migrated legacy profile and stays idempotent; no underscore file is left to come back", () => {
+  const profileDir = tempDirSync();
+  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
   const removal = removeLocalCollectorProfile({ name: "claude-code", profileDir });
   assert.equal(removal.removed, true);
+  assert.equal(removal.path, join(profileDir, "claude-code.env"));
   assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
   assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
-  assert.equal(findLocalCollectorProfiles({ profileDir, profileName: "claude-code" }).matches.length, 0);
   assert.equal(findLocalCollectorProfiles({ profileDir }).matches.length, 0);
   assert.equal(removeLocalCollectorProfile({ name: "claude-code", profileDir }).removed, false, "logout stays idempotent");
 });
 
-test("the underscore profile fallback applies to connector names only, not operator-chosen profile names", () => {
+test("the profile migration touches connector names only, not operator-chosen profile names", () => {
   const profileDir = tempDirSync();
-  writeLocalCollectorProfile({
-    baseUrl: "https://pdpp.example.com",
-    connectorId: "claude-code",
-    deviceId: "device-1",
-    deviceToken: "token-1",
-    name: "my_work",
-    profileDir,
-    sourceInstanceId: "dsrc_work",
-  });
+  writeProfile(profileDir, "my_work", "token-1", "dsrc_work");
   assert.equal(findLocalCollectorProfiles({ profileDir, profileName: "my-work" }).matches.length, 0);
+  assert.equal(existsSync(join(profileDir, "my_work.env")), true, "an operator-named profile is left alone");
 });
 
 test("writeLocalCollectorProfile restricts directory and file permissions to the owner (POSIX)", {

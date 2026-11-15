@@ -6,13 +6,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { migrateRenamedConnectorIdsSqlite } from "../server/connector-id-rename-migration.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
-import {
-  currentKeyForRetiredConnectorId,
-  migrateRetiredConnectorIdsSqlite,
-  RETIRED_CONNECTOR_IDS,
-  unknownConnectorMessage,
-} from "../server/retired-connector-ids.ts";
 
 type Db = ReturnType<typeof getDb>;
 
@@ -52,19 +47,27 @@ function withDb(fn: (db: Db) => void): () => void {
   };
 }
 
-test("retired ids map to the manifest keys of the four underscore-spelled connectors", () => {
-  assert.deepEqual(RETIRED_CONNECTOR_IDS, {
-    apple_photos: "apple-photos",
-    claude_code: "claude-code",
-    google_messages: "google-messages",
-    google_takeout: "google-takeout",
-  });
-  assert.equal(currentKeyForRetiredConnectorId(" claude_code "), "claude-code");
-  assert.equal(currentKeyForRetiredConnectorId("claude-code"), null);
-  assert.equal(currentKeyForRetiredConnectorId("toString"), null);
-  assert.equal(unknownConnectorMessage("claude_code"), "Unknown connector: claude_code. This id was renamed; use claude-code.");
-  assert.equal(unknownConnectorMessage("nope"), "Unknown connector: nope");
-});
+test(
+  "the four underscore-spelled connector ids are renamed to their manifest keys",
+  withDb((db) => {
+    const pairs = [
+      ["apple_photos", "apple-photos"],
+      ["claude_code", "claude-code"],
+      ["google_messages", "google-messages"],
+      ["google_takeout", "google-takeout"],
+    ] as const;
+    for (const [oldId] of pairs) {
+      seedConnector(db, oldId);
+    }
+    seedConnector(db, "claude_code_extra");
+    migrateRenamedConnectorIdsSqlite(db);
+    assert.deepEqual(
+      ids(db, "connectors"),
+      [...pairs.map(([, newId]) => newId), "claude_code_extra"].sort(),
+      "each old id becomes its manifest key; an id that merely starts with one is untouched"
+    );
+  })
+);
 
 test(
   "renames retired ids in every table, parent rows first, and a second run changes nothing",
@@ -79,7 +82,7 @@ test(
        VALUES ('h', 'owner_local', 'google_takeout', 'b', ?, ?)`
     ).run(NOW, NOW);
 
-    const changed = migrateRetiredConnectorIdsSqlite(db);
+    const changed = migrateRenamedConnectorIdsSqlite(db);
     assert.ok(changed >= 4, `expected the seeded rows to change, got ${changed}`);
 
     assert.deepEqual(ids(db, "connectors"), ["claude-code"]);
@@ -103,7 +106,7 @@ test(
     );
 
     const before = Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n);
-    assert.equal(migrateRetiredConnectorIdsSqlite(db), 0);
+    assert.equal(migrateRenamedConnectorIdsSqlite(db), 0);
     assert.equal(Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n), before, "no write");
   })
 );
@@ -114,7 +117,7 @@ test(
     seedConnector(db, "claude-code");
     seedConnector(db, "codex");
     const before = Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n);
-    assert.equal(migrateRetiredConnectorIdsSqlite(db), 0);
+    assert.equal(migrateRenamedConnectorIdsSqlite(db), 0);
     assert.equal(Number((db.prepare("SELECT total_changes() AS n").get() as { n: number }).n), before);
   })
 );
@@ -132,7 +135,7 @@ test(
         NOW
       );
     }
-    migrateRetiredConnectorIdsSqlite(db);
+    migrateRenamedConnectorIdsSqlite(db);
     assert.deepEqual(ids(db, "connectors"), ["claude-code"]);
     const rows = db.prepare("SELECT connector_id, record_json FROM connector_installs").all() as {
       connector_id: string;
@@ -150,7 +153,7 @@ test(
     // Same owner and binding under both ids: renaming one onto the other would merge two connections.
     seedInstance(db, "inst_old", "claude_code", "binding-a");
     seedInstance(db, "inst_new", "claude-code", "binding-a");
-    assert.throws(() => migrateRetiredConnectorIdsSqlite(db), /UNIQUE/i);
+    assert.throws(() => migrateRenamedConnectorIdsSqlite(db), /UNIQUE/i);
     assert.deepEqual(ids(db, "connectors"), ["claude-code", "claude_code"]);
     assert.deepEqual(ids(db, "connector_instances"), ["claude-code", "claude_code"]);
   })

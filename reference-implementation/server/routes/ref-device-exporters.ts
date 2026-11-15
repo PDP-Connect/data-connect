@@ -38,7 +38,6 @@ import { deriveReferenceFreshness } from "../freshness.ts";
 import { presentHeartbeatHealth } from "../heartbeat-lease.ts";
 import { buildStoredCollectionScope, COLLECTION_SCOPE_STATE_KEY } from "../local-collection-scope.ts";
 import { assertRecordIdentity, normalizePrimaryKey } from "../record-expand-helpers.ts";
-import { currentKeyForRetiredConnectorId, unknownConnectorMessage } from "../retired-connector-ids.ts";
 import { commitTerminalRun } from "../stores/terminal-run-commit-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
 import {
@@ -2540,10 +2539,6 @@ export function mountRefDeviceExporterIngestBatches(app: AppLike, ctx: MountRefD
         const batchId = requireNonEmptyString(body.batch_id, "batch_id");
         const bodyHash = requireNonEmptyString(body.body_hash, "body_hash");
         const requestConnectorId = requireNonEmptyString(body.connector_id, "connector_id");
-        if (currentKeyForRetiredConnectorId(requestConnectorId)) {
-          ctx.pdppError(res, 400, "invalid_request", unknownConnectorMessage(requestConnectorId), "connector_id");
-          return;
-        }
         if (!Number.isInteger(body.batch_seq) || (body.batch_seq as number) < 0) {
           ctx.pdppError(res, 400, "invalid_request", "batch_seq must be a non-negative integer", "batch_seq");
           return;
@@ -3117,10 +3112,6 @@ function parseGapBodyBase(
     return null;
   }
   const connectorId = requireNonEmptyString(body.connector_id, "connector_id");
-  if (currentKeyForRetiredConnectorId(connectorId)) {
-    ctx.pdppError(res, 400, "invalid_request", unknownConnectorMessage(connectorId), "connector_id");
-    return null;
-  }
   if (!sameConnectorType(ctx, sourceInstance.connectorId, connectorId)) {
     ctx.pdppError(res, 400, "invalid_request", "connector_id does not match source_instance_id", "connector_id");
     return null;

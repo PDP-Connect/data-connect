@@ -32,6 +32,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -1347,7 +1348,8 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   }
 
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const path = resolveProfilePath(profileDir, safeProfileFileName(name));
+  migrateLegacyProfileFiles(profileDir);
+  const path = join(profileDir, safeProfileFileName(name));
 
   if (!existsSync(path)) {
     return {
@@ -2343,46 +2345,42 @@ function safeProfileFileName(name: string): string {
 }
 
 /**
- * Before connector ids were manifest keys, a profile named after its
- * connector used the underscore spelling (`claude_code.env`). Returns that
- * file name for a profile named after a connector, or `null` when the name is
- * not a connector id or has no other spelling. Operator-chosen profile names
- * are never rewritten.
+ * One-time migration of profile files written before connector ids were
+ * manifest keys. A profile named after its connector used the underscore
+ * spelling (`claude_code.env`); the same profile is now `claude-code.env`.
+ * For each bundled connector this renames the underscore-named file to the
+ * hyphen name, or removes it when a hyphen-named file already exists (that
+ * one is the current profile). A second run finds nothing to do. Nothing
+ * reads or deletes an underscore-named file anywhere else: lookup, `connect`'s
+ * overwrite guard, `logout` and discovery all see only the hyphen name. The
+ * rename keeps the file's contents and mode, so a stored device token keeps
+ * working. Operator-chosen profile names are never touched.
  */
-function legacyProfileFileName(fileName: string): string | null {
-  const stem = fileName.replace(PROFILE_ENV_EXTENSION, "");
-  if (!LOCAL_COLLECTOR_DEFINITIONS.some((definition) => definition.connector_id === stem)) {
-    return null;
-  }
-  const legacy = stem.replaceAll("-", "_");
-  return legacy === stem ? null : `${legacy}.env`;
-}
-
-/**
- * Path of the profile file for `fileName` in `profileDir`: the hyphen-named
- * file when it exists, else a legacy underscore-named file left by an earlier
- * collector, else the hyphen-named path (which does not exist). Nothing is
- * renamed or removed; writes always go to the hyphen-named path.
- */
-function resolveProfilePath(profileDir: string, fileName: string): string {
-  const path = join(profileDir, fileName);
-  if (existsSync(path)) {
-    return path;
-  }
-  const legacy = legacyProfileFileName(fileName);
-  if (legacy !== null) {
-    const legacyPath = join(profileDir, legacy);
-    if (existsSync(legacyPath)) {
-      return legacyPath;
+function migrateLegacyProfileFiles(profileDir: string): void {
+  for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
+    const current = definition.connector_id.replaceAll("_", "-");
+    const legacy = current.replaceAll("-", "_");
+    if (legacy === current) {
+      continue;
+    }
+    const legacyPath = join(profileDir, `${legacy}.env`);
+    if (!existsSync(legacyPath)) {
+      continue;
+    }
+    const currentPath = join(profileDir, `${current}.env`);
+    if (existsSync(currentPath)) {
+      rmSync(legacyPath);
+    } else {
+      renameSync(legacyPath, currentPath);
     }
   }
-  return path;
 }
 
 /** Absolute path of an existing profile file for `name`, or `null` when none exists. Used by `connect`'s overwrite guard. */
 function existingCollectorProfilePath(name: string): string | null {
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const path = resolveProfilePath(profileDir, safeProfileFileName(name));
+  migrateLegacyProfileFiles(profileDir);
+  const path = join(profileDir, safeProfileFileName(name));
   return existsSync(path) ? path : null;
 }
 
@@ -2459,8 +2457,7 @@ export function writeLocalCollectorProfile(input: WriteLocalCollectorProfileInpu
  * token server-side; a stale token remains valid against the reference
  * deployment until that deployment's own admin revokes it. Returns false
  * (not an error) when the profile was already absent, so `logout` is
- * idempotent. A legacy underscore-named file for the same connector is
- * removed with it.
+ * idempotent.
  */
 export function removeLocalCollectorProfile(input: { name: string; profileDir?: string }): {
   path: string;
@@ -2469,19 +2466,13 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const fileName = safeProfileFileName(input.name);
-  const path = resolveProfilePath(profileDir, fileName);
-  // Remove the legacy underscore-named file too: left behind, it would become
-  // the resolved profile again as soon as the hyphen-named one is gone.
-  const legacy = legacyProfileFileName(fileName);
-  const legacyPath = legacy === null ? null : join(profileDir, legacy);
-  let removed = false;
-  for (const candidate of [join(profileDir, fileName), legacyPath]) {
-    if (candidate !== null && existsSync(candidate)) {
-      rmSync(candidate);
-      removed = true;
-    }
+  migrateLegacyProfileFiles(profileDir);
+  const path = join(profileDir, fileName);
+  if (!existsSync(path)) {
+    return { path, removed: false };
   }
-  return { path, removed };
+  rmSync(path);
+  return { path, removed: true };
 }
 
 export function findLocalCollectorProfiles(input: {
@@ -2492,15 +2483,14 @@ export function findLocalCollectorProfiles(input: {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
+  migrateLegacyProfileFiles(profileDir);
   const files = input.profileName
-    ? [basename(resolveProfilePath(profileDir, safeProfileFileName(input.profileName)))]
+    ? [safeProfileFileName(input.profileName)]
     : (() => {
         try {
-          const names = readdirSync(profileDir)
+          return readdirSync(profileDir)
             .filter((name) => name.endsWith(".env"))
             .sort();
-          // A hyphen-named profile supersedes a legacy underscore-named one for the same connector.
-          return names.filter((name) => !names.some((other) => legacyProfileFileName(other) === name));
         } catch {
           return [];
         }
