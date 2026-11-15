@@ -97,7 +97,7 @@ const coverageStatusSchema = z.enum([
 /**
  * coverage_diagnostics stream: one row per known local store (currently just
  * "gmcli_archive") reporting whether gmcli is installed/paired/readable.
- * Shared shape with apple_photos/claude_code/codex's coverage_diagnostics —
+ * Shared shape with apple-photos/claude-code/codex's coverage_diagnostics —
  * see src/local-source-inventory.ts's CoverageRecord.
  */
 export const coverageDiagnosticsSchema = z.object({

@@ -17,7 +17,7 @@
  *
  *   run        Run a bundled filesystem-class connector (Claude Code or
  *              Codex) under the collector runtime. The published surface
- *              accepts `--connector claude_code|codex` only; `--command
+ *              accepts `--connector claude-code|codex` only; `--command
  *              <bin>` is refused unless
  *              `PDPP_LOCAL_COLLECTOR_ALLOW_CUSTOM_COMMAND=1` is set, which
  *              is the monorepo development opt-in.
@@ -144,13 +144,13 @@ export const BUNDLED_CONNECTOR_VERSIONS: Readonly<Record<string, string>> =
 
 /**
  * Normalize an operator-typed connector id to the registry's canonical form:
- * lowercase, hyphens folded to underscores. Connector ids are always
- * `snake_case` (`claude_code`), but `--connector claude-code` or
- * `CLAUDE_CODE` is an unambiguous, natural typo — refusing it with an opaque
- * "not bundled" error is a discoverability tax, not a safety boundary.
+ * lowercase, underscores folded to hyphens. Connector ids are manifest keys
+ * (`claude-code`), but operators may still type the old `--connector
+ * claude_code` spelling, or `CLAUDE-CODE`. Converting it here means the old
+ * spelling is never sent to the server, which no longer accepts it.
  */
 export function normalizeConnectorId(connectorId: string): string {
-  return connectorId.trim().toLowerCase().replaceAll("-", "_");
+  return connectorId.trim().toLowerCase().replaceAll("_", "-");
 }
 
 /**
@@ -514,7 +514,7 @@ Advanced / low-level:
                                    exist; --force compacts anyway (VACUUM is lossless either way).
 
 Public connectors: ${BUNDLED_CONNECTOR_IDS.join(", ")}. Connector ids are case-insensitive
-and hyphens normalize to underscores (claude-code == claude_code).
+and underscores normalize to hyphens (claude_code == claude-code).
 Connection id is the stable source identity for one device/account/home binding;
 enrollment responses currently return it as source_instance_id.
 Browser-bound connectors stay in the monorepo until each has its own
@@ -1347,8 +1347,7 @@ export async function runLogout(options: CliOptions, deps: RunLogoutDeps = {}): 
   }
 
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const fileName = safeProfileFileName(name);
-  const path = join(profileDir, fileName);
+  const path = resolveProfilePath(profileDir, safeProfileFileName(name));
 
   if (!existsSync(path)) {
     return {
@@ -2343,10 +2342,47 @@ function safeProfileFileName(name: string): string {
   return PROFILE_ENV_EXTENSION.test(trimmed) ? trimmed : `${trimmed}.env`;
 }
 
+/**
+ * Before connector ids were manifest keys, a profile named after its
+ * connector used the underscore spelling (`claude_code.env`). Returns that
+ * file name for a profile named after a connector, or `null` when the name is
+ * not a connector id or has no other spelling. Operator-chosen profile names
+ * are never rewritten.
+ */
+function legacyProfileFileName(fileName: string): string | null {
+  const stem = fileName.replace(PROFILE_ENV_EXTENSION, "");
+  if (!LOCAL_COLLECTOR_DEFINITIONS.some((definition) => definition.connector_id === stem)) {
+    return null;
+  }
+  const legacy = stem.replaceAll("-", "_");
+  return legacy === stem ? null : `${legacy}.env`;
+}
+
+/**
+ * Path of the profile file for `fileName` in `profileDir`: the hyphen-named
+ * file when it exists, else a legacy underscore-named file left by an earlier
+ * collector, else the hyphen-named path (which does not exist). Nothing is
+ * renamed or removed; writes always go to the hyphen-named path.
+ */
+function resolveProfilePath(profileDir: string, fileName: string): string {
+  const path = join(profileDir, fileName);
+  if (existsSync(path)) {
+    return path;
+  }
+  const legacy = legacyProfileFileName(fileName);
+  if (legacy !== null) {
+    const legacyPath = join(profileDir, legacy);
+    if (existsSync(legacyPath)) {
+      return legacyPath;
+    }
+  }
+  return path;
+}
+
 /** Absolute path of an existing profile file for `name`, or `null` when none exists. Used by `connect`'s overwrite guard. */
 function existingCollectorProfilePath(name: string): string | null {
   const profileDir = process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const path = join(profileDir, safeProfileFileName(name));
+  const path = resolveProfilePath(profileDir, safeProfileFileName(name));
   return existsSync(path) ? path : null;
 }
 
@@ -2431,8 +2467,7 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
 } {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const fileName = safeProfileFileName(input.name);
-  const path = join(profileDir, fileName);
+  const path = resolveProfilePath(profileDir, safeProfileFileName(input.name));
   if (!existsSync(path)) {
     return { path, removed: false };
   }
@@ -2449,12 +2484,14 @@ export function findLocalCollectorProfiles(input: {
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
   const sourceInstanceId = input.sourceInstanceId?.trim() || null;
   const files = input.profileName
-    ? [safeProfileFileName(input.profileName)]
+    ? [basename(resolveProfilePath(profileDir, safeProfileFileName(input.profileName)))]
     : (() => {
         try {
-          return readdirSync(profileDir)
+          const names = readdirSync(profileDir)
             .filter((name) => name.endsWith(".env"))
             .sort();
+          // A hyphen-named profile supersedes a legacy underscore-named one for the same connector.
+          return names.filter((name) => !names.some((other) => legacyProfileFileName(other) === name));
         } catch {
           return [];
         }

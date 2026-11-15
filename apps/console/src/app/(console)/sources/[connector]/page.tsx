@@ -516,9 +516,9 @@ async function loadConnectorPageModel(
     name: manifest.name,
   });
   // Source instances surface the device(s) that fed this connection. For
-  // filesystem-class collectors (claude_code, codex), the same connector
+  // filesystem-class collectors (claude-code, codex), the same connector
   // type can be active on multiple devices; without these labels, two
-  // claude_code instances are visually indistinguishable.
+  // claude-code instances are visually indistinguishable.
   const { deviceLabels, pendingOnDevices } = summarizeSourceInstancesForHeader(diagnostics.sourceInstances);
   const headerCount = formatConnectorHeaderCount({
     pendingOnDevices,

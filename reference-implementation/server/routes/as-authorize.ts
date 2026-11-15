@@ -63,6 +63,7 @@ import {
 } from "./as-consent-ui-helpers.ts";
 import type { FetchClientLogoOptions } from "../client-logo-cache.ts";
 import { createConsentChallengeStore, type ConsentChallengeRecord, type ConsentChallengeStore } from "../stores/consent-challenge-store.ts";
+import { unknownConnectorMessage } from "../retired-connector-ids.ts";
 
 // ─── Minimal structural types ────────────────────────────────────────────────
 
@@ -383,7 +384,7 @@ async function accumulateSourceEntry(
   const { connectorId, connectionId } = selection;
   const manifest = await caps.getConnectorManifest(connectorId).catch(() => null);
   if (!manifest) {
-    oauthError(res, 400, "invalid_request", `Unknown connector: ${connectorId}`);
+    oauthError(res, 400, "invalid_request", unknownConnectorMessage(connectorId));
     return "rejected";
   }
   const source = resolveHostedMcpSourceDescriptor(manifest);
@@ -704,7 +705,7 @@ async function initiateGrantAndRedirect(
     const connectorId = selectedConnectorId as string;
     const manifest = await ctx.consentPickerCaps.getConnectorManifest(connectorId).catch(() => null);
     if (!manifest) {
-      return ctx.oauthError(res, 400, "invalid_request", `Unknown connector: ${connectorId}`);
+      return ctx.oauthError(res, 400, "invalid_request", unknownConnectorMessage(connectorId));
     }
     const source = resolveHostedMcpSourceDescriptor(manifest);
     if (!source) {

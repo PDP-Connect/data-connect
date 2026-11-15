@@ -3,21 +3,24 @@
 // biome-ignore-all lint/performance/useTopLevelRegex: rejection assertions keep their expected error pattern local.
 
 /**
- * Hosted MCP picker — legacy-alias suppression is enforced by canonical
+ * Hosted MCP picker — one connector, one row, enforced by canonical
  * connector identity at the registration layer.
  *
  * `openspec/specs/agent-consent-bundling/spec.md` ("Hosted MCP connection
- * presentation SHALL use shared connector identity") requires that when both
- * a legacy local-collector connector id (`claude_code`) and its canonical id
- * (`claude-code`) are registered, the hosted MCP picker SHALL NOT show a stale
- * zero-record legacy duplicate as a separate owner-facing source.
+ * presentation SHALL use shared connector identity") requires that the hosted
+ * MCP picker SHALL NOT show a duplicate of one connector as a separate
+ * owner-facing source.
  *
  * The reference implementation satisfies this through ONE canonical path
  * rather than a second picker-level dedup mechanism: `registerConnector`
  * canonicalizes the manifest's `connector_id` via
  * `normalizeConnectorManifestForStorage` (auth.js) and upserts under the
- * canonical key with `ON CONFLICT (connector_id) DO UPDATE`. Both the legacy
- * alias and the canonical id therefore resolve to the same connector row.
+ * canonical key with `ON CONFLICT (connector_id) DO UPDATE`. The registry-URL
+ * spelling and the bare key therefore resolve to the same connector row.
+ *
+ * The server keeps no alias list: the four underscore ids older collectors
+ * used (`claude_code`) are not rewritten here. The one-time data migration
+ * renames stored rows.
  *
  * `listHostedMcpPickerRows` (server/index.js) enumerates exactly
  * `listRegisteredConnectorIds()`, so if the storage layer cannot hold two
@@ -63,26 +66,27 @@ function claudeCodeManifest(connectorId: string, displayName: string) {
   };
 }
 
-test("registering a legacy local-collector alias and its canonical id yields one canonical connector row", async () => {
+test("registering the registry-URL spelling and the bare key yields one canonical connector row", async () => {
   initDb();
   try {
-    const canonical = claudeCodeManifest("https://registry.pdpp.dev/connectors/claude-code", "Claude Code (canonical)");
-    const legacyAlias = claudeCodeManifest("claude_code", "Claude Code (legacy alias)");
+    const url = claudeCodeManifest("https://registry.pdpp.dev/connectors/claude-code", "Claude Code (URL)");
+    const bare = claudeCodeManifest("claude-code", "Claude Code (bare key)");
 
     // Both manifests resolve to the same canonical short key.
-    assert.equal(canonicalConnectorKeyFromManifest(canonical), "claude-code");
-    assert.equal(canonicalConnectorKeyFromManifest(legacyAlias), "claude-code");
+    assert.equal(canonicalConnectorKeyFromManifest(url), "claude-code");
+    assert.equal(canonicalConnectorKeyFromManifest(bare), "claude-code");
 
-    await registerConnector(canonical);
-    await registerConnector(legacyAlias);
+    await registerConnector(url);
+    await registerConnector(bare);
 
     const ids = await listRegisteredConnectorIds();
-    const claudeRows = ids.filter((id: string) => id === "claude-code");
-
     // The picker enumerates exactly these ids: one canonical row, no
-    // separate legacy-alias source, no URL-shaped duplicate.
-    assert.deepEqual(claudeRows, ["claude-code"], "exactly one canonical claude-code row");
-    assert.ok(!ids.includes("claude_code"), "legacy snake_case alias must not survive as a separate row");
+    // URL-shaped duplicate.
+    assert.deepEqual(
+      ids.filter((id: string) => id === "claude-code"),
+      ["claude-code"],
+      "exactly one canonical claude-code row"
+    );
     assert.ok(
       !ids.includes("https://registry.pdpp.dev/connectors/claude-code"),
       "URL-shaped connector id must not survive as a separate row"
@@ -92,15 +96,12 @@ test("registering a legacy local-collector alias and its canonical id yields one
   }
 });
 
-test("alias registered before its canonical id still collapses to one canonical row", async () => {
+test("bare key registered before its registry-URL spelling still collapses to one canonical row", async () => {
   initDb();
   try {
-    // Reverse registration order: a stale legacy row landing first must not
-    // produce a duplicate when the canonical manifest is later registered.
-    await registerConnector(claudeCodeManifest("claude_code", "Claude Code (legacy alias)"));
-    await registerConnector(
-      claudeCodeManifest("https://registry.pdpp.dev/connectors/claude-code", "Claude Code (canonical)")
-    );
+    // Reverse registration order must not produce a duplicate.
+    await registerConnector(claudeCodeManifest("claude-code", "Claude Code (bare key)"));
+    await registerConnector(claudeCodeManifest("https://registry.pdpp.dev/connectors/claude-code", "Claude Code (URL)"));
 
     const ids = await listRegisteredConnectorIds();
     assert.deepEqual(
@@ -108,7 +109,6 @@ test("alias registered before its canonical id still collapses to one canonical 
       ["claude-code"],
       "exactly one canonical claude-code row regardless of registration order"
     );
-    assert.ok(!ids.includes("claude_code"), "legacy snake_case alias must not survive as a separate row");
   } finally {
     closeDb();
   }

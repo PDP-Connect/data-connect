@@ -277,7 +277,7 @@ test("startup migrates legacy local-device source namespaces to connector-instan
   const dir = await mkdtemp(join(tmpdir(), "pdpp-local-device-migration-"));
   const dbPath = join(dir, "pdpp.sqlite");
   const device = {
-    connector_id: "claude_code",
+    connector_id: "claude-code",
     connector_instance_id: "cin_preserved_legacy_local_device",
     device_id: "dev_legacy_local_device",
     device_token: "devtok_legacy_local_device",
@@ -285,10 +285,10 @@ test("startup migrates legacy local-device source namespaces to connector-instan
     source_instance_id: "src_legacy_local_device",
   };
   const oldConnectorId = legacyLocalDeviceConnectorId(device.connector_id, device.source_instance_id);
-  // Legacy `local-device:<id>:<source>` rows relocate to the bare canonical
-  // connector key (`claude_code` → `claude-code`), the same key the live
-  // ingest/read paths use. See canonicalize-connector-keys design Decision 7.
-  const newConnectorId = "claude-code";
+  // Legacy `local-device:<id>:<source>` rows relocate to the bare connector
+  // key, the same key the live ingest/read paths use. See
+  // canonicalize-connector-keys design Decision 7.
+  const newConnectorId = device.connector_id;
   try {
     initDb(dbPath);
     const db = typedDb();
@@ -494,7 +494,7 @@ test("startup migration fails clearly when a legacy local-device source maps to 
   const dir = await mkdtemp(join(tmpdir(), "pdpp-local-device-ambiguous-"));
   const dbPath = join(dir, "pdpp.sqlite");
   const sourceInstanceId = "src_ambiguous_legacy";
-  const oldConnectorId = legacyLocalDeviceConnectorId("claude_code", sourceInstanceId);
+  const oldConnectorId = legacyLocalDeviceConnectorId("claude-code", sourceInstanceId);
   try {
     initDb(dbPath);
     const db = typedDb();
@@ -508,7 +508,7 @@ test("startup migration fails clearly when a legacy local-device source maps to 
     db.prepare(
       `INSERT INTO device_source_instances(source_instance_id, device_id, connector_id, connector_instance_id, local_binding_id, display_name, status, created_at, updated_at)
        VALUES(?, ?, ?, NULL, ?, ?, 'active', ?, ?)`
-    ).run(sourceInstanceId, "dev_ambiguous", "claude_code", "laptop-a", "Legacy Claude Code", now, now);
+    ).run(sourceInstanceId, "dev_ambiguous", "claude-code", "laptop-a", "Legacy Claude Code", now, now);
     // Two legacy state rows under the same local-device namespace but DIFFERENT
     // connector_instance_ids: the migration cannot pick one without losing data.
     db.prepare(

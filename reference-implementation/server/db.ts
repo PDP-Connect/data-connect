@@ -30,6 +30,7 @@ import {
   makeConnectorInstanceSourceBindingKey as canonicalSourceBindingKey,
 } from "./connector-instance-utils.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
+import { migrateRetiredConnectorIdsSqlite } from "./retired-connector-ids.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { SqliteDriver } from "./sqlite-driver.ts";
 import {
@@ -6620,6 +6621,9 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
     addColumnIfMissing(raw, "semantic_search_rowid", "input_identity", "TEXT");
   });
   runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
+  // Rename ids that older collectors spelled with underscores before any
+  // migration below derives identity from a connector id.
+  runWithSqliteBusyRetrySync(() => migrateRetiredConnectorIdsSqlite(raw));
   runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));
   raw.exec(`

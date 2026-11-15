@@ -226,6 +226,7 @@ import {
   getDefaultSchedulerStore,
   type ProductRunHistoryRecord,
 } from "./stores/scheduler-store.ts";
+import { unknownConnectorMessage } from "./retired-connector-ids.ts";
 
 // ─── Shared domain types ────────────────────────────────────────────────────
 
@@ -9441,7 +9442,7 @@ export async function getConnectorDetail(
 ): Promise<ConnectorDetail> {
   const manifest = (await getConnectorManifest(connectorId)) as ConnectorManifest | null;
   if (!manifest) {
-    throw new RefControlError(`Unknown connector: ${connectorId}`, "not_found");
+    throw new RefControlError(unknownConnectorMessage(connectorId), "not_found");
   }
   // Resolve to at most one owner connection the SAME way
   // `getConnectorSummaryForRoute` does (design.md "Central consumer and

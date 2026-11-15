@@ -26,6 +26,8 @@
 // The connector-instance source-binding source kinds this resolver assigns at
 // enrollment. `account` and `manual` exist on the column but are not enrollment
 // outcomes, so they are not part of this enrollment-derived union.
+import { currentKeyForRetiredConnectorId, unknownConnectorMessage } from "../retired-connector-ids.ts";
+
 export type EnrolledSourceKind = "local_device" | "browser_collector";
 
 // Minimal manifest shape this resolver reads. Manifests carry far more; only the
@@ -101,7 +103,9 @@ export function resolveEnrolledSourceKind(args: {
   const derived = sourceKindFromManifestBindings(manifest);
   if (!derived) {
     throw new SourceKindResolutionError(
-      `Cannot enroll connector '${connectorId}': no registered manifest declares a 'filesystem' or 'browser' binding, so the source kind cannot be resolved.`
+      currentKeyForRetiredConnectorId(connectorId)
+        ? unknownConnectorMessage(connectorId)
+        : `Cannot enroll connector '${connectorId}': no registered manifest declares a 'filesystem' or 'browser' binding, so the source kind cannot be resolved.`
     );
   }
   if (requestedSourceKind !== null && requestedSourceKind !== undefined && requestedSourceKind !== derived) {

@@ -39,7 +39,7 @@ import {
   verifyPrivateKeyJwtClientAssertion,
 } from "./oauth-client-auth.ts";
 import { listActiveBindingsForGrant, projectBindingForWire } from "./connection-identity.ts";
-import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "./connector-key.ts";
+import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "./connector-key.ts";
 import {
   invalidConnectorManifest,
   resolveManifestSensitivity,
@@ -909,11 +909,6 @@ async function pgExec(sql: string, params: unknown[] = []): Promise<{ changes: n
 }
 
 let configuredNativeManifest: DbRow | null = null;
-// Source of truth: connector-key.ts's legacyLocalAliasMap(). This used to be a
-// second, independently-maintained table here and had drifted (missing
-// google_takeout/apple_photos/google_messages) — see
-// docs/inbox/report-connector-knowledge-clusters-bc.md.
-const LEGACY_LOCAL_CONNECTOR_MANIFEST_ALIASES = new Map(Object.entries(legacyLocalAliasMap()));
 const PENDING_CONSENT_REQUEST_URI_PREFIX = "urn:pdpp:pending-consent:";
 const LEADING_SLASH_RE = /^\//;
 const TRAILING_SLASHES_RE = /\/+$/;
@@ -5706,15 +5701,7 @@ export async function getConnectorManifest(connectorId: unknown): Promise<DbRow 
   if (!row) {
     return null;
   }
-  try {
-    return parseAndValidateConnectorManifestRow(row, connectorId);
-  } catch (err) {
-    const legacyAlias = await getLegacyLocalConnectorAliasManifest(connectorId);
-    if (legacyAlias) {
-      return legacyAlias;
-    }
-    throw err;
-  }
+  return parseAndValidateConnectorManifestRow(row, connectorId);
 }
 
 async function getConnectorManifestRow(connectorId: string): Promise<DbRow | null> {
@@ -5759,19 +5746,6 @@ function parseAndValidateConnectorManifestRow(row: DbRow, connectorId: unknown):
     err.cause = cause;
     throw err;
   }
-}
-
-async function getLegacyLocalConnectorAliasManifest(connectorId: string): Promise<DbRow | null> {
-  const canonicalConnectorId = LEGACY_LOCAL_CONNECTOR_MANIFEST_ALIASES.get(connectorId);
-  if (!canonicalConnectorId) {
-    return null;
-  }
-  const canonicalRow = await getConnectorManifestRow(canonicalConnectorId);
-  if (!canonicalRow) {
-    return null;
-  }
-  const manifest = parseAndValidateConnectorManifestRow(canonicalRow, canonicalConnectorId);
-  return cloneJson(manifest);
 }
 
 export async function getManifestForStorageBinding(

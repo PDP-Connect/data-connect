@@ -25,16 +25,15 @@ function enrollable(connectorKey: string, enrollmentKey: string): LocalCollector
 }
 
 test("a connector the server offers for enrollment resolves, whatever its key", () => {
-  const templates = [enrollable("brand-new-notes-app", "brand-new-notes-app"), enrollable("claude-code", "claude_code")];
-  assert.deepEqual(localCollectorEnrollmentKeys(templates), ["brand-new-notes-app", "claude_code"]);
+  const templates = [enrollable("brand-new-notes-app", "brand-new-notes-app"), enrollable("claude-code", "claude-code")];
+  assert.deepEqual(localCollectorEnrollmentKeys(templates), ["brand-new-notes-app", "claude-code"]);
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, "brand-new-notes-app"), "brand-new-notes-app");
 });
 
 test("a connector resolves by enrollment key, canonical key, or registry URL", () => {
-  const templates = [enrollable("claude-code", "claude_code")];
-  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "claude_code"), "claude_code");
-  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "claude-code"), "claude_code");
-  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "https://registry.pdpp.dev/connectors/claude-code"), "claude_code");
+  const templates = [enrollable("claude-code", "claude-code")];
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "claude-code"), "claude-code");
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "https://registry.pdpp.dev/connectors/claude-code"), "claude-code");
 });
 
 test("a connector without the local-collector-enroll disposition does not resolve", () => {
@@ -78,7 +77,7 @@ test("the shipped manifests that claim local collection enroll, and the others d
   }
   const keys = localCollectorEnrollmentKeys(templates);
   assert.deepEqual([...keys].sort(), [...claimed].sort());
-  for (const expected of ["claude_code", "codex", "google_takeout", "imessage", "apple_photos", "google_messages"]) {
+  for (const expected of ["claude-code", "codex", "google-takeout", "imessage", "apple-photos", "google-messages"]) {
     assert.ok(keys.includes(expected), `${expected} must be enrollable`);
   }
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, "amazon"), null);

@@ -28,6 +28,13 @@ const MAX_LEGACY_ENTRIES_PER_ROOT = 64;
 const LEGACY_SQLITE_FILE_PATTERN = /(?:\.sqlite|\.db|\.json)$/;
 const LEGACY_MIGRATION_FILE_PATTERN = /\.migration-[^/]+\.tmp$/;
 const DEFAULT_QUEUE_FILE_NAME = "collector-runner-queue.sqlite";
+/** Connectors whose id used to be spelled with underscores in queue file names. */
+const RENAMED_CONNECTOR_IDS: ReadonlySet<string> = new Set([
+  "apple-photos",
+  "claude-code",
+  "google-messages",
+  "google-takeout",
+]);
 
 export interface CollectorStatePathInput {
   /** Test hook that simulates a legacy collector write after canonical installation. */
@@ -113,6 +120,25 @@ export function canonicalCollectorQueuePath(input: {
   return join(directory, fileName);
 }
 
+/** The queue path an older collector used for a hyphenated connector id, or `null` when it has none. */
+function legacyConnectorSpellingQueuePath(
+  canonicalPath: string,
+  connectorId: string | null | undefined,
+  sourceInstanceId: string,
+  stateRoot: string
+): string | null {
+  const trimmed = connectorId?.trim();
+  if (!trimmed || !RENAMED_CONNECTOR_IDS.has(trimmed)) {
+    return null;
+  }
+  const legacyPath = canonicalCollectorQueuePath({
+    connectorId: trimmed.replaceAll("-", "_"),
+    sourceInstanceId,
+    stateRoot,
+  });
+  return legacyPath === canonicalPath ? null : legacyPath;
+}
+
 /**
  * Resolve the local collector's durable outbox path.
  *
@@ -145,6 +171,15 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
   const sourceInstanceId = input.sourceInstanceId?.trim();
   if (!sourceInstanceId) {
     return canonicalPath;
+  }
+
+  // Before connector ids were manifest keys, the queue was named with the
+  // underscore spelling (`claude_code.<source>.sqlite`). A device that still
+  // has that file keeps using it in place, so its unsent rows are not
+  // orphaned. Nothing is renamed or removed.
+  const legacySpellingPath = legacyConnectorSpellingQueuePath(canonicalPath, input.connectorId, sourceInstanceId, stateRoot);
+  if (legacySpellingPath !== null && !existsSync(canonicalPath) && existsSync(legacySpellingPath)) {
+    return legacySpellingPath;
   }
 
   if (existsSync(canonicalPath)) {

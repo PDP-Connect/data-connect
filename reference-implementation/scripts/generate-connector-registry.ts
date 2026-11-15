@@ -26,10 +26,6 @@
  * Every exported set here is derived from a manifest-declared fact:
  *   - firstPartyConnectorKeys: every manifest's connector_key (or the
  *     canonical slug of its connector_id)
- *   - legacyLocalAliases: derived by cross-referencing each local-collector
- *     bundle definition's own `connector_id` (the npm-package directory name,
- *     necessarily snake_case) against its manifest's canonical `connector_key`
- *     — an alias entry exists only where the two differ
  *
  * The generator also fails when a manifest claims
  * capabilities.proven.local_collector without a LOCAL_COLLECTOR_DEFINITIONS
@@ -141,22 +137,16 @@ const { LOCAL_COLLECTOR_DEFINITIONS } = (await import("@pdpp/polyfill-connectors
   LOCAL_COLLECTOR_DEFINITIONS: readonly { connector_id: string }[];
 };
 
-const manifestByBundleSlug = new Map<string, ManifestLike>();
+// The pinned connector package names its bundles with underscores while its
+// manifest keys use hyphens, so match a definition's id against either spelling.
+// This only feeds the drift check below; nothing derived here is emitted.
+const manifestByBundleId = new Map<string, ManifestLike>();
 for (const { manifest } of polyfillManifests) {
   const key = manifestKey(manifest);
   if (key) {
-    manifestByBundleSlug.set(key.replace(/-/g, "_"), manifest);
+    manifestByBundleId.set(key, manifest);
+    manifestByBundleId.set(key.replace(/-/g, "_"), manifest);
   }
-}
-
-const legacyLocalAliases: Record<string, string> = {};
-for (const definition of LOCAL_COLLECTOR_DEFINITIONS) {
-  const bundleId = definition.connector_id;
-  const manifest = manifestByBundleSlug.get(bundleId);
-  const canonicalKey = manifest ? manifestKey(manifest) : null;
-  // Always record the identity mapping too (matches today's `codex: "codex"`
-  // entry) so callers keying by every bundled connector id resolve uniformly.
-  legacyLocalAliases[bundleId] = canonicalKey ?? bundleId;
 }
 
 // Manifests claiming capabilities.proven.local_collector === true, by key.
@@ -174,7 +164,7 @@ const provenManifestsByKey = new Map(
 // connector offered for enrollment that has no collector code to run.
 const definitionKeysByBundleId = new Map(
   LOCAL_COLLECTOR_DEFINITIONS.map((definition) => {
-    const manifest = manifestByBundleSlug.get(definition.connector_id);
+    const manifest = manifestByBundleId.get(definition.connector_id);
     return [definition.connector_id, manifest ? manifestKey(manifest) : null] as const;
   })
 );
@@ -208,12 +198,6 @@ function jsonArrayLiteral(values: readonly string[]): string {
   return `[${values.map((value) => JSON.stringify(value)).join(", ")}]`;
 }
 
-function jsonObjectLiteral(record: Record<string, string>): string {
-  const entries = Object.entries(record).sort(([a], [b]) => a.localeCompare(b));
-  const lines = entries.map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)},`);
-  return `{\n${lines.join("\n")}\n}`;
-}
-
 const output = `// Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
@@ -231,13 +215,6 @@ const output = `// Copyright The PDP-Connect Contributors
 /** Every first-party manifest's canonical connector_key. */
 export const FIRST_PARTY_CONNECTOR_KEYS: readonly string[] = Object.freeze(${jsonArrayLiteral(firstPartyConnectorKeys)});
 
-/**
- * Legacy snake_case local-collector bundle id -> canonical manifest
- * connector_key, wherever the two differ. Derived by cross-referencing
- * LOCAL_COLLECTOR_DEFINITIONS (the bundle's own directory-name ids) against
- * each connector's manifest-declared connector_key.
- */
-export const LEGACY_LOCAL_ALIASES: Readonly<Record<string, string>> = Object.freeze(${jsonObjectLiteral(legacyLocalAliases)});
 `;
 
 if (process.argv[2]) {

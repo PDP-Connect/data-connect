@@ -34,13 +34,13 @@ const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
 const ENTRYPOINT = join(
 	PACKAGE_ROOT,
 	"connectors",
-	"google_messages",
+	"google-messages",
 	"index.ts",
 );
 const FAKE_GMCLI = join(
 	PACKAGE_ROOT,
 	"connectors",
-	"google_messages",
+	"google-messages",
 	"fixtures",
 	"fake-gmcli.mjs",
 );

@@ -2218,7 +2218,7 @@ test("enrollment against an owner-deleted binding fails closed with a typed 409,
 test("device exporter enrollment keeps connector type display names separate from device labels", async () => {
   await withServer(async ({ asUrl }) => {
     const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
-      connector_id: "claude_code",
+      connector_id: "claude-code",
       display_name: "simon@192.168.1.7 Claude Code",
       local_binding_name: "simon-laptop",
     });
@@ -2234,14 +2234,12 @@ test("device exporter enrollment keeps connector type display names separate fro
     );
     assert.equal(enrollResp.status, 201);
 
-    // The owner may enroll with the legacy snake_case alias (`claude_code`),
-    // but the catalog row, instance row, and storage key are canonicalized to
-    // `claude-code` so the connector type has one identity. The enroll
-    // response echoes the canonical key. See canonicalize-connector-keys
-    // design Decision 7.
+    // The connector type has one identity, its manifest key (`claude-code`).
+    // The enroll response echoes it, and no row exists under the retired
+    // underscore spelling.
     assert.equal(bodyOf(enrollResp).connector_id, "claude-code");
-    const legacyAliasRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
-    assert.equal(legacyAliasRow, undefined, "legacy alias MUST NOT be registered as a connector row");
+    const retiredIdRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
+    assert.equal(retiredIdRow, undefined, "a retired id MUST NOT be registered as a connector row");
 
     const connectorRow = mustExist(
       typedDb()
@@ -2263,6 +2261,99 @@ test("device exporter enrollment keeps connector type display names separate fro
       "instance row must exist"
     );
     assert.equal(instanceRow.display_name, "simon@192.168.1.7 Claude Code");
+  });
+});
+
+test("enrollment-codes rejects a retired connector id and registers no connector row", async () => {
+  await withServer(async ({ asUrl }) => {
+    const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
+      connector_id: "claude_code",
+      local_binding_name: "simon-laptop",
+    });
+    assert.equal(codeResp.status, 400);
+    assert.equal(errorCode(codeResp), "invalid_request");
+    assert.equal(errorOf(codeResp).param, "connector_id");
+    assert.equal(
+      getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code"),
+      undefined,
+      "a retired id MUST NOT be registered as a connector row"
+    );
+  });
+});
+
+// A collector from before the connector-id rename still sends the underscore
+// spelling. Each device route that carries a connector_id answers it with a 400
+// that names the current key, instead of a generic "does not match" error.
+const RETIRED_CLAUDE_CODE_MESSAGE = "Unknown connector: claude_code. This id was renamed; use claude-code.";
+
+function assertRetiredConnectorIdRejection(response: JsonResponse): void {
+  assert.equal(response.status, 400);
+  assert.equal(errorCode(response), "invalid_request");
+  assert.equal(errorMessage(response), RETIRED_CLAUDE_CODE_MESSAGE);
+  assert.equal(errorOf(response).param, "connector_id");
+}
+
+test("ingest-batches answers a retired connector id with 400 naming the current key", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-batch", "claude-code");
+    assert.equal(device.connector_id, "claude-code");
+    const batch = makeBatch(device, "batch-retired-id", "v1");
+
+    const retired = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+      { ...batch, connector_id: "claude_code" },
+      authHeaders(device.device_token)
+    );
+    assertRetiredConnectorIdRejection(retired);
+
+    const current = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
+      batch,
+      authHeaders(device.device_token)
+    );
+    assert.ok(current.status < 300, `the current key is accepted, got ${current.status}: ${JSON.stringify(current.body)}`);
+  });
+});
+
+test("terminal-collection answers a retired connector id with 400 naming the current key", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-collection", "claude-code");
+
+    const retired = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-collection`,
+      {
+        connector_id: "claude_code",
+        run_id: "run-retired-1",
+        source_instance_id: device.source_instance_id,
+        streams: [],
+      },
+      authHeaders(device.device_token)
+    );
+    assertRetiredConnectorIdRejection(retired);
+  });
+});
+
+test("terminal-run-commits answers a retired connector id with 400 naming the current key", async () => {
+  await withServer(async ({ asUrl }) => {
+    const device = await enrollDevice(asUrl, "laptop-retired-commit", "claude-code");
+
+    const retired = await postJson(
+      `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/source-instances/${encodeURIComponent(device.source_instance_id)}/terminal-run-commits`,
+      {
+        collection_boundary: "unscoped",
+        commit_id: "commit-retired-1",
+        connector_id: "claude_code",
+        connector_instance_id: device.connector_instance_id,
+        device_id: device.device_id,
+        run_id: "run-retired-1",
+        source_instance_id: device.source_instance_id,
+        state_delta: {},
+        terminal_facts: [],
+        version: 1,
+      },
+      authHeaders(device.device_token)
+    );
+    assertRetiredConnectorIdRejection(retired);
   });
 });
 

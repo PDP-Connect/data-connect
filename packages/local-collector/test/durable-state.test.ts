@@ -195,14 +195,14 @@ test("the same source resolves to the same state across cwd and install roots", 
     try {
       chdir(cwdA);
       const first = resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installA),
         sourceInstanceId: SOURCE_A,
         stateRoot,
       });
       chdir(cwdB);
       const second = resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installB),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -211,7 +211,7 @@ test("the same source resolves to the same state across cwd and install roots", 
       assert.equal(first, second);
       assert.equal(
         first,
-        canonicalCollectorQueuePath({ connectorId: "claude_code", sourceInstanceId: SOURCE_A, stateRoot })
+        canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })
       );
       assert.ok(first.startsWith(collectorStateDirectory(stateRoot)));
       assert.ok(!first.startsWith(installA));
@@ -220,11 +220,49 @@ test("the same source resolves to the same state across cwd and install roots", 
       assert.ok(!first.startsWith(cwdB));
       assert.notEqual(
         first,
-        canonicalCollectorQueuePath({ connectorId: "claude_code", sourceInstanceId: SOURCE_B, stateRoot })
+        canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_B, stateRoot })
       );
     } finally {
       chdir(previousCwd);
     }
+  });
+});
+
+test("a queue file named with the legacy underscore connector id keeps being used; a new device gets the hyphen name", () => {
+  withTempRoot("pdpp-durable-state-underscore-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    assert.notEqual(hyphenPath, underscorePath);
+
+    // No file yet: a fresh device is given the hyphen-named path.
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+
+    // An existing device holds the underscore-named queue: it is used in place.
+    mkdirSync(dirname(underscorePath), { recursive: true });
+    const legacyOutbox = new LocalDeviceOutbox({ path: underscorePath });
+    legacyOutbox.close();
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      underscorePath
+    );
+    assert.equal(existsSync(hyphenPath), false);
+
+    // Once the hyphen-named queue exists it wins, and the legacy file is left alone.
+    const hyphenOutbox = new LocalDeviceOutbox({ path: hyphenPath });
+    hyphenOutbox.close();
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(existsSync(underscorePath), true);
   });
 });
 
@@ -240,7 +278,7 @@ test("an explicit queue path wins before legacy discovery, including ambiguous s
     const resolved = resolveCollectorQueuePath({
       configuredPath: explicitPath,
       configuredPathIsExplicit: true,
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       legacyRoots: [legacyA, legacyB],
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -248,7 +286,7 @@ test("an explicit queue path wins before legacy discovery, including ambiguous s
 
     assert.equal(resolved, explicitPath);
     assert.equal(
-      existsSync(canonicalCollectorQueuePath({ connectorId: "claude_code", sourceInstanceId: SOURCE_A, stateRoot })),
+      existsSync(canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot })),
       false
     );
     assert.equal(sourceSummary(join(legacyA, "a.sqlite"), SOURCE_A), 1);
@@ -301,7 +339,7 @@ test("a unique legacy stable-state store remains discoverable in place and stays
     seedOutbox(legacyB, SOURCE_B);
 
     const resolvedA = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(join(root, "install")),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -328,14 +366,14 @@ test("a unique package-local legacy store is handed off atomically without delet
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A);
 
     const resolved = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -356,14 +394,14 @@ test("migration reconciles a legacy write that lands after the snapshot", () => 
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A, "before-snapshot");
 
     const resolved = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -381,7 +419,7 @@ test("migration retires a live WAL legacy writer before canonical installation",
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
@@ -397,7 +435,7 @@ test("migration retires a live WAL legacy writer before canonical installation",
     try {
       let canonicalWriter: LocalDeviceOutbox | undefined;
       const resolved = resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -437,7 +475,7 @@ test("restart completes a handoff after failure between retirement and canonical
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
@@ -445,7 +483,7 @@ test("restart completes a handoff after failure between retirement and canonical
 
     assert.throws(() =>
       resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -458,7 +496,7 @@ test("restart completes a handoff after failure between retirement and canonical
     assert.equal(existsSync(legacyPath), true);
 
     const restarted = resolveCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -498,14 +536,14 @@ for (const [label, hookName] of [
       const installRoot = join(root, "npx-temp-package");
       const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
       const canonicalPath = canonicalCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         sourceInstanceId: SOURCE_A,
         stateRoot,
       });
       seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
 
       const input = {
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -535,13 +573,13 @@ test("a fence left by a crashed attempt is lifted when a canonical queue appears
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
     const base = {
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       moduleUrl: modulePath(installRoot),
       sourceInstanceId: SOURCE_A,
       stateRoot,
@@ -576,14 +614,14 @@ test("a normal migration still migrates and fences the legacy source", () => {
     const installRoot = join(root, "npx-temp-package");
     const legacyPath = packageLegacyPath(installRoot, "collector-runner-queue.sqlite");
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
     seedOutbox(legacyPath, SOURCE_A, "legacy-pending");
     const { result: resolved, stderr } = captureStderr(() =>
       resolveCollectorQueuePath({
-        connectorId: "claude_code",
+        connectorId: "claude-code",
         moduleUrl: modulePath(installRoot),
         sourceInstanceId: SOURCE_A,
         stateRoot,
@@ -610,7 +648,7 @@ test("migration fails closed when the legacy and canonical roots cross filesyste
       assert.throws(
         () =>
           resolveCollectorQueuePath({
-            connectorId: "claude_code",
+            connectorId: "claude-code",
             moduleUrl: modulePath(join(root, "npx-temp-package")),
             sourceInstanceId: SOURCE_A,
             stateRoot: crossFilesystemRoot,
@@ -669,7 +707,7 @@ test("multiple nonempty legacy stores fail closed, and an empty canonical file i
     assert.throws(
       () =>
         resolveCollectorQueuePath({
-          connectorId: "claude_code",
+          connectorId: "claude-code",
           moduleUrl: modulePath(installRoot),
           sourceInstanceId: SOURCE_A,
           stateRoot,
@@ -680,7 +718,7 @@ test("multiple nonempty legacy stores fail closed, and an empty canonical file i
     assert.equal(existsSync(legacyB), true);
 
     const canonicalPath = canonicalCollectorQueuePath({
-      connectorId: "claude_code",
+      connectorId: "claude-code",
       sourceInstanceId: SOURCE_A,
       stateRoot,
     });
@@ -689,7 +727,7 @@ test("multiple nonempty legacy stores fail closed, and an empty canonical file i
     assert.throws(
       () =>
         resolveCollectorQueuePath({
-          connectorId: "claude_code",
+          connectorId: "claude-code",
           moduleUrl: modulePath(installRoot),
           sourceInstanceId: SOURCE_A,
           stateRoot,

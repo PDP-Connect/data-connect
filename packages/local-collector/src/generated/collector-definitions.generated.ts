@@ -31,8 +31,8 @@ import type { LocalCollectorDefinition } from "@pdpp/connector-protocol/collecto
  */
 export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = Object.freeze([
   {
-    connector_id: "claude_code",
-    entry: "claude_code",
+    connector_id: "claude-code",
+    entry: "claude-code",
     bindings: {
       "filesystem": { required: true },
     },
@@ -55,8 +55,8 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     enforces_source_roots: true,
   },
   {
-    connector_id: "google_takeout",
-    entry: "google_takeout",
+    connector_id: "google-takeout",
+    entry: "google-takeout",
     bindings: {
       "filesystem": { required: true },
     },
@@ -75,8 +75,8 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     time_scopable_streams: ["messages"],
   },
   {
-    connector_id: "apple_photos",
-    entry: "apple_photos",
+    connector_id: "apple-photos",
+    entry: "apple-photos",
     bindings: {
       "filesystem": { required: true },
     },
@@ -85,8 +85,8 @@ export const LOCAL_COLLECTOR_DEFINITIONS: readonly LocalCollectorDefinition[] = 
     time_scopable_streams: ["photos"],
   },
   {
-    connector_id: "google_messages",
-    entry: "google_messages",
+    connector_id: "google-messages",
+    entry: "google-messages",
     bindings: {
       "filesystem": { required: true },
     },

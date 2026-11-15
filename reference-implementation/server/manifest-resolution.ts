@@ -14,6 +14,7 @@ import {
   type TokenInfo,
 } from "./source-descriptor.ts";
 import { resolveOwnerConnectorInstanceNamespace } from "./stores/connector-instance-store.ts";
+import { unknownConnectorMessage } from "./retired-connector-ids.ts";
 
 interface OwnerScope {
   owner_subject_id?: string;
@@ -107,7 +108,7 @@ export async function resolveGrantManifest(
 export async function resolveRegisteredConnectorManifest(connectorId: string) {
   const manifest = await getConnectorManifest(connectorId);
   if (!manifest) {
-    const err = Object.assign(new Error(`Unknown connector: ${connectorId}`), { code: "not_found" });
+    const err = Object.assign(new Error(unknownConnectorMessage(connectorId)), { code: "not_found" });
     throw err;
   }
   return manifest;

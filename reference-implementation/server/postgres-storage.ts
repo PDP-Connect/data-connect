@@ -38,6 +38,10 @@ import {
   readPostgresMigrationLedgerRow,
 } from "./postgres-migration-ledger.ts";
 import {
+  migrateRetiredConnectorIdsPostgres,
+  RETIRED_CONNECTOR_ID_MIGRATION_ID,
+} from "./retired-connector-ids.ts";
+import {
   assertTestDatabase,
   claimAlreadyAdmittedTestDatabaseChildAttachment,
   testDatabaseGuardActive,
@@ -3931,6 +3935,7 @@ async function bootstrapPostgresSchemaOnce({
     // A migration that reads a missing ledger table would have to guess its
     // own completion, which is the defect the ledger exists to remove.
     await ensurePostgresMigrationLedger(client);
+    await migratePostgresRetiredConnectorIds(client, { log });
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
     await migratePostgresLegacyConnectorInstancesToDefaultAccount(client);
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
@@ -7185,6 +7190,43 @@ async function coalesceExactPostgresLocalDeviceBindingDuplicates(client: PoolCli
       }
       throw err;
     }
+  }
+}
+
+/**
+ * One-time rename of connector ids that older collectors spelled with
+ * underscores. The receipt makes later boots skip the scan; a failure leaves
+ * the receipt `blocked`, never `complete`, so the next boot tries again.
+ */
+async function migratePostgresRetiredConnectorIds(
+  client: PoolClient,
+  { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
+): Promise<void> {
+  const claim = await claimPostgresMigration(client, RETIRED_CONNECTOR_ID_MIGRATION_ID, {
+    leaseDurationMs: PG_LOCAL_DEVICE_MIGRATION_LEASE_MS,
+    leaseOwner: `${process.pid}@${POSTGRES_MIGRATION_LEASE_OWNER_NONCE}`,
+    nowIso: new Date().toISOString(),
+  });
+  if (!claim) {
+    return;
+  }
+  let changedRows: number;
+  try {
+    changedRows = await migrateRetiredConnectorIdsPostgres(client);
+  } catch (err) {
+    try {
+      await blockPostgresMigration(client, RETIRED_CONNECTOR_ID_MIGRATION_ID, {
+        error: err instanceof Error ? err.message : String(err),
+        nowIso: new Date().toISOString(),
+      });
+    } catch {
+      // A ledger write failure must not hide the original migration error.
+    }
+    throw err;
+  }
+  await completePostgresMigration(client, RETIRED_CONNECTOR_ID_MIGRATION_ID, { nowIso: new Date().toISOString() });
+  if (changedRows > 0) {
+    log(`[PDPP] Renamed retired connector ids: ${changedRows} rows changed`);
   }
 }
 

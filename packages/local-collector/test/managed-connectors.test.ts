@@ -271,7 +271,9 @@ test("a verified artifact installs under its digest and yields a runnable defini
     assert.equal(managed.length, 1);
     const entry = managed[0];
     assert.ok(entry);
-    assert.equal(entry.definition.connector_id, CONNECTOR_ID);
+    // The definition carries the manifest key, not the profile's own (URI) id:
+    // published artifacts still declare legacy spellings there.
+    assert.equal(entry.definition.connector_id, CONNECTOR_KEY);
     assert.deepEqual(entry.definition.bindings, { network: { required: true } });
     assert.deepEqual([...entry.definition.streams], ["sleep", "readiness"]);
 

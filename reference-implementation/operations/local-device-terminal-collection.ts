@@ -3,6 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
+import { currentKeyForRetiredConnectorId, unknownConnectorMessage } from "../server/retired-connector-ids.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
 import { TerminalRunCommitConflictError } from "../server/stores/terminal-run-commit-store.ts";
@@ -72,16 +73,18 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       body && Array.isArray(body.terminal_facts) ? normalizeTerminalFacts(body.terminal_facts) : null;
     const canonicalConnectorId = ctx.canonicalConnectorKey(authorized.sourceInstance.connectorId);
     // Canonicalize BOTH sides before comparing, exactly as `sameConnectorType`
-    // in routes/ref-device-exporters.ts already does for the record-batch leg.
-    // Canonicalizing only the server's side and then demanding the device match
-    // that exact spelling rejects a legacy alias the server itself recognises:
-    // `canonicalConnectorKey("claude_code")` is `"claude-code"`, so a device
-    // configured `PDPP_COLLECTOR_CONNECTOR=claude_code` failed this one guard
-    // while its 10,000 record batches passed the symmetric one. Falling back to
-    // the raw value keeps an unknown key failing closed.
+    // in routes/ref-device-exporters.ts does for the record-batch leg, so a
+    // registry-URL spelling and its bare key compare equal. Falling back to the
+    // raw value keeps an unknown key failing closed.
     const reportedConnectorKey = reportedConnectorId
       ? (ctx.canonicalConnectorKey(reportedConnectorId) ?? reportedConnectorId)
       : null;
+    if (reportedConnectorId && currentKeyForRetiredConnectorId(reportedConnectorId)) {
+      // A collector from before the rename still sends the old id. Say which
+      // key replaced it instead of the generic binding error below.
+      ctx.pdppError(res, 400, "invalid_request", unknownConnectorMessage(reportedConnectorId), "connector_id");
+      return;
+    }
     if (
       body?.version !== 1 ||
       !commitId ||
@@ -107,12 +110,8 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
       // SENT, not the canonicalized one. The collector hashes the bytes it puts
       // on the wire and compares that digest against the `envelope_hash` this
       // route returns; substituting the canonical spelling here rehashes a
-      // different envelope, so the digests never match. The guard above is
-      // deliberately alias-tolerant, which means `claude_code` is accepted and
-      // then silently rewritten to `claude-code` — every legacy alias that is
-      // not identity (apple_photos, claude_code, google_messages,
-      // google_takeout) dead-lettered its terminal commit forever. Storage
-      // identity below stays canonical; only the hash input follows the wire.
+      // different envelope, so the digests never match. Storage identity below
+      // stays canonical; only the hash input follows the wire.
       connector_id: reportedConnectorId,
       connector_instance_id: reportedConnectorInstanceId,
       device_id: deviceId,
@@ -190,6 +189,10 @@ export async function handleLocalDeviceTerminalCollection(input: {
         "invalid_request",
         "terminal collection requires matching connector_id, run_id, and source_instance_id"
       );
+      return;
+    }
+    if (currentKeyForRetiredConnectorId(connectorId)) {
+      ctx.pdppError(res, 400, "invalid_request", unknownConnectorMessage(connectorId), "connector_id");
       return;
     }
     if (!(input.sameConnectorType(authorized.sourceInstance.connectorId, connectorId) && Array.isArray(body.streams))) {

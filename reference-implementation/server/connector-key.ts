@@ -24,23 +24,14 @@
  * unit-test and safe to import from any layer.
  */
 
-import { FIRST_PARTY_CONNECTOR_KEYS, LEGACY_LOCAL_ALIASES } from "./generated/connector-registry.generated.ts";
+import { FIRST_PARTY_CONNECTOR_KEYS } from "./generated/connector-registry.generated.ts";
 
 const FIRST_PARTY_REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
 
-// FIRST_PARTY_CONNECTOR_KEYS and LEGACY_LOCAL_ALIASES are generated from the
-// shipped connector manifests and the connector package's own local-collector
-// bundle registry; see connector-registry.generated.ts and
-// scripts/generate-connector-registry.ts.
+// FIRST_PARTY_CONNECTOR_KEYS is generated from the shipped connector manifests;
+// see connector-registry.generated.ts and scripts/generate-connector-registry.ts.
 
-const LEGACY_LOCAL_ALIAS_SET = new Set(Object.keys(LEGACY_LOCAL_ALIASES));
 const CONNECTOR_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
-
-type LegacyLocalAlias = keyof typeof LEGACY_LOCAL_ALIASES;
-
-function isLegacyLocalAliasKey(value: string): value is LegacyLocalAlias {
-  return LEGACY_LOCAL_ALIAS_SET.has(value);
-}
 
 function trimOrNull(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -92,8 +83,6 @@ export function connectorKeyFromRegistryUrl(value: unknown): string | null {
  *
  *   - registry URL: its slug (`https://registry.pdpp.dev/connectors/gmail`
  *     becomes `gmail`), whether or not the slug ships in this repository
- *   - legacy snake_case local-collector alias (`claude_code`): the current key
- *     (`claude-code`)
  *   - anything else: the trimmed value
  *
  * Pure function: no DB, no I/O, no caching.
@@ -108,12 +97,6 @@ export function canonicalConnectorKey(value: unknown): string | null {
   }
   if (trimmed.startsWith(FIRST_PARTY_REGISTRY_PREFIX)) {
     return connectorKeyFromRegistryUrl(trimmed);
-  }
-  if (isLegacyLocalAliasKey(trimmed)) {
-    // isLegacyLocalAliasKey already proved membership via LEGACY_LOCAL_ALIAS_SET;
-    // the `?? trimmed` only satisfies noUncheckedIndexedAccess on the generated
-    // Record's index signature.
-    return LEGACY_LOCAL_ALIASES[trimmed] ?? trimmed;
   }
   return trimmed;
 }
@@ -187,21 +170,6 @@ export function isRegistryUrlConnectorId(value: unknown): boolean {
   return trimmed.startsWith(FIRST_PARTY_REGISTRY_PREFIX);
 }
 
-/**
- * True iff `value` is one of the migration-only legacy local-collector
- * aliases (`claude_code`, `codex`). Useful for migration diagnostics.
- *
- * @param {unknown} value
- * @returns {boolean}
- */
-export function isLegacyLocalAlias(value: unknown): boolean {
-  const trimmed = trimOrNull(value);
-  if (!trimmed) {
-    return false;
-  }
-  return LEGACY_LOCAL_ALIAS_SET.has(trimmed);
-}
-
 // Connector id substrings that identify test/stub/internal connectors that
 // should not appear in owner-facing pickers or public surfaces. Matches the
 // same set filtered by `isPublicReferenceConnector` in ref-control.ts for
@@ -240,8 +208,4 @@ export function isInternalConnectorId(value: unknown): boolean {
  */
 export function firstPartyConnectorKeys() {
   return FIRST_PARTY_CONNECTOR_KEYS;
-}
-
-export function legacyLocalAliasMap() {
-  return LEGACY_LOCAL_ALIASES;
 }

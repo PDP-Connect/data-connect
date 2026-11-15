@@ -186,10 +186,10 @@ async function main(): Promise<void> {
     assert.equal(advertised.runtime, "collector");
     assert.deepEqual([...advertised.bindings].sort(), ["filesystem", "local_device", "network"]);
     assert.deepEqual([...advertised.bundled_connectors].sort(), [
-      "apple_photos",
-      "claude_code",
+      "apple-photos",
+      "claude-code",
       "codex",
-      "google_takeout",
+      "google-takeout",
       "imessage",
     ]);
     // biome-ignore lint/performance/useTopLevelRegex: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
@@ -225,7 +225,7 @@ async function main(): Promise<void> {
       await runImessageSampleSmoke({ projectDir, env });
       await runFixtureBackedGoogleTakeoutEnrollRunSmoke({ projectDir, env });
       await runApplePhotosSampleSmoke({ projectDir, env });
-      await assertRunsUsedInstalledProfiles(stateRoot, ["codex", "imessage", "google_takeout", "apple_photos"]);
+      await assertRunsUsedInstalledProfiles(stateRoot, ["codex", "imessage", "google-takeout", "apple-photos"]);
       await runTamperedProfileSmoke({ projectDir, env, stateRoot });
     } else {
       log("SKIP fixture-backed enroll/run smoke: reference-implementation/server/index.ts not present.");
@@ -410,7 +410,7 @@ async function runTamperedProfileSmoke({
 }
 
 /**
- * google_messages has a local-collector definition but no published, signed
+ * google-messages has a local-collector definition but no published, signed
  * Collection Profile (it needs gmcli, and the artifact builder has no tool
  * layer yet), so the collector has nothing to install. The installed CLI must
  * refuse it by name before contacting any server.
@@ -422,7 +422,7 @@ async function runUnpinnedConnectorRefusalSmoke({
   projectDir: string;
   env: NodeJS.ProcessEnv;
 }): Promise<void> {
-  log("Running installed pdpp-local-collector run --connector google_messages (unpinned)...");
+  log("Running installed pdpp-local-collector run --connector google-messages (unpinned)...");
   let failure: (Error & { stderr?: string; code?: number }) | null = null;
   try {
     await run(
@@ -434,7 +434,7 @@ async function runUnpinnedConnectorRefusalSmoke({
         "--base-url",
         "http://127.0.0.1:9",
         "--connector",
-        "google_messages",
+        "google-messages",
         "--device-id",
         "dexp_unused",
         "--device-token",
@@ -447,13 +447,13 @@ async function runUnpinnedConnectorRefusalSmoke({
   } catch (error) {
     failure = error as Error & { stderr?: string; code?: number };
   }
-  assert.ok(failure, "run --connector google_messages must fail");
+  assert.ok(failure, "run --connector google-messages must fail");
   assert.match(
     `${failure.stderr ?? ""}\n${failure.message}`,
     /no published, signed Collection Profile yet/,
-    `google_messages must be refused by name: ${failure.stderr ?? failure.message}`
+    `google-messages must be refused by name: ${failure.stderr ?? failure.message}`
   );
-  log("Unpinned-connector refusal smoke PASS: google_messages was refused by name.");
+  log("Unpinned-connector refusal smoke PASS: google-messages was refused by name.");
 }
 
 /**
@@ -987,7 +987,7 @@ async function runFixtureBackedGoogleTakeoutEnrollRunSmoke({
   const takeoutDir = await prepareGoogleTakeoutFixture();
   try {
     const codeResp = await postJson(`${baseUrl}/_ref/device-exporters/enrollment-codes`, {
-      connector_id: "google_takeout",
+      connector_id: "google-takeout",
       local_binding_name: "pack-install-run-laptop",
     });
     assert.equal(
@@ -1015,7 +1015,7 @@ async function runFixtureBackedGoogleTakeoutEnrollRunSmoke({
         "--base-url",
         baseUrl,
         "--connector",
-        "google_takeout",
+        "google-takeout",
         "--device-id",
         enrollment.device_id,
         "--device-token",
@@ -1033,7 +1033,7 @@ async function runFixtureBackedGoogleTakeoutEnrollRunSmoke({
     assert.equal(runOutput.done?.status, "succeeded");
     assert.ok(
       (runOutput.recordsQueued ?? 0) > 0,
-      `google_takeout connector did not queue any records: ${runResult.stdout}`
+      `google-takeout connector did not queue any records: ${runResult.stdout}`
     );
     assert.ok((runOutput.sentBatches ?? 0) > 0);
 
@@ -1041,7 +1041,7 @@ async function runFixtureBackedGoogleTakeoutEnrollRunSmoke({
     const persisted = (getDb() as any)
       .prepare("SELECT COUNT(*) as n FROM records WHERE connector_id = ? AND connector_instance_id = ?")
       .get("google-takeout", enrollment.connector_instance_id);
-    assert.ok(persisted.n > 0, `expected at least one persisted google_takeout record; got ${persisted.n}`);
+    assert.ok(persisted.n > 0, `expected at least one persisted google-takeout record; got ${persisted.n}`);
     log(`Google Takeout fixture-backed enroll/run smoke PASS: ${persisted.n} record(s) persisted at ingest.`);
   } finally {
     await closeServer(server);
@@ -1056,7 +1056,7 @@ const APPLE_PHOTOS_SAMPLE_LIMIT = 20;
  * Build a synthetic Photos.app export directory large enough to exercise
  * `--sample` truncation (500 files, sampled to 20), using only Node
  * built-ins (no real image bytes, no native dependency) — the same
- * primitive the packed apple_photos connector itself uses to walk an
+ * primitive the packed apple-photos connector itself uses to walk an
  * export directory.
  */
 async function prepareApplePhotosFixture(): Promise<string> {
@@ -1068,12 +1068,12 @@ async function prepareApplePhotosFixture(): Promise<string> {
 }
 
 /**
- * Fixture-backed bounded-sample smoke for apple_photos (proves the
+ * Fixture-backed bounded-sample smoke for apple-photos (proves the
  * large-file / `--sample` path against the actual packed, installed
  * tarball — not just the connector's own unit tests, which run from
  * source). Points `APPLE_PHOTOS_EXPORT_DIR` at a 500-file synthetic export
  * directory and runs the installed `pdpp-local-collector run --connector
- * apple_photos --streams photos --sample 20`. Asserts the run queues and
+ * apple-photos --streams photos --sample 20`. Asserts the run queues and
  * sends exactly the sampled 20, not the full 500, then proves a follow-up
  * full run drains everything.
  */
@@ -1098,9 +1098,9 @@ async function runApplePhotosSampleSmoke({
   const baseUrl = `http://127.0.0.1:${server.asPort}`;
   const exportDir = await prepareApplePhotosFixture();
   try {
-    log("Creating enrollment code for apple_photos...");
+    log("Creating enrollment code for apple-photos...");
     const codeResp = await postJson(`${baseUrl}/_ref/device-exporters/enrollment-codes`, {
-      connector_id: "apple_photos",
+      connector_id: "apple-photos",
       local_binding_name: "pack-install-run-apple-photos",
     });
     assert.equal(
@@ -1111,7 +1111,7 @@ async function runApplePhotosSampleSmoke({
     // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
     const enrollmentCode = (codeResp.body as any).enrollment_code;
 
-    log("Running installed pdpp-local-collector enroll for apple_photos...");
+    log("Running installed pdpp-local-collector enroll for apple-photos...");
     const enroll = await run(
       "npx",
       ["--no-install", "pdpp-local-collector", "enroll", "--base-url", baseUrl, "--code", enrollmentCode],
@@ -1119,7 +1119,7 @@ async function runApplePhotosSampleSmoke({
     );
     const enrollment = JSON.parse(enroll.stdout) as EnrollmentData;
 
-    log(`Running installed pdpp-local-collector run --connector apple_photos --sample ${APPLE_PHOTOS_SAMPLE_LIMIT}...`);
+    log(`Running installed pdpp-local-collector run --connector apple-photos --sample ${APPLE_PHOTOS_SAMPLE_LIMIT}...`);
     const queuePath = path.join(projectDir, "pack-install-run-apple-photos-outbox.json");
     const runResult = await run(
       "npx",
@@ -1130,7 +1130,7 @@ async function runApplePhotosSampleSmoke({
         "--base-url",
         baseUrl,
         "--connector",
-        "apple_photos",
+        "apple-photos",
         "--device-id",
         enrollment.device_id,
         "--device-token",
@@ -1164,7 +1164,7 @@ async function runApplePhotosSampleSmoke({
     assert.ok(outboxTotal > 0, `sample run must leave sampled work in the local outbox: ${runResult.stdout}`);
 
     log(
-      "Running installed pdpp-local-collector run --connector apple_photos (no --sample) to drain the full fixture..."
+      "Running installed pdpp-local-collector run --connector apple-photos (no --sample) to drain the full fixture..."
     );
     const fullRun = await run(
       "npx",
@@ -1175,7 +1175,7 @@ async function runApplePhotosSampleSmoke({
         "--base-url",
         baseUrl,
         "--connector",
-        "apple_photos",
+        "apple-photos",
         "--device-id",
         enrollment.device_id,
         "--device-token",
@@ -1193,7 +1193,7 @@ async function runApplePhotosSampleSmoke({
     assert.equal(
       fullRunOutput.done?.status,
       "succeeded",
-      `follow-up full apple_photos run did not report DONE.status=succeeded: ${fullRun.stdout}`
+      `follow-up full apple-photos run did not report DONE.status=succeeded: ${fullRun.stdout}`
     );
 
     // biome-ignore lint/suspicious/noExplicitAny: Preserves established ordered async behavior, boundary contract, or dynamic test-harness type where a mechanical rewrite would change semantics.
