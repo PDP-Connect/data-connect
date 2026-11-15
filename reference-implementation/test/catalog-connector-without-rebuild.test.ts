@@ -7,21 +7,24 @@
  * environment and gets a manifest-derived setup plan, with no rebuild and no
  * code change. `catalog-only-example` appears nowhere else in the repository.
  *
- * Each test guards one behavior from the era when the server consulted a
- * build-time list of connector keys:
- * - install + validation: a key outside the list had no tuning namespace, so
- *   a sibling manifest declaring another connector's knob was accepted, and
- *   the declared knob was not honored at spawn. The out-of-namespace
- *   rejection and the knob reaching the child both fail on that code.
- * - spawn: tuning bindings were kept only when a list lookup named this
- *   connector as the key's owner; a key outside the list owned nothing, so
- *   the child never saw PDPP_CATALOG_ONLY_EXAMPLE_PAGE_SIZE.
- * - setup plan: proof (`capabilities.proven.*`) was read from lists keyed by
- *   connector key, so a manifest's own claim changed nothing for a key
- *   outside them. The claimed-versus-unclaimed pair fails there.
- * - key identity: a pure-function pin that the key derives from the
- *   identifier alone. It already held before the list was deleted, so it
- *   documents the contract rather than catching that change.
+ * What each test catches:
+ * - validation: a key outside the old list had no tuning namespace, so a
+ *   sibling manifest declaring another connector's knob was accepted. The
+ *   out-of-namespace rejection fails on that code.
+ * - spawn and install-and-run: tuning bindings were kept only when a list
+ *   lookup named this connector as the key's owner, so the child never saw
+ *   PDPP_CATALOG_ONLY_EXAMPLE_PAGE_SIZE. Install-and-run installs an
+ *   executable through the real install service, registers its manifest
+ *   through the server's validation, then runs that installed entrypoint with
+ *   that registered manifest. The spawn test runs a hostile manifest that
+ *   also declares a foreign knob.
+ * - key identity and setup plan: contract pins. Both already held before the
+ *   list was deleted, because the planner reads `capabilities.proven.*` from
+ *   the manifest. They stop a later change from putting a list back; they do
+ *   not catch the removal of the old one.
+ *
+ * The catalog loader and the artifact writer are injected, so this does not
+ * exercise catalog signature verification or artifact download.
  */
 
 import assert from "node:assert/strict";
@@ -88,8 +91,67 @@ test("key identity: the registry URL and the manifest both give the catalog key"
   assert.equal(canonicalConnectorKeyFromManifest({ connector_id: REGISTRY_ID }), KEY);
 });
 
-test("install: the catalog connector installs through the real service and registers under its key", async () => {
+/** A connector executable that records the *_PAGE_SIZE variables it was started with, then reports DONE. */
+function captureScript(capturePath: string): string {
+  return `
+import { createInterface } from 'node:readline';
+import { writeFileSync } from 'node:fs';
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  if (JSON.parse(line).type !== 'START') return;
+  const seen = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.endsWith('_PAGE_SIZE')));
+  writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(seen));
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+  rl.close();
+  process.exit(0);
+});
+`;
+}
+
+/**
+ * Run `connectorPath` through runConnector with `serverEnv` applied to the
+ * server's own environment, and return the capture file it wrote. The caller
+ * owns the database and the capture path.
+ */
+async function runCapture(options: {
+  capturePath: string;
+  connectorPath: string;
+  manifest: unknown;
+  serverEnv: Record<string, string>;
+}): Promise<Record<string, string>> {
+  const prior = Object.fromEntries(Object.keys(options.serverEnv).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, options.serverEnv);
+  try {
+    const result = (await runConnector({
+      admitRunConnection: ({ connectorId }: { connectorId: string }) =>
+        Promise.resolve({ connectorId, connectorInstanceId: "cin_catalog", ownerSubjectId: "owner-1" }),
+      connectorId: REGISTRY_ID,
+      connectorInstanceId: "cin_catalog",
+      connectorPath: options.connectorPath,
+      manifest: options.manifest as RuntimeRunConnectorOptions["manifest"],
+      onInteraction: null,
+      onProgress: () => undefined,
+      ownerSubjectId: "owner-1",
+      ownerToken: "test-token",
+      persistState: false,
+      state: null,
+    } as unknown as RuntimeRunConnectorOptions)) as { status: string };
+    assert.equal(result.status, "succeeded");
+    return JSON.parse(readFileSync(options.capturePath, "utf8")) as Record<string, string>;
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+test("install and run: the installed catalog connector registers under its key and runs with its declared knob", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-without-rebuild-"));
+  const capturePath = join(dataDir, "env.json");
   const entry: ConnectorCatalogEntry = {
     bindings: { network: "required" },
     config_digest: configDigest,
@@ -108,7 +170,7 @@ test("install: the catalog connector installs through the real service and regis
         mkdirSync(join(root, "profile"), { recursive: true });
         mkdirSync(join(root, "dist"), { recursive: true });
         writeFileSync(join(root, "profile", "collection-profile.json"), JSON.stringify(exampleManifest([OWN_KNOB])));
-        writeFileSync(join(root, "dist", "collection-profile.mjs"), "export {};\n");
+        writeFileSync(join(root, "dist", "collection-profile.mjs"), captureScript(capturePath));
         writeFileSync(join(root, "provenance.json"), "{}\n");
       },
       // The real registration, so install runs the server's full manifest validation.
@@ -124,6 +186,15 @@ test("install: the catalog connector installs through the real service and regis
     assert.deepEqual((registered.runtime_requirements as { tuning_environment: string[] }).tuning_environment, [
       OWN_KNOB,
     ]);
+
+    // Run what was installed: its entrypoint with its registered manifest.
+    const seen = await runCapture({
+      capturePath,
+      connectorPath: join(active.root, active.entrypointPath),
+      manifest: registered,
+      serverEnv: { [OWN_KNOB]: "25", [OTHER_KNOB]: "9", PDPP_STRAVA_PAGE_SIZE: "50" },
+    });
+    assert.deepEqual(seen, { [OWN_KNOB]: "25" });
   } finally {
     closeDb();
     rmSync(dataDir, { force: true, recursive: true });
@@ -138,70 +209,28 @@ test("validation: its own tuning namespace is accepted and another connector's i
   );
 });
 
-/** Spawn a capture child through runConnector and return the PDPP_* tuning keys it received. */
-async function childTuningEnvironment(serverEnv: Record<string, string>): Promise<Record<string, string>> {
+test("spawn: a foreign knob a manifest declares is not handed to the child, whoever declares it", async () => {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-without-rebuild-spawn-"));
   const capturePath = join(tmpDir, "env.json");
   const connectorPath = join(tmpDir, "connector.mjs");
-  writeFileSync(
-    connectorPath,
-    `
-import { createInterface } from 'node:readline';
-import { writeFileSync } from 'node:fs';
-const rl = createInterface({ input: process.stdin, terminal: false });
-rl.on('line', (line) => {
-  if (JSON.parse(line).type !== 'START') return;
-  const seen = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.endsWith('_PAGE_SIZE')));
-  writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(seen));
-  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
-  rl.close();
-  process.exit(0);
-});
-`,
-    "utf8"
-  );
-  const prior = Object.fromEntries(Object.keys(serverEnv).map((key) => [key, process.env[key]]));
-  Object.assign(process.env, serverEnv);
+  writeFileSync(connectorPath, captureScript(capturePath), "utf8");
   initDb(":memory:");
   try {
-    // Declares the foreign knob too: validation would reject it, and the
-    // runtime must still not hand it to this connector.
-    const runManifest = exampleManifest([OWN_KNOB, OTHER_KNOB]);
-    const result = (await runConnector({
-      admitRunConnection: ({ connectorId }: { connectorId: string }) =>
-        Promise.resolve({ connectorId, connectorInstanceId: "cin_catalog", ownerSubjectId: "owner-1" }),
-      connectorId: REGISTRY_ID,
-      connectorInstanceId: "cin_catalog",
+    // Validation would reject the foreign knob; the runtime must drop it anyway.
+    const seen = await runCapture({
+      capturePath,
       connectorPath,
-      manifest: runManifest as unknown as RuntimeRunConnectorOptions["manifest"],
-      onInteraction: null,
-      onProgress: () => undefined,
-      ownerSubjectId: "owner-1",
-      ownerToken: "test-token",
-      persistState: false,
-      state: null,
-    } as unknown as RuntimeRunConnectorOptions)) as { status: string };
-    assert.equal(result.status, "succeeded");
-    return JSON.parse(readFileSync(capturePath, "utf8")) as Record<string, string>;
+      manifest: exampleManifest([OWN_KNOB, OTHER_KNOB]),
+      serverEnv: { [OWN_KNOB]: "25", [OTHER_KNOB]: "9", PDPP_STRAVA_PAGE_SIZE: "50" },
+    });
+    assert.deepEqual(seen, { [OWN_KNOB]: "25" });
   } finally {
-    for (const [key, value] of Object.entries(prior)) {
-      if (value === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = value;
-      }
-    }
     closeDb();
     rmSync(tmpDir, { force: true, recursive: true });
   }
-}
-
-test("spawn: the child receives its declared knob from the server environment and no other connector's", async () => {
-  const env = await childTuningEnvironment({ [OWN_KNOB]: "25", [OTHER_KNOB]: "9", PDPP_STRAVA_PAGE_SIZE: "50" });
-  assert.deepEqual(env, { [OWN_KNOB]: "25" });
 });
 
-test("setup plan: a proof claim in the manifest decides the path, the key does not", () => {
+test("setup plan (contract pin): a proof claim in the manifest decides the path, the key does not", () => {
   const base = exampleManifest([]) as unknown as ConnectorManifestLike;
   const local = { ...base, runtime_requirements: { bindings: { filesystem: { required: true } } } };
 
