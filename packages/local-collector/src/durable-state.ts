@@ -116,15 +116,43 @@ export function canonicalCollectorQueuePath(input: {
 const QUEUE_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
 
 /**
+ * Fold a queue's write-ahead log into the main database file so the main file
+ * alone holds every committed row. Returns false when that cannot be proven:
+ * the file is not a readable database, another process holds it (a running
+ * collector), or a sidecar still has content afterwards. Callers then leave
+ * the file where it is.
+ */
+function foldQueueIntoMainFile(path: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path);
+    const row = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy?: number } | undefined;
+    if (row?.busy) {
+      return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+  return QUEUE_SIDECAR_SUFFIXES.every((suffix) => {
+    const sidecar = `${path}${suffix}`;
+    return !existsSync(sidecar) || statSync(sidecar).size === 0;
+  });
+}
+
+/**
  * One-time migration of a queue file named before connector ids were manifest
  * keys. An older collector named the queue with the underscore spelling
  * (`claude_code.<source>.sqlite`); the same queue is now
- * `claude-code.<source>.sqlite`. When only the underscore-named file exists it
- * is renamed to the hyphen path together with its SQLite sidecars, so unsent
- * rows keep their journal and are not orphaned. When the hyphen-named file
- * exists it is authoritative and the underscore-named file is left untouched.
- * A second run finds nothing to do, and nothing reads the old spelling
- * anywhere else.
+ * `claude-code.<source>.sqlite`. When only the underscore-named file exists, its
+ * write-ahead log is first folded into the main file, so the main file is
+ * complete on its own, and then the main file is renamed. Empty sidecars left
+ * behind are removed. If the fold cannot be proven (the file is held by a
+ * running collector, or unreadable), nothing is renamed and no row is lost.
+ * When the hyphen-named file exists it is authoritative and the
+ * underscore-named file is left untouched. A second run finds nothing to do,
+ * and nothing reads the old spelling anywhere else.
  */
 function migrateUnderscoreSpelledQueue(
   canonicalPath: string,
@@ -144,9 +172,12 @@ function migrateUnderscoreSpelledQueue(
   if (legacyPath === canonicalPath || existsSync(canonicalPath) || !existsSync(legacyPath)) {
     return;
   }
+  if (!foldQueueIntoMainFile(legacyPath)) {
+    return;
+  }
   for (const suffix of QUEUE_SIDECAR_SUFFIXES) {
     if (existsSync(`${legacyPath}${suffix}`)) {
-      renameSync(`${legacyPath}${suffix}`, `${canonicalPath}${suffix}`);
+      rmSync(`${legacyPath}${suffix}`);
     }
   }
   renameSync(legacyPath, canonicalPath);
