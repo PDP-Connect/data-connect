@@ -102,14 +102,14 @@ function header(request: IncomingMessage, name: string): string | null {
 /** Chromium picks its own debugging port and records it in the profile directory. */
 async function readDevtoolsPort(profileDir: string): Promise<number> {
   const file = join(profileDir, "DevToolsActivePort");
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     if (existsSync(file)) {
       const port = Number.parseInt(readFileSync(file, "utf8").split("\n")[0] ?? "", 10);
       if (Number.isInteger(port) && port > 0) {
         return port;
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Chromium wrote no DevToolsActivePort in ${profileDir}`);
 }
