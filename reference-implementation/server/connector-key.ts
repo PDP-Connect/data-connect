@@ -77,6 +77,12 @@ export function connectorKeyFromRegistryUrl(value: unknown): string | null {
   if (!tail || tail.includes("/") || tail.includes("?") || tail.includes("#")) {
     return null;
   }
+  // A slug is a connector key. Reject what isConnectorKey rejects (whitespace,
+  // backslashes, dot segments, percent escapes) so a malformed URL tail never
+  // becomes a stored or routed id.
+  if (!CONNECTOR_KEY_PATTERN.test(tail)) {
+    return null;
+  }
   return tail;
 }
 

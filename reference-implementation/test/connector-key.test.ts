@@ -97,6 +97,14 @@ test("connectorKeyFromRegistryUrl tolerates one trailing slash", () => {
   assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}gmail//`), null);
 });
 
+test("a registry URL whose tail is not a connector key gives no key", () => {
+  for (const tail of ["gmail\\extra", "..", ".", "bad key", "gmail%2Fextra", "Gmail", "-gmail"]) {
+    assert.equal(connectorKeyFromRegistryUrl(`${REGISTRY_PREFIX}${tail}`), null, tail);
+    assert.equal(canonicalConnectorKey(`${REGISTRY_PREFIX}${tail}`), null, tail);
+    assert.equal(canonicalConnectorKeyFromManifest({ connector_id: `${REGISTRY_PREFIX}${tail}` }), null, tail);
+  }
+});
+
 test("canonicalConnectorKey accepts a bare first-party slug", () => {
   for (const key of firstPartyConnectorKeys()) {
     assert.equal(canonicalConnectorKey(key), key);
