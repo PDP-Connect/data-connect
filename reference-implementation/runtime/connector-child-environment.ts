@@ -15,7 +15,7 @@
  * becomes a `process_env` binding for that connector only. Any other
  * connector's declared keys are logical keys that need an operator binding.
  */
-import { canonicalConnectorKey, firstPartyConnectorKeys, nativeConnectorKeys } from "../server/connector-key.ts";
+import { canonicalConnectorKey, firstPartyConnectorKeys } from "../server/connector-key.ts";
 import { type ReconcileOptions, reconcileConnectorBrowsersPath } from "./browser-executable.ts";
 import { UNDECLARED_TUNING_ENVIRONMENT } from "./undeclared-tuning-environment.ts";
 
@@ -387,7 +387,7 @@ function declaredTuningKeys(manifest: unknown, connectorId: string | undefined):
     : [];
 }
 
-const TUNING_NAMESPACES = [...firstPartyConnectorKeys(), ...nativeConnectorKeys()]
+const TUNING_NAMESPACES = firstPartyConnectorKeys()
   .map((connectorKey) => ({
     connectorKey,
     prefix: `PDPP_${connectorKey.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`,

@@ -281,11 +281,11 @@ test(
 );
 
 test(
-  "a manual-default manifest does not auto-enroll but accepts an explicit owner schedule",
+  "a manual-default manifest does not auto-enroll and its refresh policy gates an owner schedule",
   withTmpDb(async () => {
     const manifest = testManifest("manual");
-    const connectorId = manifest.connector_id as string;
-    await registerConnector(manifest);
+    // An unlisted registry URL is stored under its short key, like a listed one.
+    const connectorId = await registerConnector(manifest);
     const controller = createController({});
     const summary = await autoEnrollEligibleSchedules({
       controller,
@@ -295,16 +295,17 @@ test(
     assert.equal(summary.enrolled, 0, "manual-default connectors never auto-enroll on boot");
     assert.equal(await controller.getSchedule(connectorId), null);
 
-    const result = await controller.upsertSchedule(connectorId, {
-      enabled: true,
-      interval_seconds: 21_600,
-    });
-    assert.equal(result.schedule.enabled, true);
-    assert.equal(result.schedule.ineligibility_reason ?? null, null);
-    const schedule = await controller.getSchedule(connectorId);
-    assert.ok(schedule, "explicit owner schedule should be persisted");
-    assert.equal(schedule.enabled, true);
-    assert.equal(schedule.interval_seconds, 21_600);
+    // The stored manifest's policy is honored for a connector whose key is in
+    // no generated list: enabling automatic runs is refused, as for a listed
+    // manual connector. (Before, the manifest read failed for such ids and the
+    // missing policy let the schedule through.)
+    await assert.rejects(
+      controller.upsertSchedule(connectorId, { enabled: true, interval_seconds: 21_600 }),
+      /not background-safe/
+    );
+    const paused = await controller.upsertSchedule(connectorId, { enabled: false, interval_seconds: 21_600 });
+    assert.equal(paused.schedule.enabled, false);
+    assert.equal((await controller.getSchedule(connectorId))?.interval_seconds, 21_600);
   })
 );
 

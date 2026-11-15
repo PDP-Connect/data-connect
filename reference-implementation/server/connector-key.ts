@@ -2,62 +2,37 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Canonical connector-key helpers — migration groundwork.
+ * Canonical connector-key helpers.
  *
- * The reference implementation currently uses URL-shaped first-party
- * connector ids (`https://registry.pdpp.dev/connectors/<slug>`) as the
- * operational connector type key, plus a small set of legacy local-collector
- * aliases (`claude_code`, `codex`) that map to those URLs. That overload is
- * the root cause of the `Unknown connector: https` parser bug (URL `:`
- * collided with the picker's delimiter encoding) and of the broader identity
- * confusion the `canonicalize-connector-keys` OpenSpec change addresses.
+ * The reference implementation addresses a connector by a short, path-safe
+ * key (`gmail`, `claude-code`, ...). A connector manifest can also spell its
+ * identity as a registry URL (`https://registry.pdpp.dev/connectors/<slug>`).
+ * This module turns either spelling into the key.
  *
- * This module is the additive first slice. It introduces:
+ * The functions carry no connector list. Any connector, including one
+ * installed from the signed catalog after this server was built, gets the
+ * same key it would get if it shipped in the repository. They do not decide
+ * whether a connector is allowed; install, setup, scheduling and consent
+ * decide that from the manifest.
  *
- *   - a frozen allowlist of every known first-party `connector_id` value
- *     (URL-shaped + native + legacy alias) mapped to its canonical short
- *     `connector_key` (`gmail`, `slack`, `claude-code`, `codex`, ...);
- *   - pure functions that turn any accepted shape into a canonical key, or
- *     report `null` for an unmapped third-party / custom value.
- *
- * The helpers do not mutate storage, do not rewrite any in-flight request,
- * and do not change any current call site. They exist so subsequent slices
- * (manifest registration, hosted-MCP picker payload, dashboard labels,
- * migration script) can rely on one source of truth for "what is the
- * canonical key for this connector identifier?" without re-implementing the
- * mapping inline.
- *
- * The frozen allowlist is intentional: per the design note
- * (`openspec/changes/canonicalize-connector-keys/design.md` §3), unknown
- * third-party URLs SHALL NOT be silently normalized into first-party slugs;
- * a custom manifest must declare its canonical key explicitly. Returning
- * `null` for unknown inputs preserves that fail-closed posture.
+ * `FIRST_PARTY_CONNECTOR_KEYS` stays for two uses that do not gate behavior:
+ * the test that every vendored manifest is registered, and the rule that a
+ * connector's own tuning-environment namespace must not shadow a vendored
+ * connector's.
  *
  * Keep this module pure (no DB, no fs, no network) so it stays cheap to
  * unit-test and safe to import from any layer.
  */
 
-import {
-  FIRST_PARTY_CONNECTOR_KEYS,
-  LEGACY_LOCAL_ALIASES,
-  NATIVE_CONNECTOR_KEYS,
-} from "./generated/connector-registry.generated.ts";
+import { FIRST_PARTY_CONNECTOR_KEYS, LEGACY_LOCAL_ALIASES } from "./generated/connector-registry.generated.ts";
 
 const FIRST_PARTY_REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
 
-// FIRST_PARTY_CONNECTOR_KEYS, NATIVE_CONNECTOR_KEYS, and LEGACY_LOCAL_ALIASES
-// are generated from the shipped connector manifests and the connector
-// package's own local-collector bundle registry — see
-// connector-registry.generated.ts and
-// scripts/generate-connector-registry.ts. This module only builds the
-// lookup structures (Sets/inverse maps) around that manifest-derived data;
-// it does not hand-maintain a connector-id list itself. Third-party/custom
-// connectors are unaffected: they simply are not in the generated set, and
-// `canonicalConnectorKey` already fails closed (returns `null`) for anything
-// outside it — see the module docstring above.
+// FIRST_PARTY_CONNECTOR_KEYS and LEGACY_LOCAL_ALIASES are generated from the
+// shipped connector manifests and the connector package's own local-collector
+// bundle registry; see connector-registry.generated.ts and
+// scripts/generate-connector-registry.ts.
 
-const FIRST_PARTY_CONNECTOR_KEY_SET = new Set(FIRST_PARTY_CONNECTOR_KEYS);
-const NATIVE_CONNECTOR_KEY_SET = new Set(NATIVE_CONNECTOR_KEYS);
 const LEGACY_LOCAL_ALIAS_SET = new Set(Object.keys(LEGACY_LOCAL_ALIASES));
 const CONNECTOR_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 
@@ -76,9 +51,9 @@ function trimOrNull(value: unknown): string | null {
 }
 
 /**
- * Return the canonical short connector key for a URL-shaped first-party
- * connector id (`https://registry.pdpp.dev/connectors/<slug>`), or `null`
- * if `value` is not in the first-party allowlist.
+ * Return the connector key for a registry URL
+ * (`https://registry.pdpp.dev/connectors/<slug>`), or `null` if `value` is
+ * not one.
  *
  * Trailing slashes are tolerated to match common copy/paste behavior, but
  * any additional path segments, query string, or fragment cause `null`.
@@ -102,27 +77,18 @@ export function connectorKeyFromRegistryUrl(value: unknown): string | null {
   if (!tail || tail.includes("/") || tail.includes("?") || tail.includes("#")) {
     return null;
   }
-  return FIRST_PARTY_CONNECTOR_KEY_SET.has(tail) ? tail : null;
+  return tail;
 }
 
 /**
- * Return the canonical short connector key for any accepted operational
- * `connector_id` value the reference implementation currently writes or
- * reads, or `null` if the value is not in a known shape.
+ * Return the connector key for an operational `connector_id` value, or
+ * `null` for empty or non-string input and for a malformed registry URL.
  *
- * Accepted shapes (today's union):
- *   - URL-shaped first-party id: `https://registry.pdpp.dev/connectors/<slug>`
- *   - Native bare slug from `reference-implementation/fixtures/seed-manifests/*.json`
- *     (e.g. `northstar_hr_native`)
- *   - Bare first-party canonical key (e.g. `gmail`, `claude-code`)
- *   - Legacy snake_case local-collector alias (`claude_code`, `codex`)
- *
- * Returns `null` for:
- *   - empty / non-string input
- *   - URL-shaped values that point at unknown first-party slugs (fail
- *     closed — a third-party connector must declare its own canonical key
- *     in its manifest rather than being implicitly promoted)
- *   - any other unrecognized string
+ *   - registry URL: its slug (`https://registry.pdpp.dev/connectors/gmail`
+ *     becomes `gmail`), whether or not the slug ships in this repository
+ *   - legacy snake_case local-collector alias (`claude_code`): the current key
+ *     (`claude-code`)
+ *   - anything else: the trimmed value
  *
  * Pure function: no DB, no I/O, no caching.
  *
@@ -137,25 +103,18 @@ export function canonicalConnectorKey(value: unknown): string | null {
   if (trimmed.startsWith(FIRST_PARTY_REGISTRY_PREFIX)) {
     return connectorKeyFromRegistryUrl(trimmed);
   }
-  if (FIRST_PARTY_CONNECTOR_KEY_SET.has(trimmed)) {
-    return trimmed;
-  }
-  if (NATIVE_CONNECTOR_KEY_SET.has(trimmed)) {
-    return trimmed;
-  }
   if (isLegacyLocalAliasKey(trimmed)) {
     // isLegacyLocalAliasKey already proved membership via LEGACY_LOCAL_ALIAS_SET;
-    // the `?? null` only satisfies noUncheckedIndexedAccess on the generated
+    // the `?? trimmed` only satisfies noUncheckedIndexedAccess on the generated
     // Record's index signature.
-    return LEGACY_LOCAL_ALIASES[trimmed] ?? null;
+    return LEGACY_LOCAL_ALIASES[trimmed] ?? trimmed;
   }
-  return null;
+  return trimmed;
 }
 
 /**
- * True iff `value` is a syntactically valid operational connector key.
- * Custom connectors may use keys outside the first-party allowlist, but keys
- * must stay short/path-safe and must not be registry/document URLs.
+ * True iff `value` is a syntactically valid operational connector key. Keys
+ * must stay short and path-safe and must not be registry/document URLs.
  *
  * @param {unknown} value
  * @returns {boolean}
@@ -175,9 +134,8 @@ export function isConnectorKey(value: unknown): boolean {
  * `storage_binding.connector_id` (native-style reference manifest). Returns
  * `null` if no accepted identity field yields a key.
  *
- * Custom manifests are accepted only through explicit `connector_key`; URL
- * or arbitrary-string `connector_id` values still fail closed unless they are
- * in the first-party/native/legacy allowlists above.
+ * A registry-URL `connector_id` yields its slug, so a manifest that declares
+ * only the URL still gets a key.
  *
  * @param {unknown} manifest
  * @returns {string | null}
@@ -208,10 +166,9 @@ export function canonicalConnectorKeyFromManifest(manifest: unknown): string | n
 }
 
 /**
- * True iff `value` is a URL-shaped first-party connector id (whether or
- * not its slug is in the allowlist). Used by call sites that want to
- * detect "this looks like a registry URL — refuse it on an active
- * surface" without needing to know the allowlist contents.
+ * True iff `value` is a registry-URL connector id. Used by call sites that
+ * want to detect "this looks like a registry URL — refuse it on an active
+ * surface".
  *
  * @param {unknown} value
  * @returns {boolean}
@@ -272,15 +229,11 @@ export function isInternalConnectorId(value: unknown): boolean {
 }
 
 /**
- * Read-only allowlist getters. Returned arrays/objects are frozen so
- * callers cannot accidentally mutate the shared mapping table.
+ * Read-only getters. Returned arrays/objects are frozen so callers cannot
+ * accidentally mutate the shared tables.
  */
 export function firstPartyConnectorKeys() {
   return FIRST_PARTY_CONNECTOR_KEYS;
-}
-
-export function nativeConnectorKeys() {
-  return NATIVE_CONNECTOR_KEYS;
 }
 
 export function legacyLocalAliasMap() {

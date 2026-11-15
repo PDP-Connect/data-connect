@@ -77,13 +77,11 @@ import { canonicalConnectorKey, isConnectorKey } from "../server/connector-key.t
 import {
   FIRST_PARTY_CONNECTOR_KEYS,
   LEGACY_LOCAL_ALIASES,
-  NATIVE_CONNECTOR_KEYS,
 } from "../server/generated/connector-registry.generated.ts";
 
 const trackedRegistry = {
   FIRST_PARTY_CONNECTOR_KEYS,
   LEGACY_LOCAL_ALIASES,
-  NATIVE_CONNECTOR_KEYS,
 };
 
 const riRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -261,13 +259,10 @@ test("counterweight: a custom third-party connector_id, unknown to every generat
   assert.equal(staticSecret.supportState, "experimental");
   assert.equal(staticSecret.catalogDisposition, "static_secret_experimental");
 
-  // canonicalConnectorKey must fail closed for this id in URL-shaped form:
-  // a third party cannot get its own registry-URL-shaped connector_id
-  // silently promoted into the first-party allowlist.
-  assert.equal(canonicalConnectorKey(`https://registry.pdpp.dev/connectors/${thirdPartyId}`), null);
-  // But a bare custom connector_key (not URL-shaped) is still a syntactically
-  // valid key a custom manifest may declare — the fail-closed behavior only
-  // applies to the registry-URL namespace, not to bare custom keys.
+  // canonicalConnectorKey carries no connector list, so the third-party id
+  // resolves to its key in URL form and bare form alike.
+  assert.equal(canonicalConnectorKey(`https://registry.pdpp.dev/connectors/${thirdPartyId}`), thirdPartyId);
+  assert.equal(canonicalConnectorKey(thirdPartyId), thirdPartyId);
   assert.equal(isConnectorKey(thirdPartyId), true);
 });
 
@@ -275,11 +270,7 @@ test("cli/commands/seed.ts: seedableConnectorsFromManifests intersects manifest 
   const manifests = [
     { connector_id: "https://registry.pdpp.dev/connectors/acme", connector_key: "acme" },
     // connector_key present, no top-level connector_id — the shape a custom
-    // manifest without a registry URL can still declare (canonicalConnectorKey
-    // fails closed on bare, non-URL-shaped connector_id values it doesn't
-    // already recognize, matching connector-key.ts's documented fail-closed
-    // posture — so a manifest identifying itself this way must use
-    // connector_key directly).
+    // manifest without a registry URL can declare.
     { connector_key: "bravo" },
     // provider_id-shaped fixtures (no connector_id/connector_key) are
     // correctly excluded — same rule northstar-hr.json exercises for real.

@@ -821,3 +821,57 @@ test("validateConnectorManifest accepts a well-formed secret credential_capture 
 test("validateConnectorManifest accepts a manifest with no credential_capture at all", () => {
   assert.doesNotThrow(() => validateConnectorManifest(manifestWithStream({})));
 });
+
+// ─── connector_id / connector_key identity ────────────────────────────────
+//
+// The check holds no connector list: a registry-URL connector_id is valid when
+// its slug equals connector_key, whether or not this repository ships it.
+
+const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
+
+function manifestWithIdentity(identity: { connector_id?: string; connector_key?: string }) {
+  const { connector_key: _key, ...rest } = manifestWithStream();
+  return { ...rest, ...identity };
+}
+
+test("a registry-URL connector_id whose slug equals connector_key validates, shipped or not", () => {
+  for (const slug of ["gmail", "whatsapp-web", "acme-widgets"]) {
+    assert.doesNotThrow(() =>
+      validateConnectorManifest(
+        manifestWithIdentity({ connector_id: `${REGISTRY_URL_PREFIX}${slug}`, connector_key: slug })
+      )
+    );
+  }
+});
+
+test("a registry-URL connector_id whose slug differs from connector_key is refused, shipped or not", () => {
+  for (const slug of ["gmail", "acme-widgets"]) {
+    assert.throws(
+      () =>
+        validateConnectorManifest(
+          manifestWithIdentity({ connector_id: `${REGISTRY_URL_PREFIX}${slug}`, connector_key: "other-key" })
+        ),
+      /connector_key must match the canonical key for connector_id/
+    );
+  }
+});
+
+test("a bare connector_id that differs from connector_key is refused with the provenance hint", () => {
+  assert.throws(
+    () => validateConnectorManifest(manifestWithIdentity({ connector_id: "acme-widgets", connector_key: "other-key" })),
+    /connector_id must match connector_key; use manifest_uri/
+  );
+  assert.doesNotThrow(() =>
+    validateConnectorManifest(manifestWithIdentity({ connector_id: "acme-widgets", connector_key: "acme-widgets" }))
+  );
+});
+
+test("a connector_id on another host that differs from connector_key is refused with the provenance hint", () => {
+  assert.throws(
+    () =>
+      validateConnectorManifest(
+        manifestWithIdentity({ connector_id: "https://example.test/connectors/acme", connector_key: "acme" })
+      ),
+    /connector_id must match connector_key; use manifest_uri/
+  );
+});

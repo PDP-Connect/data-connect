@@ -2434,7 +2434,7 @@ rl.on('line', (line) => {
         return;
       }
 
-      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(manifest.connector_id)}`) {
+      if (req.method === "PUT" && url.pathname === `/v1/state/${encodeURIComponent(canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id)}`) {
         let body = "";
         for await (const chunk of req) {
           body += chunk;
@@ -2542,7 +2542,7 @@ rl.on('line', (line) => {
 
       for (const event of [...advancedEvents, failedEvent]) {
         assert.equal(event.data.source?.kind, "connector");
-        assert.equal(event.data.source?.id, manifest.connector_id);
+        assert.equal(event.data.source?.id, canonicalConnectorKey(manifest.connector_id));
         assert.ok(
           !("connector_id" in event.data),
           `${event.event_type} should use source descriptors instead of raw connector_id`

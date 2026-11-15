@@ -12,7 +12,7 @@ import {
   credentialValidationMode,
 } from "./polyfill-connectors-runtime.ts";
 import type { CredentialValidationMode } from "./polyfill-connectors-runtime.ts";
-import { legacyLocalAliasMap } from "./connector-key.ts";
+import { canonicalConnectorKey as serverCanonicalConnectorKey, legacyLocalAliasMap } from "./connector-key.ts";
 
 export type ConnectorIntentModality = "local_collector" | "browser_bound" | "api_network" | "unknown";
 
@@ -389,19 +389,14 @@ const READY_DEPLOYMENT_READINESS: ConnectorSetupDeploymentReadiness = Object.fre
   state: "ready",
 });
 
-const FIRST_PARTY_REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
 const SECRET_DEPLOYMENT_KEY_RE = /SECRET|TOKEN|PASSWORD|KEY/i;
-const TRAILING_SLASH_RE = /\/$/;
 
-function stripRegistryPrefix(connectorId: string): string {
-  if (connectorId.startsWith(FIRST_PARTY_REGISTRY_PREFIX)) {
-    return connectorId.slice(FIRST_PARTY_REGISTRY_PREFIX.length).replace(TRAILING_SLASH_RE, "");
-  }
-  return connectorId;
-}
-
+/**
+ * The connector key for an id, by the one list-free rule in `connector-key.ts`.
+ * An id that rule rejects (a malformed registry URL) comes back trimmed.
+ */
 export function canonicalConnectorKey(connectorId: string): string {
-  return stripRegistryPrefix(connectorId.trim());
+  return serverCanonicalConnectorKey(connectorId) ?? connectorId.trim();
 }
 
 export function connectorKeyFromManifest(manifest: ConnectorManifestLike, fallback?: string | null): string | null {
