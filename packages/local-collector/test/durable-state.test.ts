@@ -228,7 +228,7 @@ test("the same source resolves to the same state across cwd and install roots", 
   });
 });
 
-test("a queue file named with the legacy underscore connector id keeps being used; a new device gets the hyphen name", () => {
+test("a queue file named with the legacy underscore connector id is renamed once, with its sidecars; a new device gets the hyphen name", () => {
   withTempRoot("pdpp-durable-state-underscore-", (root) => {
     const stateRoot = join(root, "state");
     const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
@@ -239,30 +239,72 @@ test("a queue file named with the legacy underscore connector id keeps being use
     });
     assert.notEqual(hyphenPath, underscorePath);
 
-    // No file yet: a fresh device is given the hyphen-named path.
+    // No file yet: a fresh device is given the hyphen-named path and nothing is created.
     assert.equal(
       resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
       hyphenPath
     );
+    assert.equal(existsSync(underscorePath), false);
 
-    // An existing device holds the underscore-named queue: it is used in place.
-    mkdirSync(dirname(underscorePath), { recursive: true });
-    const legacyOutbox = new LocalDeviceOutbox({ path: underscorePath });
-    legacyOutbox.close();
-    assert.equal(
-      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
-      underscorePath
-    );
-    assert.equal(existsSync(hyphenPath), false);
-
-    // Once the hyphen-named queue exists it wins, and the legacy file is left alone.
-    const hyphenOutbox = new LocalDeviceOutbox({ path: hyphenPath });
-    hyphenOutbox.close();
+    // An existing device holds the underscore-named queue: it moves to the hyphen name.
+    seedOutbox(underscorePath, SOURCE_A);
     assert.equal(
       resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
       hyphenPath
     );
-    assert.equal(existsSync(underscorePath), true);
+    assert.equal(existsSync(underscorePath), false);
+    assert.equal(existsSync(hyphenPath), true);
+    assert.equal(sourceSummary(hyphenPath, SOURCE_A), 1, "the queue's rows moved with the file");
+
+    // A second resolve has nothing to do.
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+  });
+});
+
+test("the SQLite sidecars of an underscore-named queue move with it", () => {
+  withTempRoot("pdpp-durable-state-underscore-sidecar-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(underscorePath, SOURCE_A);
+    // Empty sidecars are valid to SQLite, so the moved queue still opens.
+    for (const suffix of ["-wal", "-shm"]) {
+      writeFileSync(`${underscorePath}${suffix}`, "");
+    }
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    for (const suffix of ["", "-wal", "-shm"]) {
+      assert.equal(existsSync(`${underscorePath}${suffix}`), false);
+      assert.equal(existsSync(`${hyphenPath}${suffix}`), true);
+    }
+  });
+});
+
+test("an underscore-named queue beside a hyphen-named one is left alone; the hyphen one wins", () => {
+  withTempRoot("pdpp-durable-state-underscore-both-", (root) => {
+    const stateRoot = join(root, "state");
+    const hyphenPath = canonicalCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot });
+    const underscorePath = canonicalCollectorQueuePath({
+      connectorId: "claude_code",
+      sourceInstanceId: SOURCE_A,
+      stateRoot,
+    });
+    seedOutbox(hyphenPath, SOURCE_A);
+    seedOutbox(underscorePath, SOURCE_A);
+    assert.equal(
+      resolveCollectorQueuePath({ connectorId: "claude-code", sourceInstanceId: SOURCE_A, stateRoot }),
+      hyphenPath
+    );
+    assert.equal(existsSync(underscorePath), true, "no data is deleted when both exist");
   });
 });
 
