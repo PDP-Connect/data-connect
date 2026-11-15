@@ -604,9 +604,9 @@ function validateLocalPaths(req: Record<string, unknown>, code: string): void {
 const TUNING_ENVIRONMENT_KEY = /^[A-Z][A-Z0-9_]*$/;
 
 // Validates `runtime_requirements.tuning_environment`: the operator tuning
-// knobs a connector reads. A first-party manifest may only declare keys in its
-// own PDPP_<KEY>_ namespace; the runtime would drop any other key at spawn, so
-// the mistake fails here instead of silently at run time.
+// knobs a connector reads. A connector may only declare keys in the
+// PDPP_<KEY>_ namespace of its own key; the runtime would drop any other key at
+// spawn, so the mistake fails here instead of silently at run time.
 function validateTuningEnvironment(manifest: Record<string, unknown>, req: Record<string, unknown>, code: string) {
   const declared = req.tuning_environment;
   if (declared === undefined) {
@@ -616,7 +616,9 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
     throw invalidConnectorManifest("runtime_requirements.tuning_environment must be an array when declared", code);
   }
   // The same identity registration stores and the runtime spawns with.
-  const firstPartyKey = canonicalConnectorKey(canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id);
+  const ownKey =
+    canonicalConnectorKeyFromManifest(manifest) ??
+    (typeof manifest.connector_id === "string" ? manifest.connector_id.trim() : null);
   const seen = new Set<string>();
   for (const [index, key] of declared.entries()) {
     if (typeof key !== "string" || !TUNING_ENVIRONMENT_KEY.test(key)) {
@@ -629,9 +631,9 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
       throw invalidConnectorManifest(`runtime_requirements.tuning_environment duplicates ${key}`, code);
     }
     seen.add(key);
-    if (firstPartyKey !== null && tuningEnvironmentKeyOwner(key) !== firstPartyKey) {
+    if (ownKey !== null && isConnectorKey(ownKey) && tuningEnvironmentKeyOwner(key, ownKey) !== ownKey) {
       throw invalidConnectorManifest(
-        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${firstPartyKey} tuning namespace`,
+        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${ownKey} tuning namespace`,
         code
       );
     }

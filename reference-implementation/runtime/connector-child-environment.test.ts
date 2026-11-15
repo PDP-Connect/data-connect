@@ -368,12 +368,20 @@ test("a declaring manifest replaces the transitional tuning table, even when emp
 
 test("a third-party manifest cannot select an ambient tuning value without an operator binding", () => {
   const connectorId = "https://registry.example.com/connectors/database";
-  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_DATABASE_URL", "EXAMPLE_PAGE_SIZE"] } };
-  const sourceEnv = { EXAMPLE_PAGE_SIZE: "25", PDPP_DATABASE_URL: "postgres://secret" };
+  const manifest = {
+    runtime_requirements: {
+      tuning_environment: ["PDPP_DATABASE_URL", "PDPP_EXAMPLE_PAGE_SIZE", "EXAMPLE_PAGE_SIZE"],
+    },
+  };
+  const sourceEnv = {
+    EXAMPLE_PAGE_SIZE: "25",
+    PDPP_DATABASE_URL: "postgres://secret",
+    PDPP_EXAMPLE_PAGE_SIZE: "30",
+  };
 
   assert.deepEqual(compose(manifest, sourceEnv, { connectorId }), {});
-  // Unknown bare identities get no namespace either.
-  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "database" }), {});
+  // A bare key owns only its own namespace, not a sibling's or an unscoped key.
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "example" }), { PDPP_EXAMPLE_PAGE_SIZE: "30" });
   assert.deepEqual(
     compose(manifest, sourceEnv, {
       approvedBindings: [processBinding("EXAMPLE_PAGE_SIZE", "EXAMPLE_PAGE_SIZE", "EXAMPLE_PAGE_SIZE", connectorId)],

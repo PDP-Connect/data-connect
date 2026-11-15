@@ -281,6 +281,40 @@ test("validateRuntimeRequirements: external_tools is NOT validated when bindings
 
 // --- tuning_environment -----------------------------------------------------
 
+test("unlisted connector keys own only their tuning namespace", () => {
+  const declared = (keys: string[]) => ({
+    connector_key: "whatsapp-web",
+    runtime_requirements: { tuning_environment: keys },
+  });
+  assert.equal(validateRuntimeRequirements(declared(["PDPP_WHATSAPP_WEB_PAGE_SIZE"]), CODE), undefined);
+  for (const key of ["EXAMPLE_PAGE_SIZE", "PDPP_GMAIL_MAX_ATTACHMENT_BYTES"]) {
+    assertRejects(declared([key]), "outside the whatsapp-web tuning namespace");
+  }
+});
+
+test("tuning namespaces use the longest first-party prefix", () => {
+  for (const [connector_key, key] of [
+    ["google", "PDPP_GOOGLE_MAPS_PAGE_SIZE"],
+    ["google_maps", "PDPP_GOOGLE_MAPS_PAGE_SIZE"],
+    ["google-maps", "PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"],
+  ]) {
+    assertRejects(
+      { connector_key, runtime_requirements: { tuning_environment: [key] } },
+      `outside the ${connector_key} tuning namespace`
+    );
+  }
+  assert.equal(
+    validateRuntimeRequirements(
+      {
+        connector_key: "google-maps-data-portability",
+        runtime_requirements: { tuning_environment: ["PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"] },
+      },
+      CODE
+    ),
+    undefined
+  );
+});
+
 function withTuning(connector_id: string, tuning_environment: unknown): Record<string, unknown> {
   return { connector_id, runtime_requirements: { tuning_environment } };
 }

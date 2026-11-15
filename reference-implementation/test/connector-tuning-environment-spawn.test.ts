@@ -100,6 +100,22 @@ const SERVER_ENV = {
   PDPP_STRAVA_PAGE_SIZE: "50",
 };
 
+test("an unlisted child receives only its own declared tuning knob", async () => {
+  const connectorId = "whatsapp-web";
+  const env = await childTuningEnvironment(
+    connectorId,
+    manifest(connectorId, {
+      tuning_environment: ["PDPP_WHATSAPP_WEB_PAGE_SIZE", "PDPP_GMAIL_MAX_ATTACHMENT_BYTES"],
+    }),
+    {
+      PDPP_GMAIL_MAX_ATTACHMENT_BYTES: "1024",
+      PDPP_STRAVA_PAGE_SIZE: "50",
+      PDPP_WHATSAPP_WEB_PAGE_SIZE: "25",
+    }
+  );
+  assert.deepEqual(env, { PDPP_WHATSAPP_WEB_PAGE_SIZE: "25" });
+});
+
 test("a real ChatGPT child receives its own undeclared knob and not Gmail's", async () => {
   const connectorId = "https://registry.pdpp.dev/connectors/chatgpt";
   const env = await childTuningEnvironment(connectorId, manifest(connectorId), SERVER_ENV);

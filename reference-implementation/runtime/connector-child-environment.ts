@@ -9,13 +9,13 @@
  * environment variable. Reserved names cannot enter through an installation
  * binding or the connection fragment.
  *
- * One exception, bounded by identity: a first-party connector may declare
+ * One exception, bounded by identity: any connector may declare
  * `runtime_requirements.tuning_environment`, the operator tuning knobs it
  * reads. Each declared key inside the connector's own `PDPP_<KEY>_` namespace
- * becomes a `process_env` binding for that connector only. Any other
- * connector's declared keys are logical keys that need an operator binding.
+ * becomes a `process_env` binding for that connector only. Keys outside that
+ * namespace still need an operator binding.
  */
-import { canonicalConnectorKey, firstPartyConnectorKeys, nativeConnectorKeys } from "../server/connector-key.ts";
+import { firstPartyConnectorKeys, isConnectorKey } from "../server/connector-key.ts";
 import { type ReconcileOptions, reconcileConnectorBrowsersPath } from "./browser-executable.ts";
 import { UNDECLARED_TUNING_ENVIRONMENT } from "./undeclared-tuning-environment.ts";
 
@@ -387,36 +387,51 @@ function declaredTuningKeys(manifest: unknown, connectorId: string | undefined):
     : [];
 }
 
-const TUNING_NAMESPACES = [...firstPartyConnectorKeys(), ...nativeConnectorKeys()]
-  .map((connectorKey) => ({
-    connectorKey,
-    prefix: `PDPP_${connectorKey.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`,
-  }))
-  // Longest prefix first: PDPP_GOOGLE_MAPS_DATA_PORTABILITY_X belongs to
-  // google-maps-data-portability, not google-maps.
-  .sort((a, b) => b.prefix.length - a.prefix.length);
+/** The environment-key prefix a connector's own tuning keys live under. */
+export function tuningNamespacePrefix(connectorKey: string): string {
+  return `PDPP_${connectorKey.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`;
+}
+
+// The first-party registry is consulted only so a connector cannot claim a key
+// in a first-party namespace by sharing its leading words (a connector named
+// `google` against PDPP_GOOGLE_MAPS_PAGE_SIZE). It never limits a connector's
+// own namespace.
+const FIRST_PARTY_TUNING_NAMESPACES = firstPartyConnectorKeys().map((connectorKey) => ({
+  connectorKey,
+  prefix: tuningNamespacePrefix(connectorKey),
+}));
 
 /**
- * The canonical connector key that owns a tuning key, or null. A connector
- * owns the keys in its `PDPP_<KEY>_` namespace. Only canonical keys from the
- * shipped first-party registry have a namespace, so a third-party or
- * unrecognized identity owns no ambient key. Reserved and proxy keys have no
- * owner.
+ * The connector key that owns a tuning key, or null. A connector owns the
+ * keys in the `PDPP_<KEY>_` namespace of its own key (`ownKey`), whether or not
+ * it is a first-party connector. The longest matching namespace wins, so
+ * PDPP_GOOGLE_MAPS_DATA_PORTABILITY_X belongs to google-maps-data-portability,
+ * not google-maps. A first-party namespace wins a prefix tie with `ownKey`.
+ * Reserved and proxy keys have no owner.
  */
-export function tuningEnvironmentKeyOwner(key: string): string | null {
+export function tuningEnvironmentKeyOwner(key: string, ownKey?: string): string | null {
   if (reserved(key) || proxyKey(key)) {
     return null;
   }
-  const match = TUNING_NAMESPACES.find(({ prefix }) => key.startsWith(prefix) && key.length > prefix.length);
+  const namespaces = [...FIRST_PARTY_TUNING_NAMESPACES];
+  if (ownKey !== undefined) {
+    const prefix = tuningNamespacePrefix(ownKey);
+    if (!namespaces.some((namespace) => namespace.prefix === prefix)) {
+      namespaces.push({ connectorKey: ownKey, prefix });
+    }
+  }
+  const match = namespaces
+    .sort((a, b) => b.prefix.length - a.prefix.length)
+    .find(({ prefix }) => key.startsWith(prefix) && key.length > prefix.length);
   return match?.connectorKey ?? null;
 }
 
 function tuningBindings(connectorId: string | undefined, keys: readonly string[]): ConnectorEnvironmentBinding[] {
-  if (connectorId === undefined || canonicalConnectorKey(connectorId) !== connectorId) {
+  if (connectorId === undefined || !isConnectorKey(connectorId)) {
     return [];
   }
   return keys
-    .filter((key) => tuningEnvironmentKeyOwner(key) === connectorId)
+    .filter((key) => tuningEnvironmentKeyOwner(key, connectorId) === connectorId)
     .map((key) => ({ connectorId, logicalKey: key, source: { key, kind: "process_env" }, targetKey: key }));
 }
 
