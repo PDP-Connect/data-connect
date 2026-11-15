@@ -285,15 +285,23 @@ function withTuning(connector_id: string, tuning_environment: unknown): Record<s
   return { connector_id, runtime_requirements: { tuning_environment } };
 }
 
-test("validateRuntimeRequirements: tuning_environment accepts keys in the first-party namespace", () => {
+test("validateRuntimeRequirements: tuning_environment accepts keys in the connector's own namespace", () => {
   const chatgpt = "https://registry.pdpp.dev/connectors/chatgpt";
   assert.equal(validateRuntimeRequirements(withTuning(chatgpt, ["PDPP_CHATGPT_PACING_MIN_INTERVAL_MS"]), CODE), undefined);
   assert.equal(validateRuntimeRequirements(withTuning(chatgpt, []), CODE), undefined);
-  // A third-party manifest has no namespace; its keys still need an operator binding.
-  assert.equal(
-    validateRuntimeRequirements(withTuning("https://registry.example.com/connectors/x", ["EXAMPLE_PAGE_SIZE"]), CODE),
-    undefined
-  );
+});
+
+test("validateRuntimeRequirements: a connector in no list owns its own PDPP_<KEY>_ namespace and no other", () => {
+  // The key `acme-widgets` appears in no list. Its own namespace is accepted;
+  // another connector's namespace and a bare key are rejected, as for any manifest.
+  const acme = { connector_key: "acme-widgets" };
+  const declare = (...keys: string[]) => ({ ...acme, runtime_requirements: { tuning_environment: keys } });
+  assert.equal(validateRuntimeRequirements(declare("PDPP_ACME_WIDGETS_PAGE_SIZE"), CODE), undefined);
+  assertRejects(declare("PDPP_OTHER_PAGE_SIZE"), "PDPP_OTHER_PAGE_SIZE is outside the acme-widgets tuning namespace");
+  assertRejects(declare("EXAMPLE_PAGE_SIZE"), "EXAMPLE_PAGE_SIZE is outside the acme-widgets tuning namespace");
+  assertRejects(declare("PDPP_ACME_WIDGETS_"), "outside the acme-widgets tuning namespace");
+  // A manifest identified only by a foreign registry URL has no usable namespace.
+  assertRejects(withTuning("https://registry.example.com/connectors/x", ["EXAMPLE_PAGE_SIZE"]), "tuning namespace");
 });
 
 test("validateRuntimeRequirements: tuning_environment is validated even without bindings", () => {

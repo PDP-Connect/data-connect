@@ -15,21 +15,11 @@
  * whether a connector is allowed; install, setup, scheduling and consent
  * decide that from the manifest.
  *
- * `FIRST_PARTY_CONNECTOR_KEYS` stays for two uses that do not gate behavior:
- * the test that every vendored manifest is registered, and the rule that a
- * connector's own tuning-environment namespace must not shadow a vendored
- * connector's.
- *
  * Keep this module pure (no DB, no fs, no network) so it stays cheap to
  * unit-test and safe to import from any layer.
  */
 
-import { FIRST_PARTY_CONNECTOR_KEYS } from "./generated/connector-registry.generated.ts";
-
 const FIRST_PARTY_REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
-
-// FIRST_PARTY_CONNECTOR_KEYS is generated from the shipped connector manifests;
-// see connector-registry.generated.ts and scripts/generate-connector-registry.ts.
 
 const CONNECTOR_KEY_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 
@@ -200,12 +190,4 @@ export function isInternalConnectorId(value: unknown): boolean {
     return false;
   }
   return INTERNAL_CONNECTOR_ID_PARTS.some((part) => trimmed.includes(part));
-}
-
-/**
- * Read-only getters. Returned arrays/objects are frozen so callers cannot
- * accidentally mutate the shared tables.
- */
-export function firstPartyConnectorKeys() {
-  return FIRST_PARTY_CONNECTOR_KEYS;
 }

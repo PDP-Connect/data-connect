@@ -107,7 +107,7 @@ test("a real ChatGPT child receives its own undeclared knob and not Gmail's", as
   assert.deepEqual(env, { PDPP_CHATGPT_PACING_MIN_INTERVAL_MS: "250" });
 });
 
-test("a real child receives a knob its first-party manifest declares", async () => {
+test("a real child receives a knob its manifest declares in its own namespace", async () => {
   const connectorId = "https://registry.pdpp.dev/connectors/strava";
   const env = await childTuningEnvironment(
     connectorId,
@@ -127,4 +127,17 @@ test("a real third-party child receives no declared knob without an operator bin
   );
 
   assert.deepEqual(env, {});
+});
+
+test("a real child of a connector in no list receives its own declared knob and not an out-of-namespace one", async () => {
+  const connectorId = "acme-widgets";
+  const env = await childTuningEnvironment(
+    connectorId,
+    manifest(connectorId, {
+      tuning_environment: ["PDPP_ACME_WIDGETS_PAGE_SIZE", "PDPP_OTHER_PAGE_SIZE"],
+    }),
+    { ...SERVER_ENV, PDPP_ACME_WIDGETS_PAGE_SIZE: "7", PDPP_OTHER_PAGE_SIZE: "9" }
+  );
+
+  assert.deepEqual(env, { PDPP_ACME_WIDGETS_PAGE_SIZE: "7" });
 });

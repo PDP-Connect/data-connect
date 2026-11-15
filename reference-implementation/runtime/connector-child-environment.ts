@@ -9,13 +9,13 @@
  * environment variable. Reserved names cannot enter through an installation
  * binding or the connection fragment.
  *
- * One exception, bounded by identity: a first-party connector may declare
+ * One exception, bounded by identity: a connector may declare
  * `runtime_requirements.tuning_environment`, the operator tuning knobs it
  * reads. Each declared key inside the connector's own `PDPP_<KEY>_` namespace
- * becomes a `process_env` binding for that connector only. Any other
- * connector's declared keys are logical keys that need an operator binding.
+ * becomes a `process_env` binding for that connector only. A declared key
+ * outside that namespace, or a reserved or proxy key, gets no binding.
  */
-import { canonicalConnectorKey, firstPartyConnectorKeys } from "../server/connector-key.ts";
+import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { type ReconcileOptions, reconcileConnectorBrowsersPath } from "./browser-executable.ts";
 import { UNDECLARED_TUNING_ENVIRONMENT } from "./undeclared-tuning-environment.ts";
 
@@ -387,28 +387,28 @@ function declaredTuningKeys(manifest: unknown, connectorId: string | undefined):
     : [];
 }
 
-const TUNING_NAMESPACES = firstPartyConnectorKeys()
-  .map((connectorKey) => ({
-    connectorKey,
-    prefix: `PDPP_${connectorKey.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`,
-  }))
-  // Longest prefix first: PDPP_GOOGLE_MAPS_DATA_PORTABILITY_X belongs to
-  // google-maps-data-portability, not google-maps.
-  .sort((a, b) => b.prefix.length - a.prefix.length);
+/**
+ * The environment-key prefix of a connector's own tuning namespace:
+ * `PDPP_<KEY>_`, where `<KEY>` is the canonical connector key upper-cased with
+ * every character outside `A-Z0-9` replaced by `_`.
+ */
+export function tuningNamespacePrefix(connectorKey: string): string {
+  return `PDPP_${connectorKey.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_`;
+}
 
 /**
- * The canonical connector key that owns a tuning key, or null. A connector
- * owns the keys in its `PDPP_<KEY>_` namespace. Only canonical keys from the
- * shipped first-party registry have a namespace, so a third-party or
- * unrecognized identity owns no ambient key. Reserved and proxy keys have no
- * owner.
+ * True when `key` is a tuning key the connector with canonical key
+ * `connectorKey` owns: a key inside its `PDPP_<KEY>_` namespace with a
+ * non-empty remainder. Reserved and proxy keys are never owned. The rule reads
+ * no connector list, so a connector installed from the signed catalog owns its
+ * namespace the same way a vendored one does.
  */
-export function tuningEnvironmentKeyOwner(key: string): string | null {
+export function ownsTuningKey(connectorKey: string, key: string): boolean {
   if (reserved(key) || proxyKey(key)) {
-    return null;
+    return false;
   }
-  const match = TUNING_NAMESPACES.find(({ prefix }) => key.startsWith(prefix) && key.length > prefix.length);
-  return match?.connectorKey ?? null;
+  const prefix = tuningNamespacePrefix(connectorKey);
+  return key.startsWith(prefix) && key.length > prefix.length;
 }
 
 function tuningBindings(connectorId: string | undefined, keys: readonly string[]): ConnectorEnvironmentBinding[] {
@@ -416,7 +416,7 @@ function tuningBindings(connectorId: string | undefined, keys: readonly string[]
     return [];
   }
   return keys
-    .filter((key) => tuningEnvironmentKeyOwner(key) === connectorId)
+    .filter((key) => ownsTuningKey(connectorId, key))
     .map((key) => ({ connectorId, logicalKey: key, source: { key, kind: "process_env" }, targetKey: key }));
 }
 

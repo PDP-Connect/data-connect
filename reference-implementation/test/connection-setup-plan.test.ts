@@ -6,6 +6,7 @@ import test from "node:test";
 import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import type { ConnectorManifestLike } from "../server/connection-setup-plan.ts";
+import { canonicalConnectorKey, isConnectorKey } from "../server/connector-key.ts";
 import {
   browserEnrollmentSupport,
   buildConnectionSetupPlan,
@@ -677,4 +678,132 @@ test("classifyConnectorIntentModality preserves filesystem over browser over net
   assert.equal(classifyConnectorIntentModality(manifest("x", { browser: {}, network: {} })), "browser_bound");
   assert.equal(classifyConnectorIntentModality(manifest("x", { browser: {}, filesystem: {} })), "local_collector");
   assert.equal(classifyConnectorIntentModality(null), "unknown");
+});
+
+function customManifest(
+  connectorId: string,
+  bindings: Readonly<Record<string, unknown>>,
+  extra: Partial<ConnectorManifestLike> = {}
+): ConnectorManifestLike {
+  return {
+    connector_id: connectorId,
+    connector_key: connectorId,
+    display_name: "A Third-Party Connector",
+    runtime_requirements: { bindings },
+    ...extra,
+  };
+}
+
+test("counterweight: a custom third-party connector_id, unknown to every shipped manifest, still classifies purely from its own manifest traits", () => {
+  const thirdPartyId = "acme-widgets-tracker";
+  assert.ok(
+    !readPolyfillManifests().some(({ manifest }) => (manifest as { connector_key?: unknown }).connector_key === thirdPartyId),
+    "test fixture collided with a real shipped connector key"
+  );
+
+  // A third-party filesystem connector that declares the exact same proof
+  // trait a first-party one would (capabilities.proven.local_collector) must
+  // be treated identically to a first-party proven connector — proving the
+  // RI reads the trait, not a hardcoded id.
+  const provenLocalCollector = buildConnectionSetupPlan({
+    connectorKey: thirdPartyId,
+    manifest: customManifest(
+      thirdPartyId,
+      { filesystem: { required: true } },
+      { capabilities: { proven: undefined } as never }
+    ),
+  });
+  assert.equal(provenLocalCollector.connectorModality, "local_collector");
+  assert.equal(
+    provenLocalCollector.supportState,
+    "proof_gated",
+    "an unproven third-party filesystem connector must stay proof-gated, exactly like an unproven first-party one"
+  );
+
+  // A third-party browser-bound connector: classification must come from
+  // runtime_requirements.bindings.browser, not from a connector list.
+  const browserBound = buildConnectionSetupPlan({
+    connectorKey: thirdPartyId,
+    manifest: customManifest(thirdPartyId, { browser: { required: true } }),
+  });
+  assert.equal(browserBound.connectorModality, "browser_bound");
+  // Not a known scaffold, so the shared browserEnrollmentSupport rule offers
+  // browser setup exactly as it would for a bundled connector.
+  assert.equal(browserBound.catalogDisposition, "browser_collector_manual");
+
+  // A third-party static-secret connector with a real credential_capture
+  // block reaches the same generic experimental path a first-party
+  // connector without a live-proof entry would — proving the classifier
+  // reads setup.credential_capture, not capabilities.proven.static_secret_live
+  // membership.
+  const staticSecret = buildConnectionSetupPlan({
+    connectorKey: thirdPartyId,
+    manifest: customManifest(
+      thirdPartyId,
+      { network: { required: true } },
+      {
+        setup: {
+          credential_capture: {
+            fields: [
+              {
+                env: ["ACME_WIDGETS_API_KEY"],
+                label: "API key",
+                name: "secret",
+                required: true,
+                secret: true,
+                type: "password",
+              },
+            ],
+            kind: "api_key",
+            label: "Acme Widgets API key",
+          },
+          modality: "static_secret",
+        },
+      }
+    ),
+  });
+  assert.equal(staticSecret.setupModality, "static_secret");
+  assert.equal(staticSecret.supportState, "experimental");
+  assert.equal(staticSecret.catalogDisposition, "static_secret_experimental");
+
+  // canonicalConnectorKey carries no connector list, so the third-party id
+  // resolves to its key in URL form and bare form alike.
+  assert.equal(canonicalConnectorKey(`https://registry.pdpp.dev/connectors/${thirdPartyId}`), thirdPartyId);
+  assert.equal(canonicalConnectorKey(thirdPartyId), thirdPartyId);
+  assert.equal(isConnectorKey(thirdPartyId), true);
+});
+
+test("classifyConnectorSetupModality never special-cases a specific connector id", () => {
+  // A first-party-shaped id and a third-party id with byte-identical
+  // manifests (same bindings, same setup block) must classify identically.
+  // If this ever fails, some branch in classifyConnectorSetupModality started
+  // keying off the id rather than the manifest shape.
+  const bindings = { network: { required: true } };
+  const firstPartyLike = classifyConnectorSetupModality(
+    "gmail",
+    customManifest("gmail", bindings, {
+      setup: {
+        credential_capture: {
+          fields: [{ env: ["X_SECRET"], label: "x", name: "secret", required: true, secret: true, type: "password" }],
+          kind: "app_password",
+          label: "x",
+        },
+        modality: "static_secret",
+      },
+    })
+  );
+  const thirdPartyLike = classifyConnectorSetupModality(
+    "totally-unrelated-vendor",
+    customManifest("totally-unrelated-vendor", bindings, {
+      setup: {
+        credential_capture: {
+          fields: [{ env: ["X_SECRET"], label: "x", name: "secret", required: true, secret: true, type: "password" }],
+          kind: "app_password",
+          label: "x",
+        },
+        modality: "static_secret",
+      },
+    })
+  );
+  assert.equal(firstPartyLike, thirdPartyLike);
 });

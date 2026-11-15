@@ -131,11 +131,9 @@ const { Pool } = pg;
  *
  * This script reads every manifest under both available manifest sets
  * (the optional polyfill runtime's `readPolyfillManifests()`,
- * `reference-implementation/manifests/` — mirroring
- * `scripts/generate-connector-registry.ts`'s own enumeration of the same two
- * sets, the sanctioned pattern for RI tooling that needs the full manifest
- * set rather than one connector at a time via the runtime installed-connector
- * catalog) and
+ * `reference-implementation/manifests/` — the sanctioned pattern for RI tooling
+ * that needs the full manifest set rather than one connector at a time via the
+ * runtime installed-connector catalog) and
  * builds `COMPACTION_POLICIES` GENERICALLY from whichever streams declare a
  * `compaction_fingerprint` field — this script contains no connector-name
  * branch anywhere. `compaction_fingerprint.exclude_keys` (and the optional

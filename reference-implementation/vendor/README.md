@@ -63,8 +63,8 @@ install`. No other code changes are needed — the package's public surface (all
 
 ## `@pdpp/polyfill-connectors` — pinned tarball, canonical `data-connectors` package (Move B seam closure)
 
-The tarball remains in this repository for host-side conformance tests,
-connector-registry generation, and the reference-stack setup helper. It is a
+The tarball remains in this repository for host-side conformance tests
+and the reference-stack setup helper. It is a
 development dependency only. Production Docker builds do not copy or install
 it: the reference implementation reaches its helper surface through an
 optional compatibility boundary, and executable connector implementations
