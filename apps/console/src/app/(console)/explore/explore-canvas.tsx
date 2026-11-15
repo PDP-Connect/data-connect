@@ -1624,7 +1624,7 @@ function StreamSeeAllLink({
 // The count is the loaded-window count (item #8): a bare number reads as a total, so
 // it is qualified "in view"; when there are zero in view it is HIDDEN (never a "0"
 // that reads as "this source is empty"), never a loaded-window count dressed as a total.
-function FacetRow({
+export function FacetRow({
   leading,
   label,
   mono,
@@ -1658,7 +1658,7 @@ function FacetRow({
           title={label}
         >
           {leading}
-          {label}
+          <span className="rr-x-facet__label">{label}</span>
         </span>
         <span className="rr-x-facet__flag" />
         {/* Exact-or-"in view"-or-hidden. count===null OR 0 → hidden (item #8). */}
