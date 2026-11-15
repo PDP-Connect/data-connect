@@ -371,3 +371,43 @@ test("validateRuntimeRequirements: a key inside an installed connector's longer 
     undefined
   );
 });
+
+test("validateRuntimeRequirements: a hyphenated key owns its own namespace and no one else's", () => {
+  const declare = (connectorKey: string, key: string) => ({
+    connector_key: connectorKey,
+    runtime_requirements: { tuning_environment: [key] },
+  });
+  assert.equal(validateRuntimeRequirements(declare("whatsapp-web", "PDPP_WHATSAPP_WEB_PAGE_SIZE"), CODE), undefined);
+  for (const key of ["EXAMPLE_PAGE_SIZE", "PDPP_GMAIL_MAX_ATTACHMENT_BYTES"]) {
+    assertRejects(declare("whatsapp-web", key), "outside the whatsapp-web tuning namespace");
+  }
+});
+
+test("validateRuntimeRequirements: a shorter key cannot claim an installed connector's namespace, whichever spelling", () => {
+  const installed = ["google", "google-maps"];
+  assert.throws(
+    () =>
+      validateRuntimeRequirements(
+        {
+          connector_key: "google",
+          runtime_requirements: { tuning_environment: ["PDPP_GOOGLE_MAPS_PAGE_SIZE"] },
+        },
+        CODE,
+        installed
+      ),
+    /PDPP_GOOGLE_MAPS_PAGE_SIZE belongs to the installed connector google-maps/
+  );
+  // `google_maps` spells the same namespace as `google-maps`: neither owns it.
+  assert.throws(
+    () =>
+      validateRuntimeRequirements(
+        {
+          connector_key: "google_maps",
+          runtime_requirements: { tuning_environment: ["PDPP_GOOGLE_MAPS_PAGE_SIZE"] },
+        },
+        CODE,
+        ["google_maps", "google-maps"]
+      ),
+    /namespace shared with the installed connector google-maps/
+  );
+});
