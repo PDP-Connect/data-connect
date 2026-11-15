@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -593,9 +593,7 @@ test("doctor --exit-code turns a dead-lettered outbox into a non-zero status", a
     outbox.deadLetter({ error: "bounded error", holder: "worker-a", id: claim.id, leaseEpoch: claim.lease_epoch });
 
     const options = parseArgs(["doctor", "--queue", path, "--source-instance-id", "src-1", "--exit-code"]);
-    const doctor = buildLocalOutboxDoctor(
-      inspectLocalOutboxStatus(options, { deploymentPosture: PUBLISHED_POSTURE })
-    );
+    const doctor = buildLocalOutboxDoctor(inspectLocalOutboxStatus(options, { deploymentPosture: PUBLISHED_POSTURE }));
     assert.equal(doctor.status, "critical");
     assert.equal(doctorExitCode(doctor.status), 1);
   } finally {
@@ -1197,17 +1195,65 @@ test("a legacy underscore-named profile is renamed once to the hyphen name, keep
   assert.equal(readFileSync(currentPath, "utf8"), body);
 });
 
-test("a legacy underscore-named profile beside a hyphen-named one is dropped; the hyphen one wins", () => {
+test("an underscore-named profile that duplicates the hyphen-named one is removed", () => {
   const profileDir = tempDirSync();
-  writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
-  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = join(profileDir, "claude-code.env");
+  writeFileSync(currentPath, readFileSync(legacyPath, "utf8"), { mode: 0o600 });
   const matches = findLocalCollectorProfiles({ profileDir }).matches;
   assert.deepEqual(
     matches.map((match) => match.path),
     [currentPath]
   );
+  assert.equal(existsSync(legacyPath), false);
+});
+
+test("an underscore-named profile that differs from the hyphen-named one is kept; the hyphen one wins", () => {
+  const profileDir = tempDirSync();
+  const legacyPath = writeProfile(profileDir, "claude_code", "token-old", "dsrc_old");
+  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  const matches = findLocalCollectorProfiles({ profileDir, profileName: "claude-code" }).matches;
+  assert.deepEqual(
+    matches.map((match) => match.path),
+    [currentPath]
+  );
   assert.equal(matches[0]?.source_instance_id, "dsrc_new");
-  assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
+  assert.equal(existsSync(legacyPath), true, "a differing file may hold another device's token, so it is not deleted");
+  assert.match(readFileSync(legacyPath, "utf8"), /token-old/);
+});
+
+test("an operator profile named like a connector but for another connector is not renamed or deleted", () => {
+  const profileDir = tempDirSync();
+  // A profile an operator named `claude_code` for the codex connector.
+  const operatorPath = writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: "device-codex",
+    deviceToken: "token-codex",
+    name: "claude_code",
+    profileDir,
+    sourceInstanceId: "dsrc_codex",
+  });
+  const body = readFileSync(operatorPath, "utf8");
+  // Beside a real claude-code profile: listing must not delete the codex credential.
+  const currentPath = writeProfile(profileDir, "claude-code", "token-new", "dsrc_new");
+  findLocalCollectorProfiles({ profileDir });
+  assert.equal(readFileSync(operatorPath, "utf8"), body);
+  assert.equal(existsSync(currentPath), true);
+  // Without a claude-code profile: it is not renamed onto the claude-code name either.
+  const alone = tempDirSync();
+  const alonePath = writeLocalCollectorProfile({
+    baseUrl: "https://pdpp.example.com",
+    connectorId: "codex",
+    deviceId: "device-codex",
+    deviceToken: "token-codex",
+    name: "claude_code",
+    profileDir: alone,
+    sourceInstanceId: "dsrc_codex",
+  });
+  findLocalCollectorProfiles({ profileDir: alone });
+  assert.equal(existsSync(alonePath), true);
+  assert.equal(existsSync(join(alone, "claude-code.env")), false);
 });
 
 test("logout removes a migrated legacy profile and stays idempotent; no underscore file is left to come back", () => {
@@ -1219,7 +1265,11 @@ test("logout removes a migrated legacy profile and stays idempotent; no undersco
   assert.equal(existsSync(join(profileDir, "claude-code.env")), false);
   assert.equal(existsSync(join(profileDir, "claude_code.env")), false);
   assert.equal(findLocalCollectorProfiles({ profileDir }).matches.length, 0);
-  assert.equal(removeLocalCollectorProfile({ name: "claude-code", profileDir }).removed, false, "logout stays idempotent");
+  assert.equal(
+    removeLocalCollectorProfile({ name: "claude-code", profileDir }).removed,
+    false,
+    "logout stays idempotent"
+  );
 });
 
 test("the profile migration touches connector names only, not operator-chosen profile names", () => {
@@ -2243,7 +2293,10 @@ test("resolveExecutionRoot runs a pinned connector from its installed release", 
   // the package and the repository, so the child runs from the directory that
   // holds it.
   assert.equal(spec.command, process.execPath);
-  assert.equal(spec.args[0], join(COLLECTION_PROFILE_ROOT, "connectors", "claude-code", CLAUDE_CODE_DIGEST_DIR, "dist", "collection-profile.mjs"));
+  assert.equal(
+    spec.args[0],
+    join(COLLECTION_PROFILE_ROOT, "connectors", "claude-code", CLAUDE_CODE_DIGEST_DIR, "dist", "collection-profile.mjs")
+  );
   const executionRoot = resolveExecutionRoot(spec);
   assert.equal(executionRoot, dirname(spec.args[0] as string));
 });
@@ -4373,10 +4426,7 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
     (process.listeners("SIGINT").at(-1) as () => void)();
 
     await assert.rejects(runPromise);
-    assert.ok(
-      recordEmitted,
-      `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`
-    );
+    assert.ok(recordEmitted, `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`);
     assert.equal(process.listenerCount("SIGINT"), beforeInt, "the handler must be removed once the run settles");
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });
