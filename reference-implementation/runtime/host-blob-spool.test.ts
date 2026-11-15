@@ -10,7 +10,18 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { HOST_BLOB_MAX_BYTES, type HostBlobMessage } from "@pdpp/connector-protocol/connector-runtime-protocol";
@@ -160,4 +171,56 @@ test("each way a spool file can disagree with its descriptor is refused", (t) =>
   for (const [label, build, pattern] of cases) {
     assert.throws(() => readVerifiedSpoolBlob(spool, build(), DECLARATION), pattern, label);
   }
+});
+
+// Behavior: a FIFO named by a BLOB is refused without blocking. Defect: the
+// blocking open waits for a writer that never comes and freezes the runtime's
+// event loop, so cancel and timers never run. Oracle: a child process reads a
+// writer-less FIFO and must exit within the watchdog; an in-process test would
+// hang the runner itself if the defect came back.
+test("a FIFO in the spool is refused at once instead of blocking the event loop", { skip: process.platform === "win32" }, () => {
+  const script = [
+    'import { execFileSync } from "node:child_process";',
+    'import { join } from "node:path";',
+    'import { createHostBlobSpool, readVerifiedSpoolBlob } from "./runtime/host-blob-spool.ts";',
+    "const spool = createHostBlobSpool();",
+    'execFileSync("mkfifo", [join(spool.dir, "pipe.json")]);',
+    "try {",
+    '  readVerifiedSpoolBlob(spool, { file: "pipe.json", key: "k", mime_type: "application/json", sha256: "0".repeat(64), size_bytes: 2, stream: "attachments", type: "BLOB" }, { maxBlobBytes: 64, streams: new Set(["attachments"]) });',
+    '  console.log("read");',
+    "} catch (error) {",
+    "  console.log(String(error.message));",
+    "} finally {",
+    "  spool.dispose();",
+    "}",
+  ].join("\n");
+  const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    cwd: join(import.meta.dirname, ".."),
+    encoding: "utf-8",
+    timeout: 20_000,
+  });
+  assert.equal(child.signal, null, "the read returned before the watchdog killed it");
+  assert.match(child.stdout, /does not match its spool file size/, child.stderr);
+});
+
+// Behavior: the spool directory is re-checked, so swapping it for a symlink to
+// another directory is refused and the outside file is neither read nor
+// deleted. Defect: O_NOFOLLOW guards only the file name, so a swapped parent
+// reads and unlinks a file outside the spool. Oracle: an outside sentinel with
+// the descriptor's exact size and hash survives the read.
+test("a spool directory swapped for a symlink is refused and the outside file survives", (t) => {
+  const spool = createHostBlobSpool();
+  const outside = mkdtempSync(join(tmpdir(), "pdpp-blob-outside-"));
+  const moved = `${spool.dir}-moved`;
+  t.after(() => {
+    rmSync(outside, { force: true, recursive: true });
+    rmSync(moved, { force: true, recursive: true });
+    rmSync(spool.dir, { force: true, recursive: true });
+  });
+  const text = JSON.stringify({ secret: true });
+  writeFileSync(join(outside, "a.json"), text);
+  renameSync(spool.dir, moved);
+  symlinkSync(outside, spool.dir);
+  assert.throws(() => readVerifiedSpoolBlob(spool, messageFor("a.json", text), DECLARATION), /spool directory replaced/);
+  assert.equal(readFileSync(join(outside, "a.json"), "utf-8"), text, "the outside file is untouched");
 });

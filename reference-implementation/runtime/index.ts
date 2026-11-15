@@ -4705,18 +4705,18 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       );
     }
     type StoredBlob = { blob_id?: unknown; sha256?: unknown; size_bytes?: unknown };
-    let stored: StoredBlob | null = null;
+    let stored: StoredBlob | null;
     try {
       stored = JSON.parse(bodyText) as StoredBlob | null;
     } catch {
       stored = null;
     }
     // The RS hashes what it received. A different hash or size means the bytes
-    // changed on the way, so the record must not point at them.
+    // changed on the way, so the record must not point at them. Blob ids are
+    // content addressed, so any other id would not resolve to these bytes.
     if (
       !stored ||
-      typeof stored.blob_id !== "string" ||
-      stored.blob_id.length === 0 ||
+      stored.blob_id !== `blob_sha256_${blob.sha256}` ||
       stored.sha256 !== blob.sha256 ||
       stored.size_bytes !== blob.sizeBytes
     ) {

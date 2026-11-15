@@ -263,7 +263,7 @@ rl.on('line', (line) => {
   } catch (err) {
     thrown = err;
   }
-  let spoolDir: string | null = null;
+  let spoolDir: string | null;
   try {
     spoolDir = (JSON.parse(readFileSync(envPath, "utf-8")) as { spool: string | null }).spool;
   } catch {
@@ -623,11 +623,17 @@ test("a connector that ends between a BLOB and its RECORD stores nothing and lea
 test("a refused or tampered blob upload fails the run and the record is not stored", async (t) => {
   const manifest = blobManifest();
   const { ownerToken, server } = await setup(t, manifest);
-  const cases: [string, () => Response, RegExp][] = [
+  const cases: [string, (ids: Ids) => Response, RegExp][] = [
     ["refused", () => new Response("{}", { status: 400 }), /Blob upload for attachments failed/],
     [
       "wrong hash",
       () => Response.json({ blob_id: `blob_sha256_${"2".repeat(64)}`, sha256: "2".repeat(64), size_bytes: 1 }),
+      /does not match the connector's BLOB/,
+    ],
+    // Hash and size match, so only the id check can catch it.
+    [
+      "wrong id",
+      (ids) => Response.json({ blob_id: `blob_sha256_${"3".repeat(64)}`, sha256: ids.sha256, size_bytes: ids.size }),
       /does not match the connector's BLOB/,
     ],
   ];
@@ -635,7 +641,7 @@ test("a refused or tampered blob upload fails the run and the record is not stor
     const ids = contentFor(`upload-${label.replace(" ", "-")}`);
     const realFetch = globalThis.fetch;
     const stub = t.mock.method(globalThis, "fetch", (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
-      String(input).includes("/v1/blobs") && init?.method === "POST" ? Promise.resolve(answer()) : realFetch(input, init)
+      String(input).includes("/v1/blobs") && init?.method === "POST" ? Promise.resolve(answer(ids)) : realFetch(input, init)
     );
     // biome-ignore lint/performance/noAwaitInLoops: each case is one isolated run.
     const outcome = await runSteps(server, ownerToken, manifest, [...goodSequence(ids), emit(DONE(1))]);

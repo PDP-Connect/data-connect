@@ -14,7 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, mkdtempSync, openSync, readSync, rmSync, unlinkSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -27,6 +27,8 @@ export const HOST_BLOB_SPOOL_ENV = "PDPP_BLOB_SPOOL_DIR";
 
 export interface HostBlobSpool {
   readonly dir: string;
+  /** Device and inode of `dir` when it was created. */
+  readonly identity: { readonly dev: number; readonly ino: number };
   /** Remove the directory and every file left in it. Safe to call twice. */
   dispose(): void;
 }
@@ -69,9 +71,11 @@ export function readHostBlobWriteDeclaration(manifest: { capabilities?: unknown 
 /** Create the run's private spool directory (mode 0700, owner only). */
 export function createHostBlobSpool(): HostBlobSpool {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-blob-spool-"));
+  const created = lstatSync(dir);
   let disposed = false;
   return {
     dir,
+    identity: { dev: created.dev, ino: created.ino },
     dispose() {
       if (disposed) {
         return;
@@ -90,6 +94,25 @@ export function createHostBlobSpool(): HostBlobSpool {
 const READ_CHUNK_BYTES = 1_048_576;
 
 /**
+ * Throw unless `spool.dir` is still the directory the runtime created. The
+ * connector owns the directory's contents and can also rename it and leave a
+ * symlink at the old name, which would point a later open or unlink outside the
+ * spool. O_NOFOLLOW guards only the last path component, so the directory is
+ * checked before the open and again before the unlink.
+ */
+function assertSpoolDirectoryUnchanged(spool: HostBlobSpool, stream: string): void {
+  let current: ReturnType<typeof lstatSync>;
+  try {
+    current = lstatSync(spool.dir);
+  } catch {
+    throw new Error(`BLOB for stream '${stream}' found its spool directory missing`);
+  }
+  if (!current.isDirectory() || current.dev !== spool.identity.dev || current.ino !== spool.identity.ino) {
+    throw new Error(`BLOB for stream '${stream}' found its spool directory replaced`);
+  }
+}
+
+/**
  * Read the spool file a BLOB descriptor names and return its bytes after they
  * pass every check, or throw. Checks, in order: the path stays inside the
  * spool; the entry is a regular file reached without following a symlink; its
@@ -106,16 +129,22 @@ export function readVerifiedSpoolBlob(
     throw new Error(`BLOB for stream '${message.stream}' exceeds the declared max_blob_bytes`);
   }
   const path = join(spool.dir, message.file);
+  assertSpoolDirectoryUnchanged(spool, message.stream);
   let fd: number;
   try {
     // O_NOFOLLOW makes a symlink fail here rather than read its target.
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NONBLOCK makes a FIFO open return at once instead of blocking the
+    // event loop until a writer appears; fstat below then refuses it.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch {
     throw new Error(`BLOB for stream '${message.stream}' names a spool file that cannot be read`);
   }
   let bytes: Buffer;
   try {
     const stat = fstatSync(fd);
+    // Re-check after the open: a swap between the first check and the open
+    // would leave the directory changed now.
+    assertSpoolDirectoryUnchanged(spool, message.stream);
     if (!stat.isFile() || stat.size !== message.size_bytes) {
       throw new Error(`BLOB for stream '${message.stream}' does not match its spool file size`);
     }
@@ -139,6 +168,7 @@ export function readVerifiedSpoolBlob(
   } catch {
     throw new Error(`BLOB for stream '${message.stream}' is not valid UTF-8 JSON`);
   }
+  assertSpoolDirectoryUnchanged(spool, message.stream);
   try {
     unlinkSync(path);
   } catch {
