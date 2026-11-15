@@ -55,6 +55,18 @@ export type CountOtherConnections = (input: {
   readonly ownerSubjectId: string;
 }) => Promise<number> | number;
 
+export function countOtherConnectionsOfConnector(
+  instances: ReadonlyArray<{ connectorInstanceId: string; connectorId: string }>,
+  target: { connectorInstanceId: string; connectorKey: string },
+  canonicalize: (connectorId: string) => string | null
+): number {
+  return instances.filter(
+    (instance) =>
+      instance.connectorInstanceId !== target.connectorInstanceId &&
+      (canonicalize(instance.connectorId) ?? instance.connectorId) === target.connectorKey
+  ).length;
+}
+
 export type BrowserProfilePurger = (input: BrowserProfilePurgeInput) => Promise<BrowserProfilePurgeResult>;
 
 interface PurgeLogger {

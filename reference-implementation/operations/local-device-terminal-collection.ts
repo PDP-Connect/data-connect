@@ -70,15 +70,16 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
     const stateDelta = body && asObject(body.state_delta);
     const normalizedFacts =
       body && Array.isArray(body.terminal_facts) ? normalizeTerminalFacts(body.terminal_facts) : null;
-    const canonicalConnectorId = ctx.canonicalConnectorKey(authorized.sourceInstance.connectorId);
+    const canonicalConnectorId =
+      ctx.canonicalConnectorKey(authorized.sourceInstance.connectorId) ?? authorized.sourceInstance.connectorId;
     // Canonicalize BOTH sides before comparing, exactly as `sameConnectorType`
     // in routes/ref-device-exporters.ts already does for the record-batch leg.
     // Canonicalizing only the server's side and then demanding the device match
     // that exact spelling rejects a legacy alias the server itself recognises:
     // `canonicalConnectorKey("claude_code")` is `"claude-code"`, so a device
     // configured `PDPP_COLLECTOR_CONNECTOR=claude_code` failed this one guard
-    // while its 10,000 record batches passed the symmetric one. Falling back to
-    // the raw value keeps an unknown key failing closed.
+    // while its 10,000 record batches passed the symmetric one. Both sides fall
+    // back to the raw value so unlisted keys match only their own identity.
     const reportedConnectorKey = reportedConnectorId
       ? (ctx.canonicalConnectorKey(reportedConnectorId) ?? reportedConnectorId)
       : null;
