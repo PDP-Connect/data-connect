@@ -205,7 +205,12 @@ jobs:
     name: test reference implementation shard ${{ matrix.shard }}
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label now resolves to Ubuntu 26.04, for
+    # which Patchright publishes no Chromium build. Its postinstall then skips
+    # the download and tests that launch a real browser (for example
+    # owner-connection-delete.test.ts) fail with "Executable doesn't exist".
+    # Move back to ubuntu-latest once Patchright ships a 26.04 browser.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
