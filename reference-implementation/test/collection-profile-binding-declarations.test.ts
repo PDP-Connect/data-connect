@@ -276,10 +276,10 @@ test("direct run: `interactive` is refused before spawn", async () => {
 
 test("direct run: a required unsupported feature is refused before spawn", async () => {
   // Old direct path ignored features and spawned the connector.
-  const result = await runWithBindings({ browser: { features: ["page_navigation"], required: true } });
+  const result = await runWithBindings({ browser: { features: ["page_input"], required: true } });
   assert.ok(result.error instanceof BindingPlacementError);
   assert.deepEqual(result.error.bindingKeys, ["browser"]);
-  assert.ok(result.error.message.includes("features page_navigation are not provided"));
+  assert.ok(result.error.message.includes("features page_input are not provided"));
   assert.equal(result.spawned, false);
 });
 
@@ -332,7 +332,7 @@ test("START encoding keeps resolved instance keys and omits a same-kind instance
   // execution can resolve these handles; the direct-run refusal above proves
   // that this runtime currently cannot.
   const instances = normalizeBindingDeclarations({
-    optional_page: { features: ["page_navigation"], kind: "browser", required: false },
+    optional_page: { features: ["page_input"], kind: "browser", required: false },
     provider_page: { kind: "browser", required: true },
   });
   const placed = instances.filter((instance) => instance.key === "provider_page");
@@ -348,7 +348,7 @@ test("START encoding keeps resolved instance keys and omits a same-kind instance
 });
 
 test("direct run: an omitted optional browser with unsupported features is not advertised in START", async () => {
-  const result = await runWithBindings({ browser: { features: ["page_navigation"], required: false } });
+  const result = await runWithBindings({ browser: { features: ["page_input"], required: false } });
   assert.equal(result.error, null);
   assert.equal(result.spawned, true);
   assert.equal(Object.hasOwn(result.start?.bindings as object, "browser"), false);
