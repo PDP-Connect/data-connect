@@ -262,6 +262,7 @@ test("the agreed add-account labels are exactly the realignment-plan vocabulary"
   // produced label is in the agreed set and free of forbidden copy.
   const map = buildSourceAddSupport([
     {
+      capabilities: { proven: { static_secret_live: { proven: true } } },
       connector_id: "ynab",
       display_name: "ynab",
       runtime_requirements: { bindings: { network: {} } },

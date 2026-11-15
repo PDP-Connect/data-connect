@@ -39,9 +39,3 @@ export const LOCAL_COLLECTOR_PROVEN_KEYS: readonly string[] = Object.freeze(["cl
 
 /** Manifests declaring a runtime_requirements.bindings.browser binding. */
 export const BROWSER_BOUND_KEYS: readonly string[] = Object.freeze(["amazon", "anthropic", "chase", "chatgpt", "doordash", "heb", "linkedin", "loom", "meta", "reddit", "shopify", "uber", "usaa", "venmo", "wholefoods", "whoop"]);
-
-/** Manifests declaring capabilities.proven.provider_auth_lifecycle === true. */
-export const PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS: readonly string[] = Object.freeze(["google-calendar", "google-contacts", "google-maps-data-portability"]);
-
-/** Manifests declaring capabilities.proven.static_secret_live.proven === true. */
-export const STATIC_SECRET_LIVE_PROVEN_KEYS: readonly string[] = Object.freeze(["github", "gmail", "slack", "ynab"]);

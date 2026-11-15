@@ -18,8 +18,6 @@ import {
   BROWSER_BOUND_KEYS,
   LEGACY_LOCAL_ALIASES,
   LOCAL_COLLECTOR_PROVEN_KEYS,
-  PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS,
-  STATIC_SECRET_LIVE_PROVEN_KEYS,
 } from "./generated/connector-registry.generated.ts";
 
 export type ConnectorIntentModality = "local_collector" | "browser_bound" | "api_network" | "unknown";
@@ -172,6 +170,18 @@ export interface ConnectorManifestLike {
        * field name -> legacy field name written by a since-retired exchanger.
        * The RI reads this mechanically; it never hardcodes a legacy name. */
       readonly legacy_bundle_field_aliases?: Readonly<Record<string, string>> | null;
+    } | null;
+    /**
+     * Proof claims the connector's own manifest makes. The RI reads them from
+     * a registered manifest only: a vendored one or one installed from the
+     * signed catalog, both reviewed before publication. A manifest from an
+     * unsigned developer-local folder is never registered, so its claims
+     * never reach the setup plan.
+     */
+    readonly proven?: {
+      readonly local_collector?: unknown;
+      readonly provider_auth_lifecycle?: unknown;
+      readonly static_secret_live?: { readonly proven?: unknown } | null;
     } | null;
   } | null;
   readonly connector_id?: string | null;
@@ -376,41 +386,29 @@ export function isKnownScaffoldConnector(connectorKey: string | null | undefined
 
 export const PROVIDER_AUTH_RUNBOOK_PATH = "docs/operator/add-connection.md";
 
-// Connector keys for which the provider-authorization lifecycle (initiate +
-// callback + token-exchange + inventory gate) is deterministically proven.
-// Only connectors in this set may advertise `open_provider_auth` as a supported
-// next step. Real production connectors must NOT be added here until their
-// connector-specific inventory/test adapter is implemented and proven.
-//
-// "test_provider" is a synthetic connector constructed only by the
-// deterministic test suite (test/provider-auth-lifecycle.test.ts fixtures);
-// it has no manifest file, so it cannot be manifest-derived and stays a
-// literal code-level addition alongside the generated,
-// capabilities.proven.provider_auth_lifecycle-backed entries. See
-// connector-registry.generated.ts.
-export const PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS: readonly string[] = Object.freeze([
-  "test_provider",
-  ...PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS,
-]);
-
-export type ProviderAuthLifecycleProvenConnector = (typeof PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS)[number];
-
-export function isProviderAuthLifecycleProven(connectorKey: string): boolean {
-  return PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS.includes(canonicalConnectorKey(connectorKey));
+// Whether the connector's manifest claims that the provider-authorization
+// lifecycle (initiate + callback + token-exchange + inventory gate) is
+// deterministically proven. Only such a connector may advertise
+// `open_provider_auth` as a supported next step. A connector must not declare
+// the claim until its connector-specific inventory/test adapter exists and is
+// proven.
+export function isProviderAuthLifecycleProven(manifest: ConnectorManifestLike | null | undefined): boolean {
+  return manifest?.capabilities?.proven?.provider_auth_lifecycle === true;
 }
 
-// Connector keys for which the static-secret credential flow (draft → capture →
-// first ingest) has been proven end-to-end via a live env-free container run.
-// This is a proof gate, not a classification: it is generated from each
-// manifest's capabilities.proven.static_secret_live.proven declaration (see
-// connector-registry.generated.ts), which also carries the run_id/date/note
-// evidence for each proof — this module only reads the boolean.
-export const STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS: readonly string[] = STATIC_SECRET_LIVE_PROVEN_KEYS;
+// Whether the connector's manifest claims that the static-secret credential
+// flow (draft -> capture -> first ingest) has been proven end-to-end through a
+// live env-free container run. This is a proof gate, not a classification.
+// The manifest also carries the run_id/date/note evidence for the proof; this
+// module reads only the boolean.
+export function isStaticSecretLiveProven(manifest: ConnectorManifestLike | null | undefined): boolean {
+  return manifest?.capabilities?.proven?.static_secret_live?.proven === true;
+}
 
-export type StaticSecretLiveProvenConnector = (typeof STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS)[number];
-
-export function isStaticSecretLiveProven(connectorKey: string): boolean {
-  return STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS.includes(canonicalConnectorKey(connectorKey));
+// Whether the connector's manifest claims a proven local collector
+// (`capabilities.proven.local_collector`).
+export function isLocalCollectorProven(manifest: ConnectorManifestLike | null | undefined): boolean {
+  return manifest?.capabilities?.proven?.local_collector === true;
 }
 
 /**
@@ -422,7 +420,7 @@ export function isStaticSecretLiveProven(connectorKey: string): boolean {
  * reaches the exact same generic capture-form → draft-connection →
  * first-sync route already proven for gmail/github/slack/ynab. The only
  * thing distinguishing "experimental" from "supported" is that no owner has
- * completed a live run yet, which `STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS`
+ * completed a live run yet, which `capabilities.proven.static_secret_live`
  * still tracks.
  *
  * This check does NOT consult `capabilities.public_listing`: lifecycle tier
@@ -951,7 +949,7 @@ function buildManualUploadSetupPlan(ctx: ConnectionSetupPlanContext): Connection
 }
 
 function buildLocalCollectorSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
-  if (isSupportedLocalCollectorConnector(ctx.enrollmentKey)) {
+  if (isLocalCollectorProven(ctx.manifest)) {
     return {
       catalogDisposition: "local_collector_enroll",
       connectorKey: ctx.connectorKey,
@@ -1022,7 +1020,7 @@ function buildBrowserBoundSetupPlan(ctx: ConnectionSetupPlanContext): Connection
 }
 
 function buildStaticSecretSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
-  const liveProven = isStaticSecretLiveProven(ctx.connectorKey);
+  const liveProven = isStaticSecretLiveProven(ctx.manifest);
   if (liveProven) {
     return {
       catalogDisposition: "static_secret_connect",
@@ -1098,7 +1096,7 @@ function buildStaticSecretSetupPlan(ctx: ConnectionSetupPlanContext): Connection
 
 function buildProviderAuthorizationSetupPlan(ctx: ConnectionSetupPlanContext): ConnectionSetupPlan {
   const deploymentBlocked = ctx.deploymentReadiness.state === "needs_config";
-  const lifecycleProven = !deploymentBlocked && isProviderAuthLifecycleProven(ctx.connectorKey);
+  const lifecycleProven = !deploymentBlocked && isProviderAuthLifecycleProven(ctx.manifest);
   if (lifecycleProven) {
     return {
       catalogDisposition: "provider_auth_connect",

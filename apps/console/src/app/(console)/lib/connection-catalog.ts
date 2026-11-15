@@ -63,6 +63,12 @@ export interface CatalogManifestLike {
       /** "unknown" is set only for an install-catalog entry that declared no tier. */
       tier?: "supported" | "preview" | "development" | "unknown" | null;
     } | null;
+    /** Proof claims read by the shared setup planner; see `ConnectorManifestLike`. */
+    proven?: {
+      local_collector?: unknown;
+      provider_auth_lifecycle?: unknown;
+      static_secret_live?: { proven?: unknown } | null;
+    } | null;
   } | null;
   connector_id: string;
   connector_key?: string | null;
