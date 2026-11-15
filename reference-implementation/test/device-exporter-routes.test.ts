@@ -2235,11 +2235,11 @@ test("device exporter enrollment keeps connector type display names separate fro
     assert.equal(enrollResp.status, 201);
 
     // The connector type has one identity, its manifest key (`claude-code`).
-    // The enroll response echoes it, and no row exists under the retired
+    // The enroll response echoes it, and no row exists under the old
     // underscore spelling.
     assert.equal(bodyOf(enrollResp).connector_id, "claude-code");
-    const retiredIdRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
-    assert.equal(retiredIdRow, undefined, "a retired id MUST NOT be registered as a connector row");
+    const oldIdRow = getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code");
+    assert.equal(oldIdRow, undefined, "an old id MUST NOT be registered as a connector row");
 
     const connectorRow = mustExist(
       typedDb()
@@ -2264,7 +2264,7 @@ test("device exporter enrollment keeps connector type display names separate fro
   });
 });
 
-test("enrollment-codes rejects a retired connector id and registers no connector row", async () => {
+test("enrollment-codes rejects an old connector id and registers no connector row", async () => {
   await withServer(async ({ asUrl }) => {
     const codeResp = await postJson(`${asUrl}/_ref/device-exporters/enrollment-codes`, {
       connector_id: "claude_code",
@@ -2276,24 +2276,22 @@ test("enrollment-codes rejects a retired connector id and registers no connector
     assert.equal(
       getDb().prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get("claude_code"),
       undefined,
-      "a retired id MUST NOT be registered as a connector row"
+      "an old id MUST NOT be registered as a connector row"
     );
   });
 });
 
 // A collector from before the connector-id rename still sends the underscore
-// spelling. Each device route that carries a connector_id answers it with a 400
-// that names the current key, instead of a generic "does not match" error.
-const RETIRED_CLAUDE_CODE_MESSAGE = "Unknown connector: claude_code. This id was renamed; use claude-code.";
-
-function assertRetiredConnectorIdRejection(response: JsonResponse): void {
+// spelling. The server has no rename step: the old id is an unknown connector,
+// and each device route that carries a connector_id refuses it with the
+// route's ordinary binding error.
+function assertOldConnectorIdRefused(response: JsonResponse): void {
   assert.equal(response.status, 400);
   assert.equal(errorCode(response), "invalid_request");
-  assert.equal(errorMessage(response), RETIRED_CLAUDE_CODE_MESSAGE);
-  assert.equal(errorOf(response).param, "connector_id");
+  assert.doesNotMatch(errorMessage(response), /claude-code/, "the refusal does not name a replacement key");
 }
 
-test("ingest-batches answers a retired connector id with 400 naming the current key", async () => {
+test("ingest-batches refuses an old connector id as an unknown connector", async () => {
   await withServer(async ({ asUrl }) => {
     const device = await enrollDevice(asUrl, "laptop-retired-batch", "claude-code");
     assert.equal(device.connector_id, "claude-code");
@@ -2304,7 +2302,7 @@ test("ingest-batches answers a retired connector id with 400 naming the current 
       { ...batch, connector_id: "claude_code" },
       authHeaders(device.device_token)
     );
-    assertRetiredConnectorIdRejection(retired);
+    assertOldConnectorIdRefused(retired);
 
     const current = await postJson(
       `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,
@@ -2315,7 +2313,7 @@ test("ingest-batches answers a retired connector id with 400 naming the current 
   });
 });
 
-test("terminal-collection answers a retired connector id with 400 naming the current key", async () => {
+test("terminal-collection refuses an old connector id as an unknown connector", async () => {
   await withServer(async ({ asUrl }) => {
     const device = await enrollDevice(asUrl, "laptop-retired-collection", "claude-code");
 
@@ -2329,11 +2327,11 @@ test("terminal-collection answers a retired connector id with 400 naming the cur
       },
       authHeaders(device.device_token)
     );
-    assertRetiredConnectorIdRejection(retired);
+    assertOldConnectorIdRefused(retired);
   });
 });
 
-test("terminal-run-commits answers a retired connector id with 400 naming the current key", async () => {
+test("terminal-run-commits refuses an old connector id as an unknown connector", async () => {
   await withServer(async ({ asUrl }) => {
     const device = await enrollDevice(asUrl, "laptop-retired-commit", "claude-code");
 
@@ -2353,7 +2351,7 @@ test("terminal-run-commits answers a retired connector id with 400 naming the cu
       },
       authHeaders(device.device_token)
     );
-    assertRetiredConnectorIdRejection(retired);
+    assertOldConnectorIdRefused(retired);
   });
 });
 

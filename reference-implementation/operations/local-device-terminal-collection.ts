@@ -3,7 +3,6 @@
 
 import { createHash } from "node:crypto";
 import { canonicalTerminalRunCommitJson } from "@pdpp/reference-contract/common";
-import { currentKeyForRetiredConnectorId, unknownConnectorMessage } from "../server/retired-connector-ids.ts";
 import { readRuntimeCollectionFact } from "../server/runtime-collection-facts.ts";
 import type { ResolvedTerminalRunCommit, TerminalRunCommitResult } from "../server/stores/terminal-run-commit-store.ts";
 import { TerminalRunCommitConflictError } from "../server/stores/terminal-run-commit-store.ts";
@@ -79,12 +78,6 @@ export async function handleLocalDeviceTerminalRunCommit(input: {
     const reportedConnectorKey = reportedConnectorId
       ? (ctx.canonicalConnectorKey(reportedConnectorId) ?? reportedConnectorId)
       : null;
-    if (reportedConnectorId && currentKeyForRetiredConnectorId(reportedConnectorId)) {
-      // A collector from before the rename still sends the old id. Say which
-      // key replaced it instead of the generic binding error below.
-      ctx.pdppError(res, 400, "invalid_request", unknownConnectorMessage(reportedConnectorId), "connector_id");
-      return;
-    }
     if (
       body?.version !== 1 ||
       !commitId ||
@@ -189,10 +182,6 @@ export async function handleLocalDeviceTerminalCollection(input: {
         "invalid_request",
         "terminal collection requires matching connector_id, run_id, and source_instance_id"
       );
-      return;
-    }
-    if (currentKeyForRetiredConnectorId(connectorId)) {
-      ctx.pdppError(res, 400, "invalid_request", unknownConnectorMessage(connectorId), "connector_id");
       return;
     }
     if (!(input.sameConnectorType(authorized.sourceInstance.connectorId, connectorId) && Array.isArray(body.streams))) {

@@ -16,6 +16,10 @@ import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { type Pool as PgPool, Pool, type PoolClient, type QueryResultRow } from "pg";
 import {
+  CONNECTOR_ID_RENAME_MIGRATION_ID,
+  migrateRenamedConnectorIdsPostgres,
+} from "./connector-id-rename-migration.ts";
+import {
   hashKey,
   makeConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey,
@@ -37,10 +41,6 @@ import {
   LOCAL_DEVICE_CANONICALIZATION_MIGRATION_ID,
   readPostgresMigrationLedgerRow,
 } from "./postgres-migration-ledger.ts";
-import {
-  migrateRetiredConnectorIdsPostgres,
-  RETIRED_CONNECTOR_ID_MIGRATION_ID,
-} from "./retired-connector-ids.ts";
 import {
   assertTestDatabase,
   claimAlreadyAdmittedTestDatabaseChildAttachment,
@@ -3935,7 +3935,7 @@ async function bootstrapPostgresSchemaOnce({
     // A migration that reads a missing ledger table would have to guess its
     // own completion, which is the defect the ledger exists to remove.
     await ensurePostgresMigrationLedger(client);
-    await migratePostgresRetiredConnectorIds(client, { log });
+    await migratePostgresRenamedConnectorIds(client, { log });
     await migratePostgresLocalDeviceConnectorInstances(client, { log });
     await migratePostgresLegacyConnectorInstancesToDefaultAccount(client);
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
@@ -7198,11 +7198,11 @@ async function coalesceExactPostgresLocalDeviceBindingDuplicates(client: PoolCli
  * underscores. The receipt makes later boots skip the scan; a failure leaves
  * the receipt `blocked`, never `complete`, so the next boot tries again.
  */
-async function migratePostgresRetiredConnectorIds(
+async function migratePostgresRenamedConnectorIds(
   client: PoolClient,
   { log = NOOP_STORAGE_LOG }: { log?: StorageLog } = {}
 ): Promise<void> {
-  const claim = await claimPostgresMigration(client, RETIRED_CONNECTOR_ID_MIGRATION_ID, {
+  const claim = await claimPostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, {
     leaseDurationMs: PG_LOCAL_DEVICE_MIGRATION_LEASE_MS,
     leaseOwner: `${process.pid}@${POSTGRES_MIGRATION_LEASE_OWNER_NONCE}`,
     nowIso: new Date().toISOString(),
@@ -7212,10 +7212,10 @@ async function migratePostgresRetiredConnectorIds(
   }
   let changedRows: number;
   try {
-    changedRows = await migrateRetiredConnectorIdsPostgres(client);
+    changedRows = await migrateRenamedConnectorIdsPostgres(client);
   } catch (err) {
     try {
-      await blockPostgresMigration(client, RETIRED_CONNECTOR_ID_MIGRATION_ID, {
+      await blockPostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, {
         error: err instanceof Error ? err.message : String(err),
         nowIso: new Date().toISOString(),
       });
@@ -7224,9 +7224,9 @@ async function migratePostgresRetiredConnectorIds(
     }
     throw err;
   }
-  await completePostgresMigration(client, RETIRED_CONNECTOR_ID_MIGRATION_ID, { nowIso: new Date().toISOString() });
+  await completePostgresMigration(client, CONNECTOR_ID_RENAME_MIGRATION_ID, { nowIso: new Date().toISOString() });
   if (changedRows > 0) {
-    log(`[PDPP] Renamed retired connector ids: ${changedRows} rows changed`);
+    log(`[PDPP] Renamed connector ids: ${changedRows} rows changed`);
   }
 }
 

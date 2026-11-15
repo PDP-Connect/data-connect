@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RETIRED_CONNECTOR_ID_MIGRATION_ID } from "../server/retired-connector-ids.ts";
+import { CONNECTOR_ID_RENAME_MIGRATION_ID } from "../server/connector-id-rename-migration.ts";
 import {
   bootstrapPostgresSchema,
   closePostgresStorage,
@@ -64,13 +64,13 @@ async function ids(pool: Pool, table: string): Promise<string[]> {
 async function receiptStatus(pool: Pool): Promise<string | undefined> {
   const result = await pool.query<{ status: string }>(
     "SELECT status FROM storage_migration_ledger WHERE migration_id = $1",
-    [RETIRED_CONNECTOR_ID_MIGRATION_ID]
+    [CONNECTOR_ID_RENAME_MIGRATION_ID]
   );
   return result.rows[0]?.status;
 }
 
 async function rearm(pool: Pool): Promise<void> {
-  await pool.query("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [RETIRED_CONNECTOR_ID_MIGRATION_ID]);
+  await pool.query("DELETE FROM storage_migration_ledger WHERE migration_id = $1", [CONNECTOR_ID_RENAME_MIGRATION_ID]);
 }
 
 if (POSTGRES_URL) {

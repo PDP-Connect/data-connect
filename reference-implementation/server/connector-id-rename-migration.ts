@@ -2,46 +2,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * The four connector ids that older local collectors spelled with underscores
- * (`claude_code`) and the server used to rewrite to the manifest key
- * (`claude-code`) on every request. The rewrite is gone: a connector has one
- * id, its manifest key.
+ * One-time data migration: rename the connector ids that older releases
+ * spelled with underscores (`claude_code`) to their manifest keys
+ * (`claude-code`) in every stored row.
  *
- * This table is historical. Identity resolution never reads it. It has two
- * uses: the one-time data migration that renames stored rows, and the error
- * message that tells a client still sending an old id which key to use.
- * Nothing here gates a connector: an id that is not in the table behaves as
- * any other id does.
+ * The four old -> new pairs live here and nowhere else. Nothing at runtime
+ * reads them: identity resolution has no rename step, and an old id sent by a
+ * stale client is an unknown connector like any other. The pairs are data for
+ * this migration only, which is why this module, and no other, names them.
  */
 
 import type { PoolClient } from "pg";
 
-export const RETIRED_CONNECTOR_IDS: Readonly<Record<string, string>> = Object.freeze({
-  apple_photos: "apple-photos",
-  claude_code: "claude-code",
-  google_messages: "google-messages",
-  google_takeout: "google-takeout",
-});
-
-/** The current key for a retired id, or null when the value is not a retired id. */
-export function currentKeyForRetiredConnectorId(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return Object.hasOwn(RETIRED_CONNECTOR_IDS, trimmed) ? (RETIRED_CONNECTOR_IDS[trimmed] ?? null) : null;
-}
-
-/** "Unknown connector: <id>", plus the current key when <id> is a retired spelling. */
-export function unknownConnectorMessage(connectorId: string): string {
-  const current = currentKeyForRetiredConnectorId(connectorId);
-  return current
-    ? `Unknown connector: ${connectorId}. This id was renamed; use ${current}.`
-    : `Unknown connector: ${connectorId}`;
-}
+const RENAMES: readonly (readonly [oldId: string, newId: string])[] = Object.freeze([
+  ["apple_photos", "apple-photos"],
+  ["claude_code", "claude-code"],
+  ["google_messages", "google-messages"],
+  ["google_takeout", "google-takeout"],
+]);
 
 /** Postgres migration receipt id. Versioned: a behavior change ships as a new id. */
-export const RETIRED_CONNECTOR_ID_MIGRATION_ID = "retired_connector_ids_v1";
+export const CONNECTOR_ID_RENAME_MIGRATION_ID = "renamed_connector_ids_v1";
 
 const ID_COLUMN_NAMES = ["connector_id", "connector_key"] as const;
 
@@ -66,19 +47,19 @@ function dropSupersededRowsSql(c: IdColumn, placeholders: { old: string; new: st
             AND EXISTS (SELECT 1 FROM ${t} n WHERE n.${col} = ${placeholders.new} AND ${sameKey})`;
 }
 
-const retiredEntries = (): [string, string][] => Object.entries(RETIRED_CONNECTOR_IDS);
+const renameEntries = (): [string, string][] => RENAMES.map(([oldId, newId]) => [oldId, newId]);
 
-/** `CASE <col> WHEN old THEN new ... END` over all retired ids, so each table is updated in one scan. */
+/** `CASE <col> WHEN old THEN new ... END` over every renamed id, so each table is updated in one scan. */
 function renameCaseSql(column: string, placeholder: (n: number) => string): { params: string[]; sql: string } {
-  const entries = retiredEntries();
+  const entries = renameEntries();
   const params = entries.flatMap(([oldId, newId]) => [oldId, newId]);
   const whens = entries.map((_, i) => `WHEN ${placeholder(2 * i + 1)} THEN ${placeholder(2 * i + 2)}`).join(" ");
   return { params, sql: `CASE ${quote(column)} ${whens} ELSE ${quote(column)} END` };
 }
 
-/** Placeholders for the retired ids, numbered after `offset` earlier parameters. */
-function retiredInList(placeholder: (n: number) => string, offset = 0): string {
-  return retiredEntries()
+/** Placeholders for the old ids, numbered after `offset` earlier parameters. */
+function renamedInList(placeholder: (n: number) => string, offset = 0): string {
+  return renameEntries()
     .map((_, i) => placeholder(offset + i + 1))
     .join(", ");
 }
@@ -144,20 +125,20 @@ function sqliteIdColumns(raw: SqliteLike): IdColumn[] {
 }
 
 /**
- * Rename stored retired connector ids to their current keys in one transaction.
- * Returns the number of rows changed; 0 (and no write) when no retired id is stored.
+ * Rename stored old connector ids to their current keys in one transaction.
+ * Returns the number of rows changed; 0 (and no write) when no old id is stored.
  *
  * Order respects the foreign keys to `connectors(connector_id)`: the current
  * key's `connectors` row is created first, every referencing row is moved,
- * and the retired row is deleted last. A row keyed by the retired id that a
+ * and the old row is deleted last. A row keyed by the old id that a
  * row keyed by the current id already covers is dropped (the current row
  * wins); any other unique-key collision aborts the migration with the
  * database's error rather than merging data.
  */
-export function migrateRetiredConnectorIdsSqlite(raw: SqliteLike): number {
+export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): number {
   const columns = sqliteIdColumns(raw);
-  const olds = retiredEntries().map(([oldId]) => oldId);
-  const marks = retiredInList(() => "?");
+  const olds = renameEntries().map(([oldId]) => oldId);
+  const marks = renamedInList(() => "?");
   const anyStored = columns.some(
     (c) =>
       raw.prepare(`SELECT 1 FROM ${quote(c.table)} WHERE ${quote(c.column)} IN (${marks}) LIMIT 1`).get(...olds) !==
@@ -169,7 +150,7 @@ export function migrateRetiredConnectorIdsSqlite(raw: SqliteLike): number {
   const changes = (result: unknown): number => Number((result as { changes?: number }).changes ?? 0);
   const run = raw.transaction(() => {
     let changed = 0;
-    for (const [oldId, newId] of retiredEntries()) {
+    for (const [oldId, newId] of renameEntries()) {
       const parent = raw.prepare("SELECT * FROM connectors WHERE connector_id = ?").get(oldId);
       if (parent && raw.prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get(newId) === undefined) {
         const copy: Record<string, unknown> = { ...parent, connector_id: newId, manifest: rewriteManifestIds(parent.manifest, oldId, newId) };
@@ -196,7 +177,7 @@ export function migrateRetiredConnectorIdsSqlite(raw: SqliteLike): number {
     changed += changes(raw.prepare(`DELETE FROM connectors WHERE connector_id IN (${marks})`).run(...olds));
     // A connection created without a name is labelled with its connector id.
     // Keep that placeholder in step with the id it names.
-    for (const [oldId, newId] of retiredEntries()) {
+    for (const [oldId, newId] of renameEntries()) {
       changed += changes(
         raw.prepare("UPDATE connector_instances SET display_name = ? WHERE display_name = ?").run(newId, oldId)
       );
@@ -238,15 +219,15 @@ async function postgresIdColumns(client: PoolClient): Promise<IdColumn[]> {
 }
 
 /**
- * Postgres counterpart of {@link migrateRetiredConnectorIdsSqlite}. The caller
+ * Postgres counterpart of {@link migrateRenamedConnectorIdsSqlite}. The caller
  * owns the migration receipt; this function runs the rename in one transaction
- * and returns the number of rows changed (0, with no write, when no retired
+ * and returns the number of rows changed (0, with no write, when no old
  * id is stored).
  */
-export async function migrateRetiredConnectorIdsPostgres(client: PoolClient): Promise<number> {
+export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Promise<number> {
   const columns = await postgresIdColumns(client);
-  const olds = retiredEntries().map(([oldId]) => oldId);
-  const marks = retiredInList((n) => `$${n}`);
+  const olds = renameEntries().map(([oldId]) => oldId);
+  const marks = renamedInList((n) => `$${n}`);
   let anyStored = false;
   for (const c of columns) {
     const hit = await client.query(`SELECT 1 FROM ${quote(c.table)} WHERE ${quote(c.column)} IN (${marks}) LIMIT 1`, olds);
@@ -261,7 +242,7 @@ export async function migrateRetiredConnectorIdsPostgres(client: PoolClient): Pr
   await client.query("BEGIN");
   try {
     let changed = 0;
-    for (const [oldId, newId] of retiredEntries()) {
+    for (const [oldId, newId] of renameEntries()) {
       const parent = await client.query("SELECT * FROM connectors WHERE connector_id = $1", [oldId]);
       const current = await client.query("SELECT 1 FROM connectors WHERE connector_id = $1", [newId]);
       const parentRow = parent.rows[0] as Record<string, unknown> | undefined;
@@ -284,7 +265,7 @@ export async function migrateRetiredConnectorIdsPostgres(client: PoolClient): Pr
       const rename = renameCaseSql(c.column, (n) => `$${n}`);
       const result = await client.query(
         `UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql}
-          WHERE ${quote(c.column)} IN (${retiredInList((n) => `$${n}`, rename.params.length)})`,
+          WHERE ${quote(c.column)} IN (${renamedInList((n) => `$${n}`, rename.params.length)})`,
         [...rename.params, ...olds]
       );
       changed += result.rowCount ?? 0;
@@ -293,7 +274,7 @@ export async function migrateRetiredConnectorIdsPostgres(client: PoolClient): Pr
     changed += removed.rowCount ?? 0;
     // A connection created without a name is labelled with its connector id.
     // Keep that placeholder in step with the id it names.
-    for (const [oldId, newId] of retiredEntries()) {
+    for (const [oldId, newId] of renameEntries()) {
       const labels = await client.query("UPDATE connector_instances SET display_name = $1 WHERE display_name = $2", [
         newId,
         oldId,
