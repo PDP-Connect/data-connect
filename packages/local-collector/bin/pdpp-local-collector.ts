@@ -2459,7 +2459,8 @@ export function writeLocalCollectorProfile(input: WriteLocalCollectorProfileInpu
  * token server-side; a stale token remains valid against the reference
  * deployment until that deployment's own admin revokes it. Returns false
  * (not an error) when the profile was already absent, so `logout` is
- * idempotent.
+ * idempotent. A legacy underscore-named file for the same connector is
+ * removed with it.
  */
 export function removeLocalCollectorProfile(input: { name: string; profileDir?: string }): {
   path: string;
@@ -2467,12 +2468,20 @@ export function removeLocalCollectorProfile(input: { name: string; profileDir?: 
 } {
   const profileDir =
     input.profileDir?.trim() || process.env[LOCAL_COLLECTOR_PROFILE_DIR_ENV]?.trim() || defaultCollectorProfileDir();
-  const path = resolveProfilePath(profileDir, safeProfileFileName(input.name));
-  if (!existsSync(path)) {
-    return { path, removed: false };
+  const fileName = safeProfileFileName(input.name);
+  const path = resolveProfilePath(profileDir, fileName);
+  // Remove the legacy underscore-named file too: left behind, it would become
+  // the resolved profile again as soon as the hyphen-named one is gone.
+  const legacy = legacyProfileFileName(fileName);
+  const legacyPath = legacy === null ? null : join(profileDir, legacy);
+  let removed = false;
+  for (const candidate of [join(profileDir, fileName), legacyPath]) {
+    if (candidate !== null && existsSync(candidate)) {
+      rmSync(candidate);
+      removed = true;
+    }
   }
-  rmSync(path);
-  return { path, removed: true };
+  return { path, removed };
 }
 
 export function findLocalCollectorProfiles(input: {
