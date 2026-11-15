@@ -28,14 +28,6 @@ const MAX_LEGACY_ENTRIES_PER_ROOT = 64;
 const LEGACY_SQLITE_FILE_PATTERN = /(?:\.sqlite|\.db|\.json)$/;
 const LEGACY_MIGRATION_FILE_PATTERN = /\.migration-[^/]+\.tmp$/;
 const DEFAULT_QUEUE_FILE_NAME = "collector-runner-queue.sqlite";
-/** Connectors whose id used to be spelled with underscores in queue file names. */
-const RENAMED_CONNECTOR_IDS: ReadonlySet<string> = new Set([
-  "apple-photos",
-  "claude-code",
-  "google-messages",
-  "google-takeout",
-]);
-
 export interface CollectorStatePathInput {
   /** Test hook that simulates a legacy collector write after canonical installation. */
   afterMigrationInstall?: (() => void) | undefined;
@@ -120,23 +112,44 @@ export function canonicalCollectorQueuePath(input: {
   return join(directory, fileName);
 }
 
-/** The queue path an older collector used for a hyphenated connector id, or `null` when it has none. */
-function legacyConnectorSpellingQueuePath(
+/** SQLite sidecar suffixes that travel with a database file. */
+const QUEUE_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
+
+/**
+ * One-time migration of a queue file named before connector ids were manifest
+ * keys. An older collector named the queue with the underscore spelling
+ * (`claude_code.<source>.sqlite`); the same queue is now
+ * `claude-code.<source>.sqlite`. When only the underscore-named file exists it
+ * is renamed to the hyphen path together with its SQLite sidecars, so unsent
+ * rows keep their journal and are not orphaned. When the hyphen-named file
+ * exists it is authoritative and the underscore-named file is left untouched.
+ * A second run finds nothing to do, and nothing reads the old spelling
+ * anywhere else.
+ */
+function migrateUnderscoreSpelledQueue(
   canonicalPath: string,
   connectorId: string | null | undefined,
   sourceInstanceId: string,
   stateRoot: string
-): string | null {
+): void {
   const trimmed = connectorId?.trim();
-  if (!trimmed || !RENAMED_CONNECTOR_IDS.has(trimmed)) {
-    return null;
+  if (!trimmed?.includes("-")) {
+    return;
   }
   const legacyPath = canonicalCollectorQueuePath({
     connectorId: trimmed.replaceAll("-", "_"),
     sourceInstanceId,
     stateRoot,
   });
-  return legacyPath === canonicalPath ? null : legacyPath;
+  if (legacyPath === canonicalPath || existsSync(canonicalPath) || !existsSync(legacyPath)) {
+    return;
+  }
+  for (const suffix of QUEUE_SIDECAR_SUFFIXES) {
+    if (existsSync(`${legacyPath}${suffix}`)) {
+      renameSync(`${legacyPath}${suffix}`, `${canonicalPath}${suffix}`);
+    }
+  }
+  renameSync(legacyPath, canonicalPath);
 }
 
 /**
@@ -148,7 +161,8 @@ function legacyConnectorSpellingQueuePath(
  * is used in place; a package-local legacy store is reconciled into a
  * consistent SQLite snapshot, retires the migrated source in the old
  * database, and installs the snapshot at the canonical path. Old pathnames
- * are never removed.
+ * are never removed, except that an underscore-spelled queue file is renamed
+ * once to its hyphen name (see {@link migrateUnderscoreSpelledQueue}).
  */
 export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): string {
   const { configuredPath, configuredPathIsExplicit } = input;
@@ -173,14 +187,7 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
     return canonicalPath;
   }
 
-  // Before connector ids were manifest keys, the queue was named with the
-  // underscore spelling (`claude_code.<source>.sqlite`). A device that still
-  // has that file keeps using it in place, so its unsent rows are not
-  // orphaned. Nothing is renamed or removed.
-  const legacySpellingPath = legacyConnectorSpellingQueuePath(canonicalPath, input.connectorId, sourceInstanceId, stateRoot);
-  if (legacySpellingPath !== null && !existsSync(canonicalPath) && existsSync(legacySpellingPath)) {
-    return legacySpellingPath;
-  }
+  migrateUnderscoreSpelledQueue(canonicalPath, input.connectorId, sourceInstanceId, stateRoot);
 
   if (existsSync(canonicalPath)) {
     // A fully installed canonical copy is authoritative. If it is an empty
