@@ -908,6 +908,7 @@ test("manual run forwards bounded trigger and automation metadata to connector c
               return Promise.resolve(null);
             },
           },
+          installedConnectorKeys: [],
           manifest: BACKGROUND_SAFE_MANIFEST,
           ownerToken: "owner-token",
           rsUrl: "http://localhost.invalid",
@@ -938,6 +939,7 @@ test("manual run forwards bounded trigger and automation metadata to connector c
           return null;
         },
       },
+      installedConnectorKeys: [],
       manifest: BACKGROUND_SAFE_MANIFEST,
       ownerToken: "owner-token",
       rsUrl: "http://localhost.invalid",
@@ -986,6 +988,7 @@ test("connector stderr progress and retained diagnostics redact secret and proxy
           return Promise.resolve(null);
         },
       },
+      installedConnectorKeys: [],
       manifest: BACKGROUND_SAFE_MANIFEST,
       onProgress: (message) => progress.push(message),
       ownerToken: "owner-token",
@@ -1146,6 +1149,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
           connectorId: "env-isolation-test",
           connectorInstanceId: "cin_env_isolation",
           connectorPath,
+          installedConnectorKeys: [],
           manifest: {
             ...BACKGROUND_SAFE_MANIFEST,
             setup: { credential_capture: { fields: [{ env: [declaredEnvName] }] } },
@@ -1182,6 +1186,7 @@ test("connector children receive run-scoped capabilities without unrelated paren
           return Promise.resolve(null);
         },
       },
+      installedConnectorKeys: [],
       manifest: {
         ...BACKGROUND_SAFE_MANIFEST,
         setup: { credential_capture: { fields: [{ env: [declaredEnvName] }] } },
