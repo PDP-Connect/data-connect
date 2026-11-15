@@ -227,7 +227,7 @@ if (provenKeysMissingADefinition.length > 0) {
   );
 }
 const definitionsWithoutAProvenManifest = [...definitionKeysByBundleId.entries()].filter(
-  ([, canonicalKey]) => canonicalKey !== null && !provenManifestsByKey.has(canonicalKey)
+  ([, canonicalKey]) => canonicalKey === null || !provenManifestsByKey.has(canonicalKey)
 );
 if (definitionsWithoutAProvenManifest.length > 0) {
   throw new Error(
