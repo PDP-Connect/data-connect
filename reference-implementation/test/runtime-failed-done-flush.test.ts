@@ -17,7 +17,7 @@
 //   DONE succeeded                  | flushed         | yes          | run.completed
 //   DONE failed                     | flushed         | NO           | run.failed (after the flush)
 //   DONE failed, flush itself fails | dropped, counted| NO           | run.failed, connector error stays primary,
-//                                   |                 |              | flush failure recorded as ingest_failure
+//                                   |                 |              | flush failure recorded as run.terminal_flush_failed
 //   DONE succeeded, flush fails     | dropped, counted| NO           | run.failed (unchanged: run fails, no success claim)
 //   DONE cancelled (connector)      | dropped         | NO           | run.failed
 //   owner cancel / run timeout      | dropped         | NO           | run.cancelled / run.failed
@@ -316,7 +316,14 @@ test("DONE failed: a flush failure never replaces the connector's error", async 
   assert.equal(data.reason, "connector_reported_failed", "the connector's failure stays the primary reason");
   assert.equal(data.connector_error_code, "upstream_boom");
   assert.equal(data.connector_error_message, "connector-reported failure");
-  assert.ok(data.ingest_failure, "the flush failure is recorded alongside it");
+  assert.equal(data.ingest_failure, undefined, "the terminal event keeps only the connector's failure");
+  const flushFailed = events.filter((e) => e.event_type === "run.terminal_flush_failed");
+  assert.equal(flushFailed.length, 1, "the flush failure is recorded as its own event");
+  assert.ok(
+    events.findIndex((e) => e.event_type === "run.terminal_flush_failed") < terminalIndex(events),
+    "the flush failure is recorded before the terminal event"
+  );
+  assert.ok(JSON.parse((flushFailed[0] as SpineRow).data_json).ingest_failure, "with the ingest failure detail");
   assert.equal(data.buffered_records_dropped, 3, "the records that did not land are counted as dropped");
   assert.equal(outcome?.connector_error?.code, "upstream_boom");
 });

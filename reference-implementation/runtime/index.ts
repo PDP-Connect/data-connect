@@ -5590,6 +5590,44 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       });
     }
 
+    // A flush failure on a failed DONE must not replace the connector's error:
+    // the run still terminates failed with the connector's own error, and the
+    // flush failure is recorded as its own event ahead of the terminal event.
+    // `buffered_records_dropped` on the terminal event counts what did not land.
+    async function flushBeforeFailedTerminal(): Promise<void> {
+      try {
+        await flushAll();
+      } catch (caught) {
+        if (terminalStopRequested()) {
+          return;
+        }
+        const err = caught as RuntimeRunError;
+        const ingestFailure = toPublicIngestFailure(err.ingest_failure);
+        try {
+          await emitSpineEventTracked({
+            actor_id: connectorId,
+            actor_type: "runtime",
+            data: {
+              buffered_records: countBufferedRecords(),
+              grant_id: grantId,
+              ...(ingestFailure ? { ingest_failure: ingestFailure } : {}),
+              message: boundedRuntimeFailureMessage(err.message || String(caught)),
+              source: runSource,
+            },
+            event_type: "run.terminal_flush_failed",
+            object_id: runId,
+            object_type: "run",
+            run_id: runId,
+            scenario_id: traceContext.scenario_id,
+            status: "failed",
+            trace_id: traceContext.trace_id,
+          });
+        } catch (emitErr) {
+          onProgress({ error: (emitErr as Error).message, type: "spine_error" });
+        }
+      }
+    }
+
     async function handleDoneMessage(msg: ConnectorMessage): Promise<void> {
       const invalidDoneStatus = validateDoneStatus(msg.status);
       if (invalidDoneStatus) {
@@ -5607,9 +5645,16 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         status: doneStatus,
       };
 
-      if (msg.status === "succeeded") {
-        // Flush any remaining records
+      // Records the connector emitted and the runtime validated are durable on
+      // succeeded and failed DONE, as mid-run batches already are: ingest upserts
+      // (connector_instance_id, stream, record_key), so a later run re-emitting them
+      // cannot duplicate. STATE is committed only by handleDoneClose, never for a
+      // failed run. Connector-reported cancelled and owner cancel/timeout drop buffers.
+      // The flush completes here, before the terminal event is emitted.
+      if (doneStatus === "succeeded") {
         await flushAll();
+      } else if (doneStatus === "failed") {
+        await flushBeforeFailedTerminal();
       }
       // Close child stdin to signal that the runtime has finished
       // consuming DONE (and flushed all records for succeeded runs).
