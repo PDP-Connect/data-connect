@@ -443,15 +443,15 @@ function lineTextAt(source: string, index: number): string {
 }
 
 /**
- * Exact files that hold historical connector ids as data, exempt from rule (1)
- * only. `server/retired-connector-ids.ts` names the four spellings that older
- * collectors sent (`claude_code` and the like) so a one-time migration can
- * rename stored rows and the server can tell a client which key replaced the
- * id it sent. Identity resolution never reads it and it gates no connector.
- * The ids are history, not a catalog, so nothing a later connector adds can
- * belong here. Exact-file, and every other rule still applies to the file.
+ * The one-time connector-id rename migration, exempt from rule (1) only.
+ * A migration that renames stored rows must name what it renames: it holds
+ * the four old -> new id pairs as private data, runs once at boot, and nothing
+ * at runtime reads them. It gates no connector and resolves no identity. The
+ * exemption is this exact file and this exact rule; every other rule still
+ * applies to it, and a rename that a later release needs belongs in its own
+ * migration, not in an extension of this one.
  */
-const HISTORICAL_CONNECTOR_ID_FILES = new Set(["reference-implementation/server/retired-connector-ids.ts"]);
+const RENAME_MIGRATION_FILES = new Set(["reference-implementation/server/connector-id-rename-migration.ts"]);
 
 const ENV_KEY_RE = /^[A-Z][A-Z0-9_]*_(CLIENT_ID|CLIENT_SECRET|REFRESH_TOKEN|API_KEY|ACCESS_TOKEN|PASSWORD)$/;
 const ABSOLUTE_URL_HOST_RE = /^https?:\/\/([^/\s:]+)/;
@@ -531,7 +531,7 @@ export function scanFile(
   const isSharedLibraryFile = relPath.startsWith(`${SHARED_LIBRARY_REPORTED_PATH_PREFIX}/`);
   violations.push(
     ...scanFileIdentity(absPath, relPath, connectorKeys, validationKinds, isSharedLibraryFile)
-      .filter((v) => !(HISTORICAL_CONNECTOR_ID_FILES.has(relPath) && v.rule === "hardcoded-connector-identity-literal"))
+      .filter((v) => !(RENAME_MIGRATION_FILES.has(relPath) && v.rule === "hardcoded-connector-identity-literal"))
       .map((v) => ({
         file: v.file,
         line: v.line,

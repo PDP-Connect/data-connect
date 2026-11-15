@@ -100,26 +100,26 @@ test("falsifiability: the scanner detects a synthetic hardcoded-identity violati
   }
 });
 
-test("falsifiability: the historical-id exemption covers one file and one rule", () => {
+test("falsifiability: the rename-migration exemption covers one file and one rule", () => {
   const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
   try {
-    const file = join(dir, "synthetic-retired.ts");
+    const file = join(dir, "synthetic-migration.ts");
     const source = [
-      'export const OLD = { gmail: "slack" };',
-      'export const URL_FOR_OLD = "https://oauth2.example-provider.com/token";',
+      'export const OLD_IDS = { gmail: "slack" };',
+      'export const URL_FOR_OLD_IDS_IDS = "https://oauth2.example-provider.com/token";',
       "",
     ].join("\n");
     writeFileSync(file, source);
     const keys = new Set(["gmail", "slack"]);
-    const elsewhere = scanFile(file, "reference-implementation/server/not-the-retired-ids-file.ts", keys, repoRoot);
+    const elsewhere = scanFile(file, "reference-implementation/server/not-the-rename-migration.ts", keys, repoRoot);
     assert.ok(
       elsewhere.some((v) => v.rule === "hardcoded-connector-identity-literal"),
       "an identity literal in any other file must still be flagged"
     );
-    const exempt = scanFile(file, "reference-implementation/server/retired-connector-ids.ts", keys, repoRoot);
+    const exempt = scanFile(file, "reference-implementation/server/connector-id-rename-migration.ts", keys, repoRoot);
     assert.ok(
       !exempt.some((v) => v.rule === "hardcoded-connector-identity-literal"),
-      "the retired-ids file is exempt from the identity-literal rule"
+      "the rename migration is exempt from the identity-literal rule"
     );
     assert.ok(
       exempt.some((v) => v.rule === "hardcoded-provider-endpoint-url"),

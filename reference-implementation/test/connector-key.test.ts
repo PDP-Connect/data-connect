@@ -24,7 +24,6 @@ import {
   isInternalConnectorId,
   isRegistryUrlConnectorId,
 } from "../server/connector-key.ts";
-import { currentKeyForRetiredConnectorId } from "../server/retired-connector-ids.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_MANIFESTS_DIR = resolve(__dirname, "..", "fixtures", "seed-manifests");
@@ -129,8 +128,8 @@ test("canonicalConnectorKey passes native bare slugs through", () => {
 
 test("canonicalConnectorKey does not rewrite a retired underscore id to its current key", () => {
   // The four ids older collectors spelled with underscores are plain unknown
-  // ids now. The server answers them with an error that names the current key
-  // (see retired-connector-id-lookup.test.ts); it never maps one to the other.
+  // ids now: nothing at runtime maps one to the other, and a lookup under the
+  // old id finds nothing (see retired-connector-id-lookup.test.ts).
   const vendored = vendoredConnectorKeys();
   for (const retired of ["apple_photos", "claude_code", "google_messages", "google_takeout"]) {
     assert.equal(canonicalConnectorKey(retired), retired);
@@ -172,11 +171,11 @@ test("bundled local-collector connector ids all resolve to a canonical key the m
       bundleIdCanonicalKey,
       `${definition.connector_id}: bundle connector_id must canonicalize`
     );
-    if (currentKeyForRetiredConnectorId(definition.connector_id) === manifestCanonicalKey) {
+    if (definition.connector_id.replaceAll("_", "-") === manifestCanonicalKey) {
       // The pinned @pdpp/polyfill-connectors tarball still bundles the four
-      // retired underscore ids. The server no longer rewrites them, so the
-      // only acceptable gap is exactly retired id -> current key; refresh the
-      // pin and this branch goes dead.
+      // underscore spellings. The server no longer rewrites them, so the only
+      // acceptable gap is the underscore spelling of the manifest key; refresh
+      // the pin and this branch goes dead.
       continue;
     }
     assert.equal(

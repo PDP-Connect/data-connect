@@ -22,7 +22,6 @@
  */
 
 import type { RefConnectorsListFreshness, RefConnectorsListRunSummary } from "../ref-connectors-list/index.ts";
-import { unknownConnectorMessage } from "../../server/retired-connector-ids.ts";
 
 export type RefConnectorDetailFreshness = RefConnectorsListFreshness;
 export type RefConnectorDetailRunSummary = RefConnectorsListRunSummary;
@@ -138,7 +137,7 @@ export class RefConnectorDetailNotFoundError extends Error {
   readonly code = "not_found" as const;
   readonly connectorId: string;
   constructor(connectorId: string) {
-    super(unknownConnectorMessage(connectorId));
+    super(`Unknown connector: ${connectorId}`);
     this.connectorId = connectorId;
     this.name = "RefConnectorDetailNotFoundError";
   }

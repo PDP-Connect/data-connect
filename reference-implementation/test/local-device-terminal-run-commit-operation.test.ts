@@ -107,17 +107,16 @@ test("terminal run commit resolves authorization before receipt lookup and passe
 });
 
 /**
- * A device configured with a retired underscore connector id
+ * A device configured with an old underscore connector id
  * (`PDPP_COLLECTOR_CONNECTOR=claude_code`) used to be rewritten to
- * `claude-code` on both sides. The server no longer rewrites ids. It answers
- * the old spelling with a 400 that names the current key, so the operator
- * knows what to change instead of reading a generic binding error.
+ * `claude-code` on both sides. The server no longer rewrites ids: the old
+ * spelling is an unknown connector, so it does not match the stored binding
+ * and the ordinary binding check refuses it.
  *
- * Uses the REAL canonicalizer: it returns the old id unchanged, so only the
- * retired-id guard can produce this answer. The commit store must not be
- * reached.
+ * Uses the REAL canonicalizer: it returns the old id unchanged. The commit
+ * store must not be reached.
  */
-test("a device sending a retired connector id gets 400 naming the current key and commits nothing", async () => {
+test("a device sending an old connector id is refused by the binding check and commits nothing", async () => {
   const capture = responseCapture();
   let errored: { code: string; message: string | undefined; param: string | undefined; status: number } | null = null;
   let storeReached = false;
@@ -126,7 +125,7 @@ test("a device sending a retired connector id gets 400 naming the current key an
       canonicalConnectorKey,
       commitTerminalRun: () => {
         storeReached = true;
-        return Promise.reject(new Error("the commit store must not be reached for a retired id"));
+        return Promise.reject(new Error("the commit store must not be reached for an old id"));
       },
       emitSpineEvent: () => Promise.resolve(),
       handleError: (_res, error) => {
@@ -148,12 +147,10 @@ test("a device sending a retired connector id gets 400 naming the current key an
         sourceInstance: { connectorId: "claude-code" },
       }),
   });
-  assert.deepEqual(errored, {
-    code: "invalid_request",
-    message: "Unknown connector: claude_code. This id was renamed; use claude-code.",
-    param: "connector_id",
-    status: 400,
-  });
+  const refusal = errored as { code: string; message: string | undefined; status: number } | null;
+  assert.equal(refusal?.status, 400);
+  assert.equal(refusal?.code, "invalid_request");
+  assert.doesNotMatch(refusal?.message ?? "", /claude-code/, "the refusal does not name a replacement key");
   assert.equal(storeReached, false);
 });
 
