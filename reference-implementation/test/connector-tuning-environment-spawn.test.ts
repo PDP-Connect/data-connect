@@ -15,6 +15,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { type RuntimeRunConnectorOptions, runConnector } from "../runtime/index.ts";
+import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 
 function manifest(connectorId: string, runtimeRequirements?: Record<string, unknown>) {
@@ -28,6 +29,7 @@ function manifest(connectorId: string, runtimeRequirements?: Record<string, unkn
         name: "items",
         primary_key: ["id"],
         schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
         semantics: "append_only",
       },
     ],
@@ -39,7 +41,8 @@ function manifest(connectorId: string, runtimeRequirements?: Record<string, unkn
 async function childTuningEnvironment(
   connectorId: string,
   runManifest: ReturnType<typeof manifest>,
-  serverEnv: Record<string, string>
+  serverEnv: Record<string, string>,
+  installed: readonly ReturnType<typeof manifest>[] = []
 ): Promise<Record<string, string>> {
   const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-tuning-env-"));
   const capturePath = join(tmpDir, "env.json");
@@ -65,6 +68,9 @@ rl.on('line', (line) => {
   Object.assign(process.env, serverEnv);
   initDb(":memory:");
   try {
+    for (const installedManifest of installed) {
+      await registerConnector(installedManifest as unknown as Record<string, unknown>, { skipDerivedRepair: true });
+    }
     const result = (await runConnector({
       admitRunConnection: ({ connectorId: admitted }: { connectorId: string }) =>
         Promise.resolve({ connectorId: admitted, connectorInstanceId: "cin_tuning", ownerSubjectId: "owner-1" }),
@@ -140,4 +146,30 @@ test("a real child of a connector in no list receives its own declared knob and 
   );
 
   assert.deepEqual(env, { PDPP_ACME_WIDGETS_PAGE_SIZE: "7" });
+});
+
+test("a real child of a connector keyed like a server variable does not receive that variable", async () => {
+  const connectorId = "database";
+  const env = await childTuningEnvironment(
+    connectorId,
+    manifest(connectorId, { tuning_environment: ["PDPP_DATABASE_URL", "PDPP_DATABASE_PAGE_SIZE"] }),
+    { PDPP_DATABASE_PAGE_SIZE: "5", PDPP_DATABASE_URL: "postgres://user:secret@db.example/pdpp" }
+  );
+
+  assert.deepEqual(env, { PDPP_DATABASE_PAGE_SIZE: "5" });
+});
+
+test("a real child does not receive a key inside an installed connector's longer namespace", async () => {
+  const connectorId = "google-maps";
+  const longer = "google-maps-data-portability";
+  const env = await childTuningEnvironment(
+    connectorId,
+    manifest(connectorId, {
+      tuning_environment: ["PDPP_GOOGLE_MAPS_PAGE_SIZE", "PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"],
+    }),
+    { PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20", PDPP_GOOGLE_MAPS_PAGE_SIZE: "10" },
+    [manifest(`https://registry.pdpp.dev/connectors/${longer}`)]
+  );
+
+  assert.deepEqual(env, { PDPP_GOOGLE_MAPS_PAGE_SIZE: "10" });
 });
