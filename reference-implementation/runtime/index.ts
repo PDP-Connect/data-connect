@@ -29,6 +29,7 @@ import { connectorChildArgs } from "../connector-dependency-loader.mjs";
 import { emitControllerBootedAndStashEpoch } from "../lib/controller-boot.ts";
 import type { SpineEventInput, SpineEventRecord } from "../lib/spine.ts";
 import { createTraceContext, emitSpineEvent, getCurrentBootEpoch } from "../lib/spine.ts";
+import { listInstalledConnectorKeys } from "../server/auth.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { resolveRunConnectorOptions } from "../server/connector-run-config.ts";
 import { readStoredCollectionScope } from "../server/local-collection-scope.ts";
@@ -521,6 +522,11 @@ export interface RuntimeRunConnectorOptions {
   /** Operator-authorized connector IDs that may receive ambient proxy aliases. */
   approvedProxyConnectorIds?: readonly string[];
   automationMode?: RuntimeRunAutomationMode | null;
+  /**
+   * Canonical keys of the installed connectors, for the tuning-namespace rule.
+   * Defaults to the connector catalog; tests and embedders may supply it.
+   */
+  installedConnectorKeys?: readonly string[];
   /**
    * Explicit browser-surface child env override for tests and integration
    * seams. Values here win over `browserSurfaceLease` fields.
@@ -3121,6 +3127,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // can collide across unrelated concurrent runs.
   const spawnRunId = opts.runId || `run_${randomUUID()}`;
 
+  // Read at spawn, not at manifest registration: a connector installed after
+  // this one still takes the keys inside its longer namespace.
+  const installedConnectorKeys = opts.installedConnectorKeys ?? (await listInstalledConnectorKeys());
+
   const launchConfig = buildConnectorLaunchConfig({
     automationMode,
     browserSurfaceEnv,
@@ -3172,6 +3182,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         values: staticSecretLaunchEnv,
       } satisfies ConnectorConnectionEnvironment,
       connectorId,
+      installedConnectorKeys,
       explicitRunEnv: {
         PDPP_CONNECTOR_ID: connectorId,
         ...connectorInstanceEnv,

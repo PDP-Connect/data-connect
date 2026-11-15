@@ -11,7 +11,7 @@
  */
 
 import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
-import { ownsTuningKey } from "../runtime/connector-child-environment.ts";
+import { explainTuningKeyRefusal } from "../runtime/connector-child-environment.ts";
 import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
@@ -609,9 +609,19 @@ const TUNING_ENVIRONMENT_KEY = /^[A-Z][A-Z0-9_]*$/;
 
 // Validates `runtime_requirements.tuning_environment`: the operator tuning
 // knobs a connector reads. A manifest may only declare keys in its own
-// PDPP_<KEY>_ namespace; the runtime would drop any other key at spawn, so the
-// mistake fails here instead of silently at run time.
-function validateTuningEnvironment(manifest: Record<string, unknown>, req: Record<string, unknown>, code: string) {
+// PDPP_<KEY>_ namespace, never a variable the server reads, and never a key
+// inside the longer namespace of another installed connector; the runtime
+// would drop any other key at spawn, so the mistake fails here instead of
+// silently at run time. `installedConnectorKeys` is supplied at registration.
+// Without it (stored-manifest reads) only the connector's own namespace is
+// checked, so installing a longer-named connector later cannot make an
+// already-stored manifest unreadable.
+function validateTuningEnvironment(
+  manifest: Record<string, unknown>,
+  req: Record<string, unknown>,
+  code: string,
+  installedConnectorKeys: readonly string[]
+) {
   const declared = req.tuning_environment;
   if (declared === undefined) {
     return;
@@ -633,11 +643,9 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
       throw invalidConnectorManifest(`runtime_requirements.tuning_environment duplicates ${key}`, code);
     }
     seen.add(key);
-    if (ownKey !== null && !ownsTuningKey(ownKey, key)) {
-      throw invalidConnectorManifest(
-        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${ownKey} tuning namespace`,
-        code
-      );
+    const refusal = ownKey === null ? null : explainTuningKeyRefusal(ownKey, key, installedConnectorKeys);
+    if (refusal !== null) {
+      throw invalidConnectorManifest(`runtime_requirements.tuning_environment[${index}] ${refusal}`, code);
     }
   }
 }
@@ -646,7 +654,11 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
 // Full manifest validation keeps main's hardened `detect.executable` contract;
 // runtime-requirements-only calls keep the branch's direct-helper compatibility
 // for legacy unit coverage.
-export function validateRuntimeRequirements(manifest: Record<string, unknown>, code: string): void {
+export function validateRuntimeRequirements(
+  manifest: Record<string, unknown>,
+  code: string,
+  installedConnectorKeys: readonly string[] = []
+): void {
   const requirements = manifest.runtime_requirements;
   if (requirements === undefined || requirements === null) {
     return;
@@ -655,7 +667,7 @@ export function validateRuntimeRequirements(manifest: Record<string, unknown>, c
     throw invalidConnectorManifest("runtime_requirements must be an object when declared", code);
   }
   const req = requirements as Record<string, unknown>;
-  validateTuningEnvironment(manifest, req, code);
+  validateTuningEnvironment(manifest, req, code, installedConnectorKeys);
   if (!validateRuntimeBindings(req, code)) {
     return;
   }
@@ -2192,7 +2204,12 @@ function validateManifestStream({
 export function validateConnectorManifest(
   manifest: Record<string, unknown> = {},
   code = "invalid_request",
-  opts: { skipCollectionProfileCheck?: boolean; skipCursorFieldSortCheck?: boolean } = {}
+  opts: {
+    /** Canonical keys of the installed connectors, for the tuning-namespace check at registration. */
+    installedConnectorKeys?: readonly string[];
+    skipCollectionProfileCheck?: boolean;
+    skipCursorFieldSortCheck?: boolean;
+  } = {}
 ): void {
   const hasConnectorId = isNonEmptyString(manifest.connector_id);
   const hasConnectorKey = isNonEmptyString(manifest.connector_key);
@@ -2236,7 +2253,7 @@ export function validateConnectorManifest(
   if (!opts.skipCollectionProfileCheck) {
     validateCollectionProfileDeclaration(manifest, code);
   }
-  validateRuntimeRequirements(manifest, code);
+  validateRuntimeRequirements(manifest, code, opts.installedConnectorKeys);
   validateRefreshPolicyCapability(manifest, code);
   validateDeclaredReasonTokensCapability(manifest, code);
   validateProvenCapability(manifest, code);

@@ -13,10 +13,12 @@
  * `runtime_requirements.tuning_environment`, the operator tuning knobs it
  * reads. Each declared key inside the connector's own `PDPP_<KEY>_` namespace
  * becomes a `process_env` binding for that connector only. A declared key
- * outside that namespace, or a reserved or proxy key, gets no binding.
+ * outside that namespace, a reserved, proxy or server-owned key, or a key inside
+ * the longer namespace of another installed connector, gets no binding.
  */
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { type ReconcileOptions, reconcileConnectorBrowsersPath } from "./browser-executable.ts";
+import { isServerOwnedEnvironmentKey } from "./server-owned-environment.ts";
 import { UNDECLARED_TUNING_ENVIRONMENT } from "./undeclared-tuning-environment.ts";
 
 const PLATFORM_KEYS = [
@@ -123,6 +125,13 @@ export interface ConnectorChildEnvironmentInput {
   /** The connector identity used to evaluate approvedProxyConnectorIds. */
   connectorId?: string;
   explicitRunEnv: Record<string, string>;
+  /**
+   * Canonical keys of every installed connector: vendored, installed from the
+   * signed catalog, and local sources. Used to give a key inside nested
+   * namespaces to the connector with the longest one. Omitted means no other
+   * connector is known.
+   */
+  installedConnectorKeys?: readonly string[];
   manifest: unknown;
   platform?: NodeJS.Platform;
   sourceEnv?: NodeJS.ProcessEnv;
@@ -397,26 +406,75 @@ export function tuningNamespacePrefix(connectorKey: string): string {
 }
 
 /**
- * True when `key` is a tuning key the connector with canonical key
- * `connectorKey` owns: a key inside its `PDPP_<KEY>_` namespace with a
- * non-empty remainder. Reserved and proxy keys are never owned. The rule reads
- * no connector list, so a connector installed from the signed catalog owns its
- * namespace the same way a vendored one does.
+ * Why the connector with canonical key `connectorKey` may not use `key` as a
+ * tuning key, or `null` when it may. One rule serves manifest validation and
+ * child-process spawn, so the two cannot disagree.
+ *
+ * A connector owns the keys in its `PDPP_<KEY>_` namespace with a non-empty
+ * remainder, except:
+ *   - reserved platform and run keys, proxy keys, and every variable the
+ *     server reads itself (`server-owned-environment.ts`): a connector cannot
+ *     claim a name the server uses, whatever its key;
+ *   - a key inside the longer namespace of another installed connector
+ *     (`installedConnectorKeys`): `google-maps` does not own
+ *     `PDPP_GOOGLE_MAPS_DATA_PORTABILITY_*` while `google-maps-data-portability`
+ *     is installed;
+ *   - a key in a namespace that two installed keys spell identically
+ *     (`a-b` and `a_b`): neither owns it.
+ *
+ * No connector list is built in. When the longer connector is not installed,
+ * nothing can tell its keys from the shorter connector's own, so they are
+ * accepted; installing the longer connector later moves them to it.
  */
-export function ownsTuningKey(connectorKey: string, key: string): boolean {
+export function explainTuningKeyRefusal(
+  connectorKey: string,
+  key: string,
+  installedConnectorKeys: readonly string[] = []
+): string | null {
   if (reserved(key) || proxyKey(key)) {
-    return false;
+    return `${key} is a reserved environment variable`;
+  }
+  if (isServerOwnedEnvironmentKey(key)) {
+    return `${key} is a server-owned environment variable`;
   }
   const prefix = tuningNamespacePrefix(connectorKey);
-  return key.startsWith(prefix) && key.length > prefix.length;
+  if (!key.startsWith(prefix) || key.length === prefix.length) {
+    return `${key} is outside the ${connectorKey} tuning namespace`;
+  }
+  for (const other of installedConnectorKeys) {
+    if (other === connectorKey) {
+      continue;
+    }
+    const otherPrefix = tuningNamespacePrefix(other);
+    if (otherPrefix === prefix) {
+      return `${key} is in a namespace shared with the installed connector ${other}`;
+    }
+    if (otherPrefix.length > prefix.length && key.startsWith(otherPrefix) && key.length > otherPrefix.length) {
+      return `${key} belongs to the installed connector ${other}`;
+    }
+  }
+  return null;
 }
 
-function tuningBindings(connectorId: string | undefined, keys: readonly string[]): ConnectorEnvironmentBinding[] {
+/** True when `explainTuningKeyRefusal` finds nothing against the connector owning `key`. */
+export function ownsTuningKey(
+  connectorKey: string,
+  key: string,
+  installedConnectorKeys: readonly string[] = []
+): boolean {
+  return explainTuningKeyRefusal(connectorKey, key, installedConnectorKeys) === null;
+}
+
+function tuningBindings(
+  connectorId: string | undefined,
+  keys: readonly string[],
+  installedConnectorKeys: readonly string[]
+): ConnectorEnvironmentBinding[] {
   if (connectorId === undefined || canonicalConnectorKey(connectorId) !== connectorId) {
     return [];
   }
   return keys
-    .filter((key) => ownsTuningKey(connectorId, key))
+    .filter((key) => ownsTuningKey(connectorId, key, installedConnectorKeys))
     .map((key) => ({ connectorId, logicalKey: key, source: { key, kind: "process_env" }, targetKey: key }));
 }
 
@@ -663,7 +721,10 @@ export function composeConnectorChildEnvironment(input: ConnectorChildEnvironmen
     env,
     approvedBindingValues(
       // Operator bindings come last, so they override a declared tuning key.
-      [...tuningBindings(input.connectorId, tuningKeys), ...policy.approvedBindings],
+      [
+        ...tuningBindings(input.connectorId, tuningKeys, input.installedConnectorKeys ?? []),
+        ...policy.approvedBindings,
+      ],
       [...declaredLogicalKeys(input.manifest), ...tuningKeys],
       input.connectorId,
       proxyAuthorized,

@@ -329,3 +329,45 @@ test("validateRuntimeRequirements: tuning_environment uses the connector_key ide
     undefined
   );
 });
+
+test("validateRuntimeRequirements: a connector cannot declare a variable the server reads", () => {
+  const declare = (connectorKey: string, ...keys: string[]) => ({
+    connector_key: connectorKey,
+    runtime_requirements: { tuning_environment: keys },
+  });
+  // `database` owns the PDPP_DATABASE_ namespace by shape, and the server reads PDPP_DATABASE_URL.
+  assertRejects(declare("database", "PDPP_DATABASE_URL"), "PDPP_DATABASE_URL is a server-owned environment variable");
+  assertRejects(
+    declare("storage", "PDPP_STORAGE_BACKEND"),
+    "PDPP_STORAGE_BACKEND is a server-owned environment variable"
+  );
+  assert.equal(validateRuntimeRequirements(declare("database", "PDPP_DATABASE_PAGE_SIZE"), CODE), undefined);
+});
+
+test("validateRuntimeRequirements: a key inside an installed connector's longer namespace is refused", () => {
+  const declared = {
+    connector_key: "google-maps",
+    runtime_requirements: {
+      tuning_environment: ["PDPP_GOOGLE_MAPS_PAGE_SIZE", "PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"],
+    },
+  };
+  // Nothing installed: both keys are accepted.
+  assert.equal(validateRuntimeRequirements(declared, CODE), undefined);
+  assert.equal(validateRuntimeRequirements(declared, CODE, ["google-maps"]), undefined);
+  assert.throws(
+    () => validateRuntimeRequirements(declared, CODE, ["google-maps", "google-maps-data-portability"]),
+    /PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE belongs to the installed connector google-maps-data-portability/
+  );
+  // The longer connector declares its own key without conflict.
+  assert.equal(
+    validateRuntimeRequirements(
+      {
+        connector_key: "google-maps-data-portability",
+        runtime_requirements: { tuning_environment: ["PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"] },
+      },
+      CODE,
+      ["google-maps", "google-maps-data-portability"]
+    ),
+    undefined
+  );
+});
