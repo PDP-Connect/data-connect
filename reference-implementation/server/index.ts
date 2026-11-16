@@ -5357,6 +5357,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
   });
 
+  // One resolver for the AS issuer: the metadata `issuer` and the RFC 9207
+  // `iss` on authorization responses both come from here, so they cannot drift.
+  const resolveExplicitAsIssuer = () =>
+    opts.asIssuer ||
+    opts.asPublicUrl ||
+    (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
+    null;
+  const resolveAsIssuer = (req: unknown) =>
+    resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], resolveExplicitAsIssuer());
+
   // AS `/.well-known/oauth-authorization-server` is mounted via
   // `server/routes/root-and-discovery.ts` per OpenSpec change
   // `split-reference-server-by-route-family`. Behaviour-preserving
@@ -5373,11 +5383,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     rejectUntrustedMetadataHost: rejectUntrustedMetadataHost as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["rejectUntrustedMetadataHost"],
-    resolveExplicitIssuer: () =>
-      opts.asIssuer ||
-      opts.asPublicUrl ||
-      (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
-      null,
+    resolveExplicitIssuer: resolveExplicitAsIssuer,
     resolvePreRegisteredPublicClients: () => resolvePreRegisteredPublicClients(opts) as unknown[],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -5520,6 +5526,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
           >,
         }
       : {}),
+    resolveIssuer: resolveAsIssuer as unknown as Parameters<typeof mountAsAuthorize>[1]["resolveIssuer"],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<
@@ -7288,6 +7295,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     providerName,
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
+    resolveIssuer: resolveAsIssuer,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountAsConsent>[1]);
 

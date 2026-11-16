@@ -32,6 +32,7 @@ import type {
   ConsentUiRenderer,
   PendingGrantRequest,
 } from "./as-consent-ui-helpers.ts";
+import { buildAuthorizationResponseUrl } from "../authorization-response.ts";
 import { resolveGrantExpiry } from "../hosted-mcp-grant-expiry.ts";
 import {
   type StreamScopeError,
@@ -299,6 +300,12 @@ export interface MountAsAuthorizeContext {
   requireCsrf: MiddlewareHandler;
   /** Owner-session enforcement middleware. */
   requireOwnerSession: MiddlewareHandler;
+  /**
+   * The RFC 9207 `iss` for authorization responses on this request. Must be
+   * the same value `/.well-known/oauth-authorization-server` reports as
+   * `issuer` for the request.
+   */
+  resolveIssuer: (req: RouteRequest) => string;
   /** Resolves the public base URL from the request and any explicit override. */
   resolvePublicUrl: (req: RouteRequest, explicitBaseUrl: string | null) => string;
   /** Hosted-MCP selection parsers (from hosted-mcp-selection.js). */
@@ -783,6 +790,7 @@ async function buildSourceAccumulator(
 // Stages a package device-code, issues an auth code, and redirects the client.
 // Extracted to reduce cognitive complexity of the POST /oauth/authorize/mcp-package handler.
 async function issuePackageAuthCodeRedirect(
+  req: RouteRequest,
   res: RouteResponse,
   packageResult: PackageGrantResult,
   pkce: {
@@ -794,7 +802,7 @@ async function issuePackageAuthCodeRedirect(
   },
   ctx: Pick<
     MountAsAuthorizeContext,
-    "stageOAuthAuthorizationCodeRequest" | "issueOAuthAuthorizationCodeForPackageDeviceCode"
+    "stageOAuthAuthorizationCodeRequest" | "issueOAuthAuthorizationCodeForPackageDeviceCode" | "resolveIssuer"
   >
 ): Promise<unknown> {
   const deviceCode = `mcpdev_${randomBytes(16).toString("hex")}`;
@@ -816,12 +824,13 @@ async function issuePackageAuthCodeRedirect(
     Object.assign(err, { code: "server_error" });
     throw err;
   }
-  const redirectUrl = new URL(issued.redirect_uri);
-  redirectUrl.searchParams.set("code", issued.code);
-  if (issued.state) {
-    redirectUrl.searchParams.set("state", issued.state);
-  }
-  return res.redirect(302, redirectUrl.toString());
+  return res.redirect(
+    302,
+    buildAuthorizationResponseUrl(issued.redirect_uri, ctx.resolveIssuer(req), {
+      code: issued.code,
+      state: issued.state,
+    })
+  );
 }
 
 // Resolves the package access mode from the raw body value.
@@ -1005,6 +1014,7 @@ async function buildPackageAndRedirect(
     | "issueOAuthAuthorizationCodeForPackageDeviceCode"
     | "oauthError"
     | "providerName"
+    | "resolveIssuer"
     | "revokeGrantPackage"
     | "stageOAuthAuthorizationCodeRequest"
   >,
@@ -1111,7 +1121,7 @@ async function buildPackageAndRedirect(
     throw err;
   }
   try {
-    return await issuePackageAuthCodeRedirect(res, packageResult, pkce, ctx);
+    return await issuePackageAuthCodeRedirect(req, res, packageResult, pkce, ctx);
   } catch (err) {
     if (ctx.revokeGrantPackage) {
       try {
@@ -1449,7 +1459,7 @@ async function buildChallengeApprovalBody(
 async function handleHostedMcpCancel(
   req: RouteRequest,
   res: RouteResponse,
-  ctx: Pick<MountAsAuthorizeContext, "ensureRequestId" | "getRegisteredClient" | "oauthError">
+  ctx: Pick<MountAsAuthorizeContext, "ensureRequestId" | "getRegisteredClient" | "oauthError" | "resolveIssuer">
 ): Promise<unknown> {
   const body = req.body || {};
   const clientId = requireAuthorizeString(body, "client_id");
@@ -1467,13 +1477,24 @@ async function handleHostedMcpCancel(
   // redirecting, so a forged redirect_uri never becomes a redirect target.
   requireRegisteredRedirectUri(client, redirectUri);
 
-  const redirectUrl = new URL(redirectUri);
-  redirectUrl.searchParams.set("error", "access_denied");
-  redirectUrl.searchParams.set("error_description", "The owner denied the request");
-  if (state) {
-    redirectUrl.searchParams.set("state", state);
-  }
-  return res.redirect(302, redirectUrl.toString());
+  return res.redirect(
+    302,
+    buildAuthorizationResponseUrl(redirectUri, ctx.resolveIssuer(req), {
+      error: "access_denied",
+      error_description: "The owner denied the request",
+      state,
+    })
+  );
+}
+
+// The consent-challenge handlers re-enter the picker handlers with a spread copy
+// of the request. Spreading drops the prototype getters (`protocol`, `hostname`)
+// the issuer resolver reads, so resolve `iss` from the original request.
+function withIssuerOfRequest<T extends Pick<MountAsAuthorizeContext, "resolveIssuer">>(
+  ctx: T,
+  originalReq: RouteRequest
+): T {
+  return { ...ctx, resolveIssuer: () => ctx.resolveIssuer(originalReq) };
 }
 
 // ─── Route mount ─────────────────────────────────────────────────────────────
@@ -1751,7 +1772,7 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         await handleHostedMcpPackageApproval(
           boundRequest,
           response,
-          ctx,
+          withIssuerOfRequest(ctx, req),
           () => consumeApprovalChallenge(boundRequest, response, id),
           () => releaseApprovalChallenge(boundRequest, id)
         );
@@ -1797,7 +1818,11 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         // re-resolves the client and re-checks the redirect_uri against its
         // registration, so this cannot be steered into an open redirect.
         const { response, redirectUrl } = captureRedirectResponse(res);
-        await handleHostedMcpCancel({ ...req, body: { ...challenge.authorizeParams }, wantsJson: true }, response, ctx);
+        await handleHostedMcpCancel(
+          { ...req, body: { ...challenge.authorizeParams }, wantsJson: true },
+          response,
+          withIssuerOfRequest(ctx, req)
+        );
         const url = redirectUrl();
         if (!url) {
           return;
