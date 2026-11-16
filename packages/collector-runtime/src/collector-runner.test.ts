@@ -1276,6 +1276,56 @@ async function tempQueuePath(): Promise<string> {
   return join(await createTempDir("pdpp-collector-runner-"), "queue.json");
 }
 
+/** A record batch exactly as a collector that spelled the connector with underscores queued it. */
+function seedQueuedRecordBatch(input: {
+  connectorId: string;
+  queuePath: string;
+  sourceInstanceId: string;
+  suffix: string;
+}): string {
+  const batchId = `${input.sourceInstanceId}:${input.suffix}-batch`;
+  const records = transformRecordsToCollectorEnvelopes({
+    batchId,
+    batchSeq: 2,
+    connectorId: input.connectorId,
+    deviceId: "device-1",
+    messages: [
+      {
+        data: { id: `${input.suffix}:m-1` },
+        emitted_at: "2026-05-19T12:00:00.000Z",
+        key: `${input.suffix}:m-1`,
+        stream: "messages",
+        type: "RECORD",
+      },
+    ],
+    sourceInstanceId: input.sourceInstanceId,
+  });
+  const id = buildLocalDeviceOutboxId({
+    kind: "record_batch",
+    parts: [batchId],
+    sourceInstanceId: input.sourceInstanceId,
+  });
+  const outbox = new LocalDeviceOutbox({ path: input.queuePath });
+  try {
+    outbox.enqueue({
+      id,
+      kind: "record_batch",
+      payload: {
+        batchId,
+        batchSeq: 2,
+        connectorId: input.connectorId,
+        deviceId: "device-1",
+        records,
+        sourceInstanceId: input.sourceInstanceId,
+      },
+      sourceInstanceId: input.sourceInstanceId,
+    });
+  } finally {
+    outbox.close();
+  }
+  return id;
+}
+
 function seedDeadLetteredRecordBatch(input: {
   connectorId: string;
   deviceId?: string;
@@ -1818,6 +1868,73 @@ test("Gmail attachment backfill cursor replays from durable STATE after restart"
       },
     });
     assert.equal(harness.ingestedBatches[1]?.records?.[0]?.data?.observed_prior_uid, 50);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runCollectorConnector delivers a backlog queued under the underscore connector spelling once the server only accepts the manifest key", async () => {
+  const harness = await startCollectorHarness({ priorState: {}, requiredConnectorId: "claude-code" });
+  try {
+    const queuePath = await tempQueuePath();
+    // A collector from before the rename queued these. One is still waiting;
+    // one was dead-lettered by a server that had already stopped accepting the
+    // underscore spelling, and is then requeued the way `recover --apply` does.
+    seedQueuedRecordBatch({ connectorId: "claude_code", queuePath, sourceInstanceId: "src-1", suffix: "pending" });
+    const deadLetterId = seedDeadLetteredRecordBatch({
+      connectorId: "claude_code",
+      error: "local device request failed: 400 invalid_request connector_id does not match source_instance_id",
+      queuePath,
+      sourceInstanceId: "src-1",
+    });
+    const requeueOutbox = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      assert.equal(requeueOutbox.requeueDeadLetters({ sourceInstanceId: "src-1" }).requeued, 1);
+    } finally {
+      requeueOutbox.close();
+    }
+
+    const fixture = await writeFixtureConnector({
+      script: `
+        let buf = "";
+        await new Promise((r) => process.stdin.on("data", (c) => {
+          buf += c;
+          if (buf.includes("\\n")) r();
+        }));
+        process.stdout.write(JSON.stringify({ type: "DONE", status: "succeeded", records_emitted: 0 }) + "\\n");
+      `,
+    });
+
+    const result = await runCollectorConnector({
+      baseUrl: harness.url,
+      connector: {
+        args: [fixture],
+        command: "node",
+        connector_id: "claude-code",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: {} },
+        streams: ["messages"],
+      },
+      deviceId: "device-1",
+      deviceToken: "device-token",
+      executionRoot: TEST_EXECUTION_ROOT,
+      queuePath,
+      sourceInstanceId: "src-1",
+    });
+
+    assert.equal(harness.ingestedBatches.length, 2, "both queued batches reached the server");
+    assert.deepEqual(
+      harness.ingestedBatches.map((batch) => batch.connector_id),
+      ["claude-code", "claude-code"]
+    );
+    assert.equal(result.outboxSummary.ready, 0);
+    assert.equal(result.outboxSummary.deadLetter, 0);
+    const outbox = new LocalDeviceOutbox({ path: queuePath });
+    try {
+      assert.equal(outbox.get(deadLetterId)?.status, "succeeded");
+    } finally {
+      outbox.close();
+    }
   } finally {
     await harness.close();
   }
@@ -2441,6 +2558,14 @@ interface CollectorHarnessOptions {
   heartbeatStatuses?: number[];
   ingestFailureMode?: "always-400" | "always-503";
   priorState?: Record<string, unknown> | null;
+  /**
+   * Make the ingest route enforce what the reference server enforces once
+   * connector ids are manifest keys: a batch naming any other spelling of the
+   * connector is rejected with 400, and `body_hash` must equal the hash of the
+   * collector envelopes rebuilt from the request's own connector id
+   * (`canonicalCollectorEnvelopeHash` in `ref-device-exporters.ts`).
+   */
+  requiredConnectorId?: string;
   /** When set, the GET state endpoint returns this status instead of 200. */
   stateReadStatus?: number;
   /** When set, a checkpoint STATE PUT returns this status without persisting. */
@@ -2646,6 +2771,13 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
         res.end(JSON.stringify({ error: { code: "synthetic_bad_request" } }));
         return;
       }
+      if (options.requiredConnectorId) {
+        const rejection = rejectIngestLikeServer(parsed, options.requiredConnectorId);
+        if (rejection) {
+          sendJson(res, 400, { error: { code: rejection } });
+          return;
+        }
+      }
       ingestedBatches.push(parsed as { records?: Array<{ data?: Record<string, unknown> }> });
       sendJson(res, 201, {
         accepted_record_count: (parsed as { records?: unknown[] }).records?.length ?? 0,
@@ -2673,6 +2805,32 @@ async function startCollectorHarness(options: CollectorHarnessOptions): Promise<
     terminalCommits,
     url: `http://127.0.0.1:${address.port}`,
   };
+}
+
+/** The two device-ingest checks that a connector-id spelling change can trip. */
+function rejectIngestLikeServer(body: unknown, requiredConnectorId: string): string | null {
+  if (!isPlainObject(body) || body.connector_id !== requiredConnectorId) {
+    return "invalid_request";
+  }
+  const records = Array.isArray(body.records) ? (body.records as Record<string, unknown>[]) : [];
+  const envelopes = records.map((record) => {
+    const envelopeBody = {
+      connector_id: body.connector_id,
+      data: record.data,
+      emitted_at: record.emitted_at,
+      record_key: String(record.record_key),
+      stream: record.stream,
+    };
+    return {
+      batch_id: body.batch_id,
+      batch_seq: body.batch_seq,
+      body_hash: hashCanonicalJson(envelopeBody),
+      device_id: body.device_id,
+      source_instance_id: body.source_instance_id,
+      ...envelopeBody,
+    };
+  });
+  return body.body_hash === hashCanonicalJson(envelopes) ? null : "device_batch_hash_mismatch";
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
