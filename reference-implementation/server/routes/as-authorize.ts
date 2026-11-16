@@ -1689,7 +1689,7 @@ export function mountAsAuthorize(app: AppLike, ctx: MountAsAuthorizeContext): vo
         return await handleHostedMcpPackageApproval(
           boundRequest,
           res,
-          ctx,
+          withIssuerOfRequest(ctx, req),
           async () => {
             if (!id) {
               ctx.oauthError(res, 400, "invalid_request", "consent_challenge is required to approve access");

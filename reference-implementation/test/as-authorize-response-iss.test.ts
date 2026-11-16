@@ -210,6 +210,61 @@ test("metadata advertises authorization_response_iss_parameter_supported", async
 	}
 });
 
+// The decision a console would submit for every offered source and stream,
+// bound to the challenge's own review and decision digests.
+async function fullDecision(
+	asUrl: string,
+	challenge: string,
+	clientId: string,
+): Promise<{
+	access_mode: string;
+	decision_digest: string;
+	grant_expiry: string;
+	review_digest: string;
+	source_id: string[];
+	stream: string[];
+	/** The same choice in the form route's vocabulary. */
+	form: { selection: string[]; stream: string[] };
+}> {
+	const model = (
+		await fetchJson(`${asUrl}/oauth/authorize/consent-challenges/${challenge}`)
+	).body as {
+		grantExpiry: { defaultId: string };
+		reviewDigest: string;
+		sources: Array<{
+			id: string;
+			selectionValue: string;
+			streams: Array<{ id: string; name: string; selectionValue: string }>;
+		}>;
+	};
+	assert.ok(model.sources.length > 0, "the fixture connector must be offered");
+	const accessMode = "continuous";
+	return {
+		access_mode: accessMode,
+		decision_digest: computeHostedMcpDecisionDigest({
+			accessMode,
+			clientId,
+			grantExpiry: model.grantExpiry.defaultId,
+			sources: model.sources.map((source) => ({
+				sourceKey: source.id,
+				streamNames: source.streams.map((stream) => stream.name).sort(),
+			})),
+		}),
+		grant_expiry: model.grantExpiry.defaultId,
+		review_digest: model.reviewDigest,
+		source_id: model.sources.map((source) => source.id),
+		stream: model.sources.flatMap((source) =>
+			source.streams.map((stream) => stream.id),
+		),
+		form: {
+			selection: model.sources.map((source) => source.selectionValue),
+			stream: model.sources.flatMap((source) =>
+				source.streams.map((stream) => stream.selectionValue),
+			),
+		},
+	};
+}
+
 test("consent-challenge accept returns a code redirect_url with iss equal to the metadata issuer", async () => {
 	const server = await startTestServer();
 	const asUrl = `http://localhost:${server.asPort}`;
@@ -218,44 +273,15 @@ test("consent-challenge accept returns a code redirect_url with iss equal to the
 		const clientId = await registerClient(asUrl);
 		const state = "accept-state";
 		const challenge = await parkConsentChallenge(asUrl, clientId, state);
-		const model = (
-			await fetchJson(
-				`${asUrl}/oauth/authorize/consent-challenges/${challenge}`,
-			)
-		).body as {
-			grantExpiry: { defaultId: string };
-			reviewDigest: string;
-			sources: Array<{
-				id: string;
-				streams: Array<{ id: string; name: string }>;
-			}>;
-		};
-		assert.ok(
-			model.sources.length > 0,
-			"the fixture connector must be offered",
+		const { form: _form, ...decision } = await fullDecision(
+			asUrl,
+			challenge,
+			clientId,
 		);
-		const accessMode = "continuous";
 		const accepted = await fetchJson(
 			`${asUrl}/oauth/authorize/consent-challenges/${challenge}/accept`,
 			{
-				body: JSON.stringify({
-					access_mode: accessMode,
-					decision_digest: computeHostedMcpDecisionDigest({
-						accessMode,
-						clientId,
-						grantExpiry: model.grantExpiry.defaultId,
-						sources: model.sources.map((source) => ({
-							sourceKey: source.id,
-							streamNames: source.streams.map((stream) => stream.name).sort(),
-						})),
-					}),
-					grant_expiry: model.grantExpiry.defaultId,
-					review_digest: model.reviewDigest,
-					source_id: model.sources.map((source) => source.id),
-					stream: model.sources.flatMap((source) =>
-						source.streams.map((stream) => stream.id),
-					),
-				}),
+				body: JSON.stringify(decision),
 				headers: {
 					Accept: "application/json",
 					"Content-Type": "application/json",
@@ -274,6 +300,54 @@ test("consent-challenge accept returns a code redirect_url with iss equal to the
 		await closeServer(server);
 	}
 });
+
+// The form route re-enters the approval handler with a copy of the request.
+// Run it with a derived and with a configured issuer: only the derived one
+// reads the request, so only it shows a copy that lost the request's getters.
+for (const [label, extra] of [
+	["derived", {}],
+	["configured", { asIssuer: "https://as.example.test" }],
+] as const) {
+	test(`POST /oauth/authorize/mcp-package with a consent challenge redirects with iss (${label} issuer)`, async () => {
+		const server = await startTestServer(extra);
+		const asUrl = `http://localhost:${server.asPort}`;
+		try {
+			await registerSpotify(asUrl);
+			const clientId = await registerClient(asUrl);
+			const state = `form-${label}-state`;
+			const challenge = await parkConsentChallenge(asUrl, clientId, state);
+			const decision = await fullDecision(asUrl, challenge, clientId);
+			const form = new URLSearchParams({
+				access_mode: decision.access_mode,
+				consent_challenge: challenge,
+				decision_digest: decision.decision_digest,
+				grant_expiry: decision.grant_expiry,
+				review_digest: decision.review_digest,
+			});
+			for (const value of decision.form.selection)
+				form.append("selection", value);
+			for (const value of decision.form.stream) form.append("stream", value);
+			const resp = await fetch(`${asUrl}/oauth/authorize/mcp-package`, {
+				body: form.toString(),
+				headers: {
+					Accept: "text/html",
+					"Content-Type": "application/x-www-form-urlencoded",
+				},
+				method: "POST",
+				redirect: "manual",
+			});
+			assert.equal(resp.status, 302, await resp.clone().text());
+			const location = new URL(resp.headers.get("location") ?? "");
+			assertAuthorizationResponse(location, await metadataIssuer(asUrl), state);
+			assert.ok(
+				location.searchParams.get("code"),
+				"a success redirect carries the code",
+			);
+		} finally {
+			await closeServer(server);
+		}
+	});
+}
 
 test("consent-challenge reject returns an access_denied redirect_url with iss", async () => {
 	const server = await startTestServer();
