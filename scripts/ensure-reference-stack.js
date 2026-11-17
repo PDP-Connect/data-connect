@@ -372,9 +372,8 @@ function createStagedPackageJson(projectRoot, stageRoot) {
   dependencies.tsx = rootPackage.devDependencies?.tsx || "^4.23.13"
   // Workspace-relative archives move one directory deeper in the staged runtime.
   for (const [name, specifier] of Object.entries(dependencies)) {
-    if (specifier.startsWith("file:vendor/")) {
-      dependencies[name] = `file:reference-implementation/${specifier.slice("file:".length)}`
-    }
+    const archive = /^file:(?:\.\/)?(vendor\/.*)$/.exec(specifier)?.[1]
+    if (archive) dependencies[name] = `file:reference-implementation/${archive}`
   }
   for (const [packageName] of LOCAL_PACKAGES) {
     dependencies[packageName] = localPackageSpecifier(packageName)

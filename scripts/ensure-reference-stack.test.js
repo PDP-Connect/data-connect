@@ -677,7 +677,11 @@ describe("reference stack staging contract", () => {
     writeFileSync(
       join(project, "reference-implementation", "package.json"),
       JSON.stringify({
-        dependencies: { tsx: "^4.23.13", "portable-archive": "file:vendor/portable.tgz" },
+        dependencies: {
+          tsx: "^4.23.13",
+          "portable-archive": "file:vendor/portable.tgz",
+          "existing-archive": "file:./vendor/existing.tgz",
+        },
         optionalDependencies: { "@opendatalabs/remote-surface": "^1.5.2" },
       })
     )
@@ -733,6 +737,7 @@ fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations)
     )
     expect(install).toBeDefined()
     expect(install.packageJson.dependencies["portable-archive"]).toBe("file:reference-implementation/vendor/portable.tgz")
+    expect(install.packageJson.dependencies["existing-archive"]).toBe("file:reference-implementation/vendor/existing.tgz")
     expect(install.args).toContain("--allow-git=all")
     expect(install.args).not.toContain("--no-package-lock")
     expect(install.packageJson.dependencies["@opendatalabs/remote-surface"]).toBe(

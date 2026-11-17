@@ -11,9 +11,14 @@ import test from "node:test";
 import { respondToConsoleProof } from "../server/reachability/console-proof.ts";
 import { startDesktopReachability } from "../server/reachability/desktop-host.ts";
 import { createHostSecretBackend, createSealedSecretBackend } from "../server/reachability/secret-backend.ts";
+import { closeTestServer } from "./helpers/close-test-server.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
-const scratch = () => mkdtemp(join(process.env.TEST_TMPDIR ?? join(homedir(), ".tmp"), "rhd-"));
+async function scratch() {
+  const parent = process.env.TEST_TMPDIR ?? join(homedir(), ".tmp");
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  return mkdtemp(join(parent, "rhd-"));
+}
 
 test("desktop host accepts the owned console port only with the current parent lease and proof", async (t) => {
   const root = await scratch();
@@ -48,7 +53,7 @@ test("desktop host accepts the owned console port only with the current parent l
     response.writeHead(answer.status, Object.fromEntries(answer.headers)).end();
   }).listen(0, "127.0.0.1");
   await once(console, "listening");
-  t.after(() => new Promise<void>(resolve => { console.closeAllConnections(); console.close(() => resolve()); }));
+  t.after(() => console[Symbol.asyncDispose]());
   const address = console.address();
   assert.ok(address && typeof address === "object");
   process.env.PORT = String(address.port);
@@ -103,10 +108,7 @@ test("desktop host accepts the owned console port only with the current parent l
     assert.deepEqual((await result.json() as { data: { value: { target: unknown } } }).data.value.target,
       { known: true, value: `127.0.0.1:${address.port}` });
   } finally {
-    await Promise.all([startup.asServer, startup.rsServer].map(server => new Promise<void>(resolve => {
-      server.closeAllConnections();
-      server.close(() => resolve());
-    })));
+    await closeTestServer(startup);
   }
   proveIdentity = false;
   assert.equal(await host.service.hostSettings().then(value => value.known && value.value.target.known), false);
