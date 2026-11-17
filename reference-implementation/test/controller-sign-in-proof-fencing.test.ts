@@ -4,6 +4,46 @@
 /**
  * The run-completion sign-in proof writer is fenced on run identity and
  * captures terminal failure evidence for the watchdog and rejection paths.
+ *
+ * Statechart of one run's evidence capture (runtime/controller.ts,
+ * recordSignInProofForRun and captureSignInProof):
+ *
+ *   States   RUNNING        the run owns its slot and no capture exists
+ *            CLAIMED        a capture is in flight, keyed by run id
+ *            CAPTURED       the capture settled, the slot is still held
+ *            RELEASED       slot cleanup ran, the run is no longer current
+ *
+ *   Events   result        the run promise resolved (any status)
+ *            rejection     the run promise rejected
+ *            watchdog      the wall-clock budget expired
+ *            read-done     the DevTools read finished (the recorder's await)
+ *
+ *   RUNNING --result|rejection|watchdog--> CLAIMED        [still current]
+ *     The first terminal path claims. A reclaimed run is not current and
+ *     never claims.
+ *   CLAIMED --result|rejection|watchdog--> CLAIMED        (awaits the claim)
+ *     A second terminal path shares the claimed capture; it records nothing.
+ *   CLAIMED --read-done--> CAPTURED   [isCurrent() re-checks identity]
+ *     The proof is written only if the run still owns its slot and
+ *     generation after the read.
+ *   CAPTURED --slot cleanup--> RELEASED
+ *     Cleanup awaits the claim first, so a held read cannot lose the slot.
+ *
+ *   Test to transition
+ *     watchdog captures ...          RUNNING -> CLAIMED, status "failed"
+ *     a rejected run captures ...    RUNNING -> CLAIMED, status "failed"
+ *     a late succeeded result ...    RUNNING -> (not current): no claim
+ *     two terminal paths ...         CLAIMED -> CLAIMED: one capture;
+ *                                    RELEASED: isCurrent() is false
+ *     a watchdog on a completed run  RUNNING -> CLAIMED with the run's real
+ *                                    terminal status, never "failed"
+ *     held capture, rejection races  CLAIMED -> CAPTURED -> RELEASED: proof
+ *     the watchdog / watchdog races  persisted before cleanup, in both
+ *     a failed result                orders of the two terminal events
+ *
+ * Ordering uses signals only: the injected recordSignInProof seam and the
+ * stubbed DevTools fetch report entry, a gate holds the read open, and mock
+ * timers fire the watchdog. No test waits on wall-clock time.
  */
 
 import assert from "node:assert/strict";
