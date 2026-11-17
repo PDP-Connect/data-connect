@@ -41,8 +41,9 @@ Rules under test, one switch each:
 
 ## Result
 
-TLC 2.19, one worker, bound of five connector messages, two keys. Reproduce with
-`tlc -workers 1 -deadlock -config base.cfg HostBlobAcceptance.tla` (and each `M-*.cfg`).
+TLC 2026.11.15 (rev bc1b506), one worker, bound of five connector messages, two keys.
+Reproduce with `tlc -workers 1 -deadlock -config base.cfg HostBlobAcceptance.tla`
+(and each `M-*.cfg` and `W-*.cfg`).
 
 | Config | Result | Distinct states | Violated invariant |
 |---|---|---|---|
@@ -51,9 +52,22 @@ TLC 2.19, one worker, bound of five connector messages, two keys. Reproduce with
 | `M-NoRequirePending.cfg` | counterexample | 5 | `BufferedRecordHasBlob` |
 | `M-LateUpload.cfg` | counterexample | 21 | `NoDanglingReference` |
 | `M-NoFailOnDoneHeld.cfg` | counterexample | 12 | `NoHeldBlobAfterRun` |
+| `W-PlainMessageFailsWithBufferedRecord.cfg` | counterexample (expected) | 39 | action property `NoPlainMessageFailureWithBufferedRecord` |
 
 Each switched-off rule breaks an invariant, so each rule in the base model does
 work and the base result is not vacuous.
+
+`W-PlainMessageFailsWithBufferedRecord.cfg` is a witness, not a mutant. It
+asserts that a message other than a BLOB or a RECORD with a blob can never fail
+the run while a RECORD is buffered. The counterexample is the trace that
+production allows: BLOB(k1), RECORD(k1), BLOB(k2), then STATE. Every failure
+discards the buffered batch (`Fail` sets `buffered' = {}`), so a failing
+`OtherMessage` or `RecordPlain` must not also say `UNCHANGED buffered`. Before
+this witness, both did, and the failure was disabled whenever a RECORD was
+buffered. The failure step reaches the same state as a second BLOB after a
+RECORD, so the reachable states and the invariant results did not change; the
+witness guards the transition relation. If the witness stops producing a
+counterexample, those two actions have regained the conflicting `UNCHANGED`.
 
 ## What the model does not show
 

@@ -90,8 +90,8 @@ RecordWithBlob(k) ==
 RecordPlain(k) ==
   /\ run = "running" /\ msgs < MaxMsgs
   /\ msgs' = msgs + 1
-  /\ UNCHANGED <<store, storeBad, buffered, durable>>
-  /\ IF held /= NoKey THEN Fail ELSE UNCHANGED <<run, held, heldBad, lateUpload>>
+  /\ UNCHANGED <<store, storeBad, durable>>
+  /\ IF held /= NoKey THEN Fail ELSE UNCHANGED <<run, held, heldBad, buffered, lateUpload>>
 
 \* PROGRESS passes while a BLOB is held. Any other message while held fails the run.
 Progress ==
@@ -102,8 +102,8 @@ Progress ==
 OtherMessage ==
   /\ run = "running" /\ msgs < MaxMsgs
   /\ msgs' = msgs + 1
-  /\ UNCHANGED <<store, storeBad, buffered, durable>>
-  /\ IF held /= NoKey THEN Fail ELSE UNCHANGED <<run, held, heldBad, lateUpload>>
+  /\ UNCHANGED <<store, storeBad, durable>>
+  /\ IF held /= NoKey THEN Fail ELSE UNCHANGED <<run, held, heldBad, buffered, lateUpload>>
 
 \* The runtime flushes one buffered record. Ingest may fail, which fails the run.
 Flush(k) ==
@@ -173,5 +173,11 @@ DoneLeavesNoOrphan == run = "done" => store \subseteq durable
 
 \* I5. A buffered record's blob is already stored when the record is buffered.
 BufferedRecordHasBlob == (UploadFirst /\ buffered \subseteq store) \/ ~UploadFirst
+
+\* W1. Witness, expected to be violated: a message that is not a BLOB or a
+\* RECORD with a blob can fail the run while a RECORD is buffered. The
+\* violation is the trace BLOB(k1), RECORD(k1), BLOB(k2), then any other message.
+NoPlainMessageFailureWithBufferedRecord ==
+  [][~((OtherMessage \/ \E k \in Keys : RecordPlain(k)) /\ buffered /= {} /\ run' = "failed")]_vars
 
 =============================================================================
