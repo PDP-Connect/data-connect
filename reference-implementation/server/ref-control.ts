@@ -4629,13 +4629,13 @@ function terminalCoverageByStream(
     // A whole-corpus run (`unscoped`) has no boundary to miss, so a stream
     // without a positive scope assertion is not evidence there. A bounded run
     // may lose the assertion for one stream: its store statuses stay visible,
-    // but a reported-collected or inventory-only status from it proves nothing,
-    // not even as the connector's report.
+    // but a reported-collected status from it proves nothing, not even as the
+    // connector's report.
     if (fact.scoped !== true && declaredScope === "unscoped") {
       return null;
     }
     const statuses = (fact.coverage_statuses as string[]).map((status) =>
-      fact.scoped !== true && (status === "reported_collected" || status === "inventory_only") ? "unknown" : status
+      fact.scoped !== true && status === "reported_collected" ? "unknown" : status
     );
     conditions.set(fact.stream, terminalCoverageCondition(statuses, bindingReason));
     if (!bindingReason && statuses.length > 0 && statuses.every((status) => status === "reported_collected")) {
@@ -4666,10 +4666,9 @@ function terminalCoverageCondition(
   if (statuses.includes("unavailable")) {
     return "unavailable";
   }
-  if (statuses.includes("inventory_only")) {
-    return "inventory_only";
-  }
-  return "complete";
+  // Every status the normalizer can emit is handled above. Anything else is not
+  // evidence the runtime holds, so it never defaults to `complete`.
+  return "unknown";
 }
 
 /**
