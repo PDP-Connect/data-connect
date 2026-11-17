@@ -544,6 +544,12 @@ export interface RefCollectionReportEntry {
   considered: number | "unknown";
   /** Derived coverage condition, from the same vocabulary as the coverage axis. */
   coverage_condition: RefCoverageAxis;
+  /**
+   * True when `coverage_condition` is `unknown` only because the connector
+   * reported collecting this stream and the runtime did not enumerate the
+   * store. A labelled report, not missing evidence. Absent on older references.
+   */
+  coverage_reported_collected?: boolean;
   /** Manifest-declared coverage proof strategy, absent on older references. */
   coverage_strategy?:
     | "checkpoint_window"
@@ -968,6 +974,7 @@ export interface RefVerdictPill {
     | "Archived"
     | "Can't collect"
     | "Checking"
+    | "Collected, not independently checked"
     | "Healthy"
     | "Import complete"
     | "Missing data"

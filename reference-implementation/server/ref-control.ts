@@ -3302,6 +3302,35 @@ export function rollupCollectionReportCoverageOverride(
  * `resolvedAxis !== "terminal_gap"` this always returns `false`: partial
  * proof of a `retryable_gap`/`gaps`/`partial` axis is not this claim.
  */
+/**
+ * `true` when the connection's resolved coverage is `unknown` only because its
+ * required streams rest on the connector's own collected report: every required
+ * stream is `complete` or a reported-collected `unknown`, and at least one is the
+ * latter. Any stream unknown for another reason (no proof, an unbound release)
+ * makes it `false`, so a report never hides a measurement gap.
+ */
+export function rollupCollectionReportReportedCollected(
+  resolvedAxis: CoverageAxis,
+  report: readonly CollectionReportEntry[],
+  manifestStreams: readonly ManifestStream[] = []
+): boolean {
+  if (resolvedAxis !== "unknown") {
+    return false;
+  }
+  const manifestByStream = firstManifestStreamsByName(manifestStreams);
+  const requiredEntries = report.filter((entry) => {
+    const manifestStream = manifestByStream.get(entry.stream);
+    return manifestStream ? isRequiredStream(manifestStream) : entry.required;
+  });
+  const isReported = (entry: CollectionReportEntry): boolean =>
+    entry.coverage_condition === "unknown" && entry.coverage_reported_collected === true;
+  return (
+    requiredEntries.length > 0 &&
+    requiredEntries.some(isReported) &&
+    requiredEntries.every((entry) => entry.coverage_condition === "complete" || isReported(entry))
+  );
+}
+
 export function rollupCollectionReportUnfillableAccounted(
   resolvedAxis: CoverageAxis,
   report: readonly CollectionReportEntry[],
@@ -3532,15 +3561,26 @@ export function refineConnectionHealthWithCollectionReport(
     collectionReport,
     healthInput.manifestStreams
   );
+  const unknownReportedCollected = rollupCollectionReportReportedCollected(
+    resolvedAxis,
+    collectionReport,
+    healthInput.manifestStreams
+  );
   const freshnessOverride = proofAgeFreshnessOverride(refinedHealthInput, collectionReport);
-  if (coverageOverride === null && freshnessOverride === null && !unfillableAccounted) {
+  if (coverageOverride === null && freshnessOverride === null && !unfillableAccounted && !unknownReportedCollected) {
     return reportAlignedHealth;
   }
   return projectConnectorSummaryConnectionHealth({
     ...refinedHealthInput,
     ...(freshnessOverride ? { freshness: freshnessOverride } : {}),
-    ...(coverageOverride || unfillableAccounted
-      ? { coverageOverride: { axis: resolvedAxis, unfillableAccounted } }
+    ...(coverageOverride || unfillableAccounted || unknownReportedCollected
+      ? {
+          coverageOverride: {
+            axis: resolvedAxis,
+            unfillableAccounted,
+            ...(unknownReportedCollected ? { unknownReportedCollected } : {}),
+          },
+        }
       : {}),
   });
 }
@@ -3556,6 +3596,7 @@ function applyCoverageOverride(
         readonly axis: CoverageAxis | undefined;
         readonly requiredButAccepted?: boolean;
         readonly unfillableAccounted?: boolean;
+        readonly unknownReportedCollected?: boolean;
       }
     | null
     | undefined
@@ -3563,6 +3604,7 @@ function applyCoverageOverride(
   axis: CoverageAxis;
   requiredButAccepted: boolean;
   unfillableAccounted?: boolean;
+  unknownReportedCollected?: boolean;
 } {
   if (!coverageOverride || coverageOverride.axis === undefined) {
     return resolvedCoverage;
@@ -3577,6 +3619,7 @@ function applyCoverageOverride(
     // PRE-override axis/report pairing. Absent/`false` on the override always
     // means `false` here.
     unfillableAccounted: coverageOverride.unfillableAccounted === true,
+    ...(coverageOverride.unknownReportedCollected === true ? { unknownReportedCollected: true } : {}),
   };
 }
 
@@ -3626,6 +3669,14 @@ export interface CollectionReportEntry {
    * accounted for" convention every other field on this rollup already uses.
    */
   readonly coverage_unfillable_accounted?: boolean;
+  /**
+   * `true` when this stream's `unknown` condition is the connector's own
+   * positive report, cross-checked against the host's delivery accounting but
+   * not against the source. It is a stated state, not a gap: a reader shows it
+   * as "the connector reports it collected this", never as `complete`. Omitted
+   * for every other condition.
+   */
+  readonly coverage_reported_collected?: boolean;
   /**
    * Connector-declared `covered` count (in-boundary items accounted for: emitted +
    * suppressed-because-unchanged), or `unknown` when the connector declared none.
@@ -4538,6 +4589,12 @@ function terminalCoverageByStream(
 ): {
   readonly conditions: ReadonlyMap<string, CoverageAxis>;
   readonly bindingReason: "artifact_digest_mismatch" | "artifact_digest_unknown" | null;
+  /**
+   * Streams whose every store is the connector's own `collected` claim, held
+   * only as a report. Their condition is `unknown`: the runtime holds no
+   * evidence of coverage, so nothing here may read as `complete`.
+   */
+  readonly reported: ReadonlySet<string>;
 } | null {
   const terminal = run?.local_terminal_coverage;
   if (
@@ -4564,6 +4621,7 @@ function terminalCoverageByStream(
   const bindingReason = normalized.find((fact) => typeof fact.artifact_binding_reason === "string")
     ?.artifact_binding_reason as "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined;
   const conditions = new Map<string, CoverageAxis>();
+  const reported = new Set<string>();
   for (const fact of normalized) {
     if (typeof fact.stream !== "string" || !Array.isArray(fact.stores)) {
       return null;
@@ -4571,16 +4629,20 @@ function terminalCoverageByStream(
     // A whole-corpus run (`unscoped`) has no boundary to miss, so a stream
     // without a positive scope assertion is not evidence there. A bounded run
     // may lose the assertion for one stream: its store statuses stay visible,
-    // but a collected or inventory-only status from it proves nothing.
+    // but a reported-collected or inventory-only status from it proves nothing,
+    // not even as the connector's report.
     if (fact.scoped !== true && declaredScope === "unscoped") {
       return null;
     }
     const statuses = (fact.coverage_statuses as string[]).map((status) =>
-      fact.scoped !== true && (status === "collected" || status === "inventory_only") ? "unknown" : status
+      fact.scoped !== true && (status === "reported_collected" || status === "inventory_only") ? "unknown" : status
     );
     conditions.set(fact.stream, terminalCoverageCondition(statuses, bindingReason));
+    if (!bindingReason && statuses.length > 0 && statuses.every((status) => status === "reported_collected")) {
+      reported.add(fact.stream);
+    }
   }
-  return { bindingReason: bindingReason ?? null, conditions };
+  return { bindingReason: bindingReason ?? null, conditions, reported };
 }
 
 function terminalCoverageCondition(
@@ -4588,6 +4650,11 @@ function terminalCoverageCondition(
   bindingReason: "artifact_digest_mismatch" | "artifact_digest_unknown" | undefined
 ): CoverageAxis {
   if (bindingReason || statuses.includes("unknown")) {
+    return "unknown";
+  }
+  // The connector's own claim is a report, not evidence: only worse statuses
+  // outrank it, and by itself it never reaches `complete`.
+  if (statuses.every((status) => status === "reported_collected") && statuses.length > 0) {
     return "unknown";
   }
   if (statuses.includes("failed") || statuses.includes("unaccounted")) {
@@ -4767,7 +4834,10 @@ function fenceTerminalCoverageProof(
     // release-binding reason stays, so the owner still sees why it is unknown.
     return {
       asOf: null,
-      coverage: coverage === null ? null : { bindingReason: coverage.bindingReason, conditions: new Map() },
+      coverage:
+        coverage === null
+          ? null
+          : { bindingReason: coverage.bindingReason, conditions: new Map(), reported: new Set<string>() },
     };
   }
   // The as-of dates every per-stream condition the proof supports: it is
@@ -4775,7 +4845,8 @@ function fenceTerminalCoverageProof(
   // Complete chip always names its run. A subset proof is dated for the streams
   // it covers; the connection axis still needs every required stream complete.
   // An unbound release or a proof that supports no stream names no run.
-  const supportsAStream = [...coverage.conditions.values()].some((condition) => condition !== "unknown");
+  const supportsAStream =
+    coverage.reported.size > 0 || [...coverage.conditions.values()].some((condition) => condition !== "unknown");
   return {
     asOf:
       coverage.bindingReason === null && supportsAStream
@@ -5606,7 +5677,7 @@ function projectConnectionHealthScheduleEvidence(
 }
 
 function buildLocalDeviceCollectionEvidence(input: {
-  readonly coverage: { readonly axis: CoverageAxis };
+  readonly coverage: { readonly axis: CoverageAxis; readonly unknownReportedCollected?: boolean };
   readonly freshnessAxis: FreshnessAxis;
   readonly localDeviceBacked: boolean | undefined;
   readonly outbox: { readonly axis: OutboxAxis; readonly cause?: OutboxStalledCause | null };
@@ -5614,7 +5685,11 @@ function buildLocalDeviceCollectionEvidence(input: {
   if (
     input.localDeviceBacked === true &&
     input.outbox.axis === "idle" &&
-    input.coverage.axis === "complete" &&
+    // The collection succeeded when the run committed and the outbox drained.
+    // Whether coverage is also independently checked is a separate question
+    // that `SourceCoverageComplete` answers, so a reported-only coverage must
+    // not hide that the collection itself finished.
+    (input.coverage.axis === "complete" || input.coverage.unknownReportedCollected === true) &&
     input.freshnessAxis === "fresh"
   ) {
     return { verdict: "succeeded" };
@@ -5806,6 +5881,7 @@ export function projectConnectorSummaryConnectionHealth(input: {
     readonly axis: CoverageAxis;
     readonly requiredButAccepted?: boolean;
     readonly unfillableAccounted?: boolean;
+    readonly unknownReportedCollected?: boolean;
   } | null;
   readonly refreshPolicy?: unknown;
   readonly unreliableSources?: readonly string[];
@@ -6927,17 +7003,21 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
         if (!condition) {
           return entry;
         }
-        const coverageCondition = ["terminal_gap", "retryable_gap", "gaps", "partial"].includes(entry.coverage_condition)
-          ? entry.coverage_condition
-          : condition;
+        const entryDegrades = ["terminal_gap", "retryable_gap", "gaps", "partial"].includes(entry.coverage_condition);
+        const coverageCondition = entryDegrades ? entry.coverage_condition : condition;
+        // The connector's report is shown as a report. A worse condition from
+        // the run's own gap evidence still names the problem instead.
+        const reportedCollected = !entryDegrades && terminalCoverage.reported.has(entry.stream);
         return {
           ...entry,
           checkpoint: "committed",
           coverage_condition: coverageCondition,
+          ...(reportedCollected ? { coverage_reported_collected: true } : {}),
           evidence_as_of: proofRun?.run.last_at ?? null,
           forward_disposition: deriveForwardDisposition({
             attentionOpen: initialConnectionHealth.axes.attention !== "none",
             coverage: coverageCondition,
+            ...(reportedCollected ? { reportedCollected: true } : {}),
             freshness: initialConnectionHealth.axes.freshness,
             gapRetryable: false,
             refresh: buildRefreshEvidence(refreshPolicy),

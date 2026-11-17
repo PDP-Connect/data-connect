@@ -119,6 +119,12 @@ interface JsonResponse {
 interface Projection {
   readonly asOf: Record<string, unknown> | null;
   readonly axis: string;
+  /**
+   * A connector report stands and nothing retired it: the axis is `unknown`
+   * (the runtime holds no evidence of the source) and the coverage condition
+   * names the report. `false` for retired or absent proof.
+   */
+  readonly reportedCollected: boolean;
 }
 
 interface HighWater {
@@ -530,7 +536,16 @@ async function projection(lane: Lane): Promise<Projection> {
   return {
     asOf: (summary.coverage_as_of as Record<string, unknown> | null) ?? null,
     axis: summary.connection_health.axes.coverage,
+    reportedCollected: hasReportedCollectedCondition(summary.connection_health),
   };
+}
+
+function hasReportedCollectedCondition(health: {
+  readonly conditions: readonly { readonly type: string; readonly reason?: string }[];
+}): boolean {
+  return health.conditions.some(
+    (condition) => condition.type === "SourceCoverageComplete" && condition.reason === "coverage_reported_collected"
+  );
 }
 
 /**
@@ -545,18 +560,21 @@ async function detailProjection(lane: Lane): Promise<Projection> {
   return {
     asOf: (summary.coverage_as_of as Record<string, unknown> | null) ?? null,
     axis: summary.connection_health.axes.coverage,
+    reportedCollected: hasReportedCollectedCondition(summary.connection_health),
   };
 }
 
 async function assertCovered(lane: Lane, runId: string, message: string): Promise<void> {
   const projected = await projection(lane);
-  assert.equal(projected.axis, "complete", message);
+  assert.equal(projected.axis, "unknown", `${message}: a connector report is never complete coverage`);
+  assert.equal(projected.reportedCollected, true, `${message}: the connector's report stands`);
   assert.equal(projected.asOf?.run_id, runId, `${message}: the coverage names its run`);
 }
 
 async function assertRetired(lane: Lane, message: string): Promise<void> {
   const projected = await projection(lane);
   assert.equal(projected.axis, "unknown", `${message}: ${JSON.stringify(projected)}`);
+  assert.equal(projected.reportedCollected, false, `${message}: a retired report is not a standing report`);
   assert.equal(projected.asOf, null, `${message}: retired coverage carries no as-of`);
 }
 
@@ -759,20 +777,21 @@ laneTest("a batch whose revision cannot be recorded admits no record", async (la
 
 laneTest("a crash after a batch record is durable cannot leave the earlier proof current", async (lane) => {
   await commitProof(lane, "run-a");
-  const observed: Array<[string, string]> = [];
+  const observed: Array<[string, string, boolean]> = [];
   __setDeviceIngestPhaseFaultHookForTest(async (point, inputIndex) => {
     if (point === "after-durable-record" || point === "after-durable-phase") {
       // The process could die here. What the owner would see is what is durable now.
-      observed.push([`${point}${inputIndex === undefined ? "" : `:${inputIndex}`}`, (await projection(lane)).axis]);
+      const projected = await projection(lane);
+      observed.push([`${point}${inputIndex === undefined ? "" : `:${inputIndex}`}`, projected.axis, projected.reportedCollected]);
     }
   });
   const accepted = await postBatch(lane, batchBody(lane, "batch-crash-window", sessionRecords("s-1", "s-2")));
   __setDeviceIngestPhaseFaultHookForTest(null);
   assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
   assert.deepEqual(observed, [
-    ["after-durable-record:0", "unknown"],
-    ["after-durable-record:1", "unknown"],
-    ["after-durable-phase", "unknown"],
+    ["after-durable-record:0", "unknown", false],
+    ["after-durable-record:1", "unknown", false],
+    ["after-durable-phase", "unknown", false],
   ]);
   await assertRetired(lane, "the accepted batch retires run A's proof");
 });
@@ -780,23 +799,23 @@ laneTest("a crash after a batch record is durable cannot leave the earlier proof
 laneTest(
   "a terminal proof committed inside a batch is retired by the batch's later record and acceptance",
   async (lane) => {
-    const observed: Array<[string, string, unknown]> = [];
+    const observed: Array<[string, string, unknown, boolean]> = [];
     __setDeviceIngestPhaseFaultHookForTest(async (point, inputIndex) => {
       if (point === "after-durable-record" && inputIndex === 0) {
         await commitProof(lane, "run-b");
         const projected = await projection(lane);
-        observed.push(["proof", projected.axis, projected.asOf?.run_id]);
+        observed.push(["proof", projected.axis, projected.asOf?.run_id, projected.reportedCollected]);
       } else if (point === "after-durable-record" && inputIndex === 1) {
         const projected = await projection(lane);
-        observed.push(["record after proof", projected.axis, projected.asOf?.run_id ?? null]);
+        observed.push(["record after proof", projected.axis, projected.asOf?.run_id ?? null, projected.reportedCollected]);
       }
     });
     const accepted = await postBatch(lane, batchBody(lane, "batch-straddles-proof", sessionRecords("s-1", "s-2")));
     __setDeviceIngestPhaseFaultHookForTest(null);
     assert.equal(accepted.status, 201, JSON.stringify(accepted.body));
     assert.deepEqual(observed, [
-      ["proof", "complete", "run-b"],
-      ["record after proof", "unknown", null],
+      ["proof", "unknown", "run-b", true],
+      ["record after proof", "unknown", null, false],
     ]);
     await assertRetired(lane, "the acceptance is later than run B's proof");
     assert.equal((await highWater(lane)).event, "batch_accepted");
@@ -928,7 +947,15 @@ laneTest("a delayed legacy split terminal for an older run retires a newer proof
   );
 });
 
-laneTest("every projection that shows complete coverage carries its as-of", async (lane) => {
+/** The health's coverage condition names a standing connector report. */
+function reportsCollected(health: unknown): boolean {
+  const conditions = (health as { conditions?: { reason?: string; type?: string }[] } | undefined)?.conditions ?? [];
+  return conditions.some(
+    (condition) => condition.type === "SourceCoverageComplete" && condition.reason === "coverage_reported_collected"
+  );
+}
+
+laneTest("every projection that shows a connector's collected report carries its as-of", async (lane) => {
   await commitProof(lane, "run-a");
   await reconcileDirtyConnectorSummaryEvidence(null);
   const { revision } = await highWater(lane);
@@ -946,21 +973,28 @@ laneTest("every projection that shows complete coverage carries its as-of", asyn
   const summary = (await listConnectorSummaries()).find(
     (row) => row.connector_instance_id === lane.enrolled.connector_instance_id
   );
-  assert.equal(summary?.connection_health.axes.coverage, "complete", "summary connection health");
+  assert.equal(summary?.connection_health.axes.coverage, "unknown", "summary connection health");
+  assert.equal(reportsCollected(summary?.connection_health), true, "summary connection health names the report");
   assert.deepEqual(pick(summary?.coverage_as_of), expected, "summary");
 
   const detail = await getConnectorDetail(CONNECTOR_ID);
   const detailRecord = detail as unknown as Record<string, unknown>;
   assert.equal(
     (detailRecord.connection_health as { axes: { coverage: string } }).axes.coverage,
-    "complete",
+    "unknown",
     "detail connection health"
   );
+  assert.equal(reportsCollected(detailRecord.connection_health), true, "detail connection health names the report");
   assert.deepEqual(pick(detailRecord.coverage_as_of), expected, "detail");
 
   const diagnostics = await getOwnerConnectionDiagnostics(lane.enrolled.connector_instance_id);
   assert.ok(diagnostics, "diagnostics resolve the connection");
-  assert.equal(diagnostics.health.axes.coverage, "complete", "diagnostics health");
+  assert.equal(diagnostics.health.axes.coverage, "unknown", "diagnostics health");
+  assert.deepEqual(
+    diagnostics.rendered_verdict?.pill,
+    { label: "Collected, not independently checked", tone: "grey" },
+    "diagnostics name the report, not a healthy source"
+  );
   assert.deepEqual(pick((diagnostics as unknown as Record<string, unknown>).coverage_as_of), expected, "diagnostics");
 
   // A health object read on its own still names what its coverage is a fact about.
@@ -1193,7 +1227,7 @@ laneTest("a scope change between the projection's reads composes no positive fro
   try {
     const during = await projection(lane);
     assert.ok(hook.fired(), "the boundary changed mid-projection");
-    assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof measured the scope that was replaced");
+    assert.deepEqual(during, { asOf: null, axis: "unknown", reportedCollected: false }, "run B's proof measured the scope that was replaced");
   } finally {
     __setLocalCoverageFenceReadHookForTest(null);
   }
@@ -1207,7 +1241,7 @@ laneTest("a manifest change between the projection's reads composes no positive 
   try {
     const during = await projection(lane);
     assert.ok(hook.fired(), "the manifest generation changed mid-projection");
-    assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof is bound to the replaced generation");
+    assert.deepEqual(during, { asOf: null, axis: "unknown", reportedCollected: false }, "run B's proof is bound to the replaced generation");
   } finally {
     __setLocalCoverageFenceReadHookForTest(null);
   }
@@ -1233,7 +1267,11 @@ laneTest(
     try {
       const during = await detailProjection(lane);
       assert.ok(hook.fired(), "the boundary changed mid-projection");
-      assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof measured the scope that was replaced");
+      assert.deepEqual(
+        during,
+        { asOf: null, axis: "unknown", reportedCollected: false },
+        "run B's proof measured the scope that was replaced"
+      );
     } finally {
       __setLocalCoverageFenceReadHookForTest(null);
     }
@@ -1250,7 +1288,11 @@ laneTest(
     try {
       const during = await detailProjection(lane);
       assert.ok(hook.fired(), "the manifest generation changed mid-projection");
-      assert.deepEqual(during, { asOf: null, axis: "unknown" }, "run B's proof is bound to the replaced generation");
+      assert.deepEqual(
+        during,
+        { asOf: null, axis: "unknown", reportedCollected: false },
+        "run B's proof is bound to the replaced generation"
+      );
     } finally {
       __setLocalCoverageFenceReadHookForTest(null);
     }
@@ -1309,7 +1351,11 @@ for (const [label, change] of [
     try {
       const during = await detailProjection(lane);
       assert.ok(hook.fired(), "the boundary changed mid-projection");
-      assert.deepEqual(during, { asOf: null, axis: "unknown" }, "the proof is not composed with the other moment");
+      assert.deepEqual(
+        during,
+        { asOf: null, axis: "unknown", reportedCollected: false },
+        "the proof is not composed with the other moment"
+      );
     } finally {
       __setLocalCoverageFenceReadHookForTest(null);
     }
@@ -1531,7 +1577,7 @@ laneTest("bounded terminal: scoped false commits state without positive coverage
   );
   assert.deepEqual(
     await reportedConditions(lane),
-    { messages: "unknown", sessions: "complete" },
+    { messages: "unknown", sessions: "reported_collected" },
     JSON.stringify(await projection(lane))
   );
   assert.notEqual(
@@ -1597,7 +1643,8 @@ laneTest(
     );
     assert.deepEqual(await runOrder(lane), bOrder, "an older run's terminal record does not move the run-order marker");
     const projected = await projection(lane);
-    assert.equal(projected.axis, "complete", "run B's proof stays current");
+    assert.equal(projected.axis, "unknown", "a connector report is never complete coverage");
+    assert.equal(projected.reportedCollected, true, "run B's report stays current");
     assert.equal(projected.asOf?.run_id, "run-b");
     assert.equal(projected.asOf?.run_sequence, 2, "the as-of names run B's sequence");
     assert.equal(projected.asOf?.collection_revision, bStored.collection_revision, "and run B's own revision");
@@ -1662,12 +1709,12 @@ async function commitShapedProof(
   assert.equal(result.replayed, false, `run ${runId} commits a new terminal proof`);
 }
 
-/** A "complete" claim names the proof run that dates it; otherwise the connection is not complete. */
+/** A complete or reported-collected claim names the proof run that dates it; otherwise it carries no as-of. */
 function assertCompleteIsDated(projected: Projection, runId: string, message: string): void {
-  if (projected.axis === "complete") {
-    assert.equal(projected.asOf?.run_id, runId, `${message}: a complete connection names its proof run`);
+  if (projected.axis === "complete" || projected.reportedCollected) {
+    assert.equal(projected.asOf?.run_id, runId, `${message}: a dated claim names its proof run`);
   } else {
-    assert.equal(projected.asOf, null, `${message}: a connection that is not complete carries no as-of`);
+    assert.equal(projected.asOf, null, `${message}: a connection with no claim carries no as-of`);
   }
 }
 
@@ -1678,19 +1725,31 @@ async function streamAsOf(lane: Lane): Promise<Record<string, unknown>> {
   return Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition]));
 }
 
-laneTest("as-of: a proof covering only some streams dates the complete it supports", async (lane) => {
+/** Which streams the owner report shows as the connector's report, not as evidence. */
+async function reportedStreams(lane: Lane): Promise<Record<string, boolean>> {
+  await reconcileDirtyConnectorSummaryEvidence(null);
+  const summary = await getConnectorSummaryForRoute(lane.enrolled.connector_instance_id);
+  assert.ok(summary && "collection_report" in summary);
+  return Object.fromEntries(
+    summary.collection_report.map((entry) => [entry.stream, entry.coverage_reported_collected === true])
+  );
+}
+
+laneTest("as-of: a proof covering only some streams dates the report it supports", async (lane) => {
   await registerFixtureManifest(lane, { nonRequired: ["messages"] });
   await commitShapedProof(lane, "run-subset", (facts) => facts.filter((fact) => fact.stream === "sessions"));
   const projected = await projection(lane);
-  assert.equal((await streamAsOf(lane)).sessions, "complete", "the covered stream shows complete");
-  assert.equal(projected.axis, "complete", "every required stream is complete");
+  assert.equal((await streamAsOf(lane)).sessions, "unknown", "a connector report is not coverage evidence");
+  assert.equal((await reportedStreams(lane)).sessions, true, "the covered stream shows the connector's report");
+  assert.equal(projected.axis, "unknown", "a report never reaches complete");
+  assert.equal(projected.reportedCollected, true, "every required stream is the connector's report");
   assertCompleteIsDated(projected, "run-subset", "a subset proof");
-  assert.equal(projected.asOf?.run_id, "run-subset", "the Complete chip is dated by the proof run");
+  assert.equal(projected.asOf?.run_id, "run-subset", "the report is dated by the proof run");
   assert.deepEqual(await detailProjection(lane), projected, "the detail path agrees");
 });
 
 laneTest(
-  "as-of: a bounded proof that lost one stream's scope assertion dates the complete it supports",
+  "as-of: a bounded proof that lost one stream's scope assertion dates the report it supports",
   async (lane) => {
     await registerFixtureManifest(lane, { nonRequired: ["messages"] });
     await commitShapedProof(lane, "run-lost-scope", (facts) =>
@@ -1698,8 +1757,11 @@ laneTest(
     );
     const projected = await projection(lane);
     const conditions = await streamAsOf(lane);
-    assert.equal(conditions.sessions, "complete");
-    assert.notEqual(conditions.messages, "complete", "a stream without its scope assertion is not complete");
+    const reported = await reportedStreams(lane);
+    assert.equal(conditions.sessions, "unknown");
+    assert.equal(reported.sessions, true, "the scoped stream shows the connector's report");
+    assert.equal(reported.messages, false, "a stream without its scope assertion is not even a report");
+    assert.equal(projected.reportedCollected, true, "the required stream carries the connection's report");
     assertCompleteIsDated(projected, "run-lost-scope", "a bounded scoped:false stream");
     assert.equal(projected.asOf?.run_id, "run-lost-scope");
   }
@@ -1711,13 +1773,18 @@ laneTest("as-of: a bounded inventory_only stream without scope assertion is unkn
     nonRequired: ["messages"],
   });
   await commitShapedProof(lane, "run-inventory-scoped", (facts) => facts);
-  assert.equal((await streamAsOf(lane)).messages, "inventory_only", "a scoped inventory-only stream is inventory_only");
+  assert.equal(
+    (await reportedStreams(lane)).messages,
+    true,
+    "a scoped inventory-only stream is the connector's report like any other"
+  );
   await commitShapedProof(lane, "run-inventory-lost-scope", (facts) =>
     facts.map((fact) => (fact.stream === "messages" ? { ...fact, scoped: false } : fact))
   );
   const conditions = await streamAsOf(lane);
-  assert.equal(conditions.sessions, "complete", "the bounded proof is otherwise admitted");
+  assert.equal((await reportedStreams(lane)).sessions, true, "the bounded proof is otherwise admitted");
   assert.equal(conditions.messages, "unknown", "inventory_only without a scope assertion is not evidence");
+  assert.equal((await reportedStreams(lane)).messages, false, "nor a report");
 });
 
 laneTest("as-of: a proof that supports no stream names no run and the connection is not complete", async (lane) => {
@@ -1736,19 +1803,21 @@ laneTest("as-of: a proof that supports no stream names no run and the connection
 laneTest("run start alone leaves earlier coverage and its as-of standing", async (lane) => {
   await commitProof(lane, "run-covered");
   const before = await projection(lane);
-  assert.equal(before.axis, "complete");
+  assert.equal(before.axis, "unknown");
+  assert.equal(before.reportedCollected, true, "the earlier report stands");
   const beforeOrder = await highWater(lane);
 
   const registered = await postRunStart(lane, "run-with-no-effect");
   assert.equal(registered.status, 201, JSON.stringify(registered.body));
 
   const after = await projection(lane);
-  assert.equal(after.axis, "complete", "registering a run is not an observed coverage effect");
+  assert.equal(after.axis, "unknown", "registering a run is not an observed coverage effect");
+  assert.equal(after.reportedCollected, true, "the earlier report still stands");
   assert.deepEqual(after.asOf, before.asOf, "the earlier proof keeps its original as-of");
   assert.deepEqual(await highWater(lane), beforeOrder, "registration takes no collection revision");
 });
 
-laneTest("coverage: a later collected proof replaces an earlier partial for the same scope", async (lane) => {
+laneTest("coverage: a later reported-collected proof replaces an earlier partial for the same scope", async (lane) => {
   const partialRunId = "run-partial";
   await issueRun(lane, partialRunId);
   const partial = await buildProof(lane, partialRunId);
@@ -1763,11 +1832,14 @@ laneTest("coverage: a later collected proof replaces an earlier partial for the 
   });
   const partialResult = await commitTerminalRun({ ...partial, normalizedFacts: partialFacts });
   assert.equal(partialResult.replayed, false);
-  assert.notEqual((await projection(lane)).axis, "complete", "the earlier partial is not positive coverage");
+  const partialProjection = await projection(lane);
+  assert.notEqual(partialProjection.axis, "complete", "the earlier partial is not positive coverage");
+  assert.equal(partialProjection.reportedCollected, false, "the earlier partial is not a standing report");
 
   await commitProof(lane, "run-collected");
   const collected = await projection(lane);
-  assert.equal(collected.axis, "complete", "a validated proof for the same scope replaces the partial");
+  assert.equal(collected.axis, "unknown", "a connector report is never complete coverage");
+  assert.equal(collected.reportedCollected, true, "a validated report for the same scope replaces the partial");
   assert.equal(collected.asOf?.run_id, "run-collected");
 });
 
@@ -1983,7 +2055,11 @@ laneTest(
     assert.equal(collectionFacts.coverage_eligibility_reason, "connection_source_kind_not_local_device");
     assert.ok(facts.length > 0, "the terminal report retains its stream facts");
     for (const fact of facts) {
-      assert.deepEqual(fact.coverage_statuses, ["collected"], "the stored run retains the device's assertion");
+      assert.deepEqual(
+        fact.coverage_statuses,
+        ["reported_collected"],
+        "the stored run retains the device's assertion as the connector's report"
+      );
       assert.deepEqual(
         (fact.stores as Record<string, unknown>[]).map((store) => store.status),
         ["collected"],
@@ -2050,7 +2126,14 @@ async function reportedConditions(lane: Lane, repairFirst = true): Promise<Recor
     (row) => row.connector_instance_id === lane.enrolled.connector_instance_id
   );
   assert.ok(summary, "the lane's connection is projected");
-  return Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition]));
+  // A connector report that stands reads `reported_collected`; the condition stays `unknown`
+  // (the runtime holds no evidence of the source) and a retired or absent report stays `unknown`.
+  return Object.fromEntries(
+    summary.collection_report.map((entry) => [
+      entry.stream,
+      entry.coverage_reported_collected === true ? "reported_collected" : entry.coverage_condition,
+    ])
+  );
 }
 
 const UNKNOWN_CONDITIONS = { messages: "unknown", sessions: "unknown" };

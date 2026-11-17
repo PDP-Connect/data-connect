@@ -170,6 +170,7 @@ interface RunOutcome {
 
 interface ProjectedStream {
   readonly coverage_condition: string;
+  readonly coverage_reported_collected?: boolean;
   readonly stream: string;
 }
 
@@ -177,6 +178,7 @@ interface OwnerConnectionRow {
   readonly collection_report: readonly ProjectedStream[];
   readonly connection_health: {
     readonly axes: { readonly coverage: string; readonly outbox: string };
+    readonly conditions: readonly { readonly reason: string; readonly type: string }[];
   };
 }
 
@@ -415,6 +417,39 @@ function conditions(row: OwnerConnectionRow): Record<string, string> {
   return Object.fromEntries(row.collection_report.map((entry) => [entry.stream, entry.coverage_condition]));
 }
 
+/** Per stream, whether the unknown coverage is the connector's own current report. */
+function reportedFlags(row: OwnerConnectionRow): Record<string, boolean> {
+  return Object.fromEntries(
+    row.collection_report.map((entry) => [entry.stream, entry.coverage_reported_collected === true])
+  );
+}
+
+/** The row shows the connector's report: unknown on every stream and on the axis, flagged, never complete. */
+function assertOwnerReportedCollected(row: OwnerConnectionRow): void {
+  assert.equal(row.connection_health.axes.coverage, "unknown", "a connector report is never complete coverage");
+  assert.deepEqual(conditions(row), { messages: "unknown", sessions: "unknown" });
+  assert.deepEqual(reportedFlags(row), { messages: true, sessions: true });
+  assert.ok(
+    row.connection_health.conditions.some(
+      (condition) => condition.type === "SourceCoverageComplete" && condition.reason === "coverage_reported_collected"
+    ),
+    "the coverage condition names the report as the cause"
+  );
+}
+
+/** The row shows no report: a retired or never-valid proof is unknown without the cause flag. */
+function assertOwnerNoReport(row: OwnerConnectionRow): void {
+  assert.equal(row.connection_health.axes.coverage, "unknown");
+  assert.deepEqual(conditions(row), { messages: "unknown", sessions: "unknown" });
+  assert.deepEqual(reportedFlags(row), { messages: false, sessions: false });
+  assert.ok(
+    !row.connection_health.conditions.some(
+      (condition) => condition.type === "SourceCoverageComplete" && condition.reason === "coverage_reported_collected"
+    ),
+    "a retired proof is not shown as a report"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Store-level ordering boundary. The clock is injected, so "the same instant as
 // the proof" and "strictly later" are exact, not timing-dependent.
@@ -539,7 +574,7 @@ async function seedV2Proof(runId: string): Promise<void> {
         checkpoint: "committed",
         collected: 0,
         considered: null,
-        coverage_statuses: ["collected"],
+        coverage_statuses: ["reported_collected"],
         covered: null,
         pending_detail_gaps: 0,
         scoped: true,
@@ -552,7 +587,7 @@ async function seedV2Proof(runId: string): Promise<void> {
         checkpoint: "committed",
         collected: 0,
         considered: null,
-        coverage_statuses: ["collected"],
+        coverage_statuses: ["reported_collected"],
         covered: null,
         pending_detail_gaps: 0,
         scoped: true,
@@ -572,6 +607,8 @@ async function boundaryProjection(): Promise<{
   asOf: Record<string, unknown> | null;
   axis: string;
   conditions: Record<string, string>;
+  reported: Record<string, boolean>;
+  reportedCollected: boolean;
 }> {
   await reconcileDirtyConnectorSummaryEvidence(null);
   const summary = (await listConnectorSummaries()).find((row) => row.connector_instance_id === connectorInstanceId);
@@ -580,6 +617,12 @@ async function boundaryProjection(): Promise<{
     asOf: (summary.coverage_as_of as Record<string, unknown> | null) ?? null,
     axis: summary.connection_health.axes.coverage,
     conditions: Object.fromEntries(summary.collection_report.map((entry) => [entry.stream, entry.coverage_condition])),
+    reported: Object.fromEntries(
+      summary.collection_report.map((entry) => [entry.stream, entry.coverage_reported_collected === true])
+    ),
+    reportedCollected: summary.connection_health.conditions.some(
+      (condition) => condition.type === "SourceCoverageComplete" && condition.reason === "coverage_reported_collected"
+    ),
   };
 }
 
@@ -596,22 +639,45 @@ const BOUNDARY_TARGET = {
   connector_id: connectorId,
   connector_instance_id: connectorInstanceId,
 };
-const COMPLETE = { messages: "complete", sessions: "complete" };
+// A connector's collected claim is shown as the connector's report, never as
+// `complete`: the coverage condition is `unknown`, and the cause flag says it is
+// a report the runtime holds no source evidence for. A retired or absent proof
+// is the same `unknown` without the flag.
+const REPORTED = { messages: "unknown", sessions: "unknown" };
 const UNKNOWN = { messages: "unknown", sessions: "unknown" };
+const REPORTED_FLAGS = { messages: true, sessions: true };
+const NOT_REPORTED_FLAGS = { messages: false, sessions: false };
+
+type BoundaryProjection = Awaited<ReturnType<typeof boundaryProjection>>;
+
+/** The projection shows the connector's current report: unknown, flagged, never complete. */
+function assertReportedCollected(projected: BoundaryProjection, message = "reported collected"): void {
+  assert.equal(projected.axis, "unknown", message);
+  assert.deepEqual(projected.conditions, REPORTED, message);
+  assert.deepEqual(projected.reported, REPORTED_FLAGS, message);
+  assert.equal(projected.reportedCollected, true, message);
+}
+
+/** The projection shows no report at all: a retired or never-valid proof is unknown without the flag. */
+function assertNoReport(projected: BoundaryProjection, message = "no report"): void {
+  assert.equal(projected.axis, "unknown", message);
+  assert.deepEqual(projected.conditions, UNKNOWN, message);
+  assert.deepEqual(projected.reported, NOT_REPORTED_FLAGS, message);
+  assert.equal(projected.reportedCollected, false, message);
+}
 
 test("revision: a distinct state commit at the proof's own instant retires it", async (t) => {
   await withBoundaryConnection(async () => {
     t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
     await seedV2Proof("run_boundary_proof");
-    assert.deepEqual((await boundaryProjection()).conditions, COMPLETE);
+    assertReportedCollected(await boundaryProjection());
 
     // The same wall-clock instant, but a separate commit: the proof does not account for it.
     await putSyncState(BOUNDARY_TARGET, {
       messages: { cursor: "same-instant" },
     });
     const projected = await boundaryProjection();
-    assert.equal(projected.axis, "unknown", "an equal timestamp is not the proof's own transaction");
-    assert.deepEqual(projected.conditions, UNKNOWN);
+    assertNoReport(projected, "an equal timestamp is not the proof's own transaction");
     assert.equal(projected.asOf, null, "retired coverage carries no as-of");
   });
 });
@@ -624,7 +690,7 @@ test("revision: a later state commit retires the proof when the server clock has
     await putSyncState(BOUNDARY_TARGET, {
       messages: { cursor: "after-clock-rollback" },
     });
-    assert.deepEqual((await boundaryProjection()).conditions, UNKNOWN);
+    assertNoReport(await boundaryProjection());
   });
 });
 
@@ -640,7 +706,7 @@ test("revision: a state commit before the proof does not retire it when the cloc
     t.mock.timers.setTime(Date.parse(PROOF_AT));
     await seedV2Proof("run_boundary_after_skewed_state");
     const projected = await boundaryProjection();
-    assert.deepEqual(projected.conditions, COMPLETE);
+    assertReportedCollected(projected);
     assert.equal(projected.asOf?.run_id, "run_boundary_after_skewed_state");
   });
 });
@@ -652,7 +718,7 @@ test("revision: a newer proof committed with the clock set back is the current p
     t.mock.timers.setTime(Date.parse(PROOF_AT) - 3_600_000);
     await seedV2Proof("run_b_after_rollback");
     const projected = await boundaryProjection();
-    assert.deepEqual(projected.conditions, COMPLETE);
+    assertReportedCollected(projected);
     assert.equal(projected.asOf?.run_id, "run_b_after_rollback", "the newest revision wins, not the newest clock");
     assert.equal(projected.asOf?.committed_at, new Date(Date.parse(PROOF_AT) - 3_600_000).toISOString());
   });
@@ -665,7 +731,7 @@ test("as-of: a shown proof carries its run id, release digest, revision and comm
     const release = readLocalCollectorRelease(connectorId);
     assert.ok(release);
     const projected = await boundaryProjection();
-    assert.equal(projected.axis, "complete");
+    assertReportedCollected(projected);
     assert.equal(projected.asOf?.run_id, "run_as_of", "the shown coverage names its run");
     assert.deepEqual(projected.asOf, {
       artifact_digest: release.artifactDigest,
@@ -692,7 +758,7 @@ test("revision: an unreadable or mismatched revision, run sequence or storage ep
     await withBoundaryConnection(async () => {
       t.mock.timers.enable({ apis: ["Date"], now: Date.parse(PROOF_AT) });
       await seedV2Proof("run_fail_closed");
-      assert.equal((await boundaryProjection()).axis, "complete", tamper);
+      assertReportedCollected(await boundaryProjection(), tamper);
       if (tamper === "drop proof revision") {
         getDb()
           .prepare(
@@ -715,7 +781,7 @@ test("revision: an unreadable or mismatched revision, run sequence or storage ep
           .run(connectorInstanceId);
       }
       const projected = await boundaryProjection();
-      assert.deepEqual(projected.conditions, UNKNOWN, tamper);
+      assertNoReport(projected, tamper);
       assert.equal(projected.asOf, null, tamper);
       t.mock.timers.reset();
     });
@@ -765,14 +831,13 @@ test("revision: a legacy diagnostics snapshot never shows positive coverage, eve
     assert.ok(revision > 0, "the commit took a revision");
     const projected = await boundaryProjection();
     // Without a run id and release digest there is nothing for the owner's "complete as of" to name.
-    assert.equal(projected.axis, "unknown", "a fully collected legacy snapshot without run provenance is unknown");
-    assert.deepEqual(projected.conditions, UNKNOWN);
+    assertNoReport(projected, "a fully collected legacy snapshot without run provenance is unknown and not a report");
     assert.equal(projected.asOf, null, "unknown coverage carries no as-of");
 
     // A v2 proof after the snapshot is the current proof, and it names its run.
     await seedV2Proof("run_after_legacy_snapshot");
     const proof = await boundaryProjection();
-    assert.equal(proof.axis, "complete");
+    assertReportedCollected(proof);
     assert.equal(proof.asOf?.run_id, "run_after_legacy_snapshot");
   });
 });
@@ -787,7 +852,7 @@ test("revision: a later server-owned scope write is not an event and does not re
       [COLLECTION_SCOPE_STATE_KEY]: buildStoredCollectionScope(null, new Date().toISOString()),
     });
     assert.equal(highWaterRevision(), revision, "the `$`-prefixed scope row gets no revision");
-    assert.equal((await boundaryProjection()).axis, "complete");
+    assertReportedCollected(await boundaryProjection());
   });
 });
 
@@ -801,7 +866,7 @@ test("journey: a later unnegotiated run that commits state retires the earlier v
     const a = await runOnce(journey, { mode: "complete", negotiated: true, tag: "a-complete" });
     assert.equal(a.observed.run_coverage_version, 1, "START negotiated run coverage");
     assert.ok(serverRunStreams("a-complete"), "the server committed run A's terminal proof");
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
 
     // Run B: unnegotiated and successful, on a fresh device outbox. It commits state and no terminal evidence.
     const freshQueue = join(journey.dir, "outbox-fresh.sqlite");
@@ -820,27 +885,23 @@ test("journey: a later unnegotiated run that commits state retires the earlier v
       "run B's state reached the server"
     );
 
-    // Run B's state is a later commit the proof does not cover. Neither list nor detail may keep it complete.
-    const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "unknown");
-    assert.deepEqual(conditions(owner), { messages: "unknown", sessions: "unknown" });
+    // Run B's state is a later commit the proof does not cover. Neither list nor detail may keep the report.
+    assertOwnerNoReport(await ownerConnectionRow(journey));
   });
 });
 
-test("journey: a later negotiated run with valid evidence projects covered again after an unnegotiated state commit", async () => {
+test("journey: a later negotiated run with valid evidence shows the connector report again after an unnegotiated state commit", async () => {
   await withJourney(async (journey) => {
     await runOnce(journey, { mode: "complete", negotiated: true, tag: "a-complete" });
     const freshQueue = join(journey.dir, "outbox-fresh.sqlite");
     await runOnce(journey, { mode: "complete", negotiated: false, queuePath: freshQueue, tag: "b-state" });
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "unknown");
+    assertOwnerNoReport(await ownerConnectionRow(journey));
 
-    // Run C: negotiated and complete. Its own terminal commit is the newest proof, so coverage is covered again.
+    // Run C: negotiated and complete. Its own terminal commit is the newest proof, so the connector's report is shown again.
     const c = await runOnce(journey, { mode: "complete", negotiated: true, tag: "c-complete" });
     assert.equal(c.result.done?.status, "succeeded");
     assert.ok(serverRunStreams("c-complete"), "the server committed run C's terminal proof");
-    const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "complete");
-    assert.deepEqual(conditions(owner), { messages: "complete", sessions: "complete" });
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
   });
 });
 
@@ -850,9 +911,7 @@ test("journey: an unnegotiated state commit before a negotiated proof does not r
     assert.equal(earlier.result.done?.status, "succeeded");
     // Run B: negotiated and complete, after the unnegotiated commit. Its proof is the newest settled evidence.
     await runOnce(journey, { mode: "complete", negotiated: true, tag: "b-complete" });
-    const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "complete");
-    assert.deepEqual(conditions(owner), { messages: "complete", sessions: "complete" });
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
   });
 });
 
@@ -863,7 +922,7 @@ test("journey: a later unnegotiated run with no STATE commits a terminal record 
       negotiated: true,
       tag: "a-complete",
     });
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
     // Run B: unnegotiated, records only, no STATE, fresh outbox. A runtime that
     // implements this profile version still commits its terminal run record.
     const freshQueue = join(journey.dir, "outbox-fresh.sqlite");
@@ -876,11 +935,6 @@ test("journey: a later unnegotiated run with no STATE commits a terminal record 
     assert.equal(b.result.done?.status, "succeeded");
     assertNoEvidenceTerminalRecord("b-silent");
     assert.deepEqual(serverCursors(journey).messages, { cursor: "a-complete-messages" }, "no cursor moved");
-    const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "unknown");
-    assert.deepEqual(conditions(owner), {
-      messages: "unknown",
-      sessions: "unknown",
-    });
+    assertOwnerNoReport(await ownerConnectionRow(journey));
   });
 });

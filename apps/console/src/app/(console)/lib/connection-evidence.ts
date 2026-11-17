@@ -61,6 +61,18 @@ import { formatTotalRecordsLabel, isTotalRecordsAuthoritative } from "./total-re
  * signal, so a genuine local-collector state is never hidden — only the
  * absence-default `unknown` is suppressed for non-local connections.
  */
+/**
+ * Condition reason the reference attaches when the connector reported
+ * collecting everything and the runtime holds no evidence of its own. Mirrors
+ * `COVERAGE_REPORTED_COLLECTED` in the reference's `connection-health.ts`.
+ */
+export const COVERAGE_REPORTED_COLLECTED_REASON = "coverage_reported_collected";
+
+/** True when the only coverage signal is the connector's own report. */
+export function coverageIsReportedCollected(snapshot: RefConnectionHealthSnapshot | null | undefined): boolean {
+  return (snapshot?.unknown_reasons ?? []).includes(COVERAGE_REPORTED_COLLECTED_REASON);
+}
+
 export function outboxAxisIsApplicable(
   axis: RefConnectionHealthSnapshot["axes"]["outbox"] | null | string | undefined,
   isLocalDeviceBacked: boolean
@@ -90,16 +102,30 @@ export function summarizeAxisChips(
   axes: RefConnectionHealthSnapshot["axes"] | undefined | null,
   options: {
     coverageAsOf?: RefCoverageAsOf | null;
+    /** The connector reported full collection; the runtime has not checked it. */
+    coverageReportedCollected?: boolean;
     isLocalDeviceBacked?: boolean;
   } = {}
 ): AxisChip[] {
   if (!axes) {
     return [];
   }
-  const out: AxisChip[] = [
-    withCoverageAsOf(formatCoverageAxis(axes.coverage), axes.coverage, options.coverageAsOf),
-    formatFreshnessAxis(axes.freshness),
-  ];
+  const coverageChip =
+    options.coverageReportedCollected === true && axes.coverage === "unknown"
+      ? withCoverageAsOf(
+          {
+            ...formatCoverageAxis(axes.coverage),
+            label: "Coverage · reported collected",
+            title:
+              "The connector reports it collected everything in its latest run. PDP Connect has not independently checked coverage of the source.",
+            tone: "neutral" as const,
+            value: "reported collected",
+          },
+          axes.coverage,
+          options.coverageAsOf
+        )
+      : withCoverageAsOf(formatCoverageAxis(axes.coverage), axes.coverage, options.coverageAsOf);
+  const out: AxisChip[] = [coverageChip, formatFreshnessAxis(axes.freshness)];
   const attention = formatAttentionAxis(axes.attention);
   if (attention) {
     out.push(attention);
@@ -262,10 +288,20 @@ const FORWARD_DISPOSITION_LABELS: Record<RefForwardDisposition, ForwardDispositi
  * honestly as a neutral "unknown to this console" line rather than dropped.
  */
 export function formatForwardDisposition(
-  disposition: RefForwardDisposition | null | string | undefined
+  disposition: RefForwardDisposition | null | string | undefined,
+  options: { coverageReportedCollected?: boolean } = {}
 ): ForwardDispositionSummary | null {
   if (disposition === null || disposition === undefined) {
     return null;
+  }
+  if (disposition === "complete" && options.coverageReportedCollected === true) {
+    return {
+      ...FORWARD_DISPOSITION_LABELS.complete,
+      label: "nothing owed (reported)",
+      title:
+        "The connector reports it collected everything and nothing in the run contradicts that. PDP Connect has not independently checked coverage; a future run re-checks the source.",
+      tone: "neutral",
+    };
   }
   if (disposition !== undefined && Object.hasOwn(FORWARD_DISPOSITION_LABELS, disposition)) {
     return FORWARD_DISPOSITION_LABELS[disposition as RefForwardDisposition];
@@ -428,7 +464,8 @@ function toneForConditionSeverity(severity: string): EvidenceTone {
 export function formatProjectionFreshness(
   snapshot: RefConnectionHealthSnapshot | null | undefined
 ): ProjectionFreshness {
-  const reasons = snapshot?.unknown_reasons ?? [];
+  // A connector-reported coverage is a labelled report, not missing evidence.
+  const reasons = (snapshot?.unknown_reasons ?? []).filter((reason) => reason !== COVERAGE_REPORTED_COLLECTED_REASON);
   if (reasons.length === 0) {
     return { detail: "", reasons: [], unreliable: false };
   }
@@ -1091,7 +1128,18 @@ export function deriveConnectionStatusDisplay(input: {
     }
     case "idle":
       return idleDisplay({ hasDurableProgress, health, localDeviceProgress });
-    case "unknown":
+    case "unknown": {
+      if (coverageIsReportedCollected(health)) {
+        const otherReasons = health.unknown_reasons.filter((reason) => reason !== COVERAGE_REPORTED_COLLECTED_REASON);
+        if (otherReasons.length === 0) {
+          return {
+            label: "Collected, not independently checked",
+            title:
+              "The connector reports it collected everything in its latest run. PDP Connect has not independently checked coverage of the source.",
+            tone: "neutral",
+          };
+        }
+      }
       return {
         label: "Unknown",
         title:
@@ -1100,6 +1148,7 @@ export function deriveConnectionStatusDisplay(input: {
             : "Projection evidence is incomplete.",
         tone: "neutral",
       };
+    }
     default:
       return {
         label: "Unknown",

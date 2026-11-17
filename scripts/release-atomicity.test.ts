@@ -666,7 +666,7 @@ describe("resolve-release-version decide()", () => {
   }
 
   it("routes a fully published tag to an ordinary release", async () => {
-    const repo = makeTaggedRepo([`v${V}`])
+    const repo = makeTaggedRepo([`npm-v${V}`])
     const stub = makeStubNpm({ view: { [CP]: "published", [CR]: "published", [LC]: "published" } })
     try {
       const result = await runDecide(repo, stub.dir)
@@ -683,7 +683,7 @@ describe("resolve-release-version decide()", () => {
   // A partial prior version is reported, not repaired — the next release
   // supersedes it rather than resuming it.
   it("routes a partially published tag to an ordinary release and names what is missing", async () => {
-    const repo = makeTaggedRepo([`v${V}`])
+    const repo = makeTaggedRepo([`npm-v${V}`])
     const stub = makeStubNpm({ view: { [CP]: "published", [CR]: "missing", [LC]: "missing" } })
     try {
       const result = await runDecide(repo, stub.dir)
@@ -695,7 +695,7 @@ describe("resolve-release-version decide()", () => {
       }
       expect(decision.mode).toBe("release")
       expect(decision.superseded?.version).toBe(V)
-      expect(decision.superseded?.tag).toBe(`v${V}`)
+      expect(decision.superseded?.tag).toBe(`npm-v${V}`)
       expect(decision.superseded?.missing).toEqual(["@pdpp/collector-runtime", "@pdpp/local-collector"])
       expect(decision.reason).toMatch(/The next successful release will supersede it\./)
     } finally {
@@ -708,7 +708,7 @@ describe("resolve-release-version decide()", () => {
   // partial set to report as superseded, and this is a real behaviour
   // difference the suite previously could not see.
   it("routes a zero-published tag to an ordinary release with nothing superseded", async () => {
-    const repo = makeTaggedRepo([`v${V}`])
+    const repo = makeTaggedRepo([`npm-v${V}`])
     const stub = makeStubNpm({ view: { [CP]: "missing", [CR]: "missing", [LC]: "missing" } })
     try {
       const result = await runDecide(repo, stub.dir)
@@ -739,7 +739,7 @@ describe("resolve-release-version decide()", () => {
   // able to make a COMPLETE release look partial and pull the pipeline into
   // re-publishing something that already shipped.
   it("throws rather than deciding anything when the registry will not answer", async () => {
-    const repo = makeTaggedRepo([`v${V}`])
+    const repo = makeTaggedRepo([`npm-v${V}`])
     const stub = makeStubNpm({
       view: {
         [CP]: "published",
@@ -762,7 +762,7 @@ describe("resolve-release-version decide()", () => {
   // The exact misclassification the #100 review found: an E500 whose body
   // happens to quote E404 must stay UNKNOWN, not degrade to "not published".
   it("does not let an E500 quoting E404 masquerade as a missing package", async () => {
-    const repo = makeTaggedRepo([`v${V}`])
+    const repo = makeTaggedRepo([`npm-v${V}`])
     const stub = makeStubNpm({
       view: {
         [CP]: "published",
@@ -781,7 +781,7 @@ describe("resolve-release-version decide()", () => {
   })
 
   it("picks the newest tag by version order, not lexically", async () => {
-    const repo = makeTaggedRepo(["v2.9.0", "v2.10.0"])
+    const repo = makeTaggedRepo(["npm-v2.9.0", "npm-v2.10.0"])
     const stub = makeStubNpm({
       view: {
         "@pdpp/connector-protocol@2.10.0": "published",
@@ -797,9 +797,9 @@ describe("resolve-release-version decide()", () => {
         superseded?: { tag: string; version: string }
       }
       expect(decision.mode).toBe("release")
-      // Lexically "v2.9.0" sorts above "v2.10.0"; semantically it does not.
+      // Lexically "npm-v2.9.0" sorts above "npm-v2.10.0"; semantically it does not.
       expect(decision.superseded?.version).toBe("2.10.0")
-      expect(decision.superseded?.tag).toBe("v2.10.0")
+      expect(decision.superseded?.tag).toBe("npm-v2.10.0")
     } finally {
       stub.cleanup()
       rmSync(repo, { recursive: true, force: true })
@@ -818,11 +818,11 @@ describe("the superseded-version report", () => {
     const { supersededMessage } = await import("./resolve-release-version.js")
     expect(
       supersededMessage(
-        { tag: `v${V}`, version: V, missing: ["@pdpp/collector-runtime", "@pdpp/local-collector"] },
+        { tag: `npm-v${V}`, version: V, missing: ["@pdpp/collector-runtime", "@pdpp/local-collector"] },
         "2.3.0"
       )
     ).toBe(
-      `v${V} is incomplete on npm (connector-protocol only; ` +
+      `npm-v${V} is incomplete on npm (connector-protocol only; ` +
         `missing collector-runtime, local-collector) and is superseded by 2.3.0`
     )
   })
@@ -838,14 +838,14 @@ describe("the superseded-version report", () => {
         "--import",
         tsxEntry,
         join(REPO_ROOT, "scripts/report-superseded-release.ts"),
-        `v${V}`,
+        `npm-v${V}`,
         "@pdpp/collector-runtime,@pdpp/local-collector",
         "2.3.0",
       ],
       { encoding: "utf8" }
     )
     expect(stdout.trim()).toBe(
-      `v${V} is incomplete on npm (connector-protocol only; ` +
+      `npm-v${V} is incomplete on npm (connector-protocol only; ` +
         `missing collector-runtime, local-collector) and is superseded by 2.3.0`
     )
   })
@@ -861,7 +861,7 @@ describe("the superseded-version report", () => {
           "--import",
           tsxEntry,
           join(REPO_ROOT, "scripts/report-superseded-release.ts"),
-          `v${V}`,
+          `npm-v${V}`,
           "",
           "2.3.0",
         ],

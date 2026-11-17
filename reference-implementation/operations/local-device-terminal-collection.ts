@@ -555,7 +555,6 @@ export function normalizeTerminalCoverageFacts(
   const manifestFingerprint =
     options.expectedManifestFingerprint ?? fingerprintDeviceAttemptManifest(rawManifest);
   const inventory = new Map<string, Set<string>>();
-  const metadataOnlyStreams = new Set<string>();
   for (const rawStream of manifestStreams) {
     const stream = asObject(rawStream);
     const name = stream && readRequiredString(stream.name);
@@ -577,9 +576,6 @@ export function normalizeTerminalCoverageFacts(
       return null;
     }
     inventory.set(name, new Set(stores));
-    if (stream?.coverage_policy === "inventory_only") {
-      metadataOnlyStreams.add(name);
-    }
   }
   if (
     (rawFacts.length === 0 && !options.allowSubset) ||
@@ -693,7 +689,11 @@ export function normalizeTerminalCoverageFacts(
       if (!complete) {
         return "partial";
       }
-      return metadataOnlyStreams.has(stream) ? "inventory_only" : "collected";
+      // The connector's own `collected` claim, cross-checked against the host's
+      // delivery accounting, is a report and nothing more: the runtime has not
+      // enumerated the store, so it holds no evidence of coverage. The status
+      // says whose word it is; no later step may promote it to `complete`.
+      return "reported_collected";
     });
     const pendingDetailGaps = accountingKnown ? Number(accounting.outstanding_debt) : 0;
     facts.push({

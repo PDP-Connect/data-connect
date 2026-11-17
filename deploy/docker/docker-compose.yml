@@ -5,12 +5,10 @@
 #   postgres   - durable storage with pgvector (semantic search index)
 #
 # Setup (see ./README.md for the full runbook):
-#
-#   curl -fsSLO https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/docker-compose.yml
-#   printf 'PDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)" > .env
-#   # Optional scripted owner-password override:
-#   # printf 'PDPP_OWNER_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
-#   docker compose up -d
+#   download this file, .env.example, and generate-secrets.sh together
+#   cp .env.example .env
+#   bash generate-secrets.sh --write .env
+#   docker compose --env-file .env up -d
 #
 # This file is intentionally small. The repository-root docker-compose.yml is
 # the development/owner stack (connector credentials, fixture mounts, browser
@@ -26,10 +24,11 @@ x-bounded-logging: &bounded-logging
 services:
   core:
     logging: *bounded-logging
-    # The released channel: moves only on a successful release, and always
-    # resolves to the same image as that release's version tag. Override with
-    # PDPP_CORE_IMAGE to pin an immutable release tag (for example core:1.5.1).
-    image: ${PDPP_CORE_IMAGE:-ghcr.io/pdp-connect/data-connect/core:latest}
+    # Pinned to the newest published Core image. core:latest does not exist
+    # until the first stable release (only prerelease images are published so
+    # far); after that release this default switches to core:latest. Override
+    # with PDPP_CORE_IMAGE to pin another immutable release tag.
+    image: ${PDPP_CORE_IMAGE:-ghcr.io/pdp-connect/data-connect/core:0.7.62}
     restart: unless-stopped
     environment:
       # The single public origin this node advertises. Override this when

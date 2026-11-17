@@ -158,6 +158,66 @@ test("host lease POST returns the host CDP URL and release DELETE targets host s
 	);
 });
 
+async function leasedHostAllocator(deleteStatus: number) {
+	const calls: MockRequest[] = [];
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		calls.push({
+			...(init?.method === undefined ? {} : { method: init.method }),
+			url: String(input),
+		});
+		if (init?.method === "POST") {
+			return {
+				json: async () => ({
+					cdp_url: "http://127.0.0.1:9222/host-cdp",
+					surface_id: "host-surface-9",
+				}),
+				ok: true,
+				status: 200,
+			} as Response;
+		}
+		return {
+			json: async () => ({}),
+			ok: deleteStatus >= 200 && deleteStatus < 300,
+			status: deleteStatus,
+		} as Response;
+	}) as typeof fetch;
+	const allocator = hostAllocator(fetchImpl);
+	allocator.bindRunToSurface({ runId: "run-9", surfaceId: "surface_9" });
+	await allocator.ensureSurface({
+		connectorId: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
+		surfaceId: "surface_9",
+	});
+	return { allocator, calls };
+}
+
+test("lease DELETE answered 404 counts as released, so idle cleanup does not retry it forever", async () => {
+	const { allocator, calls } = await leasedHostAllocator(404);
+
+	const stopped = await allocator.stopSurface({ reason: "idle_ttl", surfaceId: "surface_9" });
+
+	assert.equal(stopped?.health, "stopping");
+	assert.equal(calls.filter((call) => call.method === "DELETE").length, 1);
+	// The lease is forgotten: a second stop has nothing to release.
+	assert.equal(await allocator.stopSurface({ reason: "idle_ttl", surfaceId: "surface_9" }), null);
+	assert.equal(calls.filter((call) => call.method === "DELETE").length, 1);
+});
+
+test("lease DELETE answered 500 still fails and keeps the lease for a later retry", async () => {
+	const { allocator, calls } = await leasedHostAllocator(500);
+
+	await assert.rejects(
+		allocator.stopSurface({ reason: "idle_ttl", surfaceId: "surface_9" }),
+		/HTTP 500/,
+	);
+	await assert.rejects(
+		allocator.stopSurface({ reason: "idle_ttl", surfaceId: "surface_9" }),
+		/HTTP 500/,
+	);
+	assert.equal(calls.filter((call) => call.method === "DELETE").length, 2);
+});
+
 test("release after a lost acquire response targets the stable run id", async () => {
 	const calls: MockRequest[] = [];
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {

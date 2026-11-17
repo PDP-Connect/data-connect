@@ -198,7 +198,7 @@ test("version 2 terminal coverage validates named stores against the manifest", 
   );
 });
 
-test("typed terminal coverage is green only for complete scoped store evidence", () => {
+test("typed terminal coverage is reported collected only for collected scoped store evidence", () => {
   const manifest = { streams: [{ coverage_stores: ["messages", "history"], name: "messages" }] };
   const fact = (statuses: readonly [string, string], scoped = true) => ({
     artifact_digest: `sha256:${"a".repeat(64)}`,
@@ -226,7 +226,19 @@ test("typed terminal coverage is green only for complete scoped store evidence",
     assert.ok(parsed);
     return deriveStreamCoverageCondition(parsed, { coverage_strategy: "checkpoint_window" });
   };
-  assert.equal(axis(fact(["collected", "collected"])), "complete");
+  const statuses = (raw: unknown) => {
+    const normalized = normalizeTerminalCoverageFacts([raw], manifest, "unscoped", {
+      expectedArtifactDigest: `sha256:${"a".repeat(64)}`,
+    });
+    assert.ok(normalized);
+    return normalized[0]?.coverage_statuses;
+  };
+  // A connector's collected claim is a report, never evidence the runtime holds.
+  assert.deepEqual(statuses(fact(["collected", "collected"])), ["reported_collected", "reported_collected"]);
+  assert.equal(axis(fact(["collected", "collected"])), "unknown");
+  assert.ok(!(statuses(fact(["collected", "partial"])) as string[]).every((s) => s === "reported_collected"));
+  assert.ok(!(statuses(fact(["failed", "collected"])) as string[]).every((s) => s === "reported_collected"));
+  assert.equal(axis(fact(["collected", "collected"], false)), "unknown");
   assert.notEqual(axis(fact(["collected", "partial"])), "complete");
   assert.notEqual(axis(fact(["failed", "collected"])), "complete");
   assert.notEqual(axis(fact(["collected", "collected"], false)), "complete");
@@ -289,7 +301,7 @@ test("a selected-stream terminal commit is accepted without proving omitted mani
   assert.equal(normalizeTerminalCoverageFacts(selected, manifest, "unscoped", { allowSubset: true })?.length, 1);
 });
 
-test("a bounded producer verdict allows positive coverage only for scoped streams", () => {
+test("a bounded producer verdict allows a reported-collected claim only for scoped streams", () => {
   const manifest = {
     streams: [
       { coverage_stores: ["messages", "history"], coverage_strategy: "checkpoint_window", name: "messages" },
@@ -338,7 +350,13 @@ test("a bounded producer verdict allows positive coverage only for scoped stream
       return [fact.stream, deriveStreamCoverageCondition(fact, stream)];
     })
   );
-  assert.deepEqual(conditions, { messages: "unknown", sessions: "complete" });
+  assert.deepEqual(conditions, { messages: "unknown", sessions: "unknown" });
+  const statusByStream = Object.fromEntries(normalized.map((raw) => [raw.stream, raw.coverage_statuses]));
+  // An unscoped stream keeps the connector's report but the axis stays unknown.
+  assert.deepEqual(statusByStream, {
+    messages: ["reported_collected", "reported_collected"],
+    sessions: ["reported_collected"],
+  });
 });
 
 test("terminal run commit resolves authorization before receipt lookup and passes canonical binding", async () => {
@@ -806,7 +824,7 @@ test("connector collected assertions cannot override runtime accounting or absen
       "unscoped"
     );
     assert.ok(normalized);
-    assert.notEqual((normalized[0]?.coverage_statuses as string[] | undefined)?.[0], "collected");
+    assert.notEqual((normalized[0]?.coverage_statuses as string[] | undefined)?.[0], "reported_collected");
     assert.deepEqual(normalized[0]?.stores, raw.stores, "retain the connector assertion");
   }
   assert.notEqual(
@@ -814,7 +832,7 @@ test("connector collected assertions cannot override runtime accounting or absen
       normalizeTerminalCoverageFacts([{ ...raw, runtime_accounting: undefined }], manifest, "unscoped")?.[0]
         ?.coverage_statuses as string[] | undefined
     )?.[0],
-    "collected"
+    "reported_collected"
   );
   assert.notEqual(
     (
@@ -822,7 +840,7 @@ test("connector collected assertions cannot override runtime accounting or absen
         | string[]
         | undefined
     )?.[0],
-    "collected"
+    "reported_collected"
   );
 });
 
@@ -848,7 +866,7 @@ test("terminal collection requires the server's active artifact digest even when
     assert.ok(normalized);
     return normalized[0];
   };
-  assert.deepEqual(normalize(raw, knownDigest)?.coverage_statuses, ["collected"]);
+  assert.deepEqual(normalize(raw, knownDigest)?.coverage_statuses, ["reported_collected"]);
   const mismatched = normalize({ ...raw, artifact_digest: `sha256:${"b".repeat(64)}` }, knownDigest);
   assert.deepEqual(mismatched?.coverage_statuses, ["unknown"]);
   assert.equal(mismatched?.artifact_binding_reason, "artifact_digest_mismatch");
@@ -860,13 +878,13 @@ test("terminal collection requires the server's active artifact digest even when
     expectedArtifactDigest: knownDigest,
     validateServerArtifactDigest: true,
   });
-  assert.deepEqual(afterLaterPin?.[0]?.coverage_statuses, ["unknown"], "a later pin cannot green an unbound run");
+  assert.deepEqual(afterLaterPin?.[0]?.coverage_statuses, ["unknown"], "a later pin cannot upgrade an unbound run");
   const matchingAtCommit = normalize(raw, knownDigest);
   const matchingAtRead = normalizeTerminalCoverageFacts([matchingAtCommit], manifest, "unscoped", {
     expectedArtifactDigest: knownDigest,
     validateServerArtifactDigest: true,
   });
-  assert.deepEqual(matchingAtRead?.[0]?.coverage_statuses, ["collected"]);
+  assert.deepEqual(matchingAtRead?.[0]?.coverage_statuses, ["reported_collected"]);
   const afterReplacement = normalizeTerminalCoverageFacts([matchingAtCommit], manifest, "unscoped", {
     expectedArtifactDigest: `sha256:${"b".repeat(64)}`,
     validateServerArtifactDigest: true,
@@ -943,7 +961,7 @@ test("terminal commit records the server pin at admission and refuses an unbound
       const { normalizedFacts } = committed as ResolvedTerminalRunCommit;
       assert.equal(normalizedFacts[0]?.server_artifact_digest, expectedDigest);
       assert.deepEqual(normalizedFacts[0]?.coverage_statuses, [
-        expectedDigest === knownDigest ? "collected" : "unknown",
+        expectedDigest === knownDigest ? "reported_collected" : "unknown",
       ]);
     })
   );
@@ -1111,7 +1129,7 @@ test("a run bound to its registered release remains valid after the connector ca
   assert.equal(capture.snapshot().status, 201);
   assert.ok(committed);
   const fact = (committed as ResolvedTerminalRunCommit).normalizedFacts[0];
-  assert.deepEqual(fact?.coverage_statuses, ["collected"]);
+  assert.deepEqual(fact?.coverage_statuses, ["reported_collected"]);
   assert.equal(fact?.server_artifact_digest, registeredDigest);
 });
 
@@ -1367,7 +1385,7 @@ test("a successful empty v2 terminal commit replaces every store with unknown ev
   );
 });
 
-test("proven empty content is complete while metadata inventory stays inventory only", () => {
+test("proven empty content is a reported-collected claim whether or not the stream is metadata-only", () => {
   for (const coveragePolicy of ["collect", "inventory_only"]) {
     const manifest = {
       streams: [{ coverage_policy: coveragePolicy, coverage_stores: ["messages"], name: "messages" }],
@@ -1391,7 +1409,7 @@ test("proven empty content is complete while metadata inventory stays inventory 
     });
     assert.ok(normalized);
     assert.equal(normalized[0]?.collected, 0, "no records admitted for proven empty enumeration");
-    assert.deepEqual(normalized[0]?.coverage_statuses, [coveragePolicy === "collect" ? "collected" : "inventory_only"]);
+    assert.deepEqual(normalized[0]?.coverage_statuses, ["reported_collected"]);
   }
 });
 

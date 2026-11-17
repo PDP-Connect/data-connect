@@ -964,6 +964,63 @@ test("deriveConnectionStatusDisplay: healthy scheduled connection reads as a hea
   assert.equal(out.title.toLowerCase().includes("coverage"), true);
 });
 
+test("deriveConnectionStatusDisplay: a connector-reported collection is labelled as a report, not Healthy", () => {
+  const out = deriveConnectionStatusDisplay({
+    hasDurableProgress: true,
+    health: snapshot({
+      axes: { attention: "none", coverage: "unknown", freshness: "fresh", outbox: "idle" },
+      state: "unknown",
+      unknown_reasons: ["coverage_reported_collected"],
+    }),
+    localDeviceProgress: null,
+  });
+  assert.equal(out.label, "Collected, not independently checked");
+  assert.equal(out.tone, "neutral");
+  assert.match(out.title, /connector reports/i);
+});
+
+test("deriveConnectionStatusDisplay: the reported-collected reason does not hide other missing evidence", () => {
+  const out = deriveConnectionStatusDisplay({
+    hasDurableProgress: true,
+    health: snapshot({
+      axes: { attention: "none", coverage: "unknown", freshness: "unknown", outbox: "idle" },
+      state: "unknown",
+      unknown_reasons: ["coverage_reported_collected", "schedule_unavailable"],
+    }),
+    localDeviceProgress: null,
+  });
+  assert.equal(out.label, "Unknown");
+});
+
+test("formatProjectionFreshness does not call a connector-reported collection missing evidence", () => {
+  const out = formatProjectionFreshness(
+    snapshot({ state: "unknown", unknown_reasons: ["coverage_reported_collected"] })
+  );
+  assert.equal(out.unreliable, false);
+  assert.equal(out.detail, "");
+});
+
+test("summarizeAxisChips attributes a reported-collected coverage chip to the connector", () => {
+  const axes = snapshot({
+    axes: { attention: "none", coverage: "unknown", freshness: "fresh", outbox: "idle" },
+  }).axes;
+  const [coverage] = summarizeAxisChips(axes, { coverageReportedCollected: true });
+  assert.equal(coverage?.label, "Coverage · reported collected");
+  assert.equal(coverage?.tone, "neutral");
+  assert.match(coverage?.title ?? "", /connector reports/i);
+  // Without the cause flag the same axis stays the plain unknown chip.
+  const [plain] = summarizeAxisChips(axes);
+  assert.notEqual(plain?.label, "Coverage · reported collected");
+});
+
+test("formatForwardDisposition does not say coverage is established when it is only reported", () => {
+  const reported = formatForwardDisposition("complete", { coverageReportedCollected: true });
+  assert.equal(reported?.tone, "neutral");
+  assert.doesNotMatch(reported?.title ?? "", /Coverage is established/);
+  assert.match(reported?.title ?? "", /connector reports/i);
+  assert.match(formatForwardDisposition("complete")?.title ?? "", /Coverage is established/);
+});
+
 test("deriveConnectionStatusDisplay: stale-but-healthy connection does not claim its data is current (phase 2 lie fix)", () => {
   // An assisted scheduled connector can project `healthy` while its freshness
   // axis is `stale` (awaiting a scheduled refresh; see `stale_assisted_refresh`).

@@ -6930,7 +6930,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         ...buildIngestAccountingFields(),
         records_emitted: totalEmitted,
         run_id: runId,
-        state: newState,
+        // Committed cursors only. The scheduler persists this map after a
+        // succeeded run, and a run can succeed with staged cursors withheld.
+        state: Object.fromEntries(Object.entries(newState).filter(([stream]) => committedStateStreams.has(stream))),
         status: finalStatus,
         terminal_reason: resolution.reason,
         trace_id: traceContext.trace_id,

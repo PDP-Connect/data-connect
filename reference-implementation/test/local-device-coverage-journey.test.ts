@@ -159,6 +159,7 @@ interface RunOutcome {
 
 interface ProjectedStream {
   readonly coverage_condition: string;
+  readonly coverage_reported_collected?: boolean;
   readonly stream: string;
 }
 
@@ -175,6 +176,7 @@ interface OwnerConnectionRow {
   readonly collection_report: readonly ProjectedStream[];
   readonly connection_health: {
     readonly axes: { readonly coverage: string; readonly outbox: string };
+    readonly conditions: readonly { readonly reason?: string | null; readonly type: string }[];
   };
   readonly coverage_as_of: CoverageAsOf | null;
 }
@@ -497,6 +499,37 @@ function conditions(row: OwnerConnectionRow): Record<string, string> {
   return Object.fromEntries(row.collection_report.map((entry) => [entry.stream, entry.coverage_condition]));
 }
 
+/** Per stream, whether the unknown coverage is the connector's own current report. */
+function reportedFlags(row: OwnerConnectionRow): Record<string, boolean> {
+  return Object.fromEntries(
+    row.collection_report.map((entry) => [entry.stream, entry.coverage_reported_collected === true])
+  );
+}
+
+function coverageReason(row: OwnerConnectionRow): string | null {
+  return row.connection_health.conditions.find((condition) => condition.type === "SourceCoverageComplete")?.reason ?? null;
+}
+
+/**
+ * A connector's collected claim is shown as the connector's report, never as `complete`: the axis
+ * and every stream are `unknown`, and the cause flag and the coverage reason name the report.
+ * Only a report the server still holds a current proof for carries the flag.
+ */
+function assertOwnerReportedCollected(row: OwnerConnectionRow, message = "owner shows the connector report"): void {
+  assert.equal(row.connection_health.axes.coverage, "unknown", `${message}: a report is never complete`);
+  assert.deepEqual(conditions(row), { messages: "unknown", sessions: "unknown" }, message);
+  assert.deepEqual(reportedFlags(row), { messages: true, sessions: true }, message);
+  assert.equal(coverageReason(row), "coverage_reported_collected", message);
+}
+
+/** A retired, absent or never-valid proof is unknown without the report flag. */
+function assertOwnerNoReport(row: OwnerConnectionRow, message = "owner shows no connector report"): void {
+  assert.equal(row.connection_health.axes.coverage, "unknown", message);
+  assert.deepEqual(conditions(row), { messages: "unknown", sessions: "unknown" }, message);
+  assert.deepEqual(reportedFlags(row), { messages: false, sessions: false }, message);
+  assert.notEqual(coverageReason(row), "coverage_reported_collected", message);
+}
+
 test("J1: a registered release's run coverage crosses child, runner, server and device intact", async () => {
   await withJourney(async (journey) => {
     // Run A: every requested store collected, and the start asks for coverage.
@@ -523,15 +556,11 @@ test("J1: a registered release's run coverage crosses child, runner, server and 
       assert.equal(stream.binding_generation, sourceGeneration(journey), "bound to the source generation");
     }
     const aOwner = await ownerConnectionRow(journey);
-    assert.equal(aOwner.connection_health.axes.coverage, "complete");
-    assert.deepEqual(conditions(aOwner), {
-      messages: "complete",
-      sessions: "complete",
-    });
+    assertOwnerReportedCollected(aOwner);
     assertCoverageAsOf(journey, aOwner, "a-complete");
     const aDevice = deviceStatus(journey);
-    assert.equal(aDevice.terminal_coverage.verdict, "covered");
-    assert.equal(aDevice.lifecycle_state, "covered");
+    assert.equal(aDevice.terminal_coverage.verdict, "reported_collected");
+    assert.equal(aDevice.lifecycle_state, "reported_collected");
     const aReceipt = deviceReceiptFacts(journey);
     assert.equal(aReceipt.length, 2, "the device holds a receipt for both streams");
     assertJourneyStreams(aReceipt);
@@ -556,7 +585,17 @@ test("J1: a registered release's run coverage crosses child, runner, server and 
     assert.deepEqual(messages.stores, [{ status: "partial", store: "derived_messages" }]);
     const bOwner = await ownerConnectionRow(journey);
     assert.notEqual(conditions(bOwner).messages, "complete", "the skipped stream is not complete on the server");
-    assert.equal(conditions(bOwner).sessions, "complete", "the stream without a skip stays complete");
+    assert.equal(
+      bOwner.collection_report.find((entry) => entry.stream === "messages")?.coverage_reported_collected,
+      undefined,
+      "the skipped stream is not shown as a connector report"
+    );
+    assert.equal(conditions(bOwner).sessions, "unknown", "the stream without a skip is only the connector's report");
+    assert.equal(
+      bOwner.collection_report.find((entry) => entry.stream === "sessions")?.coverage_reported_collected,
+      true,
+      "the stream without a skip is flagged as the connector's report"
+    );
     assertCoverageAsOf(journey, bOwner, "b-skip");
     const bDevice = deviceStatus(journey);
     assert.equal(bDevice.terminal_coverage.verdict, "incomplete");
@@ -564,13 +603,13 @@ test("J1: a registered release's run coverage crosses child, runner, server and 
     const bReceipt = deviceReceiptFacts(journey).find((fact) => fact.stream === "messages");
     assert.deepEqual(bReceipt?.stores, [{ status: "partial", store: "derived_messages" }]);
 
-    // Run A again: a clean run restores complete coverage on both sides.
+    // Run A again: a clean run restores the connector's report on both sides.
     const restored = await runOnce(journey, "complete", "a-restored");
     assert.equal(restored.result.done?.status, "succeeded");
     const restoredOwner = await ownerConnectionRow(journey);
-    assert.equal(restoredOwner.connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(restoredOwner);
     assertCoverageAsOf(journey, restoredOwner, "a-restored");
-    assert.equal(deviceStatus(journey).lifecycle_state, "covered");
+    assert.equal(deviceStatus(journey).lifecycle_state, "reported_collected");
 
     // Run C: a negotiated success with no coverage claim and no records.
     const c = await runOnce(journey, "empty", "c-empty");
@@ -584,11 +623,7 @@ test("J1: a registered release's run coverage crosses child, runner, server and 
       "the empty report commits unknown inventory, not collected stores"
     );
     const cOwner = await ownerConnectionRow(journey);
-    assert.equal(cOwner.connection_health.axes.coverage, "unknown", "the empty report retires the earlier proof");
-    assert.deepEqual(conditions(cOwner), {
-      messages: "unknown",
-      sessions: "unknown",
-    });
+    assertOwnerNoReport(cOwner, "the empty report retires the earlier proof");
     assert.equal(cOwner.coverage_as_of, null, "unknown coverage carries no as-of");
     const cDevice = deviceStatus(journey);
     assert.equal(cDevice.terminal_coverage.verdict, "no_evidence");
@@ -602,9 +637,7 @@ test("A: without START coverage negotiation, a successful run supplies no positi
     const outcome = await runOnce(journey, "empty", "unnegotiated", { negotiateCoverage: false });
     assert.equal(outcome.observed.run_coverage_version, undefined, "START did not negotiate coverage");
     assert.equal(outcome.result.done?.status, "succeeded");
-    const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "unknown");
-    assert.deepEqual(conditions(owner), { messages: "unknown", sessions: "unknown" });
+    assertOwnerNoReport(await ownerConnectionRow(journey));
     const status = deviceStatus(journey);
     assert.equal(status.terminal_coverage.verdict, "no_evidence");
     assert.equal(status.lifecycle_state, "no_evidence");
@@ -612,7 +645,7 @@ test("A: without START coverage negotiation, a successful run supplies no positi
   });
 });
 
-test("B2: a server-rejected record stays unadmitted, moves no cursor, and leaves the lane not covered", async () => {
+test("B2: a server-rejected record stays unadmitted, moves no cursor, and leaves the lane not reported collected", async () => {
   await withJourney(async (journey) => {
     const outcome = await runOnce(journey, "reject", "reject-1");
     const summary = outcome.result.outboxSummary;
@@ -623,23 +656,21 @@ test("B2: a server-rejected record stays unadmitted, moves no cursor, and leaves
     assert.equal(serverRecordCount(journey, "sessions"), 0, "the rejected batch wrote no record");
     assert.deepEqual(serverCursors(journey), {}, "no cursor advanced");
     assert.equal(serverRunStreams("reject-1"), null, "no terminal commit was acknowledged");
-    const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "unknown");
-    assert.deepEqual(conditions(owner), { messages: "unknown", sessions: "unknown" });
+    assertOwnerNoReport(await ownerConnectionRow(journey));
     const status = deviceStatus(journey);
     assert.equal(status.terminal_coverage.verdict, "no_evidence");
-    assert.notEqual(status.lifecycle_state, "covered");
+    assert.notEqual(status.lifecycle_state, "reported_collected");
     assert.deepEqual(deviceReceiptFacts(journey), []);
   });
 });
 
-test("J2: a batch the server receives and rejects after a covered run retires the proof on server and device", async () => {
+test("J2: a batch the server receives and rejects after a reported-collected run retires the proof on server and device", async () => {
   await withJourney(async (journey) => {
-    // Run A: a clean complete run. The device holds a covered receipt and the server projects complete.
+    // Run A: a clean run. The device holds a reported-collected receipt and the server shows the connector's report.
     const a = await runOnce(journey, "complete", "a-complete");
     assert.equal(a.result.done?.status, "succeeded");
-    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "reported_collected");
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
 
     // Run B: the server refuses its record batch (an undeclared stream), so nothing from B is admitted.
     // The batch stays ready for retry and run B's terminal commit waits behind it.
@@ -654,26 +685,22 @@ test("J2: a batch the server receives and rejects after a covered run retires th
     assert.equal(status.lifecycle_state, "draining");
 
     // The server received run B's batch and refused it. That observed attempt is a later revision than
-    // run A's proof, so run A's coverage is no longer current: the server projects unknown.
+    // run A's proof, so run A's report is no longer current: the server projects unknown, no report.
     const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "unknown");
-    assert.deepEqual(conditions(owner), {
-      messages: "unknown",
-      sessions: "unknown",
-    });
+    assertOwnerNoReport(owner);
     assert.equal(owner.coverage_as_of, null);
     assert.equal(owner.connection_health.axes.outbox, "active");
     assert.equal(lastCollectionEvent(journey), "batch_rejected", "the newest observed event is the refused batch");
   });
 });
 
-test("J3: a run that fails before its scan leaves the lane not covered; the server keeps run A's coverage until a later run recovers the gap", async () => {
+test("J3: a run that fails before its scan leaves the lane not reported collected; the server keeps run A's report until a later run recovers the gap", async () => {
   await withJourney(async (journey) => {
-    // Run A: a clean complete run. The device holds a covered receipt and the server projects complete.
+    // Run A: a clean run. The device holds a reported-collected receipt and the server shows the connector's report.
     const a = await runOnce(journey, "complete", "a-complete");
     assert.equal(a.result.done?.status, "succeeded");
-    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "reported_collected");
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
 
     // Run B: the server refuses the run's first heartbeat, so the run fails before its state read and scan.
     // The child never starts, and the server admits nothing from the run.
@@ -692,22 +719,18 @@ test("J3: a run that fails before its scan leaves the lane not covered; the serv
     // The server never admitted run B, so its projection still reflects run A's admitted terminal commit.
     // Its outbox axis shows run A's last healthy heartbeat, because the refusal left the server nothing to
     // record. The owner projection and the device verdict disagree until a later run reaches the server.
-    // This is the documented limit: the owner sees run A's coverage, labelled as a fact about run A.
+    // This is the documented limit: the owner sees run A's report, labelled as a fact about run A.
     const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(owner);
     assert.equal(owner.connection_health.axes.outbox, "idle");
-    assert.deepEqual(conditions(owner), {
-      messages: "complete",
-      sessions: "complete",
-    });
     assertCoverageAsOf(journey, owner, "a-complete");
 
     // Run C: a clean run. Its pre-scan drain delivers run B's gap, and its complete pass recovers it.
     const c = await runOnce(journey, "complete", "c-complete");
     assert.equal(c.result.done?.status, "succeeded");
-    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
+    assert.equal(deviceStatus(journey).terminal_coverage.verdict, "reported_collected");
     const cOwner = await ownerConnectionRow(journey);
-    assert.equal(cOwner.connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(cOwner);
     assertCoverageAsOf(journey, cOwner, "c-complete");
   });
 });
@@ -757,7 +780,7 @@ test("J5: an older run's proof delivered after a newer run's terminal record sta
     const b = await runOnce(bLane, "complete", "b-newer");
     assert.equal(b.result.done?.status, "succeeded");
     const bOwner = await ownerConnectionRow(journey);
-    assert.equal(bOwner.connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(bOwner);
     assert.equal(bOwner.coverage_as_of?.run_id, "b-newer", "run B's proof is current");
     const bRevision = bOwner.coverage_as_of?.collection_revision;
 
@@ -770,9 +793,8 @@ test("J5: an older run's proof delivered after a newer run's terminal record sta
     // Run order decides eligibility: run A's proof is history, and run B's stays current.
     const owner = await ownerConnectionRow(journey);
     assert.equal(owner.coverage_as_of?.run_id, "b-newer", "the older run's late proof does not become current");
-    assert.equal(owner.connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(owner);
     assert.equal(owner.coverage_as_of?.collection_revision, bRevision, "the as-of still names run B's revision");
-    assert.deepEqual(conditions(owner), { messages: "complete", sessions: "complete" });
     // Run A's record keeps its own as-of: it started before run B.
     assert.ok(
       Number(aOrder.run_sequence) < Number(owner.coverage_as_of?.run_sequence),
@@ -820,7 +842,7 @@ async function waitForFile(path: string, timeoutMs: number): Promise<void> {
   }
 }
 
-test("J6: a runner killed after its records are admitted, before its terminal record, leaves the earlier positive unknown", async () => {
+test("J6: a runner killed after its records are admitted, before its terminal record, leaves the earlier report unknown", async () => {
   await withJourney(async (journey) => {
     const a = await runOnce(journey, "complete", "a-complete");
     assert.equal(a.result.done?.status, "succeeded");
@@ -890,16 +912,16 @@ test("J6: a runner killed after its records are admitted, before its terminal re
 
     // Run B's admitted records are an observed attempt of a later run, so run A's positive is unknown.
     const owner = await ownerConnectionRow(journey);
-    assert.equal(owner.connection_health.axes.coverage, "unknown");
+    assertOwnerNoReport(owner);
     assert.equal(owner.coverage_as_of, null);
   });
 });
 
-test("J4: a failure report the server receives after a covered run retires the proof", async () => {
+test("J4: a failure report the server receives after a reported-collected run retires the proof", async () => {
   await withJourney(async (journey) => {
     const a = await runOnce(journey, "complete", "a-complete");
     assert.equal(a.result.done?.status, "succeeded");
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
 
     // Run B: refused before its scan. The server hears nothing, and the device holds B's failure gap.
     await assert.rejects(
@@ -908,7 +930,7 @@ test("J4: a failure report the server receives after a covered run retires the p
       }),
       (error: unknown) => error instanceof LocalDeviceHttpError && error.status === 401
     );
-    assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+    assertOwnerReportedCollected(await ownerConnectionRow(journey));
 
     // Run C: its pre-scan drain delivers run B's failure gap to the server, then its child crashes.
     // Nothing later than the failure report reaches the server.
@@ -929,18 +951,18 @@ test("J4: a failure report the server receives after a covered run retires the p
     });
     assert.equal(owner.coverage_as_of, null, "run A's proof no longer backs the shown coverage");
     assert.equal(owner.connection_health.axes.coverage, "retryable_gap");
-    assert.notEqual(deviceStatus(journey).terminal_coverage.verdict, "covered");
+    assert.notEqual(deviceStatus(journey).terminal_coverage.verdict, "reported_collected");
     assert.equal(lastCollectionEvent(journey), "failure_report", "the newest observed event is the failure report");
   });
 });
 
 for (const mode of ["empty", "state"] as const) {
-  test(`U: after a covered run, an unnegotiated success ${mode === "state" ? "with" : "without"} STATE retires the proof on server and device`, async () => {
+  test(`U: after a reported-collected run, an unnegotiated success ${mode === "state" ? "with" : "without"} STATE retires the proof on server and device`, async () => {
     await withJourney(async (journey) => {
       const a = await runOnce(journey, "complete", "a-complete");
       assert.equal(a.result.done?.status, "succeeded");
-      assert.equal(deviceStatus(journey).terminal_coverage.verdict, "covered");
-      assert.equal((await ownerConnectionRow(journey)).connection_health.axes.coverage, "complete");
+      assert.equal(deviceStatus(journey).terminal_coverage.verdict, "reported_collected");
+      assertOwnerReportedCollected(await ownerConnectionRow(journey));
 
       // Run B: coverage is not negotiated. The runtime still commits B's terminal run record.
       const b = await runOnce(journey, mode, `b-${mode}`, {
@@ -960,11 +982,7 @@ for (const mode of ["empty", "state"] as const) {
       }
 
       const owner = await ownerConnectionRow(journey);
-      assert.equal(owner.connection_health.axes.coverage, "unknown");
-      assert.deepEqual(conditions(owner), {
-        messages: "unknown",
-        sessions: "unknown",
-      });
+      assertOwnerNoReport(owner);
       assert.equal(owner.coverage_as_of, null);
       const status = deviceStatus(journey);
       assert.equal(status.terminal_coverage.verdict, "no_evidence");
@@ -1021,10 +1039,11 @@ interface ShippedRelease {
 }
 
 /**
- * The SourceCoverageComplete reason a covered lane carries: the condition's reason mirrors its
- * coverage axis, so a complete lane reads "complete". A mismatch has its own reason.
+ * The SourceCoverageComplete reason a lane carries when the connector reported every store
+ * collected and nothing contradicts it. The coverage axis stays `unknown`: the report is not
+ * `complete`. A release mismatch has its own reason.
  */
-const COVERED_REASON = "complete";
+const REPORTED_COLLECTED_REASON = "coverage_reported_collected";
 
 /**
  * The installer core the shipped loader uses. ensureCollectionProfileInstalled resolves it from
@@ -1302,7 +1321,7 @@ function requireRunStreams(runId: string): Record<string, unknown>[] {
   return streams;
 }
 
-test("J2-install: a release installed through the shipped collection-profile path is covered; a replaced digest stops counting until its own run proves it", {
+test("J2-install: a release installed through the shipped collection-profile path reports collected; a replaced digest stops counting until its own run proves it", {
   skip: INSTALL_SKIP,
 }, async () => {
   const base = await mkdtemp(join(tmpdir(), "pdpp-install-path-journey-"));
@@ -1383,13 +1402,13 @@ test("J2-install: a release installed through the shipped collection-profile pat
         );
       }
       assert.deepEqual(await ownerCoverage(lane), {
-        axis: "complete",
-        conditions: { messages: "complete", sessions: "complete" },
-        reason: COVERED_REASON,
+        axis: "unknown",
+        conditions: { messages: "unknown", sessions: "unknown" },
+        reason: REPORTED_COLLECTED_REASON,
       });
       const aDevice = deviceStatus(lane, selectedA);
-      assert.equal(aDevice.terminal_coverage.verdict, "covered");
-      assert.equal(aDevice.lifecycle_state, "covered");
+      assert.equal(aDevice.terminal_coverage.verdict, "reported_collected");
+      assert.equal(aDevice.lifecycle_state, "reported_collected");
       const aReceipts = deviceReceiptFacts(lane);
       assertJourneyStreams(aReceipts);
       assert.equal(
@@ -1490,13 +1509,13 @@ test("J2-install: a release installed through the shipped collection-profile pat
         "the server stores run B under digest B",
       );
       assert.deepEqual(await ownerCoverage(lane), {
-        axis: "complete",
-        conditions: { messages: "complete", sessions: "complete" },
-        reason: COVERED_REASON,
+        axis: "unknown",
+        conditions: { messages: "unknown", sessions: "unknown" },
+        reason: REPORTED_COLLECTED_REASON,
       });
       const bDevice = deviceStatus(lane, selectedB);
-      assert.equal(bDevice.terminal_coverage.verdict, "covered");
-      assert.equal(bDevice.lifecycle_state, "covered");
+      assert.equal(bDevice.terminal_coverage.verdict, "reported_collected");
+      assert.equal(bDevice.lifecycle_state, "reported_collected");
       const bReceipts = deviceReceiptFacts(lane);
       assertJourneyStreams(bReceipts);
       assert.equal(
@@ -1516,7 +1535,7 @@ test("J2-install: a release installed through the shipped collection-profile pat
         requireRunStreams("a-install").every(
           (stream) => stream.artifact_digest === pinA.digest,
         ),
-        "run A is still recorded as release A after B is covered",
+        "run A is still recorded as release A after B reports collected",
       );
     });
   } finally {

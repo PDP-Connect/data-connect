@@ -18,7 +18,7 @@
   `getGrantParamsFromSearchParams` → resolve platform
 - For real grant sessions, background prefetch claims the session and verifies the
   builder before the user reaches `/grant`
-- `startImport` → Tauri `start_connector_run` → run status in Redux → navigate to
+- `startImport` → Tauri `start_installed_pdpp_connector_run` → run status in Redux → navigate to
   `/grant` with canonical query params, plus pre-fetched session/builder data in
   `location.state` as an optimization
 
