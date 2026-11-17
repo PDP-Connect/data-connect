@@ -31,6 +31,62 @@ export interface CoreStreamSelection {
   view?: string | undefined;
 }
 
+export type ResolvedGrantWithExtensions = ResolvedGrant & { extensions?: Record<string, unknown> };
+
+export type FrozenRangeType = "integer" | "number" | "date" | "date-time";
+
+export interface FrozenRangeFilterMember {
+  streams: Record<string, Record<string, { type: FrozenRangeType; ops: Array<"gte" | "gt" | "lte" | "lt"> }>>;
+}
+
+/** Freeze only the final granted fields from the retained consent declaration. */
+export function freezeClientRangeFilters(input: {
+  requestedStreams: ReadonlyArray<{ name: string; pdpp_range_filters?: unknown }>;
+  resolvedStreams: ReadonlyArray<CoreStreamSelection>;
+  declaration: SourceDeclaration;
+  selectionPreset?: string | undefined;
+  ownerSelected?: boolean | undefined;
+}): FrozenRangeFilterMember | undefined {
+  for (const request of input.requestedStreams) {
+    if (Object.hasOwn(request, "pdpp_range_filters") &&
+        request.pdpp_range_filters !== undefined && typeof request.pdpp_range_filters !== "boolean") {
+      fail(`Stream '${request.name}' pdpp_range_filters must be a boolean`);
+    }
+  }
+  if (input.selectionPreset !== undefined || input.ownerSelected === true) return undefined;
+  const requested = new Set(input.requestedStreams
+    .filter((request) => Object.hasOwn(request, "pdpp_range_filters") && request.pdpp_range_filters === true)
+    .map((request) => request.name));
+  const streams = new Map<string, FrozenRangeFilterMember["streams"][string]>();
+  for (const resolved of input.resolvedStreams) {
+    if (!requested.has("*") && !requested.has(resolved.name)) continue;
+    const declared = input.declaration.streams.find((stream) => stream.name === resolved.name);
+    const query: unknown = (declared as unknown as JsonObject | undefined)?.query;
+    const ranges: unknown = isObject(query) ? query.range_filters : undefined;
+    const properties: unknown = declared?.schema.properties;
+    if (!isObject(ranges) || !isObject(properties)) continue;
+    const fields = new Map<string, FrozenRangeFilterMember["streams"][string][string]>();
+    for (const field of resolved.fields ?? []) {
+      if (!Object.hasOwn(ranges, field) || !Object.hasOwn(properties, field)) continue;
+      const schema = properties[field];
+      if (!isObject(schema)) continue;
+      const types = typeof schema.type === "string" ? [schema.type] :
+        Array.isArray(schema.type) ? schema.type.filter((type) => type !== "null") : [];
+      if (types.length !== 1) continue;
+      const baseType = types[0];
+      const type: FrozenRangeType | undefined = baseType === "integer" || baseType === "number" ? baseType :
+        baseType === "string" && (schema.format === "date" || schema.format === "date-time") ? schema.format : undefined;
+      const declaredOps = ranges[field];
+      if (!type || !Array.isArray(declaredOps)) continue;
+      const ops = [...new Set(declaredOps.filter((op): op is "gte" | "gt" | "lte" | "lt" =>
+        op === "gte" || op === "gt" || op === "lte" || op === "lt"))];
+      if (ops.length > 0) fields.set(field, { type, ops });
+    }
+    if (fields.size > 0) streams.set(resolved.name, Object.fromEntries(fields));
+  }
+  return streams.size > 0 ? { streams: Object.fromEntries(streams) } : undefined;
+}
+
 export interface CoreSelection {
   access_mode: string;
   purpose_code: string;
@@ -345,8 +401,41 @@ export function resolveCoreSelection(
   });
 }
 
-export function validateCoreSelectionRequest(value: unknown): SelectionRequest {
+/**
+ * Take the profile's `pdpp_range_filters` member off each stream request entry
+ * so the closed Core request schema validates the rest, and hand back the
+ * entries that asked for a frozen set. A present non-boolean value is rejected
+ * (spec-client-range-filters.md Section 3); `false` and absence mean no set.
+ */
+function takeRangeFilterRequests(candidate: unknown): Set<number> {
+  const requested = new Set<number>();
+  if (!(isObject(candidate) && Array.isArray(candidate.streams))) {
+    return requested;
+  }
+  for (const [index, stream] of candidate.streams.entries()) {
+    if (!(isObject(stream) && Object.hasOwn(stream, "pdpp_range_filters"))) {
+      continue;
+    }
+    const flag = stream.pdpp_range_filters;
+    if (flag !== undefined && typeof flag !== "boolean") {
+      fail(`Stream '${String(stream.name)}' pdpp_range_filters must be a boolean`);
+    }
+    Reflect.deleteProperty(stream, "pdpp_range_filters");
+    if (flag === true) {
+      requested.add(index);
+    }
+  }
+  return requested;
+}
+
+export function validateCoreSelectionRequest(
+  value: unknown,
+  options: { clientRangeFilters?: boolean } = {}
+): SelectionRequest {
   const candidate = cloneJson(value);
+  // Without the profile the member stays on the entry, and Core's closed
+  // schema rejects it as any other unknown member.
+  const rangeFilterRequests = options.clientRangeFilters ? takeRangeFilterRequests(candidate) : new Set<number>();
   if (!validateSelectionRequestSchema(candidate)) {
     const details = (validateSelectionRequestSchema.errors ?? [])
       .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`)
@@ -357,6 +446,14 @@ export function validateCoreSelectionRequest(value: unknown): SelectionRequest {
   const semantic = validateSelectionRequestSemantics(request);
   if (!semantic.ok) {
     fail(`Selection request semantics are invalid: ${semantic.failures.map((item) => item.code).join(", ")}`);
+  }
+  // Keep the intent on the validated entries; the freezing step reads it at
+  // approval, from the retained request, not from the wire again.
+  for (const index of rangeFilterRequests) {
+    const stream = request.streams?.[index];
+    if (stream) {
+      Object.assign(stream, { pdpp_range_filters: true });
+    }
   }
   return request;
 }
@@ -511,6 +608,7 @@ export function materializeCoreResolvedGrant({
   accessMode,
   clientId,
   expiresAt,
+  extensions,
   grantId,
   issuedAt,
   purposeCode,
@@ -524,6 +622,7 @@ export function materializeCoreResolvedGrant({
   accessMode: string;
   clientId: string;
   expiresAt: string | null;
+  extensions?: Record<string, unknown>;
   grantId: string;
   issuedAt: string;
   purposeCode: string;
@@ -533,13 +632,14 @@ export function materializeCoreResolvedGrant({
   selectionPreset?: string | undefined;
   snapshot: RetainedCoreConsentSnapshot;
   subjectId: string;
-}): ResolvedGrant {
+}): ResolvedGrantWithExtensions {
   const candidate = {
     access_mode: accessMode,
     client: { client_id: clientId },
     // Absent-only expiry: a grant with no expiry omits the field entirely
     // rather than carrying an explicit `null` (spec-core.md, Grant fields).
     ...(expiresAt === null || expiresAt === undefined ? {} : { expires_at: expiresAt }),
+    ...(extensions === undefined ? {} : { extensions: cloneJson(extensions) }),
     grant_id: grantId,
     issued_at: issuedAt,
     purpose_code: purposeCode,
@@ -583,7 +683,27 @@ export function normalizeAbsentOnlyExpiry(candidate: unknown): unknown {
 }
 
 /**
+ * A grant may carry an `extensions` object keyed by absolute profile URI
+ * (spec-client-range-filters.md Section 4.2). The vendored Core grant schema is
+ * closed and has no such member, so it is validated here and the remainder goes
+ * through the Core schema unchanged. Core preserves the members and does not
+ * interpret them; a profile's own reader validates its member.
+ */
+export function splitGrantExtensions(candidate: unknown): { extensions?: Record<string, unknown>; rest: unknown } {
+  if (!(isObject(candidate) && "extensions" in candidate)) {
+    return { rest: candidate };
+  }
+  const { extensions, ...rest } = candidate;
+  if (!(isObject(extensions) && Object.keys(extensions).every((key) => URL.canParse(key)))) {
+    fail("Resolved grant extensions must be an object keyed by absolute URI");
+  }
+  return Object.keys(extensions).length === 0 ? { rest } : { extensions, rest };
+}
+
+/**
  * Parse the closed Source resolved-grant contract used by every binding.
+ * URI-keyed profile extensions are detached before Core validation and then
+ * restored on the validated clone; Core fields retain their closed schema.
  *
  * TOLERANT BY DESIGN, AND PERSISTED-STATE ONLY. This function deliberately
  * accepts one shape the current JSON Schema rejects: a legacy explicit
@@ -627,20 +747,21 @@ export function normalizeAbsentOnlyExpiry(candidate: unknown): unknown {
  * the documented restriction the review asked for, so the migration exception
  * does not silently become permanent protocol acceptance.
  */
-export function parseCoreResolvedGrant(value: unknown): ResolvedGrant {
-  const candidate = normalizeAbsentOnlyExpiry(cloneJson(value));
+export function parseCoreResolvedGrant(value: unknown): ResolvedGrantWithExtensions {
+  const { extensions, rest } = splitGrantExtensions(normalizeAbsentOnlyExpiry(cloneJson(value)));
+  const candidate = rest;
   if (!validateResolvedGrantSchema(candidate)) {
     const details = (validateResolvedGrantSchema.errors ?? [])
       .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`)
       .join("; ");
     fail(`Resolved grant is invalid: ${details}`);
   }
-  const grant = candidate as ResolvedGrant;
+  const grant = candidate as ResolvedGrantWithExtensions;
   const semantic = validateResolvedGrantSemantics(grant);
   if (!semantic.ok) {
     fail(`Resolved grant semantics are invalid: ${semantic.failures.map((item) => item.code).join(", ")}`);
   }
-  return grant;
+  return extensions === undefined ? grant : { ...grant, extensions };
 }
 
 export function servePrecollectedCoreRecords({

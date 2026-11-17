@@ -1395,7 +1395,7 @@ test("record-detail fields projection on an unknown field is rejected under a fu
   });
 });
 
-test("fields projection on a manifest-unknown field is rejected under a restricted grant", async () => {
+test("fields projection on a manifest-unknown field takes the same path as an ungranted one under a restricted grant", async () => {
   await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
     const connectorId = spotifyManifest.connector_id;
     const ownerToken = await issueOwnerToken(asUrl, "restricted_fields_owner");
@@ -1413,17 +1413,18 @@ test("fields projection on a manifest-unknown field is rejected under a restrict
     });
     assert.ok(approved.token, `expected grant token, got ${JSON.stringify(approved)}`);
 
-    // `not_a_real_field` is not declared by the manifest at all — this must be
-    // `unknown_field` (manifest validation), distinct from the grant-scope
-    // `field_not_granted` signal for a real-but-ungranted field.
+    // `not_a_real_field` is not declared by the manifest at all. The grant is
+    // checked before the declaration, so it gets the same `field_not_granted`
+    // as a real-but-ungranted field: a different code would tell a client
+    // which names exist outside its grant.
     const url = `${rsUrl}/v1/streams/top_artists/records?fields=id,not_a_real_field`;
     const { status, body } = await fetchJson(url, {
       headers: { Authorization: `Bearer ${approved.token}` },
     });
-    assert.equal(status, 400);
-    assert.equal(body.error.code, "unknown_field");
+    assert.equal(status, 403);
+    assert.equal(body.error.code, "field_not_granted");
     // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
-    assert.match(body.error.message || "", /Unknown field: not_a_real_field/);
+    assert.match(body.error.message || "", /Fields not in grant: not_a_real_field/);
   });
 });
 

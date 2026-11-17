@@ -22,6 +22,8 @@
 export interface AsAuthorizationServerMetadataInput {
   /** When true, advertise client_id_metadata_document in pdpp_registration_modes_supported. */
   readonly cimdEnabled?: boolean;
+  /** Experimental profile URIs this AS serves (`pdpp_client_range_filters_supported`). */
+  readonly clientRangeFiltersProfiles?: readonly string[];
   readonly dynamicClientRegistrationEnabled: boolean;
   readonly issuer: string;
   readonly preRegisteredPublicClients?: readonly AsAuthorizationServerPublicClient[];
@@ -39,6 +41,7 @@ export interface AsAuthorizationServerMetadataBuilderInput {
   readonly authorizationEndpoint: string;
   /** Passed through so buildAuthorizationServerMetadata can emit the standard draft field. */
   readonly cimdEnabled?: boolean;
+  readonly clientRangeFiltersProfiles?: readonly string[];
   readonly codeChallengeMethodsSupported: readonly string[];
   readonly deviceAuthorizationEndpoint: string;
   readonly deviceAuthorizationProfilesSupported: readonly Record<string, unknown>[];
@@ -64,7 +67,13 @@ export function executeAsAuthorizationServerMetadata(
   input: AsAuthorizationServerMetadataInput,
   deps: AsAuthorizationServerMetadataDependencies
 ): unknown {
-  const { issuer, dynamicClientRegistrationEnabled, preRegisteredPublicClients = [], cimdEnabled = false } = input;
+  const {
+    issuer,
+    dynamicClientRegistrationEnabled,
+    preRegisteredPublicClients = [],
+    cimdEnabled = false,
+    clientRangeFiltersProfiles = [],
+  } = input;
   const registrationModesBase = dynamicClientRegistrationEnabled
     ? ["dynamic", "pre_registered_public"]
     : ["pre_registered_public"];
@@ -76,6 +85,7 @@ export function executeAsAuthorizationServerMetadata(
     authorizationDetailsTypesSupported: ["https://pdpp.dev/data-access"],
     authorizationEndpoint: `${issuer}/oauth/authorize`,
     cimdEnabled,
+    clientRangeFiltersProfiles,
     codeChallengeMethodsSupported: ["S256"],
     deviceAuthorizationEndpoint: `${issuer}/oauth/device_authorization`,
     deviceAuthorizationProfilesSupported: [

@@ -74,8 +74,15 @@ export interface RsProtectedResourceMetadataClientEventSubscriptionsCapability {
   readonly [extra: string]: unknown;
 }
 
+export interface RsProtectedResourceMetadataClientRangeFiltersCapability {
+  readonly profile: string;
+  readonly stability: "experimental";
+  readonly supported: true;
+}
+
 export interface RsProtectedResourceMetadataCapabilities {
   client_event_subscriptions?: RsProtectedResourceMetadataClientEventSubscriptionsCapability;
+  client_range_filters?: RsProtectedResourceMetadataClientRangeFiltersCapability;
   hybrid_retrieval?: RsProtectedResourceMetadataHybridCapability;
   lexical_retrieval?: RsProtectedResourceMetadataLexicalCapability;
   semantic_retrieval?: RsProtectedResourceMetadataSemanticCapability;
@@ -119,6 +126,12 @@ export interface RsProtectedResourceMetadataDependencies {
    *   reference-implementation-architecture/spec.md
    */
   resolveClientEventSubscriptionsCapability: () => RsProtectedResourceMetadataClientEventSubscriptionsCapability | null;
+  /**
+   * Returns the experimental client range filters capability
+   * (`spec-client-range-filters.md` Section 2) when this deployment serves the
+   * profile, or `null` to omit the entry.
+   */
+  resolveClientRangeFiltersCapability?: () => RsProtectedResourceMetadataClientRangeFiltersCapability | null;
   /**
    * Returns the hybrid capability the host has overridden, or `null`
    * to fall through to the operation's default composition rule
@@ -265,6 +278,11 @@ export async function executeRsProtectedResourceMetadata(
   const ces = dependencies.resolveClientEventSubscriptionsCapability();
   if (ces) {
     capabilities.client_event_subscriptions = ces;
+  }
+
+  const clientRangeFilters = dependencies.resolveClientRangeFiltersCapability?.();
+  if (clientRangeFilters) {
+    capabilities.client_range_filters = clientRangeFilters;
   }
 
   return {

@@ -424,3 +424,270 @@ test("client status-class handling is identical for known and unknown codes", ()
   assert.equal(known.exitCode, unknown.exitCode);
   assert.equal(typeFor(known.status), typeFor(unknown.status));
 });
+
+// --- 3. Frozen client range filters and extension carrier ----------------
+
+import {
+  CoreSourceAuthorizationError,
+  freezeClientRangeFilters,
+  type FrozenRangeFilterMember,
+} from "../server/core-source-authorization.ts";
+import { CLIENT_RANGE_FILTERS_PROFILE_URI } from "../server/client-range-filters.ts";
+
+function rangeDeclaration() {
+  return {
+    streams: [{
+      name: "transactions",
+      semantics: "mutable_state",
+      primary_key: ["id"],
+      cursor_field: "id",
+      consent_time_field: "day",
+      schema: { properties: {
+        id: { type: "string" },
+        amount: { type: ["number", "null"] },
+        count: { type: ["integer", "null"] },
+        day: { type: ["string", "null"], format: "date" },
+        posted_at: { type: "string", format: "date-time" },
+        secret: { type: "number" },
+        not_frozen: { type: "number" },
+        flag: { type: "boolean" },
+        label: { type: "string" },
+        object_value: { type: "object" },
+        no_ops: { type: "integer" },
+      } },
+      query: { range_filters: {
+        amount: ["gte", "eq", "lte"],
+        count: ["gte", "gt", "lte", "lt"],
+        day: ["gte", "gt", "lte", "lt"],
+        posted_at: ["gte", "gt", "lte", "lt"],
+        secret: ["gte", "gt", "lte", "lt"],
+        flag: ["gte", "gt", "lte", "lt"],
+        label: ["gte", "gt", "lte", "lt"],
+        object_value: ["gte", "gt", "lte", "lt"],
+        no_ops: ["eq"],
+      } },
+    }],
+  };
+}
+
+function rangeInput() {
+  return {
+    requestedStreams: [{ name: "transactions", pdpp_range_filters: true }],
+    resolvedStreams: [{
+      name: "transactions",
+      fields: ["id", "amount", "count", "day", "posted_at", "not_frozen", "flag", "label", "object_value", "no_ops"],
+    }],
+    declaration: rangeDeclaration() as never,
+  };
+}
+
+function expectedFrozen(): FrozenRangeFilterMember {
+  return { streams: { transactions: {
+    amount: { type: "number", ops: ["gte", "lte"] },
+    count: { type: "integer", ops: ["gte", "gt", "lte", "lt"] },
+    day: { type: "date", ops: ["gte", "gt", "lte", "lt"] },
+    posted_at: { type: "date-time", ops: ["gte", "gt", "lte", "lt"] },
+  } } };
+}
+
+test("range freezing intersects requested, granted, declared and correctly typed fields", () => {
+  const input = rangeInput();
+  const before = structuredClone(input);
+  assert.deepEqual(freezeClientRangeFilters(input), expectedFrozen());
+  assert.deepEqual(input, before, "freezing must not mutate its inputs");
+});
+
+test("range flags are validated before preset and owner-selection exclusions", () => {
+  for (const invalid of ["true", 1, null, [], {}]) {
+    for (const excluded of [{}, { selectionPreset: "recent" }, { ownerSelected: true }]) {
+      assert.throws(() => freezeClientRangeFilters({
+        ...rangeInput(), ...excluded,
+        requestedStreams: [{ name: "ungranted", pdpp_range_filters: invalid }],
+      }), (error: unknown) => error instanceof CoreSourceAuthorizationError &&
+        error.message.includes("pdpp_range_filters must be a boolean"));
+    }
+  }
+  for (const entry of [
+    { name: "transactions", pdpp_range_filters: false },
+    { name: "transactions" },
+    { name: "transactions", pdpp_range_filters: undefined },
+    Object.assign(Object.create({ pdpp_range_filters: true }), { name: "transactions" }),
+  ]) {
+    assert.equal(freezeClientRangeFilters({ ...rangeInput(), requestedStreams: [entry] }), undefined);
+  }
+  assert.equal(freezeClientRangeFilters({ ...rangeInput(), selectionPreset: "recent" }), undefined);
+  assert.equal(freezeClientRangeFilters({ ...rangeInput(), selectionPreset: "" }), undefined);
+  assert.equal(freezeClientRangeFilters({ ...rangeInput(), ownerSelected: true }), undefined);
+  assert.deepEqual(freezeClientRangeFilters({ ...rangeInput(), ownerSelected: false }), expectedFrozen());
+});
+
+test("wildcards freeze all eligible resolved streams while concrete requests stay narrow", () => {
+  const declaration = rangeDeclaration();
+  declaration.streams.push(
+    { ...structuredClone(declaration.streams[0]!), name: "other" },
+    { ...structuredClone(declaration.streams[0]!), name: "empty" },
+  );
+  const input = {
+    ...rangeInput(),
+    declaration: declaration as never,
+    resolvedStreams: [
+      ...rangeInput().resolvedStreams,
+      { name: "other", fields: ["count"] },
+      { name: "empty", fields: ["flag"] },
+      { name: "no_declaration", fields: ["amount"] },
+    ],
+  };
+  assert.deepEqual(freezeClientRangeFilters({
+    ...input, requestedStreams: [{ name: "*", pdpp_range_filters: true }],
+  }), { streams: {
+    ...expectedFrozen().streams,
+    other: { count: { type: "integer", ops: ["gte", "gt", "lte", "lt"] } },
+  } });
+  assert.deepEqual(freezeClientRangeFilters(input), expectedFrozen());
+  assert.equal(freezeClientRangeFilters({
+    ...input, requestedStreams: [{ name: "missing", pdpp_range_filters: true }],
+  }), undefined);
+  assert.equal(freezeClientRangeFilters({
+    ...input, requestedStreams: [{ name: "empty", pdpp_range_filters: true }],
+  }), undefined);
+});
+
+test("frozen range members are isolated from retained declaration and output mutations", () => {
+  const declaration = rangeDeclaration();
+  const input = { ...rangeInput(), declaration: declaration as never };
+  const first = freezeClientRangeFilters(input)!;
+  declaration.streams[0]!.query.range_filters.amount.push("gt");
+  declaration.streams[0]!.schema.properties.amount.type = ["integer", "null"];
+  assert.deepEqual(first, expectedFrozen());
+  const second = freezeClientRangeFilters(input)!;
+  assert.deepEqual(second.streams.transactions!.amount, { type: "integer", ops: ["gte", "lte", "gt"] });
+  first.streams.transactions!.amount!.ops.push("lt");
+  second.streams.transactions!.amount!.ops.splice(0);
+  second.streams.transactions!.amount!.type = "date";
+  assert.deepEqual(freezeClientRangeFilters(input)!.streams.transactions!.amount,
+    { type: "integer", ops: ["gte", "lte", "gt"] });
+});
+
+test("range freezing rejects unsupported schema unions and preserves deduplicated operator order", () => {
+  const declaration = rangeDeclaration();
+  const properties = declaration.streams[0]!.schema.properties as Record<string, unknown>;
+  const ranges = declaration.streams[0]!.query.range_filters as Record<string, string[]>;
+  for (const [name, schema] of Object.entries({
+    multi: { type: ["integer", "number", "null"] },
+    duplicate: { type: ["number", "number"] },
+    null_only: { type: ["null"] },
+    array_value: { type: "array" },
+    missing_type: {},
+    wrong_format: { type: "string", format: "email" },
+  })) {
+    properties[name] = schema;
+    ranges[name] = ["gte"];
+  }
+  ranges.amount = ["lt", "eq", "gte", "lt", "lte", "gte"];
+  const result = freezeClientRangeFilters({
+    ...rangeInput(), declaration: declaration as never,
+    resolvedStreams: [{ name: "transactions", fields: Object.keys(properties) }],
+  })!;
+  assert.deepEqual(result.streams.transactions!.amount, { type: "number", ops: ["lt", "gte", "lte"] });
+  for (const name of ["multi", "duplicate", "null_only", "array_value", "missing_type", "wrong_format"]) {
+    assert.equal(Object.hasOwn(result.streams.transactions!, name), false);
+  }
+});
+
+test("range freezing uses own declaration keys and safely represents literal prototype names", () => {
+  const declaration = rangeDeclaration();
+  const stream = declaration.streams[0]!;
+  const input = {
+    ...rangeInput(), declaration: declaration as never,
+    resolvedStreams: [{ name: "transactions", fields: ["constructor", "toString"] }],
+  };
+  assert.equal(freezeClientRangeFilters(input), undefined);
+  stream.query.range_filters = Object.create({ amount: ["gte"] });
+  assert.equal(freezeClientRangeFilters({ ...input, resolvedStreams: [{ name: "transactions", fields: ["amount"] }] }), undefined);
+  stream.query.range_filters = { amount: ["gte"] } as never;
+  stream.schema.properties = Object.create({ amount: { type: "number" } });
+  assert.equal(freezeClientRangeFilters({ ...input, resolvedStreams: [{ name: "transactions", fields: ["amount"] }] }), undefined);
+  stream.name = "__proto__";
+  stream.schema.properties = Object.fromEntries([["__proto__", { type: "integer" }]]) as never;
+  stream.query.range_filters = Object.fromEntries([["__proto__", ["gte"]]]) as never;
+  const result = freezeClientRangeFilters({
+    requestedStreams: [{ name: "__proto__", pdpp_range_filters: true }],
+    resolvedStreams: [{ name: "__proto__", fields: ["__proto__"] }],
+    declaration: declaration as never,
+  })!;
+  assert.equal(Object.getPrototypeOf(result.streams), Object.prototype);
+  assert.equal(Object.hasOwn(result.streams, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(result.streams["__proto__"]), Object.prototype);
+  assert.equal(Object.hasOwn(result.streams["__proto__"]!, "__proto__"), true);
+  assert.deepEqual(result.streams["__proto__"]!["__proto__"], { type: "integer", ops: ["gte"] });
+});
+
+function rangeGrant(extensions?: Record<string, unknown>) {
+  return materializeCoreResolvedGrant({
+    accessMode: "continuous",
+    clientId: "research-app",
+    expiresAt: null,
+    ...(extensions === undefined ? {} : { extensions }),
+    grantId: "grant-core-1",
+    issuedAt: "2026-08-11T12:00:00Z",
+    purposeCode: "https://pdpp.dev/purpose/research",
+    resolvedStreams: resolvedStreams(),
+    snapshot: snapshot(),
+    subjectId: "owner-1",
+  });
+}
+
+test("grant extension members survive materialization and parsing without sharing references", () => {
+  const extensions = {
+    [CLIENT_RANGE_FILTERS_PROFILE_URI]: expectedFrozen(),
+    "https://example.test/other": { x: 1 },
+  };
+  const expected = structuredClone(extensions);
+  const grant = rangeGrant(extensions);
+  const wire = JSON.parse(JSON.stringify(grant));
+  const parsed = parseCoreResolvedGrant(wire);
+  assert.deepEqual(parsed, grant);
+  assert.deepEqual(parsed.extensions, expected);
+  extensions["https://example.test/other"].x = 2;
+  extensions[CLIENT_RANGE_FILTERS_PROFILE_URI]!.streams.transactions!.amount!.ops.push("gt");
+  assert.deepEqual(grant.extensions, expected);
+  wire.extensions["https://example.test/other"].x = 3;
+  assert.deepEqual(parsed.extensions, expected);
+  assert.deepEqual(parseCoreResolvedGrant({ ...grant, expires_at: null }), grant);
+  assert.equal(Object.hasOwn(grant, "expires_at"), false);
+});
+
+test("absent and empty grant extensions preserve the original absent-only shape", () => {
+  const expected = {
+    access_mode: "continuous",
+    client: { client_id: "research-app" },
+    grant_id: "grant-core-1",
+    issued_at: "2026-08-11T12:00:00Z",
+    purpose_code: "https://pdpp.dev/purpose/research",
+    source: SOURCE,
+    source_declaration: { version: "github-core-v1" },
+    streams: resolvedStreams(),
+    subject: { id: "owner-1" },
+    version: "0.1.0",
+  };
+  assert.deepEqual(rangeGrant(), expected);
+  assert.deepEqual(rangeGrant({}), expected);
+  assert.deepEqual(parseCoreResolvedGrant({ ...expected, extensions: {}, expires_at: null }), expected);
+  assert.equal(Object.hasOwn(rangeGrant(), "extensions"), false);
+  assert.equal(Object.hasOwn(rangeGrant({}), "extensions"), false);
+});
+
+test("grant extensions reject malformed carriers and do not bypass Core validation", () => {
+  for (const extensions of [{ relative: {} }, [], "bad", null]) {
+    assert.throws(() => parseCoreResolvedGrant({ ...grantWith(null), extensions }), CoreSourceAuthorizationError);
+    assert.throws(() => rangeGrant(extensions as never), CoreSourceAuthorizationError);
+  }
+  const extensions = { "urn:example:extension": { arbitrary: [null, true, 1, "value", {}] } };
+  assert.deepEqual(rangeGrant(extensions).extensions, extensions);
+  assert.throws(() => parseCoreResolvedGrant({
+    ...grantWith(null), extensions, unexpected: true,
+  }), CoreSourceAuthorizationError);
+  assert.throws(() => parseCoreResolvedGrant({
+    ...grantWith(null), extensions, client: {},
+  }), CoreSourceAuthorizationError);
+});
