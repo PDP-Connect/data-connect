@@ -15,7 +15,11 @@ import {
 } from "../postgres-storage.ts";
 
 export interface LoadedProviderInvalidationProofs {
-	/** The newest proof for the connection, or null. */
+	/**
+	 * The most recently recorded proof for the connection (run order, not
+	 * wall-clock time), or null. It may itself be repaired; see
+	 * `repairedProofKeys`.
+	 */
 	readonly proof: ProviderInvalidationProof | null;
 	/** `connection\nprovider\nevidence_id` keys already marked repaired. */
 	readonly repairedProofKeys: readonly string[];
@@ -47,12 +51,11 @@ function toProof(row: ProofRow): ProviderInvalidationProof {
 	};
 }
 
+/** `rows` arrive in recording order (`ORDER BY seq`); a repair covers only the rows recorded before it. */
 function toLoaded(rows: readonly ProofRow[]): LoadedProviderInvalidationProofs {
-	const newest = [...rows].sort(
-		(a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at),
-	)[0];
+	const latest = rows.at(-1);
 	return {
-		proof: newest ? toProof(newest) : null,
+		proof: latest ? toProof(latest) : null,
 		repairedProofKeys: rows
 			.filter((row) => row.repaired_at !== null)
 			.map((row) => `${row.connection_id}\n${row.provider}\n${row.run_id}`),
@@ -68,7 +71,7 @@ function createSqliteStore(): ProviderInvalidationProofStore {
 			// REVIEWED-DYNAMIC: fixed, parameterised lookup keyed by the connection id.
 			const rows = [
 				...iterateDynamicSqlAcknowledged<ProofRow>(
-					`SELECT ${SELECT_COLUMNS} FROM provider_invalidation_proofs WHERE connection_id = ?`,
+					`SELECT ${SELECT_COLUMNS} FROM provider_invalidation_proofs WHERE connection_id = ? ORDER BY seq`,
 					[connectionId],
 				),
 			];
@@ -103,7 +106,7 @@ function createPostgresStore(): ProviderInvalidationProofStore {
 	return {
 		async load(connectionId) {
 			const result = await postgresQuery<ProofRow>(
-				`SELECT ${SELECT_COLUMNS} FROM provider_invalidation_proofs WHERE connection_id = $1`,
+				`SELECT ${SELECT_COLUMNS} FROM provider_invalidation_proofs WHERE connection_id = $1 ORDER BY seq`,
 				[connectionId],
 			);
 			return toLoaded(result.rows);

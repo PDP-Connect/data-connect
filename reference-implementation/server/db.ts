@@ -2521,13 +2521,16 @@ CREATE TABLE IF NOT EXISTS storage_migration_ledger (
 -- Runtime-observed provider-invalidation proofs: one row per failed run whose
 -- last top-level navigation matched the connector's declared sign-in URL
 -- pattern. repaired_at is the replay-suppression record for that proof key.
+-- seq is the runtime-assigned recording order; it, not the wall-clock
+-- observed_at, decides which proof is current.
 CREATE TABLE IF NOT EXISTS provider_invalidation_proofs (
+  seq           INTEGER PRIMARY KEY AUTOINCREMENT,
   connection_id TEXT NOT NULL,
   run_id        TEXT NOT NULL,
   provider      TEXT NOT NULL,
   observed_at   TEXT NOT NULL,
   repaired_at   TEXT,
-  PRIMARY KEY (connection_id, run_id),
+  UNIQUE (connection_id, run_id),
   FOREIGN KEY(connection_id) REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE
 );
 

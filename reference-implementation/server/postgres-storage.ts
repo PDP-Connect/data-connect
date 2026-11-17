@@ -3521,6 +3521,7 @@ async function bootstrapPostgresSchemaOnce({
       -- Runtime-observed provider-invalidation proofs (see the SQLite DDL in
       -- server/db.ts). repaired_at records replay suppression per proof key.
       CREATE TABLE IF NOT EXISTS provider_invalidation_proofs (
+        seq BIGINT GENERATED ALWAYS AS IDENTITY,
         connection_id TEXT NOT NULL REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE,
         run_id TEXT NOT NULL,
         provider TEXT NOT NULL,
