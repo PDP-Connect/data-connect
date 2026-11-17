@@ -11,6 +11,7 @@ import type {
   JsonValue,
   ListenerEffectRequest,
   ListenerEffectResult,
+  InterfaceInventoryDocument,
   ArtifactEffectRequest,
   ArtifactEffectResult,
   ProcessEffectResult,
@@ -56,7 +57,12 @@ type NodeStatus = {
   CertDomains: string[]
 }
 type FixtureData = {
-  "recipe/probe": { cases: RecipeCase[]; nodeStatus: NodeStatus }
+  "recipe/probe": {
+    cases: RecipeCase[]
+    nodeStatus: NodeStatus
+    // Answers a recipe whose declared kind is `interfaces`.
+    interfaces: InterfaceInventoryDocument
+  }
   "local-api/request": { statusPath: string; configPath: string }
   "spawn/run": {
     trialArgs: string[]
@@ -240,13 +246,16 @@ export function createEffectFixtures({
       "recipe",
       "probe",
       async ({ recipe }) => {
-        if (
-          !recipe ||
-          typeof recipe !== "object" ||
-          Array.isArray(recipe) ||
-          !Array.isArray(recipe.args)
-        )
+        if (!recipe || typeof recipe !== "object" || Array.isArray(recipe))
           unsupported()
+        // The recipe's declared kind selects the answer, never the provider.
+        if (recipe.kind === "interfaces")
+          return {
+            stdout: JSON.stringify(fixtureData["recipe/probe"].interfaces),
+            stderr: "",
+            exitCode: 0,
+          }
+        if (!Array.isArray(recipe.args)) unsupported()
         return sourceOutput(recipe.args as string[])
       }
     ),

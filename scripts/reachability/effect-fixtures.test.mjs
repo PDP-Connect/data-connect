@@ -333,3 +333,17 @@ test("actual owned child exit withdraws only its foreground fixture configuratio
     assert.equal(fixture.ledger().some(item => item.present), false);
   } finally { await fixture.close(); }
 });
+
+test("an interfaces recipe is answered by its declared kind with the fixture inventory", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const data = JSON.parse(await readFile(new URL("../../reference-implementation/test/fixtures/reachability/effects.json", import.meta.url), "utf8"));
+  const fixture = createEffectFixtures();
+  try {
+    const probe = operation(fixture, "recipe", "probe");
+    const observed = await probe({ recipe: { kind: "interfaces" } });
+    assert.equal(observed.exitCode, 0);
+    assert.deepEqual(JSON.parse(observed.stdout), data["recipe/probe"].interfaces);
+    // A recipe with neither a known kind nor args is still refused.
+    await assert.rejects(probe({ recipe: { kind: "other" } }), { code: "unsupported" });
+  } finally { await fixture.close(); }
+});

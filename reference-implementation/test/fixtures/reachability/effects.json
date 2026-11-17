@@ -43,6 +43,28 @@
         "MagicDNSEnabled": true
       },
       "CertDomains": ["fixture.invalid"]
+    },
+    "interfaces": {
+      "interfaces": {
+        "lo": [
+          {
+            "address": "127.0.0.1",
+            "netmask": "255.0.0.0",
+            "family": "IPv4",
+            "internal": true,
+            "cidr": "127.0.0.1/8"
+          }
+        ],
+        "eth0": [
+          {
+            "address": "192.0.2.10",
+            "netmask": "255.255.255.0",
+            "family": "IPv4",
+            "internal": false,
+            "cidr": "192.0.2.10/24"
+          }
+        ]
+      }
     }
   },
   "local-api/request": {
@@ -76,5 +98,12 @@
   },
   "sdk-listener/open": {
     "safeFailureCode": "provider_unavailable"
+  },
+  "owner-inputs": {
+    "interface": { "from": "observed-interface-address" },
+    "firewall": { "from": "observed-interface-address" },
+    "gate-port": { "from": "free-local-port" },
+    "orchid.value": { "from": "free-local-port" },
+    "iris.value": { "from": "free-local-port" }
   }
 }
