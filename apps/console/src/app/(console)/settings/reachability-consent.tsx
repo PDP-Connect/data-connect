@@ -80,6 +80,7 @@ export function SetupApprovalCard({
   busy,
   onApprove,
   children,
+  buttonLabel = "Approve setup action",
 }: {
   action: Action;
   busy?: boolean;
@@ -90,6 +91,7 @@ export function SetupApprovalCard({
     consentFactsDigest: string;
   }) => void;
   children?: React.ReactNode;
+  buttonLabel?: string;
 }) {
   const [approvedDigest, setApprovedDigest] = useState<string | null>(null);
   const consent = action.consent;
@@ -137,7 +139,7 @@ export function SetupApprovalCard({
         }}
         type="button"
       >
-        Approve setup action
+        {buttonLabel}
       </button>
     </section>
   );

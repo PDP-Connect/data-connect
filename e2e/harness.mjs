@@ -250,9 +250,15 @@ async function waitReady(url, child, signal) {
   }
 }
 
+const reachabilityModes = new Map([
+  ["--reachability-stream", "stream"],
+  ["--reachability-setup", "setup"],
+  ["--reachability", "unknown"],
+])
+
 async function startStack({ root, launch, signal }, args) {
-  const reachabilityMode = args.includes("--reachability-stream") ? "stream" : args.includes("--reachability") ? "unknown" : null
-  args = args.filter(arg => !["--reachability", "--reachability-stream"].includes(arg))
+  const reachabilityMode = reachabilityModes.get(args.find(arg => reachabilityModes.has(arg)))
+  args = args.filter(arg => !reachabilityModes.has(arg))
   const data = join(root, "data")
   await mkdir(data, { mode: 0o700 })
   const nonce = randomBytes(24).toString("hex")
@@ -363,7 +369,7 @@ export async function runInSandbox(args, wrapper = SANDBOX) {
     throw new Error(
       `${wrapper[0]} is missing, and the E2E harness supports no other isolation. No servers started.`
     )
-  const ownedRoot = wrapper === SANDBOX && args.some(arg => ["--reachability", "--reachability-stream"].includes(arg))
+  const ownedRoot = wrapper === SANDBOX && args.some(arg => reachabilityModes.has(arg))
   const child = spawn(
     wrapper[0],
     ownedRoot

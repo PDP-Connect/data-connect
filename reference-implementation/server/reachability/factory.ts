@@ -29,6 +29,8 @@ export async function createReachabilityService(
     "storeSecret",
     "discardSecret",
     "runSetupAction",
+    "readSetupOperation",
+    "cancelSetupOperation",
     "reviewRouteConsent",
     "approveRouteConsent",
     "catalogRoutes",

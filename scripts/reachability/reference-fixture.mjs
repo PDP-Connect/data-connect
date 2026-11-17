@@ -13,6 +13,7 @@ import { ReachabilityService } from "../../reference-implementation/server/reach
 import { FixtureSecretBackend } from "../../reference-implementation/test/fixtures/reachability/secret-backend.ts";
 import { createEffectFixtures } from "./effect-fixtures.ts";
 import { createEffectFixtureHost } from "./testing-effects.mjs";
+import { createSetupRegistry } from "./setup-registry.mjs";
 import { createUnknownRegistry } from "./unknown-registry.mjs";
 
 const disk = await statfs(process.cwd());
@@ -25,7 +26,7 @@ const target = new URL(process.env.PDPP_REFERENCE_ORIGIN);
 if (target.hostname !== "127.0.0.1")
 	throw new Error("Fixture target must be the owned loopback console");
 const mode = process.argv[2] ?? "unknown";
-if (!["unknown", "stream"].includes(mode))
+if (!["unknown", "stream", "setup"].includes(mode))
 	throw new Error("Unknown fixture mode");
 let home = join(data, "reachability-home");
 await mkdir(home, { recursive: true, mode: 0o700 });
@@ -43,7 +44,7 @@ const hostCapabilities = Object.fromEntries(
 let registry =
 	mode === "unknown"
 		? await createUnknownRegistry(join(data, "reachability-registry"))
-		: null;
+		: mode === "setup" ? await createSetupRegistry(join(data, "reachability-registry")) : null;
 const effects =
 	mode === "stream"
 		? createEffectFixtures({ streamDelayMs: 2500, failInitialStream: true })
@@ -135,12 +136,24 @@ const controls = http.createServer(async (request, response) => {
 		return;
 	}
 	try {
-        if (request.url === "/fixture-state" && registry) {
+        if (mode === "setup" && registry) {
+            if (request.url === "/setup-world" && request.method === "GET") {
+                response.setHeader("content-type", "application/json");
+                response.end(JSON.stringify(await registry.readWorld()));
+                return;
+            }
+            if (request.url === "/verify-setup" && request.method === "POST") {
+                await registry.updateWorld({ grant: "verified" });
+                response.writeHead(204).end();
+                return;
+            }
+        }
+        if (mode === "unknown" && request.url === "/fixture-state" && registry) {
             response.setHeader("content-type", "application/json");
             response.end(JSON.stringify({ starts: await fixtureStarts(registry) }));
             return;
         }
-        if (request.url === "/reload-registry" && request.method === "POST" && registry) {
+        if (mode === "unknown" && request.url === "/reload-registry" && request.method === "POST" && registry) {
             if (await fixtureStarts(registry) !== 0) throw new Error("A fixture with started resources cannot be replaced");
             const next = await createUnknownRegistry(join(data, "reachability-registry-next"), { addedFacts: [registry.addedFact] });
             const moduleAt = current => join(current.root, "providers", current.specification.id, "index.mjs");

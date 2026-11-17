@@ -10,7 +10,8 @@ import type {
   projectRoute,
   projectRuntimeReview,
 } from "pdpp-reference-implementation/reachability-projection";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { ProviderSetup, readSetupReservations, reserveSetupOperation, saveSetupReservation, type SetupReservation } from "./provider-setup.tsx";
 import { requestReachability } from "./reachability-actions.ts";
 import { ConsentFacts, RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 
@@ -73,6 +74,11 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   const [error, setError] = useState<string | null>(null);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [reservations, setReservations] = useState<SetupReservation[]>([]);
+  const [setupReadiness, setSetupReadiness] = useState<Record<string, boolean>>({});
+  const onSetupReadiness = useCallback((draftId: string, ready: boolean) => {
+    setSetupReadiness((current) => ({ ...current, [draftId]: ready }));
+  }, []);
 
   async function send<T>(path: string, input?: Record<string, unknown>): Promise<T> {
     const result = await request(path, input);
@@ -83,6 +89,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   }
   useEffect(() => {
     let active = true;
+    setReservations(readSetupReservations());
     const pointer = sessionStorage.getItem("reachability-draft");
     if (pointer) {
       try {
@@ -118,11 +125,13 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     };
   }, [request]);
   useEffect(() => {
-    if (draft && draftProviderId) {
+    if (draft && draftProviderId && !committed) {
       sessionStorage.setItem(
         "reachability-draft",
         JSON.stringify({ providerId: draftProviderId, draftId: draft.draftId, usage, committed })
       );
+    } else if (committed) {
+      sessionStorage.removeItem("reachability-draft");
     }
   }, [draft, draftProviderId, usage, committed]);
   useEffect(() => {
@@ -278,6 +287,34 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     setReview(null);
   }
   const mutationBlocked = busy || stale || state.starting;
+  const setupAction = draft?.configuration.actions.find((action) => action.step);
+  const hasReservation = reservations.some((item) => item.draftId === draft?.draftId);
+  const setupNeedsInput = draft && (setupAction || hasReservation) && !setupReadiness[draft.draftId];
+  async function reserveSetup() {
+    if (!draft || !draftProviderId || !usage || !setupAction || hasReservation) return;
+    const saved = readSetupReservations();
+    if (saved.some((item) => item.draftId === draft.draftId)) {
+      setReservations(saved);
+      return;
+    }
+    const reservation = {
+      operationId: Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) =>
+        word.toString(16).padStart(8, "0")
+      ).join(""),
+      providerId: draftProviderId,
+      providerLabel: inventory?.providers.find((item) => item.providerId === draftProviderId)?.label ?? "Selected provider",
+      draftId: draft.draftId, actionId: setupAction.id,
+      expectedConfigurationRevision: draft.configuration.revision,
+      usage,
+    };
+    const next = saveSetupReservation(reservation);
+    try {
+      const result = await reserveSetupOperation(request, reservation);
+      if (!result.ok) throw new Error(result.message);
+    } finally {
+      setReservations(next);
+    }
+  }
   return (
     <section aria-label="Remote access" className="grid gap-6">
       <div>
@@ -466,7 +503,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
           {committed ? (
             <p>Configuration applied. Open a new draft to edit or rotate inputs.</p>
           ) : (
-            draft.configuration.actions.map((action) => (
+            !hasReservation && draft.configuration.actions.filter((action) => !action.step).map((action) => (
               <SetupApprovalCard
                 action={action}
                 busy={mutationBlocked}
@@ -508,10 +545,15 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
               </SetupApprovalCard>
             ))
           )}
+          {!committed && setupAction && !hasReservation ? (
+            <button type="button" disabled={mutationBlocked} onClick={() => void change(reserveSetup)}>
+              Start provider setup
+            </button>
+          ) : null}
           <div className="flex flex-wrap gap-3">
             {committed ? <button type="button" disabled={mutationBlocked} onClick={() => void change(editApplied)}>Edit or rotate inputs</button> : null}
             <button
-              disabled={mutationBlocked || !usage}
+              disabled={mutationBlocked || !usage || (!committed && !!setupNeedsInput)}
               onClick={() =>
                 void change(async () => {
                   if (!committed) {
@@ -546,6 +588,31 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
           </div>
         </section>
       ) : null}
+      {reservations.map((reservation) => (
+        <ProviderSetup
+          acknowledgeDisconnect={acknowledged}
+          disabled={mutationBlocked}
+          key={reservation.operationId}
+          reservation={reservation}
+          request={request}
+          onReadiness={onSetupReadiness}
+          {...(!draft ? { onResume: () => void change(async () => {
+            const restored = await send<Draft>(
+              `/drafts/${encodeURIComponent(reservation.draftId)}?providerId=${encodeURIComponent(reservation.providerId)}`
+            );
+            setDraft(restored);
+            setDraftProviderId(reservation.providerId);
+            setUsage(reservation.usage);
+            setCommitted(false);
+            setReview(null);
+          }) } : {})}
+          onChange={async (view) => {
+            setReview(null);
+            if (draft && !committed && draft.draftId === view.scope.draftId &&
+                draft.configuration.revision !== view.scope.configurationRevision) await reloadDraft();
+          }}
+        />
+      ))}
       <label className="pdpp-caption flex items-start gap-2">
         <input checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} type="checkbox" />I
         understand a remote change may disconnect this device and require local recovery.
@@ -655,6 +722,14 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
               · Cleanup: {route.cleanup.state}
             </p>
             <ConsentFacts facts={route.facts} />
+            {route.binding.remedy ? (
+              <div className="grid gap-2">
+                <h4 className="pdpp-label">{route.binding.remedy.label}</h4>
+                <p className="pdpp-caption whitespace-pre-wrap break-words">
+                  {route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text}
+                </p>
+              </div>
+            ) : null}
             {route.cleanup.nextAction ? (
               <p className="pdpp-caption whitespace-pre-wrap break-words">
                 {route.cleanup.nextAction.instructions ?? route.cleanup.nextAction.label}

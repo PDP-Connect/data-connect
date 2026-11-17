@@ -71,10 +71,12 @@ if (results[0].exitCode === 0) {
 		"scripts/reachability/host-route-history.test.mjs",
 		"scripts/reachability/install-boundary.test.mjs",
 		"scripts/reachability/sdk-refusal.test.mjs",
+		"scripts/reachability/setup-operation.test.mjs",
 	]);
 	for (const [flag, spec] of [
 		["--reachability", "reachability.spec.ts"],
 		["--reachability-stream", "reachability-stream.spec.ts"],
+		["--reachability-setup", "reachability-setup.spec.ts"],
 	]) {
 		await run(
 			spec,

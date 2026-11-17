@@ -9,6 +9,9 @@ import type {
   Configuration as ProviderConfiguration,
   ProviderInventory,
   Query,
+  RunSetupOperationRequest,
+  SetupOperation,
+  SetupOperationRef,
   RouteView as Route,
   Candidate as RouteCandidate,
 } from "@tnunamak/gozar";
@@ -23,6 +26,12 @@ type RuntimeConsentReview = Awaited<ReturnType<typeof import("@tnunamak/gozar").
 import { ReachabilityError, requireRouteApproval, requireSetupApproval } from "./approvals.ts";
 import { ConfigurationDraftSession } from "./drafts.ts";
 
+type SetupReference = Pick<SetupOperationRef, "operationId" | "providerId">;
+type SetupCommand = Pick<RunSetupOperationRequest, "actionId" | "expectedConfigurationRevision" | "expectedSetupRevision" | "draftId" | "value"> & {
+  approval?: unknown;
+  secret?: string;
+  acknowledgeDisconnect?: boolean;
+};
 type SavedDraft = { providerId: string; session: ConfigurationDraftSession };
 type Review = { id: string; candidate: RouteCandidate; query: Query; draftId: string };
 export type HostPolicy = {
@@ -184,6 +193,97 @@ export class ReachabilityService {
     this.drafts.set(draftId, { providerId, session });
     return draft;
   }
+  private setupReference(input: SetupReference): SetupOperationRef {
+    return { ...input, home: this.host.query.home, owner: this.host.query.owner };
+  }
+  readSetupOperation(reference: SetupReference): Promise<SetupOperation> {
+    return this.api.readSetupOperation(this.setupReference(reference));
+  }
+  cancelSetupOperation(reference: SetupReference): Promise<SetupOperation> {
+    return this.api.cancelSetupOperation(this.setupReference(reference));
+  }
+  private currentSetupAction(view: SetupOperation, input: SetupCommand) {
+    const action = view.nextAction;
+    const scope = action?.consent?.scope;
+    if (!action || view.revision !== input.expectedSetupRevision ||
+        view.scope.configurationRevision !== input.expectedConfigurationRevision ||
+        view.scope.draftId !== (input.draftId ?? null) || action.id !== input.actionId ||
+        scope?.operation?.id !== view.operationId || scope.operation.revision !== view.revision ||
+        scope.configurationRevision !== view.scope.configurationRevision || scope.draftId !== view.scope.draftId ||
+        scope.registryId !== view.scope.registryId || scope.providerId !== view.scope.providerId || scope.scopeId !== view.scope.scopeId) {
+      throw new ReachabilityError("setup_scope_mismatch");
+    }
+    return action;
+  }
+  async runSetupOperation(reference: SetupReference, input: SetupCommand): Promise<SetupOperation> {
+    const { actionId, expectedConfigurationRevision, expectedSetupRevision, draftId, value, secret } = input;
+    const request = {
+      ...this.setupReference(reference), actionId, expectedConfigurationRevision, expectedSetupRevision,
+      ...(draftId === undefined ? {} : { draftId }),
+    };
+    if (expectedSetupRevision === 0 || input.approval === undefined) {
+      if (value !== undefined || secret !== undefined || input.approval !== undefined) {
+        throw new ReachabilityError("invalid_input");
+      }
+      return this.api.runSetupAction(request);
+    }
+
+    const view = await this.api.readSetupOperation(request);
+    const action = this.currentSetupAction(view, input);
+    const approval = requireSetupApproval(action, input.approval);
+    if (action.kind === "open-url" || action.kind === "instructions") {
+      throw new ReachabilityError("setup_action_unavailable");
+    }
+    if ((secret !== undefined) !== (action.kind === "provide-secret") ||
+        (value !== undefined) !== (action.kind === "provide-value")) {
+      throw new ReachabilityError("invalid_input");
+    }
+    if (["stop-connector", "remove-resource", "revoke-credential", "disconnect"].includes(action.step.purpose)) {
+      await this.host.acknowledgeDisconnect(input.acknowledgeDisconnect === true);
+    }
+    this.reviews.clear();
+    if (draftId) this.drafts.get(draftId)?.session.invalidate();
+    if (secret === undefined) {
+      return this.api.runSetupAction({ ...request, approval, ...(value === undefined ? {} : { value }) });
+    }
+    if (!action.inputId || !secret) throw new ReachabilityError("secret_input_unavailable");
+    const bytes = new TextEncoder().encode(secret);
+    let handle: string;
+    try {
+      const stored = await this.api.storeSecret({ ...request, bytes, inputId: action.inputId, scopeId: view.scope.scopeId });
+      if (stored.scopeId !== view.scope.scopeId || stored.configurationRevision !== expectedConfigurationRevision) {
+        throw new ReachabilityError("secret_reference_inconsistent");
+      }
+      handle = stored.handle;
+    } finally {
+      bytes.fill(0);
+    }
+    try {
+      return await this.api.runSetupAction({ ...request, approval, secretHandle: handle });
+    } finally {
+      // The SDK protects handles bound to a configuration or the current setup operation.
+      await this.api.discardSecret({ home: request.home, handle }).catch(() => {});
+    }
+  }
+  async setupHandoff(reference: SetupReference, input: SetupCommand): Promise<{ href: string }> {
+    if (input.secret !== undefined || input.value !== undefined) throw new ReachabilityError("invalid_input");
+    const request = this.setupReference(reference);
+    const view = await this.api.readSetupOperation(request);
+    const action = this.currentSetupAction(view, input);
+    requireSetupApproval(action, input.approval);
+    if (view.state !== "pending" || action.kind !== "open-url" || !action.step.browser) {
+      throw new ReachabilityError("setup_action_unavailable");
+    }
+    const interactive = await this.api.readSetupOperation({ ...request, includeBrowserHandoff: true });
+    const offered = interactive.nextAction;
+    const url = offered?.href && URL.parse(offered.href);
+    if (interactive.revision !== view.revision || interactive.state !== "pending" ||
+        offered?.consent.consentFactsDigest !== action.consent.consentFactsDigest ||
+        !url || url.protocol !== "https:" || url.username || url.password) {
+      throw new ReachabilityError("setup_action_unavailable");
+    }
+    return { href: url.href };
+  }
   async setup(
     id: string,
     input: { actionId: string; expectedRevision: string; approval: unknown; value?: string; secret?: string }
@@ -192,6 +292,7 @@ export class ReachabilityService {
     const prior = saved.session.snapshot;
     const action = saved.session.action(input.actionId, input.expectedRevision);
     const approval = requireSetupApproval(action, input.approval);
+    if (action.step) throw new ReachabilityError("setup_required");
     const ref = this.ref(saved.providerId, id);
     this.transition({ type: "setup" });
     saved.session.invalidate();

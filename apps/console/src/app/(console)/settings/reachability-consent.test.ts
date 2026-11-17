@@ -12,7 +12,7 @@ import fixture from "../../../../../../reference-implementation/test/fixtures/re
 import { RouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 
 const base = fixture.configuration.actions[0] as SetupAction;
-const { consent: _baseConsent, ...actionDisclosure } = base;
+const { consent: _baseConsent, step: _step, review: _review, ...actionDisclosure } = base;
 const routeScope = {
   kind: "route" as const,
   registryId: "registry-one",

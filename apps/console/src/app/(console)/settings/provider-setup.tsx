@@ -1,0 +1,420 @@
+"use client"
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+import { useEffect, useState } from "react"
+import type { projectSetupOperation } from "pdpp-reference-implementation/reachability-projection"
+import { openResource } from "../../../../../../src/lib/open-resource"
+import type { requestReachability } from "./reachability-actions.ts"
+import {
+  ConsentDisclosures,
+  ConsentFacts,
+  SetupApprovalCard,
+} from "./reachability-consent.tsx"
+
+type SetupView = ReturnType<typeof projectSetupOperation>
+type Request = typeof requestReachability
+type Approval = Parameters<
+  Parameters<typeof SetupApprovalCard>[0]["onApprove"]
+>[0]
+
+export type SetupReservation = {
+  operationId: string
+  providerId: string
+  providerLabel: string
+  draftId: string
+  actionId: string
+  expectedConfigurationRevision: string
+  usage: string
+}
+
+const storageKey = "reachability-setup-reservations-v1"
+
+export function readSetupReservations(): SetupReservation[] {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "[]")
+    if (!Array.isArray(value)) return []
+    return value.filter(
+      (item): item is SetupReservation =>
+        item &&
+        typeof item === "object" &&
+        [
+          "operationId",
+          "providerId",
+          "providerLabel",
+          "draftId",
+          "actionId",
+          "expectedConfigurationRevision",
+          "usage",
+        ].every(key => typeof item[key] === "string" && item[key].length > 0)
+    )
+  } catch {
+    return []
+  }
+}
+
+export function saveSetupReservation(next: SetupReservation) {
+  const reservations = [...readSetupReservations(), next]
+  localStorage.setItem(storageKey, JSON.stringify(reservations))
+  return reservations
+}
+
+export function reserveSetupOperation(
+  request: Request,
+  reservation: SetupReservation
+) {
+  const {
+    operationId,
+    providerId,
+    draftId,
+    actionId,
+    expectedConfigurationRevision,
+  } = reservation
+  return request(`/setup-operations/${encodeURIComponent(operationId)}`, {
+    providerId,
+    draftId,
+    actionId,
+    expectedConfigurationRevision,
+    expectedSetupRevision: 0,
+  })
+}
+
+const status: Record<SetupView["state"], string> = {
+  "authorization-required": "Approval or input required",
+  pending: "Waiting for verification",
+  denied: "Authorization denied",
+  expired: "Authorization expired",
+  blocked: "Setup needs attention",
+  reconciling: "Checking what remains",
+  complete: "Setup complete",
+  cancelled: "Setup cancelled",
+}
+
+function SetupOperationAction({
+  action,
+  busy,
+  onApprove,
+}: {
+  action: NonNullable<SetupView["nextAction"]>
+  busy: boolean
+  onApprove: (approval: Approval, input: Record<string, string>) => void
+}) {
+  const [value, setValue] = useState("")
+  const secret = action.kind === "provide-secret"
+  const needsInput = secret || action.kind === "provide-value"
+  const label =
+    (secret ? action.secretLabel : action.valueLabel) ?? action.label
+  const consent = action.consent
+  const obtain = action.obtainUrl ? URL.parse(action.obtainUrl) : null
+  if (
+    action.kind === "instructions" ||
+    (action.kind === "open-url" && !action.step?.browser)
+  ) {
+    const url = action.href ? URL.parse(action.href) : null
+    return (
+      <div className="grid gap-2">
+        <h4 className="pdpp-label">{action.label}</h4>
+        <p>{action.instructions ?? action.help ?? action.disclosure.text}</p>
+        {url?.protocol === "https:" && !url.username && !url.password ? (
+          <a href={url.href} rel="noreferrer" target="_blank">
+            {action.label}
+          </a>
+        ) : null}
+        {consent?.disclosures ? (
+          <ConsentDisclosures value={consent.disclosures} />
+        ) : null}
+        {consent?.facts ? <ConsentFacts facts={consent.facts} /> : null}
+      </div>
+    )
+  }
+  return (
+    <SetupApprovalCard
+      action={action}
+      busy={busy || (needsInput && !value)}
+      buttonLabel={
+        action.kind === "open-url"
+          ? "Approve and open in browser"
+          : action.label
+      }
+      onApprove={approval => {
+        setValue("")
+        onApprove(
+          approval,
+          needsInput ? { [secret ? "secret" : "value"]: value } : {}
+        )
+      }}
+    >
+      {action.instructions || action.help ? (
+        <p>{action.instructions ?? action.help}</p>
+      ) : null}
+      {obtain?.protocol === "https:" && !obtain.username && !obtain.password ? (
+        <a href={obtain.href} rel="noreferrer" target="_blank">
+          Where to get it
+        </a>
+      ) : null}
+      {needsInput ? (
+        <label className="grid gap-2">
+          {label}
+          {action.step?.options ? (
+            <select
+              disabled={busy}
+              onChange={event => setValue(event.target.value)}
+              value={value}
+            >
+              <option value="">Choose an option</option>
+              {action.step.options.map(option => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              autoComplete="off"
+              disabled={busy}
+              onChange={event => setValue(event.target.value)}
+              placeholder={action.valuePlaceholder}
+              type={secret ? "password" : "text"}
+              value={value}
+            />
+          )}
+        </label>
+      ) : null}
+    </SetupApprovalCard>
+  )
+}
+
+export function ProviderSetup({
+  reservation,
+  request,
+  disabled,
+  onChange,
+  onReadiness,
+  onResume,
+  acknowledgeDisconnect,
+}: {
+  reservation: SetupReservation
+  request: Request
+  disabled: boolean
+  onChange: (view: SetupView) => Promise<void>
+  onReadiness: (draftId: string, ready: boolean) => void
+  onResume?: () => void
+  acknowledgeDisconnect: boolean
+}) {
+  const [view, setView] = useState<SetupView | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [missing, setMissing] = useState(false)
+  const { operationId, providerId, draftId } = reservation
+  const path = `/setup-operations/${encodeURIComponent(operationId)}`
+  const readPath = `${path}?providerId=${encodeURIComponent(providerId)}`
+  const ready =
+    view?.state === "complete" || view?.nextAction?.kind === "instructions"
+  useEffect(() => onReadiness(draftId, ready), [draftId, onReadiness, ready])
+
+  useEffect(() => {
+    let active = true
+    async function load() {
+      const result = await request(readPath)
+      if (!active) return
+      if (result.ok) {
+        setView(result.data as SetupView)
+      } else {
+        setMissing(result.code === "route_not_found")
+        setError(result.message)
+      }
+    }
+    void load()
+    return () => {
+      active = false
+    }
+  }, [request, readPath])
+
+  async function send<T>(
+    target: string,
+    body?: Record<string, unknown>
+  ): Promise<T> {
+    const result = await request(target, body)
+    if (!result.ok) throw new Error(result.message)
+    return result.data as T
+  }
+
+  async function change(run: () => Promise<SetupView>) {
+    setBusy(true)
+    setError(null)
+    try {
+      const next = await run()
+      setView(next)
+      setMissing(false)
+      await onChange(next)
+    } catch (failure) {
+      setView(null)
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "Check the current setup status."
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const browser =
+    view?.state === "pending" ? view.nextAction?.step?.browser : undefined
+  const expiresAt = browser?.expiresAt
+  const pollAfterMs = browser?.pollAfterMs
+  useEffect(() => {
+    if (!expiresAt || !pollAfterMs || busy) return
+    // Focus and a provider-suggested poll both read current evidence.
+    let active = true
+    let reading = false
+    let timer: ReturnType<typeof setTimeout>
+    const check = async () => {
+      if (reading) return
+      clearTimeout(timer)
+      reading = true
+      const result = await request(readPath)
+      reading = false
+      if (!active) return
+      if (result.ok) setView(result.data as SetupView)
+      if (Date.now() < Date.parse(expiresAt)) {
+        timer = setTimeout(() => void check(), Math.max(1000, pollAfterMs))
+      }
+    }
+    const onReturn = () => void check()
+    timer = setTimeout(onReturn, Math.max(1000, pollAfterMs))
+    window.addEventListener("focus", onReturn)
+    window.addEventListener("pageshow", onReturn)
+    return () => {
+      active = false
+      clearTimeout(timer)
+      window.removeEventListener("focus", onReturn)
+      window.removeEventListener("pageshow", onReturn)
+    }
+  }, [busy, expiresAt, pollAfterMs, readPath, request])
+
+  const action = view?.nextAction
+  return (
+    <section
+      aria-label={`Provider setup for ${reservation.providerLabel}`}
+      className="grid gap-3"
+    >
+      <h3 className="pdpp-label">{reservation.providerLabel} setup</h3>
+      <p role="status">
+        {view
+          ? status[view.state]
+          : error
+            ? "Current setup status unavailable"
+            : "Checking setup status…"}
+      </p>
+      {error ? <p role="alert">{error}</p> : null}
+      {view?.evidence.known ? <p>{view.evidence.value.summary}</p> : null}
+      {view?.resources.length ? (
+        <ul aria-label="Setup resources">
+          {view.resources.map(resource => (
+            <li key={resource.handle}>
+              {resource.label} · {resource.ownership} ·{" "}
+              {resource.removal === "required"
+                ? "Removal pending"
+                : resource.removal === "unconfirmed"
+                  ? "Removal unconfirmed"
+                  : resource.removal === "confirmed"
+                    ? "Removal confirmed"
+                    : "Retained"}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {view && action ? (
+        <SetupOperationAction
+          key={`${view.revision}:${action.consent?.consentFactsDigest}`}
+          action={action}
+          busy={busy || disabled}
+          onApprove={(approval, input) =>
+            void change(async () => {
+              const command = {
+                ...input,
+                approval,
+                providerId,
+                actionId: action.id,
+                ...(view.scope.draftId === null
+                  ? {}
+                  : { draftId: view.scope.draftId }),
+                expectedConfigurationRevision: view.scope.configurationRevision,
+                expectedSetupRevision: view.revision,
+                acknowledgeDisconnect,
+              }
+              if (action.kind === "open-url") {
+                const handoff = await send<{ href: string }>(
+                  `${path}/handoff`,
+                  command
+                )
+                const url = URL.parse(handoff.href)
+                if (
+                  !url ||
+                  url.protocol !== "https:" ||
+                  url.username ||
+                  url.password ||
+                  !(await openResource(url.href, {
+                    kind: "external-url",
+                    newTab: false,
+                  }))
+                ) {
+                  throw new Error(
+                    "The browser did not open. Check setup status before retrying."
+                  )
+                }
+                return send<SetupView>(readPath)
+              }
+              return send<SetupView>(path, command)
+            })
+          }
+        />
+      ) : null}
+      <div className="flex flex-wrap gap-3">
+        {onResume &&
+        view?.scope.draftId &&
+        !["cancelled", "denied", "expired"].includes(view.state) ? (
+          <button type="button" disabled={busy || disabled} onClick={onResume}>
+            Resume configuration
+          </button>
+        ) : null}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void change(() => send<SetupView>(readPath))}
+        >
+          Check setup status
+        </button>
+        {missing ? (
+          <button
+            type="button"
+            disabled={busy || disabled}
+            onClick={() =>
+              void change(() =>
+                reserveSetupOperation(request, reservation).then(result => {
+                  if (!result.ok) throw new Error(result.message)
+                  return result.data as SetupView
+                })
+              )
+            }
+          >
+            Retry setup reservation
+          </button>
+        ) : null}
+        {view && view.state !== "cancelled" ? (
+          <button
+            type="button"
+            disabled={busy || disabled}
+            onClick={() =>
+              void change(() =>
+                send<SetupView>(`${path}/cancel`, { providerId })
+              )
+            }
+          >
+            {view.state === "complete" ? "Prepare removal" : "Cancel setup"}
+          </button>
+        ) : null}
+      </div>
+    </section>
+  )
+}

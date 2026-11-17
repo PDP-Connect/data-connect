@@ -7,6 +7,7 @@ import type {
   Configuration as ProviderConfiguration,
   ProviderInventory,
   RouteView as Route,
+  SetupOperation,
   Candidate as RouteCandidate,
   Action as SetupAction,
 } from "@tnunamak/gozar";
@@ -98,6 +99,7 @@ export function projectAction(action: SetupAction) {
               disclosureRevision: scope.disclosureRevision,
               draftId: scope.draftId,
               kind: scope.kind,
+              ...(scope.operation ? { operation: { id: scope.operation.id, revision: scope.operation.revision } } : {}),
               providerId: scope.providerId,
               registryId: scope.registryId,
               scopeId: scope.scopeId,
@@ -115,7 +117,7 @@ export function projectAction(action: SetupAction) {
         }
       : undefined,
     help: action.help,
-    href: action.href,
+    href: action.step?.browser ? undefined : action.href,
     id: action.id,
     inputId: action.inputId,
     instructions: action.instructions,
@@ -124,6 +126,18 @@ export function projectAction(action: SetupAction) {
     obtainUrl: action.obtainUrl,
     required: action.required,
     secretLabel: action.secretLabel,
+    step: action.step ? {
+      actor: action.step.actor,
+      permission: { id: action.step.permission.id, label: action.step.permission.label },
+      verification: action.step.verification,
+      purpose: action.step.purpose,
+      prerequisites: action.step.prerequisites,
+      options: action.step.options?.map(({ value, label }) => ({ value, label })),
+      browser: action.step.browser ? {
+        expiresAt: action.step.browser.expiresAt, pollAfterMs: action.step.browser.pollAfterMs,
+      } : undefined,
+      resourceHandle: action.step.resourceHandle,
+    } : undefined,
     valueFormat: action.valueFormat,
     valueLabel: action.valueLabel,
     valuePlaceholder: action.valuePlaceholder,
@@ -131,6 +145,27 @@ export function projectAction(action: SetupAction) {
 }
 function observation<T>(input: { known: true; value: T } | { known: false; reason: string }) {
   return input.known ? { known: true as const, value: input.value } : { known: false as const, reason: input.reason };
+}
+export function projectSetupOperation(operation: SetupOperation) {
+  const { scope, evidence } = operation;
+  return {
+    operationId: operation.operationId,
+    revision: operation.revision,
+    state: operation.state,
+    scope: {
+      registryId: scope.registryId, scopeId: scope.scopeId, providerId: scope.providerId,
+      configurationRevision: scope.configurationRevision, draftId: scope.draftId,
+    },
+    evidence: evidence.known ? { known: true as const, value: {
+      stepId: evidence.value.stepId, source: evidence.value.source,
+      observedAt: evidence.value.observedAt, summary: evidence.value.summary,
+    } } : { known: false as const, reason: evidence.reason },
+    nextAction: operation.nextAction ? projectAction(operation.nextAction) : null,
+    resources: operation.resources.map((resource) => ({
+      handle: resource.handle, kind: resource.kind, label: resource.label, ownership: resource.ownership,
+      presence: observation(resource.presence), removal: resource.removal,
+    })),
+  };
 }
 export function projectConfiguration(config: ProviderConfiguration) {
   const allowed = new Set(config.inputRequirements.filter((field) => !field.secret).map((field) => field.id));

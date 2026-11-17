@@ -12,6 +12,7 @@ import {
   projectInventory,
   projectRoute,
   projectRuntimeReview,
+  projectSetupOperation,
 } from "../reachability/projection.ts";
 import type { ReachabilityService } from "../reachability/service.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
@@ -22,6 +23,7 @@ interface Request {
   query?: Record<string, unknown>;
 }
 interface Response {
+  setHeader(name: string, value: string): unknown;
   json(body: unknown): unknown;
   status(code: number): Response;
 }
@@ -135,9 +137,10 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   }
   function wrap(run: (request: Request) => Promise<unknown>): Handler {
     return async (request, response) => {
+      response.setHeader("Cache-Control", "no-store");
       try {
         const data = await run(request);
-        if (data && typeof data === "object" && "operationId" in data && !("stage" in data)) {
+        if (data && typeof data === "object" && "operationId" in data && !("stage" in data) && !("revision" in data)) {
           response.status(202);
         }
         return response.json({ data });
@@ -177,6 +180,35 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         );
     await ctx.operations.recordRecovered(record.operationId, route);
     return projectRoute(route);
+  });
+  function setupReference(request: Request, providerId: unknown) {
+    return { operationId: text(request.params.id), providerId: text(providerId) };
+  }
+  function setupCommand(input: Record<string, unknown>) {
+    return {
+      actionId: text(input.actionId),
+      expectedConfigurationRevision: text(input.expectedConfigurationRevision),
+      expectedSetupRevision: generation(input.expectedSetupRevision),
+      acknowledgeDisconnect: input.acknowledgeDisconnect === true,
+      ...(input.draftId === undefined ? {} : { draftId: text(input.draftId) }),
+      ...(input.approval === undefined ? {} : { approval: input.approval }),
+      ...(input.value === undefined ? {} : { value: text(input.value) }),
+      ...(input.secret === undefined ? {} : { secret: text(input.secret) }),
+    };
+  }
+  get("/setup-operations/:id", async (request) =>
+    projectSetupOperation(await service().readSetupOperation(setupReference(request, request.query?.providerId)))
+  );
+  post("/setup-operations/:id", async (request) => {
+    const input = body(request);
+    return projectSetupOperation(await service().runSetupOperation(setupReference(request, input.providerId), setupCommand(input)));
+  });
+  post("/setup-operations/:id/cancel", async (request) =>
+    projectSetupOperation(await service().cancelSetupOperation(setupReference(request, body(request).providerId)))
+  );
+  post("/setup-operations/:id/handoff", async (request) => {
+    const input = body(request);
+    return service().setupHandoff(setupReference(request, input.providerId), setupCommand(input));
   });
   get("/host-capabilities", async () => service().capabilities());
   get("/host-settings", async () => {
