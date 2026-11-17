@@ -51,7 +51,18 @@
   },
   "spawn/run": {
     "trialArgs": ["-R"],
-    "trialOutput": "https://fixture.lhr.life\n",
+    "trials": [
+      {
+        "args": ["nokey@localhost.run"],
+        "origin": "https://fixture.lhr.life",
+        "stdout": "https://fixture.lhr.life\n"
+      },
+      {
+        "args": ["stable@proxy.tunnl.gg", "output=json"],
+        "origin": "https://fixture.tunnl.gg",
+        "stdout": "{\"event\":\"tunnel\",\"url\":\"https://fixture.tunnl.gg\"}\n"
+      }
+    ],
     "publicArgs": ["funnel"],
     "privateArgs": ["serve"],
     "httpsPrefix": "--https=",

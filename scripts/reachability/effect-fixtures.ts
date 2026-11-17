@@ -60,7 +60,8 @@ type FixtureData = {
   "local-api/request": { statusPath: string; configPath: string }
   "spawn/run": {
     trialArgs: string[]
-    trialOutput: string
+    // A relay transcript answers only a spawn that carries all of its args.
+    trials: { args: string[]; origin: string; stdout: string }[]
     publicArgs: string[]
     privateArgs: string[]
     httpsPrefix: string
@@ -292,8 +293,14 @@ export function createEffectFixtures({
           const redirect = args[args.indexOf(data.trialArgs[0]) + 1]
           const port = Number(redirect?.split(":").at(-1))
           if (!port) unsupported()
-          output = data.trialOutput
-          item = register(output.trim(), `localhost:${port}`)
+          const matches = data.trials.filter(trial =>
+            trial.args.every(arg => args.includes(arg))
+          )
+          if (matches.length !== 1) unsupported()
+          const [trial] = matches
+          if (!trial.stdout.includes(trial.origin)) unsupported()
+          output = trial.stdout
+          item = register(trial.origin, `localhost:${port}`)
         } else {
           const port = Number(
             args
