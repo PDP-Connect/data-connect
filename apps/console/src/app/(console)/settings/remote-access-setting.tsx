@@ -75,9 +75,9 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   const [operation, setOperation] = useState<Operation | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [reservations, setReservations] = useState<SetupReservation[]>([]);
-  const [setupReadiness, setSetupReadiness] = useState<Record<string, boolean>>({});
-  const onSetupReadiness = useCallback((draftId: string, ready: boolean) => {
-    setSetupReadiness((current) => ({ ...current, [draftId]: ready }));
+  const [setupReadiness, setSetupReadiness] = useState<Record<string, string | null>>({});
+  const onSetupReadiness = useCallback((draftId: string, revision: string | null) => {
+    setSetupReadiness((current) => ({ ...current, [draftId]: revision }));
   }, []);
 
   async function send<T>(path: string, input?: Record<string, unknown>): Promise<T> {
@@ -289,7 +289,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   const mutationBlocked = busy || stale || state.starting;
   const setupAction = draft?.configuration.actions.find((action) => action.step);
   const hasReservation = reservations.some((item) => item.draftId === draft?.draftId);
-  const setupNeedsInput = draft && (setupAction || hasReservation) && !setupReadiness[draft.draftId];
+  const setupNeedsInput = draft && (setupAction || hasReservation) && setupReadiness[draft.draftId] !== draft.configuration.revision;
   async function reserveSetup() {
     if (!draft || !draftProviderId || !usage || !setupAction || hasReservation) return;
     const saved = readSetupReservations();
@@ -606,10 +606,11 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
             setCommitted(false);
             setReview(null);
           }) } : {})}
-          onChange={async (view) => {
+          onChange={async (view, mutation) => {
+            if (!draft || committed || draft.draftId !== view.scope.draftId ||
+                (!mutation && view.state !== "complete" && draft.configuration.revision === view.scope.configurationRevision)) return;
             setReview(null);
-            if (draft && !committed && draft.draftId === view.scope.draftId &&
-                draft.configuration.revision !== view.scope.configurationRevision) await reloadDraft();
+            await reloadDraft();
           }}
         />
       ))}

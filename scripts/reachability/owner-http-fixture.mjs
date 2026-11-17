@@ -20,6 +20,7 @@ export async function createOwnerHttpFixture(
 	canary,
 	identity,
 	hostCapabilities,
+	{ acknowledgeDisconnect = async () => {} } = {},
 ) {
 	const logs = [];
 	const app = createApp({
@@ -70,7 +71,7 @@ export async function createOwnerHttpFixture(
 		identity,
 		hostCapabilities,
 		prepare: async () => {},
-		acknowledgeDisconnect: async () => {},
+		acknowledgeDisconnect,
 	});
 	const context = {
 		service,
@@ -186,6 +187,7 @@ export async function createOwnerHttpFixture(
 	return {
 		app,
 		service,
+		operations: context.operations,
 		request,
 		call,
 		responses,

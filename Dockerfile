@@ -84,6 +84,7 @@ COPY reference-implementation/vendor/read-core/package.json reference-implementa
 # (@pdpp/polyfill-connectors is a devDependency pinned to a second, excluded
 # tarball -- see .dockerignore -- and is dropped below via --omit=dev.)
 COPY reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz reference-implementation/vendor/
+COPY reference-implementation/vendor/gozar/gozar-0.5.0.tgz reference-implementation/vendor/gozar/
 
 # --allow-git=all: this repo declares a git-sourced devDependency
 # (@opendatalabs/data-connectors-tools); the manifest-only tree above is

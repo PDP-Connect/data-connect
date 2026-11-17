@@ -137,9 +137,31 @@ const controls = http.createServer(async (request, response) => {
 	}
 	try {
         if (mode === "setup" && registry) {
+            if (request.url === "/reset-setup" && request.method === "POST") {
+                const state = await registry.readWorld();
+                if (state.owned || (await gozar.listRoutes({ home, owner: query.owner })).routes.length) {
+                    response.writeHead(409).end();
+                    return;
+                }
+                service.closeObservers();
+                const suffix = randomUUID().slice(0, 8);
+                registry = await createSetupRegistry(join(data, `provider-${suffix}`));
+                home = join(data, `home-${suffix}`);
+                await mkdir(home, { mode: 0o700 });
+                gozar = createGozar({ manifest: registry.manifest, root: registry.root, secretBackend: backend, identity, hostCapabilities });
+                service = makeService(gozar, { ...query, home });
+                response.writeHead(204).end();
+                return;
+            }
             if (request.url === "/setup-world" && request.method === "GET") {
                 response.setHeader("content-type", "application/json");
                 response.end(JSON.stringify(await registry.readWorld()));
+                return;
+            }
+            if (request.url === "/setup-permission" && request.method === "POST") {
+                const current = await registry.readWorld();
+                await registry.updateWorld({ blockedInstructions: !current.blockedInstructions, descriptiveGuidance: true });
+                response.writeHead(204).end();
                 return;
             }
             if (request.url === "/verify-setup" && request.method === "POST") {

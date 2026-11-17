@@ -151,15 +151,28 @@ export default {
                   resourceHandle: row.id,
                 }
               )
+      const guidance = state.descriptiveGuidance && !operation.cancelled && present
+        ? action("description", "instructions", "Review the route separately", "configure", {
+            instructions: "The completed setup is ready for a separate route review.",
+          })
+        : null;
       return {
         state: operation.cancelled
           ? "cancelled"
           : state.assisted
             ? "blocked"
             : "complete",
-        nextAction,
+        nextAction: nextAction ?? guidance,
         observations,
       }
+    }
+    if (state.blockedInstructions) {
+      return {
+        state: "blocked", evidence,
+        nextAction: action("assisted", "instructions", "Check the fixture permission", "configure", {
+          instructions: "An administrator must confirm the exact workshop permission.",
+        }),
+      };
     }
     const nextAction = next(state, await ctx.configuration(null))
     return {

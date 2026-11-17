@@ -1,7 +1,7 @@
 "use client"
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { useEffect, useState } from "react"
+import { useEffect, useEffectEvent, useRef, useState } from "react"
 import type { projectSetupOperation } from "pdpp-reference-implementation/reachability-projection"
 import { openResource } from "../../../../../../src/lib/open-resource"
 import type { requestReachability } from "./reachability-actions.ts"
@@ -195,8 +195,8 @@ export function ProviderSetup({
   reservation: SetupReservation
   request: Request
   disabled: boolean
-  onChange: (view: SetupView) => Promise<void>
-  onReadiness: (draftId: string, ready: boolean) => void
+  onChange: (view: SetupView, mutation: boolean) => Promise<void>
+  onReadiness: (draftId: string, revision: string | null) => void
   onResume?: () => void
   acknowledgeDisconnect: boolean
 }) {
@@ -207,17 +207,35 @@ export function ProviderSetup({
   const { operationId, providerId, draftId } = reservation
   const path = `/setup-operations/${encodeURIComponent(operationId)}`
   const readPath = `${path}?providerId=${encodeURIComponent(providerId)}`
-  const ready =
-    view?.state === "complete" || view?.nextAction?.kind === "instructions"
-  useEffect(() => onReadiness(draftId, ready), [draftId, onReadiness, ready])
+  const revision = view?.state === "complete" && !busy ? view.scope.configurationRevision : null
+  useEffect(() => onReadiness(draftId, revision), [draftId, onReadiness, revision])
+
+  const readEpoch = useRef(0)
+  const acceptObservation = useEffectEvent(async (next: SetupView, current: () => boolean) => {
+    if (!current()) return
+    try {
+      await onChange(next, false)
+      if (current()) {
+        setView(next)
+        setError(null)
+      }
+    } catch {
+      if (current()) {
+        setView(null)
+        setError("The current draft could not be refreshed.")
+      }
+    }
+  })
 
   useEffect(() => {
     let active = true
     async function load() {
+      const epoch = readEpoch.current
+      const current = () => active && readEpoch.current === epoch
       const result = await request(readPath)
-      if (!active) return
+      if (!current()) return
       if (result.ok) {
-        setView(result.data as SetupView)
+        await acceptObservation(result.data as SetupView, current)
       } else {
         setMissing(result.code === "route_not_found")
         setError(result.message)
@@ -238,14 +256,15 @@ export function ProviderSetup({
     return result.data as T
   }
 
-  async function change(run: () => Promise<SetupView>) {
+  async function change(run: () => Promise<SetupView>, mutation = false) {
+    ++readEpoch.current
     setBusy(true)
     setError(null)
     try {
       const next = await run()
+      await onChange(next, mutation)
       setView(next)
       setMissing(false)
-      await onChange(next)
     } catch (failure) {
       setView(null)
       setError(
@@ -272,10 +291,12 @@ export function ProviderSetup({
       if (reading) return
       clearTimeout(timer)
       reading = true
+      const epoch = readEpoch.current
+      const current = () => active && readEpoch.current === epoch
       const result = await request(readPath)
+      if (current() && result.ok) await acceptObservation(result.data as SetupView, current)
       reading = false
-      if (!active) return
-      if (result.ok) setView(result.data as SetupView)
+      if (!current()) return
       if (Date.now() < Date.parse(expiresAt)) {
         timer = setTimeout(() => void check(), Math.max(1000, pollAfterMs))
       }
@@ -366,7 +387,7 @@ export function ProviderSetup({
                 return send<SetupView>(readPath)
               }
               return send<SetupView>(path, command)
-            })
+            }, action.kind !== "open-url")
           }
         />
       ) : null}

@@ -391,6 +391,7 @@ import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./rout
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
+import { startDesktopReachability } from "./reachability/desktop-host.ts";
 import { ReachabilityOperations } from "./reachability/operations.ts";
 import { mountOwnerReachability, type OwnerReachabilityContext } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
@@ -9509,6 +9510,13 @@ export async function startServer(opts: ServerOpts = {}) {
   logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
+  const reachability = opts.reachability ?? await startDesktopReachability({
+    dataDir: runtimeDataDir, bindHost, owner: ownerAuthSubjectId,
+    passwordConfigured: Boolean(earlyOwnerAuthConfig.password),
+  }).catch(() => {
+    logger.warn("Desktop reachability is unavailable");
+    return undefined;
+  });
   const rsApp = buildRsApp({
     connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
@@ -9541,7 +9549,7 @@ export async function startServer(opts: ServerOpts = {}) {
     onScheduleMutation: () => schedulerManager?.refresh(),
     providerName,
     referenceRevision: opts.referenceRevision,
-    reachability: opts.reachability,
+    reachability,
     reachabilityContract,
     resolveIntrospectionAudience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
@@ -9880,6 +9888,7 @@ export async function startServer(opts: ServerOpts = {}) {
     releaseDeliveryWorkerLease(0);
   });
   rsServer.once("close", () => {
+    if (!opts.reachability) reachability?.service?.closeObservers();
     releaseDeliveryWorkerLease(1);
   });
   return {

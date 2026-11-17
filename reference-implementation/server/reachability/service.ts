@@ -40,6 +40,7 @@ export type HostPolicy = {
   identity: import("@tnunamak/gozar").HostIdentity;
   hostCapabilities: import("@tnunamak/gozar").HostCapabilities;
   hostSettings?: HostSettingsBridge;
+  currentTarget?: () => Promise<string>;
   evidenceSource?: "synthetic";
   prepare: (input: { usage: Query["usage"]; reach: string; transport: string }) => Promise<void>;
   acknowledgeDisconnect: (acknowledged: boolean) => Promise<void>;
@@ -409,6 +410,7 @@ export class ReachabilityService {
     await this.host.prepare({ reach: selected.reach, transport: selected.transport, usage });
     const query: Query = {
       ...this.host.query,
+      target: await this.host.currentTarget?.() ?? this.host.query.target,
       providerId: saved.providerId,
       requirements: {
         ...this.host.query.requirements,
@@ -535,6 +537,10 @@ export class ReachabilityService {
     });
     if (this.starting || [...this.routes.values()].some((route) => route.cleanup.state !== "confirmed")) {
       throw new ReachabilityError("configuration_in_use");
+    }
+    if (this.host.currentTarget && (await this.host.currentTarget()) !== review.query.target) {
+      this.reviews.delete(reviewId);
+      throw new ReachabilityError("candidate_stale");
     }
     const expiry = review.candidate.expiresAt ? Date.parse(review.candidate.expiresAt) : Number.NaN;
     const event = reduceLifecycle(this.lifecycle, {

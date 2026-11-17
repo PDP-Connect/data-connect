@@ -168,14 +168,19 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     if (input.action !== "check" && input.action !== "stop") {
       throw new ReachabilityError("invalid_input");
     }
-    if (input.action === "stop") await ctx.operations.requestStop(text(request.params.id));
-    const record = await ctx.operations.read(text(request.params.id));
+    const current = service();
+    const id = text(request.params.id);
+    if (input.action === "stop") {
+      await current.authorizeDisconnect(input.acknowledgeDisconnect === true);
+      await ctx.operations.requestStop(id);
+    }
+    const record = await ctx.operations.read(id);
     const route = record.handle
-      ? await service().reconcileKnownHandle(record.handle, record.stopTombstone || input.action === "stop")
-      : await service().recoverOperation(
+      ? await current.reconcileKnownHandle(record.handle, record.stopTombstone)
+      : await current.recoverOperation(
           record.operationId,
           input.action,
-          input.acknowledgeDisconnect === true,
+          record.stopTombstone || input.acknowledgeDisconnect === true,
           record.stopTombstone
         );
     await ctx.operations.recordRecovered(record.operationId, route);

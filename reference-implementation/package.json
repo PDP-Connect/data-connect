@@ -36,6 +36,7 @@
     "./operations/rs-protected-resource-metadata": "./operations/rs-protected-resource-metadata/index.ts",
     "./operations/ref-dataset-summary": "./operations/ref-dataset-summary/index.ts",
     "./reachability-projection": "./server/reachability/projection.ts",
+    "./reachability-console-proof": "./server/reachability/console-proof.ts",
     "./reachability-host-settings": "./server/reachability/host-settings.ts"
   },
   "bin": {
@@ -80,6 +81,7 @@
     "@pdpp/mcp-server": "*",
     "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0.tgz",
     "@streamparser/json": "^0.0.26",
+    "@tnunamak/gozar": "file:vendor/gozar/gozar-0.5.0.tgz",
     "@types/pg": "8.23.1",
     "ajv": "^8.20.0",
     "better-sqlite3": "^13.0.3",

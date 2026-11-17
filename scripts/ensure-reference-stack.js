@@ -370,10 +370,12 @@ function createStagedPackageJson(projectRoot, stageRoot) {
     readFileSync(join(projectRoot, "package.json"), "utf8")
   )
   dependencies.tsx = rootPackage.devDependencies?.tsx || "^4.23.13"
-  dependencies["@pdpp/polyfill-connectors"] =
-    "file:reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz"
-  dependencies["@pdpp/reference-contract"] =
-    "file:reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz"
+  // Workspace-relative archives move one directory deeper in the staged runtime.
+  for (const [name, specifier] of Object.entries(dependencies)) {
+    if (specifier.startsWith("file:vendor/")) {
+      dependencies[name] = `file:reference-implementation/${specifier.slice("file:".length)}`
+    }
+  }
   for (const [packageName] of LOCAL_PACKAGES) {
     dependencies[packageName] = localPackageSpecifier(packageName)
   }

@@ -72,6 +72,8 @@ if (results[0].exitCode === 0) {
 		"scripts/reachability/install-boundary.test.mjs",
 		"scripts/reachability/sdk-refusal.test.mjs",
 		"scripts/reachability/setup-operation.test.mjs",
+		"scripts/reachability/reconcile-stop.test.mjs",
+		"reference-implementation/test/reachability-desktop-host.test.ts",
 	]);
 	for (const [flag, spec] of [
 		["--reachability", "reachability.spec.ts"],

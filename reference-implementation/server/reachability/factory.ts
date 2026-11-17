@@ -11,7 +11,7 @@ import { type HostPolicy, ReachabilityService } from "./service.ts";
 // Do not call this with a cached app/factory boot ID after controller replacement.
 export async function createReachabilityService(
   options: EmbeddingFactoryOptions,
-  host: HostPolicy
+  host: Omit<HostPolicy, "identity" | "hostCapabilities">
 ): Promise<ReachabilityService> {
   const { createGozar } = await import("@tnunamak/gozar");
   if (!(options.identity && options.secretBackend && options.hostCapabilities)) {
