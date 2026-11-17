@@ -33,7 +33,9 @@ const effectData = JSON.parse(
 const artifactBytes = Buffer.from(effectData["artifact/fetch"].content)
 const artifactSha256 = createHash("sha256").update(artifactBytes).digest("hex")
 
-async function setupCase({ permitted, expectedSha = artifactSha256 }) {
+// `capability` is the observation the host reports for installer.execute;
+// leaving it undefined declares nothing about that capability.
+async function setupCase({ capability, expectedSha = artifactSha256 }) {
   const parent = join(homedir(), ".tmp", "ra")
   await mkdir(parent, { recursive: true, mode: 0o700 })
   const root = await mkdtemp(join(parent, "install-"))
@@ -60,9 +62,8 @@ async function setupCase({ permitted, expectedSha = artifactSha256 }) {
       manifest: registry.manifest,
       root: registry.root,
       secretBackend: backend,
-      hostCapabilities: {
-        "installer.execute": { known: true, value: permitted },
-      },
+      hostCapabilities:
+        capability === undefined ? {} : { "installer.execute": capability },
     },
     effects.effects
   )
@@ -102,32 +103,40 @@ async function runInstall(fixture) {
   })
 }
 
-for (const permitted of [false, true])
-  test(
-    permitted
-      ? "artifact hash mismatch executes nothing through the public testing boundary"
-      : "host refusal of installer.execute executes nothing",
-    async () => {
-      const fixture = await setupCase({
-        permitted,
-        expectedSha: permitted ? "0".repeat(64) : artifactSha256,
-      })
-      try {
-        await assert.rejects(runInstall(fixture), {
-          code: permitted ? "artifact_integrity_failed" : "unsupported",
-        })
-        assert.equal(fixture.effects.artifactExecutions, 0)
-        assert.ok(!fixture.backend.trace.includes("put"))
-      } finally {
-        await fixture.close()
-        await fixture.registry.cleanup()
-        await rm(fixture.root, { recursive: true, force: true })
-      }
+const refusals = [
+  {
+    name: "host refusal of installer.execute executes nothing",
+    capability: { known: true, value: false },
+    code: "host_policy_denied",
+  },
+  {
+    name: "an undeclared installer.execute capability executes nothing",
+    capability: undefined,
+    code: "unsupported",
+  },
+  {
+    name: "artifact hash mismatch executes nothing through the public testing boundary",
+    capability: { known: true, value: true },
+    expectedSha: "0".repeat(64),
+    code: "artifact_integrity_failed",
+  },
+]
+for (const { name, capability, expectedSha, code } of refusals)
+  test(name, async () => {
+    const fixture = await setupCase({ capability, expectedSha })
+    try {
+      await assert.rejects(runInstall(fixture), { code })
+      assert.equal(fixture.effects.artifactExecutions, 0)
+      assert.ok(!fixture.backend.trace.includes("put"))
+    } finally {
+      await fixture.close()
+      await fixture.registry.cleanup()
+      await rm(fixture.root, { recursive: true, force: true })
     }
-  )
+  })
 
 test("approved artifact bytes pass the trusted SHA check before fixture execution", async () => {
-  const fixture = await setupCase({ permitted: true })
+  const fixture = await setupCase({ capability: { known: true, value: true } })
   try {
     const result = await runInstall(fixture)
     assert.equal(result.state, "complete")
