@@ -48,7 +48,7 @@ COPY reference-implementation/vendor/read-core/package.json reference-implementa
 # local compatibility dependency. Connector implementations are not copied
 # into this image; production installs resolve them from the signed catalog.
 COPY reference-implementation/vendor/pdpp-reference-contract-0.1.0.tgz reference-implementation/vendor/
-COPY reference-implementation/vendor/gozar/gozar-0.5.0.tgz reference-implementation/vendor/gozar/
+COPY reference-implementation/vendor/gozar/gozar-0.5.0-c09b85fe.tgz reference-implementation/vendor/gozar/
 
 # --allow-git=all: this repo declares a git-sourced devDependency
 # (@opendatalabs/data-connectors-tools); the manifest-only tree above is
