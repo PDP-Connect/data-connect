@@ -148,7 +148,9 @@ export function indexCollectionReportByStream(
  */
 export function collectionReportHasOpenGaps(report: readonly RefCollectionReportEntry[] | null | undefined): boolean {
   return (report ?? []).some((entry) => {
-    if (entry.coverage_condition !== "complete") {
+    // A connector-reported collection is not an open gap; the report says so.
+    const reportedOnly = entry.coverage_reported_collected === true && entry.coverage_condition === "unknown";
+    if (entry.coverage_condition !== "complete" && !reportedOnly) {
       return true;
     }
     if (entry.pending_detail_gaps > 0) {
@@ -296,13 +298,22 @@ export function formatStreamCollectionFacts(
     readonly coverageAsOf?: RefCoverageAsOf | null;
   } = {}
 ): StreamCollectionFacts {
+  const reportedOnly = entry.coverage_reported_collected === true && entry.coverage_condition === "unknown";
   const coverage = withCoverageAsOf(
-    formatCoverageAxis(entry.coverage_condition),
+    reportedOnly
+      ? {
+          ...formatCoverageAxis(entry.coverage_condition),
+          label: "Coverage · reported collected",
+          title: "The connector reports it collected this stream. PDP Connect has not independently checked it.",
+          tone: "neutral" as const,
+          value: "reported collected",
+        }
+      : formatCoverageAxis(entry.coverage_condition),
     entry.coverage_condition,
     options.coverageAsOf
   );
   const disposition = dispositionForInstallState(
-    formatForwardDisposition(entry.forward_disposition),
+    formatForwardDisposition(entry.forward_disposition, { coverageReportedCollected: reportedOnly }),
     options.connectorNotInstalled === true
   );
   const counts = buildCountsLine(entry);

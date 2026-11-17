@@ -2664,7 +2664,7 @@ function acknowledgeTerminalCoverage(outbox, options) {
   drainRow(outbox, options.id, options.sourceInstanceId ?? "src-1");
 }
 
-test("acknowledged v2 coverage stays covered after sent rows are pruned", async () => {
+test("acknowledged v2 coverage stays reported-collected after sent rows are pruned", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2678,11 +2678,11 @@ test("acknowledged v2 coverage stays covered after sent rows are pruned", async 
   }
   const status = statusFor(path);
   assert.equal(status.outbox.counts.total, 0);
-  assert.equal(status.terminal_coverage.verdict, "covered");
+  assert.equal(status.terminal_coverage.verdict, "reported_collected");
   assert.equal(status.terminal_coverage.collection_boundary, "unscoped");
   // The verdict names what it is a fact about: the run and its place in run order.
   const asOf = status.terminal_coverage.as_of;
-  assert.ok(asOf, "a covered verdict carries its as-of");
+  assert.ok(asOf, "a reported-collected verdict carries its as-of");
   assert.deepEqual(
     { ...asOf, acknowledged_at: typeof asOf.acknowledged_at },
     {
@@ -2693,7 +2693,7 @@ test("acknowledged v2 coverage stays covered after sent rows are pruned", async 
       storage_epoch: 1,
     }
   );
-  assert.equal(status.lifecycle_state, "covered");
+  assert.equal(status.lifecycle_state, "reported_collected");
   assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "ok");
   const matchingDoctor = buildLocalOutboxDoctor(status, null, {
     base_url: "https://pdpp.example.com/",
@@ -2701,7 +2701,7 @@ test("acknowledged v2 coverage stays covered after sent rows are pruned", async 
     scope: "unscoped",
     status: "ok",
   });
-  assert.equal(matchingDoctor.lifecycle_state, "covered");
+  assert.equal(matchingDoctor.lifecycle_state, "reported_collected");
   assert.equal(matchingDoctor.scope.active, "unscoped");
   const staleDoctor = buildLocalOutboxDoctor(status, null, {
     base_url: "https://pdpp.example.com/",
@@ -2746,14 +2746,14 @@ test("a receipt without a run sequence is no evidence, and an older run's late A
       terminalAck: { collectionRevision: newer + 1, runId: "terminal-older", runSequence: newer - 1, storageEpoch: 1 },
     });
     const status = statusFor(path);
-    assert.equal(status.terminal_coverage.verdict, "covered", "the newer run's receipt stands");
+    assert.equal(status.terminal_coverage.verdict, "reported_collected", "the newer run's receipt stands");
     assert.equal(status.terminal_coverage.as_of?.run_sequence, newer);
   } finally {
     reopened.close();
   }
 });
 
-test("a later partial terminal receipt replaces a previously covered verdict", async () => {
+test("a later partial terminal receipt replaces a previously reported-collected verdict", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2796,7 +2796,7 @@ test("a later v1 terminal ACK clears prior v2 coverage proof", async () => {
 
 // The collector's own accounting can contradict a store that reads collected:
 // the server withholds collected for these facts, so the device must not read
-// the receipt as covered either.
+// the receipt as reported-collected either.
 for (const [field, value] of [
   ["durable_admission", false],
   ["detail_complete", false],
@@ -2842,10 +2842,10 @@ test("v2 receipt without runtime accounting reads no_evidence, even when every s
   assert.equal(status.lifecycle_state, "no_evidence");
 });
 
-// A covered receipt is proof for the run that wrote it. A later run whose record
+// A reported-collected receipt is a report for the run that wrote it. A later run whose record
 // batch the server refuses is not admitted, and its terminal commit waits behind
 // that batch, so the device must not keep reporting the older run's proof.
-test("a later run whose record batch stays ready makes an earlier covered receipt unadmitted", async () => {
+test("a later run whose record batch stays ready makes an earlier reported-collected receipt unadmitted", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2864,7 +2864,7 @@ test("a later run whose record batch stays ready makes an earlier covered receip
   assert.equal(buildLocalOutboxDoctor(status).checks.terminal_coverage, "warn");
 });
 
-test("a later run whose record batch is dead-lettered makes an earlier covered receipt unadmitted", async () => {
+test("a later run whose record batch is dead-lettered makes an earlier reported-collected receipt unadmitted", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2966,9 +2966,9 @@ function refusedStatePassConfig(baseUrl, queuePath, runId) {
   };
 }
 
-// A failed pass must not leave an earlier covered receipt standing for its lane. Both
+// A failed pass must not leave an earlier reported-collected receipt standing for its lane. Both
 // tests fail the pass at the state read, which is before the scan starts.
-test("a pass that fails before its scan leaves an earlier covered receipt unadmitted", async () => {
+test("a pass that fails before its scan leaves an earlier reported-collected receipt unadmitted", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -2979,7 +2979,7 @@ test("a pass that fails before its scan leaves an earlier covered receipt unadmi
   } finally {
     outbox.close();
   }
-  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+  assert.equal(statusFor(path).terminal_coverage.verdict, "reported_collected");
 
   const server = await startStateReadRefusingServer();
   try {
@@ -2992,7 +2992,7 @@ test("a pass that fails before its scan leaves an earlier covered receipt unadmi
   }
   const status = statusFor(path);
   assert.equal(status.terminal_coverage.verdict, "unadmitted");
-  assert.notEqual(status.lifecycle_state, "covered");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
 });
 
 test("a pass that fails after its pre-scan drain delivered an earlier gap leaves the lane unadmitted", async () => {
@@ -3082,7 +3082,7 @@ async function drainLaneOnce(path: string, baseUrl: string, connectorId: string)
   }
 }
 
-test("a run aborted before start leaves an earlier covered receipt unadmitted", async () => {
+test("a run aborted before start leaves an earlier reported-collected receipt unadmitted", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -3093,7 +3093,7 @@ test("a run aborted before start leaves an earlier covered receipt unadmitted", 
   } finally {
     outbox.close();
   }
-  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+  assert.equal(statusFor(path).terminal_coverage.verdict, "reported_collected");
 
   const controller = new AbortController();
   controller.abort(new Error("operator cancelled run"));
@@ -3120,7 +3120,7 @@ test("a run aborted before start leaves an earlier covered receipt unadmitted", 
   );
   const status = statusFor(path);
   assert.equal(status.terminal_coverage.verdict, "unadmitted");
-  assert.notEqual(status.lifecycle_state, "covered");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
 });
 
 test("an unrecovered failure gap delivered by an independent drain leaves the lane unadmitted", async () => {
@@ -3134,7 +3134,7 @@ test("an unrecovered failure gap delivered by an independent drain leaves the la
   } finally {
     outbox.close();
   }
-  assert.equal(statusFor(path).terminal_coverage.verdict, "covered");
+  assert.equal(statusFor(path).terminal_coverage.verdict, "reported_collected");
 
   // A failed pass leaves its gap open, then an independent drain delivers it.
   // Delivery is not recovery: no complete run has resolved the barrier.
@@ -3153,10 +3153,10 @@ test("an unrecovered failure gap delivered by an independent drain leaves the la
   }
   const status = statusFor(path);
   assert.equal(status.terminal_coverage.verdict, "unadmitted");
-  assert.notEqual(status.lifecycle_state, "covered");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
 });
 
-test("a following successful pass without coverage evidence leaves a delivered failure gap unrecovered and the lane not covered", async () => {
+test("a following successful pass without coverage evidence leaves a delivered failure gap unrecovered and the lane not reported-collected", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   let gapId = "";
@@ -3220,10 +3220,10 @@ test("a following successful pass without coverage evidence leaves a delivered f
   } finally {
     after.close();
   }
-  // The pass's own no-evidence terminal record replaced run A's covered receipt.
+  // The pass's own no-evidence terminal record replaced run A's reported-collected receipt.
   const status = statusFor(path);
   assert.equal(status.terminal_coverage.verdict, "no_evidence");
-  assert.notEqual(status.lifecycle_state, "covered");
+  assert.notEqual(status.lifecycle_state, "reported_collected");
 });
 
 test("open record work without an acknowledged receipt stays no_evidence", async () => {
@@ -3239,7 +3239,7 @@ test("open record work without an acknowledged receipt stays no_evidence", async
   assert.equal(status.lifecycle_state, "draining");
 });
 
-test("a covered verdict returns once the later run's commit is acknowledged clean", async () => {
+test("a reported-collected verdict returns once the later run's commit is acknowledged clean", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
@@ -3255,13 +3255,13 @@ test("a covered verdict returns once the later run's commit is acknowledged clea
     outbox.close();
   }
   const status = statusFor(path);
-  assert.equal(status.terminal_coverage.verdict, "covered");
-  assert.equal(status.lifecycle_state, "covered");
+  assert.equal(status.terminal_coverage.verdict, "reported_collected");
+  assert.equal(status.lifecycle_state, "reported_collected");
 });
 
 // A receipt is current only for the release this device selects. Each case is
 // a receipt acknowledged for another release, or for none, while every store
-// reads collected: it must not be reported as covered.
+// reads collected: it must not be reported as collected.
 for (const [label, receiptRelease, selectedRelease] of [
   ["a superseded artifact digest", SUPERSEDED_RELEASE, SELECTED_RELEASE],
   [
@@ -3315,7 +3315,7 @@ test("partial, failed, unscoped, and v1 terminal commits do not prove coverage",
     }
     const observed = statusFor(path);
     assert.equal(observed.terminal_coverage.verdict, expected);
-    assert.notEqual(observed.lifecycle_state, "covered");
+    assert.notEqual(observed.lifecycle_state, "reported_collected");
     assert.equal(buildLocalOutboxDoctor(observed).checks.terminal_coverage, expected === "no_evidence" ? "unknown" : "warn");
   }
 });

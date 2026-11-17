@@ -1694,8 +1694,10 @@ export interface LocalOutboxStatusOutput {
    * Latest server-acknowledged typed terminal verdict, retained after outbox
    * pruning.
    *
-   * - `covered`: every requested store collected, bound to the release this
-   *   device selects, and the run's runtime accounting is clean.
+   * - `reported_collected`: the connector reported every requested store
+   *   collected, bound to the release this device selects, and the run's
+   *   delivery accounting is clean. A report, not a verdict: nothing here
+   *   checked the source, so it is never read as coverage.
    * - `incomplete`: bound to the selected release, but a store fell short or
    *   the runtime accounting shows outstanding debt.
    * - `unadmitted`: the lane holds open outbox work (queued, leased or
@@ -1722,7 +1724,7 @@ export interface LocalOutboxStatusOutput {
       storage_epoch: number;
     } | null;
     collection_boundary: string | null;
-    verdict: "covered" | "incomplete" | "unadmitted" | "not_current" | "no_evidence";
+    verdict: "reported_collected" | "incomplete" | "unadmitted" | "not_current" | "no_evidence";
   };
   db: {
     configured: boolean;
@@ -1739,13 +1741,13 @@ export interface LocalOutboxStatusOutput {
   deployment_posture: LocalCollectorDeploymentPosture;
   /**
    * The single lifecycle state for this lane. Open work takes priority;
-   * a drained scoped lane is covered only after a v2 terminal ACK for the
-   * selected release, and otherwise reports incomplete, not current, or no
-   * evidence.
+   * a drained scoped lane reports the connector's collection only after a v2
+   * terminal ACK for the selected release, and otherwise reports incomplete,
+   * not current, or no evidence.
    */
   lifecycle_state:
     | LocalCollectorLifecycleState
-    | "covered"
+    | "reported_collected"
     | "coverage_incomplete"
     | "coverage_not_current"
     | "no_evidence";
@@ -1924,8 +1926,8 @@ export function inspectLocalOutboxStatus(
   const terminalVerdict = terminalCoverageVerdict(inspection.terminalCoverage, selectedRelease, latestRunOpen);
   const lifecycleState =
     options.sourceInstanceId && (outboxLifecycleState === "healthy_idle" || outboxLifecycleState === "coverage_missing")
-      ? terminalVerdict === "covered"
-        ? "covered"
+      ? terminalVerdict === "reported_collected"
+        ? "reported_collected"
         : terminalVerdict === "incomplete" || terminalVerdict === "unadmitted"
           ? "coverage_incomplete"
           : terminalVerdict === "not_current"
@@ -2102,7 +2104,8 @@ export function buildLocalOutboxDoctor(
   const status: LocalOutboxStatusOutput = staleScope
     ? {
         ...statusInput,
-        lifecycle_state: statusInput.lifecycle_state === "covered" ? "no_evidence" : statusInput.lifecycle_state,
+        lifecycle_state:
+          statusInput.lifecycle_state === "reported_collected" ? "no_evidence" : statusInput.lifecycle_state,
         terminal_coverage: { ...statusInput.terminal_coverage, verdict: "no_evidence" },
       }
     : statusInput;
@@ -2110,7 +2113,7 @@ export function buildLocalOutboxDoctor(
   const postureDisqualifiesEvidence = posture.kind === "repo_dist_override" || posture.is_placeholder_version;
   const checks: LocalOutboxDoctorOutput["checks"] = {
     coverage_diagnostics:
-      status.terminal_coverage.verdict !== "covered" &&
+      status.terminal_coverage.verdict !== "reported_collected" &&
       status.coverage.observed === false &&
       status.coverage.record_batches > 0 &&
       status.lifecycle_state === "no_evidence"
@@ -2119,7 +2122,7 @@ export function buildLocalOutboxDoctor(
     terminal_coverage:
       staleScope
         ? "warn"
-        : status.terminal_coverage.verdict === "covered"
+        : status.terminal_coverage.verdict === "reported_collected"
         ? "ok"
         : status.terminal_coverage.verdict === "incomplete" ||
             status.terminal_coverage.verdict === "unadmitted" ||
@@ -2161,11 +2164,11 @@ export function buildLocalOutboxDoctor(
   if (checks.terminal_coverage === "warn") {
     remediation.push(
       staleScope
-        ? "The latest acknowledged terminal verdict belongs to an older collection boundary. Re-run against the active scope before treating this lane as covered."
+        ? "The latest acknowledged terminal verdict belongs to an older collection boundary. Re-run against the active scope before treating this lane's collection report as current."
         : status.terminal_coverage.verdict === "unadmitted"
           ? "The latest run has not reached the server: its queued, retrying or dead-lettered work is still open, or a failure gap is not yet recovered, so the last acknowledged verdict does not stand for it. Let the next complete run drain the queue and recover the gap, or resolve dead-letter rows with `pdpp-local-collector recover`."
           : status.terminal_coverage.verdict === "not_current"
-            ? "The latest acknowledged terminal verdict was produced for a connector release other than the one this device selects, or for none. Re-run the collector on the selected release before treating this lane as covered."
+            ? "The latest acknowledged terminal verdict was produced for a connector release other than the one this device selects, or for none. Re-run the collector on the selected release before treating this lane's collection report as current."
             : "The latest acknowledged terminal verdict is incomplete; inspect the connector run diagnostics and re-run after resolving the missing store coverage."
     );
   }
@@ -3863,12 +3866,13 @@ export function selectedReleaseForPin(
 }
 
 /**
- * Covered is a claim about one run on one release. Open work, or an unrecovered
- * gap, for the lane means the latest run is unadmitted, so the receipt cannot
- * speak for the lane. A receipt for another digest or fingerprint, or on a device
- * that selects no release, is `not_current` whatever its stores say. The run's own
- * runtime accounting must be present and clean: a store reads `collected` only as
- * the collector measured it.
+ * A reported collection is a claim about one run on one release. Open work, or
+ * an unrecovered gap, for the lane means the latest run is unadmitted, so the
+ * receipt cannot speak for the lane. A receipt for another digest or
+ * fingerprint, or on a device that selects no release, is `not_current`
+ * whatever its stores say. The run's own delivery accounting must be present
+ * and clean. Even then the verdict is the connector's report: nothing here
+ * checked the source.
  */
 function terminalCoverageVerdict(
   receipt: LocalOutboxInspection["terminalCoverage"],
@@ -3903,7 +3907,7 @@ function terminalCoverageVerdict(
         fact.stores.every((store) => store.status === "collected") &&
         accounting[index] === "clean"
     )
-    ? "covered"
+    ? "reported_collected"
     : "incomplete";
 }
 

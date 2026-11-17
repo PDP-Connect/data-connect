@@ -12,6 +12,7 @@ import {
   substituteCommandTemplate,
 } from "@/lib/pdpp-cli-command.ts";
 import {
+  coverageIsReportedCollected,
   formatCollectionRateReadout,
   formatDominantCondition,
   formatForwardDisposition,
@@ -493,8 +494,10 @@ function ProjectedStateDiagnostics({
   // local/device-backed connections (or when it carries a concrete verdict).
   // The diagnostics block already receives the connection's local-device
   // progress, so reuse it as the local-backing signal.
+  const coverageReportedCollected = coverageIsReportedCollected(connectionHealth);
   const axisChips = summarizeAxisChips(connectionHealth.axes, {
     coverageAsOf,
+    coverageReportedCollected,
     isLocalDeviceBacked: Boolean(localDeviceProgress),
   });
   const outboxRemediation = summarizeOutboxStallRemediation(connectionHealth, localDeviceProgress);
@@ -506,7 +509,7 @@ function ProjectedStateDiagnostics({
   // that don't send `remediation` fall back to the legacy steps below.
   const verdictRemediation = primaryOwnerActionRemediation(renderedVerdict);
   const forwardDisposition = dispositionForInstallState(
-    formatForwardDisposition(connectionHealth.forward_disposition),
+    formatForwardDisposition(connectionHealth.forward_disposition, { coverageReportedCollected }),
     connectorNotInstalled
   );
   const dominantCondition = formatDominantCondition(connectionHealth);
