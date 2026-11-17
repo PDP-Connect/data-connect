@@ -20,6 +20,7 @@ import {
   hasOwnerBlockingAction,
   isPassiveScheduledRecovery,
   cadenceLatenessIsSoleDegradation,
+  unknownIsOnlyReportedCollected,
 } from "../runtime/rendered-verdict.ts";
 import type { ConnectorSummary } from "./ref-control.ts";
 
@@ -317,13 +318,18 @@ function isActiveWork(summary: FleetSummary): boolean {
 
 function hasUnknownEvidence(summary: FleetSummary): boolean {
   const { connection_health: health, owner_state: ownerState } = summary;
+  // A connector's own coverage report that nothing contradicts is `unknown`
+  // on the wire but neutral for the owner: the fleet must not read it as
+  // missing evidence. The shared predicate keeps this, the console summary
+  // and the pill on one meaning.
+  const neutralReportedCollected = unknownIsOnlyReportedCollected(health);
   return (
     // `connection_health.state` is the canonical composition of whether an
     // axis applies. In particular, a normal server connection can carry an
     // intentionally inapplicable raw `outbox: "unknown"` while remaining
     // healthy. Do not recompose raw axes here.
-    evidenceFor(HEADLINE_EVIDENCE, health.state) === "unknown" ||
-    health.unknown_reasons.length > 0 ||
+    (!neutralReportedCollected && evidenceFor(HEADLINE_EVIDENCE, health.state) === "unknown") ||
+    (!neutralReportedCollected && health.unknown_reasons.length > 0) ||
     // These are independent composed dispositions, not raw axes. Keep their
     // fail-closed behavior until their owning projections fold them into the
     // headline state.

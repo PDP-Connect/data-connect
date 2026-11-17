@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { normalizeTerminalCoverageFacts } from "../operations/local-device-terminal-collection.ts";
+import { normalizeTerminalCoverageFacts, normalizeTerminalFacts } from "../operations/local-device-terminal-collection.ts";
 import { reconcileDirtyConnectorSummaryEvidence } from "../server/connector-summary-read-model.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { fingerprintDeviceAttemptManifest } from "../server/device-ingest-attempt-context.ts";
@@ -353,6 +353,46 @@ test("legacy terminal commit without v2 proof stays unknown", async () => {
   await withLocalConnection(async () => {
     await seedTerminalCoverage("collected", false, 1);
     assert.equal((await projectedCoverage()).axis, "unknown");
+  });
+});
+
+test("a v1 terminal commit's connector `collected` claim never becomes a per-stream complete", async () => {
+  await withLocalConnection(async () => {
+    // The facts a v1 collector posts: the raw per-stream status set, with the
+    // connector's own `collected` and nothing the server measured.
+    const normalizedFacts = normalizeTerminalFacts([
+      { coverage_statuses: ["collected"], stream: "sessions" },
+      { coverage_statuses: ["collected"], stream: "messages" },
+    ]);
+    assert.ok(normalizedFacts);
+    await commitRegisteredTerminalRun({
+      collectionBoundary: "unscoped",
+      commitId: "commit_v1_collected",
+      connectorId,
+      connectorInstanceId,
+      deviceId,
+      envelopeHash: "test-envelope-hash-v1",
+      normalizedFacts,
+      runId: "run_v1_collected",
+      sourceInstanceId,
+      stateDelta: {},
+      version: 1,
+    });
+    // The commit landed: the v1 terminal event is in the spine, so the result
+    // below is the projection declining to read it, not a missing commit.
+    const stored = getDb()
+      .prepare("SELECT COUNT(*) AS n FROM spine_events WHERE object_id = ?")
+      .get("run_v1_collected") as { n: number };
+    assert.ok(stored.n >= 1);
+    const result = await projectedCoverage();
+    assert.notEqual(result.axis, "complete");
+    // A local-device source takes its per-stream coverage from the v2 proof
+    // only. The v1 run facts are never consulted, so no stream reads a
+    // connector's `collected` as observed, proven or reported.
+    assert.deepEqual(result.reportedStreams, { messages: false, sessions: false });
+    for (const [stream, condition] of Object.entries(result.conditions)) {
+      assert.notEqual(condition, "complete", `${stream} must not be complete on a connector's claim alone`);
+    }
   });
 });
 

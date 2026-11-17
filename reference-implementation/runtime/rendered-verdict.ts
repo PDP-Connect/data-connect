@@ -929,6 +929,22 @@ export function coverageIsReportedOnly(snapshot: ConnectionHealthSnapshot): bool
 }
 
 /**
+ * Whether the headline `unknown` is only the neutral reported-collected state:
+ * the one `unknown` the runtime names and does not treat as missing evidence.
+ * Every consumer that asks "is there unknown evidence here?" must use this
+ * instead of reading `state` or `unknown_reasons` itself, so the fleet verdict,
+ * the console summary and the pill cannot disagree about it.
+ */
+export function unknownIsOnlyReportedCollected(snapshot: ConnectionHealthSnapshot): boolean {
+  return (
+    snapshot.state === "unknown" &&
+    snapshot.unknown_reasons.length > 0 &&
+    snapshot.unknown_reasons.every((reason) => reason === CONNECTION_CONDITION_REASONS.COVERAGE_REPORTED_COLLECTED) &&
+    coverageIsReportedOnly(snapshot)
+  );
+}
+
+/**
  * Whether a one-time import has POSITIVE RECEIPT PROOF that it actually
  * finished ingesting something — i.e. `CollectionSucceeded` settled `true`
  * via `CONDITION_REASON.COLLECTION_SUCCEEDED_IMPORT_COMPLETE`, which
