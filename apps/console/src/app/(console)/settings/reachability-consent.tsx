@@ -168,6 +168,9 @@ export function RouteConsentCard({
       {complete ? (
         <>
           <p className="pdpp-caption break-words">Requested target: {consent.scope?.query.target}</p>
+          {consent.scope?.query.expectedOrigin ? (
+            <p className="pdpp-caption break-words">Expected origin: {consent.scope.query.expectedOrigin}</p>
+          ) : null}
           <ConsentDisclosures value={consent.disclosures} />
           <ConsentFacts facts={consent.facts} />
           <label className="pdpp-caption flex items-start gap-2">
@@ -223,6 +226,10 @@ export function RuntimeRouteConsentCard({
       <h3 className="pdpp-label">Review changed reachability</h3>
       {valid ? (
         <>
+          <p className="pdpp-caption break-words">Requested target: {review.scope?.query.target}</p>
+          {review.scope?.query.expectedOrigin ? (
+            <p className="pdpp-caption break-words">Expected origin: {review.scope.query.expectedOrigin}</p>
+          ) : null}
           <ConsentDisclosures value={review.disclosures} />
           <ConsentFacts facts={review.facts} />
           <label>

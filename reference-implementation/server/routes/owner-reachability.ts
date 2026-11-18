@@ -170,15 +170,19 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     }
     const current = service();
     const id = text(request.params.id);
+    const terminal = await current.observeOperationRecovery(await ctx.operations.read(id));
     if (input.action === "stop") {
       await current.authorizeDisconnect(input.acknowledgeDisconnect === true);
+    }
+    if (terminal) return projectRoute(terminal);
+    if (input.action === "stop") {
       await ctx.operations.requestStop(id);
     }
     const record = await ctx.operations.read(id);
     const route = record.handle
       ? await current.reconcileKnownHandle(record.handle, record.stopTombstone)
       : await current.recoverOperation(
-          record.operationId,
+          record,
           input.action,
           record.stopTombstone || input.acknowledgeDisconnect === true,
           record.stopTombstone

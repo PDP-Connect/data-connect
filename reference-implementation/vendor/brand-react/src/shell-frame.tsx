@@ -303,7 +303,7 @@ export function RecordroomShell({
 }: RecordroomShellProps) {
   const identity = DATACONNECT_PRODUCT_IDENTITY;
   const resolvedBuild = build ?? `${identity.name} ${identity.version}`;
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);

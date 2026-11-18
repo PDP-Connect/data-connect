@@ -16,6 +16,7 @@ export type OperationRecord = {
     target: string;
     usage: import("@tnunamak/gozar").Usage;
     expectedOrigin: string | null;
+    ownership?: Route["ownership"];
     consentFactsDigest: string;
   } | null;
   operationId: string;

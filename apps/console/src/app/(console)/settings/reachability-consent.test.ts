@@ -115,6 +115,30 @@ test("route card rejects a digest alias mismatch without showing unrelated catal
   assert.match(html, /disabled=""/);
 });
 
+test("route card shows the exact address and target covered by approval", () => {
+  const expectedOrigin = "https://owner.fixture.invalid";
+  const review = projectCandidate({
+    configuration: fixture.configuration,
+    consentFactsDigest: "fixture-route",
+    consent: {
+      scope: { ...routeScope, query: { ...routeScope.query, expectedOrigin } },
+      consentFactsDigest: "fixture-route",
+      facts: [],
+      disclosures: { ownership: "external-owned" },
+    },
+    disclosure: base.disclosure,
+    display: { label: "Fixture", description: "", needs: "" },
+    eligible: true, expiresAt: null, facts: [],
+    providerId: "fixture", ownership: "external-owned",
+  } as unknown as Parameters<typeof projectCandidate>[0]);
+  // A minimal projected disclosure is enough; the HTTP test covers the SDK payload.
+  assert.ok(review.consent);
+  review.consent.disclosures = { ownership: "external-owned" };
+  const html = renderToStaticMarkup(createElement(RouteConsentCard, { review, onApprove: () => {} }));
+  assert.match(html, /Expected origin: https:\/\/owner\.fixture\.invalid/);
+  assert.match(html, /Requested target: fixture-target/);
+});
+
 test("canary private fields are absent from projected setup and route snapshots", () => {
   const canary = "credential-canary-for-projection";
   const action = {

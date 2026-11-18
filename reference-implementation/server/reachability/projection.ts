@@ -301,6 +301,7 @@ export function projectRoute(route: Route) {
     },
     operationId: route.operationId,
     origin: route.origin,
+    ownership: route.ownership,
     published: route.published,
     routeState: route.routeState,
     state: route.state,

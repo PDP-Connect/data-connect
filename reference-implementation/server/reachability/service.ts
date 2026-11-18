@@ -25,6 +25,7 @@ type RuntimeConsentReview = Awaited<ReturnType<typeof import("@tnunamak/gozar").
 
 import { ReachabilityError, requireRouteApproval, requireSetupApproval } from "./approvals.ts";
 import { ConfigurationDraftSession } from "./drafts.ts";
+import type { OperationRecord } from "./operations.ts";
 
 type SetupReference = Pick<SetupOperationRef, "operationId" | "providerId">;
 type SetupCommand = Pick<RunSetupOperationRequest, "actionId" | "expectedConfigurationRevision" | "expectedSetupRevision" | "draftId" | "value"> & {
@@ -399,6 +400,9 @@ export class ReachabilityService {
       throw new ReachabilityError("ambiguous_selection");
     }
     const selected = variants[0];
+    if (selected.availability[usage.kind]?.state !== "available") {
+      throw new ReachabilityError("setup_required");
+    }
     if (
       !(
         ["internet", "tailnet", "lan", "this-device"].includes(selected.reach) &&
@@ -408,8 +412,9 @@ export class ReachabilityService {
       throw new ReachabilityError("unsupported");
     }
     await this.host.prepare({ reach: selected.reach, transport: selected.transport, usage });
-    const query: Query = {
+    let query: Query = {
       ...this.host.query,
+      intent: "create",
       target: await this.host.currentTarget?.() ?? this.host.query.target,
       providerId: saved.providerId,
       requirements: {
@@ -419,8 +424,27 @@ export class ReachabilityService {
       },
       usage,
     };
-    const catalog = await this.api.catalogRoutes(query);
-    const candidate = catalog.candidates.find((item: RouteCandidate) => item.providerId === saved.providerId);
+    const offer = async () => (await this.api.catalogRoutes(query)).candidates
+      .find((item: RouteCandidate) => item.providerId === saved.providerId);
+    let candidate = await offer();
+    if (candidate?.ownership === "external-owned") {
+      const { configuration } = candidate;
+      const origins = configuration.inputRequirements
+        .filter(field => field.kind === "https-origin" && !field.secret)
+        .map(field => configuration.values[field.id])
+        .filter(Boolean);
+      const origin = query.origin ?? candidate.consent.scope.query.expectedOrigin ??
+        (origins.length === 1 ? URL.parse(origins[0] ?? "")?.origin : undefined);
+      if (!origin || usage.kind === "attached") throw new ReachabilityError("setup_required");
+      query = { ...query, origin };
+      candidate = await offer();
+      if (candidate?.ownership !== "external-owned" ||
+          candidate.consent.disclosures.ownership !== candidate.ownership ||
+          candidate.consent.scope.query.expectedOrigin !== origin ||
+          candidate.consent.scope.query.target !== query.target) {
+        throw new ReachabilityError("candidate_stale");
+      }
+    }
     if (!(candidate && candidate.eligible && candidate.candidateToken)) {
       throw new ReachabilityError("setup_required");
     }
@@ -440,6 +464,7 @@ export class ReachabilityService {
       consentFactsDigest: review.candidate.consentFactsDigest,
       expectedOrigin: review.query.origin ?? null,
       instanceId: this.host.identity.instanceId,
+      ownership: review.candidate.ownership,
       providerId: review.candidate.providerId,
       target: review.query.target,
       usage: review.query.usage,
@@ -470,12 +495,42 @@ export class ReachabilityService {
   observeHostConfinement(confinement: import("@tnunamak/gozar").Observation<boolean>): void {
     this.transition({ confinement, type: "host-confinement" });
   }
+  async observeOperationRecovery(record: OperationRecord): Promise<Route | null> {
+    if (record.handle?.kind !== "external" && record.intent?.ownership !== "external-owned") return null;
+    const { home, owner } = this.host.query;
+    const { routes } = await this.api.listRoutes({ home, owner });
+    const matches = routes.filter(route => record.handle
+      ? route.handle.kind === record.handle.kind && route.handle.id === record.handle.id &&
+        route.handle.generation === record.handle.generation
+      : route.operationId === record.operationId);
+    if (matches.length !== 1 || !matches[0] || !this.matchesExternalOperation(matches[0], record)) {
+      throw new ReachabilityError("operation_recovery_unauthorized");
+    }
+    const route = matches[0];
+    return route.state === "released" && route.cleanup.state === "confirmed" ? route : null;
+  }
+  private matchesExternalOperation(route: Route, record: OperationRecord): boolean {
+    if (route.ownership !== "external-owned" || route.handle.kind !== "external") return false;
+    // A Stop receipt already records the exact authorized handle. A start
+    // receipt additionally binds recovery to the reviewed target and origin.
+    if (record.kind === "stop") return record.handle?.kind === "external";
+    const intent = record.intent;
+    if (intent?.ownership !== "external-owned" || intent.instanceId !== this.host.identity.instanceId ||
+        route.operationId !== record.operationId || !intent.expectedOrigin || route.origin !== intent.expectedOrigin) {
+      return false;
+    }
+    // After removal Gozar forgets the target. Only the already-authorized
+    // tombstone can consume that terminal observation, without closing again.
+    if (record.stopTombstone && route.state === "released" && route.cleanup.state === "confirmed") return true;
+    return route.hostConfiguration.target.known && route.hostConfiguration.target.value === intent.target;
+  }
   async recoverOperation(
-    operationId: string,
+    record: OperationRecord,
     action: "check" | "stop",
     acknowledged: boolean,
     stopTombstone = false
   ): Promise<Route> {
+    const { operationId } = record;
     if (stopTombstone || action === "stop") {
       ++this.epoch;
       if (!this.starting) this.transition({ operationId, type: "restore-intent" });
@@ -503,7 +558,7 @@ export class ReachabilityService {
       throw new ReachabilityError("operation_not_found");
     }
     const route = matches[0];
-    if (route.ownership !== "gozar-owned") {
+    if (route.ownership !== "gozar-owned" && !this.matchesExternalOperation(route, record)) {
       throw new ReachabilityError("operation_recovery_unauthorized");
     }
     this.routes.set(route.handle.id, route);

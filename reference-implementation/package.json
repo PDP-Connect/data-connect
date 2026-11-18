@@ -37,6 +37,7 @@
     "./operations/ref-dataset-summary": "./operations/ref-dataset-summary/index.ts",
     "./reachability-projection": "./server/reachability/projection.ts",
     "./reachability-console-proof": "./server/reachability/console-proof.ts",
+    "./reachability-service-proof": "./server/reachability/service-proof.ts",
     "./reachability-host-settings": "./server/reachability/host-settings.ts"
   },
   "bin": {

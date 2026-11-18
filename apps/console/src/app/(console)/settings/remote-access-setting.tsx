@@ -472,10 +472,12 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
           </section>
           <fieldset disabled={mutationBlocked}>
             <legend className="pdpp-label">Route lifetime</legend>
-            {Object.keys(provider.availability).map((kind) => (
+            {Object.entries(provider.availability).map(([kind, available]) => (
               <label className="mr-4" key={kind}>
                 <input
                   checked={usage === kind}
+                  disabled={available.state === "unsupported" || available.state === "detect-only" ||
+                    (kind === "durable" && capabilities["runtime.durable"]?.value === false)}
                   name="usage"
                   onChange={() => {
                     setUsage(kind);

@@ -73,6 +73,8 @@ if (results[0].exitCode === 0) {
 		"scripts/reachability/sdk-refusal.test.mjs",
 		"scripts/reachability/setup-operation.test.mjs",
 		"scripts/reachability/reconcile-stop.test.mjs",
+		"scripts/reachability/external-route.test.mjs",
+		"scripts/reachability/cost-projection.test.mjs",
 		"reference-implementation/test/reachability-desktop-host.test.ts",
 	]);
 	for (const [flag, spec] of [
