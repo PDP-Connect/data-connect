@@ -295,14 +295,18 @@ test("PostgreSQL: a succeeded terminal event stores no runtime failure fields (r
           [runId]
         )
       ).rows[0];
-    for (const runId of ["run_pg_ok_running", "run_pg_ok_insert"]) {
-      const row = await read(runId);
+    const okIds = ["run_pg_ok_running", "run_pg_ok_insert"];
+    const okRows = await Promise.all(okIds.map(read));
+    for (const [i, runId] of okIds.entries()) {
+      const row = okRows[i];
       assert.equal(row?.status, "succeeded", runId);
       assert.equal(row?.failure_reason, null, runId);
       assert.equal(row?.connector_error_json, null, runId);
     }
-    for (const runId of ["run_pg_bad_running", "run_pg_bad_insert"]) {
-      const row = await read(runId);
+    const badIds = ["run_pg_bad_running", "run_pg_bad_insert"];
+    const badRows = await Promise.all(badIds.map(read));
+    for (const [i, runId] of badIds.entries()) {
+      const row = badRows[i];
       assert.equal(row?.status, "failed", runId);
       assert.equal(row?.failure_reason, "stale runtime failure", runId);
       assert.deepEqual(
