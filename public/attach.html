@@ -293,6 +293,9 @@
       // What the owner is looking at in the confirm step. Connect sends this
       // key back; Rust connects only to a server that proves it.
       let inspected = null;
+      // The code this page copied out of a pairing link. It belongs to that
+      // link, so it is dropped with the link; a code the owner typed is not.
+      let autoFilledCode = null;
 
       const invoke =
         window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
@@ -316,6 +319,10 @@
 
       function leaveConfirm() {
         inspected = null;
+        if (autoFilledCode !== null && codeInput.value === autoFilledCode) {
+          codeInput.value = "";
+        }
+        autoFilledCode = null;
         confirmSection.classList.remove("visible");
         unverifiedInput.checked = false;
       }
@@ -374,8 +381,9 @@
                   "). Continue only if you expect that."
               : ""
           );
-          if (result.code && !codeInput.value) {
+          if (result.code) {
             codeInput.value = result.code;
+            autoFilledCode = result.code;
           }
           confirmSection.classList.add("visible");
           passwordSection.open = !result.serverId;
