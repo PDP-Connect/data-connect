@@ -4,7 +4,19 @@
 // then what to do. The code itself stays reachable under Details → Diagnostics.
 // An unknown code gets the generic message.
 
-export const GENERIC_ERROR = "Remote access couldn't turn on. Try again, or copy the details for support.";
+// What the owner was doing when it failed. The fallback names that action, so
+// a failed turn-off never says it couldn't turn on.
+export type ActionKind = "turn-on" | "turn-off" | "check" | "change";
+
+const SUPPORT = "Try again, or copy the details for support.";
+export const GENERIC_ERROR = `Remote access couldn't turn on. ${SUPPORT}`;
+const GENERIC_BY_ACTION: Readonly<Record<ActionKind, string>> = {
+  "turn-on": GENERIC_ERROR,
+  "turn-off": `Remote access couldn't turn off. It may still be on. ${SUPPORT}`,
+  check: `We couldn't check remote access. ${SUPPORT}`,
+  change: `That change didn't save. ${SUPPORT}`,
+};
+export const genericErrorFor = (action: ActionKind): string => GENERIC_BY_ACTION[action];
 
 const TRY_AGAIN = "Something changed while we were connecting. Try again.";
 const SERVICE_DOWN = "DataConnect's background service isn't running. Restart DataConnect, then try again.";
@@ -81,11 +93,11 @@ export type PublicError = {
   serverMessage?: string;
 };
 
-export function publicError(code: string | undefined, serverMessage?: string): PublicError {
+export function publicError(code: string | undefined, serverMessage?: string, action: ActionKind = "turn-on"): PublicError {
   const known = code === undefined ? undefined : Object.hasOwn(ERROR_MESSAGES, code) ? ERROR_MESSAGES[code] : undefined;
   return {
     code: code ?? "reachability_unavailable",
-    message: known ?? GENERIC_ERROR,
+    message: known ?? genericErrorFor(action),
     ...(serverMessage ? { serverMessage } : {}),
   };
 }

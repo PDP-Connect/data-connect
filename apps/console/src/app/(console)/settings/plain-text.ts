@@ -7,11 +7,16 @@
 
 type TimeOptions = { locale?: string; timeZone?: string; now?: number };
 
-const isoTimestamp = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?/g;
-const underscoreCode = /\b[a-z0-9]+(?:_[a-z0-9]+)+\b/gi;
-const dottedFlag = /\b(?:installer|runtime|privilege|secrets|host)\.[a-z]+(?:\.[a-z]+)*\b/gi;
+const isoTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+const underscoreCode = /^[a-z0-9]+(?:_[a-z0-9]+)+$/i;
+// The capability flags the host reports. A list, not a pattern: a pattern also
+// matches host names such as `secrets.example.com`.
+const dottedFlag = /^(?:installer\.execute|privilege\.elevate|runtime\.attached|runtime\.durable|secrets\.backend)$/;
 const hyphenCode = /^[a-z0-9]+(?:-[a-z0-9]+)+$/;
-const oldName = /reachability/gi;
+const oldName = /^reachability$/i;
+// A token with any of these is a URL, an address, a query or a path. It is
+// somebody's value and passes through whole.
+const opaque = /[/?=&#@\\]|:\/\//;
 
 // "1:00 PM" today; "Nov 19, 1:00 PM" on another day. Never ISO.
 export function formatLocalTime(value: string | number | Date, options: TimeOptions = {}): string {
@@ -28,14 +33,29 @@ export function formatLocalTime(value: string | number | Date, options: TimeOpti
   return `${date.toLocaleDateString(options.locale, { month: "short", day: "numeric", ...zone })}, ${time}`;
 }
 
+// For a code or label that a library or the host supplied: a status, a
+// reason, a capability flag, a group or a label. Each whitespace-separated word
+// is rewritten only if the whole word is a code, an ISO timestamp or the old
+// product name, so a URL, host name, address, query string or command inside a
+// longer text stays as it is. Never pass it a value, an address or text the
+// owner has to copy or type (instructions, help, a setting's value).
 export function plain(text: string, options: TimeOptions = {}): string {
-  let out = text.replace(isoTimestamp, (match) => formatLocalTime(match, options));
-  out = out.replace(dottedFlag, (match) => match.replaceAll(".", " "));
-  out = out.replace(underscoreCode, (match) => match.replaceAll("_", " ").toLowerCase());
-  if (hyphenCode.test(out)) {
-    out = out.replaceAll("-", " ");
-  }
-  return out.replace(oldName, (match) => (match[0] === "R" ? "Remote access" : "remote access"));
+  const whole = hyphenCode.test(text) ? text.replaceAll("-", " ") : text;
+  return whole
+    .split(/(\s+)/)
+    .map((word) => (/^\s*$/.test(word) ? word : plainWord(word, options)))
+    .join("");
+}
+
+function plainWord(word: string, options: TimeOptions): string {
+  const match = /^([("'[]*)(.*?)([)"'\].,;:!]*)$/.exec(word);
+  const [, lead = "", core = word, tail = ""] = match ?? [];
+  if (!core || opaque.test(core)) return word;
+  if (isoTimestamp.test(core)) return `${lead}${formatLocalTime(core, options)}${tail}`;
+  if (dottedFlag.test(core)) return `${lead}${core.replaceAll(".", " ")}${tail}`;
+  if (underscoreCode.test(core)) return `${lead}${core.replaceAll("_", " ").toLowerCase()}${tail}`;
+  if (oldName.test(core)) return `${lead}${core[0] === "R" ? "Remote access" : "remote access"}${tail}`;
+  return word;
 }
 
 // A disclosure key such as `metadataVisibleTo` or `tls_termination` as a label.

@@ -106,7 +106,7 @@ test("migration keeps what the server holds, drops stale entries, then clears th
   }) as typeof requestReachability
   const result = await migrateLegacySetupReservations(request, { local, session })
   assert.deepEqual(asked, ["op-live", "op-stale"])
-  assert.deepEqual(result, { adopted: 1, dropped: 1, deferred: 0 })
+  assert.deepEqual(result, { adopted: 1, dropped: 1, deferred: 0, cleanup: 0, draft: "none" })
   assert.equal(local.items.size, 0)
   assert.equal(session.items.size, 0)
 })
@@ -124,7 +124,7 @@ test("migration keeps a saved setup when the server cannot answer", async () => 
     local,
     session: memoryStore(),
   })
-  assert.deepEqual(result, { adopted: 0, dropped: 0, deferred: 1 })
+  assert.deepEqual(result, { adopted: 0, dropped: 0, deferred: 1, cleanup: 0, draft: "none" })
   assert.deepEqual(
     JSON.parse(local.items.get("reachability-setup-reservations-v1")!),
     [legacy("op-live")]
@@ -186,5 +186,127 @@ test("the state that showed two cards for one service renders one", async () => 
   } finally {
     await act(async () => root.unmount())
     dom.window.close()
+  }
+})
+
+const draftPointer = JSON.stringify({ providerId: "svc", draftId: "draft-1", usage: "durable" })
+
+test("migration sends the saved draft to the host and keeps it until the host answers", async () => {
+  const session = memoryStore({ "reachability-draft": draftPointer })
+  const sent: unknown[] = []
+  let answer: unknown = { ok: false, code: "reachability_unavailable", message: "down" }
+  const request = (async (path: string, body?: Record<string, unknown>) => {
+    assert.equal(path, "/setups/adopt-draft")
+    sent.push(body)
+    return answer
+  }) as typeof requestReachability
+  const local = memoryStore()
+  // The host did not answer: the pointer stays, so the next load tries again.
+  assert.equal((await migrateLegacySetupReservations(request, { local, session })).draft, "deferred")
+  assert.equal(session.items.get("reachability-draft"), draftPointer)
+  // The host took it, already has a draft, or says the draft is gone: all final.
+  for (const data of [{ adopted: true }, { adopted: false, reason: "service_has_draft" }, { adopted: false, reason: "unknown" }]) {
+    session.setItem("reachability-draft", draftPointer)
+    answer = { ok: true, data }
+    assert.equal((await migrateLegacySetupReservations(request, { local, session })).draft, "sent")
+    assert.equal(session.items.has("reachability-draft"), false)
+  }
+  assert.deepEqual(sent[0], { providerId: "svc", draftId: "draft-1", usage: "durable" })
+})
+
+test("migration drops a draft pointer that names nothing, and reports a leftover setup", async () => {
+  const session = memoryStore({ "reachability-draft": "{}" })
+  const local = memoryStore({ "reachability-setup-reservations-v1": JSON.stringify([legacy("op-second")]) })
+  const request = (async (path: string) => {
+    assert.equal(path, "/setups/adopt")
+    return { ok: true, data: { adopted: false, reason: "needs_cleanup" } }
+  }) as typeof requestReachability
+  const result = await migrateLegacySetupReservations(request, { local, session })
+  assert.deepEqual(result, { adopted: 0, dropped: 0, deferred: 0, cleanup: 1, draft: "none" })
+  assert.equal(session.items.size, 0)
+  assert.equal(local.items.size, 0)
+})
+
+test("a leftover setup gets its own card beside the service's setup", () => {
+  const cards = setupCards([{ ...entry("svc", "op-live"), cleanup: ["op-left-1", "op-left-2"] }])
+  assert.deepEqual(
+    cards.map(card => card.operationId),
+    ["op-live", "op-left-1", "op-left-2"]
+  )
+  assert.match(cards[1]!.providerLabel, /left over/)
+  // A service with only leftovers still shows them.
+  assert.deepEqual(
+    setupCards([{ ...entry("svc", "x"), setup: null, cleanup: ["op-left"] }]).map(card => card.operationId),
+    ["op-left"]
+  )
+})
+
+async function mountSetting(request: typeof requestReachability, withStorage?: (dom: JSDOM) => void) {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
+  Object.assign(globalThis, {
+    React,
+    window: dom.window,
+    document: dom.window.document,
+    IS_REACT_ACT_ENVIRONMENT: true,
+  })
+  withStorage?.(dom)
+  const root = createRoot(dom.window.document.querySelector("#root")!)
+  const { RemoteAccessSetting } = await import("./remote-access-setting.tsx")
+  await act(async () => root.render(createElement(RemoteAccessSetting, { request })))
+  return {
+    container: dom.window.document.querySelector("#root")!,
+    async stop() {
+      await act(async () => root.unmount())
+      dom.window.close()
+    },
+  }
+}
+
+test("polling starts only after the browser-storage migration finishes", async () => {
+  const calls: string[] = []
+  let finish: (value: unknown) => void = () => {}
+  const request = (async (url: string) => {
+    calls.push(url)
+    if (url === "/setups/adopt") return new Promise(resolve => (finish = resolve))
+    return { ok: true, data: url === "/catalog" ? { providers: [] } : url === "/state" ? { routes: [], reasons: {}, starting: false } : url === "/host-settings" ? { known: false, reason: "unavailable" } : {} }
+  }) as unknown as typeof requestReachability
+  const screen = await mountSetting(request, dom => {
+    Object.defineProperty(globalThis, "localStorage", { value: dom.window.localStorage, configurable: true })
+    Object.defineProperty(globalThis, "sessionStorage", { value: dom.window.sessionStorage, configurable: true })
+    dom.window.localStorage.setItem("reachability-setup-reservations-v1", JSON.stringify([legacy("op-live")]))
+  })
+  try {
+    assert.deepEqual(calls, ["/setups/adopt"], "a poll ran before the migration finished")
+    await act(async () => finish({ ok: true, data: { adopted: true } }))
+    assert.ok(calls.includes("/catalog") && calls.includes("/state"))
+  } finally {
+    await screen.stop()
+  }
+})
+
+test("a failed draft read is retried on the next poll", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] })
+  let draftReads = 0
+  const services = [{ ...entry("svc", "op-x"), setup: null, draftId: "draft-1" }]
+  const request = (async (url: string) => {
+    if (url.startsWith("/drafts/draft-1")) {
+      draftReads += 1
+      return draftReads === 1
+        ? { ok: false, code: "reachability_unavailable", message: "down" }
+        : { ok: true, data: { draftId: "draft-1", configuration: { revision: "r", actions: [], inputRequirements: [], values: {}, credentials: {} } } }
+    }
+    return { ok: true, data: url === "/catalog" ? { providers: [] } : url === "/state" ? { routes: [], reasons: {}, starting: false, services } : url === "/host-settings" ? { known: false, reason: "unavailable" } : {} }
+  }) as unknown as typeof requestReachability
+  const screen = await mountSetting(request)
+  try {
+    assert.equal(draftReads, 1)
+    await act(async () => t.mock.timers.tick(3000))
+    await act(async () => {})
+    assert.equal(draftReads, 2, "the failed read was not retried")
+    await act(async () => t.mock.timers.tick(3000))
+    await act(async () => {})
+    assert.equal(draftReads, 2, "a successful read is not repeated")
+  } finally {
+    await screen.stop()
   }
 })

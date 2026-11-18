@@ -6,7 +6,7 @@
 // may show codes and flags; nothing outside it may.
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { formatLocalTime } from "./plain-text.ts";
-import { GENERIC_ERROR, type PublicError, publicError } from "./reachability-errors.ts";
+import { type ActionKind, GENERIC_ERROR, genericErrorFor, type PublicError, publicError } from "./reachability-errors.ts";
 
 export const DiagnosticsContext = createContext<{ appVersion?: string }>({});
 
@@ -29,7 +29,8 @@ export class ReachabilityFailure extends Error {
 export function toDisplayError(
   failure: unknown,
   source: DisplayError["source"],
-  service?: string
+  service?: string,
+  action: ActionKind = "turn-on"
 ): DisplayError {
   const base =
     failure instanceof ReachabilityFailure
@@ -39,7 +40,9 @@ export function toDisplayError(
           message: GENERIC_ERROR,
           ...(failure instanceof Error && failure.message ? { serverMessage: failure.message } : {}),
         };
-  return { ...base, at: Date.now(), source, ...(service ? { service } : {}) };
+  // The fallback sentence was fixed before we knew the action. Say the right one.
+  const message = base.message === GENERIC_ERROR ? genericErrorFor(action) : base.message;
+  return { ...base, message, at: Date.now(), source, ...(service ? { service } : {}) };
 }
 
 export function diagnosticsText(error: DisplayError, appVersion?: string): string {

@@ -15,7 +15,8 @@ import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
 import type { requestReachability } from "./reachability-actions.ts";
-import { ERROR_MESSAGES, GENERIC_ERROR, publicError } from "./reachability-errors.ts";
+import { ERROR_MESSAGES, GENERIC_ERROR, genericErrorFor, publicError } from "./reachability-errors.ts";
+import { ReachabilityFailure, toDisplayError } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
 import { RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
@@ -110,6 +111,68 @@ export function userFacingLiterals(fileName: string, code: string): string[] {
   return found;
 }
 
+// A literal that matches a banned shape can reach the screen through a
+// variable or a lookup table, where `userFacingLiterals` cannot follow it. So
+// every string literal that has a banned shape must be a comparison, a storage
+// key, a code handed to the error table, or be listed here on purpose.
+const nonDisplayCallsForCodes = new Set([...nonDisplayCalls, "publicError", "genericErrorFor"]);
+const allowedBannedLiterals = new Set<string>([
+  "reachability-errors.ts: reachability_unavailable",
+  // The request path. It is a URL, never displayed.
+  "reachability-actions.ts: /v1/owner/reachability",
+]);
+
+export function bannedLiteralsAnywhere(fileName: string, code: string): string[] {
+  const kind = fileName.endsWith("x") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const source = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, kind);
+  const found: string[] = [];
+  const excluded = (node: ts.Node): boolean => {
+    for (let parent = node.parent; parent; parent = parent.parent) {
+      if (ts.isTypeNode(parent) || ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent) || ts.isCaseClause(parent)) return true;
+      if (ts.isBinaryExpression(parent) && comparisonOperators.has(parent.operatorToken.kind)) return true;
+      if (ts.isJsxElement(parent) && parent.openingElement.tagName.getText(source) === "Diagnostics") return true;
+      if (ts.isCallExpression(parent)) {
+        const callee = parent.expression;
+        const name = ts.isPropertyAccessExpression(callee) ? callee.name.text : callee.getText(source);
+        if (nonDisplayCallsForCodes.has(name) && parent.arguments.some((arg) => node.pos >= arg.pos && node.end <= arg.end)) return true;
+      }
+      if (ts.isJsxAttribute(parent) && !displayedAttributes.has(parent.name.getText(source))) return true;
+    }
+    return false;
+  };
+  function visit(node: ts.Node) {
+    if ((ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) && bannedIn(node.text).length > 0 && !excluded(node)) {
+      if (!allowedBannedLiterals.has(`${fileName}: ${node.text}`)) found.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  return found;
+}
+
+test("no source literal with a banned shape can reach the screen by another route", () => {
+  for (const file of sourceFiles) {
+    const literals = bannedLiteralsAnywhere(file, readFileSync(new URL(file, dir), "utf8"));
+    assert.deepEqual(literals, [], `${file}: banned-shape literals that are not comparisons, storage keys or listed:\n${literals.join("\n")}`);
+  }
+});
+
+test("the wide scan catches a code shown through a variable or a lookup table", () => {
+  const sample = `
+    const shown = "owner_password_required";
+    const labels = { a: "installer.execute", b: "Proof 2026-11-18T13:05:42Z" };
+    const ok = result.code === "owner_password_required";
+    switch (code) { case "owner_password_required": break; }
+    localStorage.getItem("reachability-draft");
+    publicError("configuration_stale");
+    export const view = () => (<p>{shown}{labels.a}</p>);`;
+  assert.deepEqual(bannedLiteralsAnywhere("sample.tsx", sample), [
+    "owner_password_required",
+    "installer.execute",
+    "Proof 2026-11-18T13:05:42Z",
+  ]);
+});
+
 test("user-facing string literals in the Remote access files use the closed vocabulary", () => {
   for (const file of sourceFiles) {
     const literals = userFacingLiterals(file, readFileSync(new URL(file, dir), "utf8"));
@@ -161,6 +224,54 @@ test("plain() removes codes, flags, ISO times and the old name from library text
   assert.equal(formatLocalTime("not a time"), "an unknown time");
 });
 
+test("plain() leaves URLs, host names, addresses, queries and commands alone", () => {
+  const options = { locale: "en-US", timeZone: "UTC", now: Date.parse("2026-11-18T12:00:00Z") };
+  for (const value of [
+    "host.example.com",
+    "secrets.example.com",
+    "localhost.run",
+    "127.0.0.1:37807",
+    "https://owner.example.invalid/x?since=2026-11-18T13:05:42Z",
+    "reset_password?client_id=abc&scope=read_only",
+    "Open reset_password?client_id=abc in a browser",
+    "Run ./install_helper --target=host.example.com",
+    "user@host.example.com",
+    "my_api_key_name=value",
+  ]) {
+    assert.equal(plain(value, options), value);
+  }
+  // A code on its own, or a whole word of one, is still rewritten.
+  assert.equal(plain("Fix needs_provider_call now", options), "Fix needs provider call now");
+});
+
+test("instructions the owner must copy are shown exactly as given", async () => {
+  const instructions = "Open reset_password?client_id=abc on host.example.com and run ./install_helper --target=127.0.0.1:37807";
+  const copyRoute = {
+    ...route,
+    binding: { ...route.binding, remedy: { label: "Fix", instructions, disclosure: { text: "" } } },
+    facts: [{ id: "v", group: "address", label: "Address", known: true, value: "host.example.com", source: "provider", asOf: null }],
+  };
+  await withScreen(world({ "/state": ok({ routes: [copyRoute], reasons: {}, lifecycle: lifecycle("stale"), starting: false }) }), async ({ container }) => {
+    const text = visibleText(container);
+    assert.ok(text.includes(instructions), text);
+  });
+  const html = renderToStaticMarkup(
+    createElement(RouteConsentCard, {
+      review: {
+        consent: {
+          facts: [{ id: "v", group: "address", label: "Address", known: true, value: "host.example.com", source: "provider", asOf: null }],
+          disclosures: {},
+          consentFactsDigest: "d",
+          scope: { kind: "route", query: { target: "127.0.0.1:37807", expectedOrigin: "https://abc.example.invalid" } },
+        },
+        consentFactsDigest: "d",
+      } as never,
+      onApprove: () => {},
+    })
+  );
+  assert.ok(html.includes(">host.example.com<"), html);
+});
+
 test("every error message is plain, and an unknown code gets the generic message", () => {
   for (const [code, message] of Object.entries(ERROR_MESSAGES)) assertClean(`message for ${code}`, message);
   assertClean("generic message", GENERIC_ERROR);
@@ -201,7 +312,7 @@ const provider = (providerId: string, label: string, reach: string) => ({
       label: "installer_execute ready",
       state: "present",
       observedAt: isoA,
-      remedy: { label: "Fix_it", instructions: `Run installer.execute again (seen ${isoA}).`, disclosure: { text: "" } },
+      remedy: { label: "Fix_it", instructions: "Install the helper, then check again.", disclosure: { text: "" } },
       version: { known: false, reason: "host-supervisor-unavailable" },
     },
   ],
@@ -211,7 +322,7 @@ const route = {
   origin: "https://abc.example.invalid",
   binding: {
     authority: "host_authority",
-    remedy: { label: "Fix_binding", instructions: "Run runtime.attached again.", disclosure: { text: "" } },
+    remedy: { label: "Fix_binding", instructions: "Reconnect the helper.", disclosure: { text: "" } },
     target: { known: false, reason: "effective-target-not-observed" },
   },
   cleanup: { state: "none", nextAction: null },
@@ -413,7 +524,7 @@ test("an unknown error code shows the generic message, and an action error survi
 test("setup, approval and consent cards show no codes, flags or ISO times", () => {
   const facts = [
     { id: "f", group: "tls_termination", label: "metadata_visible_to", known: false, reason: "needs-provider-call", source: "provider_library", asOf: isoA },
-    { id: "g", group: "cost", label: "Cost", known: true, value: `since ${isoB}`, source: "x", asOf: null },
+    { id: "g", group: "cost", label: "Cost", known: true, value: "free", source: "x", asOf: null },
   ];
   const disclosures = { requiresPrivilege: false, expires_at: isoB, "installer.execute": "needs_provider_call", note: "Reachability" };
   const consent = { facts, disclosures, consentFactsDigest: "d", scope: { kind: "route", query: { target: "127.0.0.1:37807", expectedOrigin: "https://abc.example.invalid" } } };
@@ -491,4 +602,123 @@ test("setup status cards show no codes in any state", async () => {
   } finally {
     dom.window.close();
   }
+});
+
+// ---------- 4. polls and actions ----------
+
+async function failFirstDraft(container: Element, run: typeof act, settle: () => Promise<void>) {
+  const radios = [...container.querySelectorAll<HTMLInputElement>('input[name="way"]')];
+  await run(async () => radios[1]!.click());
+  const usage = [...container.querySelectorAll<HTMLInputElement>('input[name="usage"]')];
+  await run(async () => usage[0]!.click());
+  const next = [...container.querySelectorAll("button")].find((node) => node.textContent === "Continue setup")!;
+  await run(async () => next.click());
+  await settle();
+}
+const alertText = (container: Element) => container.querySelector("[role=alert]")?.textContent ?? "";
+
+test("a failed background poll does not replace an action error, and a good poll does not erase it", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let catalog: Result | null = null;
+  const base = world({ "/state": ok({ routes: [], reasons: {}, starting: false }), "/drafts": fail("brand_new_server_code") });
+  const handler: Handler = (url, body) => (url === "/catalog" && catalog ? catalog : base(url, body));
+  await withScreen(handler, async ({ container, act: run, settle }) => {
+    await failFirstDraft(container, run, settle);
+    assert.match(alertText(container), /couldn.t turn on/);
+    catalog = fail("owner_password_required");
+    await run(async () => t.mock.timers.tick(3000));
+    await settle();
+    assert.match(alertText(container), /couldn.t turn on/, "the poll failure took over the action error");
+    assert.doesNotMatch(alertText(container), /Set a password first/);
+    catalog = null;
+    await run(async () => t.mock.timers.tick(3000));
+    await settle();
+    assert.match(alertText(container), /couldn.t turn on/, "a good poll erased the action error");
+  });
+});
+
+test("a poll that started before an action cannot overwrite the action's error when it lands late", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let release: (value: Result) => void = () => {};
+  let hold = false;
+  const base = world({ "/state": ok({ routes: [], reasons: {}, starting: false }), "/drafts": fail("brand_new_server_code") });
+  const handler = ((url: string, body?: Record<string, unknown>) => {
+    if (hold && url === "/catalog") {
+      hold = false;
+      return new Promise<Result>((resolve) => {
+        release = resolve;
+      });
+    }
+    return base(url, body);
+  }) as unknown as Handler;
+  await withScreen(handler, async ({ container, act: run, settle }) => {
+    hold = true;
+    await run(async () => t.mock.timers.tick(3000)); // poll starts and waits
+    await failFirstDraft(container, run, settle); // the action fails meanwhile
+    assert.match(alertText(container), /couldn.t turn on/);
+    await run(async () => release(fail("owner_password_required"))); // the old poll lands late, as a failure
+    await settle();
+    assert.match(alertText(container), /couldn.t turn on/);
+    assert.doesNotMatch(alertText(container), /Set a password first/);
+  });
+});
+
+test("polls that finish out of order apply the newest answer only", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const releases: Array<(value: Result) => void> = [];
+  let stateCalls = 0;
+  const base = world({ "/state": ok({ routes: [], reasons: {}, starting: false }) });
+  const closed = ok({
+    routes: [],
+    reasons: {},
+    lifecycle: { handle: null, phase: "idle", confinement: { known: false }, cleanup: "unconfirmed", stopRequested: false },
+    starting: false,
+  });
+  const handler = ((url: string, body?: Record<string, unknown>) => {
+    if (url !== "/state") return base(url, body);
+    stateCalls += 1;
+    if (stateCalls === 2) return new Promise<Result>((resolve) => releases.push(resolve)); // older poll, slow
+    if (stateCalls === 3) return closed; // newer poll, fast
+    return base(url, body);
+  }) as unknown as Handler;
+  await withScreen(handler, async ({ container, act: run, settle }) => {
+    await run(async () => t.mock.timers.tick(3000)); // poll 2 starts and waits
+    await run(async () => t.mock.timers.tick(3000)); // poll 3 finishes first
+    await settle();
+    assert.match(visibleText(container), /couldn.t confirm your address is closed/);
+    await run(async () => releases[0]!(ok({ routes: [], reasons: {}, starting: false }))); // the older answer lands last
+    await settle();
+    assert.match(visibleText(container), /couldn.t confirm your address is closed/, "an older poll overwrote a newer one");
+  });
+});
+
+test("the fallback error names the action that failed", async () => {
+  assert.match(publicError("brand_new", undefined, "turn-off").message, /couldn.t turn off\. It may still be on/);
+  assert.match(publicError("brand_new", undefined, "check").message, /couldn.t check remote access/);
+  assert.match(publicError("brand_new").message, /couldn.t turn on/);
+  for (const action of ["turn-on", "turn-off", "check", "change"] as const) assertClean(`fallback ${action}`, genericErrorFor(action));
+  // A known code keeps its own sentence whatever the action.
+  assert.equal(publicError("host_path_too_long", undefined, "turn-off").message, ERROR_MESSAGES.host_path_too_long);
+  // A fallback fixed before the action was known is reworded for it.
+  const fixed = toDisplayError(new ReachabilityFailure({ ...publicError("brand_new"), serverMessage: "x" }), "action", undefined, "turn-off");
+  assert.match(fixed.message, /turn off/);
+  assert.match(toDisplayError(new Error("boom"), "action", undefined, "check").message, /check remote access/);
+});
+
+test("a failed turn off says so on screen", async () => {
+  const stop = fail("brand_new_server_code");
+  const handler: Handler = (url, body) =>
+    url.endsWith("/stop") ? stop : world()(url, body);
+  await withScreen(handler, async ({ container, act: run, settle }) => {
+    const press = async (label: RegExp) => {
+      const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
+      assert.ok(button, `no button matching ${label}`);
+      await run(async () => button.click());
+      await settle();
+    };
+    const ack = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    if (ack) await run(async () => ack.click());
+    await press(/^Turn off$/);
+    assert.match(alertText(container), /couldn.t turn off\. It may still be on/);
+  });
 });

@@ -17,7 +17,7 @@ import {
   toDisplayError,
 } from "./diagnostics.tsx"
 import { plain } from "./plain-text.ts"
-import { publicError } from "./reachability-errors.ts"
+import { type ActionKind, publicError } from "./reachability-errors.ts"
 
 type SetupView = ReturnType<typeof projectSetupOperation>
 type Request = typeof requestReachability
@@ -90,7 +90,7 @@ function SetupOperationAction({
     return (
       <div className="grid gap-2">
         <h4 className="pdpp-label">{plain(action.label)}</h4>
-        <p>{plain(action.instructions ?? action.help ?? action.disclosure.text)}</p>
+        <p>{action.instructions ?? action.help ?? action.disclosure.text}</p>
         {url?.protocol === "https:" && !url.username && !url.password ? (
           <a href={url.href} rel="noreferrer" target="_blank">
             {plain(action.label)}
@@ -121,7 +121,7 @@ function SetupOperationAction({
       }}
     >
       {action.instructions || action.help ? (
-        <p>{plain(action.instructions ?? action.help ?? "")}</p>
+        <p>{action.instructions ?? action.help ?? ""}</p>
       ) : null}
       {obtain?.protocol === "https:" && !obtain.username && !obtain.password ? (
         <a href={obtain.href} rel="noreferrer" target="_blank">
@@ -247,7 +247,7 @@ export function ProviderSetup({
     return result.data as T
   }
 
-  async function change(run: () => Promise<SetupView>, mutation = false) {
+  async function change(run: () => Promise<SetupView>, mutation = false, kind: ActionKind = "turn-on") {
     ++readEpoch.current
     setBusy(true)
     setError(null)
@@ -258,7 +258,7 @@ export function ProviderSetup({
       setMissing(false)
     } catch (failure) {
       setView(null)
-      setError(toDisplayError(failure, "action", reservation.providerLabel))
+      setError(toDisplayError(failure, "action", reservation.providerLabel, kind))
     } finally {
       setBusy(false)
     }
@@ -390,7 +390,7 @@ export function ProviderSetup({
         <button
           type="button"
           disabled={busy}
-          onClick={() => void change(() => send<SetupView>(readPath))}
+          onClick={() => void change(() => send<SetupView>(readPath), false, "check")}
         >
           Check setup status
         </button>
@@ -415,9 +415,7 @@ export function ProviderSetup({
             type="button"
             disabled={busy || disabled}
             onClick={() =>
-              void change(() =>
-                send<SetupView>(`${path}/cancel`, { providerId })
-              )
+              void change(() => send<SetupView>(`${path}/cancel`, { providerId }), false, "turn-off")
             }
           >
             {view.state === "complete" ? "Undo setup" : "Cancel setup"}

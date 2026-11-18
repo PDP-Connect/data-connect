@@ -381,3 +381,14 @@ test("a save syncs the directory after the rename, and the parent when it made t
     await rm(parent, { recursive: true });
   }
 });
+
+test("public reachability errors never echo raw messages, causes or properties", async () => {
+  const { publicReachabilityError } = await import("../server/routes/owner-reachability.ts");
+  const secret = "token=abc123 password=hunter2 secret://vault/key /var/lib/app/state.json";
+  const error = Object.assign(new Error(secret), { code: "route_not_found", cause: new Error(secret), detail: secret });
+  const unknown = Object.assign(new Error(secret), { code: secret });
+  for (const candidate of [error, unknown, secret, { message: secret }]) {
+    const shown = JSON.stringify(publicReachabilityError(candidate));
+    for (const part of ["abc123", "hunter2", "secret://", "/var/lib"]) assert.equal(shown.includes(part), false);
+  }
+});

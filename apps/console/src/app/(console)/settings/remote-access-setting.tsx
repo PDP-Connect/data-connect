@@ -25,7 +25,7 @@ import {
   toDisplayError,
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
-import { ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
+import { type ActionKind, ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
 import { ConsentFacts, RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 
 type Draft = ReturnType<typeof projectDraft>;
@@ -110,6 +110,13 @@ export function RemoteAccessSetting({
   const [acknowledged, setAcknowledged] = useState(false);
   const reservations = setupCards(state.services);
   const draftHydrated = useRef(false);
+  const draftRef = useRef<Draft | null>(null);
+  draftRef.current = draft;
+  // Bumped when an action starts and when it ends. A poll started in an earlier
+  // epoch is dropped. `loadSeq` and `appliedSeq` order the polls themselves.
+  const actionEpoch = useRef(0);
+  const loadSeq = useRef(0);
+  const appliedSeq = useRef(0);
   const [setupReadiness, setSetupReadiness] = useState<Record<string, string | null>>({});
   const onSetupReadiness = useCallback((draftId: string, revision: string | null) => {
     setSetupReadiness((current) => ({ ...current, [draftId]: revision }));
@@ -124,23 +131,34 @@ export function RemoteAccessSetting({
   }
   useEffect(() => {
     let active = true;
+    let timer: ReturnType<typeof setInterval> | undefined;
     const load = async () => {
+      const seq = ++loadSeq.current;
+      const startedInEpoch = actionEpoch.current;
       const [catalogResult, stateResult, hostResult, capabilityResult] = await Promise.all([
         request("/catalog"),
         request("/state"),
         request("/host-settings"),
         request("/host-capabilities"),
       ]);
-      if (!active) {
+      // A poll reports on the moment it started. If an action began or ended
+      // since, or a later poll already landed, this answer is out of date and
+      // must not replace what the action or the later poll set.
+      const outdated = () => !active || seq < appliedSeq.current || startedInEpoch !== actionEpoch.current;
+      if (outdated()) {
         return;
       }
+      appliedSeq.current = seq;
+      // A background failure never replaces an error that an action owns.
+      const showLoadError = (failure: Parameters<typeof toDisplayError>[0]) =>
+        setError((current) => (current?.source === "action" ? current : toDisplayError(failure, "load")));
       if (catalogResult.ok) {
         setInventory(catalogResult.data as Inventory);
         setStale(false);
       } else {
         setStale(true);
         setError((current) =>
-          current?.source === "load" && current.code === catalogResult.code
+          current?.source === "action" || (current?.source === "load" && current.code === catalogResult.code)
             ? current
             : toDisplayError(new ReachabilityFailure(catalogResult), "load")
         );
@@ -155,23 +173,27 @@ export function RemoteAccessSetting({
         const next = stateResult.data as State;
         setState(next);
         if (!draftHydrated.current) {
-          // The host holds the draft. Pick it up once, after a reload or restart.
-          draftHydrated.current = true;
+          // The host holds the draft. Pick it up after a reload or restart.
+          // Hydration is done only once a read has succeeded; a failed read is
+          // tried again on the next poll. A draft the owner already has stays.
           const saved = next.services?.find((item) => item.draftId && !item.committed);
-          if (saved?.draftId) {
+          if (draftRef.current) {
+            draftHydrated.current = true;
+          } else if (saved?.draftId) {
             const result = await request(
               `/drafts/${encodeURIComponent(saved.draftId)}?providerId=${encodeURIComponent(saved.providerId)}`
             );
-            if (!active) {
+            if (!active || startedInEpoch !== actionEpoch.current) {
               return;
             }
-            if (result.ok) {
+            if (result.ok && !draftRef.current) {
+              draftHydrated.current = true;
               setDraft(result.data as Draft);
               setDraftProviderId(saved.providerId);
               setUsage(saved.usage);
               setCommitted(false);
-            } else {
-              setError(toDisplayError(new ReachabilityFailure(result), "load"));
+            } else if (!result.ok) {
+              showLoadError(new ReachabilityFailure(result));
             }
           }
         }
@@ -186,16 +208,26 @@ export function RemoteAccessSetting({
         setError((current) => (current?.source === "load" ? null : current));
       }
     };
-    // Setups an older console kept in the browser move to the host first.
+    // Setups an older console kept in the browser move to the host first, and
+    // polling starts only after that finishes.
     void migrateLegacySetupReservations(request)
       .catch(() => undefined)
-      .then(() => load());
-    const timer = setInterval(() => {
-      void load();
-    }, 3000);
+      .then(async () => {
+        if (!active) {
+          return;
+        }
+        await load();
+        if (active) {
+          timer = setInterval(() => {
+            void load();
+          }, 3000);
+        }
+      });
     return () => {
       active = false;
-      clearInterval(timer);
+      if (timer !== undefined) {
+        clearInterval(timer);
+      }
     };
   }, [request]);
 
@@ -241,18 +273,24 @@ export function RemoteAccessSetting({
       a.label.localeCompare(b.label) ||
       a.providerId.localeCompare(b.providerId)
   );
-  async function change(run: () => Promise<void>) {
+  async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
+    actionEpoch.current += 1;
     setBusy(true);
     setError(null);
     try {
       await run();
     } catch (failure) {
-      setError(toDisplayError(failure, "action", provider ? plain(provider.label) : undefined));
+      setError(toDisplayError(failure, "action", provider ? plain(provider.label) : undefined, kind));
     } finally {
+      actionEpoch.current += 1;
       setBusy(false);
       setValues({});
     }
   }
+  // The same runner, told what the owner was doing, so a failure says so.
+  const turnOff = (run: () => Promise<void>) => change(run, "turn-off");
+  const checkIt = (run: () => Promise<void>) => change(run, "check");
+  const edit = (run: () => Promise<void>) => change(run, "change");
   async function openDraft() {
     if (!provider) {
       return;
@@ -393,7 +431,7 @@ export function RemoteAccessSetting({
         <button
           disabled={mutationBlocked || !host.known || !host.value.port.known}
           onClick={() =>
-            void change(async () => {
+            void edit(async () => {
               if (!(host.known && host.value.port.known)) {
                 return;
               }
@@ -424,7 +462,7 @@ export function RemoteAccessSetting({
                 </p>
                 {item.remedy ? (
                   <p className="pdpp-caption whitespace-pre-wrap break-words">
-                    {plain(item.remedy.instructions ?? item.remedy.label)}
+                    {item.remedy.instructions ?? plain(item.remedy.label)}
                   </p>
                 ) : (
                   <p className="pdpp-caption">No automatic fix is available.</p>
@@ -466,7 +504,7 @@ export function RemoteAccessSetting({
       {draft ? (
         <section aria-label="Setup" className="grid gap-4">
           <h3 className="pdpp-label">Setup details</h3>
-          <button disabled={busy} onClick={() => void change(reloadDraft)}>
+          <button disabled={busy} onClick={() => void edit(reloadDraft)}>
             Reload
           </button>
           {committed ? (
@@ -495,7 +533,7 @@ export function RemoteAccessSetting({
                         value={values[field.id] ?? (field.secret ? "" : (draft.configuration.values[field.id] ?? ""))}
                       />
                       <span className="pdpp-caption text-muted-foreground">
-                        {plain(field.help)} We only check the format.
+                        {field.help} We only check the format.
                       </span>
                       {field.obtainUrl && /^https?:\/\//.test(field.obtainUrl) ? (
                         <a className="underline" href={field.obtainUrl} rel="noreferrer" target="_blank">
@@ -546,7 +584,7 @@ export function RemoteAccessSetting({
             <button
               disabled={busy}
               onClick={() =>
-                void change(async () => {
+                void edit(async () => {
                   await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
                   setDraft(null);
                   setReview(null);
@@ -566,7 +604,7 @@ export function RemoteAccessSetting({
           reservation={reservation}
           request={request}
           onReadiness={onSetupReadiness}
-          {...(!draft && reservation.draftId !== null ? { onResume: () => void change(async () => {
+          {...(!draft && reservation.draftId !== null ? { onResume: () => void edit(async () => {
             const resumedDraftId = reservation.draftId as string;
             const restored = await send<Draft>(
               `/drafts/${encodeURIComponent(resumedDraftId)}?providerId=${encodeURIComponent(reservation.providerId)}`
@@ -625,7 +663,7 @@ export function RemoteAccessSetting({
               <button
                 disabled={!operation.recovery.available || busy}
                 onClick={() =>
-                  void change(async () => {
+                  void turnOff(async () => {
                     await send(`/operations/${encodeURIComponent(operation.operationId)}/reconcile`, {
                       action: "stop",
                       acknowledgeDisconnect: acknowledged,
@@ -640,7 +678,7 @@ export function RemoteAccessSetting({
             <button
               disabled={busy}
               onClick={() =>
-                void change(async () =>
+                void checkIt(async () =>
                   setOperation(await send<Operation>(`/operations/${encodeURIComponent(operation.operationId)}`))
                 )
               }
@@ -660,7 +698,7 @@ export function RemoteAccessSetting({
         <RuntimeRouteConsentCard
           busy={busy}
           onApprove={(approval) =>
-            void change(async () => {
+            void edit(async () => {
               await send(`/routes/${encodeURIComponent(runtimeReview.routeId)}/approve`, {
                 generation: runtimeReview.generation,
                 ...approval,
@@ -690,13 +728,13 @@ export function RemoteAccessSetting({
               <div className="grid gap-2">
                 <h4 className="pdpp-label">{plain(route.binding.remedy.label)}</h4>
                 <p className="pdpp-caption whitespace-pre-wrap break-words">
-                  {plain(route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text)}
+                  {route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text}
                 </p>
               </div>
             ) : null}
             {route.cleanup.nextAction ? (
               <p className="pdpp-caption whitespace-pre-wrap break-words">
-                {plain(route.cleanup.nextAction.instructions ?? route.cleanup.nextAction.label)}
+                {route.cleanup.nextAction.instructions ?? plain(route.cleanup.nextAction.label)}
               </p>
             ) : null}
             {route.cleanup.state !== "confirmed" ? <div className="flex flex-wrap gap-3">
@@ -704,7 +742,7 @@ export function RemoteAccessSetting({
                 <button
                   disabled={busy}
                   onClick={() =>
-                    void change(async () => {
+                    void edit(async () => {
                       const snapshot = await send<ReturnType<typeof projectRuntimeReview>>(
                         `/routes/${encodeURIComponent(route.handle.id)}/review`,
                         { generation: route.handle.generation }
@@ -720,7 +758,7 @@ export function RemoteAccessSetting({
                 <button
                   disabled={busy}
                   onClick={() =>
-                    void change(async () => {
+                    void checkIt(async () => {
                       await send(`/routes/${encodeURIComponent(route.handle.id)}/check`, {
                         generation: route.handle.generation,
                       });
@@ -733,7 +771,7 @@ export function RemoteAccessSetting({
               <button
                 disabled={busy}
                 onClick={() =>
-                  void change(async () => {
+                  void turnOff(async () => {
                     const pending = await send<{ operationId: string }>(
                       `/routes/${encodeURIComponent(route.handle.id)}/stop`,
                       { generation: route.handle.generation, acknowledgeDisconnect: acknowledged }
@@ -804,7 +842,7 @@ export function RemoteAccessSetting({
             <button
               disabled={mutationBlocked}
               onClick={() =>
-                void change(async () => {
+                void edit(async () => {
                   const value = port.trim() === "" ? null : Number(port);
                   if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
                     throw new ReachabilityFailure({ code: "invalid_input", message: "Enter a port between 1 and 65535." });
