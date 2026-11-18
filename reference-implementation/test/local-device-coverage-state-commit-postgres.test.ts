@@ -3,12 +3,12 @@
 
 /**
  * Real-PostgreSQL proof for the collection-revision fence the local coverage
- * projection reads (`revisionFence`). State commits, terminal runs and
+ * projection reads (`localRevisionFence`). State commits, terminal runs and
  * observed attempts each take the next per-connection revision at commit, and
- * the server's own `$` scope rows take none. The fence SQL runs in both the
- * singleton and the page-batched readers, and the batched one is the list
- * path, which swallows its own failures. So this test reads it back directly
- * rather than trusting a projection that would silently degrade.
+ * the server's own `$` scope rows take none. The fence SQL is the page-batched
+ * reader the projection uses, and that path swallows its own failures. So this
+ * test reads it back directly rather than trusting a projection that would
+ * silently degrade.
  */
 
 import assert from "node:assert/strict";
@@ -16,11 +16,8 @@ import test from "node:test";
 
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import {
-  readCommittedLocalCoverageDiagnostics,
-  readCommittedLocalCoverageDiagnosticsByConnectionIds,
-} from "../server/records.ts";
-import {
   issueCollectionRunSequence,
+  readLocalCoverageRevisionFences,
   recordCollectionRevisionEvent,
 } from "../server/stores/collection-revision-store.ts";
 import { createPostgresConnectorStateStore } from "../server/stores/connector-state-store.ts";
@@ -78,19 +75,14 @@ async function stateRowRevisions(connectorInstanceId: string): Promise<Record<st
 }
 
 async function fences() {
-  const batch = await readCommittedLocalCoverageDiagnosticsByConnectionIds([WITH_STATE, SCOPE_ONLY]);
-  const single = await readCommittedLocalCoverageDiagnostics({
-    connector_id: CONNECTOR_ID,
-    connector_instance_id: WITH_STATE,
-  });
-  assert.deepEqual(single.revisionFence, batch.get(WITH_STATE)?.revisionFence, "the singleton reader agrees");
+  const fenced = await readLocalCoverageRevisionFences([WITH_STATE, SCOPE_ONLY]);
   return {
-    scopeOnly: batch.get(SCOPE_ONLY)?.revisionFence,
-    withState: batch.get(WITH_STATE)?.revisionFence,
+    scopeOnly: fenced.get(SCOPE_ONLY),
+    withState: fenced.get(WITH_STATE),
   };
 }
 
-test("real PostgreSQL: the collection revision orders commits and observed events, and both coverage readers return the same fence (skipped: PDPP_TEST_POSTGRES_URL unset)", {
+test("real PostgreSQL: the collection revision orders commits and observed events, and the fence reads the run it names (skipped: PDPP_TEST_POSTGRES_URL unset)", {
   skip: !POSTGRES_URL,
 }, async () => {
   await initPostgresStorage(postgresStorageConfig());

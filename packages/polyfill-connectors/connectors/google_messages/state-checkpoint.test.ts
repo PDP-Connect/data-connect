@@ -163,7 +163,7 @@ function runGoogleMessagesCustom(
 		},
 		start: {
 			scope: {
-				streams: [{ name: "messages" }, { name: "coverage_diagnostics" }],
+				streams: [{ name: "messages" }],
 			},
 			state,
 			type: "START",

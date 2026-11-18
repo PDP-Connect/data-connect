@@ -19,7 +19,7 @@
  *
  *   docker run -d --rm --log-driver none -p 5556:5000 registry:2
  *   node scripts/build-connector-oci-artifact.mjs --connector oura --out /tmp/oura   # in data-connectors
- *   oras push --plain-http localhost:5556/pdp-connect/connector/oura:0.1.0 \
+ *   oras push --plain-http localhost:5556/pdp-connect/connector/oura:0.1.5 \
  *     --artifact-type application/vnd.pdpp.connector.v1+json \
  *     --config config.json:application/vnd.pdpp.connector.config.v1+json <layers…>
  *   PDPP_TEST_OCI_REGISTRY=localhost:5556 PDPP_TEST_OCI_DIGEST=sha256:… npm test
@@ -60,7 +60,7 @@ test(
               connectorKey: "oura",
               connectorId: "https://registry.pdpp.dev/connectors/oura",
               reference: `${registry}/${repository}`,
-              version: "0.1.0",
+              version: "0.1.5",
               digest: digest as string,
             },
           ],

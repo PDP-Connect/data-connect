@@ -13,7 +13,6 @@
  */
 
 import type { ManualUploadValidationResult } from "@pdpp/polyfill-connectors/manual-upload-validation";
-import type { ParsedCoverageDiagnosticsStateSnapshot } from "@pdpp/polyfill-connectors/local-source-inventory";
 
 export type { ManualUploadValidationResult };
 
@@ -148,7 +147,6 @@ interface OptionalModuleMap {
   readonly configKinds: Record<string, unknown> | null;
   readonly credentialProbe: Record<string, unknown> | null;
   readonly credentialProbeTransport: Record<string, unknown> | null;
-  readonly coverage: Record<string, unknown> | null;
   readonly injection: Record<string, unknown> | null;
   readonly manifests: Record<string, unknown> | null;
   readonly manualUpload: Record<string, unknown> | null;
@@ -221,7 +219,6 @@ const optionalModules: OptionalModuleMap = {
   configKinds: requireOptional("@pdpp/polyfill-connectors/connector-config-option-kind-registry"),
   credentialProbe: requireOptional("@pdpp/polyfill-connectors/credential-probe"),
   credentialProbeTransport: requireOptional("@pdpp/polyfill-connectors/credential-probe-transport"),
-  coverage: requireOptional("@pdpp/polyfill-connectors/local-source-inventory"),
   injection: requireOptional("@pdpp/polyfill-connectors/static-secret-injection"),
   manifests: requireOptional("@pdpp/polyfill-connectors/manifests"),
   manualUpload: requireOptional("@pdpp/polyfill-connectors/manual-upload-validation"),
@@ -342,24 +339,6 @@ export function connectorOptionsSchema(connectorKey: string | null): ResolvedCon
 // webpack-analyzable "node:crypto"-reaching import back on this module's
 // value-import graph, defeating the split. Import it directly from
 // provider-auth-adapter-loader.ts. See that module's header comment.
-
-export function parseCoverageDiagnosticsStateSnapshot(
-  connectorId: string,
-  state: unknown
-): ParsedCoverageDiagnosticsStateSnapshot {
-  const parse = optionalModules.coverage?.parseCoverageDiagnosticsStateSnapshot;
-  return typeof parse === "function"
-    ? (parse(connectorId, state) as ParsedCoverageDiagnosticsStateSnapshot)
-    : {
-        duplicateStores: [],
-        hasAuthoritativeInventory: false,
-        hasCommittedSnapshot: false,
-        malformed: state !== null && state !== undefined,
-        missingStores: [],
-        rows: [],
-        unexpectedStores: [],
-      };
-}
 
 export async function loadStaticSecretInjectionHelpers(): Promise<{
   readonly buildConnectionScopedSecretEnv: (connectorId: string, recovered: unknown, sourceBinding?: unknown) => Record<string, string>;

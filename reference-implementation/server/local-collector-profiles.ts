@@ -21,6 +21,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { canonicalConnectorKey } from "./connector-key.ts";
 
 interface LocalCollectorProfilePin {
   readonly connector_key: string;
@@ -60,6 +61,28 @@ export function __setLocalCollectorReleaseForTest(connectorKey: string, release:
  */
 export function readLocalCollectorProfile(connectorKey: string): Record<string, unknown> | null {
   return readPinnedProfile(connectorKey)?.profile ?? null;
+}
+
+/**
+ * The manifest the server registers for a connector the local collector runs
+ * on the owner's device: the pinned profile under its canonical key, or
+ * `null` for any other connector. Enrollment, catalog installs and the boot
+ * reconcile all register this one manifest, so none of them can replace it
+ * with a catalog release the device does not run.
+ */
+export function pinnedLocalCollectorManifest(connectorId: string): Record<string, unknown> | null {
+  const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
+  const profile = readLocalCollectorProfile(connectorKey);
+  if (!profile) {
+    return null;
+  }
+  return {
+    ...profile,
+    connector_id: connectorKey,
+    // The manifest is the only source of the owner-facing name; there is no
+    // RI-side fallback string to disagree with it.
+    display_name: profile.display_name || connectorKey,
+  };
 }
 
 /** The server's current OCI artifact identity for a local-device connector. */

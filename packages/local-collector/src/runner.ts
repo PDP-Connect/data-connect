@@ -55,13 +55,10 @@ export {
   buildLocalDeviceOutboxId,
   buildLocalDeviceRecordEnvelope,
   COLLECTION_SCOPE_STATE_KEY,
-  COLLECTOR_COVERAGE_STATUSES,
   COLLECTOR_PROTOCOL_VERSION,
   type CollectionScope,
   type CollectorChildContext,
-  type CollectorCompletenessSummary,
   type CollectorConnectorSpec,
-  type CollectorCoverageStatus,
   type CollectorEnrollmentConfig,
   type CollectorRunConfig,
   type CollectorRunResult,
@@ -118,7 +115,6 @@ export {
   readCollectionScopeFromState,
   resolveScopedStreamTimeRanges,
   runCollectorConnector,
-  summarizeCollectorCompleteness,
   transformRecordsToCollectorEnvelopes,
 } from "../../collector-runtime/src/index.ts";
 export {

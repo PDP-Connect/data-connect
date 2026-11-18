@@ -236,39 +236,6 @@ test("bundled connector entries declare filesystem binding as required", () => {
   }
 });
 
-test("legacy profiles that declare coverage_diagnostics request it by default", async () => {
-  // Reads each connector's pinned Collection Profile (the manifest of the
-  // release the collector installs), which the reference server keeps under
-  // reference-implementation/server/local-collector-profiles/.
-  //
-  // Older profiles used `coverage_diagnostics` records. When a profile still
-  // declares that stream, its default set must request it. Typed terminal
-  // coverage is checked separately below; this legacy stream alone proves
-  // no current coverage verdict.
-  //
-  // Not every connector uses this mechanism: iMessage declares a per-stream
-  // `coverage_strategy` (snapshot_import_receipt) in its manifest instead, and
-  // has no coverage_diagnostics stream to request at all — this check only
-  // applies when the manifest declares one.
-  for (const id of BUNDLED_CONNECTOR_IDS) {
-    const entry = getBundledConnector(id);
-    assert.ok(entry, `entry for ${id}`);
-    const manifestPath = new URL(
-      `../../../reference-implementation/server/local-collector-profiles/${id.replaceAll("_", "-")}.json`,
-      import.meta.url
-    );
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-    const declaresCoverageDiagnostics = manifest.streams.some((stream) => stream.name === "coverage_diagnostics");
-    if (!declaresCoverageDiagnostics) {
-      continue;
-    }
-    assert.ok(
-      entry.streams.includes("coverage_diagnostics"),
-      `${id} default streams must include coverage_diagnostics; got ${entry.streams.join(", ")}`
-    );
-  }
-});
-
 test("bundled connector default streams are all manifest-declared (no undeclared stream requested)", async () => {
   // Reads each connector's pinned Collection Profile, as the test above does.
   for (const id of BUNDLED_CONNECTOR_IDS) {
@@ -468,16 +435,13 @@ test("local collector doctor flags missing db, expired leases, and dead letters"
 
     assert.equal(doctor.status, "critical");
     assert.deepEqual(doctor.checks, {
-      coverage_diagnostics: "ok",
       deployment_posture: "ok",
       expired_leases: "warn",
       outbox_db: "ok",
       outbox_failures: "fail",
       terminal_coverage: "unknown",
     });
-    // Dead letters dominate the lifecycle state even though no coverage
-    // diagnostic was observed: a lane that needs recovery is not first
-    // labeled "coverage missing".
+    // Dead letters dominate the lifecycle state even without a typed verdict.
     assert.equal(doctor.lifecycle_state, "dead_letter");
     assert.equal(doctor.outbox.counts.dead_letter, 1);
     assert.equal(doctor.outbox.counts.retrying, 1);
@@ -1920,7 +1884,6 @@ test("local collector run output summarizes state cursors without dumping payloa
 /** A baseline succeeded-source run result with a fully drained outbox. */
 function baseRunResult(outboxSummary) {
   return {
-    completeness: null,
     done: { records_emitted: 1, status: "succeeded", type: "DONE" },
     enqueuedBatches: 1,
     flushedState: {},
@@ -2036,81 +1999,6 @@ test("run summary names the scan-budget cutoff so the backlog is not read as the
   assert.equal(output.drained, false);
   // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
   assert.match(output.drain_note, /enqueue budget/);
-});
-
-// --- coverage_note: exhaustive-vs-partial completion honesty ---
-//
-// A run's coverage_note must agree EXACTLY with whether collector-runner.ts's
-// own reportTerminalCollection gate fired — the same three axes: scan budget,
-// DONE status, and a real coverage observation. It must never say "committed"
-// for a run that could not have reached that call.
-
-test("coverage_note reports committed + fully accounted for a clean succeeded run", () => {
-  const result = baseRunResult({ ready: 0, succeeded: 5, total: 5 });
-  result.completeness = {
-    byStore: { messages: "observed_collected" },
-    countsByStatus: { observed_collected: 1 },
-    fullyAccounted: true,
-    storeCount: 1,
-    unaccountedStores: [],
-  };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /Coverage committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /fully accounted/);
-});
-
-test("coverage_note names unaccounted stores rather than claiming full coverage", () => {
-  const result = baseRunResult({ ready: 0, succeeded: 5, total: 5 });
-  result.completeness = {
-    byStore: { attachments: "unaccounted", messages: "observed_collected" },
-    countsByStatus: { observed_collected: 1, unaccounted: 1 },
-    fullyAccounted: false,
-    storeCount: 2,
-    unaccountedStores: ["attachments"],
-  };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /Coverage committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /attachments/);
-});
-
-test("coverage_note never claims committed coverage when the scan budget stopped the run", () => {
-  const result = baseRunResult({ ready: 500, succeeded: 1000, total: 1500 });
-  result.scanBudgetExceeded = true;
-  result.completeness = {
-    byStore: { messages: "observed_collected" },
-    countsByStatus: { observed_collected: 1 },
-    fullyAccounted: true,
-    storeCount: 1,
-    unaccountedStores: [],
-  };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /NOT committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /scan budget/);
-});
-
-test("coverage_note never claims committed coverage when the connector did not report succeeded", () => {
-  const result = baseRunResult({ ready: 0, succeeded: 0, total: 0 });
-  result.done = { records_emitted: 0, status: "failed", type: "DONE" };
-  const output = summarizeRunResultForCli(result);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /NOT committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /did not finish/);
-});
-
-test("coverage_note never claims committed coverage when no coverage diagnostic was observed", () => {
-  const output = summarizeRunResultForCli(baseRunResult({ ready: 0, succeeded: 5, total: 5 }));
-  assert.equal(output.completeness, null);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /NOT committed/);
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.match(output.coverage_note, /reported no coverage diagnostics/);
 });
 
 test("run summary drained flag is true iff lifecycle_state is healthy_idle", () => {
@@ -2535,7 +2423,7 @@ test("inspectLocalOutboxStatus reads connection-scoped counts from the scoped de
   assert.equal(bOnly.outbox.counts.total, 1);
 });
 
-// --- Lifecycle state axis: queue health and acknowledged terminal coverage. ---
+// Status and doctor derive lifecycle state from durable outbox counts.
 
 function statusFor(path, sourceInstanceId = "src-1", selectedRelease = SELECTED_RELEASE) {
   return inspectLocalOutboxStatus(
@@ -2559,8 +2447,6 @@ function enqueueRecordBatch(outbox, { id, sourceInstanceId = "src-1", streams })
       batchSeq: 1,
       connectorId: "claude_code",
       deviceId: "device-1",
-      // Shape mirrors buildLocalDeviceRecordEnvelope output: the outbox's
-      // coverage scan reads $.records[*].stream.
       records: streams.map((stream, index) => ({ data: { id: `${stream}-${index}` }, stream })),
       sourceInstanceId,
     },
@@ -3350,8 +3236,6 @@ test("lifecycle_state is no_evidence on an empty scoped outbox", async () => {
   const status = statusFor(path);
   assert.equal(status.lifecycle_state, "no_evidence");
   assert.equal(status.terminal_coverage.verdict, "no_evidence");
-  assert.deepEqual(status.coverage, { observed: false, record_batches: 0 });
-  assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
 });
 
 test("lifecycle_state is draining when claimable-now record work exists", async () => {
@@ -3424,79 +3308,14 @@ test("lifecycle_state is stale_lease when a lease is past expiry", async () => {
   assert.ok(doctor.remediation.some((line) => /past expiry/.test(line)));
 });
 
-test("lifecycle_state is no_evidence after a clean drain without a typed terminal verdict", async () => {
-  const path = await tempOutboxPath();
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    // Collect and fully drain real records, but none on coverage_diagnostics.
-    enqueueRecordBatch(outbox, { id: "rb-content", streams: ["sessions", "messages"] });
-    drainRow(outbox, "rb-content");
-  } finally {
-    outbox.close();
-  }
-  const status = statusFor(path);
-  assert.equal(status.outbox.counts.pending, 0);
-  assert.equal(status.outbox.counts.leased, 0);
-  assert.equal(status.coverage.observed, false);
-  assert.ok(status.coverage.record_batches >= 1);
-  assert.equal(status.lifecycle_state, "no_evidence");
-  assert.equal(status.terminal_coverage.verdict, "no_evidence");
-
-  const doctor = buildLocalOutboxDoctor(status);
-  assert.equal(doctor.checks.coverage_diagnostics, "warn");
-  assert.equal(doctor.status, "warning");
-  assert.ok(doctor.remediation.some((line) => /Coverage remains unknown/.test(line)));
-});
-
-test("legacy coverage_diagnostics alone does not prove typed terminal coverage", async () => {
-  const path = await tempOutboxPath();
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    enqueueRecordBatch(outbox, { id: "rb-content", streams: ["messages"] });
-    drainRow(outbox, "rb-content");
-    enqueueRecordBatch(outbox, { id: "rb-coverage", streams: ["coverage_diagnostics"] });
-    drainRow(outbox, "rb-coverage");
-  } finally {
-    outbox.close();
-  }
-  const status = statusFor(path);
-  assert.equal(status.coverage.observed, true);
-  assert.equal(status.lifecycle_state, "no_evidence");
-  assert.equal(status.terminal_coverage.verdict, "no_evidence");
-  assert.equal(buildLocalOutboxDoctor(status).checks.coverage_diagnostics, "ok");
-});
-
-test("coverage observation survives a clean drain and ignores dead-letter rows", async () => {
-  const path = await tempOutboxPath();
-  const outbox = new LocalDeviceOutbox({ path });
-  try {
-    // A coverage record that only ever dead-lettered was never durably
-    // observed by the lane, so it must not count as coverage.
-    enqueueRecordBatch(outbox, { id: "rb-dl-coverage", streams: ["coverage_diagnostics"] });
-    const [claim] = outbox.claimReady({ holder: "w", leaseMs: 60_000, sourceInstanceId: "src-1" });
-    outbox.deadLetter({ error: "terminal", holder: "w", id: claim.id, leaseEpoch: claim.lease_epoch });
-    // A separate, successfully drained content batch with no coverage.
-    enqueueRecordBatch(outbox, { id: "rb-content", streams: ["messages"] });
-    drainRow(outbox, "rb-content");
-  } finally {
-    outbox.close();
-  }
-  // dead_letter dominates the lifecycle verdict, but the coverage signal
-  // itself still reports observed:false because the only coverage row
-  // dead-lettered.
-  const status = statusFor(path);
-  assert.equal(status.coverage.observed, false);
-  assert.equal(status.lifecycle_state, "dead_letter");
-});
-
-test("lifecycle/coverage status leaks no payloads", async () => {
+test("lifecycle status leaks no payloads", async () => {
   const path = await tempOutboxPath();
   const outbox = new LocalDeviceOutbox({ path });
   try {
     outbox.enqueue({
       id: "secret-row",
       kind: "record_batch",
-      payload: { records: [{ data: { id: "do-not-print", token: "nope" }, stream: "coverage_diagnostics" }] },
+      payload: { records: [{ data: { id: "do-not-print", token: "nope" }, stream: "messages" }] },
       sourceInstanceId: "src-1",
     });
     drainRow(outbox, "secret-row");
@@ -3509,48 +3328,6 @@ test("lifecycle/coverage status leaks no payloads", async () => {
   // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
   assert.doesNotMatch(rendered, /do-not-print|secret-row|nope/);
 });
-
-test("status/doctor stay bounded and report observed:null on a giant legacy (pre-index) outbox", async () => {
-  // The performance flaw this lane fixes: doctor against a real ~35 GB Codex
-  // outbox hung because coverage detection scanned every retained payload with
-  // json_each. The fix moves coverage to a payload-light index; a pre-index
-  // outbox whose unindexed backlog exceeds the bounded scan budget must report
-  // observed:null (unknown) instead of launching an unbounded scan. We assert
-  // the bounded behavior by timing a status/doctor pass over an over-budget
-  // legacy DB and proving it answers null rather than a partial false negative.
-  const path = await tempOutboxPath();
-  const budget = 5000;
-  seedLegacyV1Outbox(
-    path,
-    Array.from({ length: budget + 50 }, (_value, index) => ({
-      id: `legacy-${index}`,
-      sourceInstanceId: "src-legacy",
-      streams: ["messages"],
-    }))
-  );
-
-  const status = inspectLocalOutboxStatus({
-    baseUrl: "http://127.0.0.1:7662",
-    command: "status",
-    queuePath: path,
-    sourceInstanceId: "src-legacy",
-  });
-  // The bounded legacy scan cannot supply typed terminal proof; a fully
-  // drained lane still reports no evidence.
-  assert.equal(status.coverage.observed, null);
-  assert.equal(status.lifecycle_state, "no_evidence");
-
-  const doctor = buildLocalOutboxDoctor(status);
-  assert.equal(doctor.checks.coverage_diagnostics, "ok");
-  // The whole pass leaks no payloads even on the legacy path.
-  // biome-ignore lint/performance/useTopLevelRegex: inline assertion literal scoped to this test case; hoisting would separate the pattern from the single call site it documents.
-  assert.doesNotMatch(JSON.stringify({ status, doctor }), /messages-\d/);
-});
-
-// --- Sent-row retention / prune-sent (outbox-retention-health-v1) ---
-//
-// Invariant: pruneSent never touches pending, leased, retrying, or dead-letter
-// rows. It only deletes succeeded rows that satisfy the age/count policy.
 
 test("pruneSent dry-run reports matched count without deleting", async () => {
   const path = await tempOutboxPath();
@@ -3664,17 +3441,11 @@ test("pruneSent cascades to the observed-stream index", async () => {
     enqueueRecordBatch(outbox, { id: "rb-1", streams: ["messages", "sessions"] });
     drainRow(outbox, "rb-1");
 
-    // Verify coverage observation works before pruning.
-    assert.equal(outbox.hasObservedStream({ sourceInstanceId: "src-1", stream: "messages" }), true);
-
     const result = outbox.pruneSent({ dryRun: false, keepCount: 0 });
     assert.equal(result.pruned, 1);
 
     // After pruning, the parent outbox row is gone. The index entries for this
     // outbox_id are also gone (no orphan rows left behind).
-    // The coverage observation now returns false (no non-dead-letter record_batch rows).
-    assert.equal(outbox.hasObservedStream({ sourceInstanceId: "src-1", stream: "messages" }), false);
-    assert.equal(outbox.countRecordBatches({ sourceInstanceId: "src-1" }), 0);
   } finally {
     outbox.close();
   }
@@ -5162,61 +4933,3 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
     }
   }
 });
-
-/**
- * Seed a schema-v1 (pre-observed-stream-index) outbox file directly so the CLI
- * surface can be tested against the legacy bounded-scan fallback. Mirrors the
- * v1 table DDL and creates NO observed-stream index table, exactly as a
- * database created before this index existed would look.
- */
-function seedLegacyV1Outbox(path, rows) {
-  const db = new DatabaseSync(path);
-  try {
-    db.exec(`
-      CREATE TABLE local_device_outbox (
-        id TEXT PRIMARY KEY,
-        source_instance_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        body_hash TEXT NOT NULL,
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        next_attempt_at TEXT NOT NULL,
-        lease_holder TEXT,
-        lease_epoch INTEGER NOT NULL DEFAULT 0,
-        lease_until TEXT,
-        last_error TEXT,
-        acknowledged_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      PRAGMA user_version = 1;
-    `);
-    const insert = db.prepare(
-      `INSERT INTO local_device_outbox (
-         id, source_instance_id, kind, status, payload_json, body_hash,
-         attempt_count, next_attempt_at, created_at, updated_at
-       ) VALUES (?, ?, 'record_batch', 'succeeded', ?, 'hash', 0, ?, ?, ?)`
-    );
-    const stamp = "2026-05-19T12:00:00.000Z";
-    // This fixture is intentionally over the legacy bounded-scan budget. Its
-    // setup is not the behavior under test, so seed it in one transaction
-    // rather than paying an fsync for every synthetic row and making the
-    // aggregate suite look like it has leaked an open handle.
-    db.exec("BEGIN");
-    try {
-      for (const row of rows) {
-        const payload = JSON.stringify({
-          records: row.streams.map((stream, index) => ({ data: { id: `${stream}-${index}` }, stream })),
-        });
-        insert.run(row.id, row.sourceInstanceId, payload, stamp, stamp, stamp);
-      }
-      db.exec("COMMIT");
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
-  } finally {
-    db.close();
-  }
-}
