@@ -34,6 +34,7 @@ import {
   formatRecoveryHint,
   type KnownGap,
   type KnownGapSummary,
+  recoveryHintLabel,
   type SkippedStreamSummary,
   summarizeSkippedStreams,
 } from "../../lib/run-gaps.ts";
@@ -188,18 +189,6 @@ export default async function RunDetailPage({
         interactions={interactions}
         progress={progress}
       />
-      {runStatus?.failure?.recovery_hint?.action === "refresh_credentials" && connectorId ? (
-        <p className="pdpp-caption mb-8 text-muted-foreground">
-          Reconnect this source to sync again:{" "}
-          {sourceHref ? (
-            <Link className="text-foreground underline" href={sourceHref}>
-              {connectorName}
-            </Link>
-          ) : (
-            <span>{connectorName}</span>
-          )}
-        </p>
-      ) : null}
       <KnownGapsSection
         coverageGaps={gapClassification.coverageGaps}
         informationalGaps={gapClassification.informationalGaps}
@@ -568,10 +557,7 @@ function KnownGapsSection({
                   </>
                 ) : null}
               </div>
-              <div className="pdpp-caption mt-1 text-muted-foreground">
-                recovery: <span className="text-foreground">{formatRecoveryHint(gap)}</span>
-                {gap.message ? ` · ${gap.message}` : ""}
-              </div>
+              <GapRecoveryLine gap={gap} />
               <GapDiagnosticsPanel diagnostics={gap.diagnostics} />
             </li>
           ))}
@@ -710,6 +696,27 @@ function GapDiagnosticsPanel({ diagnostics }: { diagnostics?: Record<string, unk
         {JSON.stringify(diagnostics, null, 2)}
       </pre>
     </details>
+  );
+}
+
+/**
+ * A gap's recovery hint and message. A connector's hint reads as its
+ * suggestion, not an instruction; see `recoveryHintLabel`.
+ */
+function GapRecoveryLine({ gap }: { gap: KnownGap }) {
+  const label = recoveryHintLabel(gap);
+  if (!(label || gap.message)) {
+    return null;
+  }
+  return (
+    <div className="pdpp-caption mt-1 text-muted-foreground">
+      {label ? (
+        <>
+          {label}: <span className="text-foreground">{formatRecoveryHint(gap)}</span>
+        </>
+      ) : null}
+      {gap.message ? `${label ? " · " : ""}${gap.message}` : ""}
+    </div>
   );
 }
 
@@ -1108,9 +1115,6 @@ function summarizeFailure(failure: SpineEvent | undefined, runStatus: RunStatusE
       ];
     }
     if (runStatus?.failure) {
-      if (runStatus.failure.recovery_hint?.action === "refresh_credentials") {
-        return runStatus.failure.message ? [["message", runStatus.failure.message]] : [];
-      }
       return [
         ["reason", runStatus.failure.reason ?? runStatus.terminal_reason ?? "—"],
         ["origin", runStatus.failure.origin ?? "—"],
@@ -1124,11 +1128,16 @@ function summarizeFailure(failure: SpineEvent | undefined, runStatus: RunStatusE
   }
   const failureOrigin = typeof failure.data.failure_origin === "string" ? failure.data.failure_origin : null;
   const failureMessage = typeof failure.data.failure_message === "string" ? failure.data.failure_message : null;
+  // The connector's own error text always stays visible (Collection Profile
+  // 0.2.0, Section 5.11).
+  const connectorMessage =
+    typeof failure.data.connector_error_message === "string" ? failure.data.connector_error_message : null;
   return [
     ["reason", String(failure.data.reason ?? failure.data.failure_reason ?? "—")],
     ["retryable", String(failure.data.connector_error_retryable ?? "—")],
     ...(failureOrigin ? [["origin", failureOrigin] as [string, string]] : []),
     ...(failureMessage ? [["message", failureMessage] as [string, string]] : []),
+    ...(connectorMessage ? [["connector", connectorMessage] as [string, string]] : []),
   ];
 }
 
