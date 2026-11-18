@@ -122,7 +122,8 @@ bearer in memory between runs. The
 runtime keeps the bearer in its own process: connector child processes never
 receive it. Each admitted run gets a random run-scoped credential
 (`PDPP_BLOB_UPLOAD_TOKEN`) that is valid only for `POST /v1/blobs`, only for
-that run's connector and connection, and only until the run ends. The pre-registered set
+that run's connector and connection, and only until the run ends. Connectors
+built before that name read the same credential as `PDPP_OWNER_TOKEN`. The pre-registered set
 is reference-local convenience; production deployments should supply their
 own `preRegisteredPublicClients` option.
 
