@@ -228,7 +228,11 @@ test("installer applies the release floor and the local waiver", async (t) => {
 	assert.notEqual(refused.status, 0);
 	assert.match(refused.stderr, /NOT RUN \(disk\): need 105 GB free/);
 	assert.equal(refused.npmRan, false);
-	const atFloor = await standalone(t, "./install-tarball.mjs", 105_000_000_000, base);
+	// A one-byte tarball reserves 100 MB + 20 bytes on top of the release floor.
+	const belowTotal = await standalone(t, "./install-tarball.mjs", 105_100_000_019, base);
+	assert.match(belowTotal.stderr, /NOT RUN \(disk\)/);
+	assert.equal(belowTotal.npmRan, false);
+	const atFloor = await standalone(t, "./install-tarball.mjs", 105_100_000_020, base);
 	assert.doesNotMatch(atFloor.stderr, /NOT RUN \(disk\)/);
 	assert.equal(atFloor.npmRan, true);
 	const waived = await standalone(t, "./install-tarball.mjs", 50_000_000_000, { ...base, ...waiver });

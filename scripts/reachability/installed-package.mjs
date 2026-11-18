@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, readlink, symlink } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 // Map of relative path -> "file:<sha256>" or "link:<target>" for every entry
@@ -65,6 +65,17 @@ export async function linkInstalledPackage(source, target) {
 		return { mode: "linked", target };
 	} catch (error) {
 		if (error.code !== "EEXIST") throw error;
+	}
+	if ((await lstat(target)).isSymbolicLink()) {
+		const staging = await mkdtemp(join(dirname(target), ".gozar-link-"));
+		const replacement = join(staging, "link");
+		try {
+			await symlink(source, replacement, "dir");
+			await rename(replacement, target);
+			return { mode: "linked", target };
+		} finally {
+			await rm(staging, { recursive: true, force: true });
+		}
 	}
 	const difference = await firstTreeDifference(source, target);
 	if (difference)

@@ -35,8 +35,11 @@ export function resolveDiskFloor(env = process.env, defaultFloor = RELEASE_DISK_
 	return { floor, waived: true, reason };
 }
 
-export async function requireDiskFloor(env = process.env, cwd = process.cwd(), defaultFloor = RELEASE_DISK_FLOOR_BYTES) {
-	const { floor, waived, reason } = resolveDiskFloor(env, defaultFloor);
+export async function requireDiskFloor(env = process.env, cwd = process.cwd(), defaultFloor = RELEASE_DISK_FLOOR_BYTES, { reserveBytes = 0 } = {}) {
+	const { floor: baseFloor, waived, reason } = resolveDiskFloor(env, defaultFloor);
+	if (!Number.isSafeInteger(reserveBytes) || reserveBytes < 0 || !Number.isSafeInteger(baseFloor + reserveBytes))
+		throw new Error("disk reserve must be a nonnegative safe integer with a safe total");
+	const floor = baseFloor + reserveBytes;
 	const disk = await statfs(cwd);
 	const available = disk.bavail * disk.bsize;
 	if (waived) {
@@ -44,7 +47,9 @@ export async function requireDiskFloor(env = process.env, cwd = process.cwd(), d
 			at: new Date().toISOString(),
 			status: "DISK_PREFLIGHT_WAIVED",
 			availableBytes: available,
-			waivedFloorBytes: floor,
+			waivedFloorBytes: baseFloor,
+			reserveBytes,
+			requiredFreeBytes: floor,
 			releaseFloorBytes: defaultFloor,
 			reason,
 			...(env[LOCAL_DISK_FOOTPRINT_ENV]
