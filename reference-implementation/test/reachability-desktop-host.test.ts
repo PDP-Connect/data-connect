@@ -77,6 +77,8 @@ test("desktop host accepts the owned console port only with the current parent l
   });
   assert.deepEqual(host.service.capabilities()["installer.execute"], { known: true, value: false });
   assert.deepEqual(host.service.capabilities()["secrets.backend"], { known: true, value: true });
+  assert.deepEqual(host.usage("session"), { kind: "session", lifetimeMs: 3_600_000 });
+  assert.deepEqual(host.usage("attached"), { kind: "attached" });
   assert.throws(() => host.usage("durable"), { code: "host_runtime_unavailable" });
   // Exercise the real startup path with no injected reachability service.
   const { startServer } = await import("../server/index.ts");

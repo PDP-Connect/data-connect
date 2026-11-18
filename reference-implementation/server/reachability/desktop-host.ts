@@ -137,8 +137,9 @@ export async function startDesktopReachability(input: {
   return {
     service,
     usage(kind) {
-      if (kind !== "attached") throw new ReachabilityError("host_runtime_unavailable");
-      return { kind };
+      if (kind === "attached") return { kind };
+      if (kind === "session") return { kind, lifetimeMs: 3_600_000 };
+      throw new ReachabilityError("host_runtime_unavailable");
     },
   };
 }

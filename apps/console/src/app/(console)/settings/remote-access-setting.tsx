@@ -483,7 +483,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                   }}
                   type="radio"
                 />{" "}
-                {kind}
+                {kind === "session" ? "session (1 hour)" : kind}
               </label>
             ))}
           </fieldset>
