@@ -7,6 +7,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import { AboutSection } from "./about-section.tsx"
+import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
@@ -74,6 +75,14 @@ export default async function SettingsPage() {
               bearers={ownerSessions.bearers}
               sessions={ownerSessions.sessions}
             />
+          </Section>
+        ) : null}
+        {ownerSessions.enabled ? (
+          <Section
+            description="Pair the DataConnect desktop app with this server. The desktop shows this server's console and signs in as you."
+            title="Attach a desktop app"
+          >
+            <DesktopPairingSetting />
           </Section>
         ) : null}
         <Section
