@@ -27,7 +27,18 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -620,6 +631,102 @@ test("repairing a corrupted active root with a good artifact replaces the root a
     const repaired = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
 
     assert.equal(readFileSync(join(repaired.root, "dist", "collection-profile.mjs"), "utf8"), "export {};\n");
+    assert.equal((await agreement()).agree, true);
+  });
+});
+
+// A retained record is trusted only as a regular file this process wrote. A symlink at that path
+// lets whoever planted it choose the hashes, so it must never vouch for altered orphan bytes.
+test("a symlinked retained record does not vouch for altered orphan bytes", async () => {
+  await withSandbox(async ({ dataDir, dbPath, dir }) => {
+    await initDb(dbPath);
+    await installService(dataDir, { digest: UPDATE_DIGEST, manifest: updatedGmail }).install("gmail", UPDATE_DIGEST);
+    await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
+    const rootB = rootOf(dataDir, UPDATE_DIGEST);
+    const altered = "process.exit(1);\n";
+    writeFileSync(join(rootB, "dist", "collection-profile.mjs"), altered);
+    const retainedPath = join(dataDir, "connectors", ".retained", `gmail-${UPDATE_DIGEST.replace(":", "-")}.json`);
+    const record = JSON.parse(readFileSync(retainedPath, "utf8"));
+    record.entrypointSha256 = `sha256:${createHash("sha256").update(altered).digest("hex")}`;
+    const planted = join(dir, "planted.json");
+    writeFileSync(planted, JSON.stringify(record));
+    rmSync(retainedPath);
+    symlinkSync(planted, retainedPath);
+    let staged = 0;
+
+    await installService(dataDir, {
+      digest: UPDATE_DIGEST,
+      installArtifact: (root) => {
+        staged += 1;
+        writeArtifact(root, updatedGmail);
+      },
+      manifest: updatedGmail,
+    })
+      .install("gmail", UPDATE_DIGEST)
+      .catch(() => undefined);
+
+    assert.equal(staged, 1, "the install went back to the verified artifact");
+    assert.equal(readFileSync(join(rootB, "dist", "collection-profile.mjs"), "utf8"), "export {};\n");
+  });
+});
+
+// If the put-back of the recorded root fails, the transaction holds the only copy. It must stay.
+test("a failed rollback of a repair keeps the previous root in its transaction", async () => {
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    await initDb(dbPath);
+    const first = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
+    writeFileSync(join(first.root, "dist", "collection-profile.mjs"), "process.exit(1);\n");
+    const realRename = fs.renameSync;
+    let injected = false;
+    fs.renameSync = ((from: string, to: string) => {
+      if (!injected && String(from).endsWith("/previous") && to === first.root) {
+        injected = true;
+        throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+      }
+      return realRename(from, to);
+    }) as typeof fs.renameSync;
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(
+        installService(dataDir, { manifest: unregistrableGmail }).install("gmail", GMAIL_INSTALL_DIGEST)
+      );
+    } finally {
+      fs.renameSync = realRename;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(injected, true);
+    const kept = readdirSync(join(dataDir, "connectors", "gmail")).some((name) =>
+      existsSync(join(dataDir, "connectors", "gmail", name, "previous"))
+    );
+    assert.equal(existsSync(first.root) || kept, true, "the old root or its transaction still exists");
+  });
+});
+
+// A kill between moving the recorded root aside and publishing leaves the pointer naming a missing
+// root. The next install of that id puts the root back before it tries anything else.
+test("a root moved aside by a killed repair is restored before a retry, so a failing download does not matter", async () => {
+  await withSandbox(async ({ dataDir, dbPath }) => {
+    await initDb(dbPath);
+    const first = await installService(dataDir).install("gmail", GMAIL_INSTALL_DIGEST);
+    const transaction = join(
+      dataDir,
+      "connectors",
+      "gmail",
+      `.${GMAIL_INSTALL_DIGEST.replace(":", "-")}-install-abc123`
+    );
+    mkdirSync(transaction);
+    renameSync(first.root, join(transaction, "previous"));
+
+    // The download would fail, so the retry can only succeed on the restored root.
+    await installService(dataDir, {
+      installArtifact: () => {
+        throw new Error("artifact download failed");
+      },
+    }).install("gmail", GMAIL_INSTALL_DIGEST);
+
+    assert.equal(existsSync(first.root), true, "the recorded root is back");
+    assert.equal((await activeRecord())?.root, first.root);
     assert.equal((await agreement()).agree, true);
   });
 });

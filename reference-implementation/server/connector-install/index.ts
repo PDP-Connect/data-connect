@@ -10,10 +10,14 @@
  */
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -689,9 +693,28 @@ function writeRetainedRecord(dataDir: string, record: ConnectorInstallRecord): v
   }
 }
 
+/**
+ * Trust boundary: a regular retained record written by this process is trusted, the
+ * same as the active record. A symlinked record or `.retained` directory is not,
+ * because whoever planted it chose the hashes; it reads as absent and the digest is
+ * reinstalled from the verified artifact.
+ */
 function readRetainedRecord(dataDir: string, connectorId: string, digest: string): ConnectorInstallRecord | null {
   try {
-    return JSON.parse(readFileSync(retainedRecordPath(dataDir, connectorId, digest), "utf8")) as ConnectorInstallRecord;
+    const path = retainedRecordPath(dataDir, connectorId, digest);
+    if (!lstatSync(dirname(path)).isDirectory()) {
+      return null;
+    }
+    assertNoSymlinkComponents(dirname(path));
+    const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      if (!fstatSync(fd).isFile()) {
+        return null;
+      }
+      return JSON.parse(readFileSync(fd, "utf8")) as ConnectorInstallRecord;
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return null;
   }
@@ -789,6 +812,8 @@ async function installStagedEntry(options: {
   const setAside = join(transaction, "previous");
   let published = false;
   let movedAside = false;
+  // True once the recorded root cannot be put back: the transaction holds the only copy.
+  let keepTransaction = false;
   try {
     const discoveredConfigDigest = await options.installArtifact(staged, options.entry, options.signal);
     options.signal.throwIfAborted();
@@ -833,7 +858,9 @@ async function installStagedEntry(options: {
         // Same-root repair: put the recorded root back first, so no pointer
         // ever names a directory that does not exist.
         removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.entry.digest);
-        renameSync(setAside, options.root);
+        keepTransaction = true;
+        restorePreviousRoot(setAside, options.root, transaction, error);
+        keepTransaction = false;
       }
       if (options.existing) {
         await options.store.activate(options.existing);
@@ -844,11 +871,58 @@ async function installStagedEntry(options: {
         removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.entry.digest);
       }
     } else if (movedAside) {
-      renameSync(setAside, options.root);
+      keepTransaction = true;
+      restorePreviousRoot(setAside, options.root, transaction, error);
+      keepTransaction = false;
     }
     throw error;
   } finally {
-    rmSync(transaction, { force: true, recursive: true });
+    if (!keepTransaction) {
+      rmSync(transaction, { force: true, recursive: true });
+    }
+  }
+}
+
+function restorePreviousRoot(setAside: string, root: string, transaction: string, cause: unknown): void {
+  try {
+    renameSync(setAside, root);
+  } catch (restoreError) {
+    throw new Error(
+      `Connector repair failed and the previous root could not be restored; it is kept in ${transaction}: ${
+        restoreError instanceof Error ? restoreError.message : String(restoreError)
+      }`,
+      { cause }
+    );
+  }
+}
+
+/**
+ * A kill between moving the recorded root aside and publishing its replacement leaves
+ * the active record naming a missing root while the old root sits in an install
+ * transaction. Put it back before anything else uses the record.
+ */
+function restoreAbandonedPreviousRoot(existing: ConnectorInstallRecord | null, dataDir: string): void {
+  if (!existing || existsSync(existing.root)) {
+    return;
+  }
+  const root = resolve(existing.root);
+  if (root !== resolve(dataDir, "connectors", existing.connectorId, existing.digest)) {
+    return;
+  }
+  const prefix = `.${existing.digest.replace(":", "-")}-install-`;
+  try {
+    assertNoSymlinkComponents(dirname(root));
+    for (const name of readdirSync(dirname(root))) {
+      const previous = join(dirname(root), name, "previous");
+      if (name.startsWith(prefix) && existsSync(previous)) {
+        assertNoSymlinkComponents(previous);
+        renameSync(previous, root);
+        rmSync(join(dirname(root), name), { force: true, recursive: true });
+        return;
+      }
+    }
+  } catch {
+    // The install below runs as it would without a transaction to restore.
   }
 }
 
@@ -956,6 +1030,7 @@ export function createConnectorInstallService(options: {
   ): Promise<ConnectorInstallRecord> => {
     const root = join(dataDir, "connectors", connectorId, entry.digest);
     const existing = await store.getActive(connectorId);
+    restoreAbandonedPreviousRoot(existing, dataDir);
     let replaceRoot = false;
     if (existsSync(root)) {
       if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
