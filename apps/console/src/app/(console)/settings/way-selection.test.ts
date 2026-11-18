@@ -439,7 +439,7 @@ test("recommendation, rows and pinned usability agree on every provider prerequi
   for (const providerId of ["localhost-run", "cloudflare-named"]) {
     for (const state of ["missing", "denied", "unknown", "present"]) {
       const provider = way(providerId, { prerequisites: [prerequisite("Client", state)] });
-      const inventory = { ...noTailscale, providers: [provider] } as Parameters<typeof recommendedWay>[0];
+      const inventory = { ...noTailscale, providers: [provider] } as unknown as Parameters<typeof recommendedWay>[0];
       const row = inventory.providers[0]!;
       const blocked = state === "missing" || state === "denied";
       assert.equal(wayUnusable(row, {}), blocked);

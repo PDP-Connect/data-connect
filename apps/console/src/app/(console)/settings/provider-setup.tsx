@@ -22,7 +22,6 @@ import {
   adminStepCopy,
   approvalFor,
   chainAsksFields,
-  computerMatchesEmail,
   isInputStep,
   isSignInChain,
   linkInHelp,
@@ -399,7 +398,10 @@ export function ProviderSetup({
     return result.data as T
   }
 
-  async function change(run: () => Promise<SetupView>, mutation = false, kind: ActionKind = "turn-on") {
+  // `secret`: the request carried a token. A failure then shows only words fixed
+  // here, chosen by its code. The server's message and any echo of the request
+  // never reach state, the page or the copied details.
+  async function change(run: () => Promise<SetupView>, mutation = false, kind: ActionKind = "turn-on", secret = false) {
     ++readEpoch.current
     setBusy(true)
     setError(null)
@@ -410,7 +412,9 @@ export function ProviderSetup({
       setMissing(false)
     } catch (failure) {
       setView(null)
-      setError(toDisplayError(failure, "action", reservation.providerLabel, kind))
+      const reported =
+        secret ? new ReachabilityFailure(publicError(failure instanceof ReachabilityFailure ? failure.detail.code : "client_error", undefined, kind)) : failure
+      setError(toDisplayError(reported, "action", reservation.providerLabel, kind))
     } finally {
       setBusy(false)
     }
@@ -510,9 +514,8 @@ export function ProviderSetup({
   // click only if its facts are in this list: nothing is approved unseen.
   const [shown, setShown] = useState<Consent[]>([])
   const shownDigests = useRef(new Set<string>())
-  // Whether a step's facts were already on the card when the step first arrived.
-  const arrival = useRef<{ key: string; covered: boolean }>({ key: "", covered: false })
-  const clicked = useRef(false)
+  // True from the click until the chain stops. Set synchronously, so a second click cannot start a second chain.
+  const chainRunning = useRef(false)
   const [account, setAccount] = useState("")
   const [tailnet, setTailnet] = useState("")
   const [dnsUrl, setDnsUrl] = useState<string | null>(null)
@@ -526,23 +529,24 @@ export function ProviderSetup({
     const consent = next.consent
     if (!consent?.facts || consent.disclosures == null) return
     if (!(isSignInChain(view) || signInStage(view) === "sign-in")) return
-    const key = `${next.id}:${next.digest}`
-    if (arrival.current.key !== key) {
-      arrival.current = { key, covered: shownDigests.current.has(consent.consentFactsDigest) }
-    }
     if (shownDigests.current.has(consent.consentFactsDigest)) return
     shownDigests.current.add(consent.consentFactsDigest)
     setShown(list => [...list, consent])
   }, [view])
 
-  // One click on the sign-in card. Each step is approved from its own consent
-  // data, in the order the host returns the steps, and only if its facts were
-  // on the card when the owner clicked. A step with new facts stops the chain
-  // and the button comes back with the new facts shown.
-  const runChain = (start: SetupView) =>
-    guarded(async () => {
-      clicked.current = true
-      const onCard = new Set(shownDigests.current)
+  // One click on the sign-in card. The click makes one immutable authorization:
+  // the consent facts on the card at that moment and the setup revision. Every
+  // step the chain runs, the first included, must carry facts in that set, so a
+  // step with new facts stops the chain and the button comes back with them
+  // shown. The authorization lives only inside this call: it ends when the chain
+  // stops, finishes, or the owner leaves the way. A step that does not move the
+  // setup on (same revision, or a step already run in this chain) stops it too.
+  const runChain = (start: SetupView) => {
+    if (chainRunning.current) return Promise.resolve()
+    chainRunning.current = true
+    return guarded(async () => {
+      const authorization = Object.freeze({ digests: new Set(shownDigests.current), revision: start.revision })
+      const ran = new Set<string>()
       let at = start
       for (let step = 0; step < 8 && isCurrentWay(); step++) {
         const next = at.nextAction
@@ -550,7 +554,10 @@ export function ProviderSetup({
         if (!next || !(isSignInChain(at) || browser)) break
         const approval = approvalFor(next)
         if (!approval) throw new ReachabilityFailure(publicError("consent_required"))
-        if (step > 0 && !onCard.has(approval.consentFactsDigest)) break
+        if (!authorization.digests.has(approval.consentFactsDigest)) break
+        const key = [at.operationId, at.revision, next.id, approval.consentFactsDigest].join("\u0000")
+        if (ran.has(key)) throw new ReachabilityFailure(publicError("configuration_stale"))
+        ran.add(key)
         if (browser) {
           const url = await signInLink(at)
           if (!url) return
@@ -570,27 +577,26 @@ export function ProviderSetup({
           }
           input = { value: typed }
         } else if (next.id === "tailscale-node") {
+          // The owner's click is the confirmation. The label proves only the email, not the tailnet or the computer.
           const computer = observedComputer(next)
-          // The first step is the button the owner pressed. A later one is
-          // confirmed for them only when the one computer belongs to their email.
-          if (!computer || (step > 0 && !computerMatchesEmail(computer.label, account))) break
+          if (!computer) break
           input = { value: computer.value }
         }
-        at = await send<SetupView>(path, { ...input, ...command(at, next, approval) })
+        const response = await send<SetupView>(path, { ...input, ...command(at, next, approval) })
         if (!isCurrentWay()) return
-        await onChange(at, true)
-        installView(at)
+        await onChange(response, true)
+        installView(response)
+        if (response.revision <= Math.max(at.revision, authorization.revision)) {
+          // The host answered without moving the setup on. Stop, and let the owner try again.
+          throw new ReachabilityFailure(publicError("configuration_stale"))
+        }
+        at = response
       }
+    }).finally(() => {
+      // Also runs when the owner left the way and nothing started: the chain's authorization is gone either way.
+      chainRunning.current = false
     })
-  // After the browser sign-in the host asks to confirm the one computer it
-  // saw. If those facts were already on the card and the computer belongs to
-  // the email the owner typed, the owner's click covers it.
-  useEffect(() => {
-    const next = view?.nextAction
-    if (!view || !next || busy || !clicked.current || !isSignInChain(view) || !isCurrentWay()) return
-    const computer = observedComputer(next)
-    if (computer && arrival.current.covered && computerMatchesEmail(computer.label, account)) void runChain(view)
-  }, [view])
+  }
   const checkAgain = () =>
     guarded(async () => {
       const next = await send<SetupView>(readPath)
@@ -691,7 +697,7 @@ export function ProviderSetup({
         busy={busy || disabled}
         service={plain(reservation.providerLabel)}
         onSubmit={(approval, input) =>
-          void change(() => send<SetupView>(path, { ...input, ...command(view, action, approval) }), true)
+          void change(() => send<SetupView>(path, { ...input, ...command(view, action, approval) }), true, "turn-on", "secret" in input)
         }
       />
     )

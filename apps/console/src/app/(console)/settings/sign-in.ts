@@ -97,12 +97,6 @@ export function observedComputer(action: SetupAction): { host: string; value: st
   return { host: only!.label.replace(/\s*\(.*\)\s*$/, ""), value: only!.value, label: only!.label };
 }
 
-/** Does the observed computer belong to the email the owner typed? */
-export function computerMatchesEmail(label: string, email: string): boolean {
-  const typed = email.trim().toLowerCase();
-  return typed !== "" && label.toLowerCase().endsWith(`(${typed})`);
-}
-
 const ADMIN_COPY: Record<string, string> = {
   "tailscale-magicdns": "Turn on MagicDNS for your tailnet.",
   "tailscale-https": "Turn on HTTPS certificates for your tailnet.",

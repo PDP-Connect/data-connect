@@ -183,7 +183,7 @@ const approvalOk = (call: Call) =>
   call.body.approval.digest === `digest-${call.body.actionId}` &&
   call.body.approval.consentFactsDigest === call.body.approval.consentFactsDigest
 
-test("signed out: one card throughout, one click runs the chain and opens the browser once, then it finishes by itself", async () => {
+test("signed out: one card throughout, one click runs the chain and opens the browser once, then the computer needs its own click", async () => {
   opened.length = 0
   const { dom, container, root, button, field, type } = await setup()
   const calls: Call[] = []
@@ -221,16 +221,18 @@ test("signed out: one card throughout, one click runs the chain and opens the br
     assert.match(text(), /Waiting for you to finish signing in…/)
     assert.equal(container.querySelectorAll("section").length, 1)
     assert.deepEqual(bannedIn(text()), [])
-    // The owner signs in; the next poll finds the node step and the earlier click covers it.
+    // The owner signs in; the next poll finds the node step. Nothing is confirmed for them, even with its facts on the card.
     fake.state.signedIn = true
     calls.length = 0
     await render(root, request, { pollTick: 1 })
     assert.deepEqual(
       calls.map(call => `${call.body ? "POST" : "GET"} ${call.body?.actionId ?? ""}`.trim()),
-      ["GET", "POST tailscale-node"]
+      ["GET"]
     )
-    assert.equal(calls[1]!.body!.value, "node-choice")
-    assert.ok(approvalOk(calls[1]!))
+    await act(async () => button("Use this computer (host-1)")!.click())
+    assert.deepEqual(posts(calls).map(call => call.body!.actionId), ["tailscale-node"])
+    assert.equal(posts(calls)[0]!.body!.value, "node-choice")
+    assert.ok(approvalOk(posts(calls)[0]!))
     assert.equal(container.textContent, "")
     assert.equal(opened.length, 1)
   } finally {
@@ -464,3 +466,101 @@ test("leaving the way mid-chain sends no further request for it", async () => {
     dom.window.close()
   }
 })
+
+test("a node step that comes back with changed facts after the click is not approved, and its facts show", async () => {
+  opened.length = 0
+  const { dom, container, root, button, field, type } = await setup()
+  const calls: Call[] = []
+  const fake = fakeTailscale(sharedFacts)
+  let changed = false
+  try {
+    const request = transport(
+      () => {
+        const now = fake.current() as { nextAction: { id: string } | null; revision: number }
+        if (changed && now.nextAction?.id === "tailscale-node") {
+          return { ...now, revision: now.revision + 1, nextAction: actions(id => `facts-changed-${id}`)["tailscale-node"] }
+        }
+        return now
+      },
+      calls,
+      body => {
+        if (body.actionId === SEQUENCE[fake.state.at] && body.actionId !== "tailscale-node") fake.state.at++
+      }
+    )
+    await render(root, request, { pollTick: 0 })
+    await type(field("Tailscale email")!, EMAIL)
+    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    await act(async () => button("Sign in to Tailscale")!.click())
+    fake.state.signedIn = true
+    changed = true
+    calls.length = 0
+    await render(root, request, { pollTick: 1 })
+    // The node step's facts were never shown: no automatic approval, and the button asks.
+    assert.deepEqual(posts(calls), [])
+    assert.match(container.querySelector("details")!.innerHTML, /facts-changed-tailscale-node|tailscale-node/)
+    await act(async () => button("Use this computer (host-1)")!.click())
+    assert.equal(posts(calls).length, 1)
+    assert.equal(posts(calls)[0]!.body!.approval.consentFactsDigest, "facts-changed-tailscale-node")
+    // The host answers with the same step and different facts: nothing more is approved unseen.
+    assert.equal(posts(calls).length, 1)
+    assert.ok(button("Use this computer (host-1)"))
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+  }
+})
+
+test("a response that does not move the setup on stops the chain after one request", async () => {
+  const { dom, container, root, button, field, type } = await setup()
+  const calls: Call[] = []
+  const all = actions(sharedFacts)
+  try {
+    const request = transport(() => view("authorization-required", all["tailscale-setup"], 3), calls)
+    await render(root, request)
+    await type(field("Tailscale email")!, EMAIL)
+    await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
+    calls.length = 0
+    await act(async () => button("Sign in to Tailscale")!.click())
+    assert.equal(posts(calls).length, 1)
+    assert.match(container.textContent ?? "", /Try again/)
+    assert.deepEqual(bannedIn(container.textContent ?? ""), [])
+    assert.ok(button("Sign in to Tailscale"), "the owner can try again")
+    assert.equal(container.querySelector("details summary")?.textContent !== undefined, true)
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+  }
+})
+
+for (const mode of ["server message", "thrown error"] as const) {
+  test(`a failed token save never puts the token in the page or the copied details (${mode})`, async () => {
+    const { dom, container, root, button, field, type } = await setup()
+    const copied: string[] = []
+    Object.defineProperty(dom.window.navigator, "clipboard", { value: { writeText: async (text: string) => void copied.push(text) }, configurable: true })
+    const calls: Call[] = []
+    const request: typeof requestReachability = async (url, body) => {
+      calls.push({ url, ...(body ? { body: body as Record<string, any> } : {}) })
+      if (!body) return { ok: true, data: view("authorization-required", tokenAction, 4) }
+      if (mode === "thrown error") throw new Error(`could not store ${SECRET}`)
+      return { ok: false, code: "internal_error", message: `rejected ${SECRET}`, serverMessage: `echo ${SECRET}` } as never
+    }
+    try {
+      await render(root, request, { reservation: ngrokReservation })
+      const input = field("ngrok agent authtoken")!
+      await type(input, SECRET)
+      await act(async () => button("Save token")!.click())
+      assert.equal(posts(calls).length, 1)
+      assert.equal(input.value, "")
+      assert.equal(container.innerHTML.includes(SECRET), false)
+      assert.equal((container.textContent ?? "").includes(SECRET), false)
+      for (const copy of [...container.querySelectorAll("button")].filter(node => /^Copy diagnostics$/.test(node.textContent ?? ""))) {
+        await act(async () => copy.click())
+      }
+      assert.equal(copied.some(text => text.includes(SECRET)), false)
+      assert.match(container.textContent ?? "", /Try again|couldn.t/i)
+    } finally {
+      await act(async () => root.unmount())
+      dom.window.close()
+    }
+  })
+}
