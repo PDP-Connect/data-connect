@@ -104,6 +104,21 @@ pub(crate) fn profile_env(real_home: &Path, profile: &str) -> Vec<(&'static str,
     ]
 }
 
+/// The real home, given the current `HOME`. A process that restarts itself
+/// (attach and detach do) inherits the profile's HOME, so `home` may already
+/// be `<real home>/.dataconnect-profiles/<profile>/home`; the real home is then
+/// three levels up. Without this the restarted process would nest a second
+/// profile root inside the first and lose its saved state.
+pub(crate) fn real_home_from(home: &Path, profile: &str) -> PathBuf {
+    let already_entered = home.parent().and_then(Path::parent).and_then(Path::parent);
+    match already_entered {
+        Some(real_home) if profile_root(real_home, profile).join("home") == home => {
+            real_home.to_path_buf()
+        }
+        _ => home.to_path_buf(),
+    }
+}
+
 /// `path` must be inside `root` with no `..` component.
 pub(crate) fn check_inside(label: &str, path: &Path, root: &Path) -> Result<(), String> {
     let escapes = path.components().any(|part| part == Component::ParentDir);
@@ -179,10 +194,11 @@ fn enter_profile(profile: &str) {
 fn enter_profile(profile: &str) {
     use std::os::unix::fs::DirBuilderExt;
 
-    let Some(real_home) = dirs::home_dir() else {
+    let Some(current_home) = dirs::home_dir() else {
         eprintln!("profile {profile}: cannot resolve the real home directory");
         std::process::exit(1);
     };
+    let real_home = real_home_from(&current_home, profile);
     let root = profile_root(&real_home, profile);
     let env = profile_env(&real_home, profile);
     for (_, directory) in &env {
@@ -219,6 +235,17 @@ fn enter_profile(profile: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_restarted_profile_process_finds_the_same_root() {
+        let real = Path::new("/home/owner");
+        let entered = profile_root(real, "attach-test").join("home");
+        assert_eq!(real_home_from(&entered, "attach-test"), real);
+        assert_eq!(real_home_from(real, "attach-test"), real);
+        // another profile's home is not mistaken for this one's
+        let other = profile_root(real, "other").join("home");
+        assert_eq!(real_home_from(&other, "attach-test"), other);
+    }
+
     #[test]
     fn a_profile_build_needs_its_own_identifier() {
         assert!(check_identifier("attach-test", "dev.dataconnect.attach-test").is_ok());
