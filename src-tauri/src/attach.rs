@@ -31,6 +31,13 @@ const ENV_OVERRIDE_VARS: [&str; 2] = ["DATACONNECT_RI_URL", "DATACONNECT_CONSOLE
 const PROTECTED_RESOURCE_PATH: &str = "/.well-known/oauth-protected-resource";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// A password login may hash slowly on the server, so it gets longer than
+/// the other requests; it must still end, or the attach window stays busy.
+#[cfg(not(test))]
+const PASSWORD_LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const PASSWORD_LOGIN_TIMEOUT: Duration = Duration::from_secs(1);
+const PASSWORD_LOGIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What the owner pasted, reduced to a server origin and an optional code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,7 +626,14 @@ pub(crate) async fn login_with_password(
     origin: &str,
     password: &str,
 ) -> Result<String, AttachError> {
-    crate::commands::login_reference_server_with_password_and_host(
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(PASSWORD_LOGIN_TIMEOUT)
+        .connect_timeout(PASSWORD_LOGIN_CONNECT_TIMEOUT)
+        .build()
+        .map_err(|_| AttachError::Unreachable)?;
+    crate::commands::login_reference_server_with_client(
+        &client,
         origin.to_string(),
         password,
         None,
@@ -630,7 +644,7 @@ pub(crate) async fn login_with_password(
     .map_err(|error| password_login_error(&error))
 }
 
-/// Maps `login_reference_server_with_password_and_host`'s error text.
+/// Maps `login_reference_server_with_client`'s error text.
 /// `password_login_errors_follow_the_login_function` pins this mapping to
 /// that function's real output.
 fn password_login_error(error: &str) -> AttachError {

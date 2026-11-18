@@ -303,6 +303,77 @@ fn pairing_saves_the_attachment_and_restarts() {
     );
 }
 
+/// A server that answers the identity check, then accepts the next request
+/// and never answers it. It hangs up after `stall` or when the client does.
+fn serve_then_stall(stall: std::time::Duration) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+    let origin = format!("http://{}", listener.local_addr().expect("addr"));
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buffer = [0_u8; 4096];
+        let mut request = Vec::new();
+        while !String::from_utf8_lossy(&request).contains("\r\n\r\n") {
+            let read = stream.read(&mut buffer).expect("read request");
+            if read == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..read]);
+        }
+        stream
+            .write_all(pdpp_metadata().as_bytes())
+            .expect("answer the identity check");
+        drop(stream);
+        let (mut stalled, _) = listener.accept().expect("accept the login");
+        stalled
+            .set_read_timeout(Some(stall))
+            .expect("read timeout");
+        // Returns when the client hangs up or `stall` passes.
+        while matches!(stalled.read(&mut buffer), Ok(read) if read > 0) {}
+    });
+    (origin, handle)
+}
+
+/// A password login that never gets an answer must end with an error and
+/// free the window for the next attempt.
+#[test]
+fn a_stalled_password_login_times_out_and_frees_the_window() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let (origin, server) = serve_then_stall(std::time::Duration::from_secs(15));
+    let started = std::time::Instant::now();
+    let error = invoke_from(
+        &attach_window,
+        "attach_with_owner_password",
+        json!({"input": origin, "password": "pw", "trustPlainHttp": false}),
+    )
+    .expect_err("the login timed out");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the login waited {:?}",
+        started.elapsed()
+    );
+    assert_eq!(error, json!(AttachError::Unreachable.message(&origin)));
+    assert!(
+        !app.state::<AttachWindowState>().busy.load(Ordering::SeqCst),
+        "the window is free again"
+    );
+    let next = invoke_from(
+        &attach_window,
+        "attach_with_owner_password",
+        json!({"input": closed_origin(), "password": "pw", "trustPlainHttp": false}),
+    )
+    .expect_err("nothing listens");
+    assert!(
+        !next.as_str().expect("text").contains("already attaching"),
+        "{next}"
+    );
+    server.join().expect("server");
+    assert!(relaunches(&app).is_empty());
+    assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+}
+
 #[test]
 fn a_rejected_code_saves_nothing_and_does_not_restart() {
     let data_root = tempfile::tempdir().expect("tempdir");
