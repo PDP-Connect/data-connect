@@ -99,7 +99,7 @@ function SetupOperationAction({
         {consent?.disclosures ? (
           <ConsentDisclosures value={consent.disclosures} />
         ) : null}
-        {consent?.facts ? <ConsentFacts facts={consent.facts} /> : null}
+        {consent?.facts ? <ConsentFacts facts={consent.facts} providerId={consent.scope.providerId} /> : null}
       </div>
     )
   }

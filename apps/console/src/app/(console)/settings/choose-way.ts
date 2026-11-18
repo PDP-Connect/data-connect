@@ -101,10 +101,43 @@ function blockedStep(provider: Provider): Missing | null {
 // Reasons the host gives for a way it cannot run, in the owner's words.
 const unsupportedText = "Can't run on this computer.";
 
-function missingFor(provider: Provider, capabilities: Capabilities): Missing | null {
+/**
+ * Ways whose own setup ended blocked on a step only an administrator can do,
+ * by provider id. The console learns this from the setup, not the catalog.
+ */
+export type Blocks = Readonly<Record<string, Missing>>;
+
+/** The one setup outcome that demotes a way: Tailscale Funnel not allowed on this node. */
+export const funnelPolicyActionId = "tailscale-funnel-policy";
+
+/** What the owner reads for a Funnel setup blocked on the administrator step. */
+export function funnelPolicyBlock(href: string | undefined): Missing {
+  const url = href ? URL.parse(href) : null;
+  const safe = url?.protocol === "https:" && !url.username && !url.password ? url.href : funnelHelp;
+  return {
+    text: "Funnel isn't allowed on this Tailscale device yet. Ask an administrator to allow it.",
+    link: { label: "Open Tailscale access controls", href: safe },
+  };
+}
+
+function missingFor(provider: Provider, capabilities: Capabilities, blocks: Blocks = {}): Missing | null {
+  const blocked = blocks[provider.providerId];
+  if (blocked) return blocked;
   const step = blockedStep(provider);
   if (step) return step;
   return pickUsage(provider, capabilities) === null ? { text: unsupportedText } : null;
+}
+
+/**
+ * True when the way can no longer be used: the host says it is not available,
+ * a prerequisite is missing or denied, or its setup ended blocked. A
+ * prerequisite the host cannot read right now (`unknown`, for example while an
+ * app restarts) does not count, so a pinned way survives a short gap.
+ */
+export function wayUnusable(provider: Provider, capabilities: Capabilities, blocks: Blocks = {}): boolean {
+  if (blocks[provider.providerId]) return true;
+  if (pickUsage(provider, capabilities) === null) return true;
+  return provider.prerequisites.some((item) => item.state === "denied" || item.state === "missing");
 }
 
 /**
@@ -112,9 +145,9 @@ function missingFor(provider: Provider, capabilities: Capabilities): Missing | n
  * public address when Tailscale is ready and nothing is missing; otherwise the
  * temporary address. Falls back to the first way this computer can run.
  */
-export function recommendedWay(inventory: Inventory, capabilities: Capabilities): Provider | undefined {
+export function recommendedWay(inventory: Inventory, capabilities: Capabilities, blocks: Blocks = {}): Provider | undefined {
   const visible = inventory.providers.filter((item) => !isDevelopmentOnly(item));
-  const runnable = (item: Provider) => missingFor(item, capabilities) === null;
+  const runnable = (item: Provider) => missingFor(item, capabilities, blocks) === null;
   const funnel = visible.find((item) => item.providerId === "tailscale-funnel");
   if (funnel && runnable(funnel)) return funnel;
   const temporary = visible.find((item) => item.providerId === "localhost-run");
@@ -126,9 +159,9 @@ export function recommendedWay(inventory: Inventory, capabilities: Capabilities)
   );
 }
 
-export function wayRow(provider: Provider, capabilities: Capabilities): WayRow {
+export function wayRow(provider: Provider, capabilities: Capabilities, blocks: Blocks = {}): WayRow {
   const known = copy[provider.providerId];
-  const missing = missingFor(provider, capabilities);
+  const missing = missingFor(provider, capabilities, blocks);
   return {
     providerId: provider.providerId,
     reach: provider.reach,
@@ -141,10 +174,10 @@ export function wayRow(provider: Provider, capabilities: Capabilities): WayRow {
 }
 
 /** The visible ways under "Other ways": three groups, ways that can run first, the recommended way left out. */
-export function otherWays(inventory: Inventory, capabilities: Capabilities, recommendedId: string | null) {
+export function otherWays(inventory: Inventory, capabilities: Capabilities, recommendedId: string | null, blocks: Blocks = {}) {
   const rows = inventory.providers
     .filter((item) => !isDevelopmentOnly(item) && item.providerId !== recommendedId)
-    .map((item) => wayRow(item, capabilities));
+    .map((item) => wayRow(item, capabilities, blocks));
   return groupOrder.map((id) => ({
     id,
     ...groupTitles[id],

@@ -7,6 +7,7 @@ import type {
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react";
+import { isKnownFalseCondition } from "./known-false-conditions.ts";
 import { formatLocalTime, humanizeKey, plain, verbatimValue } from "./plain-text.ts";
 
 type Fact = ReturnType<typeof projectFact>;
@@ -30,7 +31,8 @@ export function UnknownFactsCount({ count, service }: { count: number; service: 
 }
 
 // Every known fact is shown: the owner approves exactly what is listed here.
-export function ConsentFacts({ facts }: { facts: Fact[] }) {
+export function ConsentFacts({ facts: all, providerId }: { facts: Fact[]; providerId: string | null | undefined }) {
+  const facts = all.filter((fact) => !isKnownFalseCondition(providerId, fact.value));
   const groups = [...new Set(facts.map((fact) => fact.group))];
   return (
     <div className="grid gap-4">
@@ -129,7 +131,7 @@ export function SetupApprovalCard({
       {complete ? (
         <>
           <ConsentDisclosures value={consent.disclosures} />
-          <ConsentFacts facts={consent.facts!} />
+          <ConsentFacts facts={consent.facts!} providerId={consent.scope.providerId} />
           <label className="pdpp-caption flex items-start gap-2">
             <input
               checked={checked}
@@ -195,7 +197,7 @@ export function RuntimeRouteConsentCard({
             <p className="pdpp-caption break-words">Your address will be: {review.scope.query.expectedOrigin}</p>
           ) : null}
           <ConsentDisclosures value={review.disclosures} />
-          <ConsentFacts facts={review.facts} />
+          <ConsentFacts facts={review.facts} providerId={review.scope?.providerId} />
           <label>
             <input
               checked={approvedDigest === review.consentFactsDigest}

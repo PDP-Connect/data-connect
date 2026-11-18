@@ -57,7 +57,7 @@ export function TurnOnCard({
           {consent.scope?.query.expectedOrigin ? (
             <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
           ) : null}
-          <ConsentFacts facts={shown} />
+          <ConsentFacts facts={shown} providerId={candidate.providerId} />
           <UnknownFactsCount count={unknown} service={candidate.display.label} />
         </details>
       ) : null}

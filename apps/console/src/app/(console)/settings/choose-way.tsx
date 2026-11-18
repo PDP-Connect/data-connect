@@ -1,7 +1,7 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { type WayRow, otherWays } from "./choose-way.ts";
+import { type Blocks, type WayRow, otherWays } from "./choose-way.ts";
 import type { Inventory } from "./prepare-remote-access.ts";
 
 type Capabilities = Parameters<typeof otherWays>[1];
@@ -40,16 +40,18 @@ function WayChoice({ row, checked, onPick }: { row: WayRow; checked: boolean; on
 export function RecommendedWay({
   row,
   checked,
+  disabled,
   onPick,
 }: {
   row: WayRow;
   checked: boolean;
+  disabled: boolean;
   onPick: (providerId: string) => void;
 }) {
   return (
     <section aria-label="Recommended way" className="grid gap-1 rounded-lg border p-3">
       <span>
-        <input checked={checked} name="way" onChange={() => onPick(row.providerId)} type="radio" />{" "}
+        <input checked={checked} disabled={disabled} name="way" onChange={() => onPick(row.providerId)} type="radio" />{" "}
         <strong>{row.title}</strong> · Recommended
       </span>
       {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
@@ -64,16 +66,18 @@ export function OtherWays({
   recommendedId,
   pickedId,
   disabled,
+  blocks,
   onPick,
 }: {
   inventory: Inventory;
   capabilities: Capabilities;
+  blocks: Blocks;
   recommendedId: string | null;
   pickedId: string | null;
   disabled: boolean;
   onPick: (providerId: string) => void;
 }) {
-  const groups = otherWays(inventory, capabilities, recommendedId);
+  const groups = otherWays(inventory, capabilities, recommendedId, blocks);
   return (
     <fieldset className="grid gap-4" disabled={disabled}>
       <legend className="pdpp-label">Other ways</legend>

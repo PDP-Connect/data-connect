@@ -190,6 +190,13 @@ async function withScreen<T>(
   }
 }
 const mutating = (calls: Call[]) => calls.filter((call) => call.url.startsWith("/operations") || call.url.includes("/approve"));
+// Every request that changes the host for one way: its draft, actions, commit and setup.
+const changesHostFor = (calls: Call[], providerId: string) =>
+  calls.filter(
+    (call) =>
+      /^\/(setups|drafts)$|\/(actions|commit)\b/.test(call.url.split("?")[0]!) &&
+      (call.body?.providerId === providerId || call.url.includes(`d-${providerId}/`))
+  );
 
 test("the card recommends the temporary address and Other ways opens in three groups", async () => {
   await withScreen(noTailscale, async ({ container, press, text }) => {
@@ -221,6 +228,9 @@ test("choosing another way prepares that way and never approves without the clic
     assert.equal(drafts.length, before + 1, "one new draft for the chosen way");
     assert.equal(drafts.at(-1)!.body?.providerId, "cloudflare-named");
     assert.deepEqual(mutating(calls), []);
+    // After the click, nothing positive goes to the way that was left.
+    const afterClick = calls.slice(calls.findIndex((call) => call.body?.providerId === "cloudflare-named"));
+    assert.deepEqual(changesHostFor(afterClick, "tailscale-funnel"), []);
     assert.match(text(), /Turn on remote access/);
     await act(async () => radio.click());
     await settle();

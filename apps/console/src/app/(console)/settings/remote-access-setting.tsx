@@ -41,7 +41,14 @@ import {
   staleReviewCodes,
 } from "./prepare-remote-access.ts";
 import { OtherWays, RecommendedWay } from "./choose-way.tsx";
-import { recommendedWay, wayRow } from "./choose-way.ts";
+import {
+  type Blocks,
+  funnelPolicyActionId,
+  funnelPolicyBlock,
+  recommendedWay,
+  wayRow,
+  wayUnusable,
+} from "./choose-way.ts";
 import { AllowCard, TurnOnCard, TurningOnChecklist, checklistStep } from "./turn-on.tsx";
 
 type Inventory = ReturnType<typeof projectInventory>;
@@ -96,8 +103,17 @@ export function RemoteAccessSetting({
   const [inventory, setInventory] = useState<Inventory | null>(null);
   const [state, setState] = useState<State>({ routes: [], reasons: {}, starting: false });
   const [stateLoaded, setStateLoaded] = useState(false);
-  // The way the owner picked under Other ways. Until then the default one is used.
-  const [chosen, setChosen] = useState<string | null>(null);
+  // The way on screen, owned here. It is set when the owner picks a way and
+  // when preparation starts for one. After that a catalog poll changes only
+  // which way carries the Recommended badge, never the way being prepared.
+  const [pinned, setPinned] = useState<string | null>(null);
+  // Ways whose own setup ended blocked on an administrator step.
+  const [blocks, setBlocks] = useState<Blocks>({});
+  // Why the console moved off a way the owner was on.
+  const [switchNote, setSwitchNote] = useState<string | null>(null);
+  // Bumped whenever the way on screen changes. A preparation or click binds to
+  // the value it started with and sends nothing positive once it has moved on.
+  const selection = useRef(0);
   const [showOtherWays, setShowOtherWays] = useState(false);
   const [declined, setDeclined] = useState<string | null>(null);
   const [prep, setPrep] = useState<Prep>({ status: "idle" });
@@ -270,10 +286,11 @@ export function RemoteAccessSetting({
     return () => { active = false; };
   }, [operation, request]);
 
-  const recommended = inventory ? recommendedWay(inventory, capabilities) : undefined;
-  const way = inventory
-    ? ((chosen ? inventory.providers.find((item) => item.providerId === chosen) : undefined) ?? recommended)
-    : undefined;
+  const recommended = inventory ? recommendedWay(inventory, capabilities, blocks) : undefined;
+  const pinnedWay = inventory && pinned ? inventory.providers.find((item) => item.providerId === pinned) : undefined;
+  // The pinned way stays until it truly cannot be used: a way whose prerequisite
+  // is only unreadable for a moment is not one.
+  const way = pinnedWay && !wayUnusable(pinnedWay, capabilities, blocks) ? pinnedWay : recommended;
   const wayUsage = way ? pickUsage(way, capabilities) : null;
   const wayId = way?.providerId ?? null;
   const wayLabel = way ? plain(way.label) : undefined;
@@ -356,13 +373,31 @@ export function RemoteAccessSetting({
       (outcome === "done" && state.routes.length > 0 && operation.kind !== "start"));
   const readyToPrepare = idle && !passwordMissing && wayId !== null && wayUsage !== null && declined !== wayId;
 
+  // Preparation for a way pins it. If that replaces a way the owner was on,
+  // the old way could no longer be used: say why.
+  useEffect(() => {
+    if (!readyToPrepare || !way || !wayId || pinned === wayId) return;
+    if (pinned !== null) {
+      selection.current += 1;
+      const from = pinnedWay ? wayRow(pinnedWay, capabilities, blocks) : null;
+      setSwitchNote(
+        from
+          ? `${from.title} can't be used now${from.missing ? `: ${from.missing.text}` : "."} Using ${plain(wayRow(way, capabilities, blocks).title)} instead.`
+          : null
+      );
+    }
+    setPinned(wayId);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when the way on screen changes
+  }, [readyToPrepare, wayId, pinned]);
+
   useEffect(() => {
     if (!readyToPrepare || !wayId || !wayUsage) {
       refreshing.current = null;
       return;
     }
     let active = true;
-    const isCurrent = () => active && mounted.current;
+    const token = selection.current;
+    const isCurrent = () => active && mounted.current && selection.current === token;
     // A review already on screen for this way stays while it is refreshed.
     setPrep((current) =>
       current.status === "done" && current.providerId === wayId && current.result.kind === "ready"
@@ -463,13 +498,19 @@ export function RemoteAccessSetting({
   // `shown` is the review the owner saw: its digest is what is approved. If the
   // host holds a newer review of the same facts, only its id is newer.
   async function turnOn(shown: Review) {
+    const token = selection.current;
     await change(async () => {
+      if (selection.current !== token) return;
       let target = shown;
       let refresh = false;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         if (refresh || reviewExpired(target, Date.now())) {
           // Stopped means the screen went away or the password is gone; the screen already says so.
-          const fresh = await prepare(shown.candidate.providerId, wayUsage ?? "", () => mounted.current).catch((failure) => {
+          const fresh = await prepare(
+            shown.candidate.providerId,
+            wayUsage ?? "",
+            () => mounted.current && selection.current === token
+          ).catch((failure) => {
             if (failure instanceof PreparationStopped) return null;
             throw failure;
           });
@@ -511,14 +552,20 @@ export function RemoteAccessSetting({
     });
   }
   async function allow(draft: Draft, action: Action, input: { value?: string; secret?: string }) {
+    const token = selection.current;
     await change(async () => {
       requirePassword();
+      if (selection.current !== token) return;
       await runAction(send, draft, action, input);
       setPrepRun((n) => n + 1);
     });
   }
   function pickWay(providerId: string) {
-    setChosen(providerId);
+    // The radios are disabled while a change is in flight; this is the same rule at the handler.
+    if (mutationBlocked) return;
+    selection.current += 1;
+    setPinned(providerId);
+    setSwitchNote(null);
     setDeclined(null);
     setChanged(null);
     shownReview.current = null;
@@ -719,8 +766,14 @@ export function RemoteAccessSetting({
         <section aria-label="Turn on remote access" className="grid gap-4">
           <h3 className="pdpp-label">Step 2 of 2 · Turn on</h3>
           {inventory && recommended ? (
-            <RecommendedWay checked={wayId === recommended.providerId} onPick={pickWay} row={wayRow(recommended, capabilities)} />
+            <RecommendedWay
+              checked={wayId === recommended.providerId}
+              disabled={mutationBlocked}
+              onPick={pickWay}
+              row={wayRow(recommended, capabilities, blocks)}
+            />
           ) : null}
+          {switchNote ? <p role="status">{switchNote}</p> : null}
           {prep.status === "preparing" ? <p role="status">Checking this computer…</p> : null}
           {done?.kind === "allow" && declined !== wayId ? (
             <AllowCard
@@ -746,6 +799,7 @@ export function RemoteAccessSetting({
           </button>
           {showOtherWays && inventory ? (
             <OtherWays
+              blocks={blocks}
               capabilities={capabilities}
               disabled={mutationBlocked}
               inventory={inventory}
@@ -766,6 +820,17 @@ export function RemoteAccessSetting({
           onReadiness={() => undefined}
           onChange={async (view, mutation) => {
             // A finished or changed setup moves the chain on.
+            if (view.scope.providerId === "tailscale-funnel") {
+              const policy = view.state === "blocked" && view.nextAction?.id === funnelPolicyActionId;
+              setBlocks((current) => {
+                if (!policy) {
+                  if (!("tailscale-funnel" in current)) return current;
+                  const { "tailscale-funnel": _gone, ...rest } = current;
+                  return rest;
+                }
+                return { ...current, "tailscale-funnel": funnelPolicyBlock(view.nextAction?.href) };
+              });
+            }
             const mark = `${view.operationId}:${view.revision}:${view.state}`;
             if ((mutation || view.state === "complete") && seenSetup.current !== mark) {
               seenSetup.current = mark;
@@ -872,7 +937,7 @@ export function RemoteAccessSetting({
                 Lifecycle: {phase ?? "none"} · route{" "}
                 {route.routeState}
               </p>
-              <ConsentFacts facts={knownFacts} />
+              <ConsentFacts facts={knownFacts} providerId={wayId} />
               <UnknownFactsCount count={unknownFacts} service={serviceLabel} />
             </Diagnostics>
           );
