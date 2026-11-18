@@ -203,7 +203,7 @@ test("signed out: one card throughout, one click runs the chain and opens the br
     assert.ok(find, "the tailnet field says where to find the name")
     assert.equal(find.getAttribute("href"), "https://login.tailscale.com/admin/dns")
     assert.match(text(), /Tailscale shows it under DNS in its admin console\./)
-    assert.ok(container.querySelector("details")?.textContent?.includes("What this does"))
+    assert.ok(container.querySelector('[aria-label="What this does"]'), "what the approval does is in the default view")
     assert.deepEqual(bannedIn(text()), [])
     await type(field("Tailscale email")!, EMAIL)
     await type(field("Your tailnet name (ends in .ts.net)")!, TAILNET)
@@ -294,8 +294,7 @@ test("new facts mid-chain stop the chain, show the facts, and nothing is approve
     assert.ok(button("Sign in to Tailscale"))
     assert.match(container.textContent ?? "", /Sign in to Tailscale to finish\./)
     assert.equal(opened.length, 0)
-    const facts = container.querySelector("details")!
-    assert.match(facts.innerHTML, /Facts for tailscale-tailnet\./)
+    assert.match(container.querySelector('[aria-label="What this does"]')!.textContent ?? "", /Facts for tailscale-tailnet\./)
     // The owner clicks again with those facts on the card; the login step's facts are new again.
     await act(async () => button("Sign in to Tailscale")!.click())
     assert.deepEqual(posts(calls).map(call => call.body!.actionId), [
@@ -502,7 +501,7 @@ test("a node step that comes back with changed facts after the click is not appr
     await render(root, request, { pollTick: 1 })
     // The node step's facts were never shown: no automatic approval, and the button asks.
     assert.deepEqual(posts(calls), [])
-    assert.match(container.querySelector("details")!.innerHTML, /Facts for tailscale-node\./)
+    assert.match(container.querySelector('[aria-label="What this does"]')!.textContent ?? "", /Facts for tailscale-node\./)
     await act(async () => button("Use this computer (host-1)")!.click())
     assert.equal(posts(calls).length, 1)
     assert.equal(posts(calls)[0]!.body!.approval.consentFactsDigest, "facts-changed-tailscale-node")

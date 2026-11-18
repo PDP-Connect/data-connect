@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useState } from "react";
 import { Input } from "@/components/ui/input.tsx";
-import { ConsentDisclosures, ConsentFacts, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
+import { ApprovalDisclosure, ConsentDisclosures, ConsentFacts, PlainDisclosure, readDisclosure, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import { type Action, type Draft, disclosureLines, effectLines, type Review } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
 
@@ -36,6 +36,13 @@ export function TurnOnCard({
     candidate.consentFactsDigest === consent.consentFactsDigest &&
     steps.every((step) => step.consent?.facts !== undefined && step.consent.disclosures != null);
   const { shown, unknown } = splitFacts(consent?.facts ?? []);
+  // disclosureLines words the route's traffic, cost and address; every other string the approval binds shows here too.
+  const { traffic: _traffic, cost: _cost, address: _address, ...otherDisclosures } = isRecord(consent?.disclosures) ? consent.disclosures : {};
+  const lines = [...disclosureLines(candidate), ...steps.map((step) => step.disclosure.text), ...steps.map((step) => step.label)];
+  const bound = [otherDisclosures, ...steps.map((step) => step.consent?.disclosures)];
+  // An unreadable shape opens Details: the owner is never asked to approve text that is hidden.
+  const readable = readDisclosure(bound);
+  const detailsOpen = readable.unreadable;
   return (
     <section aria-label="Turn on" className="grid gap-4">
       {changed ? (
@@ -55,11 +62,12 @@ export function TurnOnCard({
       ) : (
         <p role="status">We couldn't load this service's details. Try again.</p>
       )}
+      {complete ? <PlainDisclosure value={bound} except={lines} /> : null}
       <button disabled={busy || !complete} onClick={() => onTurnOn(review)} type="button">
         Turn on remote access
       </button>
       {complete ? (
-        <details>
+        <details open={detailsOpen}>
           <summary>Details</summary>
           <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
           {consent.scope?.query.expectedOrigin ? (
@@ -80,6 +88,9 @@ export function TurnOnCard({
     </section>
   );
 }
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** A setup action with effects. Nothing runs until Allow. */
 export function AllowCard({
@@ -106,6 +117,7 @@ export function AllowCard({
           <li key={line}>{plain(line)}</li>
         ))}
       </ul>
+      {action.consent && complete ? <ApprovalDisclosure actionDisclosure={action.disclosure} consent={action.consent} shown={[action.label, ...effectLines(action)]} /> : null}
       {field ? (
         <label className="grid gap-2">
           <span>{plain(field.label)}</span>

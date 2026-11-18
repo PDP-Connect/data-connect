@@ -100,40 +100,79 @@ export function ConsentDisclosures({ value, providerId }: { value: unknown; prov
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+// Fields that are identifiers, evidence or addresses, never text for the owner to read.
+const machineKey =
+  /^(?:id|kind|type|digest|revision|hash|href|url|uri|links?|actor|verification|purpose|permission|scope)$|(?:Id|Ids|Digest|Revision|Hash|Href|Url|Uri|At|Time|Timestamp)$|[_-](?:id|digest|revision|hash|href|url|uri|at|time|timestamp)$/;
+// Keys whose single-word value is still a sentence ("Free").
+const textKey = /^(?:text|summary|description|message|title|note|reason|condition|conditions|disclosure|disclosures|warning|detail|details|statement)$/i;
+// Enum-like words, ids and digests, URLs and timestamps: machine values by shape.
+const machineShape = /^(?:[a-z][a-z0-9_.:-]*|[0-9a-f]{16,}|[a-z][a-z0-9+.-]*:\/\/\S*|\d{4}-\d{2}-\d{2}T\S*)$/;
+
 /**
- * The sentences a disclosure holds, in reading order: the action or route's own text, its cost, and the
- * conditions on the address. Keys, digests, revisions and kinds are never sentences, so they never show.
- * Shapes: an action's disclosures are { action: { disclosure: { text } } }; a route's are
- * { disclosure: { text }, cost: { summary }, address: { conditions: [] } }.
+ * Walks a disclosure for the text an owner reads. A string with spaces, or a one-word string under a
+ * text key, is a sentence; ids, digests, revisions, links, enum words and timestamps are not. A number,
+ * a boolean or a capitalised one-word string under another key has no known reading: `unreadable`.
  */
-export function disclosureSentences(value: unknown): string[] {
-  if (!isRecord(value)) return [];
-  const text = (holder: unknown) => (isRecord(holder) && typeof holder.text === "string" ? [holder.text] : []);
-  const action = isRecord(value.action) ? value.action : {};
-  const cost = isRecord(value.cost) && typeof value.cost.summary === "string" ? [value.cost.summary] : [];
-  const address = isRecord(value.address) ? value.address : {};
-  const conditions = Array.isArray(address.conditions)
-    ? address.conditions.filter((item): item is string => typeof item === "string")
-    : [];
-  return [...text(value.disclosure), ...text(action.disclosure), ...cost, ...conditions]
-    .map((sentence) => plain(sentence).trim())
-    .filter((sentence) => sentence !== "")
-    .map((sentence) => `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}`)
-    .map((sentence) => (/[.!?]$/.test(sentence) ? sentence : `${sentence}.`));
+export function readDisclosure(value: unknown): { sentences: string[]; unreadable: boolean } {
+  const found: string[] = [];
+  let unreadable = false;
+  const walk = (node: unknown, key: string) => {
+    if (node === null || node === undefined) return;
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item, key);
+    } else if (isRecord(node)) {
+      for (const [name, item] of Object.entries(node)) walk(item, name);
+    } else if (machineKey.test(key)) {
+      return;
+    } else if (typeof node === "string") {
+      const text = node.trim();
+      if (text === "") return;
+      if (/\s/.test(text) || textKey.test(key)) found.push(text);
+      else if (!machineShape.test(text)) unreadable = true;
+    } else {
+      unreadable = true;
+    }
+  };
+  walk(value, "");
+  return { sentences: found, unreadable };
 }
 
-/** The structured disclosure, verbatim, for the owner who wants every field. Closed by default. */
-export function DisclosureDetails({ value, providerId }: { value: unknown; providerId?: string | null }) {
+const asSentence = (text: string) => {
+  const sentence = plain(text).trim();
+  const cased = `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}`;
+  return /[.!?]$/.test(cased) ? cased : `${cased}.`;
+};
+
+/**
+ * The sentences a disclosure holds, in reading order, found by walking it (see readDisclosure), so the
+ * text is shown wherever the host puts it. Sentences in `except` are already on screen and are left out.
+ */
+export function disclosureSentences(value: unknown, except: readonly string[] = []): string[] {
+  const seen = new Set(except.filter((line) => line.trim() !== "").map(asSentence));
+  const sentences: string[] = [];
+  for (const text of readDisclosure(value).sentences) {
+    if (plain(text).trim() === "") continue;
+    const sentence = asSentence(text);
+    if (!seen.has(sentence)) {
+      seen.add(sentence);
+      sentences.push(sentence);
+    }
+  }
+  return sentences;
+}
+
+/** The structured disclosure, verbatim, for the owner who wants every field. Closed unless `open`. */
+export function DisclosureDetails({ value, providerId, open }: { value: unknown; providerId?: string | null; open?: boolean }) {
   return (
-    <details>
+    <details open={open}>
       <summary>Details</summary>
       <ConsentDisclosures value={value} providerId={providerId} />
     </details>
   );
 }
 
-export function PlainDisclosure({ value }: { value: unknown }) {
-  const sentences = disclosureSentences(value);
+export function PlainDisclosure({ value, except }: { value: unknown; except?: readonly string[] }) {
+  const sentences = disclosureSentences(value, except);
   if (sentences.length === 0) return null;
   return (
     <ul className="grid gap-2">
@@ -141,6 +180,35 @@ export function PlainDisclosure({ value }: { value: unknown }) {
         <li key={sentence}>{sentence}</li>
       ))}
     </ul>
+  );
+}
+
+type ApprovalConsent = NonNullable<Action["consent"]>;
+
+/**
+ * What an approval card shows before its approve or save control: every sentence the disclosure and the
+ * action's own disclosure hold, the facts, and the structured Details. The text is found by walking, so
+ * no field is named here. `shown` lists text the card already prints. An unreadable shape opens Details
+ * (fail closed: the owner is never asked to approve text that is hidden).
+ */
+export function ApprovalDisclosure({
+  consent,
+  actionDisclosure,
+  shown = [],
+}: {
+  consent: ApprovalConsent;
+  actionDisclosure?: unknown;
+  shown?: readonly string[];
+}) {
+  const bound = { disclosure: actionDisclosure, disclosures: consent.disclosures };
+  const readable = readDisclosure(bound);
+  const open = readable.unreadable || readable.sentences.length === 0;
+  return (
+    <>
+      <PlainDisclosure value={bound} except={shown} />
+      {consent.facts ? <ConsentFacts facts={consent.facts} providerId={consent.scope.providerId} /> : null}
+      <DisclosureDetails open={open} value={consent.disclosures} providerId={consent.scope.providerId} />
+    </>
   );
 }
 
@@ -178,9 +246,7 @@ export function SetupApprovalCard({
       {children}
       {complete ? (
         <>
-          <PlainDisclosure value={consent.disclosures} />
-          <ConsentFacts facts={consent.facts!} providerId={consent.scope.providerId} />
-          <DisclosureDetails value={consent.disclosures} providerId={consent.scope.providerId} />
+          <ApprovalDisclosure actionDisclosure={action.disclosure} consent={consent} shown={[action.label]} />
           <label className="pdpp-caption flex items-start gap-2">
             <input
               checked={checked}

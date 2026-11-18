@@ -7,9 +7,7 @@ import { Input } from "@/components/ui/input.tsx"
 import { openResource } from "../../../../../../src/lib/open-resource"
 import type { requestReachability } from "./reachability-actions.ts"
 import {
-  DisclosureDetails,
-  PlainDisclosure,
-  ConsentFacts,
+  ApprovalDisclosure,
   SetupApprovalCard,
 } from "./reachability-consent.tsx"
 import {
@@ -120,13 +118,7 @@ function SetupOperationAction({
             {plain(action.label)}
           </a>
         ) : null}
-        {consent?.disclosures ? (
-          <>
-            <PlainDisclosure value={consent.disclosures} />
-            <DisclosureDetails value={consent.disclosures} providerId={consent.scope.providerId} />
-          </>
-        ) : null}
-        {consent?.facts ? <ConsentFacts facts={consent.facts} providerId={consent.scope.providerId} /> : null}
+        {consent ? <ApprovalDisclosure actionDisclosure={action.disclosure} consent={consent} shown={[action.label, action.instructions ?? action.help ?? action.disclosure.text]} /> : null}
       </div>
     )
   }
@@ -189,22 +181,18 @@ function SetupOperationAction({
 
 type Consent = NonNullable<NonNullable<SetupView["nextAction"]>["consent"]>
 
-// The plain-words facts of the steps one click may cover.
-function WhatThisDoes({ consents }: { consents: Consent[] }) {
+// What the steps one click may cover do, in the default view before the control that sends the approval.
+function WhatThisDoes({ consents, shown: already = [], actionDisclosure }: { consents: Consent[]; shown?: readonly string[]; actionDisclosure?: unknown }) {
   const shown = consents.filter(consent => consent.facts !== undefined && consent.disclosures != null)
   if (shown.length === 0) return null
   return (
-    <details>
-      <summary>What this does</summary>
-      <div className="grid gap-3">
-        {shown.map(consent => (
-          <div className="grid gap-2" key={consent.consentFactsDigest}>
-            <PlainDisclosure value={consent.disclosures} />
-            <ConsentFacts facts={consent.facts!} providerId={consent.scope.providerId} />
-          </div>
-        ))}
-      </div>
-    </details>
+    <div aria-label="What this does" className="grid gap-3" role="group">
+      {shown.map(consent => (
+        <div className="grid gap-2" key={consent.consentFactsDigest}>
+          <ApprovalDisclosure actionDisclosure={actionDisclosure} consent={consent} shown={already} />
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -271,7 +259,7 @@ function InputCard({
           {secret ? "Get a token" : "Where to get it"}
         </a>
       ) : null}
-      {action.consent ? <WhatThisDoes consents={[action.consent]} /> : null}
+      {action.consent ? <WhatThisDoes actionDisclosure={action.disclosure} consents={[action.consent]} shown={[action.label]} /> : null}
       {approval ? null : <p role="status">We couldn't load this service's details. Try again.</p>}
       <div className="flex flex-wrap gap-3">
         <button

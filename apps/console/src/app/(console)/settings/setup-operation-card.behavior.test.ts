@@ -151,3 +151,159 @@ test("an approval card lists sentences and facts, keeps the raw descriptor in De
     await close()
   }
 })
+
+/** The page text a person sees without opening any disclosure: closed Details are removed, open ones stay. */
+function shownText(container: Element) {
+  const copy = container.cloneNode(true) as Element
+  for (const closed of copy.querySelectorAll("details:not([open])")) closed.remove()
+  return copy.textContent ?? ""
+}
+
+function withDisclosures(kind: string, disclosures: unknown) {
+  const next = action(kind)
+  return { ...next, consent: { ...next.consent, disclosures } }
+}
+
+const approvalFields = { digest: DIGEST, disclosureRevision: REVISION, consentFactsDigest: "consent-v1:abc" }
+
+function pickFields(approval: Record<string, unknown> | undefined) {
+  return {
+    digest: approval?.digest,
+    disclosureRevision: approval?.disclosureRevision,
+    consentFactsDigest: approval?.consentFactsDigest,
+  }
+}
+
+test("a token card shows the disclosure sentence and the cost before Save token, and no digest", async () => {
+  const { act, container, sent, close } = await mount(action("provide-secret", { secretLabel: "Scoped API token" }))
+  try {
+    const text = shownText(container)
+    assert.match(text, /This sets up the service for you\./)
+    assert.match(text, /Cost/)
+    assert.match(text, /Free/)
+    assert.equal(text.includes(DIGEST), false)
+    assert.equal(text.includes(REVISION), false)
+    assert.equal(text.includes("consent-v1:abc"), false)
+    const input = container.querySelector<HTMLInputElement>('input[type="password"]')!
+    await act(async () => type(container, input, "secret-value"))
+    await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent === "Save token")!.click())
+    assert.deepEqual(pickFields(sent.find(body => "secret" in body)!.approval), approvalFields)
+  } finally {
+    await close()
+  }
+})
+
+test("a setup approval shows a top-level disclosures string and an object-valued address condition", async () => {
+  const sentence = "This action creates a recurring paid subscription"
+  const condition = "The address changes after every restart"
+  const { act, container, sent, close } = await mount(
+    withDisclosures("gozar-runs", {
+      disclosures: [sentence],
+      address: { conditions: [{ detail: condition, kind: "ephemeral", digest: DIGEST }] },
+      evidence: { revision: REVISION, observedAt: "2026-11-18T10:00:00Z", href: "https://example.test/terms" },
+    })
+  )
+  try {
+    const text = shownText(container)
+    assert.ok(text.includes(`${sentence}.`), "the top-level disclosures string shows")
+    assert.ok(text.includes(`${condition}.`), "the object-valued condition shows")
+    assert.equal(text.includes(DIGEST), false, "a digest stays out of the default view")
+    assert.equal(text.includes(REVISION), false)
+    assert.equal(text.includes("example.test"), false)
+    assert.equal(text.includes("2026-11-18"), false)
+    assert.equal(container.querySelector("details")!.hasAttribute("open"), false, "a readable disclosure leaves Details closed")
+    await act(async () => container.querySelector<HTMLInputElement>('[aria-label="Setup approval"] input[type="checkbox"]')!.click())
+    await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent === "Authorize the setup")!.click())
+    assert.deepEqual(pickFields(sent.find(body => body.approval)!.approval), approvalFields)
+  } finally {
+    await close()
+  }
+})
+
+test("a disclosure of an unknown shape opens Details on the setup approval and on the token card", async () => {
+  const unknown = { retentionDays: 30, recurring: true }
+  for (const kind of ["gozar-runs", "provide-secret"]) {
+    const { container, close } = await mount(withDisclosures(kind, unknown))
+    try {
+      assert.equal(container.querySelector("details")!.hasAttribute("open"), true, `${kind}: Details starts open`)
+      assert.match(shownText(container), /Retention days/)
+    } finally {
+      await close()
+    }
+  }
+})
+
+test("the allow card and the turn-on card show every disclosure string and still send the same approval", async () => {
+  const React = await import("react")
+  const { act, createElement } = React
+  const { createRoot } = await import("react-dom/client")
+  const { AllowCard, TurnOnCard } = await import("./turn-on.tsx")
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+  const container = dom.window.document.querySelector("#root")!
+  const root = createRoot(container)
+  try {
+    const step = action("run-it", { effects: { writes: [], networkOrigins: [], requiresPrivilege: false, restartRequired: false } }) as never as Record<string, any>
+    step.consent.disclosures = { action: { id: "next-step", digest: DIGEST }, disclosures: ["This step bills your card every month"] }
+    const allowed: unknown[] = []
+    await act(async () =>
+      root.render(
+        createElement(AllowCard, {
+          action: step as never,
+          draft: { configuration: { inputRequirements: [] } } as never,
+          busy: false,
+          onAllow: (given: unknown) => allowed.push(given),
+          onOther: () => {},
+        })
+      )
+    )
+    const allowText = shownText(container)
+    assert.ok(allowText.includes("This step bills your card every month."))
+    assert.match(allowText, /Cost/)
+    assert.equal(allowText.includes(DIGEST), false)
+    await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent === "Allow")!.click())
+    const given = allowed[0] as typeof step
+    assert.deepEqual(
+      { digest: given.digest, disclosureRevision: given.disclosure.revision, consentFactsDigest: given.consent.consentFactsDigest },
+      approvalFields
+    )
+
+    const review = {
+      id: "review-1",
+      kind: "route",
+      candidate: {
+        providerId: "workshop",
+        display: { label: "Workshop" },
+        consentFactsDigest: "consent-v1:route",
+        consent: {
+          consentFactsDigest: "consent-v1:route",
+          facts: [],
+          scope: { kind: "route", providerId: "workshop", query: { target: "http://localhost:3000", usage: { kind: "attached" } } },
+          disclosures: {
+            traffic: { providerCanReadPayload: false },
+            cost: { kind: "free" },
+            address: { stability: "stable" },
+            disclosures: ["Your address is listed in a public directory"],
+            digest: DIGEST,
+          },
+        },
+      },
+    }
+    const turned: unknown[] = []
+    await act(async () =>
+      root.render(createElement(TurnOnCard, { review: review as never, busy: false, changed: null, onTurnOn: (given: unknown) => turned.push(given) }))
+    )
+    const turnText = shownText(container)
+    assert.ok(turnText.includes("Your address is listed in a public directory."))
+    assert.equal(turnText.includes(DIGEST), false)
+    assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
+    await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!.click())
+    const sentReview = turned[0] as typeof review
+    assert.equal(sentReview.id, "review-1")
+    assert.equal(sentReview.candidate.consentFactsDigest, "consent-v1:route")
+    assert.equal(sentReview.candidate.consent.consentFactsDigest, "consent-v1:route")
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+  }
+})
