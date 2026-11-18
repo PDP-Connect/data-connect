@@ -8,7 +8,7 @@ import { JSDOM } from "jsdom";
 import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { type Action, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn } from "./prepare-remote-access.ts";
+import { type Action, MAX_PREPARATION_RESTARTS, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn } from "./prepare-remote-access.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
 import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
@@ -232,7 +232,7 @@ test("when the library does not say whether an action has effects, it counts as 
   });
 });
 
-test("a draft the host no longer holds restarts the chain once from a new draft", async () => {
+test("a draft the host no longer holds restarts the chain from a new draft without discarding it", async () => {
   let reviews = 0;
   const { request, urls } = recorder({
     ...baseTable,
@@ -241,7 +241,47 @@ test("a draft the host no longer holds restarts the chain once from a new draft"
   });
   const result = await prepareTurnOn(request, choice);
   assert.equal(result.kind, "ready");
-  assert.ok(urls().includes("/drafts/d-1/discard"));
+  assert.ok(!urls().includes("/drafts/d-1/discard"), "the host's state does not name this draft, so it is not ours to drop");
+});
+
+test("a draft another preparer committed is not discarded by a restart", async () => {
+  const committed = [{ providerId: "p-tunnel", providerLabel: "T", draftId: "d-1", usage: "session", committed: true, setup: null }];
+  let commits = 0;
+  const { request, urls } = recorder({
+    ...baseTable,
+    "/state": () => ok({ routes: [], reasons: {}, starting: false, services: commits > 0 ? committed : [] }),
+    "/drafts/d-1/commit": () => (++commits === 1 ? fail("configuration_stale") : ok(draftWith().configuration)),
+    "/drafts/d-1": ok(draftWith()),
+    "/drafts/d-1/discard": ok({ discarded: true }),
+  });
+  const result = await prepareTurnOn(request, choice);
+  assert.equal(result.kind, "ready");
+  assert.ok(!urls().includes("/drafts/d-1/discard"));
+});
+
+test("an uncommitted draft the host still names is discarded once when it is stale, so the restart starts fresh", async () => {
+  const uncommitted = [{ providerId: "p-tunnel", providerLabel: "T", draftId: "d-1", usage: "session", committed: false, setup: null }];
+  let discarded = false;
+  let commits = 0;
+  const { request, urls } = recorder({
+    ...baseTable,
+    "/state": () => ok({ routes: [], reasons: {}, starting: false, services: discarded ? [] : uncommitted }),
+    "/drafts/d-1": ok(draftWith()),
+    "/drafts/d-1/commit": () => (++commits === 1 ? fail("configuration_stale") : ok(draftWith().configuration)),
+    "/drafts/d-1/discard": () => {
+      discarded = true;
+      return ok({ discarded: true });
+    },
+  });
+  const result = await prepareTurnOn(request, choice);
+  assert.equal(result.kind, "ready");
+  assert.equal(urls().filter((url) => url === "/drafts/d-1/discard").length, 1);
+});
+
+test("restarts are bounded: a host that always answers stale ends in the failure", async () => {
+  const { request, urls } = recorder({ ...baseTable, "/drafts/d-1/commit": fail("configuration_stale") });
+  await assert.rejects(prepareTurnOn(request, choice), (failure: { detail?: { code?: string } }) => failure.detail?.code === "configuration_stale");
+  assert.equal(urls().filter((url) => url === "/drafts/d-1/commit").length, MAX_PREPARATION_RESTARTS + 1);
 });
 
 test("a finished operation reads as Off only when it failed before any effect", () => {

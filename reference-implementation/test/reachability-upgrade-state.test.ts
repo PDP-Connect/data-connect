@@ -36,7 +36,7 @@ async function scratch() {
 }
 
 // A "process": a fresh service and routes over a state folder that may already hold state.
-async function boot(root: string) {
+async function boot(root: string, journal = "reachability-setups") {
   process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY ??= randomBytes(32).toString("hex");
   const home = join(root, "reachability");
   await mkdir(home, { mode: 0o700, recursive: true });
@@ -92,7 +92,7 @@ async function boot(root: string) {
       requireOwner: pass,
       requireToken: pass,
       service,
-      setups: new ReachabilitySetups(join(root, "reachability-setups")),
+      setups: new ReachabilitySetups(join(root, journal)),
       usage: (kind: string) => (kind === "attached" ? { kind } : { kind: "session", lifetimeMs: 3_600_000 }),
     } as never
   );
@@ -145,7 +145,7 @@ async function boot(root: string) {
     }
     return { data: payload.data, ok: true as const };
   };
-  return { request, service, setups: new ReachabilitySetups(join(root, "reachability-setups")) };
+  return { request, service, setups: new ReachabilitySetups(join(root, journal)) };
 }
 
 const choice = { providerId: "localhost-run", usage: "session" };
@@ -226,16 +226,74 @@ test("a committed leftover that also holds a finished setup turns on in one clic
   assert.deepEqual(outcomes, ["ready", "ready"]);
 });
 
-test("two preparers on one profile both end at a review, never at a stale dead end", async (t) => {
+test("three preparers on one profile all end at a review, never at a stale dead end", async (t) => {
   const root = await scratch();
   t.after(() => rm(root, { force: true, recursive: true }));
   const { request } = await boot(root);
-  const results = await Promise.allSettled([prepareTurnOn(request, choice), prepareTurnOn(request, choice)]);
+  const results = await Promise.allSettled([prepareTurnOn(request, choice), prepareTurnOn(request, choice), prepareTurnOn(request, choice)]);
   for (const result of results) {
-    assert.equal(result.status, "fulfilled");
+    assert.equal(result.status, "fulfilled", result.status === "rejected" ? String(result.reason?.detail?.code ?? result.reason) : "");
   }
-  // A third click after the race still works.
+  // A later click after the race still works.
   assert.equal((await prepareTurnOn(request, choice)).kind, "ready");
+});
+
+function gate() {
+  let open!: () => void;
+  const opened = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { open, opened };
+}
+const outcome = (settled: PromiseSettledResult<{ kind: string }>) =>
+  settled.status === "fulfilled" ? settled.value.kind : String((settled.reason as any)?.detail?.code ?? settled.reason);
+
+test("a preparer whose commit is refused as stale leaves the draft another preparer committed and is reviewing", async (t) => {
+  const root = await scratch();
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const { request } = await boot(root);
+  const firstAtReview = gate();
+  const secondDone = gate();
+  const firstWrapper: typeof request = async (path, body) => {
+    if (path.endsWith("/review")) {
+      firstAtReview.open();
+      await secondDone.opened;
+    }
+    return request(path, body);
+  };
+  const secondWrapper: typeof request = async (path, body) => {
+    // The second preparer holds the same draft, then commits after the first one did.
+    if (path.endsWith("/commit")) await firstAtReview.opened;
+    return request(path, body);
+  };
+  const first = prepareTurnOn(firstWrapper, choice);
+  const second = prepareTurnOn(secondWrapper, choice).finally(() => secondDone.open());
+  const results = await Promise.allSettled([first, second]);
+  assert.deepEqual(results.map(outcome), ["ready", "ready"]);
+});
+
+test("an uncommitted draft left stale by another process is discarded and replaced, not resumed in a loop", async (t) => {
+  const root = await scratch();
+  t.after(() => rm(root, { force: true, recursive: true }));
+  // One process holds an uncommitted draft in its journal, then a second process (its own journal) commits.
+  const stale = await boot(root);
+  const catalog = (await stale.request("/catalog")) as any;
+  const provider = catalog.data.providers.find((p: any) => p.providerId === choice.providerId);
+  await stale.request("/drafts", {
+    expectedRevision: provider.configuration.revision,
+    providerId: choice.providerId,
+    usage: choice.usage,
+  });
+  const other = await boot(root, "other-setups");
+  assert.equal((await prepareTurnOn(other.request, choice)).kind, "ready");
+  const seen: string[] = [];
+  const counting: typeof stale.request = (path, body) => {
+    seen.push(`${body === undefined ? "GET" : "POST"} ${path.split("?")[0]}`);
+    return stale.request(path, body);
+  };
+  const result = await prepareTurnOn(counting, choice);
+  assert.equal(result.kind, "ready");
+  assert.equal(seen.filter((path) => path === "GET /catalog").length <= 3, true, seen.join(" "));
 });
 
 test("two windows on one profile, each its own process view, both reach a review", async (t) => {

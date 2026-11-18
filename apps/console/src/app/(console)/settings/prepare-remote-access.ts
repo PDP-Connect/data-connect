@@ -124,6 +124,9 @@ const codeOf = (failure: unknown) => (failure instanceof ReachabilityFailure ? f
 type Choice = { providerId: string; usage: string };
 
 export const PREPARATION_REQUEST_TIMEOUT_MS = 15_000;
+// A restart re-reads the host's state, so another preparer's committed draft is picked up. A few
+// restarts cover a few preparers racing; the chain never retries without a bound.
+export const MAX_PREPARATION_RESTARTS = 6;
 
 /**
  * The preparation may no longer send a positive request: its screen went away,
@@ -139,13 +142,16 @@ export class PreparationStopped extends Error {
 /**
  * Inventory, then the service's draft (reused by id), then each setup action
  * that has no effects, then commit, then review. It stops at the first human
- * step. If the host no longer knows the draft, it starts once more from a fresh
- * draft.
+ * step. Other preparers on the same profile share the host's one draft for the
+ * service, so a restart code means the state moved, not that this draft is bad:
+ * the chain re-reads the state, up to MAX_PREPARATION_RESTARTS times. A restart
+ * discards a draft only when it is the service's uncommitted draft (or has failed
+ * twice), because a draft another preparer committed or is reviewing is shared work.
  */
 export async function prepareTurnOn(
   request: Request,
   choice: Choice,
-  options: { restarted?: boolean; mayRunActions?: () => boolean; isCurrent?: () => boolean; onPasswordMissing?: () => void } = {}
+  options: { restarts?: number; failedDrafts?: ReadonlySet<string>; mayRunActions?: () => boolean; isCurrent?: () => boolean; onPasswordMissing?: () => void } = {}
 ): Promise<Prepared> {
   // Checked before every positive request (draft, action, commit, review, discard).
   // Reads are never guarded: a stopped chain may finish the read it already sent.
@@ -238,12 +244,43 @@ export async function prepareTurnOn(
     return { kind: "ready", draft, review, steps: draft.configuration.actions.filter(isRouteConsentStep) };
   } catch (failure) {
     const code = codeOf(failure);
-    if (!options.restarted && code && restartCodes.has(code)) {
+    const restarts = options.restarts ?? 0;
+    if (restarts < MAX_PREPARATION_RESTARTS && code && restartCodes.has(code)) {
       proceed();
-      if (draft) await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
-      return prepareTurnOn(request, choice, { ...options, restarted: true });
+      const failedDrafts = new Set(options.failedDrafts);
+      if (draft) {
+        const repeated = failedDrafts.has(draft.draftId);
+        failedDrafts.add(draft.draftId);
+        await discardIfOnlyOurs(send, choice.providerId, draft.draftId, repeated, proceed);
+      }
+      return prepareTurnOn(request, choice, { ...options, restarts: restarts + 1, failedDrafts });
     }
     throw failure;
+  }
+}
+
+/**
+ * Drops a draft that failed with a restart code, so a restart does not resume it again. Without
+ * this, the host hands back its stale uncommitted draft and the chain would fail the same way.
+ * The host's current state decides: a draft that is gone, replaced or committed by another
+ * preparer is left alone (committed work is reviewed, not thrown away) unless it already failed once.
+ */
+async function discardIfOnlyOurs(
+  send: <T>(path: string, body?: Record<string, unknown>) => Promise<T>,
+  providerId: string,
+  draftId: string,
+  repeated: boolean,
+  proceed: () => void
+): Promise<void> {
+  const state = await send<{ services?: ServiceEntry[] }>("/state");
+  const entry = state.services?.find((item) => item.providerId === providerId);
+  if (entry?.draftId !== draftId || (entry.committed && !repeated)) return;
+  proceed();
+  try {
+    await send(`/drafts/${encodeURIComponent(draftId)}/discard`, {});
+  } catch (failure) {
+    // Already gone is the state this wanted.
+    if (codeOf(failure) !== "draft_not_found") throw failure;
   }
 }
 
