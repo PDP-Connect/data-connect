@@ -110,6 +110,8 @@ export interface OwnerSessionController {
    * outside a cookie. Null when owner auth is disabled or the store refuses.
    */
   issueSessionToken: (metadata: OwnerSessionIssueMetadata, ttlSeconds: number) => Promise<OwnerSessionToken | null>;
+  /** True while the session keyed by `idHash` exists, is unexpired and unrevoked. Does not touch last-seen. */
+  isSessionLive: (idHash: string) => Promise<boolean>;
   readSessionFromCookieValue: (raw?: string | null) => Promise<OwnerSessionPayload | null>;
   readSessionFromCookieHeader: (header?: string | null) => Promise<OwnerSessionPayload | null>;
   readSessionRecordFromCookieHeader: (header?: string | null) => Promise<OwnerSessionRecord | null>;
@@ -430,6 +432,13 @@ export function createOwnerSessionController({
     return record ? { exp: record.exp, iat: record.iat, sub: record.sub } : null;
   }
 
+  async function isSessionLive(idHash: string): Promise<boolean> {
+    if (!enabled) {
+      return false;
+    }
+    return (await store.readSession(idHash, Math.floor(Date.now() / 1000))) !== null;
+  }
+
   async function issueSessionToken(
     metadata: OwnerSessionIssueMetadata,
     ttlSeconds: number
@@ -539,6 +548,7 @@ export function createOwnerSessionController({
     listOwnerBearers,
     issueSessionCookieHeader,
     issueSessionToken,
+    isSessionLive,
     readSessionFromCookieValue,
     readSessionFromCookieHeader,
     readSessionRecordFromCookieHeader,

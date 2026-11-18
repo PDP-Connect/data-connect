@@ -509,6 +509,8 @@ interface SessionHelpers {
   ) => ReturnType<OwnerSessionController["issueSessionToken"]>;
   readSession: (req: AuthRequest) => Promise<OwnerSessionPayload | null>;
   readSessionRecord: (req: AuthRequest) => Promise<OwnerSessionRecord | null>;
+  isSessionLive: (idHash: string) => Promise<boolean>;
+  revokeSessionId: (sessionId: string) => Promise<boolean>;
   revokeSession: (req: AuthRequest) => Promise<boolean>;
   listSessions: (req: AuthRequest, subjectId: string) => ReturnType<OwnerSessionController["listSessions"]>;
   revokeSessionByPublicId: (subjectId: string, publicId: string) => Promise<boolean>;
@@ -573,6 +575,12 @@ function buildSessionHelpers(controller: OwnerSessionController): SessionHelpers
     },
     readSessionRecord(req: AuthRequest): Promise<OwnerSessionRecord | null> {
       return controller.readSessionRecordFromCookieHeader(req.headers.cookie);
+    },
+    isSessionLive(idHash: string): Promise<boolean> {
+      return controller.isSessionLive(idHash);
+    },
+    revokeSessionId(sessionId: string): Promise<boolean> {
+      return controller.revokeSessionFromCookieValue(sessionId);
     },
     revokeSession(req: AuthRequest): Promise<boolean> {
       return controller.revokeSessionFromCookieHeader(req.headers.cookie);
@@ -1045,7 +1053,13 @@ async function handleDesktopPairingCreate(
 ): Promise<void> {
   if (!isCsrfAuthorized(req, res, context)) return;
   if (!(await requireSignedInSession(req, res, context))) return;
-  const { code, expiresAtMs } = context.desktopPairings.create();
+  // The code belongs to this session: it stops working when this session is signed out.
+  const issuer = await context.session.readSessionRecord(req);
+  if (!issuer) {
+    denyOwnerAccess(req, res);
+    return;
+  }
+  const { code, expiresAtMs } = context.desktopPairings.create(issuer.idHash);
   const serverOrigin = new URL(resolvePublicOrigin(req)).origin;
   const identity = requireInstanceIdentity(context);
   res
@@ -1156,8 +1170,10 @@ async function handleDesktopPairingRedeem(
     });
     return;
   }
-  // One answer for unknown, expired and used codes: no oracle.
-  if (!context.desktopPairings.redeem(code)) {
+  // One answer for unknown, expired, used and orphaned codes: no oracle. A code
+  // whose issuing session was signed out since is orphaned.
+  const issuerIdHash = context.desktopPairings.redeem(code);
+  if (issuerIdHash === null || !(await context.session.isSessionLive(issuerIdHash))) {
     replyInvalidPairingCode(res);
     return;
   }
@@ -1169,6 +1185,14 @@ async function handleDesktopPairingRedeem(
     res.status(503).json({
       error: { code: "pairing_unavailable", message: "Could not start a session. Create a new pairing code." },
     });
+    return;
+  }
+  // Sign-out everywhere can land while the session is being written, and it
+  // only revokes sessions that already exist. Check again now that the new one
+  // does, and take it back if its issuer is gone.
+  if (!(await context.session.isSessionLive(issuerIdHash))) {
+    await context.session.revokeSessionId(minted.sessionId);
+    replyInvalidPairingCode(res);
     return;
   }
   // The session id leaves only in this body: never a Set-Cookie, never logged.

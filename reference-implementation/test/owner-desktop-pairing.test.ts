@@ -11,14 +11,20 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { closeDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
-import { instanceFingerprint, instanceProofMessage } from "../server/instance-identity.ts";
+import { createInstanceIdentityProvider, instanceFingerprint, instanceProofMessage } from "../server/instance-identity.ts";
+import { createOwnerAuthPlaceholder } from "../server/owner-auth.ts";
 import {
   createDesktopPairingStore,
   DESKTOP_PAIRING_ALPHABET,
   DESKTOP_PAIRING_MAX_OUTSTANDING,
   DESKTOP_PAIRING_TTL_SECONDS,
 } from "../server/owner-desktop-pairing.ts";
-import { createOwnerSessionController, createMemoryOwnerSessionStore } from "../server/owner-session.ts";
+import {
+  createMemoryOwnerSessionStore,
+  createOwnerSessionController,
+  type OwnerSessionRecord,
+  type OwnerSessionStore,
+} from "../server/owner-session.ts";
 import { createOwnerPasswordVerifierStore, setOwnerPassword } from "../server/stores/owner-password-verifier-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
@@ -171,7 +177,7 @@ const INVALID_CODE_ERROR = {
 test("desktop pairing store: codes use the 12-character alphabet in dashed groups of four", () => {
   const store = createDesktopPairingStore();
   for (let i = 0; i < 50; i++) {
-    const { code } = store.create();
+    const { code } = store.create("issuer-1");
     assert.match(code, CODE_PATTERN);
     for (const ch of code.replaceAll("-", "")) assert.ok(DESKTOP_PAIRING_ALPHABET.includes(ch));
   }
@@ -181,29 +187,29 @@ test("desktop pairing store: codes use the 12-character alphabet in dashed group
 
 test("desktop pairing store: a code redeems once, tolerates case, dashes and spaces, then is gone", () => {
   const store = createDesktopPairingStore();
-  const { code } = store.create();
-  assert.equal(store.redeem(`  ${code.toLowerCase().replaceAll("-", " ")} `), true);
-  assert.equal(store.redeem(code), false);
+  const { code } = store.create("issuer-1");
+  assert.equal(store.redeem(`  ${code.toLowerCase().replaceAll("-", " ")} `), "issuer-1", "redeem returns the issuer");
+  assert.equal(store.redeem(code), null);
 });
 
 test("desktop pairing store: a code expires after ten minutes on the injected clock", () => {
   let now = 1_000_000;
   const store = createDesktopPairingStore({ now: () => now });
-  const live = store.create();
-  const stale = store.create();
+  const live = store.create("issuer-1");
+  const stale = store.create("issuer-1");
   assert.equal(live.expiresAtMs, now + DESKTOP_PAIRING_TTL_SECONDS * 1000);
   now += (DESKTOP_PAIRING_TTL_SECONDS - 1) * 1000;
-  assert.equal(store.redeem(live.code), true, "still valid one second before expiry");
+  assert.equal(store.redeem(live.code), "issuer-1", "still valid one second before expiry");
   now += 1000;
-  assert.equal(store.redeem(stale.code), false, "expired at the TTL boundary");
+  assert.equal(store.redeem(stale.code), null, "expired at the TTL boundary");
 });
 
 test("desktop pairing store: the sixth outstanding code evicts the oldest", () => {
   assert.equal(DESKTOP_PAIRING_MAX_OUTSTANDING, 5);
   const store = createDesktopPairingStore();
-  const codes = Array.from({ length: 6 }, () => store.create().code);
-  assert.equal(store.redeem(codes[0] as string), false, "oldest evicted");
-  for (const code of codes.slice(1)) assert.equal(store.redeem(code), true);
+  const codes = Array.from({ length: 6 }, () => store.create("issuer-1").code);
+  assert.equal(store.redeem(codes[0] as string), null, "oldest evicted");
+  for (const code of codes.slice(1)) assert.equal(store.redeem(code), "issuer-1");
 });
 
 test("owner session controller: issueSessionToken mints a caller-TTL session and returns the opaque id", async () => {
@@ -464,6 +470,179 @@ test("desktop pairing: an owner password change revokes the paired session", asy
     });
   } finally {
     await rm(directory, { force: true, recursive: true });
+  }
+});
+
+// ── pending codes die with the session that issued them ─────────────────────
+
+async function revokeAll(asUrl: string, cookie: string): Promise<number> {
+  const resp = await fetch(`${asUrl}/owner/sessions/revoke-all`, {
+    headers: { Accept: "application/json", "Content-Type": "application/json", Cookie: cookie },
+    method: "POST",
+  });
+  return resp.status;
+}
+
+async function ownerSessionLabels(asUrl: string, cookie: string): Promise<string[]> {
+  const list = (await (
+    await fetch(`${asUrl}/owner/sessions`, { headers: { Accept: "application/json", Cookie: cookie } })
+  ).json()) as { sessions: Array<{ label: string }> };
+  return list.sessions.map((entry) => entry.label);
+}
+
+test("pending_pairing_cannot_restore_access_after_revoke_all", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const issuer = await login(asUrl, TEST_PASSWORD);
+    assert.ok(issuer.cookie);
+    const pending = (await createPairing(asUrl, issuer.cookie)).body.code;
+    assert.equal(await revokeAll(asUrl, issuer.cookie), 204);
+
+    const redeemed = await redeem(asUrl, { code: pending, label: "Stale" });
+    assert.equal(redeemed.status, 401, "a code issued by a revoked session must not mint a session");
+    assert.deepEqual(redeemed.body, INVALID_CODE_ERROR, "same answer as any other dead code");
+
+    const later = await login(asUrl, TEST_PASSWORD);
+    assert.ok(later.cookie);
+    assert.deepEqual(
+      (await ownerSessionLabels(asUrl, later.cookie)).filter((label) => label === "Stale"),
+      [],
+      "no session was created"
+    );
+  });
+});
+
+test("desktop pairing: a code is bound to its own issuer, so revoking one session leaves another's code alive", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const first = await login(asUrl, TEST_PASSWORD);
+    const second = await login(asUrl, TEST_PASSWORD);
+    assert.ok(first.cookie && second.cookie);
+    const firstCode = (await createPairing(asUrl, first.cookie)).body.code;
+    const secondCode = (await createPairing(asUrl, second.cookie)).body.code;
+    const list = (await (
+      await fetch(`${asUrl}/owner/sessions`, { headers: { Accept: "application/json", Cookie: second.cookie } })
+    ).json()) as { sessions: Array<{ current: boolean; id: string }> };
+    const firstPublicId = list.sessions.find((entry) => !entry.current)?.id;
+    assert.ok(firstPublicId);
+    const revoke = await fetch(`${asUrl}/owner/sessions/${firstPublicId}/revoke`, {
+      headers: { Accept: "application/json", "Content-Type": "application/json", Cookie: second.cookie },
+      method: "POST",
+    });
+    assert.equal(revoke.status, 204);
+
+    assert.equal((await redeem(asUrl, { code: firstCode })).status, 401, "the revoked issuer's code is dead");
+    assert.equal((await redeem(asUrl, { code: secondCode })).status, 200, "the live issuer's code still works");
+  });
+});
+
+/** The auth routes on a route table, driven with request shims (no HTTP server). */
+function pairingHarness(sessionStore: OwnerSessionStore) {
+  const routes = new Map<string, (req: unknown, res: unknown) => unknown>();
+  const dataDir = mkdtempSync(join(tmpdir(), "pdpp-desktop-pairing-race-"));
+  const auth = createOwnerAuthPlaceholder({
+    instanceIdentity: createInstanceIdentityProvider(dataDir),
+    password: TEST_PASSWORD,
+    resolvePublicOrigin: () => "https://vault.example.test",
+    sessionStore,
+  });
+  auth.attachRoutes({
+    get: (path, handler) => routes.set(`GET ${path}`, handler as never),
+    post: (path, handler) => routes.set(`POST ${path}`, handler as never),
+  });
+  async function call(
+    route: string,
+    request: { body?: Record<string, unknown>; cookie?: string }
+  ): Promise<{ body: Record<string, unknown> | undefined; status: number }> {
+    const handler = routes.get(route);
+    assert.ok(handler, `${route} is attached`);
+    const result: { body: Record<string, unknown> | undefined; status: number } = { body: undefined, status: 200 };
+    const headers: Record<string, string | string[]> = {};
+    const res = {
+      end() {},
+      getHeader: (name: string) => headers[name.toLowerCase()],
+      json(body: Record<string, unknown>) {
+        result.body = body;
+        return res;
+      },
+      redirect() {},
+      send() {
+        return res;
+      },
+      setHeader(name: string, value: string | string[]) {
+        headers[name.toLowerCase()] = value;
+        return res;
+      },
+      status(code: number) {
+        result.status = code;
+        return res;
+      },
+    };
+    await handler(
+      {
+        body: request.body,
+        headers: {
+          ...(request.cookie ? { cookie: request.cookie } : {}),
+          "content-type": "application/json",
+        },
+        ip: "127.0.0.1",
+        method: "POST",
+        originalUrl: route,
+        url: route,
+      },
+      res
+    );
+    return result;
+  }
+  return { auth, call, dataDir };
+}
+
+test("pending_pairing_redeemed_while_revoke_all_runs_ends_up_revoked", async () => {
+  const store = createMemoryOwnerSessionStore();
+  let holdNextCreate: Promise<void> | null = null;
+  let creating: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => {
+    creating = resolve;
+  });
+  const gated: OwnerSessionStore = {
+    ...store,
+    async createSession(record: OwnerSessionRecord, expectedCredentialRevision?: string) {
+      if (holdNextCreate) {
+        const hold = holdNextCreate;
+        holdNextCreate = null;
+        creating();
+        await hold;
+      }
+      return store.createSession(record, expectedCredentialRevision);
+    },
+  };
+  const { call, dataDir } = pairingHarness(gated);
+  try {
+    // A signed-in owner session, minted through a controller over the same store.
+    const controller = createOwnerSessionController({ enabled: true, sessionStore: store });
+    const owner = await controller.issueSessionToken({ label: "Browser" }, 3600);
+    assert.ok(owner);
+    const cookie = `pdpp_owner_session=${owner.sessionId}`;
+
+    const created = await call("POST /owner/desktop-pairings", { cookie });
+    assert.equal(created.status, 201);
+    const code = created.body?.code as string;
+
+    let release: () => void = () => undefined;
+    holdNextCreate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const redeeming = call("POST /owner/desktop-pairings/redeem", { body: { code } });
+    await entered; // the redeem is now inside createSession, after its checks passed
+    const revoked = await call("POST /owner/sessions/revoke-all", { cookie });
+    assert.equal(revoked.status, 204);
+    release();
+
+    const outcome = await redeeming;
+    assert.equal(outcome.status, 401, "a redeem that finished after revocation must not hand out a session");
+    assert.deepEqual(outcome.body, INVALID_CODE_ERROR);
+    const live = await store.listSessions(controller.subjectId, Math.floor(Date.now() / 1000));
+    assert.deepEqual(live, [], "the session minted during the race was revoked, so nothing is live");
+  } finally {
+    await rm(dataDir, { force: true, recursive: true });
   }
 });
 

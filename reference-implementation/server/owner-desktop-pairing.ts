@@ -12,6 +12,11 @@ import crypto from "node:crypto";
  * which is acceptable for a ten-minute artifact and avoids any schema change.
  * The map is keyed by the SHA-256 of the normalized code, so a memory dump does
  * not reveal a usable code.
+ *
+ * Each code remembers the owner session that created it (by the hash the
+ * session store keys on). Redeeming a code hands that issuer back so the caller
+ * can refuse it once the issuer is signed out: a pending code must not outlive
+ * "sign out everywhere".
  */
 
 /** No I, O, L, U, 0 or 1: they read as one another or as other characters. */
@@ -39,9 +44,13 @@ export interface DesktopPairingCode {
 }
 
 export interface DesktopPairingStore {
-  create: () => DesktopPairingCode;
-  /** Consumes the code. True only for a known, unexpired, unused code. */
-  redeem: (submitted: string) => boolean;
+  /** `issuer` identifies the owner session creating the code. */
+  create: (issuer: string) => DesktopPairingCode;
+  /**
+   * Consumes the code. Returns the issuer for a known, unexpired, unused code,
+   * and null for any other.
+   */
+  redeem: (submitted: string) => string | null;
 }
 
 function normalizeDesktopPairingCode(submitted: string): string {
@@ -70,21 +79,21 @@ export function createDesktopPairingStore({
   ttlSeconds = DESKTOP_PAIRING_TTL_SECONDS,
 }: DesktopPairingStoreOptions = {}): DesktopPairingStore {
   // Map iteration order is insertion order, so the first key is the oldest code.
-  const pending = new Map<string, number>();
+  const pending = new Map<string, { expiresAtMs: number; issuer: string }>();
 
   function dropExpired(nowMs: number): void {
-    for (const [hash, expiresAtMs] of pending) {
+    for (const [hash, { expiresAtMs }] of pending) {
       if (expiresAtMs <= nowMs) pending.delete(hash);
     }
   }
 
   return {
-    create(): DesktopPairingCode {
+    create(issuer: string): DesktopPairingCode {
       const nowMs = now();
       dropExpired(nowMs);
       const code = generateDesktopPairingCode();
       const expiresAtMs = nowMs + ttlSeconds * 1000;
-      pending.set(hashDesktopPairingCode(normalizeDesktopPairingCode(code)), expiresAtMs);
+      pending.set(hashDesktopPairingCode(normalizeDesktopPairingCode(code)), { expiresAtMs, issuer });
       while (pending.size > maxOutstanding) {
         const oldest = pending.keys().next().value;
         if (oldest === undefined) break;
@@ -92,9 +101,13 @@ export function createDesktopPairingStore({
       }
       return { code, expiresAtMs };
     },
-    redeem(submitted: string): boolean {
+    redeem(submitted: string): string | null {
       dropExpired(now());
-      return pending.delete(hashDesktopPairingCode(normalizeDesktopPairingCode(submitted)));
+      const hash = hashDesktopPairingCode(normalizeDesktopPairingCode(submitted));
+      const entry = pending.get(hash);
+      if (!entry) return null;
+      pending.delete(hash);
+      return entry.issuer;
     },
   };
 }
