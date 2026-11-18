@@ -392,3 +392,16 @@ test("isInternalConnectorId identifies test/stub/internal connector ids", () => 
   assert.equal(isInternalConnectorId(""), false);
   assert.equal(isInternalConnectorId(42), false);
 });
+
+test("a non-registry URL connector_id keeps its spelling as the key", () => {
+  const url = "https://test.pdpp.dev/connectors/acme";
+  assert.equal(canonicalConnectorKeyFromManifest({ connector_id: url }), url);
+  assert.equal(canonicalConnectorKeyFromManifest({ storage_binding: { connector_id: url } }), url);
+});
+
+test("manifest key derivation rejects malformed id-only identities", () => {
+  for (const value of ["bad key", `${REGISTRY_PREFIX}gmail/extra`]) {
+    assert.equal(canonicalConnectorKeyFromManifest({ connector_id: value }), null, value);
+    assert.equal(canonicalConnectorKeyFromManifest({ storage_binding: { connector_id: value } }), null, value);
+  }
+});
