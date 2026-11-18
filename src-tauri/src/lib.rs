@@ -193,6 +193,8 @@ pub fn run() {
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
+            #[cfg(target_os = "linux")]
+            linux_app_id::report_integration_error();
 
             #[cfg(desktop)]
             if main_thread_watchdog::is_enabled() {
