@@ -13,7 +13,13 @@ export type RouteDisplayInput = {
   routeState: string;
   cleanup: { state: string };
   verification: { status: string; vantage: string; observedAt: string | null; validUntil?: Known<string> };
+  /** The server's own end time for this route, when it reports one. */
+  expiresAt?: Known<string>;
+  handle?: { kind?: string };
 };
+
+/** Why a route needs the owner, when the server's state alone would show On or Off. */
+export type Attention = "lost" | "expired" | "recheck-failed";
 
 // The four words the owner sees: Off, Turning on, On, Needs your action
 // (plus Turning off while a stop is under way).
@@ -36,31 +42,130 @@ const phaseStatus: Record<string, string> = {
 export function routeHeadline(
   route: RouteDisplayInput,
   lifecyclePhase: string | null,
-  proofRefreshUnsupported: boolean
+  proofRefreshUnsupported: boolean,
+  attention: Attention | null = null
 ): string {
-  if (proofRefreshUnsupported) return "Needs your action";
+  if (proofRefreshUnsupported || attention) return "Needs your action";
   if (route.state === "released" && route.cleanup.state === "confirmed") return "Off";
   return phaseStatus[lifecyclePhase ?? route.routeState] ?? "Needs your action";
 }
 
 // One sentence under the status, only where the status alone would not say it.
-export function routeSentence(route: RouteDisplayInput, headline: string): string | null {
-  if (headline === "Off" && route.state === "released") return "Your address no longer works.";
+export function routeSentence(route: RouteDisplayInput, headline: string, options: TimeOptions = {}): string | null {
+  if (headline === "Off" && route.state === "released") {
+    const end = expiryTime(route);
+    return end !== null && end <= (options.now ?? Date.now())
+      ? `Your address turned off at ${formatLocalTime(end, options)}.`
+      : "Your address no longer works.";
+  }
   return null;
 }
 
-// "verified" is the last observed result. Say when its validity window has ended.
+/** The route's end time in ms, only when the server reports one. */
+export function expiryTime(route: RouteDisplayInput): number | null {
+  const until = route.expiresAt;
+  if (!until?.known) return null;
+  const ms = Date.parse(until.value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+// One lifetime number for the owner: the end time the server reports for this
+// route. It is never computed from a label or a requested duration. A temporary
+// route whose end the server does not report says so and invents nothing.
+export function expiryLine(route: RouteDisplayInput, options: TimeOptions = {}): string | null {
+  const end = expiryTime(route);
+  if (end !== null) return `Turns off at ${formatLocalTime(end, options)}`;
+  return route.handle?.kind === "session" ? "Temporary address; it may turn off or change" : null;
+}
+
+/** "just now", "5 min ago", "2 hr ago", "3 days ago". */
+export function relativeAge(value: string | null, now: number): string | null {
+  const then = value ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(then)) return null;
+  const minutes = Math.floor(Math.max(0, now - then) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
+// "verified" is the last observed result. The app re-checks before its window
+// ends, so the line says only how long ago the last check was.
 export function proofLine(
   route: RouteDisplayInput,
   now: number,
-  options: { synthetic?: boolean } & TimeOptions = {}
+  options: { synthetic?: boolean } = {}
 ): string {
-  const { synthetic, ...time } = options;
   const { status, vantage, observedAt } = route.verification;
-  const when = observedAt ? `checked ${formatLocalTime(observedAt, time)}` : "check time unknown";
+  const age = relativeAge(observedAt, now);
+  const when = age ? `checked ${age}` : "check time unknown";
   const where = vantage === "public" ? "Works from the internet" : "Works on this computer";
   const base = status === "verified" ? `${where} · ${when}` : `Not confirmed yet · ${when}`;
+  return `${options.synthetic ? "Test data: " : ""}${base}`;
+}
+
+/**
+ * When to re-check a proof that is still valid: before its window ends, with a
+ * margin of a third of the window (at least five seconds, at most a minute).
+ * Null when the server reports no window, so nothing is guessed.
+ */
+export function recheckAt(route: RouteDisplayInput): number | null {
   const until = route.verification.validUntil;
-  const ended = until?.known && Date.parse(until.value) <= now ? " · check expired; use Check again" : "";
-  return `${synthetic ? "Test data: " : ""}${base}${ended}`;
+  if (!until?.known) return null;
+  const end = Date.parse(until.value);
+  if (!Number.isFinite(end)) return null;
+  const start = route.verification.observedAt ? Date.parse(route.verification.observedAt) : Number.NaN;
+  const window = Number.isFinite(start) && end > start ? end - start : 30_000;
+  return end - Math.min(60_000, Math.max(5_000, Math.floor(window / 3)));
+}
+
+/**
+ * The reason a route that looks On or Off needs the owner: the host lost it,
+ * its end time passed with cleanup unconfirmed, or the automatic re-check failed.
+ * `acknowledged` is set once the owner chose Turn on again for this route.
+ */
+export function routeAttention(
+  route: RouteDisplayInput,
+  context: {
+    lifecycleReason: string | null;
+    recheckFailed: boolean;
+    acknowledged: boolean;
+    now: number;
+    lifecyclePhase: string | null;
+    recheckUnderWay: boolean;
+  }
+): Attention | null {
+  if (context.acknowledged) return null;
+  if (route.state === "lost" || context.lifecycleReason === "agent-exited") return "lost";
+  if (route.cleanup.state === "confirmed") return null;
+  // The server stops calling the proof verified at the end time, so a browser
+  // clock that runs ahead cannot flip a working address to Needs your action.
+  const end = expiryTime(route);
+  if (end !== null && end <= context.now && route.verification.status !== "verified") return "expired";
+  if (context.recheckFailed) return "recheck-failed";
+  // The host calls the proof stale and no re-check is under way to renew it.
+  if (context.lifecyclePhase === "stale" && !context.recheckUnderWay) return "recheck-failed";
+  return null;
+}
+
+// The service descriptor can carry a free-text condition about how long a
+// session lasts. The server's end time for the route is the one lifetime the
+// owner sees, so a condition that states a duration or a session limit is
+// dropped from every owner-facing list rather than shown beside it.
+const durationClaim = /\b\d+\s*(?:seconds?|minutes?|hours?|days?)\b|\bsession (?:limit|lifetime)\b|\blimits? a session\b/i;
+export const isLifetimeClaim = (text: string): boolean => durationClaim.test(text);
+
+/** What happened and what to do, for a route that needs the owner. */
+export function attentionSentence(attention: Attention, route: RouteDisplayInput, service: string, options: TimeOptions = {}): string {
+  const name = service;
+  if (attention === "lost") {
+    return `Your address stopped working. ${name} closed the connection. Turn it on again to get a new address, then update it wherever you pasted the old one.`;
+  }
+  if (attention === "expired") {
+    const end = expiryTime(route);
+    return `Your address turned off${end !== null ? ` at ${formatLocalTime(end, options)}` : ""}. Turn it on again to get a new address, then update it wherever you pasted the old one.`;
+  }
+  return "We can't confirm the address still works. Turn it on again to get a fresh one.";
 }

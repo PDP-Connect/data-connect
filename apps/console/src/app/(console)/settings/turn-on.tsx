@@ -2,7 +2,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useState } from "react";
-import { ConsentFacts } from "./reachability-consent.tsx";
+import { ConsentFacts, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import { type Action, type Draft, disclosureLines, effectLines, type Review } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
 
@@ -30,8 +30,7 @@ export function TurnOnCard({
     consent.facts !== undefined &&
     consent.disclosures != null &&
     candidate.consentFactsDigest === consent.consentFactsDigest;
-  const shown = (consent?.facts ?? []).filter((fact) => fact.known && fact.value !== null);
-  const unknown = (consent?.facts ?? []).filter((fact) => !fact.known).length;
+  const { shown, unknown } = splitFacts(consent?.facts ?? []);
   return (
     <section aria-label="Turn on" className="grid gap-4">
       {changed ? (
@@ -59,11 +58,7 @@ export function TurnOnCard({
             <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
           ) : null}
           <ConsentFacts facts={shown} />
-          {unknown > 0 ? (
-            <p className="pdpp-caption">
-              {unknown} {unknown === 1 ? "fact" : "facts"} {plain(candidate.display.label)} doesn't publish.
-            </p>
-          ) : null}
+          <UnknownFactsCount count={unknown} service={candidate.display.label} />
         </details>
       ) : null}
     </section>

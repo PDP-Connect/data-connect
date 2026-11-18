@@ -13,7 +13,8 @@ import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-a
 import { ProviderSetup } from "./provider-setup.tsx";
 import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-actions.ts";
-import { proofLine, routeHeadline, routeSentence } from "./route-display.ts";
+import { OnCard } from "./on-card.tsx";
+import { type Attention, attentionSentence, proofLine, recheckAt, routeAttention, routeHeadline, routeSentence } from "./route-display.ts";
 import {
   type DisplayError,
   Diagnostics,
@@ -24,7 +25,7 @@ import {
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { type ActionKind, ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
-import { ConsentFacts, RuntimeRouteConsentCard } from "./reachability-consent.tsx";
+import { ConsentFacts, RuntimeRouteConsentCard, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import {
   type Action,
   type Draft,
@@ -59,6 +60,7 @@ type State = {
     phase: string;
     confinement: { known: boolean; value?: boolean };
     cleanup: string;
+    reason?: string | null;
     stopRequested: boolean;
   };
   routes: Route[];
@@ -128,6 +130,20 @@ export function RemoteAccessSetting({
   const [operation, setOperation] = useState<Operation | null>(null);
   // After Cancel: the host is turning it off, or could not confirm it is off.
   const [cancel, setCancel] = useState<"stopping" | "unconfirmed" | null>(null);
+  // Automatic proof re-check. `rechecking` holds routes with a check under way;
+  // `recheckFailure` the code of one that failed; `rechecked` the proof windows
+  // already re-checked, so one window is checked once.
+  const [rechecking, setRechecking] = useState<ReadonlySet<string>>(new Set());
+  const [recheckFailure, setRecheckFailure] = useState<Readonly<Record<string, string>>>({});
+  const [rechecked, setRechecked] = useState<ReadonlySet<string>>(new Set());
+  // Routes the owner has moved past by choosing Turn on again or Turn off.
+  const [acknowledged, setAcknowledged] = useState<ReadonlySet<string>>(new Set());
+  // The address the owner had before Turn on again, to tell if it changed.
+  const [previousOrigin, setPreviousOrigin] = useState<string | null>(null);
+  // Set by Turn on again: the digest of the facts the owner last approved.
+  const againPending = useRef(false);
+  // The digest of the facts the owner approved with the last Turn on click.
+  const approvedDigest = useRef<string | null>(null);
   const reservations = setupCards(state.services);
   // Bumped when an action starts and when it ends. A poll started in an earlier
   // epoch is dropped. `loadSeq` and `appliedSeq` order the polls themselves.
@@ -278,9 +294,50 @@ export function RemoteAccessSetting({
     if (passwordMissingNow.current) throw new ReachabilityFailure(publicError("owner_password_required"));
   };
   const phaseOf = (route: Route) => (state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.phase ?? null) : null);
-  const routesOff = state.routes.every(
-    (route) => routeHeadline(route, phaseOf(route), state.reasons[route.handle.id] === "proof_refresh_unsupported") === "Off"
-  );
+  const unsupportedOf = (route: Route) => state.reasons[route.handle.id] === "proof_refresh_unsupported";
+  // The route whose proof the app renews before its window ends: still verified
+  // (or just past its window, with no check yet), not stopping, not given up on.
+  const recheckTarget = (() => {
+    for (const route of state.routes) {
+      const phase = phaseOf(route);
+      const at = recheckAt(route);
+      if (
+        (phase === "verified" || phase === "stale") &&
+        at !== null &&
+        route.cleanup.state !== "confirmed" &&
+        !state.lifecycle?.stopRequested &&
+        !unsupportedOf(route) &&
+        !(route.handle.id in recheckFailure) &&
+        !acknowledged.has(route.handle.id)
+      ) {
+        const until = route.verification.validUntil;
+        const key = `${route.handle.id}:${route.handle.generation}:${until?.known ? until.value : ""}`;
+        return { route, at, key };
+      }
+    }
+    return null;
+  })();
+  const recheckPending = (route: Route) =>
+    recheckTarget?.route.handle.id === route.handle.id && !rechecked.has(recheckTarget.key);
+  const recheckUnderWay = (route: Route) => rechecking.has(route.handle.id) || recheckPending(route);
+  // While a re-check is pending or under way the status stays On: neither
+  // "checking" nor "stale" reaches the owner.
+  const shownPhase = (route: Route) => {
+    const phase = phaseOf(route);
+    return recheckUnderWay(route) && (phase === "checking" || phase === "stale") ? "verified" : phase;
+  };
+  const attentionOf = (route: Route): Attention | null =>
+    routeAttention(route, {
+      lifecycleReason: state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.reason ?? null) : null,
+      recheckFailed: route.handle.id in recheckFailure,
+      acknowledged: acknowledged.has(route.handle.id),
+      now: Date.now(),
+      lifecyclePhase: phaseOf(route),
+      recheckUnderWay: recheckUnderWay(route),
+    });
+  const headlineOf = (route: Route) =>
+    routeHeadline(route, shownPhase(route), unsupportedOf(route), attentionOf(route));
+  const routesOff = state.routes.every((route) => headlineOf(route) === "Off");
   const outcome = operation ? operationOutcome(operation) : null;
   // Preparation runs only while nothing is on or on its way. A finished
   // start waits for the next state read to show its address.
@@ -355,6 +412,19 @@ export function RemoteAccessSetting({
     return () => clearInterval(timer);
   }, [readyReview]);
 
+  // After Turn on again: turn on once the review is ready and shows the facts
+  // the owner approved before. Different facts wait for a click.
+  useEffect(() => {
+    if (!readyReview || !againPending.current || busy) return;
+    againPending.current = false;
+    if (readyReview.candidate.consentFactsDigest === approvedDigest.current) {
+      void turnOn(readyReview);
+    } else {
+      setChanged([]);
+    }
+    // biome-ignore lint/correctness/useExhaustiveDependencies: runs when a review becomes ready
+  }, [readyReview, busy]);
+
   async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
     actionEpoch.current += 1;
     setBusy(true);
@@ -403,6 +473,7 @@ export function RemoteAccessSetting({
             consentFactsDigest: shown.candidate.consentFactsDigest,
             acknowledgeDisconnect: true,
           });
+          approvedDigest.current = shown.candidate.consentFactsDigest;
           setOperation({ ...pending, kind: "start", stage: "applying", recovery: null });
           setCancel(null);
           setChanged(null);
@@ -451,6 +522,83 @@ export function RemoteAccessSetting({
       }
     }, "turn-off");
   }
+  // Renews the proof before its window ends, with no click and no status change.
+  async function runRecheck(id: string, generation: number, key: string) {
+    setRechecked((current) => new Set(current).add(key));
+    setRechecking((current) => new Set(current).add(id));
+    const fail = (code: string) => setRecheckFailure((current) => ({ ...current, [id]: code }));
+    try {
+      const result = await request(`/routes/${encodeURIComponent(id)}/check`, { generation });
+      if (!result.ok) {
+        fail(result.code);
+        return;
+      }
+      const checked = result.data as Route;
+      if (checked.verification.status !== "verified" || !checked.published) fail(publicError("verification_failed").code);
+      const fresh = await request("/state");
+      if (fresh.ok) setState(fresh.data as State);
+    } catch {
+      fail(publicError("service_unreachable").code);
+    } finally {
+      setRechecking((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
+  const recheckKey = recheckTarget && !rechecked.has(recheckTarget.key) ? recheckTarget.key : null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one timer per proof window, keyed by `recheckKey`
+  useEffect(() => {
+    if (!recheckTarget || recheckKey === null || busy) return;
+    const { route, key, at } = recheckTarget;
+    const timer = setTimeout(() => {
+      void runRecheck(route.handle.id, route.handle.generation, key);
+    }, Math.max(0, at - Date.now()));
+    return () => clearTimeout(timer);
+  }, [recheckKey, busy, request]);
+
+  async function stopRoute(route: Route) {
+    await turnOff(async () => {
+      const pending = await send<{ operationId: string }>(`/routes/${encodeURIComponent(route.handle.id)}/stop`, {
+        generation: route.handle.generation,
+        acknowledgeDisconnect: true,
+      });
+      setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
+    });
+  }
+  function turnOffRoute(route: Route) {
+    setAcknowledged((current) => new Set(current).add(route.handle.id));
+    setPreviousOrigin(null);
+    againPending.current = false;
+    return stopRoute(route);
+  }
+  // Turn off, then turn on again on the facts the owner already approved. If the
+  // facts changed, the owner sees what changed and clicks again.
+  function turnOnAgain(route: Route) {
+    setAcknowledged((current) => new Set(current).add(route.handle.id));
+    setPreviousOrigin(route.origin);
+    againPending.current = approvedDigest.current !== null;
+    return stopRoute(route);
+  }
+  // Same operation id: the host checks the route it already has and starts nothing new.
+  async function retryOperation(current: Operation) {
+    await checkIt(async () => {
+      await send(`/operations/${encodeURIComponent(current.operationId)}/reconcile`, {
+        action: "check",
+        acknowledgeDisconnect: true,
+      });
+      const [operationResult, stateResult] = await Promise.all([
+        request(`/operations/${encodeURIComponent(current.operationId)}`),
+        request("/state"),
+      ]);
+      if (operationResult.ok) {
+        setOperation({ ...(operationResult.data as Operation), kind: (operationResult.data as Operation).kind ?? current.kind });
+      }
+      if (stateResult.ok) setState(stateResult.data as State);
+    });
+  }
+
   // After it failed or after Cancel: Off and a fresh review, once the owner asks.
   function startOver() {
     setOperation(null);
@@ -475,6 +623,11 @@ export function RemoteAccessSetting({
       if (!result.ok) throw new ReachabilityFailure(publicError("owner_password_required", result.message, "change"));
     }, "change");
   }
+  // A route turned off and replaced is history: the newest one is the card.
+  const settledOff = (route: Route) => route.state === "released" && route.cleanup.state === "confirmed";
+  const visibleRoutes = state.routes.filter(
+    (route) => !(settledOff(route) && state.routes.some((other) => other !== route && !settledOff(other)))
+  );
   const hostReasonShown = !host.known && host.reason !== "loading";
   const serviceLabel = wayLabel ?? "the service";
   const done = prep.status === "done" ? prep.result : null;
@@ -627,6 +780,11 @@ export function RemoteAccessSetting({
           >
             Check and turn off
           </button>
+          {cancel === null && operation.recovery?.available ? (
+            <button disabled={busy} onClick={() => void retryOperation(operation)} type="button">
+              Try again
+            </button>
+          ) : null}
           {operation.failureCode || operation.recovery ? (
             <Diagnostics>
               {operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}
@@ -661,79 +819,15 @@ export function RemoteAccessSetting({
         />
       ) : null}
       <section aria-label="Your address" className="grid gap-4">
-        {state.routes.map((route) => {
-          const unsupportedRefresh = state.reasons[route.handle.id] === "proof_refresh_unsupported";
-          const phase = state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.phase ?? null) : null;
-          const headline = routeHeadline(route, phase, unsupportedRefresh);
+        {visibleRoutes.map((route) => {
+          const unsupportedRefresh = unsupportedOf(route);
+          const phase = phaseOf(route);
+          const attention = attentionOf(route);
+          const headline = headlineOf(route);
           const sentence = routeSentence(route, headline);
-          return (
-          <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
-            <h3 className="pdpp-label">{headline}</h3>
-            {sentence ? <p role="status">{sentence}</p> : null}
-            {unsupportedRefresh ? <p role="status">{ERROR_MESSAGES.proof_refresh_unsupported}</p> : null}
-            <p className="pdpp-caption break-words">Your address: {route.origin ?? "Not available yet"}</p>
-            <p className="pdpp-caption">
-              {proofLine(route, Date.now(), { synthetic: state.evidenceSource === "synthetic" })}
-            </p>
-            {route.binding.remedy ? (
-              <div className="grid gap-2">
-                <h4 className="pdpp-label">{plain(route.binding.remedy.label)}</h4>
-                <p className="pdpp-caption whitespace-pre-wrap break-words">
-                  {route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text}
-                </p>
-              </div>
-            ) : null}
-            {route.cleanup.nextAction ? (
-              <p className="pdpp-caption whitespace-pre-wrap break-words">
-                {route.cleanup.nextAction.instructions ?? plain(route.cleanup.nextAction.label)}
-              </p>
-            ) : null}
-            {route.cleanup.state !== "confirmed" ? <div className="flex flex-wrap gap-3">
-              {state.lifecycle?.phase === "review" && !unsupportedRefresh ? (
-                <button
-                  disabled={busy}
-                  onClick={() =>
-                    void edit(async () => {
-                      const snapshot = await send<ReturnType<typeof projectRuntimeReview>>(
-                        `/routes/${encodeURIComponent(route.handle.id)}/review`,
-                        { generation: route.handle.generation }
-                      );
-                      setRuntimeReview({ routeId: route.handle.id, generation: route.handle.generation, snapshot });
-                    })
-                  }
-                >
-                  Review changes
-                </button>
-              ) : null}
-              {!state.lifecycle?.stopRequested && !unsupportedRefresh ? (
-                <button
-                  disabled={busy}
-                  onClick={() =>
-                    void checkIt(async () => {
-                      await send(`/routes/${encodeURIComponent(route.handle.id)}/check`, {
-                        generation: route.handle.generation,
-                      });
-                    })
-                  }
-                >
-                  Check again
-                </button>
-              ) : null}
-              <button
-                disabled={busy}
-                onClick={() =>
-                  void turnOff(async () => {
-                    const pending = await send<{ operationId: string }>(
-                      `/routes/${encodeURIComponent(route.handle.id)}/stop`,
-                      { generation: route.handle.generation, acknowledgeDisconnect: true }
-                    );
-                    setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
-                  })
-                }
-              >
-                {route.cleanup.state === "unconfirmed" ? "Try turning off again" : "Turn off"}
-              </button>
-            </div> : null}
+          const now = Date.now();
+          const { shown: knownFacts, unknown: unknownFacts } = splitFacts(route.facts);
+          const details = (
             <Diagnostics>
               <p className="break-words">
                 Requested target:{" "}
@@ -755,8 +849,96 @@ export function RemoteAccessSetting({
                 Lifecycle: {phase ?? "none"} · route{" "}
                 {route.routeState}
               </p>
-              <ConsentFacts facts={route.facts} />
+              <ConsentFacts facts={knownFacts} />
+              <UnknownFactsCount count={unknownFacts} service={serviceLabel} />
             </Diagnostics>
+          );
+          const extras = (
+            <>
+              {route.binding.remedy ? (
+                <div className="grid gap-2">
+                  <h4 className="pdpp-label">{plain(route.binding.remedy.label)}</h4>
+                  <p className="pdpp-caption whitespace-pre-wrap break-words">
+                    {route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text}
+                  </p>
+                </div>
+              ) : null}
+              {route.cleanup.nextAction ? (
+                <p className="pdpp-caption whitespace-pre-wrap break-words">
+                  {route.cleanup.nextAction.instructions ?? plain(route.cleanup.nextAction.label)}
+                </p>
+              ) : null}
+            </>
+          );
+          if (headline === "On" && route.cleanup.state !== "confirmed") {
+            return (
+              <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
+                <OnCard
+                  addressChanged={previousOrigin !== null && route.origin !== null && route.origin !== previousOrigin}
+                  busy={busy}
+                  now={now}
+                  onTurnOff={() => void turnOffRoute(route)}
+                  route={route}
+                  synthetic={state.evidenceSource === "synthetic"}
+                >
+                  {extras}
+                  {details}
+                </OnCard>
+              </div>
+            );
+          }
+          return (
+          <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
+            <h3 className="pdpp-label">{headline}</h3>
+            {sentence ? <p role="status">{sentence}</p> : null}
+            {attention ? <p role="status">{attentionSentence(attention, route, serviceLabel)}</p> : null}
+            {unsupportedRefresh ? <p role="status">{ERROR_MESSAGES.proof_refresh_unsupported}</p> : null}
+            <p className="pdpp-caption break-words">Your address: {route.origin ?? "Not available yet"}</p>
+            <p className="pdpp-caption">
+              {proofLine(route, now, { synthetic: state.evidenceSource === "synthetic" })}
+            </p>
+            {extras}
+            {route.cleanup.state !== "confirmed" || attention ? <div className="flex flex-wrap gap-3">
+              {headline === "Needs your action" && route.cleanup.state !== "unconfirmed" ? (
+                <button disabled={busy} onClick={() => void turnOnAgain(route)} type="button">
+                  Turn on again
+                </button>
+              ) : null}
+              {state.lifecycle?.phase === "review" && !unsupportedRefresh && !attention ? (
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void edit(async () => {
+                      const snapshot = await send<ReturnType<typeof projectRuntimeReview>>(
+                        `/routes/${encodeURIComponent(route.handle.id)}/review`,
+                        { generation: route.handle.generation }
+                      );
+                      setRuntimeReview({ routeId: route.handle.id, generation: route.handle.generation, snapshot });
+                    })
+                  }
+                >
+                  Review changes
+                </button>
+              ) : null}
+              {!state.lifecycle?.stopRequested && !unsupportedRefresh && !attention ? (
+                <button
+                  disabled={busy}
+                  onClick={() =>
+                    void checkIt(async () => {
+                      await send(`/routes/${encodeURIComponent(route.handle.id)}/check`, {
+                        generation: route.handle.generation,
+                      });
+                    })
+                  }
+                >
+                  Check again
+                </button>
+              ) : null}
+              <button disabled={busy} onClick={() => void turnOffRoute(route)}>
+                {route.cleanup.state === "unconfirmed" ? "Try turning off again" : "Turn off"}
+              </button>
+            </div> : null}
+            {details}
           </div>
           );
         })}

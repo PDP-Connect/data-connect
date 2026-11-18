@@ -2,7 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { proofLine, routeHeadline, routeSentence, type RouteDisplayInput } from "./route-display.ts";
+import {
+  attentionSentence,
+  expiryLine,
+  isLifetimeClaim,
+  proofLine,
+  recheckAt,
+  routeAttention,
+  routeHeadline,
+  routeSentence,
+  type RouteDisplayInput,
+} from "./route-display.ts";
 
 // Values copied from the secret-free /v1/owner/reachability/state snapshots of
 // the packaged native walk (plan050 evidence state-snapshots-run2.jsonl, same
@@ -22,23 +32,74 @@ const releasedRoute: RouteDisplayInput = {
 };
 const utc = { locale: "en-US", timeZone: "UTC", now: Date.parse("2026-11-18T12:00:00Z") };
 
-test("the proof line says when it was checked in local time and when its window has ended", () => {
-  const line = proofLine(staleRoute, Date.parse("2026-11-18T07:08:43.857Z"), utc);
-  assert.match(line, /^Works from the internet · checked 7:08.AM/);
-  assert.match(line, /check expired/);
-  assert.doesNotMatch(line, /\d{4}-\d{2}-\d{2}T/);
+test("the proof line says how long ago it was checked and never shows an expiry notice", () => {
+  const line = proofLine(staleRoute, Date.parse("2026-11-18T07:08:43.857Z"));
+  assert.equal(line, "Works from the internet · checked just now");
+  assert.equal(proofLine(staleRoute, Date.parse("2026-11-18T07:13:20Z")), "Works from the internet · checked 5 min ago");
+  assert.doesNotMatch(line, /expired|Check again|\d{4}-\d{2}-\d{2}T/);
   assert.equal(routeHeadline(staleRoute, "stale", false), "Needs your action");
 });
 
-test("a proof inside its window is not called expired, and an unknown window claims nothing", () => {
-  assert.doesNotMatch(proofLine(staleRoute, Date.parse("2026-11-18T07:08:20Z"), utc), /expired/);
-  const unknownWindow = { ...staleRoute, verification: { ...staleRoute.verification, validUntil: { known: false as const, reason: "x" } } };
-  assert.doesNotMatch(proofLine(unknownWindow, Date.now(), utc), /expired/);
+test("an unverified route is not called working; test data is labelled; no check time is not invented", () => {
+  assert.match(proofLine(releasedRoute, Date.parse("2026-11-18T14:12:04Z")), /^Not confirmed yet · checked 7 hr ago/);
+  assert.match(proofLine(staleRoute, Date.parse("2026-11-18T07:09:00Z"), { synthetic: true }), /^Test data: Works from the internet/);
+  const unknownTime = { ...staleRoute, verification: { ...staleRoute.verification, observedAt: null } };
+  assert.match(proofLine(unknownTime, 0), /check time unknown/);
 });
 
-test("an unverified route is not called working; test data is labelled", () => {
-  assert.match(proofLine(releasedRoute, Date.now(), utc), /^Not confirmed yet · checked 7:11.AM/);
-  assert.match(proofLine(staleRoute, 0, { ...utc, synthetic: true }), /^Test data: Works from the internet/);
+test("the one lifetime is the server's expiry, formatted local; nothing is computed from a label", () => {
+  const session = { ...staleRoute, handle: { kind: "session" }, expiresAt: { known: true as const, value: "2026-11-18T15:05:00Z" } };
+  assert.equal(expiryLine(session, utc), "Turns off at 3:05 PM");
+  assert.equal(expiryLine({ ...session, expiresAt: { known: true, value: "2026-11-19T15:05:00Z" } }, utc), "Turns off at Nov 19, 3:05 PM");
+  // Unknown expiry: a session says it is temporary and gives no number; a lasting route says nothing.
+  const unknown = { ...session, expiresAt: { known: false as const, reason: "not-observed" } };
+  assert.equal(expiryLine(unknown), "Temporary address; it may turn off or change");
+  assert.equal(expiryLine({ ...unknown, handle: { kind: "external" } }), null);
+  assert.doesNotMatch(String(expiryLine(unknown)), /\d/);
+});
+
+test("a route that ended at its expiry says when", () => {
+  const ended = { ...releasedRoute, expiresAt: { known: true as const, value: "2026-11-18T15:05:00Z" } };
+  assert.equal(routeSentence(ended, "Off", { ...utc, now: Date.parse("2026-11-18T16:00:00Z") }), "Your address turned off at 3:05 PM.");
+  assert.equal(routeSentence(ended, "Off", { ...utc, now: Date.parse("2026-11-18T14:00:00Z") }), "Your address no longer works.");
+});
+
+test("the re-check is due before the proof window ends, and only when the server reports a window", () => {
+  // Window 07:08:13.767 to 07:08:43.767 is 30 s: a third is 10 s.
+  assert.equal(recheckAt(staleRoute), Date.parse("2026-11-18T07:08:33.767Z"));
+  const longWindow = { ...staleRoute, verification: { ...staleRoute.verification, observedAt: "2026-11-18T07:00:00Z", validUntil: { known: true as const, value: "2026-11-18T08:00:00Z" } } };
+  assert.equal(recheckAt(longWindow), Date.parse("2026-11-18T07:59:00Z"), "the margin is capped at a minute");
+  const noWindow = { ...staleRoute, verification: { ...staleRoute.verification, validUntil: { known: false as const, reason: "x" } } };
+  assert.equal(recheckAt(noWindow), null);
+});
+
+const base = { lifecycleReason: null, recheckFailed: false, acknowledged: false, now: Date.parse("2026-11-18T07:08:30Z"), lifecyclePhase: "verified", recheckUnderWay: false };
+test("a lost route, a failed re-check and an unrenewed stale proof need the owner, with one sentence each", () => {
+  assert.equal(routeAttention(staleRoute, { ...base, lifecycleReason: "agent-exited" }), "lost");
+  assert.equal(routeAttention({ ...staleRoute, state: "lost" }, base), "lost");
+  assert.equal(routeAttention(staleRoute, { ...base, recheckFailed: true }), "recheck-failed");
+  assert.equal(routeAttention(staleRoute, { ...base, lifecyclePhase: "stale" }), "recheck-failed");
+  assert.equal(routeAttention(staleRoute, { ...base, lifecyclePhase: "stale", recheckUnderWay: true }), null, "a re-check under way is not a failure");
+  assert.equal(routeAttention(staleRoute, base), null);
+  assert.equal(routeAttention(staleRoute, { ...base, lifecycleReason: "agent-exited", acknowledged: true }), null);
+  assert.equal(routeHeadline(staleRoute, "verified", false, "lost"), "Needs your action");
+  assert.match(attentionSentence("lost", staleRoute, "Tunnel service"), /^Your address stopped working\. Tunnel service closed the connection\. Turn it on again/);
+  assert.match(attentionSentence("recheck-failed", staleRoute, "Tunnel service"), /^We can't confirm the address still works\. Turn it on again/);
+});
+
+test("an address past its end time with a proof no longer verified needs the owner; a skewed clock alone does not", () => {
+  const ended = { ...staleRoute, expiresAt: { known: true as const, value: "2026-11-18T07:08:00Z" } };
+  const unverified = { ...ended, verification: { ...ended.verification, status: "unverified" } };
+  assert.equal(routeAttention(unverified, base), "expired");
+  assert.equal(routeAttention(ended, base), null);
+  assert.match(attentionSentence("expired", unverified, "Tunnel service", utc), /^Your address turned off at 7:08 AM\./);
+});
+
+test("a duration claim in a service condition is recognised, and ordinary conditions are kept", () => {
+  assert.equal(isLifetimeClaim("the plan limits a session to 15 minutes"), true);
+  assert.equal(isLifetimeClaim("lasts 2 hours"), true);
+  assert.equal(isLifetimeClaim("trial: uptime and URL lifetime are not guaranteed"), false);
+  assert.equal(isLifetimeClaim("a new connection gets a new URL"), false);
 });
 
 test("a released route with confirmed cleanup reads Off, not unknown", () => {

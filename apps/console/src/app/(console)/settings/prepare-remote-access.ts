@@ -211,12 +211,6 @@ export async function runAction(
 
 // ---------- what the Turn on button shows ----------
 
-const plainDuration = (ms: number): string => {
-  const minutes = Math.round(ms / 60_000);
-  if (minutes >= 60 && minutes % 60 === 0) return minutes === 60 ? "1 hour" : `${minutes / 60} hours`;
-  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
-};
-
 /** One short line per material fact, all read from the review being shown. */
 export function disclosureLines(candidate: Candidate): string[] {
   const consent = candidate.consent;
@@ -250,7 +244,7 @@ export function disclosureLines(candidate: Candidate): string[] {
   lines.push(`${price}${address}`);
   lines.push(
     usage?.kind === "session"
-      ? `Turns off after ${plainDuration(usage.lifetimeMs)}.`
+      ? "Turns off by itself. The time shows once it's on."
       : usage?.kind === "durable"
         ? "Stays on until you turn it off."
         : usage?.kind === "attached"

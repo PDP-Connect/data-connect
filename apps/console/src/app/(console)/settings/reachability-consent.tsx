@@ -8,11 +8,35 @@ import type {
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react";
 import { formatLocalTime, humanizeKey, plain } from "./plain-text.ts";
+import { isLifetimeClaim } from "./route-display.ts";
 
 type Fact = ReturnType<typeof projectFact>;
 type Action = ReturnType<typeof projectAction>;
 
-export function ConsentFacts({ facts }: { facts: Fact[] }) {
+/**
+ * Facts the owner can read: known ones, including those known to be empty
+ * (shown as None). `unknown` counts only the facts the service does not publish.
+ */
+export function splitFacts(facts: Fact[]): { shown: Fact[]; unknown: number } {
+  return { shown: facts.filter((fact) => fact.known), unknown: facts.filter((fact) => !fact.known).length };
+}
+
+export function UnknownFactsCount({ count, service }: { count: number; service: string }) {
+  if (count === 0) return null;
+  return (
+    <p className="pdpp-caption">
+      {count} {count === 1 ? "fact" : "facts"} {plain(service)} doesn't publish.
+    </p>
+  );
+}
+
+// A condition fact that states how long a session lasts would contradict the
+// route's own end time, which is the only lifetime shown.
+const contradictsEndTime = (fact: Fact) =>
+  fact.known && fact.value !== null && /condition/i.test(`${fact.id} ${fact.group} ${fact.label}`) && isLifetimeClaim(String(fact.value));
+
+export function ConsentFacts({ facts: all }: { facts: Fact[] }) {
+  const facts = all.filter((fact) => !contradictsEndTime(fact));
   const groups = [...new Set(facts.map((fact) => fact.group))];
   return (
     <div className="grid gap-4">
@@ -61,14 +85,17 @@ export function ConsentDisclosures({ value }: { value: unknown }) {
   if (typeof value === "object") {
     return (
       <dl className="grid gap-3">
-        {Object.entries(value).map(([key, item]) => (
+        {Object.entries(value).map(([key, raw]) => {
+          const item = key === "conditions" && Array.isArray(raw) ? raw.filter((line) => typeof line !== "string" || !isLifetimeClaim(line)) : raw;
+          return (
           <div key={key}>
             <dt className="pdpp-label">{humanizeKey(key)}</dt>
             <dd>
               <ConsentDisclosures value={item} />
             </dd>
           </div>
-        ))}
+          );
+        })}
       </dl>
     );
   }

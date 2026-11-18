@@ -57,6 +57,7 @@ const sourceFiles = [
   "provider-setup.tsx",
   "reachability-consent.tsx",
   "route-display.ts",
+  "on-card.tsx",
   "reachability-actions.ts",
   "diagnostics.tsx",
   "page.tsx",
@@ -464,7 +465,7 @@ test("the main state, with library and server values full of codes, shows none",
     assert.match(text, /Needs your action/);
     assert.match(text, /We lost track of the address\. It may still be on\./);
     assert.match(text, /too long for remote access/);
-    assert.match(text, /Works from the internet · checked \d{1,2}:\d{2}/);
+    assert.match(text, /Works from the internet · checked (just now|\d+ (min|hr|days?) ago)/);
     assert.doesNotMatch(text, /Staged configuration|Reload draft|Commit and review route|Host settings/);
     // Host internals live under Details.
     const details = [...container.querySelectorAll("[data-diagnostics]")].map((node) => node.textContent).join("\n");
@@ -480,7 +481,8 @@ test("the default way opens at Turn on, in plain words, with no old setup screen
     assertClean("ready to turn on", text);
     assert.match(text, /Step 2 of 2 · Turn on/);
     assert.match(text, /Tunnel service can see what passes through\./);
-    assert.match(text, /Turns off after 1 hour\./);
+    assert.match(text, /Turns off by itself\./);
+    assert.doesNotMatch(text, /\b\d+\s*(seconds?|minutes?|hours?)\b|1 hour|15 minutes/);
     assert.match(text, /Turn on remote access/);
     assert.doesNotMatch(text, /Continue setup|Staged configuration|Reload|Start setup|Save and review|Discard|Review reachability|Apply reachability/);
     assert.doesNotMatch(text, /\b(draft|route|attached|session|durable)\b/i);
