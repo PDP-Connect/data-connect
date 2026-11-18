@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PAGE_FILE = `${HERE}page.tsx`;
+const SYNC_BREADCRUMB_TRAIL =
+  /breadcrumbs=\{breadcrumbsFor\(\s*`\/syncs\/\$\{runId\}`,\s*\.\.\.\(sourceHref \? \[\{ href: sourceHref, label: connectorName \}\] : \[\]\),\s*\{ label: "Sync" \}\s*\)\}/;
 
 test("all run source links share the encoded resolved connection route", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
@@ -32,8 +34,7 @@ test("description and reconnect labels stay visible without a source route", asy
 
 test("breadcrumbs include a source only when its connection route is known", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  assert.match(src, /breadcrumbs=\{\s*sourceHref\s*\? \[/);
-  assert.match(src, /: \[\{ href: dashboardRoutes\.section\.runs, label: "Syncs" \}, \{ label: "Sync" \}\]/);
+  assert.match(src, SYNC_BREADCRUMB_TRAIL);
 });
 
 test("auth failure diagnosis hides the connector code and links to reconnect", async () => {

@@ -8,6 +8,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { loadBrowserConnectSupport } from "../../../../lib/load-browser-connect-support.ts";
 import { findManifestForConnectorId } from "../../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../../lib/rs-client.ts";
@@ -57,14 +58,11 @@ export default async function BrowserSessionLaunchPage({
             Back to Sources
           </Link>
         }
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          {
-            href: `/connect/browser-session/${encodeURIComponent(connectorId)}`,
-            label: `Connect ${displayName}`,
-          },
-          { label: "Starting browser" },
-        ]}
+        breadcrumbs={breadcrumbsFor(
+          `/connect/browser-session/${rawConnectorId}/launch`,
+          { href: `/connect/browser-session/${encodeURIComponent(connectorId)}`, label: `Connect ${displayName}` },
+          { label: "Starting browser" }
+        )}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />

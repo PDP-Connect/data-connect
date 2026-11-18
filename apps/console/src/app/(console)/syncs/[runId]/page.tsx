@@ -9,6 +9,7 @@ import { notFound } from "next/navigation";
 import { Fragment } from "react";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import {
@@ -258,15 +259,11 @@ export default async function RunDetailPage({
       <RunDetailPoller enabled={active} />
       <TimelineDetailView
         beforeTimelineContent={beforeTimeline}
-        breadcrumbs={
-          sourceHref
-            ? [
-                { href: dashboardRoutes.section.runs, label: "Syncs" },
-                { href: sourceHref, label: connectorName },
-                { label: "Sync" },
-              ]
-            : [{ href: dashboardRoutes.section.runs, label: "Syncs" }, { label: "Sync" }]
-        }
+        breadcrumbs={breadcrumbsFor(
+          `/syncs/${runId}`,
+          ...(sourceHref ? [{ href: sourceHref, label: connectorName }] : []),
+          { label: "Sync" }
+        )}
         cliCommand={`pdpp ref run timeline ${runId}`}
         description={description}
         envelope={envelope}

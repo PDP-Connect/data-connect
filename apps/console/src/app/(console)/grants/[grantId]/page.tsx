@@ -7,6 +7,7 @@ import { TimelineDetailView } from "@pdpp/operator-ui/components/views/timeline-
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { ServerUnreachable } from "../../components/server-unreachable.tsx";
 import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { getGrantTimeline, lookupGrantPackageIdForGrant } from "../../lib/ref-client.ts";
@@ -77,7 +78,7 @@ export default async function GrantDetailPage({
             </Link>
           </div>
         }
-        breadcrumbs={[{ href: "/grants", label: "Grants" }, { label: "Grant" }]}
+        breadcrumbs={breadcrumbsFor(`/grants/${grantId}`, { label: "Grant" })}
         cliCommand={`pdpp ref grant timeline ${grantId}`}
         count={`${envelope.events.length} events${revoked ? " · revoked" : ""}`}
         envelope={envelope}

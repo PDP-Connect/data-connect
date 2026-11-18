@@ -7,6 +7,7 @@ import { PageHeader } from "@pdpp/operator-ui/components/primitives";
 import Link from "next/link";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
+import { breadcrumbsFor } from "@/app/(console)/lib/breadcrumbs.ts";
 import { findManifestForConnectorId } from "../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
 
@@ -33,11 +34,7 @@ export default async function ProviderAuthPage({
   return (
     <RecordroomShellWithPalette>
       <PageHeader
-        breadcrumbs={[
-          { href: "/sources", label: "Sources" },
-          { href: "/sources/add", label: "Add source" },
-          { label: `Authorize ${displayName}` },
-        ]}
+        breadcrumbs={breadcrumbsFor(`/connect/provider-auth/${connectorId}`, { label: `Authorize ${displayName}` })}
         description={
           <span className="inline-flex items-center gap-2">
             <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={displayName} />
