@@ -889,14 +889,14 @@ pub(crate) fn grant_owner_password_change_for_test(request_id: u64, grant_id: &s
 }
 
 /// Queue the stack restart that starts the RI with the password just saved.
-/// A change or a recovery restarts now and revokes every owner session and
-/// bearer: a replaced password must not leave a phone or a CLI token signed
-/// in. First-time setup with remote access off keeps the delayed restart
-/// without revocation: no remote device can be signed in, and the
-/// remote-access form that asked for it saves its config next, which
-/// restarts the stack sooner through the config watcher. First-time setup
-/// with remote access already on (an install from before the password gate)
-/// is a change: a phone may be signed in with the generated password.
+/// The running server reads the owner credential at start, so the new password
+/// signs in only after the restart: every purpose restarts now. A change or a
+/// recovery also revokes every owner session and bearer: a replaced password
+/// must not leave a phone or a CLI token signed in. First-time setup with
+/// remote access off revokes nothing: no remote device can be signed in.
+/// First-time setup with remote access already on (an install from before the
+/// password gate) is a change: a phone may be signed in with the generated
+/// password.
 fn queue_owner_password_stack_restart_request<R: Runtime>(
     app: &AppHandle<R>,
     purpose: &str,
@@ -915,13 +915,8 @@ fn queue_owner_password_stack_restart_request<R: Runtime>(
         "initial_setup" if crate::remote_access::saved_remote_access_posture_is_off(app) => None,
         _ => Some("password_change"),
     };
-    if revoke_reason.is_none() {
-        state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
-        state.revoke_sessions = None;
-    } else {
-        state.not_before_unix_ms = None;
-        state.revoke_sessions = Some(true);
-    }
+    state.not_before_unix_ms = None;
+    state.revoke_sessions = revoke_reason.map(|_| true);
     state.revoke_reason = revoke_reason.map(str::to_string);
     save_owner_password_request_state(&path, &state, "owner-password stack-restart request")
 }
@@ -2324,13 +2319,14 @@ mod tests {
     }
 
     /// True first setup: remote access is off, so no remote device can be
-    /// signed in. The restart waits and revokes nothing.
+    /// signed in. The restart starts now, so the new password signs in at once,
+    /// and it revokes nothing.
     #[cfg(desktop)]
     #[test]
     fn a_first_password_with_remote_access_off_does_not_revoke() {
         for posture in [None, Some("off")] {
             let state = first_password_restart_request(posture);
-            assert!(state.not_before_unix_ms.is_some(), "{posture:?}: {state:?}");
+            assert_eq!(state.not_before_unix_ms, None, "{posture:?}: {state:?}");
             assert_eq!(state.revoke_sessions, None, "{posture:?}");
             assert_eq!(state.revoke_reason, None, "{posture:?}");
         }
