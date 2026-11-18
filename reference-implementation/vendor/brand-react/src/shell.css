@@ -88,6 +88,14 @@ html:has(.rr-app) {
   width: 18px;
   height: 18px;
 }
+/* The navy tile's lower edge is nearly the dark sidebar's colour. On the dark
+   surface a hairline ring, drawn inside the tile, keeps its outline. */
+.rr-side__mark-edge {
+  stroke: none;
+}
+[data-theme="dark"] .rr-side__mark-edge {
+  stroke: color-mix(in oklab, white 22%, transparent);
+}
 /* Light surface — standard hues. */
 .rr-app,
 .pdpp-dialog.rr-drawer {

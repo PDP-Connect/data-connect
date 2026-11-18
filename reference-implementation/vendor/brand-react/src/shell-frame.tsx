@@ -42,7 +42,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useState } from "react";
 import "./components.css";
 import {
   IcDialog,
@@ -162,9 +162,14 @@ export function isNavItemActive(href: string, pathname: string): boolean {
 // dependency direction is one-way). This keeps the package-boundary contract
 // intact while still shipping the real logo, not a placeholder shape.
 function BrandMark() {
+  // One gradient id per copy. The sidebar, header and drawer share a document, and a
+  // fixed id made the header's fill resolve to the sidebar copy, which is hidden at
+  // 860 px and below, so the header showed only the white glyphs.
+  const gradientId = useId();
   return (
     <svg aria-hidden="true" className="rr-side__mark" height="18" role="presentation" viewBox="0 0 832 832" width="18">
-      <rect fill="url(#rr-dataconnect-mark-bg)" height="832" rx="183" width="832" />
+      <rect fill={`url(#${gradientId})`} height="832" rx="183" width="832" />
+      <rect className="rr-side__mark-edge" fill="none" height="792" rx="163" strokeWidth={40} width="792" x="20" y="20" />
       <path
         d="M188.955 197.596C309.404 197.596 407.047 295.552 407.047 416C407.047 536.449 309.404 634.405 188.955 634.405C187.051 634.405 185.153 634.38 183.262 634.332C161.511 633.772 150.635 633.492 140.716 623.315C130.797 613.137 130.797 599.88 130.797 573.367V258.633C130.797 232.12 130.797 218.864 140.716 208.686C150.636 198.508 161.511 198.229 183.262 197.669C185.154 197.621 187.051 197.596 188.955 197.596Z"
         fill="white"
@@ -174,7 +179,7 @@ function BrandMark() {
         fill="white"
       />
       <defs>
-        <linearGradient id="rr-dataconnect-mark-bg" x1="416" x2="416" y1="0" y2="832" gradientUnits="userSpaceOnUse">
+        <linearGradient id={gradientId} x1="416" x2="416" y1="0" y2="832" gradientUnits="userSpaceOnUse">
           <stop offset="0.100024" stopColor="#304DC0" />
           <stop offset="0.578171" stopColor="#121265" />
           <stop offset="0.956731" stopColor="#090939" />
