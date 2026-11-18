@@ -37,8 +37,6 @@ mod test_executable;
 #[cfg(desktop)]
 mod unified;
 #[cfg(target_os = "linux")]
-pub mod linux_app_id;
-#[cfg(target_os = "linux")]
 pub mod wayland_titlebar;
 
 pub use commands::browser_surface_host_env_pairs;
@@ -96,13 +94,9 @@ fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // GTK reports the program name as the Wayland app_id; it must match the
-    // packaged desktop file for the compositor to show the app icon.
+    // GTK sends the program name as the Wayland app_id; it must equal productName so it matches DataConnect.desktop.
     #[cfg(target_os = "linux")]
-    {
-        linux_app_id::set_program_name();
-        linux_app_id::integrate_appimage_if_needed();
-    }
+    gtk::glib::set_prgname(Some("DataConnect"));
 
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
     // `aws-lc-rs` are present in the tree (they both are, transitively), and
@@ -193,8 +187,6 @@ pub fn run() {
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
-            #[cfg(target_os = "linux")]
-            linux_app_id::report_integration_error();
 
             #[cfg(desktop)]
             if main_thread_watchdog::is_enabled() {

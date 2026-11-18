@@ -2,7 +2,7 @@
   Custom desktop template: adds %u to Exec for deep-link URL handling.
   Tauri's default template omits %u, which breaks KDE/KIO protocol dispatch.
   StartupWMClass is the product name: the window's app_id is set to it in
-  src-tauri/src/linux_app_id.rs, and Tauri names this file {{name}}.desktop,
+  src-tauri/src/lib.rs, and Tauri names this file {{name}}.desktop,
   so compositors match window, file and icon.
   See: https://github.com/tauri-apps/tauri/issues/10570
   See: https://github.com/tauri-apps/tauri/issues/5176
