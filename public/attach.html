@@ -230,7 +230,7 @@
         for (const control of controls) {
           control.disabled = value || disabledByEnvironment;
         }
-        detachButton.disabled = value;
+        detachButton.disabled = value || disabledByEnvironment;
       }
 
       function message(error, fallback) {

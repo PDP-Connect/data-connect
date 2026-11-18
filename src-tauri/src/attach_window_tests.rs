@@ -176,6 +176,8 @@ fn an_environment_override_disables_attaching() {
         .starts_with("Set by environment"));
     // No server listens here: a refusal must come before any request.
     let origin = closed_origin();
+    // A saved attachment the environment overrides: Detach must keep it.
+    saved(data_root.path(), &origin);
     for (command, args) in [
         (
             "attach_with_pairing_code",
@@ -185,6 +187,7 @@ fn an_environment_override_disables_attaching() {
             "attach_with_owner_password",
             json!({"input": origin, "password": "pw", "trustPlainHttp": false}),
         ),
+        ("detach_from_server", json!({})),
     ] {
         let error = invoke_from(&attach_window, command, args).expect_err("refused");
         assert!(
@@ -196,6 +199,7 @@ fn an_environment_override_disables_attaching() {
         );
     }
     assert!(relaunches(&app).is_empty());
+    assert!(attach::attachment_path(&data_dir(data_root.path())).exists());
 }
 
 #[test]

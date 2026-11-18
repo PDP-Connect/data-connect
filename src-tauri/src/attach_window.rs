@@ -403,6 +403,11 @@ pub(crate) async fn detach_from_server<R: Runtime>(
     webview: tauri::WebviewWindow<R>,
 ) -> Result<String, String> {
     require_attach_window(webview.label())?;
+    // The environment chooses the server; detaching here would change nothing
+    // it uses, only delete the saved pairing behind the owner's back.
+    if environment_override_for(&app) {
+        return Err(ENVIRONMENT_OVERRIDE_MESSAGE.to_string());
+    }
     detach_and_restart(&app).await
 }
 
