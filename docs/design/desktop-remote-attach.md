@@ -81,7 +81,7 @@ Tim's rule that any surface syncs with any surface, read as a constraint on this
 - Any `http(s)` origin. No provider knowledge: a Gozar route, a Cloudflare tunnel, a LAN name, Tailscale and `localhost` are all just origins. One origin per attachment. If an address changes, the owner re-pairs; a stable Gozar hostname makes that rare. (T3 keeps an ordered route list. This design does not, because the first user has one route.)
 - `https` is required unless the host is loopback or the owner ticks "I trust this network" for plain HTTP. The window shows the warning text. The experiment worked over plain HTTP on a LAN, so the rule is policy, not a technical limit.
 - Fix the cookie install for single-label hosts (build the native cookie from fields, not by parsing a header string) so `localhost` and LAN names work.
-- Known gap: the desktop does not pin server identity. T3 checks a public descriptor before sending credentials to a saved LAN address. Here, `https` makes this moot for named hosts. For a plain-HTTP LAN address another machine can answer. The notice above covers the risk and a descriptor check is a follow-up.
+- Known gap, required before any merge to main: the desktop does not pin server identity, and `https` does not close it. A tunnel or Gozar hostname can be released and reassigned, and the new owner of that hostname holds a valid certificate, so it would receive the stored 30 day session. The `/.well-known/oauth-protected-resource` probe cannot tell the servers apart either: its issuer comes from the request host or `PDPP_REFERENCE_ORIGIN` (`routes/root-and-discovery.ts`, issuer resolution), so any server answers with whatever name was asked for. A public instance id does not help, because anyone can copy it. The fix: the server holds an instance key pair; redeem returns the public key; the desktop pins it with the attachment and, before each send of the session, checks a signature over a fresh nonce. This PR does not build it. It is an explicit gate: Tim either accepts the gap for a test build or the pin lands before merge.
 
 ## What this PR builds
 
@@ -102,10 +102,21 @@ Tim's rule that any surface syncs with any surface, read as a constraint on this
 
 - Desktop as a worker for browser connectors (above). Largest user-visible gap.
 - Refresh of a 30 day session without re-pairing (T3 has none either).
-- Ordered routes per server and a public-descriptor identity check before sending credentials.
+- Ordered routes per server.
+- Instance key pinning (Decision 5). Gate before merge, not a nice-to-have.
 - DPoP-bound sessions. Useful when a server is reachable by many networks; not needed to test.
 - Several saved servers and a switcher. One attachment at a time.
 
 ## Research gaps
 
 Jupyter, Syncthing and T3's own pairing docs were researched separately and captured in the divan entry named by the research child (path recorded in the PR description). They refine, and do not change, the decisions above.
+
+## Review input folded in (2026-11-17)
+
+An independent review of a parallel design raised five findings. Each was checked against the code.
+
+1. Desktop and Vault recovery settings render on a server where nothing answers them (`settings/page.tsx`, routes mounted unconditionally in `server/index.ts`). Accepted. This PR gates both sections on `PDPP_MANAGED_DESKTOP_HOST`. Remote access stays visible.
+2. `decide_console_navigation` opens the system browser for any https navigation with no gesture (`unified.rs`). Accepted. While attached the desktop asks for a native confirmation naming the target origin. Local mode is unchanged. The webview gives no gesture signal, so the confirm replaces a click check.
+3. Identity before credentials. Accepted, and it corrects Decision 5. Built as a gate, not in this PR (see Decision 5).
+4. Cookies are keyed by host, not port, so a forwarded remote and the local console collide. Accepted. Detach, an expired pairing and the switch delete the remote session cookie from the webview store, and the walkthrough attaches, detaches and checks that the local console is signed in as local.
+5. Stale comments claiming no IPC bridge. Not changed. `capabilities/console.json` grants the console window no `remote` URLs, so by Tauri 2 rules IPC is refused from an external origin whatever the injected global is. The walkthrough checks this by calling `window.__TAURI__.core.invoke` from the attached console. Comment wording is not part of this PR.
