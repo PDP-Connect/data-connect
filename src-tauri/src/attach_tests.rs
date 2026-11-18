@@ -1,0 +1,630 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
+use super::*;
+
+fn input(origin: &str, code: Option<&str>) -> AttachInput {
+    AttachInput {
+        origin: origin.to_string(),
+        code: code.map(ToOwned::to_owned),
+    }
+}
+
+#[test]
+fn parses_a_pairing_link_with_an_encoded_server_and_code() {
+    assert_eq!(
+        parse_attach_input(
+            "vana://attach?server=https%3A%2F%2Fdc.example.com%2F&code=abcd-efgh-jkmn"
+        ),
+        Ok(input("https://dc.example.com", Some("ABCDEFGHJKMN")))
+    );
+    assert_eq!(
+        parse_attach_input("  VANA://attach/?code=ABCDEFGHJKMN&server=http://localhost:3000  "),
+        Ok(input("http://localhost:3000", Some("ABCDEFGHJKMN")))
+    );
+    assert_eq!(
+        parse_attach_input("vana://attach?server=http%3A%2F%2Fnas%3A8080"),
+        Ok(input("http://nas:8080", None))
+    );
+}
+
+#[test]
+fn rejects_links_that_are_not_attach_links() {
+    assert!(parse_attach_input("vana://connect?sessionId=x&secret=y").is_err());
+    assert!(parse_attach_input("vana://attach?code=ABCDEFGHJKMN").is_err());
+    assert!(parse_attach_input("vana://attach?server=ftp://x&code=ABCDEFGHJKMN").is_err());
+    assert!(parse_attach_input("vana://attach?server=https://x&code=nope").is_err());
+}
+
+#[test]
+fn reduces_addresses_to_an_origin() {
+    for (raw, origin) in [
+        ("https://dc.example.com/settings?tab=1#x", "https://dc.example.com"),
+        ("https://dc.example.com:443/", "https://dc.example.com"),
+        ("http://192.168.1.20:3000/", "http://192.168.1.20:3000"),
+        ("HTTPS://DC.Example.COM", "https://dc.example.com"),
+        ("dc.example.com", "https://dc.example.com"),
+        ("nas:8080", "https://nas:8080"),
+        ("localhost:3000", "http://localhost:3000"),
+        ("127.0.0.1:4310/console", "http://127.0.0.1:4310"),
+        ("[::1]:3000", "http://[::1]:3000"),
+    ] {
+        assert_eq!(parse_attach_input(raw), Ok(input(origin, None)), "{raw}");
+    }
+}
+
+#[test]
+fn rejects_unusable_addresses() {
+    for raw in [
+        "",
+        "   ",
+        "ftp://dc.example.com",
+        "file:///etc/passwd",
+        "https://user:pw@dc.example.com",
+        "https://user@dc.example.com",
+        "https://",
+        "javascript:alert(1)",
+    ] {
+        assert!(parse_attach_input(raw).is_err(), "{raw:?} must be rejected");
+    }
+}
+
+#[test]
+fn normalizes_pairing_codes() {
+    assert_eq!(
+        normalize_pairing_code(" abcd-efgh-jkmn "),
+        Ok("ABCDEFGHJKMN".to_string())
+    );
+    assert_eq!(
+        normalize_pairing_code("ABCD EFGH JKMN"),
+        Ok("ABCDEFGHJKMN".to_string())
+    );
+    assert_eq!(
+        normalize_pairing_code("2345-6789-WXYZ"),
+        Ok("23456789WXYZ".to_string())
+    );
+    for bad in [
+        "",
+        "ABCD-EFGH-JKM",
+        "ABCD-EFGH-JKMNP",
+        "ABCD-EFGH-JKMI",
+        "ABCD-EFGH-JKMO",
+        "ABCD-EFGH-JKM0",
+        "ABCD-EFGH-JKM1",
+        "ABCD-EFGH-JKMU",
+        "ABCD-EFGH-JKML",
+        "ABCD_EFGH_JKMN",
+    ] {
+        assert!(normalize_pairing_code(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn https_is_required_unless_loopback_or_trusted() {
+    use HttpsPolicy::{Allowed, Refuse, Warn};
+    for (origin, trust, expected) in [
+        ("https://dc.example.com", false, Allowed),
+        ("https://dc.example.com", true, Allowed),
+        ("http://localhost:3000", false, Allowed),
+        ("http://127.0.0.1:3000", false, Allowed),
+        ("http://127.8.9.10:3000", false, Allowed),
+        ("http://[::1]:3000", false, Allowed),
+        ("http://nas:3000", false, Refuse),
+        ("http://192.168.1.20:3000", false, Refuse),
+        ("http://nas:3000", true, Warn),
+        ("http://dc.example.com", true, Warn),
+        ("ftp://dc.example.com", true, Refuse),
+        ("not a url", true, Refuse),
+    ] {
+        assert_eq!(https_policy(origin, trust), expected, "{origin} trust={trust}");
+    }
+}
+
+fn attachment(origin: &str) -> Attachment {
+    Attachment {
+        origin: origin.to_string(),
+        label: "DataConnect desktop (test)".to_string(),
+        paired_at: "2026-11-17T00:00:00+00:00".to_string(),
+    }
+}
+
+#[test]
+fn attachment_round_trips_without_secrets() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_eq!(load_attachment(dir.path()), Ok(None));
+    let saved = attachment("https://dc.example.com");
+    save_attachment(dir.path(), &saved).expect("save");
+    assert_eq!(load_attachment(dir.path()), Ok(Some(saved)));
+
+    let raw: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join(ATTACH_FILE)).expect("read"),
+    )
+    .expect("json");
+    let mut keys: Vec<_> = raw.as_object().expect("object").keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, ["label", "origin", "paired_at"]);
+
+    remove_attachment(dir.path()).expect("remove");
+    assert_eq!(load_attachment(dir.path()), Ok(None));
+    remove_attachment(dir.path()).expect("removing twice is fine");
+}
+
+#[test]
+fn an_attachment_with_a_bad_origin_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join(ATTACH_FILE),
+        r#"{"origin":"https://dc.example.com/path","label":"x","paired_at":"y"}"#,
+    )
+    .expect("write");
+    assert!(load_attachment(dir.path()).is_err());
+    std::fs::write(dir.path().join(ATTACH_FILE), "{").expect("write");
+    assert!(load_attachment(dir.path()).is_err());
+}
+
+#[test]
+fn the_environment_override_wins_over_a_saved_attachment() {
+    let saved = attachment("https://dc.example.com");
+    assert_eq!(
+        resolve_attach_target(true, Some(saved.clone())),
+        AttachTarget::Environment
+    );
+    assert_eq!(resolve_attach_target(true, None), AttachTarget::Environment);
+    assert_eq!(
+        resolve_attach_target(false, Some(saved.clone())),
+        AttachTarget::Saved(saved)
+    );
+    assert_eq!(resolve_attach_target(false, None), AttachTarget::Local);
+}
+
+#[test]
+fn the_environment_override_needs_a_non_blank_variable() {
+    assert!(!env_override_from(|_| None));
+    assert!(!env_override_from(|_| Some("  ".to_string())));
+    assert!(env_override_from(|name| {
+        (name == "DATACONNECT_RI_URL").then(|| "http://127.0.0.1:3000".to_string())
+    }));
+    assert!(env_override_from(|name| {
+        (name == "DATACONNECT_CONSOLE_URL").then(|| "http://127.0.0.1:3001".to_string())
+    }));
+    // Read only by the legacy reference-server commands; it never put
+    // unified mode into attach mode, so it does not override a saved
+    // attachment either.
+    assert!(!env_override_from(|name| {
+        (name == "PDPP_REFERENCE_SERVER_URL").then(|| "http://127.0.0.1:3000".to_string())
+    }));
+}
+
+#[test]
+fn the_attachment_names_its_host() {
+    assert_eq!(attachment("https://dc.example.com").host(), "dc.example.com");
+    assert_eq!(attachment("http://localhost:3000").host(), "localhost:3000");
+}
+
+/// A keychain that is down: every call fails.
+struct BrokenKeychain;
+
+impl SessionStore for BrokenKeychain {
+    fn load(&self, _: &str) -> Result<Option<String>, String> {
+        Err("no secret service".to_string())
+    }
+    fn save(&self, _: &str, _: &str) -> Result<(), String> {
+        Err("no secret service".to_string())
+    }
+    fn delete(&self, _: &str) -> Result<(), String> {
+        Err("no secret service".to_string())
+    }
+}
+
+#[test]
+fn a_working_keychain_holds_the_session() {
+    let keychain = MemorySessionStore::default();
+    let memory = MemorySessionStore::default();
+    let origin = "https://dc.example.com";
+    assert_eq!(load_session(&keychain, &memory, origin), SessionLookup::Missing);
+    assert_eq!(
+        store_session(&keychain, &memory, origin, "sess-1"),
+        Ok(StoredIn::Keychain)
+    );
+    assert_eq!(keychain.load(origin), Ok(Some("sess-1".to_string())));
+    assert_eq!(memory.load(origin), Ok(None));
+    assert_eq!(
+        load_session(&keychain, &memory, origin),
+        SessionLookup::Found("sess-1".to_string())
+    );
+    assert_eq!(
+        load_session(&keychain, &memory, "https://other.example.com"),
+        SessionLookup::Missing,
+        "sessions are keyed by origin"
+    );
+    forget_session(&keychain, &memory, origin).expect("forget");
+    assert_eq!(load_session(&keychain, &memory, origin), SessionLookup::Missing);
+}
+
+#[test]
+fn an_unavailable_keychain_degrades_to_memory_never_a_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let memory = MemorySessionStore::default();
+    let origin = "https://dc.example.com";
+    assert_eq!(
+        store_session(&BrokenKeychain, &memory, origin, "sess-1"),
+        Ok(StoredIn::MemoryOnly)
+    );
+    assert_eq!(
+        load_session(&BrokenKeychain, &memory, origin),
+        SessionLookup::Found("sess-1".to_string())
+    );
+    assert!(
+        std::fs::read_dir(dir.path()).expect("read dir").next().is_none(),
+        "nothing may be written to disk"
+    );
+    assert!(forget_session(&BrokenKeychain, &memory, origin).is_err());
+    assert_eq!(
+        load_session(&BrokenKeychain, &memory, origin),
+        SessionLookup::KeychainUnavailable,
+        "the memory copy is gone even when the keychain delete fails"
+    );
+}
+
+#[test]
+fn the_real_keychain_store_is_never_used_under_test() {
+    assert!(KeychainSessionStore.load("https://dc.example.com").is_err());
+    assert!(KeychainSessionStore.save("https://dc.example.com", "s").is_err());
+}
+
+#[test]
+fn the_session_label_names_this_computer() {
+    let label = desktop_session_label();
+    assert!(label.starts_with("DataConnect desktop ("), "{label}");
+    assert!(label.ends_with(')'), "{label}");
+}
+
+/// Serves one canned response per connection and returns the raw requests
+/// (lowercased) once every response was sent.
+fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+    let origin = format!("http://{}", listener.local_addr().expect("addr"));
+    let handle = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for response in responses {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).expect("read request");
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(head_end) = text.find("\r\n\r\n") {
+                    let length = text[..head_end]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())?
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= head_end + 4 + length || read == 0 {
+                        break;
+                    }
+                }
+                if read == 0 {
+                    break;
+                }
+            }
+            stream.write_all(response.as_bytes()).expect("answer");
+            requests.push(String::from_utf8_lossy(&request).to_ascii_lowercase());
+        }
+        requests
+    });
+    (origin, handle)
+}
+
+fn response(status: &str, headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn pdpp_metadata() -> String {
+    response(
+        "200 OK",
+        "Content-Type: application/json\r\n",
+        r#"{"resource":"https://dc.example.com","authorization_servers":["https://dc.example.com"]}"#,
+    )
+}
+
+fn closed_origin() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let origin = format!("http://{}", listener.local_addr().expect("addr"));
+    drop(listener);
+    origin
+}
+
+#[tokio::test]
+async fn identifies_a_pdpp_server_by_its_protected_resource_metadata() {
+    let (origin, server) = serve(vec![pdpp_metadata()]);
+    assert_eq!(verify_pdpp_server(&origin).await, Ok(()));
+    let requests = server.join().expect("server");
+    assert!(requests[0].starts_with("get /.well-known/oauth-protected-resource "));
+
+    let (origin, server) = serve(vec![response(
+        "200 OK",
+        "Content-Type: text/html\r\n",
+        "<html>router login</html>",
+    )]);
+    assert_eq!(verify_pdpp_server(&origin).await, Err(AttachError::NotPdppServer));
+    server.join().expect("server");
+
+    let (origin, server) = serve(vec![response("404 Not Found", "", "")]);
+    assert_eq!(verify_pdpp_server(&origin).await, Err(AttachError::NotPdppServer));
+    server.join().expect("server");
+
+    let (origin, server) = serve(vec![response("502 Bad Gateway", "", "")]);
+    assert_eq!(verify_pdpp_server(&origin).await, Err(AttachError::Unreachable));
+    server.join().expect("server");
+
+    assert_eq!(
+        verify_pdpp_server(&closed_origin()).await,
+        Err(AttachError::Unreachable)
+    );
+}
+
+#[tokio::test]
+async fn the_identity_check_does_not_follow_redirects() {
+    let (origin, server) = serve(vec![response(
+        "302 Found",
+        "Location: https://elsewhere.example.com/.well-known/oauth-protected-resource\r\n",
+        "",
+    )]);
+    assert_eq!(verify_pdpp_server(&origin).await, Err(AttachError::NotPdppServer));
+    assert_eq!(server.join().expect("server").len(), 1);
+}
+
+#[tokio::test]
+async fn redeems_a_pairing_code_for_a_session() {
+    let (origin, server) = serve(vec![response(
+        "200 OK",
+        "Content-Type: application/json\r\n",
+        r#"{"object":"desktop_pairing_session","session":"sess-abc","expires_at":"2026-12-17T00:00:00.000Z","expires_in_seconds":2592000,"label":"DataConnect desktop (box)"}"#,
+    )]);
+    let redeemed = redeem_pairing(&origin, "ABCDEFGHJKMN", "DataConnect desktop (box)")
+        .await
+        .expect("redeem");
+    assert_eq!(
+        redeemed,
+        RedeemedSession {
+            session: "sess-abc".to_string(),
+            expires_at: Some("2026-12-17T00:00:00.000Z".to_string()),
+        }
+    );
+    let request = &server.join().expect("server")[0];
+    assert!(request.starts_with("post /owner/desktop-pairings/redeem "));
+    assert!(request.contains("content-type: application/json"));
+    assert!(request.contains(r#""code":"abcdefghjkmn""#));
+    assert!(request.contains(r#""label":"dataconnect desktop (box)""#));
+}
+
+#[tokio::test]
+async fn names_each_redeem_failure() {
+    let invalid = response(
+        "401 Unauthorized",
+        "Content-Type: application/json\r\n",
+        r#"{"error":{"code":"invalid_pairing_code","message":"x"}}"#,
+    );
+    for (answer, expected) in [
+        (invalid, AttachError::InvalidCode),
+        (response("404 Not Found", "", ""), AttachError::PairingUnsupported),
+        (
+            response("405 Method Not Allowed", "", ""),
+            AttachError::PairingUnsupported,
+        ),
+        (
+            response("429 Too Many Requests", "Retry-After: 42\r\n", ""),
+            AttachError::RateLimited {
+                retry_after_seconds: Some(42),
+            },
+        ),
+        (
+            response("429 Too Many Requests", "", ""),
+            AttachError::RateLimited {
+                retry_after_seconds: None,
+            },
+        ),
+        (
+            response("500 Internal Server Error", "", ""),
+            AttachError::Server { status: 500 },
+        ),
+        (
+            response("200 OK", "Content-Type: application/json\r\n", r#"{"object":"x"}"#),
+            AttachError::Server { status: 200 },
+        ),
+    ] {
+        let (origin, server) = serve(vec![answer]);
+        assert_eq!(
+            redeem_pairing(&origin, "ABCDEFGHJKMN", "label").await,
+            Err(expected.clone()),
+            "{expected:?}"
+        );
+        server.join().expect("server");
+    }
+    assert_eq!(
+        redeem_pairing(&closed_origin(), "ABCDEFGHJKMN", "label").await,
+        Err(AttachError::Unreachable)
+    );
+}
+
+#[tokio::test]
+async fn a_signed_in_session_is_valid() {
+    let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
+    assert_eq!(check_session(&origin, "sess-abc").await, SessionCheck::Valid);
+    let requests = server.join().expect("server");
+    assert!(requests[1].starts_with("get /owner/session "));
+    assert!(requests[1].contains("\r\ncookie: pdpp_owner_session=sess-abc\r\n"));
+    assert!(
+        !requests[0].contains("cookie:"),
+        "the identity check carries no credential"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_session_has_ended() {
+    for answer in [
+        response("401 Unauthorized", "", ""),
+        response("302 Found", "Location: /owner/login\r\n", ""),
+    ] {
+        let (origin, server) = serve(vec![pdpp_metadata(), answer]);
+        assert_eq!(check_session(&origin, "sess-abc").await, SessionCheck::Expired);
+        server.join().expect("server");
+    }
+}
+
+#[tokio::test]
+async fn a_server_that_is_down_or_not_pdpp_gets_no_session() {
+    assert_eq!(
+        check_session(&closed_origin(), "sess-abc").await,
+        SessionCheck::Unreachable(AttachError::Unreachable)
+    );
+    let (origin, server) = serve(vec![response("200 OK", "", "<html>other machine</html>")]);
+    assert_eq!(
+        check_session(&origin, "sess-abc").await,
+        SessionCheck::Unreachable(AttachError::NotPdppServer)
+    );
+    let requests = server.join().expect("server");
+    assert_eq!(requests.len(), 1, "the session was never sent");
+    assert!(!requests[0].contains("sess-abc"));
+
+    let (origin, server) = serve(vec![
+        pdpp_metadata(),
+        response("500 Internal Server Error", "", ""),
+    ]);
+    assert_eq!(
+        check_session(&origin, "sess-abc").await,
+        SessionCheck::Unreachable(AttachError::Server { status: 500 })
+    );
+    server.join().expect("server");
+}
+
+#[tokio::test]
+async fn revoking_signs_the_session_out_as_a_json_client() {
+    let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
+    assert!(revoke_session(&origin, "sess-abc").await);
+    let requests = server.join().expect("server");
+    assert!(requests[1].starts_with("post /owner/logout "));
+    assert!(requests[1].contains("\r\ncookie: pdpp_owner_session=sess-abc\r\n"));
+    assert!(requests[1].contains("content-type: application/json"));
+
+    let (origin, server) = serve(vec![
+        pdpp_metadata(),
+        response("500 Internal Server Error", "", ""),
+    ]);
+    assert!(!revoke_session(&origin, "sess-abc").await);
+    server.join().expect("server");
+    assert!(!revoke_session(&closed_origin(), "sess-abc").await);
+}
+
+#[tokio::test]
+async fn password_login_errors_follow_the_login_function() {
+    let (origin, server) = serve(vec![response(
+        "302 Found",
+        "Location: /\r\nSet-Cookie: pdpp_owner_session=fresh; Path=/; HttpOnly\r\n",
+        "",
+    )]);
+    assert_eq!(login_with_password(&origin, "pw").await, Ok("fresh".to_string()));
+    let request = &server.join().expect("server")[0];
+    assert!(request.starts_with("post /owner/login "));
+    assert!(
+        !request.contains("x-pdpp-owner-session-label"),
+        "\"This computer\" would replace the remote's own desktop session"
+    );
+
+    for (answer, expected) in [
+        (response("401 Unauthorized", "", ""), AttachError::WrongPassword),
+        (
+            response("429 Too Many Requests", "", ""),
+            AttachError::RateLimited {
+                retry_after_seconds: None,
+            },
+        ),
+        (
+            response("500 Internal Server Error", "", ""),
+            AttachError::Server { status: 500 },
+        ),
+    ] {
+        let (origin, server) = serve(vec![answer]);
+        assert_eq!(login_with_password(&origin, "pw").await, Err(expected));
+        server.join().expect("server");
+    }
+    assert_eq!(
+        login_with_password(&closed_origin(), "pw").await,
+        Err(AttachError::Unreachable)
+    );
+}
+
+#[tokio::test]
+async fn an_attached_launch_opens_the_console_with_a_valid_session() {
+    let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
+    assert_eq!(
+        decide_attached_launch(&origin, SessionLookup::Found("sess-abc".to_string())).await,
+        AttachedLaunch::OpenConsole {
+            session: "sess-abc".to_string()
+        }
+    );
+    server.join().expect("server");
+}
+
+#[tokio::test]
+async fn an_attached_launch_with_an_ended_session_asks_to_pair_again() {
+    let (origin, server) = serve(vec![pdpp_metadata(), response("401 Unauthorized", "", "")]);
+    assert_eq!(
+        decide_attached_launch(&origin, SessionLookup::Found("sess-abc".to_string())).await,
+        AttachedLaunch::PairAgain {
+            notice: PAIRING_ENDED_NOTICE.to_string()
+        }
+    );
+    server.join().expect("server");
+    assert_eq!(
+        decide_attached_launch("https://dc.example.com", SessionLookup::Missing).await,
+        AttachedLaunch::PairAgain {
+            notice: PAIRING_ENDED_NOTICE.to_string()
+        },
+        "no request is made without a session"
+    );
+    assert!(matches!(
+        decide_attached_launch("https://dc.example.com", SessionLookup::KeychainUnavailable)
+            .await,
+        AttachedLaunch::PairAgain { .. }
+    ));
+}
+
+#[tokio::test]
+async fn an_unreachable_server_keeps_the_pairing_and_names_the_origin() {
+    let origin = closed_origin();
+    let AttachedLaunch::Unreachable { message } =
+        decide_attached_launch(&origin, SessionLookup::Found("sess-abc".to_string())).await
+    else {
+        panic!("expected Unreachable");
+    };
+    assert!(message.contains(&origin), "{message}");
+    assert!(message.contains("detach"), "{message}");
+}
+
+#[test]
+fn error_messages_never_include_the_code_or_session() {
+    for error in [
+        AttachError::Unreachable,
+        AttachError::NotPdppServer,
+        AttachError::InvalidCode,
+        AttachError::RateLimited {
+            retry_after_seconds: Some(3),
+        },
+        AttachError::PairingUnsupported,
+        AttachError::WrongPassword,
+        AttachError::Server { status: 500 },
+    ] {
+        let message = error.message("https://dc.example.com");
+        assert!(!message.is_empty());
+        assert!(!message.contains("ABCDEFGHJKMN"));
+    }
+}

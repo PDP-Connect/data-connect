@@ -5,6 +5,8 @@ mod webview_cookies;
 #[cfg(desktop)]
 mod atomic_write;
 #[cfg(desktop)]
+mod attach;
+#[cfg(desktop)]
 mod console_port;
 #[cfg(desktop)]
 mod main_thread_watchdog;
