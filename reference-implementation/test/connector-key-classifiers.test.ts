@@ -62,9 +62,9 @@ test("canonicalConnectorKey: trims and strips the first-party registry prefix + 
 test("connectorKeyFromManifest: prefers connector_key, canonicalized", () => {
   assert.equal(connectorKeyFromManifest({ connector_id: "other", connector_key: "  gmail  " }), "gmail");
   assert.equal(
-    connectorKeyFromManifest({ connector_key: "https://registry.pdpp.dev/connectors/slack" }),
+    connectorKeyFromManifest({ connector_id: "https://registry.pdpp.dev/connectors/slack" }),
     "slack",
-    "connector_key is canonicalized"
+    "a registry-URL connector_id yields its slug"
   );
 });
 

@@ -26,7 +26,12 @@
 
 import { FIRST_PARTY_CONNECTOR_KEYS } from "./generated/connector-registry.generated.ts";
 
-const FIRST_PARTY_REGISTRY_PREFIX = "https://registry.pdpp.dev/connectors/";
+/**
+ * The registry URL prefix. The one definition; nothing else spells the
+ * registry host. The display package shows any URL by its last path segment
+ * and needs no copy.
+ */
+export const REGISTRY_CONNECTOR_PREFIX = "https://registry.pdpp.dev/connectors/";
 
 // FIRST_PARTY_CONNECTOR_KEYS is generated from the shipped connector manifests;
 // see connector-registry.generated.ts and scripts/generate-connector-registry.ts.
@@ -57,10 +62,10 @@ export function connectorKeyFromRegistryUrl(value: unknown): string | null {
   if (!trimmed) {
     return null;
   }
-  if (!trimmed.startsWith(FIRST_PARTY_REGISTRY_PREFIX)) {
+  if (!trimmed.startsWith(REGISTRY_CONNECTOR_PREFIX)) {
     return null;
   }
-  let tail = trimmed.slice(FIRST_PARTY_REGISTRY_PREFIX.length);
+  let tail = trimmed.slice(REGISTRY_CONNECTOR_PREFIX.length);
   // Tolerate one trailing slash, but reject anything past it.
   if (tail.endsWith("/")) {
     tail = tail.slice(0, -1);
@@ -95,7 +100,7 @@ export function canonicalConnectorKey(value: unknown): string | null {
   if (!trimmed) {
     return null;
   }
-  if (trimmed.startsWith(FIRST_PARTY_REGISTRY_PREFIX)) {
+  if (trimmed.startsWith(REGISTRY_CONNECTOR_PREFIX)) {
     return connectorKeyFromRegistryUrl(trimmed);
   }
   return trimmed;
@@ -167,7 +172,7 @@ export function isRegistryUrlConnectorId(value: unknown): boolean {
   if (!trimmed) {
     return false;
   }
-  return trimmed.startsWith(FIRST_PARTY_REGISTRY_PREFIX);
+  return trimmed.startsWith(REGISTRY_CONNECTOR_PREFIX);
 }
 
 // Connector id substrings that identify test/stub/internal connectors that

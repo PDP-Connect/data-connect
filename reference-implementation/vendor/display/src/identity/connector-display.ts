@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const LOCAL_DEVICE_PREFIX = "local-device:";
-const REGISTRY_CONNECTOR_HOST = "registry.pdpp.dev";
-const REGISTRY_CONNECTOR_PATH_PREFIX = "/connectors/";
 
 const CONNECTOR_KEY_ALIASES = new Map<string, string>([
   ["amazon", "Amazon"],
@@ -141,9 +139,6 @@ function connectorKeyFromUrl(value: string): string | null {
     return null;
   }
   const pathPart = url.pathname.split("/").filter(Boolean).at(-1);
-  if (url.hostname === REGISTRY_CONNECTOR_HOST && url.pathname.startsWith(REGISTRY_CONNECTOR_PATH_PREFIX)) {
-    return decodePathPart(pathPart) ?? "unknown connector";
-  }
   return decodePathPart(pathPart) ?? url.hostname;
 }
 
