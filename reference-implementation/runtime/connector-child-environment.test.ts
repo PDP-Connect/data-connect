@@ -36,6 +36,7 @@ function compose(
     connectionEnv?: Record<string, string>;
     connectorId?: string;
     explicitRunEnv?: Record<string, string>;
+    installedConnectorKeys?: readonly string[];
     platform?: NodeJS.Platform;
   } = {}
 ): Record<string, string> {
@@ -54,6 +55,7 @@ function compose(
       : {}),
     connectorId: options.connectorId ?? "test-connector",
     explicitRunEnv: options.explicitRunEnv ?? {},
+    ...(options.installedConnectorKeys ? { installedConnectorKeys: options.installedConnectorKeys } : {}),
     manifest,
     platform: options.platform ?? "linux",
     sourceEnv,
@@ -695,6 +697,35 @@ test("a connector receives a neighbor's namespaced key only from its own namespa
 
   assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "google-maps-data-portability" }), {
     PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20",
+  });
+});
+
+test("a manifest keyed database never receives the server's PDPP_DATABASE_URL", () => {
+  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_DATABASE_URL", "PDPP_DATABASE_PAGE_SIZE"] } };
+  const sourceEnv = { PDPP_DATABASE_PAGE_SIZE: "5", PDPP_DATABASE_URL: "postgres://secret" };
+
+  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "database" }), {});
+  assert.equal(ownsTuningKey("database", "PDPP_DATABASE_URL"), false);
+  assert.equal(ownsTuningKey("database", "pdpp_database_url"), false);
+  assert.equal(ownsTuningKey("widgets", "PDPP_WIDGETS_PAGE_SIZE"), true, "an ordinary namespace is unaffected");
+});
+
+test("the connector with the longest installed namespace owns a nested key", () => {
+  const installed = ["foo", "foo_bar"];
+  const foo = { runtime_requirements: { tuning_environment: ["PDPP_FOO_X", "PDPP_FOO_BAR_X"] } };
+  const fooBar = { runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  const sourceEnv = { PDPP_FOO_BAR_X: "nested", PDPP_FOO_X: "own" };
+
+  assert.deepEqual(compose(foo, sourceEnv, { connectorId: "foo", installedConnectorKeys: installed }), {
+    PDPP_FOO_X: "own",
+  });
+  assert.deepEqual(compose(fooBar, sourceEnv, { connectorId: "foo_bar", installedConnectorKeys: installed }), {
+    PDPP_FOO_BAR_X: "nested",
+  });
+  // With the longer connector not installed, nothing can tell its keys apart.
+  assert.deepEqual(compose(foo, sourceEnv, { connectorId: "foo", installedConnectorKeys: ["foo"] }), {
+    PDPP_FOO_BAR_X: "nested",
+    PDPP_FOO_X: "own",
   });
 });
 
