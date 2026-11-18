@@ -935,6 +935,8 @@ interface ServerOpts {
     max?: number;
   } | null;
   quiet?: boolean;
+  /** Optional catalog directory for boot reconciliation; unset uses the installed catalog. */
+  polyfillManifestsDir?: string;
   reconcilePolyfillManifests?: boolean;
   reconcilePolyfillManifestsImpl?: typeof reconcilePolyfillManifests;
   recoveryOnly?: boolean;
@@ -1380,10 +1382,12 @@ function scheduleRetrievalStartupBackfill({
 function schedulePolyfillManifestReconciliation({
   enabled,
   logger,
+  manifestsDir,
   reconcile = reconcilePolyfillManifests,
 }: {
   enabled: boolean;
   logger: LoggerLike;
+  manifestsDir?: string;
   reconcile?: typeof reconcilePolyfillManifests;
 }): Promise<void> {
   logger.info({ enabled }, "polyfill manifest reconciliation scheduled after AS/RS listen");
@@ -1393,6 +1397,7 @@ function schedulePolyfillManifestReconciliation({
         enabled,
         includeUnlisted: process.env.PDPP_EXPOSE_UNPROVEN_CONNECTORS_UAT === "1",
         log: (msg) => logger.info(msg),
+        ...(manifestsDir === undefined ? {} : { manifestsDir }),
       });
       if (summary.scanned > 0) {
         logger.info(summary, "polyfill manifest reconcile summary");
@@ -9584,6 +9589,7 @@ export async function startServer(opts: ServerOpts = {}) {
     : schedulePolyfillManifestReconciliation({
         enabled: reconcilePolyfillManifestsEnabled,
         logger,
+        ...(opts.polyfillManifestsDir === undefined ? {} : { manifestsDir: opts.polyfillManifestsDir }),
         ...(opts.reconcilePolyfillManifestsImpl === undefined
           ? {}
           : { reconcile: opts.reconcilePolyfillManifestsImpl }),

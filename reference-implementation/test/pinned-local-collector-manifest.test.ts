@@ -20,6 +20,7 @@ import {
 } from "../server/auth.ts";
 import { installedConnectorManifestRegistration } from "../server/connector-install/manifest-registration.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { startServer } from "../server/index.ts";
 import { pinnedLocalCollectorManifest } from "../server/local-collector-profiles.ts";
 import { reconcilePolyfillManifests } from "../server/polyfill-manifest-reconcile.ts";
 import { listPendingRecordDerivedRepairs, runRecordDerivedRepairRound } from "../server/record-derived-repair.ts";
@@ -179,6 +180,7 @@ test(
       failed: 0,
       incomplete: false,
     });
+    await assertUploadsFollowThePin();
   })
 );
 
@@ -210,5 +212,54 @@ test(
     const second = await reconcilePolyfillManifests({ manifestsDir });
     assert.equal(second.unchanged, 1);
     assert.equal(await storedVersion(), pinnedManifest().version);
+  })
+);
+
+test(
+  "startServer boot reconciliation restores a replaced local-collector manifest to the pin",
+  withTmpDb(async (dir, dbPath) => {
+    const manifestsDir = join(dir, "boot-catalog");
+    mkdirSync(manifestsDir);
+    writeFileSync(join(manifestsDir, "claude-code.json"), JSON.stringify(catalogRelease()));
+    await registerConnector(catalogRelease(), { replaceAcceptedDigest: true });
+    assert.equal(await storedVersion(), "99.0.0");
+    closeDb();
+
+    let server: Awaited<ReturnType<typeof startServer>> | undefined;
+    try {
+      server = await startServer({
+        asPort: 0,
+        rsPort: 0,
+        dbPath,
+        reconcilePolyfillManifests: true,
+        autoEnrollEligibleSchedules: false,
+        polyfillManifestsDir: manifestsDir,
+        quiet: true,
+      });
+      await server.manifestReconciliationDone;
+      assert.equal(await storedVersion(), pinnedManifest().version);
+    } finally {
+      if (server) {
+        server.abortStartupBackfill("test shutdown");
+        server.schedulerManager.stop();
+        server.stopBrowserSurfaceLeaseSweep();
+        server.stopConnectorMaintenanceSweep();
+        server.stopPostgresDerivedIndexMaintenance();
+        await Promise.all(
+          [server.asServer, server.rsServer].map(
+            (listener) => new Promise<void>((resolve, reject) => {
+              listener.closeAllConnections?.();
+              listener.close((error) => error ? reject(error) : resolve());
+            })
+          )
+        );
+        await server.stopClientEventDeliveryWorker();
+        await Promise.allSettled([
+          server.startupBackfillDone,
+          server.startupRunHistoryBackfillDone,
+          server.startupSummaryEvidenceSweepDone,
+        ]);
+      }
+    }
   })
 );
