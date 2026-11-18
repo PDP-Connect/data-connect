@@ -33,6 +33,12 @@ export function formatLocalTime(value: string | number | Date, options: TimeOpti
   return `${date.toLocaleDateString(options.locale, { month: "short", day: "numeric", ...zone })}, ${time}`;
 }
 
+// A disclosure value is shown as written, except an ISO timestamp, which is a
+// time and never appears as ISO on screen.
+export function verbatimValue(value: string, options: TimeOptions = {}): string {
+  return isoTimestamp.test(value) ? formatLocalTime(value, options) : value;
+}
+
 // For a code or label that a library or the host supplied: a status, a
 // reason, a capability flag, a group or a label. Each whitespace-separated word
 // is rewritten only if the whole word is a code, an ISO timestamp or the old
@@ -52,6 +58,8 @@ function plainWord(word: string, options: TimeOptions): string {
   const [, lead = "", core = word, tail = ""] = match ?? [];
   if (!core || opaque.test(core)) return word;
   if (isoTimestamp.test(core)) return `${lead}${formatLocalTime(core, options)}${tail}`;
+  // Unknown dotted tokens are opaque values, never guessed capability labels.
+  if (/\w\.\w/.test(core) && !dottedFlag.test(core)) return word;
   if (dottedFlag.test(core)) return `${lead}${core.replaceAll(".", " ")}${tail}`;
   if (underscoreCode.test(core)) return `${lead}${core.replaceAll("_", " ").toLowerCase()}${tail}`;
   if (oldName.test(core)) return `${lead}${core[0] === "R" ? "Remote access" : "remote access"}${tail}`;

@@ -7,7 +7,7 @@ import type {
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react";
-import { formatLocalTime, humanizeKey, plain } from "./plain-text.ts";
+import { formatLocalTime, humanizeKey, plain, verbatimValue } from "./plain-text.ts";
 import { isLifetimeClaim } from "./route-display.ts";
 
 type Fact = ReturnType<typeof projectFact>;
@@ -99,7 +99,8 @@ export function ConsentDisclosures({ value }: { value: unknown }) {
       </dl>
     );
   }
-  return <span className="pdpp-caption whitespace-pre-wrap break-words">{plain(String(value))}</span>;
+  // Values are approval evidence, not labels (an ISO time shows as a local time); React still escapes this text.
+  return <span data-consent-value="" className="pdpp-caption whitespace-pre-wrap break-words">{verbatimValue(String(value))}</span>;
 }
 
 export function SetupApprovalCard({

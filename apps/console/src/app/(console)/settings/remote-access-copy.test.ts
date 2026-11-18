@@ -19,7 +19,7 @@ import { ERROR_MESSAGES, GENERIC_ERROR, genericErrorFor, publicError } from "./r
 import { ReachabilityFailure, toDisplayError } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
-import { RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
+import { ConsentDisclosures, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 import { TurnOnCard } from "./turn-on.tsx";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
@@ -427,6 +427,8 @@ const readyWorld = (overrides: Partial<Record<string, Result>> = {}) =>
 function visibleText(container: Element): string {
   const clone = container.cloneNode(true) as Element;
   for (const node of clone.querySelectorAll("[data-diagnostics]")) node.remove();
+  // Only disclosure leaf values are opaque evidence; labels and all other copy stay scanned.
+  for (const node of clone.querySelectorAll("[data-consent-value]")) node.remove();
   const attributes = [...clone.querySelectorAll("[aria-label],[placeholder],[title]")].flatMap((node) =>
     ["aria-label", "placeholder", "title"].map((name) => node.getAttribute(name) ?? "")
   );
@@ -728,4 +730,17 @@ test("a failed turn off says so on screen", async () => {
     await press(/^Turn off$/);
     assert.match(alertText(container), /couldn.t turn off\. It may still be on/);
   });
+});
+
+test("consent disclosure leaves preserve exact values (ISO times shown local) while keys are labels", () => {
+  const values = ["my-host.example.net", "My_App", "runtime.attached", "2026-11-18T13:05:42.477Z", "<script>not markup</script>"];
+  const markup = renderToStaticMarkup(createElement(ConsentDisclosures, { value: { metadataVisibleTo: values } }));
+  const dom = new JSDOM(markup);
+  try {
+    const shown = values.map((v) => (v.startsWith("2026-") ? formatLocalTime(v) : v));
+    assert.notEqual(shown[3], values[3], "an ISO time is not shown raw");
+    assert.deepEqual([...dom.window.document.querySelectorAll("[data-consent-value]")].map(node => node.textContent), shown);
+    assert.equal(dom.window.document.querySelector("dt")?.textContent, "Metadata visible to");
+    assert.equal(dom.window.document.querySelector("script"), null, "verbatim text stays React-escaped");
+  } finally { dom.window.close(); }
 });
