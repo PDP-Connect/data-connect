@@ -3,7 +3,7 @@
 // Explicit e2e entrypoint. Never imported by the production server.
 import { randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, statfs, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import http from "node:http";
 import { join } from "node:path";
 import { createGozar } from "@tnunamak/gozar";
@@ -13,12 +13,11 @@ import { ReachabilityService } from "../../reference-implementation/server/reach
 import { FixtureSecretBackend } from "../../reference-implementation/test/fixtures/reachability/secret-backend.ts";
 import { createEffectFixtures } from "./effect-fixtures.ts";
 import { createEffectFixtureHost } from "./testing-effects.mjs";
+import { requireDiskFloor } from "./disk-floor.mjs";
 import { createSetupRegistry } from "./setup-registry.mjs";
 import { createUnknownRegistry } from "./unknown-registry.mjs";
 
-const disk = await statfs(process.cwd());
-if (disk.bavail * disk.bsize < 110_000_000_000)
-	throw new Error("NOT RUN (disk): browser stack needs 110 GB free");
+await requireDiskFloor(process.env, process.cwd(), 110_000_000_000);
 const data = process.env.PDPP_DATA_DIR;
 if (!data || !process.env.PDPP_OWNER_PASSWORD)
 	throw new Error("Use the owned e2e harness");
