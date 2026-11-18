@@ -43,6 +43,27 @@ export function TurnOnCard({
   // An unreadable shape opens Details: the owner is never asked to approve text that is hidden.
   const readable = readDisclosure(bound);
   const detailsOpen = readable.unreadable;
+  // Unreadable disclosures sit above the button, so the raw values are read before the approval.
+  const details = complete ? (
+    <details open={detailsOpen}>
+      <summary>Details</summary>
+      <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
+      {consent.scope?.query.expectedOrigin ? (
+        <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
+      ) : null}
+      <ConsentDisclosures value={consent.disclosures} />
+      <ConsentFacts facts={shown} providerId={candidate.providerId} />
+      <UnknownFactsCount count={unknown} service={candidate.display.label} />
+      {steps.map((step) => (
+        <div className="grid gap-2" key={step.id}>
+          <h4 className="pdpp-label">{plain(step.label)}</h4>
+          {step.instructions ? <p className="pdpp-caption break-words">{step.instructions}</p> : null}
+          <ConsentDisclosures value={step.consent?.disclosures} />
+          <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} providerId={candidate.providerId} />
+        </div>
+      ))}
+    </details>
+  ) : null;
   return (
     <section aria-label="Turn on" className="grid gap-4">
       {changed ? (
@@ -63,28 +84,11 @@ export function TurnOnCard({
         <p role="status">We couldn't load this service's details. Try again.</p>
       )}
       {complete ? <PlainDisclosure value={bound} except={lines} /> : null}
+      {detailsOpen ? details : null}
       <button disabled={busy || !complete} onClick={() => onTurnOn(review)} type="button">
         Turn on remote access
       </button>
-      {complete ? (
-        <details open={detailsOpen}>
-          <summary>Details</summary>
-          <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
-          {consent.scope?.query.expectedOrigin ? (
-            <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
-          ) : null}
-          <ConsentDisclosures value={consent.disclosures} />
-          <ConsentFacts facts={shown} providerId={candidate.providerId} />
-          <UnknownFactsCount count={unknown} service={candidate.display.label} />
-          {steps.map((step) => (
-            <div className="grid gap-2" key={step.id}>
-              <h4 className="pdpp-label">{plain(step.label)}</h4>
-              {step.instructions ? <p className="pdpp-caption break-words">{step.instructions}</p> : null}
-              <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} providerId={candidate.providerId} />
-            </div>
-          ))}
-        </details>
-      ) : null}
+      {detailsOpen ? null : details}
     </section>
   );
 }

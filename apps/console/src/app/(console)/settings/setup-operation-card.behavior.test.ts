@@ -307,3 +307,47 @@ test("the allow card and the turn-on card show every disclosure string and still
     dom.window.close()
   }
 })
+
+test("the turn-on card shows unreadable route and step disclosures, open, above its button", async () => {
+  const React = await import("react")
+  const { act, createElement } = React
+  const { createRoot } = await import("react-dom/client")
+  const { TurnOnCard } = await import("./turn-on.tsx")
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+  const container = dom.window.document.querySelector("#root")!
+  const root = createRoot(container)
+  const routeConsent = (disclosures: unknown) => ({
+    consentFactsDigest: "consent-v1:route",
+    facts: [],
+    scope: { kind: "route", providerId: "workshop", query: { target: "http://localhost:3000", usage: { kind: "attached" } } },
+    disclosures,
+  })
+  const review = (disclosures: unknown) => ({
+    id: "review-1",
+    kind: "route",
+    candidate: { providerId: "workshop", display: { label: "Workshop" }, consentFactsDigest: "consent-v1:route", consent: routeConsent(disclosures) },
+  })
+  const readableRoute = { traffic: { providerCanReadPayload: false }, cost: { kind: "free" }, address: { stability: "stable" } }
+  const step = action("run-it") as never as Record<string, any>
+  step.consent.disclosures = { retentionDays: 30, recurring: true }
+  const cases = [
+    { name: "a step", props: { review: review(readableRoute), steps: [step] } },
+    { name: "the route", props: { review: review({ ...readableRoute, retentionDays: 30, recurring: true }), steps: [] } },
+  ]
+  try {
+    for (const { name, props } of cases) {
+      await act(async () => root.render(createElement(TurnOnCard, { ...props, busy: false, changed: null, onTurnOn: () => {} } as never)))
+      const details = container.querySelector("details")!
+      const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!
+      assert.equal(details.hasAttribute("open"), true, `${name}: Details starts open`)
+      assert.ok(details.compareDocumentPosition(button) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING, `${name}: Details comes before the button`)
+      const text = shownText(container)
+      assert.match(text, /Retention days/, `${name}: the raw key shows`)
+      assert.match(text, /30/, `${name}: the raw value shows`)
+    }
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+  }
+})
