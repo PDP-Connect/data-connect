@@ -122,6 +122,16 @@ export function disclosureSentences(value: unknown): string[] {
     .map((sentence) => (/[.!?]$/.test(sentence) ? sentence : `${sentence}.`));
 }
 
+/** The structured disclosure, verbatim, for the owner who wants every field. Closed by default. */
+export function DisclosureDetails({ value, providerId }: { value: unknown; providerId?: string | null }) {
+  return (
+    <details>
+      <summary>Details</summary>
+      <ConsentDisclosures value={value} providerId={providerId} />
+    </details>
+  );
+}
+
 export function PlainDisclosure({ value }: { value: unknown }) {
   const sentences = disclosureSentences(value);
   if (sentences.length === 0) return null;
@@ -168,8 +178,9 @@ export function SetupApprovalCard({
       {children}
       {complete ? (
         <>
-          <ConsentDisclosures value={consent.disclosures} providerId={consent.scope.providerId} />
+          <PlainDisclosure value={consent.disclosures} />
           <ConsentFacts facts={consent.facts!} providerId={consent.scope.providerId} />
+          <DisclosureDetails value={consent.disclosures} providerId={consent.scope.providerId} />
           <label className="pdpp-caption flex items-start gap-2">
             <input
               checked={checked}

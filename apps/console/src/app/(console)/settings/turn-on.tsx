@@ -2,6 +2,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useState } from "react";
+import { Input } from "@/components/ui/input.tsx";
 import { ConsentDisclosures, ConsentFacts, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import { type Action, type Draft, disclosureLines, effectLines, type Review } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
@@ -108,9 +109,10 @@ export function AllowCard({
       {field ? (
         <label className="grid gap-2">
           <span>{plain(field.label)}</span>
-          <input
+          <Input
             autoComplete="off"
             onChange={(event) => setValue(event.target.value)}
+            placeholder={field.secret ? "Paste it here" : "Type it here"}
             type={field.secret ? "password" : "text"}
             value={value}
           />

@@ -3,10 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useEffectEvent, useRef, useState } from "react"
 import type { projectSetupOperation } from "pdpp-reference-implementation/reachability-projection"
+import { Input } from "@/components/ui/input.tsx"
 import { openResource } from "../../../../../../src/lib/open-resource"
 import type { requestReachability } from "./reachability-actions.ts"
 import {
-  ConsentDisclosures,
+  DisclosureDetails,
   PlainDisclosure,
   ConsentFacts,
   SetupApprovalCard,
@@ -84,6 +85,11 @@ const status: Record<SetupView["state"], (service: string) => string> = {
   cancelled: () => "Setup cancelled",
 }
 
+/** The host's own placeholder when it sends one; otherwise a plain prompt, so an empty field is never a bare gap. */
+function inputPlaceholder(action: NonNullable<SetupView["nextAction"]>, secret: boolean) {
+  return action.valuePlaceholder ?? (secret ? "Paste it here" : "Type it here")
+}
+
 function SetupOperationAction({
   action,
   busy,
@@ -115,7 +121,10 @@ function SetupOperationAction({
           </a>
         ) : null}
         {consent?.disclosures ? (
-          <ConsentDisclosures value={consent.disclosures} />
+          <>
+            <PlainDisclosure value={consent.disclosures} />
+            <DisclosureDetails value={consent.disclosures} providerId={consent.scope.providerId} />
+          </>
         ) : null}
         {consent?.facts ? <ConsentFacts facts={consent.facts} providerId={consent.scope.providerId} /> : null}
       </div>
@@ -163,11 +172,11 @@ function SetupOperationAction({
               ))}
             </select>
           ) : (
-            <input
+            <Input
               autoComplete="off"
               disabled={busy}
               onChange={event => setValue(event.target.value)}
-              placeholder={action.valuePlaceholder}
+              placeholder={inputPlaceholder(action, secret)}
               type={secret ? "password" : "text"}
               value={value}
             />
@@ -229,10 +238,11 @@ function InputCard({
       <label className="grid gap-2">
         {label}
         {secret ? (
-          <input
+          <Input
             autoComplete="off"
             disabled={busy}
             onChange={() => setFilled(secretField.current?.value !== "")}
+            placeholder={inputPlaceholder(action, true)}
             ref={secretField}
             type="password"
           />
@@ -246,11 +256,11 @@ function InputCard({
             ))}
           </select>
         ) : (
-          <input
+          <Input
             autoComplete="off"
             disabled={busy}
             onChange={event => setTyped(event.target.value)}
-            placeholder={action.valuePlaceholder}
+            placeholder={inputPlaceholder(action, false)}
             type="text"
             value={typed}
           />
@@ -671,11 +681,11 @@ export function ProviderSetup({
           <>
             <label className="grid gap-2">
               Tailscale email
-              <input autoComplete="off" disabled={busy} onChange={event => setAccount(event.target.value)} type="email" value={account} />
+              <Input autoComplete="off" disabled={busy} onChange={event => setAccount(event.target.value)} placeholder="name@example.com" type="email" value={account} />
             </label>
             <label className="grid gap-2">
               Your tailnet name (ends in .ts.net)
-              <input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} type="text" value={tailnet} />
+              <Input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} placeholder="example.ts.net" type="text" value={tailnet} />
             </label>
             <p>
               Tailscale shows it under DNS in its admin console.{" "}
