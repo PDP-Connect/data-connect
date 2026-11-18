@@ -435,3 +435,49 @@ test("capCoveredCount never raises a declared count, caps it at the provable cei
   assert.equal(capCoveredCount(1, 5, 1), 1);
   assert.equal(capCoveredCount(3, 2, 5), 0);
 });
+
+// A declared parent may itself be a state_stream child (the manifest validator
+// allows the chain), so its raw name differs from the staged cursor key. The
+// runtime passes raw manifest maps, so the decision must map parents itself.
+test("a declared parent whose state_stream is aliased withholds the aliased cursor", () => {
+  const decision = decideCheckpointCommits(
+    input({
+      detailParentsByStream: new Map([["items", new Set(["orders"])]]),
+      inScopeStreams: new Set(["orders", "items"]),
+      omissions: [{ source: "retryable_skip", stream: "items" }],
+      stagedStateStreams: ["orders_cursor"],
+      stateStreamByStream: new Map([["orders", "orders_cursor"]]),
+    })
+  );
+  assert.deepEqual(decision.commit, []);
+  assert.deepEqual(decision.withheld.map((reason) => reason.kind).sort(), [
+    "coverage_report_missing",
+    "reported_omission",
+  ]);
+});
+
+test("control: an unaliased parent still withholds its own cursor on a child omission", () => {
+  const decision = decideCheckpointCommits(
+    input({
+      detailParentsByStream: new Map([["items", new Set(["orders"])]]),
+      inScopeStreams: new Set(["orders", "items"]),
+      omissions: [{ source: "retryable_skip", stream: "items" }],
+      stagedStateStreams: ["orders"],
+    })
+  );
+  assert.deepEqual(decision.commit, []);
+  assert.ok(decision.withheld.some((reason) => reason.kind === "reported_omission"));
+});
+
+test("control: an aliased parent does not withhold an unrelated staged cursor", () => {
+  const decision = decideCheckpointCommits(
+    input({
+      detailParentsByStream: new Map([["items", new Set(["orders"])]]),
+      inScopeStreams: new Set(["orders", "items"]),
+      omissions: [{ source: "retryable_skip", stream: "items" }],
+      stagedStateStreams: ["orders_cursor", "other"],
+      stateStreamByStream: new Map([["orders", "orders_cursor"]]),
+    })
+  );
+  assert.deepEqual(decision.commit, ["other"]);
+});

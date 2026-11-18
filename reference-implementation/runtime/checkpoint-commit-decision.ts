@@ -161,9 +161,18 @@ function stateStreamsOwning(
 ): ReadonlySet<string> {
   const declaredParents = input.detailParentsByStream.get(dataStream);
   if (declaredParents?.size) {
-    return declaredParents;
+    return new Set([...declaredParents].map((parent) => stateStreamOf(parent, input)));
   }
-  return new Set([input.stateStreamByStream.get(dataStream) || dataStream]);
+  return new Set([stateStreamOf(dataStream, input)]);
+}
+
+/**
+ * The staged STATE_STREAM key a data stream checkpoints under: its static
+ * `state_stream`, else itself. A declared parent can itself be a state_stream
+ * child, so raw `parent_streams` names must pass through this too.
+ */
+function stateStreamOf(stream: string, input: Pick<CheckpointCommitInput, "stateStreamByStream">): string {
+  return input.stateStreamByStream.get(stream) || stream;
 }
 
 function missingCoverageReports(input: CheckpointCommitInput, stateStream: string): WithholdReason[] {
@@ -172,7 +181,7 @@ function missingCoverageReports(input: CheckpointCommitInput, stateStream: strin
   for (const [stream, parents] of input.detailParentsByStream) {
     if (
       input.inScopeStreams.has(stream) &&
-      parents.has(stateStream) &&
+      [...parents].some((parent) => stateStreamOf(parent, input) === stateStream) &&
       !reports.some((report) => report.stream === stream)
     ) {
       reasons.push({ kind: "coverage_report_missing", stateStream, stream });
