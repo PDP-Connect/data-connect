@@ -51,7 +51,8 @@ function step(id: string, facts: Facts, extra: Record<string, unknown> = {}) {
     disclosure: { revision: "1", text: "Sign in", links: [] },
     consent: {
       facts: [],
-      disclosures: { action: id },
+      // Real shape: gozar's setup consent disclosures are { action: { id, disclosure: { text, revision, links } } }.
+      disclosures: { action: { id, disclosure: { revision: "1", text: `Facts for ${id}.`, links: [] } } },
       consentFactsDigest: facts(id),
       scope: { kind: "setup", actionDigest: `digest-${id}`, actionId: id, disclosureRevision: "1" },
     },
@@ -290,7 +291,7 @@ test("new facts mid-chain stop the chain, show the facts, and nothing is approve
     assert.match(container.textContent ?? "", /Sign in to Tailscale to finish\./)
     assert.equal(opened.length, 0)
     const facts = container.querySelector("details")!
-    assert.match(facts.innerHTML, /tailscale-tailnet/)
+    assert.match(facts.innerHTML, /Facts for tailscale-tailnet\./)
     // The owner clicks again with those facts on the card; the login step's facts are new again.
     await act(async () => button("Sign in to Tailscale")!.click())
     assert.deepEqual(posts(calls).map(call => call.body!.actionId), [
@@ -497,7 +498,7 @@ test("a node step that comes back with changed facts after the click is not appr
     await render(root, request, { pollTick: 1 })
     // The node step's facts were never shown: no automatic approval, and the button asks.
     assert.deepEqual(posts(calls), [])
-    assert.match(container.querySelector("details")!.innerHTML, /facts-changed-tailscale-node|tailscale-node/)
+    assert.match(container.querySelector("details")!.innerHTML, /Facts for tailscale-node\./)
     await act(async () => button("Use this computer (host-1)")!.click())
     assert.equal(posts(calls).length, 1)
     assert.equal(posts(calls)[0]!.body!.approval.consentFactsDigest, "facts-changed-tailscale-node")

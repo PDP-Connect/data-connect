@@ -19,6 +19,18 @@ export type ServiceEntry = {
   cleanup?: string[]
 }
 
+// Card copy names a service by its family ("Sign in to Tailscale"), not by the way's own label
+// ("Tailscale Funnel"). Provider ids are the host's (gozar catalog: tailscale-funnel, tailscale-private,
+// ngrok-*, cloudflare-named). A provider with no known family keeps the label the host gave it.
+const families: [prefix: string, name: string][] = [
+  ["tailscale-", "Tailscale"],
+  ["ngrok-", "ngrok"],
+  ["cloudflare-", "Cloudflare"],
+]
+export function familyName(providerId: string, label: string): string {
+  return families.find(([prefix]) => providerId.startsWith(prefix))?.[1] ?? label
+}
+
 // The last non-empty entry for a provider wins.
 export function setupCards(services: ServiceEntry[] | undefined): SetupReservation[] {
   const byService = new Map<string, ServiceEntry>()
@@ -39,7 +51,7 @@ export function setupCards(services: ServiceEntry[] | undefined): SetupReservati
         ...base,
         operationId: entry.setup.operationId,
         ...(entry.cleanup?.includes(entry.setup.operationId) ? { cleanup: true } : {}),
-        providerLabel: entry.providerLabel,
+        providerLabel: familyName(entry.providerId, entry.providerLabel),
         actionId: entry.setup.actionId,
         expectedConfigurationRevision: entry.setup.expectedConfigurationRevision,
       })
@@ -50,7 +62,7 @@ export function setupCards(services: ServiceEntry[] | undefined): SetupReservati
       cards.push({
         ...base,
         operationId,
-        providerLabel: `${entry.providerLabel} (left over)`,
+        providerLabel: `${familyName(entry.providerId, entry.providerLabel)} (left over)`,
         cleanup: true,
         actionId: "",
         expectedConfigurationRevision: "",

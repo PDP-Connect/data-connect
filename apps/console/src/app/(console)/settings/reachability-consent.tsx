@@ -97,6 +97,43 @@ export function ConsentDisclosures({ value, providerId }: { value: unknown; prov
   return <span data-consent-value="" className="pdpp-caption whitespace-pre-wrap break-words">{verbatimValue(String(value))}</span>;
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The sentences a disclosure holds, in reading order: the action or route's own text, its cost, and the
+ * conditions on the address. Keys, digests, revisions and kinds are never sentences, so they never show.
+ * Shapes: an action's disclosures are { action: { disclosure: { text } } }; a route's are
+ * { disclosure: { text }, cost: { summary }, address: { conditions: [] } }.
+ */
+export function disclosureSentences(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  const text = (holder: unknown) => (isRecord(holder) && typeof holder.text === "string" ? [holder.text] : []);
+  const action = isRecord(value.action) ? value.action : {};
+  const cost = isRecord(value.cost) && typeof value.cost.summary === "string" ? [value.cost.summary] : [];
+  const address = isRecord(value.address) ? value.address : {};
+  const conditions = Array.isArray(address.conditions)
+    ? address.conditions.filter((item): item is string => typeof item === "string")
+    : [];
+  return [...text(value.disclosure), ...text(action.disclosure), ...cost, ...conditions]
+    .map((sentence) => plain(sentence).trim())
+    .filter((sentence) => sentence !== "")
+    .map((sentence) => `${sentence.charAt(0).toUpperCase()}${sentence.slice(1)}`)
+    .map((sentence) => (/[.!?]$/.test(sentence) ? sentence : `${sentence}.`));
+}
+
+export function PlainDisclosure({ value }: { value: unknown }) {
+  const sentences = disclosureSentences(value);
+  if (sentences.length === 0) return null;
+  return (
+    <ul className="grid gap-2">
+      {sentences.map((sentence) => (
+        <li key={sentence}>{sentence}</li>
+      ))}
+    </ul>
+  );
+}
+
 export function SetupApprovalCard({
   action,
   busy,

@@ -19,7 +19,10 @@ import { ERROR_MESSAGES, GENERIC_ERROR, genericErrorFor, publicError } from "./r
 import { ReachabilityFailure, toDisplayError } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
-import { ConsentDisclosures, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
+import { ConsentDisclosures, PlainDisclosure, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
+import { diagnosticsText } from "./diagnostics.tsx";
+import { setupCards } from "./setup-services.ts";
+import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
 import { TurnOnCard } from "./turn-on.tsx";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
@@ -745,4 +748,45 @@ test("consent disclosure leaves preserve exact values (ISO times shown local) wh
     assert.equal(dom.window.document.querySelector("dt")?.textContent, "Metadata visible to");
     assert.equal(dom.window.document.querySelector("script"), null, "verbatim text stays React-escaped");
   } finally { dom.window.close(); }
+});
+
+// ---------- 4. rendered output of real-shape fixtures ----------
+
+// Route candidate disclosures, as gozar serves them (localhost.run candidate): a disclosure text, a cost
+// summary and address conditions beside typed keys the owner must never read as labels.
+const routeDisclosures = {
+  address: {
+    conditions: ["trial: uptime and URL lifetime are not guaranteed", "a new connection gets a new URL"],
+    ports: null,
+    scope: "random hostname under relay.example.com for one connection",
+    stability: "ephemeral",
+  },
+  cost: { kind: "free", summary: "The free tier costs nothing and needs no signup." },
+  disclosure: { links: [], revision: "disc-e68dce2053c0-facts-83b757334442", text: "Start a public HTTPS trial through the relay." },
+};
+
+test("What this does renders plain sentences for a real action and a real route, never keys or revisions", () => {
+  for (const [name, value] of [["action", trialConsentAction.consent.disclosures], ["route", routeDisclosures]] as const) {
+    const html = renderToStaticMarkup(createElement(PlainDisclosure, { value }));
+    const text = html.replace(/<[^>]+>/g, " ");
+    assertClean(`${name} disclosure`, text);
+    assert.doesNotMatch(text, /\b(Action|Digest|Kind|Revision|Ports|Stability)\b|gozar-runs|disc-/, text);
+    assert.match(text, /\./);
+  }
+  assert.match(renderToStaticMarkup(createElement(PlainDisclosure, { value: routeDisclosures })), /A new connection gets a new URL\./);
+});
+
+test("the Tailscale setup card names the family, not the way", () => {
+  const entry = (providerId: string, providerLabel: string) => ({
+    providerId, providerLabel, draftId: null, usage: "durable", committed: false,
+    setup: { operationId: `op-${providerId}`, actionId: "tailscale-setup", expectedConfigurationRevision: "r" },
+  });
+  const cards = setupCards([entry("tailscale-funnel", "Tailscale Funnel"), entry("localhost-run", "localhost.run trial")]);
+  assert.deepEqual(cards.map((card) => card.providerLabel), ["Tailscale", "localhost.run trial"]);
+});
+
+test("copied details show a local time, never an ISO time", () => {
+  const text = diagnosticsText({ code: "setup_required", message: "m", at: Date.parse("2026-11-18T13:05:42Z"), source: "load" } as never, "0.7.63");
+  assert.deepEqual(bannedIn(text.replace(/^Code: .*$/m, "")), []);
+  assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}T/);
 });

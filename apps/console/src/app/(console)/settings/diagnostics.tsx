@@ -60,7 +60,7 @@ export function toDisplayError(
 export function diagnosticsText(error: DisplayError, appVersion?: string): string {
   return [
     `Code: ${error.code}`,
-    `Time: ${formatLocalTime(error.at)} (${new Date(error.at).toISOString()})`,
+    `Time: ${formatLocalTime(error.at)}`,
     `Service: ${error.service ?? "not chosen"}`,
     `App version: ${appVersion ?? "unknown"}`,
     ...(error.serverMessage ? [`Server message: ${error.serverMessage}`] : []),

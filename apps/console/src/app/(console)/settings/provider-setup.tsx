@@ -7,6 +7,7 @@ import { openResource } from "../../../../../../src/lib/open-resource"
 import type { requestReachability } from "./reachability-actions.ts"
 import {
   ConsentDisclosures,
+  PlainDisclosure,
   ConsentFacts,
   SetupApprovalCard,
 } from "./reachability-consent.tsx"
@@ -186,7 +187,7 @@ function WhatThisDoes({ consents }: { consents: Consent[] }) {
       <div className="grid gap-3">
         {shown.map(consent => (
           <div className="grid gap-2" key={consent.consentFactsDigest}>
-            <ConsentDisclosures value={consent.disclosures} />
+            <PlainDisclosure value={consent.disclosures} />
             <ConsentFacts facts={consent.facts!} providerId={consent.scope.providerId} />
           </div>
         ))}

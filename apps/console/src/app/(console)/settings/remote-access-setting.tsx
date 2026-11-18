@@ -1220,7 +1220,7 @@ export function RemoteAccessSetting({
               <p key={prerequisite.id}>
                 {prerequisite.id}: {prerequisite.state} ·{" "}
                 {prerequisite.version.known ? prerequisite.version.value : prerequisite.version.reason} ·{" "}
-                {prerequisite.observedAt}
+                {prerequisite.observedAt ? formatLocalTime(prerequisite.observedAt) : "not checked"}
               </p>
             ))}
           </div>
