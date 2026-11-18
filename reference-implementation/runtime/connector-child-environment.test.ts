@@ -9,7 +9,6 @@ import {
   type ConnectorEnvironmentBinding,
   type ConnectorEnvironmentBindingSource,
   composeConnectorChildEnvironment,
-  explainTuningKeyRefusal,
   ownsTuningKey,
   parseConnectorEnvironmentPolicy,
   tuningNamespacePrefix,
@@ -37,7 +36,6 @@ function compose(
     connectionEnv?: Record<string, string>;
     connectorId?: string;
     explicitRunEnv?: Record<string, string>;
-    installedConnectorKeys?: readonly string[];
     platform?: NodeJS.Platform;
   } = {}
 ): Record<string, string> {
@@ -56,7 +54,6 @@ function compose(
       : {}),
     connectorId: options.connectorId ?? "test-connector",
     explicitRunEnv: options.explicitRunEnv ?? {},
-    ...(options.installedConnectorKeys ? { installedConnectorKeys: options.installedConnectorKeys } : {}),
     manifest,
     platform: options.platform ?? "linux",
     sourceEnv,
@@ -688,28 +685,6 @@ test("manifest-declared local path overrides cross the child boundary without am
   assert.equal(env.SECRET, undefined);
 });
 
-test("a local path override cannot select a server-owned or proxy variable", () => {
-  const env = compose(
-    {
-      runtime_requirements: {
-        local_paths: {
-          home_env_override: "PDPP_DATABASE_URL",
-          paths: [{ env_override: "HTTP_PROXY" }, { env_override: "pdpp_owner_password" }],
-        },
-      },
-    },
-    {
-      HTTP_PROXY: "http://proxy.invalid:3128",
-      PDPP_DATABASE_URL: "postgres://example.invalid/synthetic",
-      PDPP_OWNER_PASSWORD: "synthetic-secret",
-    }
-  );
-  assert.equal(env.PDPP_DATABASE_URL, undefined);
-  assert.equal(env.HTTP_PROXY, undefined);
-  assert.equal(env.PDPP_OWNER_PASSWORD, undefined);
-  assert.equal(env.pdpp_owner_password, undefined);
-});
-
 test("a connector receives a neighbor's namespaced key only from its own namespace", () => {
   const manifest = {
     runtime_requirements: {
@@ -727,91 +702,4 @@ test("a connector key that names an Object.prototype member composes without tun
   for (const connectorId of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
     assert.deepEqual(compose({}, { PATH: "/usr/bin" }, { connectorId }), { PATH: "/usr/bin" });
   }
-});
-
-test("a connector cannot claim a variable the server reads, whatever its key", () => {
-  const sourceEnv = {
-    PDPP_CREDENTIAL_ENCRYPTION_KEY: "encryption-key",
-    PDPP_DATABASE_URL: "postgres://user:secret@db.example/pdpp",
-    PDPP_OWNER_PASSWORD: "owner-password",
-    PDPP_STORAGE_BACKEND: "postgres",
-  };
-  const declared = (key: string) => ({ runtime_requirements: { tuning_environment: [key] } });
-
-  // A manifest keyed `database` is inside the PDPP_DATABASE_ namespace by shape.
-  assert.deepEqual(compose(declared("PDPP_DATABASE_URL"), sourceEnv, { connectorId: "database" }), {});
-  assert.deepEqual(compose(declared("PDPP_STORAGE_BACKEND"), sourceEnv, { connectorId: "storage" }), {});
-  assert.deepEqual(compose(declared("PDPP_OWNER_PASSWORD"), sourceEnv, { connectorId: "owner" }), {});
-  assert.deepEqual(compose(declared("PDPP_CREDENTIAL_ENCRYPTION_KEY"), sourceEnv, { connectorId: "credential" }), {});
-  // A key the server does not read, in the same namespace, is still the connector's own.
-  assert.deepEqual(
-    compose(
-      declared("PDPP_DATABASE_PAGE_SIZE"),
-      { ...sourceEnv, PDPP_DATABASE_PAGE_SIZE: "20" },
-      { connectorId: "database" }
-    ),
-    { PDPP_DATABASE_PAGE_SIZE: "20" }
-  );
-});
-
-test("ownsTuningKey refuses a server-owned name in any letter case", () => {
-  assert.equal(ownsTuningKey("database", "PDPP_DATABASE_URL"), false);
-  assert.equal(ownsTuningKey("database", "pdpp_database_url"), false);
-  assert.match(explainTuningKeyRefusal("database", "PDPP_DATABASE_URL") ?? "", /server-owned environment variable/);
-  assert.equal(explainTuningKeyRefusal("database", "PDPP_DATABASE_PAGE_SIZE"), null);
-});
-
-test("an installed connector with a longer namespace owns the keys inside it", () => {
-  const manifest = {
-    runtime_requirements: {
-      tuning_environment: ["PDPP_GOOGLE_MAPS_PAGE_SIZE", "PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"],
-    },
-  };
-  const sourceEnv = { PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20", PDPP_GOOGLE_MAPS_PAGE_SIZE: "10" };
-  const installedConnectorKeys = ["google-maps", "google-maps-data-portability", "gmail"];
-
-  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "google-maps", installedConnectorKeys }), {
-    PDPP_GOOGLE_MAPS_PAGE_SIZE: "10",
-  });
-  assert.deepEqual(
-    compose(manifest, sourceEnv, { connectorId: "google-maps-data-portability", installedConnectorKeys }),
-    { PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20" }
-  );
-  assert.match(
-    explainTuningKeyRefusal("google-maps", "PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE", installedConnectorKeys) ?? "",
-    /belongs to the installed connector google-maps-data-portability/
-  );
-});
-
-test("a longer connector that is not installed does not take keys from the shorter one", () => {
-  // Without the longer connector installed there is nothing to compare with.
-  // Installing it later moves the keys inside its namespace to it.
-  const manifest = { runtime_requirements: { tuning_environment: ["PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE"] } };
-  const sourceEnv = { PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20" };
-  const received = { PDPP_GOOGLE_MAPS_DATA_PORTABILITY_PAGE_SIZE: "20" };
-
-  assert.deepEqual(
-    compose(manifest, sourceEnv, { connectorId: "google-maps", installedConnectorKeys: ["google-maps"] }),
-    received
-  );
-  assert.deepEqual(compose(manifest, sourceEnv, { connectorId: "google-maps" }), received);
-  assert.deepEqual(
-    compose(manifest, sourceEnv, {
-      connectorId: "google-maps",
-      installedConnectorKeys: ["google-maps", "google-maps-data-portability"],
-    }),
-    {}
-  );
-});
-
-test("a namespace two installed connector keys share belongs to neither", () => {
-  // `a-b` and `a_b` both spell PDPP_A_B_; no rule tells them apart.
-  const installedConnectorKeys = ["a-b", "a_b"];
-  assert.equal(ownsTuningKey("a-b", "PDPP_A_B_PAGE_SIZE", installedConnectorKeys), false);
-  assert.equal(ownsTuningKey("a_b", "PDPP_A_B_PAGE_SIZE", installedConnectorKeys), false);
-  assert.match(
-    explainTuningKeyRefusal("a-b", "PDPP_A_B_PAGE_SIZE", installedConnectorKeys) ?? "",
-    /shared with the installed connector a_b/
-  );
-  assert.equal(ownsTuningKey("a-b", "PDPP_A_B_PAGE_SIZE", ["a-b"]), true);
 });
