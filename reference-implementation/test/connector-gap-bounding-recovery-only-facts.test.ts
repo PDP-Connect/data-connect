@@ -4,7 +4,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildCollectionFacts, buildRecoveryGapClosureFacts } from "../runtime/connector-gap-bounding.ts";
+import {
+  boundConnectorErrorCode,
+  buildCollectionFacts,
+  buildKnownGap,
+  buildRecoveryGapClosureFacts,
+  normalizeRecoveryHint,
+  RECOVERY_ACTIONS,
+} from "../runtime/connector-gap-bounding.ts";
+import { validateDoneError } from "../runtime/done-validators.ts";
 
 type BuildCollectionFactsInput = Parameters<typeof buildCollectionFacts>[0];
 
@@ -237,4 +245,45 @@ test("buildRecoveryGapClosureFacts: malformed entries (no gap_id) are excluded f
   assert.ok(facts);
   const entry = facts.streams[0] as { recovered_count: number; stream: string };
   assert.deepEqual(entry, { recovered_count: 2, stream: "orders" });
+});
+
+test("absent and invalid recovery hints never infer an action", () => {
+  for (const input of [undefined, null, "garbage", {}, [], 7]) {
+    assert.deepEqual(normalizeRecoveryHint(input), { action: "unknown", retryable: false });
+  }
+  assert.deepEqual(normalizeRecoveryHint({ retryable: true }), { action: "unknown", retryable: true });
+  assert.deepEqual(normalizeRecoveryHint({ action: "garbage", retryable: true }), {
+    action: "unknown", retryable: true,
+  });
+});
+
+test("valid recovery actions and explicit retryability remain diagnostic claims", () => {
+  for (const action of RECOVERY_ACTIONS) {
+    const expected = { action, retryable: action === "retry_by_runtime" };
+    assert.deepEqual(normalizeRecoveryHint(action), expected);
+    assert.deepEqual(normalizeRecoveryHint({ action }), expected);
+    for (const retryable of [false, true]) {
+      assert.deepEqual(normalizeRecoveryHint({ action, retryable }), { action, retryable });
+    }
+  }
+});
+
+test("known gaps do not infer recovery actions from connector text", () => {
+  for (const bait of ["login expired", "rate limit 429", "captcha", "login expired, rate limit 429, captcha"]) {
+    const gap = buildKnownGap({ kind: bait, reason: bait, message: bait });
+    assert.deepEqual(gap.recovery_hint, { action: "unknown", retryable: false });
+  }
+});
+
+test("connector error codes use the shared one-through-64 character grammar", () => {
+  assert.equal(boundConnectorErrorCode("a"), "a");
+  assert.equal(boundConnectorErrorCode("a".repeat(64)), "a".repeat(64));
+  assert.equal(boundConnectorErrorCode("a".repeat(65)), null);
+  assert.equal(boundConnectorErrorCode("A"), null);
+});
+
+test("DONE error validation accepts the same one-character code", () => {
+  assert.deepEqual(validateDoneError("failed", { code: "x", message: "diagnostic", retryable: false }), {
+    code: "x", message: "diagnostic", retryable: false,
+  });
 });

@@ -11,6 +11,7 @@
  */
 
 import { BindingDeclarationError, normalizeBindingDeclarations } from "../runtime/binding-declarations.ts";
+import { MAX_SIGN_IN_PATTERN_LENGTH } from "../runtime/browser-surface/sign-in-proof.ts";
 import { collectionProfileDeclarationProblem } from "../runtime/collection-profile-support.ts";
 import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
 import {
@@ -359,6 +360,26 @@ function validateRuntimeBindings(req: Record<string, unknown>, code: string): vo
       throw invalidConnectorManifest(error.message, code);
     }
     throw error;
+  }
+  const bindings = req.bindings;
+  if (typeof bindings !== "object" || bindings === null) {
+    return;
+  }
+  const browser = (bindings as Record<string, unknown>).browser;
+  const signInPattern =
+    typeof browser === "object" && browser !== null
+      ? (browser as Record<string, unknown>).sign_in_url_pattern
+      : undefined;
+  if (
+    signInPattern !== undefined &&
+    (typeof signInPattern !== "string" ||
+      signInPattern.trim().length === 0 ||
+      signInPattern.trim().length > MAX_SIGN_IN_PATTERN_LENGTH)
+  ) {
+    throw invalidConnectorManifest(
+      `runtime_requirements.bindings.browser.sign_in_url_pattern must be a non-empty string of at most ${MAX_SIGN_IN_PATTERN_LENGTH} characters`,
+      code
+    );
   }
 }
 

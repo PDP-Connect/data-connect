@@ -153,11 +153,19 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # Cargo 1.100's per-crate search paths exceed Windows' command-line limit
+      # for sigstore. Keep intermediate paths short without moving the bundles.
+      - name: Shorten Windows Rust build paths
+        if: matrix.os_family == 'windows'
+        shell: pwsh
+        run: '"CARGO_BUILD_BUILD_DIR=C:\t" >> $env:GITHUB_ENV'
+
       - name: Cache Rust dependencies and build output
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
+          cache-directories: ${{ matrix.os_family == 'windows' && 'C:\t' || '' }}
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11

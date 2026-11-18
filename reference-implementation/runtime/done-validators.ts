@@ -14,7 +14,7 @@
 // Extracted from runtime/index.js: pure shape/consistency checks with no
 // runtime state, secret handling, or grant/scope enforcement.
 
-import { isValidRecoveryHintShape } from "./connector-gap-bounding.ts";
+import { CONNECTOR_ERROR_CODE_RE, isValidRecoveryHintShape } from "./connector-gap-bounding.ts";
 import { isObservationIdSyntax } from "./observations.ts";
 
 type DoneStatus = "succeeded" | "failed" | "cancelled";
@@ -81,8 +81,6 @@ export function validateDoneStatus(status: unknown, portable = false): Error | n
   return new Error(`Connector emitted invalid DONE status: ${status}`);
 }
 
-const DONE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
-
 /**
  * What the run's protocol state lets a DONE error say. `strict` is the
  * Collection Profile 0.2.0 shape: a failed DONE carries an error and a boolean
@@ -134,7 +132,7 @@ export function validateDoneError(
     return new Error(`Connector emitted invalid DONE.error: unsupported fields ${unsupportedFields.join(", ")}`);
   }
   // biome-ignore lint/suspicious/noEqualsToNull: check for both null and undefined
-  if (error.code != null && (typeof error.code !== "string" || !DONE_ERROR_CODE_RE.test(error.code))) {
+  if (error.code != null && (typeof error.code !== "string" || !CONNECTOR_ERROR_CODE_RE.test(error.code))) {
     return new Error("Connector emitted invalid DONE.error.code: expected bounded snake_case code");
   }
   if (typeof error.message !== "string" || !error.message.trim()) {

@@ -5,7 +5,7 @@
  * Reproducible production-cadence benchmark for the STREAM_EVIDENCE
  * accepted-keys store (`createAcceptedKeysStore`, runtime/index.ts).
  *
- * Independent review (STREAM-EVIDENCE-P1-2-REREVIEW.md item 1) found the
+ * An independent review found the
  * prior implementation report's 1M-row benchmark measured one transaction
  * containing 1,000,000 inserts (1,168-1,221ms) -- not the shape production
  * actually runs. Production commits once per `flushBatch` call, and the
@@ -40,8 +40,7 @@
  * environment's numbers, not a guarantee about every CI/production host's
  * storage; see the sanity test below for the bound this environment CAN
  * make (the PRAGMAs actually take effect), and independent review's own
- * 138,336ms figure (STREAM-EVIDENCE-P1-2-REREVIEW.md item 1, a real
- * disk-backed measurement) for the regression class this acceptance target
+ * 138,336ms figure (a real disk-backed measurement) for the regression class this acceptance target
  * defends against.
  *
  * Acceptance target: total wall-clock for the full 1,000,000-row production
@@ -49,7 +48,7 @@
  * measurement of the UNFIXED cadence (rollback-journal, synchronous=FULL)
  * was 138,336ms -- a regression back to that configuration fails this gate
  * by roughly 7x, with no risk of a false pass. The WAL+NORMAL cadence
- * measured on this session's reference hardware is ~1,200-1,700ms, leaving
+ * measured on one development machine is ~1,200-1,700ms, leaving
  * roughly 12-15x headroom for slower CI/sandboxed storage before the gate
  * would trip on the FIXED configuration. 20s is also small relative to a
  * real 1,000,000-record connector run's total wall-clock (dominated by the

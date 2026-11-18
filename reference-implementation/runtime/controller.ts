@@ -64,6 +64,7 @@ import {
   getDefaultBrowserSurfaceReplacementReceiptStore,
 } from "../server/stores/browser-surface-replacement-ledger-store.ts";
 import { getDefaultConnectorAttentionStore } from "../server/stores/connector-attention-store.ts";
+import { getDefaultProviderInvalidationProofStore } from "../server/stores/provider-invalidation-proof-store.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import {
   createPostgresConnectorInstanceStore,
@@ -85,6 +86,7 @@ import {
   observeDynamicBrowserSurfaceRuntimeInventory,
   observeDynamicBrowserSurfaceRuntimeSurfaces,
 } from "./browser-surface/allocator-observation.ts";
+import { recordSignInProofAfterRun } from "./browser-surface/sign-in-proof-recorder.ts";
 import {
   type BrowserSurfaceManagerDeps,
   type BrowserSurfaceReadinessProbe,
@@ -552,6 +554,11 @@ export interface ControllerOptions {
   }) => Promise<void> | void;
   /** Awaited before a managed surface lease becomes reusable after run cleanup. */
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
+  /** Run-completion sign-in proof writer. Defaults to the durable store-backed recorder; tests may observe it. */
+  recordSignInProof?: (
+    deps: Parameters<typeof recordSignInProofAfterRun>[0],
+    input: Parameters<typeof recordSignInProofAfterRun>[1]
+  ) => ReturnType<typeof recordSignInProofAfterRun>;
   /**
    * Resolves the host allocator's recorded start failure (code + message) for a
    * run whose browser-surface lease just went surface_failed. Wired to the host
@@ -1138,6 +1145,10 @@ const runWatchdogSettlements = new Map<string, { promise: Promise<void>; resolve
 // Growth is bounded by the number of distinct connector_instance keys ever
 // admitted, not by run count.
 const runGenerations = new Map<string, number>();
+// The in-flight terminal sign-in evidence capture per run. The first terminal
+// path to reach a run starts it; every later path, and slot cleanup, awaits
+// the same promise so the slot is not released while the capture is in flight.
+const signInProofCaptures = new Map<string, Promise<void>>();
 // Keyed by run_id. Interaction broker state is intentionally in-memory:
 // dashboard-submitted values satisfy the current live run only and are never
 // persisted to `.env.local`, SQLite config/state, or spine event payloads.
@@ -3381,6 +3392,72 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
   }
 
+  // Runtime-side provider-invalidation proof: the run's own browser surface
+  // is read while the lease is still held. Never lets a recording failure
+  // change the run outcome.
+  //
+  // Fenced on run identity: only the run that still owns the connection slot,
+  // at the generation it was admitted under, may write. A late result from a
+  // run the watchdog already reclaimed must neither clear a newer run's proof
+  // nor attribute another run's page to itself.
+  async function recordSignInProofForRun(input: {
+    readonly browserSurfaceLease: BrowserSurfaceLease | null;
+    readonly connectorId: string;
+    readonly connectorInstanceId: string;
+    readonly generation: number;
+    readonly key: string;
+    readonly manifest: ConnectorManifest;
+    readonly runId: string;
+    readonly status: string | null | undefined;
+  }): Promise<void> {
+    const stillCurrent = () =>
+      activeRuns.get(input.key)?.run_id === input.runId && runGenerations.get(input.key) === input.generation;
+    const claimed = signInProofCaptures.get(input.runId);
+    if (claimed) {
+      await claimed;
+      return;
+    }
+    if (!stillCurrent()) {
+      return;
+    }
+    const capture = captureSignInProof(input, stillCurrent);
+    signInProofCaptures.set(input.runId, capture);
+    await capture;
+  }
+
+  async function captureSignInProof(
+    input: {
+      readonly browserSurfaceLease: BrowserSurfaceLease | null;
+      readonly connectorId: string;
+      readonly connectorInstanceId: string;
+      readonly manifest: ConnectorManifest;
+      readonly runId: string;
+      readonly status: string | null | undefined;
+    },
+    stillCurrent: () => boolean
+  ): Promise<void> {
+    try {
+      const surfaceId = input.browserSurfaceLease?.surface_id;
+      const cdpUrl = surfaceId ? (browserSurfaceLeaseManager?.getSurface(surfaceId)?.cdp_url ?? null) : null;
+      await (opts.recordSignInProof ?? recordSignInProofAfterRun)(
+        { store: getDefaultProviderInvalidationProofStore() },
+        {
+          cdpUrl,
+          connectionId: input.connectorInstanceId,
+          connectorId: input.connectorId,
+          isCurrent: stillCurrent,
+          manifest: input.manifest,
+          nowIso: nowIso(),
+          runId: input.runId,
+          status: input.status,
+        }
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn?.(`[controller] failed to record sign-in proof for ${input.runId}: ${message}`);
+    }
+  }
+
   async function finalizeRunCleanup(input: {
     readonly browserSurfaceLease: BrowserSurfaceLease | null;
     readonly connectorId: string;
@@ -3389,6 +3466,13 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly runId: string;
     readonly traceContext: SpineTraceContext;
   }): Promise<void> {
+    // Let a claimed capture finish before the slot is released, so its
+    // currency check still sees the run as the slot owner.
+    const capture = signInProofCaptures.get(input.runId);
+    if (capture) {
+      await capture;
+      signInProofCaptures.delete(input.runId);
+    }
     // Idempotency guard: the watchdog and the run's own .finally() can both
     // call finalizeRunCleanup. Only the first call does real work; subsequent
     // calls are silent no-ops. We detect "already finalized" by checking
@@ -4142,14 +4226,17 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly browserSurfaceLease: BrowserSurfaceLease | null;
     readonly connectorId: string;
     readonly connectorInstanceId: string;
+    readonly generation: number;
     readonly key: string;
+    readonly manifest: ConnectorManifest;
     readonly runId: string;
     readonly traceContext: SpineTraceContext;
   }): void {
     if (!Number.isFinite(maxRunWallClockMs) || maxRunWallClockMs <= 0) {
       return;
     }
-    const { browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext } = input;
+    const { browserSurfaceLease, connectorId, connectorInstanceId, generation, key, manifest, runId, traceContext } =
+      input;
     let resolveSettlement!: () => void;
     const settlementPromise = new Promise<void>((resolve) => {
       resolveSettlement = resolve;
@@ -4199,6 +4286,20 @@ export function createController(opts: ControllerOptions = {}): Controller {
           const emitMessage = emitErr instanceof Error ? emitErr.message : String(emitErr);
           log.warn?.(`[controller] watchdog: failed to emit run_timed_out terminal for ${runId}: ${emitMessage}`);
         }
+        // Capture terminal evidence while the lease is still held, under the
+        // run's actual terminal status (a run that already completed must not
+        // record failure evidence).
+        const terminalStatus = await getRunTerminalStatus(runId).catch(() => null);
+        await recordSignInProofForRun({
+          browserSurfaceLease,
+          connectorId,
+          connectorInstanceId,
+          generation,
+          key,
+          manifest,
+          runId,
+          status: terminalStatus === "completed" ? "succeeded" : (terminalStatus ?? "failed"),
+        });
         await finalizeRunCleanup({ browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext });
       };
       emitAndFinalize()
@@ -4499,6 +4600,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
       // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: This protocol transition owns ordered state invariants that must remain local.
       .then(async (result) => {
         runResult = result;
+        await recordSignInProofForRun({
+          browserSurfaceLease,
+          connectorId,
+          connectorInstanceId,
+          generation: myRunGeneration,
+          key,
+          manifest,
+          runId,
+          status: result?.status,
+        });
         // A managed dynamic surface can pass pre-flight readiness and still
         // wedge before the connector reaches any record/progress. The
         // connector-runtime source boundary (browser-launch.ts's
@@ -4571,6 +4682,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
           );
           return;
         }
+        // The run rejected before a result existed: capture failure evidence
+        // while the lease is still held (the fence above and in the recorder
+        // keep a reclaimed run out).
+        await recordSignInProofForRun({
+          browserSurfaceLease,
+          connectorId,
+          connectorInstanceId,
+          generation: myRunGeneration,
+          key,
+          manifest,
+          runId,
+          status: "failed",
+        });
         // Close the phantom-202 window: a throw before the runtime's
         // `run.started` emit (env/spawn prep) used to leave a 202-returned
         // run id with ZERO spine events — log-and-forget. Emit a typed
@@ -4662,7 +4786,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // in activeRuns that blocks all future run-nows with 409 until restart.
     // armRunWatchdog bounds this: it force-finalizes the run after the budget
     // expires and is a no-op when maxRunWallClockMs is Infinity or zero.
-    armRunWatchdog({ browserSurfaceLease, connectorId, connectorInstanceId, key, runId, traceContext });
+    armRunWatchdog({
+      browserSurfaceLease,
+      connectorId,
+      connectorInstanceId,
+      generation: myRunGeneration,
+      key,
+      manifest,
+      runId,
+      traceContext,
+    });
 
     return { run_id: runId, status: "started", trace_id: traceContext.trace_id, ...automationMetadata };
   }
