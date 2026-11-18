@@ -528,6 +528,14 @@ export interface RunTargetNonceHooks {
   registerNonce: (args: { runId: string; nonce: string }) => void;
 }
 
+/**
+ * Hooks the controller calls to mint and revoke the per-run blob upload
+ * credential. The child receives the raw token as `PDPP_BLOB_UPLOAD_TOKEN`
+ * instead of an owner bearer; the hook stores only its hash, bound to the
+ * run's connector instance. Revoked when the run ends.
+ */
+export type RunBlobUploadCredentialHooks = import("../server/run-blob-upload-credentials.ts").RunBlobUploadCredentialHooks;
+
 export interface ControllerOptions {
   /**
    * Resolves an exact configured connection before runtime can emit a new
@@ -704,6 +712,12 @@ export interface ControllerOptions {
    *   reference-implementation/server/streaming/run-target-registry.js
    */
   streamingTargetNonceHooks?: RunTargetNonceHooks;
+  /**
+   * Optional run-scoped blob upload credential hooks. When absent, children
+   * get no blob upload credential and blob uploads report unavailable. The
+   * owner bearer is never forwarded to the child.
+   */
+  blobUploadCredentialHooks?: RunBlobUploadCredentialHooks;
 }
 
 function resolveAdmittedRunConnection(
@@ -3265,11 +3279,43 @@ export function createController(opts: ControllerOptions = {}): Controller {
     return nonce;
   }
 
+  function mintRunBlobUploadCredential(input: {
+    readonly connectorId: string;
+    readonly connectorInstanceId: string;
+    readonly ownerSubjectId: string;
+    readonly runId: string;
+  }): string | null {
+    // Per-run credential for POST /v1/blobs, the only authenticated call a
+    // connector child makes. Same lifecycle as the streaming nonce: minted at
+    // admission, hash-stored by the hook, revoked at run end.
+    if (!opts.blobUploadCredentialHooks) {
+      return null;
+    }
+    const token = randomBytes(32).toString("hex");
+    try {
+      opts.blobUploadCredentialHooks.register({ ...input, token });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn?.(`[controller] blob upload credential register failed for ${input.runId}: ${message}`);
+      return null;
+    }
+    return token;
+  }
+
+  function revokeRunBlobUploadCredential(runId: string): void {
+    try {
+      opts.blobUploadCredentialHooks?.revoke({ runId });
+    } catch {
+      /* registry shutdown raced run end — safe to ignore */
+    }
+  }
+
   async function registerActiveRunBookkeeping(input: {
     readonly automationMetadata: Pick<RunNowResult, "automation_mode" | "automation_summary">;
     readonly connectorId: string;
     readonly connectorInstanceId: string;
     readonly key: string;
+    readonly ownerSubjectId: string;
     readonly runId: string;
     readonly resetState?: boolean;
     readonly sourceWebhookEvent?: SourceWebhookRunEvent;
@@ -3277,7 +3323,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     readonly startedAt: string;
     readonly traceContext: SpineTraceContext;
   }): Promise<
-    | { readonly kind: "admitted"; readonly streamingNonce: string | null }
+    | { readonly kind: "admitted"; readonly blobUploadToken: string | null; readonly streamingNonce: string | null }
     | { readonly kind: "replay"; readonly receipt: SourceWebhookRunReceipt }
   > {
     // Advance the fencing token only after the durable gate accepts the row.
@@ -3352,7 +3398,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connector_id: input.connectorId,
       pending: null,
     });
-    return { kind: "admitted", streamingNonce: mintStreamingRegistrationNonce(input.runId) };
+    return {
+      blobUploadToken: mintRunBlobUploadCredential({
+        connectorId: input.connectorId,
+        connectorInstanceId: input.connectorInstanceId,
+        ownerSubjectId: input.ownerSubjectId,
+        runId: input.runId,
+      }),
+      kind: "admitted",
+      streamingNonce: mintStreamingRegistrationNonce(input.runId),
+    };
   }
 
   function clearStreamingNonceForRun(runId: string): void {
@@ -3446,6 +3501,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
         log.warn?.(`[controller] run cleanup barrier failed for ${input.runId}: ${message}`);
       }
       clearStreamingNonceForRun(input.runId);
+      revokeRunBlobUploadCredential(input.runId);
       if (input.browserSurfaceLease) {
         try {
           await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
@@ -4331,6 +4387,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connectorId: admittedConnectorId,
       connectorInstanceId,
       key,
+      ownerSubjectId: runOwnerSubjectId,
       runId,
       ...(options.resetState ? { resetState: true } : {}),
       ...(sourceWebhookEvent ? { sourceWebhookEvent, sourceWebhookOwnerSubjectId: runOwnerSubjectId } : {}),
@@ -4340,7 +4397,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (bookkeeping.kind === "replay") {
       return sourceWebhookReceiptRunHandle(bookkeeping.receipt);
     }
-    const { streamingNonce } = bookkeeping;
+    const { blobUploadToken, streamingNonce } = bookkeeping;
     let browserSurfaceLease: BrowserSurfaceLease | null = null;
     let browserSurfaceEnv: Record<string, string> | null = null;
     try {
@@ -4476,6 +4533,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
           state,
           ...(scopedResources ? { scope: { streams: scopedResources } } : {}),
           automationMode: automationMetadata.automation_mode ?? null,
+          blobUploadToken,
           browserSurfaceEnv,
           cancelSignal: cancellation.signal,
           collectionMode,
