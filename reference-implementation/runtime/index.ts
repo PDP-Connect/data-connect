@@ -597,6 +597,13 @@ export interface RuntimeRunConnectorOptions {
   onInteractionTerminal?: ((info: { interactionId: string; status: string }) => unknown) | null;
   onProgress?: (message: unknown) => void;
   onStarted?: ((info: { run_id: string; scenario_id?: string; trace_id: string }) => void) | null;
+  /**
+   * Run-scoped credential for `POST /v1/blobs`, minted by the controller.
+   * Forwarded to the child as `PDPP_BLOB_UPLOAD_TOKEN`. The owner bearer
+   * (`ownerToken`) stays in the runtime parent and is never put in the child
+   * environment.
+   */
+  blobUploadToken?: string | null;
   /** Authenticated owner for standalone default-account resolution. */
   ownerSubjectId?: string | null;
   ownerToken: string;
@@ -2985,6 +2992,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     connectorInstanceId = null,
     ownerSubjectId = null,
     ownerToken,
+    blobUploadToken = null,
     manifest,
     runSource: requestedRunSource,
     scope: providedScope = null,
@@ -3175,7 +3183,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       explicitRunEnv: {
         PDPP_CONNECTOR_ID: connectorId,
         ...connectorInstanceEnv,
-        PDPP_OWNER_TOKEN: ownerToken,
+        ...(blobUploadToken ? { PDPP_BLOB_UPLOAD_TOKEN: blobUploadToken } : {}),
         PDPP_RS_URL: rsUrl,
         ...streamingRegistrationEnv,
         ...browserSurfaceLaunchEnv,
@@ -7036,12 +7044,13 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // deployed head, with a real owner credential. See stderr-redact.ts.
       //
       // The set is every live secret THIS run handed the child, not just the
-      // connection's own credential: `ownerToken` and the streaming
-      // registration token are bearer credentials in the same environment, so
-      // a child that echoes one into stderr leaks it the same way. Scoping to
+      // connection's own credential: the blob upload and streaming
+      // registration tokens are bearer credentials in the same environment, so
+      // a child that echoes one into stderr leaks it the same way. The owner
+      // token is not in the child environment; it stays listed as a backstop. Scoping to
       // what was actually injected keeps this a fact about the run rather than
       // a guess about the connector.
-      const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, streamingRegistrationToken].filter(
+      const runKnownSecrets = [...Object.values(staticSecretLaunchEnv), ownerToken, blobUploadToken, streamingRegistrationToken].filter(
         (value): value is string => typeof value === "string" && value.length > 0
       );
       if (stderrTailRaw.text) {
