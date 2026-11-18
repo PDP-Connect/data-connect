@@ -168,14 +168,19 @@ jobs:
           test_bin="$(cargo test --lib --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.profile.test == true and .executable != null) | .executable' | tail -n 1)"
           test -x "$test_bin"
-          timeout --signal=TERM --kill-after=5s 120s xvfb-run -a dbus-run-session -- \
-            ../scripts/ci/webkitgtk-cookie-probe.sh "$test_bin" "$RUNNER_TEMP/webkitgtk-cookie-test.log" \
-            2>&1 | tee "$RUNNER_TEMP/webkitgtk-cookie-probe.log"
-          grep -q '^WEBKITGTK COOKIE TEST RAN$' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
-            echo "::error::WebKitGTK cookie test did not print its RAN marker"
-            exit 1
-          }
-          grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
-            echo "::error::WebKitGTK cookie test did not report a passing result"
-            exit 1
-          }
+          # The stall is intermittent (one run in many), so repeat the test,
+          # each time on a fresh display and bus, and stop at the first failure.
+          for attempt in $(seq 1 30); do
+            echo "probe: attempt $attempt"
+            timeout --signal=TERM --kill-after=5s 120s xvfb-run -a dbus-run-session -- \
+              ../scripts/ci/webkitgtk-cookie-probe.sh "$test_bin" "$RUNNER_TEMP/webkitgtk-cookie-test.log" \
+              2>&1 | tee -a "$RUNNER_TEMP/webkitgtk-cookie-probe.log"
+            grep -q '^WEBKITGTK COOKIE TEST RAN$' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
+              echo "::error::WebKitGTK cookie test did not print its RAN marker (attempt $attempt)"
+              exit 1
+            }
+            grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
+              echo "::error::WebKitGTK cookie test did not report a passing result (attempt $attempt)"
+              exit 1
+            }
+          done
