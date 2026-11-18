@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest"
 
 interface CapabilityDocument {
   platforms?: string[]
+  windows?: string[]
   permissions: Array<string | { identifier: string; allow?: unknown[] }>
 }
 
@@ -193,25 +194,92 @@ describe("capability scoping of app commands", () => {
     expect(document.windows).toEqual(["main", "connector-*"])
   })
 
-  // Every capability file and the exact window patterns it may name. A new
-  // file, or a new window in an existing file, fails here until someone adds it
-  // on purpose. The attach window ("attach") is deliberately in no file: its
+  // Every capability file, the exact window patterns it may name, and the
+  // exact permission identifiers it may grant (a string entry, or the
+  // `identifier` of an object entry; an object's scope is not compared). A new
+  // file, a new window or a new grant fails here until someone adds it on
+  // purpose. The attach window ("attach") is deliberately in no file: its
   // commands check the window label themselves, and any capability that lists
   // it would widen who can reach them.
-  const ALLOWED_CAPABILITY_WINDOWS: Record<string, string[]> = {
-    "default.json": ["main", "connector-*"],
-    "console.json": ["console"],
-    "mcp-bridge.json": ["main", "connector-*"],
+  const ALLOWED_CAPABILITIES: Record<string, { windows: string[]; permissions: string[] }> = {
+    "default.json": {
+      windows: ["main", "connector-*"],
+      permissions: [
+        "core:default",
+        "core:window:allow-create",
+        "core:window:allow-close",
+        "core:window:allow-set-size",
+        "core:window:allow-set-position",
+        "core:window:allow-show",
+        "core:window:allow-hide",
+        "core:window:allow-start-dragging",
+        "core:webview:default",
+        "core:webview:allow-create-webview-window",
+        "core:event:default",
+        "core:event:allow-listen",
+        "core:event:allow-emit",
+        "core:path:default",
+        "fs:default",
+        "fs:allow-app-read-recursive",
+        "fs:allow-app-write-recursive",
+        "fs:allow-appdata-read-recursive",
+        "fs:allow-appdata-write-recursive",
+        "shell:default",
+        "shell:allow-open",
+        "deep-link:default",
+        "clipboard-manager:allow-write-text",
+        "http:default",
+        "http:allow-fetch",
+      ],
+    },
+    "console.json": {
+      windows: ["console"],
+      permissions: [
+        "core:default",
+        "core:event:default",
+        "core:event:allow-listen",
+        "core:event:allow-emit",
+        "notification:default",
+      ],
+    },
+    "mcp-bridge.json": {
+      windows: ["main", "connector-*"],
+      permissions: [
+        "mcp-bridge:default",
+      ],
+    },
   }
 
-  it("every capability file and window is on the explicit allow-list", () => {
+  const permissionIdentifier = (entry: string | { identifier: string }) =>
+    typeof entry === "string" ? entry : entry.identifier
+
+  // Tauri reads every capability file in the directory, whatever its extension,
+  // so an entry that is not a known top-level .json file (a .toml, a
+  // subdirectory) is a grant this test could not see.
+  it("the capabilities directory holds only the known top-level .json files", () => {
     const directory = resolve(process.cwd(), "src-tauri/capabilities")
-    const actual: Record<string, string[]> = {}
-    for (const name of readdirSync(directory).filter(entry => entry.endsWith(".json")).sort()) {
-      const document = JSON.parse(readFileSync(resolve(directory, name), "utf-8")) as { windows?: string[] }
-      actual[name] = document.windows ?? []
+    const entries = readdirSync(directory, { withFileTypes: true })
+    const unknown = entries
+      .filter(entry => !entry.isFile() || !(entry.name in ALLOWED_CAPABILITIES))
+      // This test file sits beside the capabilities it checks.
+      .filter(entry => entry.name !== "default.test.ts")
+      .map(entry => (entry.isDirectory() ? `${entry.name}/` : entry.name))
+    expect(unknown).toEqual([])
+    expect(entries.filter(entry => entry.isFile() && entry.name.endsWith(".json")).map(entry => entry.name).sort())
+      .toEqual(Object.keys(ALLOWED_CAPABILITIES).sort())
+  })
+
+  it("every capability file grants exactly the listed windows and permissions", () => {
+    const directory = resolve(process.cwd(), "src-tauri/capabilities")
+    const actual: Record<string, { windows: string[]; permissions: string[] }> = {}
+    for (const name of Object.keys(ALLOWED_CAPABILITIES).sort()) {
+      const document = JSON.parse(readFileSync(resolve(directory, name), "utf-8")) as CapabilityDocument
+      actual[name] = {
+        windows: document.windows ?? [],
+        permissions: document.permissions.map(permissionIdentifier),
+      }
     }
-    expect(actual).toEqual(ALLOWED_CAPABILITY_WINDOWS)
+    expect(actual).toEqual(ALLOWED_CAPABILITIES)
   })
 
   // Tauri refuses an app command from a page that is not the app's own unless
