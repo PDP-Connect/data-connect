@@ -67,7 +67,7 @@ pub(crate) fn open_attach_window<R: Runtime>(app: &AppHandle<R>, prefill: Attach
         ATTACH_WINDOW_LABEL,
         WebviewUrl::App("attach.html".into()),
     )
-    .title("Connect to a server")
+    .title(crate::profile::decorate("Connect to a server"))
     .inner_size(560.0, 720.0)
     .min_inner_size(480.0, 520.0)
     .center()

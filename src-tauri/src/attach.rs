@@ -311,7 +311,7 @@ pub(crate) fn keyring_service_for(app_identifier: &str) -> String {
     format!("{app_identifier}.{SESSION_KEYRING_SUFFIX}")
 }
 
-fn keyring_service() -> String {
+fn base_keyring_service() -> String {
     KEYRING_SERVICE
         .get()
         .cloned()
@@ -327,7 +327,7 @@ impl KeychainSessionStore {
         if cfg!(test) {
             return Err("the OS keychain is not used under cargo test".to_string());
         }
-        keyring::Entry::new(&keyring_service(), origin)
+        keyring::Entry::new(&crate::profile::keyring_service(&base_keyring_service()), origin)
             .map_err(|error| format!("could not initialize OS keychain: {error}"))
     }
 }

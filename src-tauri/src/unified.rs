@@ -620,8 +620,28 @@ where
     // A second click while disabled is a no-op, not a second concurrent
     // shutdown, because request_shutdown (lib.rs/unified.rs) is idempotent.
     let quit = MenuItem::with_id(manager, "quit", "Quit", !quitting, None::<&str>)?;
-    let mut items: Vec<&dyn tauri::menu::IsMenuItem<R>> =
-        vec![&scope_item, &status_item, &open_console, &open_browser];
+    // Only a test-profile build has a header, so its tray menu says which
+    // build it is before any item can be clicked.
+    let header_item = match crate::profile::current() {
+        Some(_) => Some(MenuItem::with_id(
+            manager,
+            "profile-header",
+            crate::profile::decorate("DataConnect"),
+            false,
+            None::<&str>,
+        )?),
+        None => None,
+    };
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<R>> = Vec::new();
+    if let Some(header_item) = &header_item {
+        items.push(header_item);
+    }
+    items.extend([
+        &scope_item as &dyn tauri::menu::IsMenuItem<R>,
+        &status_item,
+        &open_console,
+        &open_browser,
+    ]);
     if let Some(server_item) = &server_item {
         items.push(server_item);
     }
@@ -640,7 +660,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     let menu = build_tray_menu(app, UnifiedStatus::Starting)?;
     let mut tray_builder = TrayIconBuilder::with_id(TRAY_ICON_ID)
         .menu(&menu)
-        .tooltip("DataConnect")
+        .tooltip(crate::profile::decorate("DataConnect"))
         .on_menu_event(handle_tray_menu_event);
     if let Some(icon) = app.default_window_icon().cloned() {
         tray_builder = tray_builder.icon(icon);
@@ -681,6 +701,13 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     crate::owner_credential::spawn_owner_password_window_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_os_reauth_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_password_stack_restart_watcher(app_handle.clone());
+    // A profile build has no local stack and nothing saved yet: ask which
+    // server to connect to instead of showing only a tray icon.
+    if opens_attach_window_at_launch(crate::profile::current(), &crate::attach::current_target()) {
+        set_status(&app_handle, UnifiedStatus::NeedsPairing);
+        crate::attach_window::open_attach_window(&app_handle, Default::default());
+        return Ok(());
+    }
     tauri::async_runtime::spawn(async move {
         if let Err(failure) =
             bootstrap_and_open_console(app_handle.clone(), should_show, None, None).await
@@ -797,6 +824,15 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         TrayAction::Unknown => {}
     }
+}
+
+/// A profile build with no saved attachment and no environment override has
+/// no server to show, so it opens the "Connect to a server" window.
+fn opens_attach_window_at_launch(
+    profile: Option<&str>,
+    target: &crate::attach::AttachTarget,
+) -> bool {
+    profile.is_some() && *target == crate::attach::AttachTarget::Local
 }
 
 /// No local stack: an environment override or a saved server attachment.
@@ -4959,7 +4995,7 @@ async fn create_or_update_console_window(
     let console_origin_for_navigation = url.clone();
     let window =
         WebviewWindowBuilder::new(app, CONSOLE_WINDOW_LABEL, WebviewUrl::External(blank_url))
-            .title("DataConnect")
+            .title(crate::profile::decorate("DataConnect"))
             .visible(false)
             // Sizing grounded in measured prior art, not a round number —
             // see ai/research/desktop-app-packaging/vscode-electron-window-state-sizing-precedent-2026.md.
@@ -5174,6 +5210,14 @@ mod tests {
     use std::thread;
     use std::time::Instant;
     use tempfile::{tempdir, NamedTempFile};
+
+    #[test]
+    fn only_a_profile_build_without_a_server_opens_the_attach_window_at_launch() {
+        use crate::attach::AttachTarget;
+        assert!(opens_attach_window_at_launch(Some("p"), &AttachTarget::Local));
+        assert!(!opens_attach_window_at_launch(None, &AttachTarget::Local));
+        assert!(!opens_attach_window_at_launch(Some("p"), &AttachTarget::Environment));
+    }
 
     #[test]
     fn unhandled_deep_link_notice_omits_the_grant_secret() {

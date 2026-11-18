@@ -17,6 +17,8 @@ mod main_thread_watchdog;
 mod owner_credential;
 mod processors;
 #[cfg(desktop)]
+mod profile;
+#[cfg(desktop)]
 mod recovery_code;
 #[cfg(desktop)]
 mod remote_access;
@@ -99,6 +101,11 @@ fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before any thread exists: a test-profile build moves HOME and
+    // the XDG base directories here, and nothing may have read them yet.
+    #[cfg(desktop)]
+    profile::enter();
+
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
     // `aws-lc-rs` are present in the tree (they both are, transitively), and
     // it panics on first TLS use instead of failing gracefully. ngrok opens a
@@ -182,6 +189,17 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Before the log plugin creates its directory: a profile build
+            // must find the Tauri paths inside its root or not start.
+            #[cfg(desktop)]
+            if profile::current().is_some() {
+                profile::require_inside_root(
+                    "Tauri app data directory",
+                    &app.path().app_data_dir()?,
+                );
+                profile::require_inside_root("Tauri log directory", &app.path().app_log_dir()?);
+            }
+
             // Enable logging in both debug and release builds, writing to both stdout and a file
             // Default targets are already [Stdout, LogDir] — do NOT add
             // .target() calls or each log line gets written twice.
@@ -190,6 +208,14 @@ pub fn run() {
                     .level(log::LevelFilter::Info)
                     .build(),
             )?;
+
+            #[cfg(desktop)]
+            if let Some(profile) = profile::current() {
+                log::info!(
+                    "profile {profile}: root={}",
+                    profile::root().map(|root| root.display().to_string()).unwrap_or_default()
+                );
+            }
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
