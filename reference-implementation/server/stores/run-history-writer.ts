@@ -188,6 +188,10 @@ function runtimeFailureConnectorErrorJson(data: Record<string, unknown>): string
   });
 }
 
+function failureReasonFromTerminalData(data: Record<string, unknown>): string | null {
+  return typeof data.failure_message === "string" && data.failure_message ? data.failure_message : null;
+}
+
 function connectorErrorJsonFromTerminalData(data: Record<string, unknown>): string | null {
   // The executor flattens connector-error fields onto the terminal event's
   // data (buildTerminalConnectorFields, runtime/index.ts) rather than
@@ -323,15 +327,12 @@ function writeSqliteRunHistoryWith(event: RunHistorySpineEvent, execute: SqliteR
 
   const terminalStatus = toTerminalStatus(event.eventType, event.status);
   const connectorErrorJson = connectorErrorJsonFromTerminalData(event.data);
-  // Slice A scope: the general executor's terminal `data.reason`
-  // (e.g. "connector_reported_failed", "owner_cancelled") maps to
-  // `terminal_reason` only. `failure_reason` is a narrower scheduler-only
-  // classification (see runtime/scheduler/run-executor.ts) this writer
-  // does not reproduce for general-executor runs — left null rather than
-  // fabricated, since no Slice A reader depends on it for non-scheduled
-  // runs.
+  // `terminal_reason` is the executor's `data.reason` (e.g.
+  // "connector_reported_failed", "owner_cancelled"). `failure_reason` is the
+  // runtime-authored terminal explanation, `data.failure_message`, the same
+  // value the scheduler stores for its own runs (runtime/scheduler/run-executor.ts).
   const terminalReason = typeof event.data.reason === "string" ? event.data.reason : null;
-  const failureReason: string | null = null;
+  const failureReason = failureReasonFromTerminalData(event.data);
   const factsJson = factsJsonFromTerminalData(event.data);
   const recordsEmitted = typeof event.data.records_emitted === "number" ? event.data.records_emitted : 0;
 
@@ -430,15 +431,12 @@ export async function writePostgresRunHistoryForSpineEvent(
 
   const terminalStatus = toTerminalStatus(event.eventType, event.status);
   const connectorErrorJson = connectorErrorJsonFromTerminalData(event.data);
-  // Slice A scope: the general executor's terminal `data.reason`
-  // (e.g. "connector_reported_failed", "owner_cancelled") maps to
-  // `terminal_reason` only. `failure_reason` is a narrower scheduler-only
-  // classification (see runtime/scheduler/run-executor.ts) this writer
-  // does not reproduce for general-executor runs — left null rather than
-  // fabricated, since no Slice A reader depends on it for non-scheduled
-  // runs.
+  // `terminal_reason` is the executor's `data.reason` (e.g.
+  // "connector_reported_failed", "owner_cancelled"). `failure_reason` is the
+  // runtime-authored terminal explanation, `data.failure_message`, the same
+  // value the scheduler stores for its own runs (runtime/scheduler/run-executor.ts).
   const terminalReason = typeof event.data.reason === "string" ? event.data.reason : null;
-  const failureReason: string | null = null;
+  const failureReason = failureReasonFromTerminalData(event.data);
   const factsJson = factsJsonFromTerminalData(event.data);
   const recordsEmitted = typeof event.data.records_emitted === "number" ? event.data.records_emitted : 0;
 

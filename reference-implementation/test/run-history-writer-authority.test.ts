@@ -33,6 +33,7 @@ interface RunHistoryTestRow {
   readonly connector_id: string;
   readonly connector_instance_id: string;
   readonly facts_json: string | null;
+  readonly failure_reason: string | null;
   readonly run_id: string;
   readonly scheduler_managed: 0 | 1;
   readonly started_at: string;
@@ -209,6 +210,9 @@ test("a runtime-authored terminal failure stores its failure_message as the conn
     const row = readRunHistoryRow(runId);
     assert.equal(row?.status, "failed");
     assert.equal(row?.terminal_reason, "connector_protocol_violation");
+    // The product read model surfaces `failure_reason`; it must carry the
+    // runtime's terminal explanation, not stay null.
+    assert.equal(row?.failure_reason, failureMessage);
     assert.ok(row?.connector_error_json, "a terminal failure must not be stored with an empty error");
     assert.deepEqual(JSON.parse(row?.connector_error_json ?? "null"), {
       code: null,
