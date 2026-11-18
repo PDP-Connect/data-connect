@@ -70,6 +70,9 @@ export function reserveSetupOperation(
   })
 }
 
+/** Where Tailscale shows a tailnet's name, for the field that asks for it before the setup has sent its own help. */
+const TAILNET_NAME_HELP_URL = "https://login.tailscale.com/admin/dns"
+
 const status: Record<SetupView["state"], (service: string) => string> = {
   "authorization-required": service => `Sign in to ${service} to finish.`,
   pending: () => "Waiting for you to finish signing in…",
@@ -674,11 +677,12 @@ export function ProviderSetup({
               Your tailnet name (ends in .ts.net)
               <input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} type="text" value={tailnet} />
             </label>
-            {dnsUrl ? (
-              <a href={dnsUrl} rel="noreferrer" target="_blank">
+            <p>
+              Tailscale shows it under DNS in its admin console.{" "}
+              <a href={dnsUrl ?? TAILNET_NAME_HELP_URL} rel="noreferrer" target="_blank">
                 Find it in Tailscale
               </a>
-            ) : null}
+            </p>
           </>
         ) : null}
         {computer ? <p>{`Tailscale found this computer: ${computer.label}.`}</p> : null}
