@@ -512,3 +512,71 @@ test("malformed binding requirements from a JSON caller are refused, not read as
   } as unknown as ConnectorPlacementInput;
   assert.equal(evaluatePlacement(notAnObject, COLLECTOR_RUNTIME_CAPABILITIES).kind, "malformed_bindings");
 });
+
+const fromJson = (text: string): ConnectorPlacementInput => JSON.parse(text) as ConnectorPlacementInput;
+
+test("collector refuses an unadvertised required binding interface", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "future-network",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { network: { interface: "network@999", required: true } } },
+    })
+  );
+  for (const runtime of [PROVIDER_RUNTIME_CAPABILITIES, COLLECTOR_RUNTIME_CAPABILITIES]) {
+    const decision = evaluatePlacement(connector, runtime);
+    assert.equal(decision.kind, "missing_capability");
+    if (decision.kind === "missing_capability") {
+      assert.deepEqual(decision.missing, ["network"]);
+      assert.deepEqual(decision.missingInterfaces, [{ binding: "network", interface: "network@999" }]);
+    }
+    assert.throws(() => assertPlacementOrThrow(connector, runtime), /network@999/);
+  }
+});
+
+test("a required binding that states the supported interface version is placed", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "v1-network",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { network: { interface: "network@1", required: true } } },
+    })
+  );
+  assert.deepEqual(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: ["network"] });
+});
+
+test("an optional binding with an unsupported interface does not block placement", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "optional-future",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { network: { interface: "network@999", required: false } } },
+    })
+  );
+  assert.equal(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES).kind, "ok");
+});
+
+test("a binding interface that is not <kind>@<positive integer> for its own kind is malformed", () => {
+  for (const iface of ["network", "browser@1", "network@0", "network@01", 1, null]) {
+    const connector = fromJson(
+      JSON.stringify({
+        connector_id: "bad-interface",
+        protocol_capabilities: [],
+        runtime_requirements: { bindings: { network: { interface: iface, required: true } } },
+      })
+    );
+    assert.equal(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES).kind, "malformed_bindings", String(iface));
+  }
+});
+
+test("missing binding required flag is malformed, not an optional request", () => {
+  const connector = fromJson(
+    JSON.stringify({
+      connector_id: "missing-required",
+      protocol_capabilities: [],
+      runtime_requirements: { bindings: { browser: {} } },
+    })
+  );
+  assert.equal(evaluatePlacement(connector, PROVIDER_RUNTIME_CAPABILITIES).kind, "malformed_bindings");
+  assert.throws(() => assertPlacementOrThrow(connector, PROVIDER_RUNTIME_CAPABILITIES), RuntimeBindingInvalidError);
+});
