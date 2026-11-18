@@ -599,7 +599,8 @@ export interface RuntimeRunConnectorOptions {
   onStarted?: ((info: { run_id: string; scenario_id?: string; trace_id: string }) => void) | null;
   /**
    * Run-scoped credential for `POST /v1/blobs`, minted by the controller.
-   * Forwarded to the child as `PDPP_BLOB_UPLOAD_TOKEN`. The owner bearer
+   * Forwarded to the child as `PDPP_BLOB_UPLOAD_TOKEN`, and as
+   * `PDPP_OWNER_TOKEN` for connectors built before that name. The owner bearer
    * (`ownerToken`) stays in the runtime parent and is never put in the child
    * environment.
    */
@@ -3183,7 +3184,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       explicitRunEnv: {
         PDPP_CONNECTOR_ID: connectorId,
         ...connectorInstanceEnv,
-        ...(blobUploadToken ? { PDPP_BLOB_UPLOAD_TOKEN: blobUploadToken } : {}),
+        // Connectors built before PDPP_BLOB_UPLOAD_TOKEN read the blob upload
+        // credential from PDPP_OWNER_TOKEN. They get the same run-scoped
+        // credential under that name, never the owner bearer.
+        ...(blobUploadToken ? { PDPP_BLOB_UPLOAD_TOKEN: blobUploadToken, PDPP_OWNER_TOKEN: blobUploadToken } : {}),
         PDPP_RS_URL: rsUrl,
         ...streamingRegistrationEnv,
         ...browserSurfaceLaunchEnv,

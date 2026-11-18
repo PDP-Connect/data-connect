@@ -1216,8 +1216,9 @@ test("connector children receive run-scoped capabilities without unrelated paren
       PDPP_FORCE_CONTAINER: "1",
       // The child holds the run-scoped blob credential and never the owner
       // bearer, neither the runtime's nor a stale one from the parent env.
+      // Older connectors read the same credential under the old name.
       PDPP_BLOB_UPLOAD_TOKEN: "run-scoped-blob-token",
-      PDPP_OWNER_TOKEN: null,
+      PDPP_OWNER_TOKEN: "run-scoped-blob-token",
       PDPP_REFERENCE_BASE_URL: null,
       PDPP_RS_URL: "http://127.0.0.1:7663",
       PDPP_RUN_ID: null,

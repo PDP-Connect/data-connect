@@ -306,12 +306,14 @@ async function assertOwnerIsolation(
     assert.deepEqual(JSON.parse(readFileSync(snapshotA, "utf8")), {
       blobUploadToken: blobTokenA,
       githubToken: SECRET_A,
-      ownerToken: null,
+      // Older connectors read the run credential under the old name.
+      ownerToken: blobTokenA,
     });
     assert.deepEqual(JSON.parse(readFileSync(snapshotB, "utf8")), {
       blobUploadToken: blobTokenB,
       githubToken: SECRET_B,
-      ownerToken: null,
+      // Older connectors read the run credential under the old name.
+      ownerToken: blobTokenB,
     });
     assert.notEqual(
       JSON.parse(readFileSync(snapshotA, "utf8")).githubToken,
