@@ -32,7 +32,7 @@ function setupView(operationId: string, state: string, resources: unknown[] = []
 }
 
 // Mounts the real routes over a fake host service and a real journal.
-async function harness(dir: string, setups = new ReachabilitySetups(dir)) {
+async function harness(dir: string, setups = new ReachabilitySetups(dir), passwordSet?: () => Promise<boolean>) {
   const routes = new Map<string, Handler>();
   const app = {
     get: (path: string, ...args: Handler[]) => routes.set(`GET ${path}`, args.at(-1) as Handler),
@@ -83,6 +83,7 @@ async function harness(dir: string, setups = new ReachabilitySetups(dir)) {
     service: service as never,
     operations: { list: async () => [] } as never,
     setups,
+    passwordSet,
     requireToken: pass,
     requireOwner: pass,
     requireCsrf: pass,
@@ -390,5 +391,17 @@ test("public reachability errors never echo raw messages, causes or properties",
   for (const candidate of [error, unknown, secret, { message: secret }]) {
     const shown = JSON.stringify(publicReachabilityError(candidate));
     for (const part of ["abc123", "hunter2", "secret://", "/var/lib"]) assert.equal(shown.includes(part), false);
+  }
+});
+
+test("state reports whether the owner has set a password", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "svc-journal-"));
+  try {
+    for (const [hosted, expected] of [[async () => false, false], [async () => true, true], [undefined, true]] as const) {
+      const { call } = await harness(dir, undefined, hosted);
+      assert.equal((await call("GET", "/state")).payload.data.passwordSet, expected);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

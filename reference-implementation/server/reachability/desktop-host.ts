@@ -77,7 +77,7 @@ export async function startDesktopReachability(input: {
   bindHost: string;
   owner: string;
   passwordConfigured: boolean;
-}): Promise<Pick<OwnerReachabilityContext, "service" | "usage"> | undefined> {
+}): Promise<Pick<OwnerReachabilityContext, "passwordSet" | "service" | "usage"> | undefined> {
   const proofKey = process.env.PDPP_OWNER_CREDENTIAL_REVEAL_PROOF;
   if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1" || input.bindHost !== "127.0.0.1" || !proofKey) return;
   const dataDir = await realpath(input.dataDir);
@@ -150,6 +150,7 @@ export async function startDesktopReachability(input: {
   });
   return {
     service,
+    passwordSet: passwordReady,
     usage(kind) {
       if (kind === "attached") return { kind };
       if (kind === "session") return { kind, lifetimeMs: 3_600_000 };

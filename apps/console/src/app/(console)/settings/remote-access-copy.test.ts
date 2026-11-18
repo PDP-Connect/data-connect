@@ -21,6 +21,9 @@ import { formatLocalTime, plain } from "./plain-text.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
 import { RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 
+mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
+  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+});
 mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {

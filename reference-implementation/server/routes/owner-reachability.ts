@@ -41,6 +41,8 @@ export type OwnerReachabilityContext = {
   requireOwner: MiddlewareHandler;
   requireCsrf: MiddlewareHandler;
   usage: (kind: string) => Usage;
+  /** Whether the owner has chosen a password. Absent where remote access is not hosted. */
+  passwordSet?: () => Promise<boolean>;
 };
 const safeCodes = new Set([
   "host_policy_denied",
@@ -364,6 +366,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       operations,
       reasons: state.reasons,
       routes: state.routes.map(projectRoute),
+      passwordSet: ctx.passwordSet ? await ctx.passwordSet() : true,
       services: await ctx.setups.list(),
       starting: state.starting,
     };

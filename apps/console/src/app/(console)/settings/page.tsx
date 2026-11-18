@@ -13,7 +13,7 @@ import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
 import { RemoteAccessSetting } from "./remote-access-setting.tsx"
 import { OwnerSessionsSetting } from "./owner-sessions-setting.tsx"
 import { loadOwnerSessionInventory } from "./owner-sessions-data.ts"
-import { loadOwnerPasswordSource } from "./owner-password-data.ts"
+import { loadOwnerPasswordSet, loadOwnerPasswordSource } from "./owner-password-data.ts"
 import { OwnerPasswordSetting } from "./owner-password-setting.tsx"
 
 export const metadata: Metadata = {
@@ -22,11 +22,12 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const identity = getProductIdentity()
-  const [hasLocalRevealProof, ownerSessions, ownerPasswordSource] =
+  const [hasLocalRevealProof, ownerSessions, ownerPasswordSource, ownerPasswordSet] =
     await Promise.all([
       hasValidLocalOwnerCredentialRevealProofCookie(),
       loadOwnerSessionInventory(),
       loadOwnerPasswordSource(),
+      loadOwnerPasswordSet(),
     ])
 
   return (
@@ -43,6 +44,7 @@ export default async function SettingsPage() {
           <DeveloperModeSetting />
         </Section>
         <Section
+          id="remote-access"
           description="Use DataConnect from your phone, or let AI apps like ChatGPT reach it."
           title="Remote access"
         >
@@ -61,6 +63,7 @@ export default async function SettingsPage() {
             <OwnerPasswordSetting
               canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
               managedDesktop={process.env.PDPP_MANAGED_DESKTOP_HOST === "1"}
+              passwordSet={ownerPasswordSet}
               source={ownerPasswordSource}
             />
           </Section>

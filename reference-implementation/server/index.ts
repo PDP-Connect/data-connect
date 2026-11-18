@@ -815,7 +815,7 @@ interface MutationContext {
 
 interface ServerOpts {
   /** Trusted host injects one long-lived reachability service and its usage policy. */
-  reachability?: Pick<OwnerReachabilityContext, "service" | "usage">;
+  reachability?: Pick<OwnerReachabilityContext, "passwordSet" | "service" | "usage">;
   acceptedCollectorProtocolVersions?: readonly string[];
   /** Internal onboarding handoff. This value is never accepted from the PAR request. */
   acceptedProviderNativeRevision?: {
@@ -8522,6 +8522,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   // One long-lived service is injected by the trusted host supervisor.
   mountOwnerReachability(app, {
     service: opts.reachability?.service ?? null,
+    passwordSet: opts.reachability?.passwordSet,
     operations: new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
     setups: new ReachabilitySetups(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-setups")),
     usage: opts.reachability?.usage ?? (() => { throw Object.assign(new Error("unsupported"), { code: "unsupported" }); }),

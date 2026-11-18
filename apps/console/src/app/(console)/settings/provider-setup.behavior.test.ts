@@ -93,6 +93,9 @@ test("only completed setup enables route review, including when instructions are
   }
 })
 
+mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
+  namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
+})
 mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {

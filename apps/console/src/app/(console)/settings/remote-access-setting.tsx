@@ -12,6 +12,7 @@ import type {
 } from "pdpp-reference-implementation/reachability-projection";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { migrateLegacySetupReservations } from "../../../lib/legacy-setup-reservations.ts";
+import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
 import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-actions.ts";
@@ -57,6 +58,8 @@ type State = {
   routes: Route[];
   reasons: Record<string, string>;
   services?: ServiceEntry[];
+  /** False while the owner has not chosen a password. Absent means there is nothing to ask. */
+  passwordSet?: boolean;
   starting: boolean;
 };
 
@@ -350,6 +353,27 @@ export function RemoteAccessSetting({
     setReview(null);
   }
   const mutationBlocked = busy || stale || state.starting;
+  // The password is the only gate on an address reachable from the internet,
+  // so nothing can be turned on until the owner has chosen one.
+  const passwordMissing = state.passwordSet === false;
+  const turnOnBlocked = mutationBlocked || passwordMissing;
+  // After the desktop restarts for a new password it reopens this card by its
+  // fragment. Remember that once, then clear the fragment.
+  const [returnedFromPassword] = useState(
+    () => typeof window !== "undefined" && window.location.hash === "#remote-access"
+  );
+  useEffect(() => {
+    if (returnedFromPassword) window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }, [returnedFromPassword]);
+  async function setPassword() {
+    // The native shell reads this address before it restarts, so the card is
+    // reopened afterwards.
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#remote-access`);
+    await change(async () => {
+      const result = await requestOwnerPasswordWindowAction();
+      if (!result.ok) throw new ReachabilityFailure(publicError("owner_password_required", result.message, "change"));
+    }, "change");
+  }
   const setupAction = draft?.configuration.actions.find((action) => action.step);
   const hasReservation = reservations.some((item) => item.draftId === draft?.draftId);
   const setupNeedsInput = draft && (setupAction || hasReservation) && setupReadiness[draft.draftId] !== draft.configuration.revision;
@@ -381,13 +405,27 @@ export function RemoteAccessSetting({
       <div>
         <h2 className="pdpp-heading">Remote access</h2>
       </div>
+      {passwordMissing ? (
+        <div className="grid gap-2">
+          <h3 className="pdpp-label">Step 1: Set a password</h3>
+          <p>
+            Once remote access is on, anyone with your address can reach the sign-in page. Your password is the only
+            thing stopping them, so choose one first.
+          </p>
+          <button type="button" disabled={busy || stale} onClick={() => void setPassword()}>
+            Set password
+          </button>
+        </div>
+      ) : returnedFromPassword ? (
+        <p role="status">Password saved ✓ Step 2: choose a way to connect.</p>
+      ) : null}
       {error ? <ErrorNotice error={error} /> : null}
       {stale ? <p role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
       {hostReasonShown ? <p role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
       {state.lifecycle?.cleanup === "unconfirmed" ? (
         <p role="status">We couldn't confirm your address is closed. It may still work.</p>
       ) : null}
-      <fieldset className="grid gap-3" disabled={mutationBlocked || draft !== null}>
+      <fieldset className="grid gap-3" disabled={turnOnBlocked || draft !== null}>
         <legend className="pdpp-label">Ways to connect</legend>
         <label>
           <input
@@ -495,7 +533,7 @@ export function RemoteAccessSetting({
             ))}
           </fieldset>
           {draft ? null : (
-            <button disabled={mutationBlocked || !usage} onClick={() => void change(openDraft)}>
+            <button disabled={turnOnBlocked || !usage} onClick={() => void change(openDraft)}>
               Continue setup
             </button>
           )}
@@ -555,14 +593,14 @@ export function RemoteAccessSetting({
             ))
           )}
           {!committed && setupAction && !hasReservation ? (
-            <button type="button" disabled={mutationBlocked} onClick={() => void change(reserveSetup)}>
+            <button type="button" disabled={turnOnBlocked} onClick={() => void change(reserveSetup)}>
               Start setup
             </button>
           ) : null}
           <div className="flex flex-wrap gap-3">
             {committed ? <button type="button" disabled={mutationBlocked} onClick={() => void change(editApplied)}>Change settings</button> : null}
             <button
-              disabled={mutationBlocked || !usage || (!committed && !!setupNeedsInput)}
+              disabled={turnOnBlocked || !usage || (!committed && !!setupNeedsInput)}
               onClick={() =>
                 void change(async () => {
                   if (!committed) {
@@ -599,7 +637,7 @@ export function RemoteAccessSetting({
       {reservations.map((reservation) => (
         <ProviderSetup
           acknowledgeDisconnect={acknowledged}
-          disabled={mutationBlocked}
+          disabled={turnOnBlocked}
           key={reservation.operationId}
           reservation={reservation}
           request={request}
