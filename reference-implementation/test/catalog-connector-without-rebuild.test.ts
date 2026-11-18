@@ -56,6 +56,16 @@ const KEY = "catalog-only-example";
 const REGISTRY_ID = `https://registry.pdpp.dev/connectors/${KEY}`;
 const OWN_KNOB = "PDPP_CATALOG_ONLY_EXAMPLE_PAGE_SIZE";
 const OTHER_KNOB = "PDPP_OTHER_THING_PAGE_SIZE";
+// Not *_PAGE_SIZE: a leak of either would be invisible to a knob-only capture.
+const FOREIGN_SECRET = "PDPP_OTHER_THING_TOKEN";
+const UNDECLARED_OWN_SECRET = "PDPP_CATALOG_ONLY_EXAMPLE_TOKEN";
+const SERVER_ENV = {
+  [OWN_KNOB]: "25",
+  [OTHER_KNOB]: "9",
+  [FOREIGN_SECRET]: "foreign-secret",
+  [UNDECLARED_OWN_SECRET]: "undeclared-secret",
+  PDPP_STRAVA_PAGE_SIZE: "50",
+};
 const digest = `sha256:${"c".repeat(64)}`;
 const configDigest = `sha256:${"d".repeat(64)}`;
 
@@ -97,7 +107,7 @@ test("key identity: the registry URL and the manifest both give the catalog key"
   assert.equal(canonicalConnectorKeyFromManifest({ connector_id: REGISTRY_ID }), KEY);
 });
 
-/** A connector executable that records the *_PAGE_SIZE variables it was started with, then reports DONE. */
+/** A connector executable that records every PDPP_* variable it was started with, then reports DONE. */
 function captureScript(capturePath: string): string {
   return `
 import { createInterface } from 'node:readline';
@@ -105,13 +115,24 @@ import { writeFileSync } from 'node:fs';
 const rl = createInterface({ input: process.stdin, terminal: false });
 rl.on('line', (line) => {
   if (JSON.parse(line).type !== 'START') return;
-  const seen = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.endsWith('_PAGE_SIZE')));
+  const seen = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PDPP_')));
   writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(seen));
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
   rl.close();
   process.exit(0);
 });
 `;
+}
+
+/** The runtime's own PDPP_* variables, plus the one declared knob and nothing else. */
+function assertOnlyDeclaredKnob(seen: Record<string, string>): void {
+  assert.deepEqual(seen, {
+    PDPP_CONNECTOR_ID: KEY,
+    PDPP_CONNECTOR_INSTANCE_ID: "cin_catalog",
+    PDPP_OWNER_TOKEN: "test-token",
+    PDPP_RS_URL: seen.PDPP_RS_URL,
+    [OWN_KNOB]: "25",
+  });
 }
 
 /**
@@ -198,9 +219,9 @@ test("install and run: a connector from an injected catalog entry registers unde
       capturePath,
       connectorPath: join(active.root, active.entrypointPath),
       manifest: registered,
-      serverEnv: { [OWN_KNOB]: "25", [OTHER_KNOB]: "9", PDPP_STRAVA_PAGE_SIZE: "50" },
+      serverEnv: SERVER_ENV,
     });
-    assert.deepEqual(seen, { [OWN_KNOB]: "25" });
+    assertOnlyDeclaredKnob(seen);
   } finally {
     closeDb();
     rmSync(dataDir, { force: true, recursive: true });
@@ -227,9 +248,9 @@ test("spawn: a foreign knob a manifest declares is not handed to the child, whoe
       capturePath,
       connectorPath,
       manifest: exampleManifest([OWN_KNOB, OTHER_KNOB]),
-      serverEnv: { [OWN_KNOB]: "25", [OTHER_KNOB]: "9", PDPP_STRAVA_PAGE_SIZE: "50" },
+      serverEnv: SERVER_ENV,
     });
-    assert.deepEqual(seen, { [OWN_KNOB]: "25" });
+    assertOnlyDeclaredKnob(seen);
   } finally {
     closeDb();
     rmSync(tmpDir, { force: true, recursive: true });
