@@ -58,6 +58,8 @@ const sourceFiles = [
   "reachability-consent.tsx",
   "route-display.ts",
   "on-card.tsx",
+  "choose-way.tsx",
+  "choose-way.ts",
   "reachability-actions.ts",
   "diagnostics.tsx",
   "page.tsx",

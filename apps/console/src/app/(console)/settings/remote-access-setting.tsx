@@ -32,7 +32,6 @@ import {
   type Prepared,
   type Review,
   changedFacts,
-  defaultProvider,
   operationOutcome,
   pickUsage,
   prepareTurnOn,
@@ -40,6 +39,8 @@ import {
   runAction,
   staleReviewCodes,
 } from "./prepare-remote-access.ts";
+import { OtherWays, RecommendedWay } from "./choose-way.tsx";
+import { recommendedWay, wayRow } from "./choose-way.ts";
 import { AllowCard, TurnOnCard, TurningOnChecklist, checklistStep } from "./turn-on.tsx";
 
 type Inventory = ReturnType<typeof projectInventory>;
@@ -75,20 +76,6 @@ type Prep =
   | { status: "idle" }
   | { status: "preparing" }
   | { status: "done"; providerId: string; result: Prepared };
-
-// How a way reaches people, in the owner's words. Unlisted values pass through `plain`.
-const reachLabels: Record<string, string> = { lan: "Same Wi-Fi only" };
-const kindLabels: Record<string, string> = {
-  session: "Temporary",
-  durable: "Lasting",
-  attached: "While DataConnect runs",
-};
-const availabilityLabels: Record<string, string> = {
-  "action-required": "Needs setup",
-  "detect-only": "Not available yet",
-  unsupported: "Not supported",
-};
-const kindLabel = (kind: string) => kindLabels[kind] ?? plain(kind.charAt(0).toUpperCase() + kind.slice(1));
 
 export function RemoteAccessSetting({
   request = requestReachability,
@@ -269,15 +256,9 @@ export function RemoteAccessSetting({
     return () => { active = false; };
   }, [operation, request]);
 
-  const providers = [...(inventory?.providers ?? [])].sort(
-    (a, b) =>
-      Number(b.reach === "lan") - Number(a.reach === "lan") ||
-      a.label.localeCompare(b.label) ||
-      a.providerId.localeCompare(b.providerId)
-  );
+  const recommended = inventory ? recommendedWay(inventory, capabilities) : undefined;
   const way = inventory
-    ? ((chosen ? inventory.providers.find((item) => item.providerId === chosen) : undefined) ??
-      defaultProvider(inventory, capabilities))
+    ? ((chosen ? inventory.providers.find((item) => item.providerId === chosen) : undefined) ?? recommended)
     : undefined;
   const wayUsage = way ? pickUsage(way, capabilities) : null;
   const wayId = way?.providerId ?? null;
@@ -496,6 +477,13 @@ export function RemoteAccessSetting({
       setPrepRun((n) => n + 1);
     });
   }
+  function pickWay(providerId: string) {
+    setChosen(providerId);
+    setDeclined(null);
+    setChanged(null);
+    shownReview.current = null;
+    setPrepRun((n) => n + 1);
+  }
   function chooseAnotherWay() {
     if (wayId) setDeclined(wayId);
     setShowOtherWays(true);
@@ -674,6 +662,9 @@ export function RemoteAccessSetting({
       {idle && !passwordMissing ? (
         <section aria-label="Turn on remote access" className="grid gap-4">
           <h3 className="pdpp-label">Step 2 of 2 · Turn on</h3>
+          {inventory && recommended ? (
+            <RecommendedWay checked={wayId === recommended.providerId} onPick={pickWay} row={wayRow(recommended, capabilities)} />
+          ) : null}
           {prep.status === "preparing" ? <p role="status">Checking this computer…</p> : null}
           {done?.kind === "allow" && declined !== wayId ? (
             <AllowCard
@@ -697,39 +688,15 @@ export function RemoteAccessSetting({
           <button aria-expanded={showOtherWays} disabled={busy} onClick={() => setShowOtherWays((open) => !open)} type="button">
             Other ways
           </button>
-          {showOtherWays ? (
-            <fieldset className="grid gap-3" disabled={mutationBlocked}>
-              <legend className="pdpp-label">Other ways</legend>
-              {providers.map((item) => (
-                <label className="grid gap-1 rounded-lg border p-3" key={`${item.providerId}-${item.reach}`}>
-                  <span>
-                    <input
-                      checked={wayId === item.providerId}
-                      disabled={pickUsage(item, capabilities) === null}
-                      name="way"
-                      onChange={() => {
-                        setChosen(item.providerId);
-                        setDeclined(null);
-                        setChanged(null);
-                        shownReview.current = null;
-                        setPrepRun((n) => n + 1);
-                      }}
-                      type="radio"
-                    />{" "}
-                    {plain(item.label)}
-                  </span>
-                  <span className="pdpp-caption text-muted-foreground">{reachLabels[item.reach] ?? plain(item.reach)}</span>
-                  {Object.entries(item.availability)
-                    .filter(([, available]) => available.state !== "available")
-                    .map(([kind, available]) => (
-                      <span className="pdpp-caption" key={kind}>
-                        {kindLabel(kind)}: {availabilityLabels[available.state] ?? plain(available.state)}
-                        {available.reason && available.state !== "detect-only" ? ` — ${plain(available.reason)}` : ""}
-                      </span>
-                    ))}
-                </label>
-              ))}
-            </fieldset>
+          {showOtherWays && inventory ? (
+            <OtherWays
+              capabilities={capabilities}
+              disabled={mutationBlocked}
+              inventory={inventory}
+              onPick={pickWay}
+              pickedId={wayId}
+              recommendedId={recommended?.providerId ?? null}
+            />
           ) : null}
         </section>
       ) : null}
