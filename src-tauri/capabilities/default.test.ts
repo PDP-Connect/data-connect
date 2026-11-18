@@ -4,10 +4,12 @@ import { readdirSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
+type CapabilityPermission = string | { identifier: string; allow?: unknown[]; deny?: unknown[] }
+
 interface CapabilityDocument {
   platforms?: string[]
   windows?: string[]
-  permissions: Array<string | { identifier: string; allow?: unknown[] }>
+  permissions: CapabilityPermission[]
 }
 
 describe("default desktop capabilities", () => {
@@ -195,13 +197,13 @@ describe("capability scoping of app commands", () => {
   })
 
   // Every capability file, the exact window patterns it may name, and the
-  // exact permission identifiers it may grant (a string entry, or the
-  // `identifier` of an object entry; an object's scope is not compared). A new
-  // file, a new window or a new grant fails here until someone adds it on
-  // purpose. The attach window ("attach") is deliberately in no file: its
+  // exact permission entries it may grant: a string, or an object written out
+  // in full with its `allow`/`deny` scope. A scope is part of the grant, so
+  // widening one, or rewriting a string into object form, fails here too. A new
+  // file, a new window or a new grant fails until someone adds it on purpose. The attach window ("attach") is deliberately in no file: its
   // commands check the window label themselves, and any capability that lists
   // it would widen who can reach them.
-  const ALLOWED_CAPABILITIES: Record<string, { windows: string[]; permissions: string[] }> = {
+  const ALLOWED_CAPABILITIES: Record<string, { windows: string[]; permissions: CapabilityPermission[] }> = {
     "default.json": {
       windows: ["main", "connector-*"],
       permissions: [
@@ -229,7 +231,14 @@ describe("capability scoping of app commands", () => {
         "deep-link:default",
         "clipboard-manager:allow-write-text",
         "http:default",
-        "http:allow-fetch",
+        {
+          identifier: "http:allow-fetch",
+          allow: [
+            { url: "http://localhost:*" },
+            { url: "http://127.0.0.1:*" },
+            { url: "https://*" },
+          ],
+        },
       ],
     },
     "console.json": {
@@ -250,9 +259,6 @@ describe("capability scoping of app commands", () => {
     },
   }
 
-  const permissionIdentifier = (entry: string | { identifier: string }) =>
-    typeof entry === "string" ? entry : entry.identifier
-
   // Tauri reads every capability file in the directory, whatever its extension,
   // so an entry that is not a known top-level .json file (a .toml, a
   // subdirectory) is a grant this test could not see.
@@ -271,12 +277,12 @@ describe("capability scoping of app commands", () => {
 
   it("every capability file grants exactly the listed windows and permissions", () => {
     const directory = resolve(process.cwd(), "src-tauri/capabilities")
-    const actual: Record<string, { windows: string[]; permissions: string[] }> = {}
+    const actual: Record<string, { windows: string[]; permissions: CapabilityPermission[] }> = {}
     for (const name of Object.keys(ALLOWED_CAPABILITIES).sort()) {
       const document = JSON.parse(readFileSync(resolve(directory, name), "utf-8")) as CapabilityDocument
       actual[name] = {
         windows: document.windows ?? [],
-        permissions: document.permissions.map(permissionIdentifier),
+        permissions: document.permissions,
       }
     }
     expect(actual).toEqual(ALLOWED_CAPABILITIES)
