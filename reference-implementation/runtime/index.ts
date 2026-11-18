@@ -6270,7 +6270,6 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         msg.kind === "manual_action" || msg.kind === "otp" ? "manual_action_required" : "refresh_credentials";
       appendKnownGap(
         buildKnownGap({
-          interactionKind: (msg.kind as string | undefined) || null,
           kind: "interaction_required",
           message: (msg.message as string | undefined) || null,
           reason: `interaction_${responseStatus}`,

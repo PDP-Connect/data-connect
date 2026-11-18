@@ -24,7 +24,7 @@
 //   normalizeConsideredInDiagnostics, GAP_SEVERITIES, INFORMATIONAL_GAP_REASONS,
 //   TRANSIENT_GAP_REASONS, VIOLATION_STRING_MAX, GAP_LIST_MAX,
 //   CONNECTOR_ERROR_MESSAGE_MAX, GAP_DIAGNOSTICS_BYTES_MAX,
-//   GAP_DIAGNOSTICS_DEPTH_MAX, GAP_DIAGNOSTICS_LIST_MAX, inferRecoveryAction,
+//   GAP_DIAGNOSTICS_DEPTH_MAX, GAP_DIAGNOSTICS_LIST_MAX,
 //   BROWSER_SURFACE_EVIDENCE_VARIANT_BY_KIND (a manifest-selectable index into
 //   a closed set of RI-owned, provider-name-free posture/validation
 //   algorithms — see hasSurfaceSpecificCounts / deriveBrowserSurfacePosture /
@@ -222,11 +222,8 @@ export function boundConnectorErrorMessage(value: unknown, declaredReasonTokens?
   return `${text.slice(0, CONNECTOR_ERROR_MESSAGE_MAX - 1)}…`;
 }
 
-// Mirrors packages/polyfill-connectors/src/connector-runtime.ts's
-// CONNECTOR_ERROR_CODE_RE — the two run in different processes (connector
-// child vs. RS-side runtime) so cannot literally share a module, but the
-// contract MUST match: short, lowercase, snake_case only.
-const CONNECTOR_ERROR_CODE_RE = /^[a-z][a-z0-9_]{1,63}$/;
+// Shared connector error-code grammar: 1–64 lowercase snake_case characters.
+export const CONNECTOR_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
 /**
  * Validate a connector-declared `error.code` before it is copied verbatim
@@ -871,69 +868,29 @@ export function buildRecoveryGapClosureFacts({
 
 // ── RECOVERY HINT NORMALISATION ───────────────────────────────────────────────
 
-const RE_MANUAL = /\b(otp|mfa|2fa|manual|captcha|anti[-_ ]?bot)\b/;
-const RE_CREDENTIALS = /\b(credential|credentials|auth|login|session_expired|reauth|token)\b/;
-const RE_TRANSIENT = /\b(rate|429|timeout|timed out|5\d\d|network|temporar|retry)\b/;
-const RE_UPGRADE = /\b(template|parser|schema|version|unsupported|capability)\b/;
-const RE_SELECTOR = /\b(selector|selectors|dom|drift)\b/;
-const RE_UPSTREAM = /\b(blocked|locked|unavailable|upstream)\b/;
-
-function inferRecoveryAction(
-  reason: string | null,
-  message: string | null,
-  interactionKind: string | null = null
-): string {
-  const text = `${reason || ""} ${message || ""} ${interactionKind || ""}`.toLowerCase();
-  if (RE_MANUAL.test(text)) {
-    return "manual_action_required";
-  }
-  if (RE_CREDENTIALS.test(text)) {
-    return "refresh_credentials";
-  }
-  if (RE_TRANSIENT.test(text)) {
-    return "retry_by_runtime";
-  }
-  if (RE_UPGRADE.test(text)) {
-    return "retry_on_connector_upgrade";
-  }
-  if (RE_SELECTOR.test(text)) {
-    return "update_selector";
-  }
-  if (RE_UPSTREAM.test(text)) {
-    return "upstream_unblock";
-  }
-  return "unknown";
-}
-
 interface RecoveryHintInput {
   action?: unknown;
   retryable?: unknown;
 }
 
-export function normalizeRecoveryHint(
-  input: unknown,
-  {
-    reason = null,
-    message = null,
-    interactionKind = null,
-  }: { reason?: string | null; message?: string | null; interactionKind?: string | null } = {}
-): { action: string; retryable: boolean } {
-  const inferredAction = inferRecoveryAction(reason, message, interactionKind);
+/**
+ * An absent or unrecognised hint is unknown. The runtime never infers an
+ * action from reason, message, error code or interaction kind. A hint and
+ * retryable are connector claims and never start a retry by themselves.
+ */
+export function normalizeRecoveryHint(input: unknown): { action: string; retryable: boolean } {
   if (typeof input === "string" && RECOVERY_ACTIONS.has(input)) {
     return { action: input, retryable: input === "retry_by_runtime" };
   }
   if (input && typeof input === "object" && !Array.isArray(input)) {
     const r = input as RecoveryHintInput;
-    const action = RECOVERY_ACTIONS.has(r.action as string) ? (r.action as string) : inferredAction;
+    const action = RECOVERY_ACTIONS.has(r.action as string) ? (r.action as string) : "unknown";
     return {
       action,
       retryable: typeof r.retryable === "boolean" ? r.retryable : action === "retry_by_runtime",
     };
   }
-  return {
-    action: inferredAction,
-    retryable: inferredAction === "retry_by_runtime",
-  };
+  return { action: "unknown", retryable: false };
 }
 
 // ── GAP SCOPE + SEVERITY ──────────────────────────────────────────────────────
@@ -1034,7 +991,6 @@ interface BuildKnownGapInput {
   continuation?: RuntimeContinuationFact | null;
   diagnostics?: unknown;
   explicitSelection?: boolean;
-  interactionKind?: string | null;
   kind: string;
   message?: string | null;
   reason?: string | null;
@@ -1053,7 +1009,6 @@ export function buildKnownGap({
   message = null,
   recoveryHint = null,
   scope = null,
-  interactionKind = null,
   explicitSelection = false,
   severity = null,
   unsupportedInDefaultScope = false,
@@ -1081,11 +1036,7 @@ export function buildKnownGap({
     ...(persistedBoundaryClaim ? { boundary_claim: persistedBoundaryClaim } : {}),
     ...(safeMessage ? { message: safeMessage } : {}),
     ...(scope ? { scope } : {}),
-    recovery_hint: normalizeRecoveryHint(recoveryHint, {
-      interactionKind,
-      message: safeMessage,
-      reason: safeReason,
-    }),
+    recovery_hint: normalizeRecoveryHint(recoveryHint),
     ...(boundedDiagnostics ? { diagnostics: boundedDiagnostics } : {}),
     ...optionalContinuationField(continuation),
   };
