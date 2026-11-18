@@ -3,17 +3,18 @@
   Copyright The PDP-Connect Contributors
   SPDX-License-Identifier: Apache-2.0
 
-  Attach window for the desktop app: pair this computer with a DataConnect
-  server elsewhere, or detach from it. Rust opens it from the tray or a
-  vana://attach link (src-tauri/src/attach_window.rs). Every command it
-  calls is refused unless the caller is this window. Nothing is submitted
-  until the owner presses a button.
+  Connect window for the desktop app: connect this computer to a DataConnect
+  server elsewhere, or disconnect from it. Rust opens it from the tray
+  (src-tauri/src/attach_window.rs). Every command it calls is refused
+  unless the caller is this window. Nothing is sent to the server until the
+  owner presses a button, and no code or password until the server has
+  proven the Server ID shown here.
 -->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DataConnect - Attach to a server</title>
+    <title>Connect to a server</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -127,19 +128,53 @@
         font-size: 0.85rem;
         word-break: break-all;
       }
+      #confirm {
+        display: none;
+        gap: 0.8rem;
+      }
+      #confirm.visible {
+        display: grid;
+      }
+      .facts {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 0.3rem 0.8rem;
+        margin: 0;
+        font-size: 0.9rem;
+      }
+      .facts dd {
+        margin: 0;
+        word-break: break-all;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        letter-spacing: 0.04em;
+      }
+      #identity-changed {
+        border: 1px solid #d33;
+      }
     </style>
   </head>
   <body>
-    <h1>Attach to a server</h1>
+    <h1>Connect to a server</h1>
     <p>
       Use this app with a DataConnect server on another computer. In that server's console, open
-      Settings, then "Attach a desktop app", and create a pairing code.
+      Settings, then "Attach a desktop app", and create a pairing code. Paste the server address or
+      the pairing link below.
     </p>
     <div id="notice" class="box" role="status"></div>
     <div id="environment" class="box" role="status"></div>
+    <div id="identity-changed" class="box" role="alert">
+      <p><strong>This server's identity changed.</strong></p>
+      <p id="identity-changed-text"></p>
+      <p>
+        DataConnect sent nothing to it. Disconnect to remove this connection, or connect again if
+        you expect the server to have a new identity.
+      </p>
+    </div>
     <div id="attached" class="box">
       <div id="attached-text"></div>
-      <button id="detach-button" class="secondary" type="button">Detach</button>
+      <button id="detach-button" class="secondary" type="button">Disconnect</button>
     </div>
     <form id="attach-form">
       <label>
@@ -160,34 +195,59 @@
           I trust this network
         </label>
       </div>
-      <label>
-        Pairing code
-        <input
-          id="code-input"
-          autocapitalize="characters"
-          autocomplete="off"
-          placeholder="ABCD-EFGH-JKMN"
-          spellcheck="false"
-          type="text"
-        />
-      </label>
-      <button id="attach-button" type="submit">Attach</button>
-      <details id="password-section">
-        <summary>Use the owner password instead</summary>
-        <div>
-          <p class="hint">
-            For a server without pairing codes. DataConnect uses the password once to sign in
-            and does not keep it.
-          </p>
+      <button id="continue-button" type="button">Continue</button>
+
+      <div id="confirm">
+        <dl class="facts">
+          <dt>Server</dt>
+          <dd id="confirm-server"></dd>
+          <dt>Server ID</dt>
+          <dd id="confirm-id" class="mono"></dd>
+        </dl>
+        <p id="confirm-link" class="hint"></p>
+        <p id="confirm-changed" class="box"></p>
+        <div id="pairing-section">
           <label>
-            Server owner password
-            <input id="password-input" autocomplete="off" type="password" />
+            Pairing code
+            <input
+              id="code-input"
+              autocapitalize="characters"
+              autocomplete="off"
+              placeholder="ABCD-EFGH-JKMN"
+              spellcheck="false"
+              type="text"
+            />
           </label>
-          <button id="password-button" class="secondary" type="button">
-            Attach with password
-          </button>
+          <button id="attach-button" type="submit">Connect</button>
         </div>
-      </details>
+        <div id="unverified" class="box">
+          <p><strong>This server cannot prove its identity.</strong></p>
+          <p>
+            It is older than this app's identity check. You can still connect with the owner
+            password, but DataConnect cannot tell whether the server answering is the one you meant.
+          </p>
+          <label class="check">
+            <input id="unverified-input" type="checkbox" />
+            I understand and want to connect anyway
+          </label>
+        </div>
+        <details id="password-section">
+          <summary>Use the owner password instead</summary>
+          <div>
+            <p class="hint">
+              For a server without pairing codes. DataConnect uses the password once to sign in
+              and does not keep it.
+            </p>
+            <label>
+              Server owner password
+              <input id="password-input" autocomplete="off" type="password" />
+            </label>
+            <button id="password-button" class="secondary" type="button">
+              Connect with password
+            </button>
+          </div>
+        </details>
+      </div>
       <div id="error" class="box" role="alert"></div>
     </form>
     <script>
@@ -195,6 +255,8 @@
       const codeInput = document.getElementById("code-input");
       const trustInput = document.getElementById("trust-input");
       const passwordInput = document.getElementById("password-input");
+      const unverifiedInput = document.getElementById("unverified-input");
+      const continueButton = document.getElementById("continue-button");
       const attachButton = document.getElementById("attach-button");
       const passwordButton = document.getElementById("password-button");
       const detachButton = document.getElementById("detach-button");
@@ -206,16 +268,31 @@
       const environmentBox = document.getElementById("environment");
       const attachedBox = document.getElementById("attached");
       const attachedText = document.getElementById("attached-text");
+      const identityChangedBox = document.getElementById("identity-changed");
+      const identityChangedText = document.getElementById("identity-changed-text");
+      const confirmSection = document.getElementById("confirm");
+      const confirmServer = document.getElementById("confirm-server");
+      const confirmId = document.getElementById("confirm-id");
+      const confirmLink = document.getElementById("confirm-link");
+      const confirmChanged = document.getElementById("confirm-changed");
+      const pairingSection = document.getElementById("pairing-section");
+      const unverifiedBox = document.getElementById("unverified");
+      const passwordSection = document.getElementById("password-section");
       const controls = [
         serverInput,
         codeInput,
         trustInput,
         passwordInput,
+        unverifiedInput,
+        continueButton,
         attachButton,
         passwordButton,
       ];
       let busy = false;
       let disabledByEnvironment = false;
+      // What the owner is looking at in the confirm step. Connect sends this
+      // key back; Rust connects only to a server that proves it.
+      let inspected = null;
 
       const invoke =
         window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
@@ -237,6 +314,12 @@
         return typeof error === "string" ? error : fallback;
       }
 
+      function leaveConfirm() {
+        inspected = null;
+        confirmSection.classList.remove("visible");
+        unverifiedInput.checked = false;
+      }
+
       let previewRun = 0;
       async function updatePreview() {
         const run = ++previewRun;
@@ -248,21 +331,63 @@
           return;
         }
         if (preview.origin) {
-          target.textContent = "Target: " + preview.origin;
+          target.textContent = "Server: " + preview.origin;
         } else if (preview.error) {
-          target.textContent = "Target: " + preview.error;
+          target.textContent = preview.error;
         } else {
-          target.textContent = "Target: none yet";
+          target.textContent = "Server: none yet";
         }
         warning.classList.toggle("visible", preview.plainHttp);
         warningText.textContent = preview.warning || "";
-        if (preview.code && !codeInput.value) {
-          codeInput.value = preview.code;
+      }
+
+      async function inspect() {
+        if (busy) {
+          return;
+        }
+        show(errorBox, "");
+        leaveConfirm();
+        setBusy(true);
+        try {
+          const result = await invoke("inspect_server", {
+            input: serverInput.value,
+            trustPlainHttp: trustInput.checked,
+          });
+          inspected = result;
+          confirmServer.textContent = result.origin;
+          pairingSection.style.display = result.serverId ? "" : "none";
+          unverifiedBox.classList.toggle("visible", !result.serverId);
+          if (result.serverId) {
+            confirmId.textContent = result.serverId;
+            confirmLink.textContent = result.matchesLink
+              ? "Matches your link."
+              : "Check this matches Settings, then Attach a desktop app, on your server.";
+          } else {
+            confirmId.textContent = "none";
+            confirmLink.textContent = "";
+          }
+          show(
+            confirmChanged,
+            result.previouslyConnectedId
+              ? "This server's ID is different from the one you connected to before (" +
+                  result.previouslyConnectedId +
+                  "). Continue only if you expect that."
+              : ""
+          );
+          if (result.code && !codeInput.value) {
+            codeInput.value = result.code;
+          }
+          confirmSection.classList.add("visible");
+          passwordSection.open = !result.serverId;
+        } catch (error) {
+          show(errorBox, message(error, "DataConnect could not reach this server."));
+        } finally {
+          setBusy(false);
         }
       }
 
       async function attach(command, args) {
-        if (busy) {
+        if (busy || !inspected) {
           return;
         }
         show(errorBox, "");
@@ -271,12 +396,13 @@
           const outcome = await invoke(command, {
             input: serverInput.value,
             trustPlainHttp: trustInput.checked,
+            confirmedKey: inspected.serverKey,
             ...args,
           });
-          const restarting = "Attached to " + outcome.origin + ". DataConnect is restarting.";
+          const restarting = "Connected to " + outcome.origin + ". DataConnect is restarting.";
           show(noticeBox, outcome.notice ? restarting + " " + outcome.notice : restarting);
         } catch (error) {
-          show(errorBox, message(error, "DataConnect could not attach to this server."));
+          show(errorBox, message(error, "DataConnect could not connect to this server."));
           setBusy(false);
         } finally {
           passwordInput.value = "";
@@ -293,7 +419,7 @@
           const notice = await invoke("detach_from_server");
           show(noticeBox, notice + " DataConnect is restarting on this computer.");
         } catch (error) {
-          show(errorBox, message(error, "DataConnect could not detach."));
+          show(errorBox, message(error, "DataConnect could not disconnect."));
           setBusy(false);
         }
       }
@@ -312,12 +438,26 @@
           return;
         }
         serverInput.value = view.input || "";
-        codeInput.value = view.code || "";
+        codeInput.value = "";
         show(noticeBox, view.notice);
         if (view.attached) {
-          attachedText.textContent = "This app is attached to " + view.attached.host + ".";
-          detachButton.textContent = "Detach from " + view.attached.host;
+          attachedText.textContent = "This app is connected to " + view.attached.host + ".";
+          detachButton.textContent = "Disconnect from " + view.attached.host;
           attachedBox.classList.add("visible");
+        }
+        if (view.identityChanged) {
+          const changed = view.identityChanged;
+          const lines = [];
+          if (changed.pinnedId) {
+            lines.push("Server ID you connected to: " + changed.pinnedId + ".");
+          }
+          lines.push(
+            changed.answeringId
+              ? "Server ID answering now: " + changed.answeringId + "."
+              : "The server answering now could not prove any identity."
+          );
+          identityChangedText.textContent = lines.join(" ");
+          identityChangedBox.classList.add("visible");
         }
         if (view.environmentOverride) {
           disabledByEnvironment = true;
@@ -327,14 +467,30 @@
         await updatePreview();
       }
 
-      serverInput.addEventListener("input", () => void updatePreview());
-      trustInput.addEventListener("change", () => void updatePreview());
+      serverInput.addEventListener("input", () => {
+        leaveConfirm();
+        void updatePreview();
+      });
+      trustInput.addEventListener("change", () => {
+        leaveConfirm();
+        void updatePreview();
+      });
+      continueButton.addEventListener("click", () => void inspect());
+      serverInput.addEventListener("keydown", event => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          void inspect();
+        }
+      });
       document.getElementById("attach-form").addEventListener("submit", event => {
         event.preventDefault();
         void attach("attach_with_pairing_code", { code: codeInput.value });
       });
       passwordButton.addEventListener("click", () => {
-        void attach("attach_with_owner_password", { password: passwordInput.value });
+        void attach("attach_with_owner_password", {
+          password: passwordInput.value,
+          acceptUnverified: unverifiedInput.checked,
+        });
       });
       passwordInput.addEventListener("keydown", event => {
         if (event.key === "Enter") {
