@@ -63,16 +63,17 @@ export function ConsentFacts({ facts: all, providerId }: { facts: Fact[]; provid
 
 // Disclosures are library-owned typed data. Keep every item visible without
 // flattening objects, truncating long strings or interpreting provider prose.
-export function ConsentDisclosures({ value }: { value: unknown }) {
+export function ConsentDisclosures({ value, providerId }: { value: unknown; providerId?: string | null }) {
+  if (isKnownFalseCondition(providerId, value)) return null;
   if (value === null) {
     return <span>None</span>;
   }
   if (Array.isArray(value)) {
     return (
       <ol className="grid gap-3">
-        {value.map((item, index) => (
+        {value.filter((item) => !isKnownFalseCondition(providerId, item)).map((item, index) => (
           <li key={index}>
-            <ConsentDisclosures value={item} />
+            <ConsentDisclosures value={item} providerId={providerId} />
           </li>
         ))}
       </ol>
@@ -81,11 +82,11 @@ export function ConsentDisclosures({ value }: { value: unknown }) {
   if (typeof value === "object") {
     return (
       <dl className="grid gap-3">
-        {Object.entries(value).map(([key, item]) => (
+        {Object.entries(value).filter(([, item]) => !isKnownFalseCondition(providerId, item)).map(([key, item]) => (
           <div key={key}>
             <dt className="pdpp-label">{humanizeKey(key)}</dt>
             <dd>
-              <ConsentDisclosures value={item} />
+              <ConsentDisclosures value={item} providerId={providerId} />
             </dd>
           </div>
         ))}
@@ -130,7 +131,7 @@ export function SetupApprovalCard({
       {children}
       {complete ? (
         <>
-          <ConsentDisclosures value={consent.disclosures} />
+          <ConsentDisclosures value={consent.disclosures} providerId={consent.scope.providerId} />
           <ConsentFacts facts={consent.facts!} providerId={consent.scope.providerId} />
           <label className="pdpp-caption flex items-start gap-2">
             <input
@@ -196,7 +197,7 @@ export function RuntimeRouteConsentCard({
           {review.scope?.query.expectedOrigin ? (
             <p className="pdpp-caption break-words">Your address will be: {review.scope.query.expectedOrigin}</p>
           ) : null}
-          <ConsentDisclosures value={review.disclosures} />
+          <ConsentDisclosures value={review.disclosures} providerId={review.scope?.providerId} />
           <ConsentFacts facts={review.facts} providerId={review.scope?.providerId} />
           <label>
             <input

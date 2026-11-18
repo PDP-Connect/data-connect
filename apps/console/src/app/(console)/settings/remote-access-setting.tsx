@@ -400,6 +400,12 @@ export function RemoteAccessSetting({
   // Preparation for a way pins it. If that replaces a way the owner was on,
   // the old way could no longer be used: say why.
   useEffect(() => {
+    if (!wayId && pinnedWay && wayUnusable(pinnedWay, capabilities, blocks)) {
+      selection.current += 1;
+      const from = wayRow(pinnedWay, capabilities, blocks);
+      setSwitchNote(`${from.title} can\'t be used now: ${from.missing?.text ?? "No usable way is available."}`);
+      return;
+    }
     if (!readyToPrepare || !way || !wayId || pinned === wayId) return;
     if (pinned !== null) {
       selection.current += 1;
@@ -474,7 +480,7 @@ export function RemoteAccessSetting({
   }, [readyToPrepare, wayId, wayUsage, prepRun, request]);
 
   // An expired review is replaced without a click.
-  const readyReview = prep.status === "done" && prep.result.kind === "ready" ? prep.result.review : null;
+  const readyReview = prep.status === "done" && prep.providerId === wayId && prep.result.kind === "ready" ? prep.result.review : null;
   useEffect(() => {
     if (!readyReview) return;
     const timer = setInterval(() => {
@@ -523,8 +529,9 @@ export function RemoteAccessSetting({
   // host holds a newer review of the same facts, only its id is newer.
   async function turnOn(shown: Review) {
     const token = selection.current;
+    const isCurrent = () => mounted.current && selection.current === token && wayIdNow.current === shown.candidate.providerId;
     await change(async () => {
-      if (selection.current !== token) return;
+      if (!isCurrent()) return;
       let target = shown;
       let refresh = false;
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -533,12 +540,12 @@ export function RemoteAccessSetting({
           const fresh = await prepare(
             shown.candidate.providerId,
             wayUsage ?? "",
-            () => mounted.current && selection.current === token
+            isCurrent
           ).catch((failure) => {
             if (failure instanceof PreparationStopped) return null;
             throw failure;
           });
-          if (!fresh) return;
+          if (!fresh || !isCurrent()) return;
           if (fresh.kind !== "ready") {
             setPrep({ status: "done", providerId: shown.candidate.providerId, result: fresh });
             return;
@@ -551,6 +558,7 @@ export function RemoteAccessSetting({
           }
           target = fresh.review;
         }
+        if (!isCurrent()) return;
         requirePassword();
         try {
           const pending = await send<{ operationId: string }>("/operations", {
@@ -559,6 +567,7 @@ export function RemoteAccessSetting({
             consentFactsDigest: shown.candidate.consentFactsDigest,
             acknowledgeDisconnect: true,
           });
+          if (!isCurrent()) return;
           approvedDigest.current = shown.candidate.consentFactsDigest;
           setOperation({ ...pending, kind: "start", stage: "applying", recovery: null });
           setCancel(null);
@@ -567,6 +576,7 @@ export function RemoteAccessSetting({
           setPrep({ status: "idle" });
           return;
         } catch (failure) {
+          if (!isCurrent()) return;
           const code = failure instanceof ReachabilityFailure ? failure.detail.code : null;
           if (!(code && staleReviewCodes.has(code)) || attempt === 1) throw failure;
           // The host no longer holds that review. Get a new one and compare.
@@ -762,7 +772,7 @@ export function RemoteAccessSetting({
   };
   const hostReasonShown = !host.known && host.reason !== "loading";
   const serviceLabel = wayLabel ?? "the service";
-  const done = prep.status === "done" ? prep.result : null;
+  const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
     <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
     <section aria-label="Remote access" className="grid gap-6">

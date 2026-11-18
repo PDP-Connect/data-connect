@@ -86,8 +86,12 @@ const isTailscale = (provider: Provider) => provider.providerId.startsWith("tail
  * missing or denied (for example Funnel not allowed) blocks the way.
  */
 function blockedStep(provider: Provider): Missing | null {
-  if (!isTailscale(provider)) return null;
-  if (prerequisiteState(provider, "local-setup") !== "present") {
+  if (!isTailscale(provider)) {
+    const missing = provider.prerequisites.find((item) => item.state === "denied" || item.state === "missing");
+    return missing ? { text: `Needs ${plain(missing.label)} (${missing.state}).` } : null;
+  }
+  const local = prerequisiteState(provider, "local-setup");
+  if (local !== "present" && local !== "unknown") {
     return { text: "Needs the Tailscale app, signed in.", link: { label: "Get Tailscale", href: tailscaleDownload } };
   }
   if (provider.prerequisites.some((item) => item.state === "denied" || item.state === "missing")) {
@@ -135,9 +139,7 @@ function missingFor(provider: Provider, capabilities: Capabilities, blocks: Bloc
  * app restarts) does not count, so a pinned way survives a short gap.
  */
 export function wayUnusable(provider: Provider, capabilities: Capabilities, blocks: Blocks = {}): boolean {
-  if (blocks[provider.providerId]) return true;
-  if (pickUsage(provider, capabilities) === null) return true;
-  return provider.prerequisites.some((item) => item.state === "denied" || item.state === "missing");
+  return missingFor(provider, capabilities, blocks) !== null;
 }
 
 /**

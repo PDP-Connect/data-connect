@@ -11,8 +11,9 @@ import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
+import { recommendedWay, wayRow, wayUnusable } from "./choose-way.ts";
 import { knownFalseConditions } from "./known-false-conditions.ts";
-import { ConsentFacts } from "./reachability-consent.tsx";
+import { ConsentDisclosures, ConsentFacts } from "./reachability-consent.tsx";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
 
@@ -366,4 +367,76 @@ test("the 15-minute line is hidden for localhost.run only; retention and cost te
   assert.ok(html("another-provider", [falseLine]).includes(falseLine), "another provider keeps its own text");
   assert.ok(html("localhost-run", [`${falseLine}.`]).includes(`${falseLine}.`), "exact text only, never a pattern");
   assert.ok(html("localhost-run", ["a session lasts up to 15 minutes"]).includes("15 minutes"));
+});
+
+test("typed disclosures hide only the exact localhost-run false condition", () => {
+  const value = { address: { conditions: [falseLine, "Logs retained for 30 days"] } };
+  for (const providerId of ["localhost-run", "another-provider", undefined]) {
+    const markup = renderToStaticMarkup(createElement(ConsentDisclosures, { value, providerId }));
+    assert.equal(markup.includes(falseLine), providerId !== "localhost-run");
+    assert.ok(markup.includes("Logs retained for 30 days"));
+  }
+});
+
+for (const alternative of [true, false]) {
+  test("denied temporary prerequisite moves the pin only to a usable alternative: " + alternative, async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    let catalog = { ...noTailscale, providers: [way("localhost-run"), ...(alternative ? [way("cloudflare-named")] : [])] };
+    await withScreen(host(() => catalog), async ({ calls, settle, text }) => {
+      assert.deepEqual(draftsFor(calls), ["localhost-run"]);
+      catalog = { ...catalog, providers: catalog.providers.map((row) => row.providerId === "localhost-run"
+        ? way("localhost-run", { prerequisites: [prerequisite("SSH permission", "denied")] }) : row) };
+      for (let n = 0; n < 3; n++) {
+        await act(async () => t.mock.timers.tick(3000));
+        await settle();
+      }
+      assert.deepEqual(draftsFor(calls), alternative ? ["localhost-run", "cloudflare-named"] : ["localhost-run"]);
+      assert.match(text(), /Needs SSH permission \(denied\)/);
+      if (alternative) assert.match(text(), /Using Cloudflare instead/);
+      else assert.doesNotMatch(text(), /Turn on remote access/);
+    });
+  });
+}
+
+test("a final review arriving after Funnel policy demotion cannot start the old way", async () => {
+  const lateReview = deferred<Result>();
+  const policy = deferred<Result>();
+  const initial = candidate("tailscale-funnel");
+  let reviews = 0;
+  const handler = host(() => tailscaleReady, {
+    "/state": () => ok({ ...idleState, services: [{ ...funnelService, committed: true }] }),
+    "/drafts/d-tailscale-funnel": () => ok(draftOf("tailscale-funnel")),
+    "/drafts/d-tailscale-funnel/review": () => ++reviews === 1
+      ? ok({ id: "initial-review", kind: "route", candidate: initial }) : lateReview.promise,
+    "/setup-operations/op-1": () => policy.promise,
+    "/operations": () => { throw new Error("stale way must not start"); },
+  });
+  await withScreen(handler, async ({ calls, press, settle, container }) => {
+    assert.equal(reviews, 1);
+    initial.expiresAt = "2000-01-01T00:00:00.000Z";
+    await press(/^Turn on remote access$/);
+    assert.equal(reviews, 2, "the final refresh is actually pending");
+    await act(async () => policy.resolve(ok(blockedView("tailscale-funnel-policy"))));
+    await settle();
+    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Temporary address/);
+    await act(async () => lateReview.resolve(ok({ id: "late-review", kind: "route", candidate: candidate("tailscale-funnel") })));
+    await settle();
+    assert.equal(calls.filter((call) => call.url === "/operations").length, 0);
+    const other = [...container.querySelectorAll("button")].find((node) => node.textContent === "Other ways")!;
+    assert.equal(other.disabled, false, "stale return clears busy");
+  });
+});
+
+test("recommendation, rows and pinned usability agree on every provider prerequisite", () => {
+  for (const providerId of ["localhost-run", "cloudflare-named"]) {
+    for (const state of ["missing", "denied", "unknown", "present"]) {
+      const provider = way(providerId, { prerequisites: [prerequisite("Client", state)] });
+      const inventory = { ...noTailscale, providers: [provider] } as Parameters<typeof recommendedWay>[0];
+      const row = inventory.providers[0]!;
+      const blocked = state === "missing" || state === "denied";
+      assert.equal(wayUnusable(row, {}), blocked);
+      assert.equal(wayRow(row, {}).usable, !blocked);
+      assert.equal(recommendedWay(inventory, {})?.providerId, blocked ? undefined : providerId);
+    }
+  }
 });
