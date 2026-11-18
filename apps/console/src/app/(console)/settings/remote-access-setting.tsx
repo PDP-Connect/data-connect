@@ -26,6 +26,7 @@ import {
   toDisplayError,
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
+import { isOpenThroughRoute } from "./remote-origin.ts";
 import { type ActionKind, CLEANUP_UNCONFIRMED, ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
 import { ConsentFacts, RuntimeRouteConsentCard, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import {
@@ -144,6 +145,10 @@ export function RemoteAccessSetting({
   const [rechecked, setRechecked] = useState<ReadonlySet<string>>(new Set());
   // Routes the owner has moved past by choosing Turn on again or Turn off.
   const [acknowledged, setAcknowledged] = useState<ReadonlySet<string>>(new Set());
+  // A stop the owner must confirm first: this page is open through the address being turned off.
+  const [confirmStop, setConfirmStop] = useState<{ route: Route; again: boolean } | null>(null);
+  // The stop was confirmed from far away; this page is about to stop working.
+  const [closingPage, setClosingPage] = useState(false);
   // The address the owner had before Turn on again, to tell if it changed.
   const [previousOrigin, setPreviousOrigin] = useState<string | null>(null);
   // Set by Turn on again: the digest of the facts the owner last approved.
@@ -688,30 +693,58 @@ export function RemoteAccessSetting({
 
   // `accepted` runs only once the host has accepted the stop. A refused stop
   // leaves the route where it was, still needing the owner and still re-checked.
-  async function stopRoute(route: Route, accepted: () => void) {
+  async function stopRoute(route: Route, accepted: () => void, farAway = false) {
+    // Said before the request: the tunnel may close before a reply comes back.
+    if (farAway) setClosingPage(true);
     await turnOff(async () => {
-      const pending = await send<{ operationId: string }>(`/routes/${encodeURIComponent(route.handle.id)}/stop`, {
-        generation: route.handle.generation,
-        acknowledgeDisconnect: true,
-      });
+      let pending: { operationId: string };
+      try {
+        pending = await send<{ operationId: string }>(`/routes/${encodeURIComponent(route.handle.id)}/stop`, {
+          generation: route.handle.generation,
+          acknowledgeDisconnect: true,
+        });
+      } catch (failure) {
+        // From far away, a request that dies because the address closed is the expected end.
+        if (farAway && !(failure instanceof ReachabilityFailure)) return;
+        setClosingPage(false);
+        throw failure;
+      }
       accepted();
+      // The reply came back, so this page is still here to show the result.
+      setClosingPage(false);
       setAcknowledged((current) => new Set(current).add(route.handle.id));
       setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
     });
   }
-  function turnOffRoute(route: Route) {
-    return stopRoute(route, () => {
-      setPreviousOrigin(null);
-      againPending.current = false;
-    });
+  // Turn off, Turn off and on, Turn on again: ask first only when this page came in through the address.
+  function requestStop(route: Route, again: boolean) {
+    if (isOpenThroughRoute(window.location.origin, route.origin)) {
+      setConfirmStop({ route, again });
+      return;
+    }
+    void (again ? turnOnAgain(route) : turnOffRoute(route));
+  }
+  function turnOffRoute(route: Route, farAway = false) {
+    return stopRoute(
+      route,
+      () => {
+        setPreviousOrigin(null);
+        againPending.current = false;
+      },
+      farAway
+    );
   }
   // Turn off, then turn on again on the facts the owner already approved. If the
   // facts changed, the owner sees what changed and clicks again.
-  function turnOnAgain(route: Route) {
-    return stopRoute(route, () => {
-      setPreviousOrigin(route.origin);
-      againPending.current = approvedDigest.current !== null;
-    });
+  function turnOnAgain(route: Route, farAway = false) {
+    return stopRoute(
+      route,
+      () => {
+        setPreviousOrigin(route.origin);
+        againPending.current = approvedDigest.current !== null;
+      },
+      farAway
+    );
   }
   // Same operation id: the host checks the route it already has and starts nothing new.
   async function retryOperation(current: Operation) {
@@ -786,6 +819,27 @@ export function RemoteAccessSetting({
       <div>
         <h2 className="pdpp-heading">Remote access</h2>
       </div>
+      {confirmStop ? (
+        <div aria-label="Turn off remote access" aria-modal="true" className="grid gap-3 rounded-lg border p-4" role="alertdialog">
+          <p>You're using this address now. Turning it off will close this page.</p>
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => {
+                const { route, again } = confirmStop;
+                setConfirmStop(null);
+                void (again ? turnOnAgain(route, true) : turnOffRoute(route, true));
+              }}
+              type="button"
+            >
+              Turn off
+            </button>
+            <button onClick={() => setConfirmStop(null)} type="button">
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {closingPage ? <p role="status">Turning off… this page will stop working in a moment.</p> : null}
       {passwordMissing ? (
         <div className="grid gap-2">
           <h3 className="pdpp-label">Step 1: Set a password</h3>
@@ -1022,7 +1076,7 @@ export function RemoteAccessSetting({
                   addressChanged={previousOrigin !== null && route.origin !== null && route.origin !== previousOrigin}
                   busy={busy}
                   now={now}
-                  onTurnOff={() => void turnOffRoute(route)}
+                  onTurnOff={() => requestStop(route, false)}
                   route={route}
                   synthetic={state.evidenceSource === "synthetic"}
                 >
@@ -1045,7 +1099,7 @@ export function RemoteAccessSetting({
             {extras}
             {route.cleanup.state !== "confirmed" || attention ? <div className="flex flex-wrap gap-3">
               {headline === "Needs your action" && route.cleanup.state !== "unconfirmed" ? (
-                <button disabled={busy} onClick={() => void turnOnAgain(route)} type="button">
+                <button disabled={busy} onClick={() => requestStop(route, true)} type="button">
                   {unsupportedRefresh ? "Turn off and on" : "Turn on again"}
                 </button>
               ) : null}
@@ -1079,7 +1133,7 @@ export function RemoteAccessSetting({
                   Check again
                 </button>
               ) : null}
-              <button disabled={busy} onClick={() => void turnOffRoute(route)}>
+              <button disabled={busy} onClick={() => requestStop(route, false)}>
                 {route.cleanup.state === "unconfirmed" ? "Try again" : "Turn off"}
               </button>
             </div> : null}
