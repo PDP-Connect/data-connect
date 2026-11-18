@@ -27,7 +27,7 @@ import {
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { isOpenThroughRoute } from "./remote-origin.ts";
-import { type ActionKind, CLEANUP_UNCONFIRMED, ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
+import { type ActionKind, CLEANUP_UNCONFIRMED, ERROR_MESSAGES, genericErrorFor, publicError } from "./reachability-errors.ts";
 import { ConsentFacts, RuntimeRouteConsentCard, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import {
   type Action,
@@ -891,6 +891,15 @@ export function RemoteAccessSetting({
               onOther={chooseAnotherWay}
             />
           ) : null}
+          {done?.kind === "sign-in" && !reservations.some((item) => item.providerId === wayId) ? (
+            // A step the page cannot show as a sign-in: never a blank card.
+            <section aria-label="Turn on" className="grid gap-3">
+              <p role="status">{genericErrorFor("turn-on")}</p>
+              <button disabled={busy} onClick={refresh} type="button">
+                Try again
+              </button>
+            </section>
+          ) : null}
           {done?.kind === "ready" ? (
             <TurnOnCard
               busy={mutationBlocked}
@@ -898,6 +907,7 @@ export function RemoteAccessSetting({
               key={done.review.id}
               onTurnOn={(review) => void turnOn(review)}
               review={done.review}
+              steps={done.steps}
             />
           ) : null}
           {wayId && wayUsage === null ? <p role="status">Remote access can't start with this way on this computer.</p> : null}

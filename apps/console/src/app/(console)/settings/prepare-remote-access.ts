@@ -59,6 +59,17 @@ export function effectLines(action: Action): string[] {
   return lines;
 }
 
+/**
+ * An owner step that only asks the owner to authorize the route, such as the temporary
+ * address's trial consent (gozar adapters/providers/localhost-run/ssh-setup.mjs:25-37).
+ * The host cannot run an `instructions` step (service.ts runSetupOperation throws
+ * setup_action_unavailable), and the route approval carries the consent. So it is shown
+ * with Turn on and never approved on its own.
+ */
+export function isRouteConsentStep(action: Action): boolean {
+  return action.kind === "instructions" && action.step?.actor === "owner" && action.step.purpose === "authorize";
+}
+
 // ---------- default way ----------
 
 const usageOrder = ["session", "attached", "durable"] as const;
@@ -89,7 +100,8 @@ export function defaultProvider(inventory: Inventory, capabilities: Capabilities
 // ---------- the chain ----------
 
 export type Prepared =
-  | { kind: "ready"; draft: Draft; review: Review }
+  // `steps`: owner steps the route approval itself satisfies; the card shows their facts beside the review's.
+  | { kind: "ready"; draft: Draft; review: Review; steps: Action[] }
   // A setup action with effects. It waits for Allow.
   | { kind: "allow"; draft: Draft; action: Action }
   // A step the owner does outside this page (sign in). The setup card shows it.
@@ -200,6 +212,7 @@ export async function prepareTurnOn(
         const needsInput = draft.configuration.inputRequirements.some((field) => field.actionId === action.id);
         // The caller posts the setup for a sign-in step, so it only gets one while this may still act.
         proceed();
+        if (isRouteConsentStep(action)) continue;
         if (action.step) return { kind: "sign-in", draft, action };
         if (hasEffects(action, needsInput)) return { kind: "allow", draft, action };
         draft = await runAction(send, draft, action);
@@ -211,7 +224,7 @@ export async function prepareTurnOn(
     }
     proceed();
     const review = await send<Review>(`/drafts/${encodeURIComponent(draft.draftId)}/review`, { usage: choice.usage });
-    return { kind: "ready", draft, review };
+    return { kind: "ready", draft, review, steps: draft.configuration.actions.filter(isRouteConsentStep) };
   } catch (failure) {
     const code = codeOf(failure);
     if (!options.restarted && code && restartCodes.has(code)) {

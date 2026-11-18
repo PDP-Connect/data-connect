@@ -11,6 +11,7 @@ import { createRoot } from "react-dom/client";
 import { type Action, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn } from "./prepare-remote-access.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
+import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -133,6 +134,16 @@ test("the chain stops at a sign-in step and does not commit", async () => {
   const result = await prepareTurnOn(request, choice);
   assert.equal(result.kind, "sign-in");
   assert.deepEqual(urls(), ["/catalog", "/state", "/drafts"]);
+});
+
+// Real shape: the temporary address's only setup action is an owner step that the route approval satisfies.
+// The host refuses to run it (an `instructions` step has no run), so the chain must not stop on it.
+test("the temporary address's trial-consent step does not stop the chain; its facts travel with the review", async () => {
+  const { request, urls } = recorder({ ...baseTable, "/drafts": ok(draftWith([trialConsentAction])) });
+  const result = await prepareTurnOn(request, choice);
+  assert.equal(result.kind, "ready");
+  assert.deepEqual(urls(), ["/catalog", "/state", "/drafts", "/drafts/d-1/commit", "/drafts/d-1/review"]);
+  assert.deepEqual(result.kind === "ready" ? result.steps.map((step) => step.id) : [], ["trial-consent"]);
 });
 
 test("the chain waits while the service's own setup is open", async () => {
@@ -822,5 +833,40 @@ test("a hung preparation times out with Try again and cannot resume positive req
     assert.ok(!calls.some((call) => call.url.endsWith("/commit")), "late timeout response cannot continue the chain");
     await press(/^Try again$/);
     assert.match(text(), /Turn on remote access/);
+  });
+});
+
+test("real trial-consent action: Turn on shows the trial's own facts, and one click sends one route approval", async () => {
+  const handler = host({
+    "/drafts": ok(draftWith([trialConsentAction])),
+    "/operations": ok({ operationId: "op-1" }),
+  });
+  await withScreen(handler, async ({ calls, press, text, container }) => {
+    assert.match(text(), /The relay terminates TLS and can read payloads\./);
+    const button = [...container.querySelectorAll("button")].find((node) => node.textContent === "Turn on remote access");
+    assert.ok(button, "the Turn on button is on screen");
+    assert.equal(button.disabled, false);
+    assert.ok(!calls.some((call) => call.url === "/setups"), "no setup is started for a consent-only step");
+    await press(/^Turn on remote access$/);
+    assert.deepEqual(
+      calls.map((call) => call.url).filter((url) => url === "/operations" || url.includes("/actions/") || url === "/setups"),
+      ["/operations"]
+    );
+    assert.deepEqual(approvals(calls).map((call) => call.body), [
+      { reviewId: "rev-1", kind: "route", consentFactsDigest: "digest-1", acknowledgeDisconnect: true },
+    ]);
+  });
+});
+
+// A step the page cannot show as a sign-in must not leave a blank card.
+test("an owner step with no setup card shows the generic sentence and Try again, never nothing", async () => {
+  const unknownStep = { ...trialConsentAction, id: "other-step", step: { ...trialConsentAction.step, actor: "administrator", purpose: "configure" } };
+  const handler = host({
+    "/drafts": ok(draftWith([unknownStep])),
+    "/setups": ok({ operationId: "op-x" }),
+  });
+  await withScreen(handler, async ({ text, container }) => {
+    assert.match(text(), /couldn't turn on/);
+    assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Try again"));
   });
 });

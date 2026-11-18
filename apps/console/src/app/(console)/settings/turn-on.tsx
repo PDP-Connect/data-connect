@@ -16,8 +16,11 @@ export function TurnOnCard({
   busy,
   changed,
   onTurnOn,
+  steps = [],
 }: {
   review: Review;
+  /** Owner steps the route approval satisfies (the trial's consent). Their facts are shown here, beside the review's. */
+  steps?: Action[];
   busy: boolean;
   /** Labels of the facts that changed since the owner last saw them. */
   changed: string[] | null;
@@ -29,7 +32,8 @@ export function TurnOnCard({
     consent?.scope?.kind === "route" &&
     consent.facts !== undefined &&
     consent.disclosures != null &&
-    candidate.consentFactsDigest === consent.consentFactsDigest;
+    candidate.consentFactsDigest === consent.consentFactsDigest &&
+    steps.every((step) => step.consent?.facts !== undefined && step.consent.disclosures != null);
   const { shown, unknown } = splitFacts(consent?.facts ?? []);
   return (
     <section aria-label="Turn on" className="grid gap-4">
@@ -42,6 +46,9 @@ export function TurnOnCard({
         <ul className="grid gap-2">
           {disclosureLines(candidate).map((line) => (
             <li key={line}>{line}</li>
+          ))}
+          {steps.map((step) => (
+            <li key={step.id}>{plain(step.disclosure.text)}</li>
           ))}
         </ul>
       ) : (
@@ -60,6 +67,13 @@ export function TurnOnCard({
           <ConsentDisclosures value={consent.disclosures} />
           <ConsentFacts facts={shown} providerId={candidate.providerId} />
           <UnknownFactsCount count={unknown} service={candidate.display.label} />
+          {steps.map((step) => (
+            <div className="grid gap-2" key={step.id}>
+              <h4 className="pdpp-label">{plain(step.label)}</h4>
+              {step.instructions ? <p className="pdpp-caption break-words">{step.instructions}</p> : null}
+              <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} providerId={candidate.providerId} />
+            </div>
+          ))}
         </details>
       ) : null}
     </section>
