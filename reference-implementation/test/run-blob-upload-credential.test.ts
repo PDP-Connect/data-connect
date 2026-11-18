@@ -290,3 +290,130 @@ test("a credential from an earlier run stays rejected after a later run starts f
     await closeTestServer(server);
   }
 });
+
+async function schedulerCredentialFixture(
+  overrides: Partial<import("../runtime/scheduler/run-executor.ts").RunExecutorDeps> = {}
+) {
+  const { createRunExecutor } = await import("../runtime/scheduler/run-executor.ts");
+  const { projectRunAutomationPolicy } = await import("../runtime/run-automation-policy.ts");
+  const history: import("../runtime/scheduler-domain-types.ts").RunRecord[] = [];
+  const completed: typeof history = [];
+  const persisted: import("../server/stores/scheduler-store.ts").SchedulerRunHistoryRecord[] = [];
+  const removed: string[] = [];
+  const executor = createRunExecutor({
+    admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId }) => ({
+      connectorId, connectorInstanceId: connectorInstanceId!, ownerSubjectId: ownerSubjectId!,
+    }),
+    getState: async () => null,
+    handleGrantFailureDisable: () => undefined,
+    isManagedConnector: () => false,
+    markNeedsHuman: () => undefined,
+    maxRunWallClockMs: 0,
+    onInteraction: async () => ({ status: "cancelled", type: "INTERACTION_RESPONSE" }),
+    onRunComplete: (record) => { completed.push(record); },
+    persistLastRunTime: () => undefined,
+    recordAndNotify: (record) => { completed.push(record); return record; },
+    referenceBaseUrl: null,
+    registerRunCancellation: null,
+    resolveStaticSecretRunEnv: null,
+    rsUrl: "http://localhost.invalid",
+    runManagedConnectorViaController: null,
+    runtime: {
+      announcedBackoffClass: new Map(), announcedBlockedClass: new Map(),
+      exhaustedGrants: new Set(), history, running: true,
+    },
+    schedulerStore: {
+      appendRunHistory: async (record) => { persisted.push(record); },
+      upsertActiveRun: async () => true,
+      deleteActiveRun: async (_instanceId, runId) => { removed.push(runId); },
+    },
+    setState: async () => undefined,
+    ...overrides,
+  });
+  const run = () => executor.launchRun({
+    connectorId: "amazon", connectorInstanceId: "cin_scheduler_blob", connectorPath: "/not-spawned.ts",
+    intervalMs: 60_000, manifest: CONTROLLER_MANIFEST, ownerSubjectId: OWNER,
+    ownerToken: "synthetic-parent-only", maxRetries: 2,
+  }, false, projectRunAutomationPolicy({ triggerKind: "scheduled" }));
+  return { run, history, completed, persisted, removed };
+}
+
+test("scheduler registration failure fails the attempt without launching and revokes partial registration", async (t) => {
+  const registered: string[] = [];
+  const revoked: string[] = [];
+  const launch = t.mock.fn(async () => ({ status: "succeeded" as const }));
+  const fixture = await schedulerCredentialFixture({
+    runConnectorImpl: launch,
+    blobUploadCredentialHooks: {
+      register: ({ runId }) => { registered.push(runId); throw new Error("partial registration"); },
+      revoke: ({ runId }) => { revoked.push(runId); },
+    },
+  });
+  const result = await fixture.run();
+  assert.equal(launch.mock.callCount(), 0);
+  assert.equal(registered.length, 1, "permission failure is not retried");
+  assert.deepEqual(revoked, registered);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failureReason, "permission_error");
+  assert.equal(result.terminalReason, "permission_error");
+  assert.equal(result.error, "blob_upload_credential_unavailable");
+  assert.equal(result.runId, registered[0]);
+  assert.deepEqual(fixture.history, [result]);
+  assert.deepEqual(fixture.completed, [result]);
+  assert.equal(fixture.persisted.length, 1, "uses existing durable attempt history");
+  assert.equal(fixture.persisted[0]?.failureReason, "permission_error");
+  assert.equal(fixture.persisted[0]?.status, "failed");
+  assert.equal(fixture.persisted[0]?.runId, registered[0]);
+  assert.deepEqual(fixture.removed, registered);
+});
+
+test("scheduler revokes even when cancellation unregister throws", async (t) => {
+  const registered: string[] = [];
+  const revoked: string[] = [];
+  const log = t.mock.method(console, "error", () => undefined);
+  const unregister = t.mock.fn(() => { throw new Error("unregister failed"); });
+  const fixture = await schedulerCredentialFixture({
+    blobUploadCredentialHooks: {
+      register: ({ runId }) => { registered.push(runId); },
+      revoke: ({ runId }) => { revoked.push(runId); },
+    },
+    registerRunCancellation: () => unregister,
+    runConnectorImpl: async (call) => {
+      assert.ok(call.blobUploadToken);
+      call.onStarted?.({ run_id: call.runId ?? null, trace_id: "trace_test" });
+      return { status: "succeeded", run_id: call.runId ?? "run_test" };
+    },
+  });
+  assert.equal((await fixture.run()).status, "succeeded");
+  assert.equal(unregister.mock.callCount(), 1);
+  assert.deepEqual(revoked, registered);
+  assert.equal(revoked.length, 1);
+  assert.deepEqual(fixture.removed, registered);
+  assert.equal(log.mock.callCount(), 1);
+});
+
+test("scheduler without hooks still launches with no blob credential", async (t) => {
+  const launch = t.mock.fn(async (call: Parameters<NonNullable<
+    import("../runtime/scheduler/run-executor.ts").RunExecutorDeps["runConnectorImpl"]
+  >>[0]) => {
+    assert.equal(call.blobUploadToken, null);
+    return { status: "succeeded" as const, run_id: call.runId ?? "run_test" };
+  });
+  const fixture = await schedulerCredentialFixture({ runConnectorImpl: launch });
+  assert.equal((await fixture.run()).status, "succeeded");
+  assert.equal(launch.mock.callCount(), 1);
+});
+
+test("scheduler logs a revoke failure once without losing attempt completion", async (t) => {
+  const log = t.mock.method(console, "error", () => undefined);
+  const revoke = t.mock.fn(() => { throw new Error("synthetic revoke error"); });
+  const fixture = await schedulerCredentialFixture({
+    blobUploadCredentialHooks: { register: () => undefined, revoke },
+    runConnectorImpl: async (call) => ({ status: "succeeded", run_id: call.runId ?? "run_test" }),
+  });
+  assert.equal((await fixture.run()).status, "succeeded");
+  assert.equal(revoke.mock.callCount(), 1);
+  assert.equal(log.mock.callCount(), 1);
+  assert.match(String(log.mock.calls[0]?.arguments[0]), /blob upload credential revoke failed/);
+  assert.equal(fixture.removed.length, 1);
+});

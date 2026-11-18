@@ -88,6 +88,8 @@ export interface RunExecutorDeps {
   approvedEnvironmentBindings?: readonly ConnectorEnvironmentBinding[];
   approvedProxyConnectorIds?: readonly string[];
   blobUploadCredentialHooks?: import("../scheduler-domain-types.ts").SchedulerOptions["blobUploadCredentialHooks"];
+  /** Optional launch seam for bounded executor tests; production uses the runtime. */
+  runConnectorImpl?: typeof invokeRunConnector;
   getState: GetStateHandler;
   handleGrantFailureDisable: (reason: string | null | undefined, connectorInstanceId: string) => void;
   isManagedConnector: IsManagedConnectorHandler;
@@ -757,6 +759,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     approvedProxyConnectorIds,
     blobUploadCredentialHooks,
     getState,
+    runConnectorImpl = invokeRunConnector,
     handleGrantFailureDisable,
     isManagedConnector,
     logger: baseLogger = NOOP_RUN_BASE_LOGGER,
@@ -1046,10 +1049,14 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
         runId,
         token,
       });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[scheduler] blob upload credential register failed for ${runId}: ${message}`);
-      return null;
+    } catch {
+      // Do not expose arbitrary hook errors or continue without upload authority.
+      throw Object.assign(new Error("blob_upload_credential_unavailable"), {
+        failure_reason: "permission_error",
+        terminal_reason: "permission_error" as const,
+        run_id: runId,
+        trace_id: call.traceContext?.trace_id ?? null,
+      });
     }
     return token;
   }
@@ -1058,7 +1065,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     try {
       blobUploadCredentialHooks?.revoke({ runId });
     } catch {
-      /* registry shutdown raced run end */
+      // Cleanup remains best-effort, but a failed revoke must be observable.
+      console.error(`[scheduler] blob upload credential revoke failed for ${runId}`);
     }
   }
 
@@ -1099,11 +1107,10 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       traceContext
     );
     const unregisterCancellationBox: { value: (() => void) | null } = { value: null };
-    const blobUploadToken = mintAttemptBlobUploadToken(schedule, call, runId);
 
     const leasedCall: RunConnectorCall = {
       ...call,
-      blobUploadToken,
+      blobUploadToken: null,
       cancelSignal: watchdog.signal,
       onProgress: (msg) => {
         const suppressedWallClock = watchdog.markProgress(extractPhaseBoundary(msg));
@@ -1135,10 +1142,14 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     };
 
     const clear = async (): Promise<void> => {
-      unregisterCancellationBox.value?.();
-      unregisterCancellationBox.value = null;
-      watchdog.clear();
-      if (blobUploadToken) {
+      try {
+        unregisterCancellationBox.value?.();
+      } catch {
+        console.error(`[scheduler] cancellation unregister failed for ${runId}`);
+      } finally {
+        unregisterCancellationBox.value = null;
+        watchdog.clear();
+        // Also revoke if register partly mutated its registry before throwing.
         revokeAttemptBlobUploadToken(runId);
       }
       if (admitted && activeRunStore) {
@@ -1175,7 +1186,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           ),
         };
       }
-      const result = await invokeRunConnector(lease.call);
+      lease.call.blobUploadToken = mintAttemptBlobUploadToken(schedule, lease.call, lease.call.runId!);
+      const result = await runConnectorImpl(lease.call);
       if (watchdog.timedOut()) {
         return { error: runTimedOutError(result, maxRunWallClockMs), kind: "give-up" };
       }
