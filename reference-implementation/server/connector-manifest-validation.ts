@@ -21,6 +21,7 @@ import {
 import {
   canonicalConnectorKey,
   canonicalConnectorKeyFromManifest,
+  connectorIdMustBeKeyShaped,
   isConnectorKey,
 } from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
@@ -2236,10 +2237,10 @@ export function validateConnectorManifest(
   if (hasConnectorKey && !isConnectorKey(manifest.connector_key)) {
     throw invalidConnectorManifest("connector_key must be a non-empty slug-like key, not a URL", code);
   }
+  const canonicalFromConnectorId = canonicalConnectorKey(manifest.connector_id);
   if (hasConnectorId && hasConnectorKey) {
     const connectorId = (manifest.connector_id as string).trim();
     const connectorKey = (manifest.connector_key as string).trim();
-    const canonicalFromConnectorId = canonicalConnectorKey(manifest.connector_id);
     if (canonicalFromConnectorId !== connectorKey) {
       // A registry URL or a legacy alias rewrites to a key; a bare id keeps its own spelling.
       if (canonicalFromConnectorId && canonicalFromConnectorId !== connectorId) {
@@ -2250,6 +2251,13 @@ export function validateConnectorManifest(
         code
       );
     }
+  }
+  if (
+    manifest.connector_id !== undefined &&
+    connectorIdMustBeKeyShaped(manifest.connector_id) &&
+    !isConnectorKey(canonicalFromConnectorId)
+  ) {
+    throw invalidConnectorManifest("connector_id must resolve to a valid connector key", code);
   }
   if (isNonEmptyString(manifest.provider_id)) {
     throw invalidConnectorManifest(
