@@ -280,7 +280,42 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         expectedConfigurationRevision: text(input.expectedConfigurationRevision),
       },
     });
-    return adopted ? { adopted: true } : { adopted: false, reason: "service_has_setup" };
+    if (adopted) return { adopted: true };
+    const known = await ctx.setups.get(providerId);
+    if (known?.setup?.operationId === operationId) return { adopted: true };
+    // A second live setup for this service. The host still holds it, so it is
+    // cancelled if the host can do that with nothing left to remove. If not,
+    // the journal keeps its id as a leftover that needs cleaning up.
+    try {
+      const cancelled = projectSetupOperation(await service().cancelSetupOperation({ operationId, providerId }));
+      const leftover = cancelled.resources.some((item) => item.removal === "required" || item.removal === "unconfirmed");
+      if (cancelled.state === "cancelled" && !leftover) return { adopted: false, reason: "cancelled" };
+    } catch {
+      // The host could not cancel it. Treat it as a leftover below.
+    }
+    await ctx.setups.addCleanup({ providerId, providerLabel: text(input.providerLabel), operationId });
+    return { adopted: false, reason: "needs_cleanup" };
+  });
+  // One-time takeover of a draft an older console kept in the browser.
+  post("/setups/adopt-draft", async (request) => {
+    const input = body(request);
+    const providerId = text(input.providerId);
+    const draftId = text(input.draftId);
+    try {
+      await service().reload(providerId, draftId);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "draft_not_found") {
+        return { adopted: false, reason: "unknown" };
+      }
+      throw error;
+    }
+    const { adopted } = await ctx.setups.adoptDraft({
+      providerId,
+      providerLabel: (await ctx.setups.get(providerId))?.providerLabel ?? (await service().providerLabel(providerId)),
+      draftId,
+      usage: typeof input.usage === "string" && input.usage ? input.usage : null,
+    });
+    return adopted ? { adopted: true } : { adopted: false, reason: "service_has_draft" };
   });
   post("/setup-operations/:id/handoff", async (request) => {
     const input = body(request);
