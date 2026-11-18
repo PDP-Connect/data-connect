@@ -42,6 +42,14 @@ use tauri_plugin_notification::NotificationExt;
 pub(crate) const CONSOLE_WINDOW_LABEL: &str = "console";
 pub(crate) const RECOVERY_WINDOW_LABEL: &str = "recovery";
 const TRAY_ICON_ID: &str = "dataconnect-tray";
+
+/// The tray id names the icon file the desktop environment reads
+/// (`$XDG_RUNTIME_DIR/tray-icon/tray-icon-<id>-0.png`), and that directory is
+/// shared by every app of the user. A profile build gets its own id so it never
+/// rewrites or deletes the installed app's icon file.
+fn tray_icon_id() -> String {
+    crate::profile::scoped_id(TRAY_ICON_ID)
+}
 const DEFAULT_CONSOLE_URL: &str = "http://localhost:3001";
 /// How long one readiness ROUND waits before reporting the console as not
 /// yet answering. Reaching it is not a verdict that the console is broken
@@ -134,6 +142,9 @@ enum UnifiedStatus {
     // open waiting for a recovery code), so the tray should say so rather
     // than reuse the generic "something went wrong, nothing to do" label.
     NeedsRecovery,
+    // Attached, and the server ended this computer's session: the attach
+    // window is open with "Connect again". Never retried on its own.
+    NeedsPairing,
 }
 
 impl UnifiedStatus {
@@ -146,6 +157,7 @@ impl UnifiedStatus {
             Self::Stopped => "Status: Stopped",
             Self::Error => "Status: Error",
             Self::NeedsRecovery => "Status: Needs recovery code",
+            Self::NeedsPairing => "Status: Connect again",
         }
     }
 }
@@ -333,6 +345,8 @@ enum TrayAction {
     OpenConsole,
     OpenBrowser,
     ShowLogs,
+    AttachServer,
+    DetachServer,
     Quit,
     Unknown,
 }
@@ -342,6 +356,8 @@ fn tray_action_for_menu_id(id: &str) -> TrayAction {
         "open-console" => TrayAction::OpenConsole,
         "open-browser" => TrayAction::OpenBrowser,
         "show-logs" => TrayAction::ShowLogs,
+        "attach-server" => TrayAction::AttachServer,
+        "detach-server" => TrayAction::DetachServer,
         "quit" => TrayAction::Quit,
         _ => TrayAction::Unknown,
     }
@@ -475,9 +491,22 @@ fn report_console_port_outcome(
     }
 }
 
+/// The console URL when no local stack runs: `DATACONNECT_CONSOLE_URL`,
+/// else the saved server (only without an environment override), else the
+/// default.
+fn console_url_source(environment: Option<String>, target: &crate::attach::AttachTarget) -> String {
+    match (environment, target) {
+        (Some(url), _) => url,
+        (None, crate::attach::AttachTarget::Saved(attachment)) => attachment.origin.clone(),
+        (None, _) => DEFAULT_CONSOLE_URL.to_string(),
+    }
+}
+
 fn configured_console_url() -> Result<String, String> {
-    let raw = std::env::var("DATACONNECT_CONSOLE_URL")
-        .unwrap_or_else(|_| DEFAULT_CONSOLE_URL.to_string());
+    let raw = console_url_source(
+        std::env::var("DATACONNECT_CONSOLE_URL").ok(),
+        &crate::attach::current_target(),
+    );
     let mut url: tauri::Url = raw
         .parse()
         .map_err(|error| format!("Invalid DATACONNECT_CONSOLE_URL: {error}"))?;
@@ -490,12 +519,91 @@ fn configured_console_url() -> Result<String, String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
+/// Which server the tray speaks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TrayScope {
+    Local,
+    Attached {
+        host: String,
+    },
+    /// `DATACONNECT_RI_URL` / `DATACONNECT_CONSOLE_URL`: not changed here.
+    Environment {
+        host: String,
+    },
+}
+
+fn tray_scope_for(target: &crate::attach::AttachTarget, console_url: Option<String>) -> TrayScope {
+    use crate::attach::AttachTarget;
+    match target {
+        AttachTarget::Local => TrayScope::Local,
+        AttachTarget::Saved(attachment) => TrayScope::Attached {
+            host: attachment.host(),
+        },
+        AttachTarget::Environment => TrayScope::Environment {
+            host: console_url
+                .and_then(|url| url.parse::<tauri::Url>().ok())
+                .and_then(|url| {
+                    let host = url.host_str()?.to_string();
+                    Some(match url.port() {
+                        Some(port) => format!("{host}:{port}"),
+                        None => host,
+                    })
+                })
+                .unwrap_or_else(|| "a server".to_string()),
+        },
+    }
+}
+
+fn tray_scope() -> TrayScope {
+    let target = crate::attach::current_target();
+    let console_url = match target {
+        crate::attach::AttachTarget::Environment => configured_console_url().ok(),
+        _ => None,
+    };
+    tray_scope_for(&target, console_url)
+}
+
 fn build_tray_menu<M, R>(manager: &M, status: UnifiedStatus) -> tauri::Result<Menu<R>>
 where
     M: Manager<R>,
     R: Runtime,
 {
+    build_tray_menu_for(manager, status, &tray_scope())
+}
+
+fn build_tray_menu_for<M, R>(
+    manager: &M,
+    status: UnifiedStatus,
+    scope: &TrayScope,
+) -> tauri::Result<Menu<R>>
+where
+    M: Manager<R>,
+    R: Runtime,
+{
     let quitting = status == UnifiedStatus::Quitting;
+    let scope_label = match scope {
+        TrayScope::Local => "This computer".to_string(),
+        TrayScope::Attached { host } => format!("Connected to {host}"),
+        TrayScope::Environment { host } => format!("Connected to {host} (set by environment)"),
+    };
+    let scope_item = MenuItem::with_id(manager, "server-scope", scope_label, false, None::<&str>)?;
+    let server_item = match scope {
+        TrayScope::Local => Some(MenuItem::with_id(
+            manager,
+            "attach-server",
+            "Connect to a server...",
+            !quitting,
+            None::<&str>,
+        )?),
+        TrayScope::Attached { host } => Some(MenuItem::with_id(
+            manager,
+            "detach-server",
+            format!("Disconnect from {host}"),
+            !quitting,
+            None::<&str>,
+        )?),
+        TrayScope::Environment { .. } => None,
+    };
     let status_item = MenuItem::with_id(manager, "status", status.label(), false, None::<&str>)?;
     let open_console = MenuItem::with_id(
         manager,
@@ -520,24 +628,47 @@ where
     // A second click while disabled is a no-op, not a second concurrent
     // shutdown, because request_shutdown (lib.rs/unified.rs) is idempotent.
     let quit = MenuItem::with_id(manager, "quit", "Quit", !quitting, None::<&str>)?;
-    Menu::with_items(
-        manager,
-        &[
-            &status_item,
-            &open_console,
-            &open_browser,
-            &show_logs,
-            &quit,
-        ],
-    )
+    // Only a test-profile build has a header, so its tray menu says which
+    // build it is before any item can be clicked.
+    let header_item = match crate::profile::current() {
+        Some(_) => Some(MenuItem::with_id(
+            manager,
+            "profile-header",
+            crate::profile::decorate("DataConnect"),
+            false,
+            None::<&str>,
+        )?),
+        None => None,
+    };
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<R>> = Vec::new();
+    if let Some(header_item) = &header_item {
+        items.push(header_item);
+    }
+    items.extend([
+        &scope_item as &dyn tauri::menu::IsMenuItem<R>,
+        &status_item,
+        &open_console,
+        &open_browser,
+    ]);
+    if let Some(server_item) = &server_item {
+        items.push(server_item);
+    }
+    items.push(&show_logs);
+    items.push(&quit);
+    Menu::with_items(manager, &items)
 }
 
 pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(UnifiedRuntimeState::default());
+    app.manage(crate::attach_window::AttachWindowState::default());
+    // Before the tray and the bootstrap read it: which server this process
+    // uses is fixed for its lifetime.
+    crate::attach::init_keyring_service(&app.config().identifier);
+    crate::attach::init_saved_attachment(&app.path().app_data_dir()?);
     let menu = build_tray_menu(app, UnifiedStatus::Starting)?;
-    let mut tray_builder = TrayIconBuilder::with_id(TRAY_ICON_ID)
+    let mut tray_builder = TrayIconBuilder::with_id(tray_icon_id())
         .menu(&menu)
-        .tooltip("DataConnect")
+        .tooltip(crate::profile::decorate("DataConnect"))
         .on_menu_event(handle_tray_menu_event);
     if let Some(icon) = app.default_window_icon().cloned() {
         tray_builder = tray_builder.icon(icon);
@@ -561,6 +692,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     // passes should_show = true regardless of this preference.
     let should_show = !crate::commands::read_start_minimized_preference();
     let app_handle = app.handle().clone();
+    let _ = NAVIGATION_DIALOG_APP.set(app_handle.clone());
     // Before anything is spawned: a previous session's orphan may still be
     // holding the loopback port this session is about to ask for.
     reap_orphans_from_dead_sessions(&app_handle);
@@ -577,6 +709,13 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     crate::owner_credential::spawn_owner_password_window_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_os_reauth_watcher(app_handle.clone());
     crate::owner_credential::spawn_owner_password_stack_restart_watcher(app_handle.clone());
+    // A profile build has no local stack and nothing saved yet: ask which
+    // server to connect to instead of showing only a tray icon.
+    if opens_attach_window_at_launch(crate::profile::current(), &crate::attach::current_target()) {
+        set_status(&app_handle, UnifiedStatus::NeedsPairing);
+        crate::attach_window::open_attach_window(&app_handle, Default::default());
+        return Ok(());
+    }
     tauri::async_runtime::spawn(async move {
         if let Err(failure) =
             bootstrap_and_open_console(app_handle.clone(), should_show, None, None).await
@@ -588,9 +727,9 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Unified mode does not build the legacy window, which is the only consumer
-/// of `vana://` links. Record each one received so a dropped link shows in
-/// the log instead of vanishing. Whether unified mode should serve these
-/// links is an open product decision; this boundary only reports.
+/// of `vana://` links. Every link is recorded so a dropped link shows in the
+/// log instead of vanishing. Whether unified mode should serve those links
+/// is an open product decision; this boundary only reports.
 fn report_unhandled_deep_links(app: &tauri::App) {
     use tauri_plugin_deep_link::DeepLinkExt;
     if let Ok(Some(urls)) = app.deep_link().get_current() {
@@ -598,7 +737,7 @@ fn report_unhandled_deep_links(app: &tauri::App) {
             log::warn!("{}", unhandled_deep_link_notice(url));
         }
     }
-    app.deep_link().on_open_url(|event| {
+    app.deep_link().on_open_url(move |event| {
         for url in &event.urls() {
             log::warn!("{}", unhandled_deep_link_notice(url));
         }
@@ -674,6 +813,19 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 set_status(app, UnifiedStatus::Error);
             }
         }
+        TrayAction::AttachServer => crate::attach_window::open_attach_window(
+            app,
+            crate::attach_window::AttachPrefill::default(),
+        ),
+        TrayAction::DetachServer => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::attach_window::detach_and_restart(&app).await {
+                    log::error!("Detach failed: {error}");
+                    set_status(&app, UnifiedStatus::Error);
+                }
+            });
+        }
         TrayAction::Quit => {
             log::info!("Unified tray quit requested; deferring shutdown to exit handler");
             app.exit(0);
@@ -682,14 +834,18 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
+/// A profile build with no saved attachment and no environment override has
+/// no server to show, so it opens the "Connect to a server" window.
+fn opens_attach_window_at_launch(
+    profile: Option<&str>,
+    target: &crate::attach::AttachTarget,
+) -> bool {
+    profile.is_some() && *target == crate::attach::AttachTarget::Local
+}
+
+/// No local stack: an environment override or a saved server attachment.
 pub(crate) fn attach_mode() -> bool {
-    ["DATACONNECT_RI_URL", "DATACONNECT_CONSOLE_URL"]
-        .into_iter()
-        .any(|name| {
-            std::env::var(name)
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty())
-        })
+    crate::attach::current_target() != crate::attach::AttachTarget::Local
 }
 
 fn unified_profile() -> String {
@@ -2727,6 +2883,162 @@ impl From<String> for BootstrapFailure {
     }
 }
 
+/// What a launch attached to a saved server does, from the session check.
+#[derive(Debug, PartialEq, Eq)]
+enum AttachedStartup {
+    OpenConsole {
+        session: String,
+    },
+    /// Open the attach window to pair again. Never retried on its own.
+    /// `forget_session` only when a stored session was read and the server
+    /// refused it: a locked keychain must not lose the pairing.
+    PairAgain {
+        prefill: crate::attach_window::AttachPrefill,
+        forget_session: bool,
+    },
+    /// Keep the pairing; show the error and Disconnect.
+    Unreachable {
+        prefill: crate::attach_window::AttachPrefill,
+        error: String,
+    },
+    /// Something other than the pinned server answered and nothing was sent.
+    /// Keeps the pairing record and the stored session.
+    IdentityChanged {
+        prefill: crate::attach_window::AttachPrefill,
+    },
+}
+
+fn attached_startup(
+    origin: &str,
+    pinned_id: Option<String>,
+    launch: crate::attach::AttachedLaunch,
+    had_session: bool,
+) -> AttachedStartup {
+    use crate::attach::AttachedLaunch;
+    use crate::attach_window::AttachPrefill;
+    let prefill = |notice: String| AttachPrefill {
+        input: Some(origin.to_string()),
+        notice: Some(notice),
+        identity_changed: None,
+    };
+    match launch {
+        AttachedLaunch::OpenConsole { session } => AttachedStartup::OpenConsole { session },
+        AttachedLaunch::PairAgain { notice } => AttachedStartup::PairAgain {
+            prefill: prefill(notice),
+            forget_session: had_session,
+        },
+        AttachedLaunch::Unreachable { message } => AttachedStartup::Unreachable {
+            prefill: prefill(message.clone()),
+            error: message,
+        },
+        AttachedLaunch::IdentityChanged { answering } => AttachedStartup::IdentityChanged {
+            prefill: AttachPrefill {
+                input: Some(origin.to_string()),
+                notice: None,
+                identity_changed: Some(crate::attach_window::IdentityChanged {
+                    pinned_id,
+                    answering_id: answering,
+                }),
+            },
+        },
+    }
+}
+
+/// The session side of an attached launch, without a window: keep a session
+/// the previous process handed over, check the stored session, and delete
+/// it when the server ended it.
+async fn resolve_attached_startup(
+    attachment: &crate::attach::Attachment,
+    keychain: &dyn crate::attach::SessionStore,
+    memory: &dyn crate::attach::SessionStore,
+    handed_off: Option<String>,
+) -> AttachedStartup {
+    use crate::attach::SessionLookup;
+    let origin = attachment.origin.as_str();
+    if let Some(session) = handed_off {
+        let _ = memory.save(origin, &session);
+    }
+    let lookup = crate::attach::load_session(keychain, memory, origin);
+    let had_session = matches!(lookup, SessionLookup::Found(_));
+    let launch =
+        crate::attach::decide_attached_launch(origin, attachment.server_key.as_deref(), lookup)
+            .await;
+    let startup = attached_startup(origin, attachment.server_id(), launch, had_session);
+    if let AttachedStartup::PairAgain {
+        forget_session: true,
+        ..
+    } = &startup
+    {
+        if let Err(error) = crate::attach::forget_session(keychain, memory, origin) {
+            log::warn!("Could not delete the ended attach session: {error}");
+        }
+    }
+    startup
+}
+
+/// Launch attached to a saved server: no local sidecars and no local owner
+/// password. The stored session becomes the console cookie.
+async fn open_saved_attachment(
+    app: &AppHandle,
+    attachment: crate::attach::Attachment,
+    should_show: bool,
+    preserved_path: Option<String>,
+) -> Result<(), String> {
+    let startup = resolve_attached_startup(
+        &attachment,
+        &crate::attach::KeychainSessionStore,
+        crate::attach::process_memory_store(),
+        crate::attach::take_handed_off_session(),
+    )
+    .await;
+    let origin = attachment.origin;
+    match startup {
+        AttachedStartup::OpenConsole { session } => {
+            finish_bootstrap(
+                app,
+                OwnerSignIn::Session(session),
+                origin.clone(),
+                origin,
+                false,
+                should_show,
+                "",
+                preserved_path,
+                None,
+            )
+            .await
+        }
+        AttachedStartup::PairAgain {
+            prefill,
+            forget_session,
+        } => {
+            log::warn!("The pairing with {origin} ended; asking the owner to pair again");
+            if forget_session {
+                crate::attach_window::forget_console_session_cookie(app, &origin).await;
+            }
+            set_status(app, UnifiedStatus::NeedsPairing);
+            crate::attach_window::open_attach_window(app, prefill);
+            Ok(())
+        }
+        AttachedStartup::IdentityChanged { prefill } => {
+            log::error!("The server at {origin} did not prove its pinned identity; sent nothing");
+            // The console cookie of this server is not trusted either.
+            crate::attach_window::forget_console_session_cookie(app, &origin).await;
+            set_status(app, UnifiedStatus::NeedsPairing);
+            crate::attach_window::open_attach_window(app, prefill);
+            Ok(())
+        }
+        AttachedStartup::Unreachable { prefill, error } => {
+            crate::attach_window::show_notification(
+                app,
+                "DataConnect cannot reach the server",
+                &error,
+            );
+            crate::attach_window::open_attach_window(app, prefill);
+            Err(error)
+        }
+    }
+}
+
 async fn bootstrap_and_open_console(
     app: AppHandle,
     should_show: bool,
@@ -2759,6 +3071,12 @@ async fn bootstrap_and_open_console_with_stack_guard(
     owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
+
+    if let crate::attach::AttachTarget::Saved(attachment) = crate::attach::current_target() {
+        return open_saved_attachment(&app, attachment, should_show, preserved_path)
+            .await
+            .map_err(BootstrapFailure::from);
+    }
 
     let attach = attach_mode();
     // Attach mode starts no stack, so it can carry out no restart request.
@@ -2823,7 +3141,7 @@ async fn bootstrap_and_open_console_with_stack_guard(
 
     finish_bootstrap(
         &app,
-        &password,
+        OwnerSignIn::Password(&password),
         ri_origin,
         console_url,
         managed,
@@ -2834,6 +3152,13 @@ async fn bootstrap_and_open_console_with_stack_guard(
     )
     .await
     .map_err(BootstrapFailure::from)
+}
+
+/// How `finish_bootstrap` gets the owner session: sign in to the local RI
+/// with the owner password, or use a session a saved pairing holds.
+enum OwnerSignIn<'a> {
+    Password(&'a str),
+    Session(String),
 }
 
 /// The shared tail of bootstrap once an RI origin and console URL exist,
@@ -2859,7 +3184,7 @@ async fn bootstrap_and_open_console_with_stack_guard(
 /// `StopReason`'s doc comment for the live incident this fixes.
 async fn finish_bootstrap(
     app: &AppHandle,
-    password: &str,
+    sign_in: OwnerSignIn<'_>,
     ri_origin: String,
     console_url: String,
     managed: bool,
@@ -2870,19 +3195,22 @@ async fn finish_bootstrap(
 ) -> Result<(), String> {
     let host_header = ri_readiness_host_header(trusted_hosts);
     let ri_origin_for_state = ri_origin.clone();
-    let login = match login_reference_server_with_password_and_host(
-        ri_origin,
-        password,
-        host_header.as_deref(),
-        Some(DESKTOP_OWNER_SESSION_LABEL),
-    )
-    .await
-    {
-        Ok(login) => login,
-        Err(error) => {
-            teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
-            return Err(error);
-        }
+    let session_cookie = match sign_in {
+        OwnerSignIn::Password(password) => match login_reference_server_with_password_and_host(
+            ri_origin,
+            password,
+            host_header.as_deref(),
+            Some(DESKTOP_OWNER_SESSION_LABEL),
+        )
+        .await
+        {
+            Ok(login) => login.session_cookie,
+            Err(error) => {
+                teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
+                return Err(error);
+            }
+        },
+        OwnerSignIn::Session(session) => session,
     };
 
     // A slow console is not a broken console. This retries with backoff for
@@ -2911,7 +3239,7 @@ async fn finish_bootstrap(
             return Err(error);
         }
     };
-    let owner_cookie = match owner_session_cookie(&console_origin, &login.session_cookie) {
+    let owner_cookie = match owner_session_cookie(&console_origin, &session_cookie) {
         Ok(cookie) => cookie,
         Err(error) => {
             teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
@@ -2943,8 +3271,7 @@ async fn finish_bootstrap(
         *state
             .session_cookie
             .lock()
-            .map_err(|_| "Unified runtime state is poisoned".to_string())? =
-            Some(login.session_cookie);
+            .map_err(|_| "Unified runtime state is poisoned".to_string())? = Some(session_cookie);
         Ok(())
     })();
     if let Err(error) = state_update {
@@ -3287,7 +3614,7 @@ async fn import_database_encryption_recovery_code_with_stack_guard(
 
     finish_bootstrap(
         &app,
-        &password,
+        OwnerSignIn::Password(&password),
         ri_origin,
         console_url,
         true,
@@ -4253,6 +4580,7 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
         .domain(host)
         .path("/")
         .http_only(true)
+        .secure(url.scheme() == "https")
         .build())
 }
 
@@ -4349,28 +4677,133 @@ fn open_external_dry_run_is_enabled() -> bool {
 /// `opened-externally` (denied in-app, handed to `open::that_detached`),
 /// `refused` (denied, non-`https:` scheme, nothing opened). This is the
 /// single place all three are decided, so this is also the single place
-/// that needs to log them.
+/// that needs to log them. While attached to a remote server a fourth,
+/// `declined`, logs an owner's "Cancel" on the confirm dialog.
 fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
+    decide_console_navigation_with(
+        url,
+        console_origin,
+        matches!(
+            crate::attach::current_target(),
+            crate::attach::AttachTarget::Saved(_)
+        ),
+        ask_before_opening_externally,
+        open_external_url,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationPolicy {
+    AllowInternal,
+    OpenExternally,
+    /// Attached to a remote server: the page comes from that server, and
+    /// the webview gives no signal that the owner clicked, so the owner
+    /// confirms before the system browser opens anything.
+    ConfirmThenOpen,
+    Refuse,
+}
+
+fn console_navigation_policy(
+    url: &tauri::Url,
+    console_origin: &tauri::Url,
+    attached: bool,
+) -> NavigationPolicy {
     if is_console_origin(url, console_origin) {
-        log::info!("{}", console_navigation_notice(url, "allowed-internal"));
-        return true;
-    }
-    if url.scheme() == "https" {
-        if open_external_dry_run_is_enabled() {
-            log::info!("{}", console_navigation_notice(url, "opened-externally (dry run)"));
-        } else {
-            match open::that_detached(url.as_str()) {
-                Ok(()) => log::info!("{}", console_navigation_notice(url, "opened-externally")),
-                // Opener errors may echo the raw URL argument.
-                Err(_) => log::error!(
-                    "{}", console_navigation_notice(url, "opened-externally failed to open")
-                ),
-            }
-        }
+        NavigationPolicy::AllowInternal
+    } else if url.scheme() != "https" {
+        NavigationPolicy::Refuse
+    } else if attached {
+        NavigationPolicy::ConfirmThenOpen
     } else {
-        log::warn!("{}", console_navigation_notice(url, "refused (non-https scheme)"));
+        NavigationPolicy::OpenExternally
+    }
+}
+
+/// `decide_console_navigation` with the confirm dialog and the opener
+/// injected. `confirm` gets the target origin and a reply callback; it must
+/// not block, because navigation handlers run on the UI thread.
+fn decide_console_navigation_with(
+    url: &tauri::Url,
+    console_origin: &tauri::Url,
+    attached: bool,
+    confirm: impl FnOnce(String, Box<dyn FnOnce(bool) + Send>),
+    open: impl FnOnce(&tauri::Url) + Send + 'static,
+) -> bool {
+    match console_navigation_policy(url, console_origin, attached) {
+        NavigationPolicy::AllowInternal => {
+            log::info!("{}", console_navigation_notice(url, "allowed-internal"));
+            return true;
+        }
+        NavigationPolicy::OpenExternally => open(url),
+        NavigationPolicy::ConfirmThenOpen => {
+            let target = url.clone();
+            confirm(
+                url.origin().ascii_serialization(),
+                Box::new(move |accepted| {
+                    if accepted {
+                        open(&target);
+                    } else {
+                        log::info!("{}", console_navigation_notice(&target, "declined"));
+                    }
+                }),
+            );
+        }
+        NavigationPolicy::Refuse => {
+            log::warn!(
+                "{}",
+                console_navigation_notice(url, "refused (non-https scheme)")
+            );
+        }
     }
     false
+}
+
+/// Hand an `https:` URL to the system browser, or only log it when
+/// `PDPP_OPEN_EXTERNAL_DRY_RUN=1`.
+fn open_external_url(url: &tauri::Url) {
+    if open_external_dry_run_is_enabled() {
+        log::info!(
+            "{}",
+            console_navigation_notice(url, "opened-externally (dry run)")
+        );
+        return;
+    }
+    match open::that_detached(url.as_str()) {
+        Ok(()) => log::info!("{}", console_navigation_notice(url, "opened-externally")),
+        // Opener errors may echo the raw URL argument.
+        Err(_) => log::error!(
+            "{}",
+            console_navigation_notice(url, "opened-externally failed to open")
+        ),
+    }
+}
+
+/// The app handle the navigation confirm dialog needs. Set once in `setup`.
+static NAVIGATION_DIALOG_APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
+/// The confirm text. `decide_console_navigation_with` passes the origin
+/// only: a path or query can carry tokens, and the owner decides on the
+/// site, not the page.
+fn external_open_question(origin: &str) -> String {
+    format!("The attached server's page wants to open {origin} in your browser.")
+}
+
+fn ask_before_opening_externally(origin: String, reply: Box<dyn FnOnce(bool) + Send>) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let Some(app) = NAVIGATION_DIALOG_APP.get() else {
+        log::warn!("on_navigation: no app handle for the confirm dialog; not opening");
+        reply(false);
+        return;
+    };
+    app.dialog()
+        .message(external_open_question(&origin))
+        .title("Open in your browser?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Open".to_string(),
+            "Cancel".to_string(),
+        ))
+        .show(reply);
 }
 
 /// Never format the raw URL (or an opener error) into a navigation log.
@@ -4570,7 +5003,7 @@ async fn create_or_update_console_window(
     let console_origin_for_navigation = url.clone();
     let window =
         WebviewWindowBuilder::new(app, CONSOLE_WINDOW_LABEL, WebviewUrl::External(blank_url))
-            .title("DataConnect")
+            .title(crate::profile::decorate("DataConnect"))
             .visible(false)
             // Sizing grounded in measured prior art, not a round number —
             // see ai/research/desktop-app-packaging/vscode-electron-window-state-sizing-precedent-2026.md.
@@ -4761,7 +5194,7 @@ fn set_status(app: &AppHandle, status: UnifiedStatus) {
         let mut state = state;
         *state = status;
     }
-    let Some(tray) = app.tray_by_id(TRAY_ICON_ID) else {
+    let Some(tray) = app.tray_by_id(&tray_icon_id()) else {
         return;
     };
     match build_tray_menu(app, status) {
@@ -4785,6 +5218,14 @@ mod tests {
     use std::thread;
     use std::time::Instant;
     use tempfile::{tempdir, NamedTempFile};
+
+    #[test]
+    fn only_a_profile_build_without_a_server_opens_the_attach_window_at_launch() {
+        use crate::attach::AttachTarget;
+        assert!(opens_attach_window_at_launch(Some("p"), &AttachTarget::Local));
+        assert!(!opens_attach_window_at_launch(None, &AttachTarget::Local));
+        assert!(!opens_attach_window_at_launch(Some("p"), &AttachTarget::Environment));
+    }
 
     #[test]
     fn unhandled_deep_link_notice_omits_the_grant_secret() {
@@ -8387,6 +8828,18 @@ setInterval(() => {}, 1000);
         assert_eq!(cookie.http_only(), Some(true));
     }
 
+    /// Like the server's own cookie (`owner-session.ts`), the session cookie
+    /// is Secure on an https origin, so it is never sent over plain http.
+    #[test]
+    fn owner_session_cookie_is_secure_on_https_only() {
+        let https: tauri::Url = "https://dc.example.com/".parse().expect("test url");
+        let cookie = owner_session_cookie(&https, "session-value").expect("session cookie");
+        assert_eq!(cookie.secure(), Some(true));
+        let http: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
+        let cookie = owner_session_cookie(&http, "session-value").expect("session cookie");
+        assert_ne!(cookie.secure(), Some(true));
+    }
+
     /// The console webview must send both cookies the desktop sets on it.
     /// wry turns a cookie with no domain into a WebKitGTK cookie with domain
     /// "", which WebKitGTK stores and never sends; the reveal cookie had no
@@ -8778,6 +9231,599 @@ setInterval(() => {}, 1000);
             !allowed,
             "decide_console_navigation must still deny in-app navigation for an \
              https: external url even in dry-run mode"
+        );
+    }
+
+    /// Runs one navigation through the injectable decision and records
+    /// whether it asked, what the question named, and whether it opened.
+    fn navigate(url: &str, attached: bool, answer: bool) -> (bool, Option<String>, Vec<String>) {
+        use std::sync::{Arc, Mutex};
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        let url: tauri::Url = url.parse().expect("test url");
+        let asked = Arc::new(Mutex::new(None));
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let asked_in = Arc::clone(&asked);
+        let opened_in = Arc::clone(&opened);
+        let allowed = decide_console_navigation_with(
+            &url,
+            &console,
+            attached,
+            move |origin, reply| {
+                *asked_in.lock().unwrap() = Some(origin);
+                reply(answer);
+            },
+            move |url: &tauri::Url| opened_in.lock().unwrap().push(url.to_string()),
+        );
+        let asked = asked.lock().unwrap().clone();
+        let opened = opened.lock().unwrap().clone();
+        (allowed, asked, opened)
+    }
+
+    #[test]
+    fn local_console_opens_https_links_without_asking() {
+        let (allowed, asked, opened) = navigate("https://pdpp.dev/docs?x=1", false, false);
+        assert!(!allowed);
+        assert_eq!(asked, None);
+        assert_eq!(opened, vec!["https://pdpp.dev/docs?x=1".to_string()]);
+    }
+
+    #[test]
+    fn attached_console_opens_https_links_only_after_the_owner_confirms() {
+        let (allowed, asked, opened) = navigate("https://pdpp.dev/docs?token=SECRET", true, true);
+        assert!(!allowed);
+        assert_eq!(asked.as_deref(), Some("https://pdpp.dev"));
+        assert_eq!(opened, vec!["https://pdpp.dev/docs?token=SECRET".to_string()]);
+    }
+
+    #[test]
+    fn attached_console_opens_nothing_when_the_owner_declines() {
+        let (allowed, asked, opened) = navigate("https://pdpp.dev/docs", true, false);
+        assert!(!allowed);
+        assert_eq!(asked.as_deref(), Some("https://pdpp.dev"));
+        assert!(opened.is_empty());
+    }
+
+    #[test]
+    fn non_https_navigation_is_refused_without_asking_local_or_attached() {
+        for attached in [false, true] {
+            for url in ["http://127.0.0.1:1/", "file:///etc/passwd", "javascript:alert(1)"] {
+                let (allowed, asked, opened) = navigate(url, attached, true);
+                assert!(!allowed, "{url} attached={attached}");
+                assert_eq!(asked, None, "{url} attached={attached}");
+                assert!(opened.is_empty(), "{url} attached={attached}");
+            }
+        }
+    }
+
+    #[test]
+    fn same_origin_navigation_is_allowed_without_asking_local_or_attached() {
+        for attached in [false, true] {
+            let (allowed, asked, opened) =
+                navigate("http://127.0.0.1:4310/settings", attached, false);
+            assert!(allowed, "attached={attached}");
+            assert_eq!(asked, None);
+            assert!(opened.is_empty());
+        }
+    }
+
+    #[test]
+    fn external_open_question_names_only_the_origin() {
+        let (_, asked, _) = navigate(
+            "https://user:pw@pdpp.dev:8443/a/b?token=SECRET#frag",
+            true,
+            false,
+        );
+        let question = external_open_question(&asked.expect("asked"));
+        assert!(question.contains("https://pdpp.dev:8443"), "{question}");
+        for leaked in ["SECRET", "frag", "/a/b", "user", "pw@"] {
+            assert!(
+                !question.contains(leaked),
+                "question leaked {leaked}: {question}"
+            );
+        }
+    }
+
+    fn menu_text(menu: &Menu<tauri::test::MockRuntime>, id: &str) -> Option<(String, bool)> {
+        let item = menu.get(id)?.as_menuitem().cloned()?;
+        Some((
+            item.text().expect("item text"),
+            item.is_enabled().expect("enabled state"),
+        ))
+    }
+
+    #[test]
+    fn the_tray_names_this_computer_and_offers_attach_when_local() {
+        let app = tauri::test::mock_app();
+        let menu =
+            build_tray_menu_for(&app, UnifiedStatus::Ready, &TrayScope::Local).expect("menu");
+        assert_eq!(
+            menu_text(&menu, "server-scope"),
+            Some(("This computer".to_string(), false))
+        );
+        assert_eq!(
+            menu_text(&menu, "attach-server"),
+            Some(("Connect to a server...".to_string(), true))
+        );
+        assert_eq!(menu_text(&menu, "detach-server"), None);
+    }
+
+    #[test]
+    fn the_tray_names_the_attached_host_and_offers_detach() {
+        let app = tauri::test::mock_app();
+        let scope = TrayScope::Attached {
+            host: "dc.example.com".to_string(),
+        };
+        let menu = build_tray_menu_for(&app, UnifiedStatus::Ready, &scope).expect("menu");
+        assert_eq!(
+            menu_text(&menu, "server-scope"),
+            Some(("Connected to dc.example.com".to_string(), false))
+        );
+        assert_eq!(
+            menu_text(&menu, "detach-server"),
+            Some(("Disconnect from dc.example.com".to_string(), true))
+        );
+        assert_eq!(menu_text(&menu, "attach-server"), None);
+        let quitting = build_tray_menu_for(&app, UnifiedStatus::Quitting, &scope).expect("menu");
+        assert_eq!(
+            menu_text(&quitting, "detach-server").map(|(_, enabled)| enabled),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn the_tray_offers_neither_attach_nor_detach_under_an_environment_override() {
+        let app = tauri::test::mock_app();
+        let scope = TrayScope::Environment {
+            host: "127.0.0.1".to_string(),
+        };
+        let menu = build_tray_menu_for(&app, UnifiedStatus::Ready, &scope).expect("menu");
+        assert_eq!(
+            menu_text(&menu, "server-scope"),
+            Some((
+                "Connected to 127.0.0.1 (set by environment)".to_string(),
+                false
+            ))
+        );
+        assert_eq!(menu_text(&menu, "attach-server"), None);
+        assert_eq!(menu_text(&menu, "detach-server"), None);
+    }
+
+    #[test]
+    fn the_attach_and_detach_tray_items_dispatch() {
+        assert_eq!(
+            tray_action_for_menu_id("attach-server"),
+            TrayAction::AttachServer
+        );
+        assert_eq!(
+            tray_action_for_menu_id("detach-server"),
+            TrayAction::DetachServer
+        );
+        assert_eq!(tray_action_for_menu_id("server-scope"), TrayAction::Unknown);
+    }
+
+    #[test]
+    fn the_tray_scope_follows_the_attach_target() {
+        use crate::attach::{AttachTarget, Attachment};
+        assert_eq!(tray_scope_for(&AttachTarget::Local, None), TrayScope::Local);
+        assert_eq!(
+            tray_scope_for(
+                &AttachTarget::Saved(Attachment {
+                    origin: "https://dc.example.com".to_string(),
+                    label: "l".to_string(),
+                    paired_at: "t".to_string(),
+                    server_key: None,
+                }),
+                None
+            ),
+            TrayScope::Attached {
+                host: "dc.example.com".to_string()
+            }
+        );
+        assert_eq!(
+            tray_scope_for(
+                &AttachTarget::Environment,
+                Some("http://127.0.0.1:4310".to_string())
+            ),
+            TrayScope::Environment {
+                host: "127.0.0.1:4310".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_console_url_prefers_the_environment_then_the_saved_server() {
+        use crate::attach::{AttachTarget, Attachment};
+        let saved = AttachTarget::Saved(Attachment {
+            origin: "https://dc.example.com".to_string(),
+            label: "l".to_string(),
+            paired_at: "t".to_string(),
+            server_key: None,
+        });
+        assert_eq!(
+            console_url_source(Some("http://127.0.0.1:9/x?y".to_string()), &saved),
+            "http://127.0.0.1:9/x?y"
+        );
+        assert_eq!(console_url_source(None, &saved), "https://dc.example.com");
+        assert_eq!(
+            console_url_source(None, &AttachTarget::Environment),
+            DEFAULT_CONSOLE_URL
+        );
+        assert_eq!(
+            console_url_source(None, &AttachTarget::Local),
+            DEFAULT_CONSOLE_URL
+        );
+    }
+
+    #[test]
+    fn a_valid_session_opens_the_console() {
+        let startup = attached_startup(
+            "https://dc.example.com",
+            None,
+            crate::attach::AttachedLaunch::OpenConsole {
+                session: "sess".to_string(),
+            },
+            true,
+        );
+        assert_eq!(
+            startup,
+            AttachedStartup::OpenConsole {
+                session: "sess".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_ended_pairing_forgets_the_session_and_asks_to_pair_again() {
+        use crate::attach_window::AttachPrefill;
+        let launch = crate::attach::AttachedLaunch::PairAgain {
+            notice: crate::attach::PAIRING_ENDED_NOTICE.to_string(),
+        };
+        assert_eq!(
+            attached_startup("https://dc.example.com", None, launch.clone(), true),
+            AttachedStartup::PairAgain {
+                prefill: AttachPrefill {
+                    input: Some("https://dc.example.com".to_string()),
+                    notice: Some(crate::attach::PAIRING_ENDED_NOTICE.to_string()),
+                    identity_changed: None,
+                },
+                forget_session: true,
+            }
+        );
+        // No session was read (missing, or the keychain is locked): keep
+        // whatever the keychain holds.
+        match attached_startup("https://dc.example.com", None, launch, false) {
+            AttachedStartup::PairAgain { forget_session, .. } => assert!(!forget_session),
+            other => panic!("expected pair again, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreachable_server_keeps_the_pairing_and_names_the_origin() {
+        let message = crate::attach::AttachError::Unreachable.message("https://dc.example.com");
+        let startup = attached_startup(
+            "https://dc.example.com",
+            None,
+            crate::attach::AttachedLaunch::Unreachable {
+                message: message.clone(),
+            },
+            true,
+        );
+        match startup {
+            AttachedStartup::Unreachable { prefill, error } => {
+                assert!(error.contains("https://dc.example.com"), "{error}");
+                assert_eq!(prefill.input.as_deref(), Some("https://dc.example.com"));
+                assert_eq!(prefill.notice.as_deref(), Some(message.as_str()));
+            }
+            other => panic!("expected unreachable, got {other:?}"),
+        }
+    }
+
+    fn unpinned(origin: &str) -> crate::attach::Attachment {
+        crate::attach::Attachment {
+            origin: origin.to_string(),
+            label: "DataConnect desktop (test)".to_string(),
+            paired_at: "2026-11-17T00:00:00Z".to_string(),
+            server_key: None,
+        }
+    }
+
+    fn pinned(origin: &str, key: &ed25519_dalek::SigningKey) -> crate::attach::Attachment {
+        crate::attach::Attachment {
+            server_key: Some(crate::attach::tests::key_text(key)),
+            ..unpinned(origin)
+        }
+    }
+
+    /// A pinned start proves the server first: the stored session is sent
+    /// only after a valid signature, and never to a server that fails it.
+    #[tokio::test]
+    async fn a_pinned_start_verifies_the_server_before_sending_the_session() {
+        use crate::attach::tests::{pdpp_route, serve_with, test_key};
+        let key = test_key(31);
+        let signer = key.clone();
+        let (origin, server) = serve_with(2, move |origin, request| {
+            pdpp_route(origin, request, Some(&signer))
+        });
+        let keychain = keychain_with(&origin, "sess-pinned");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup =
+            resolve_attached_startup(&pinned(&origin, &key), &keychain, &memory, None).await;
+        let requests = server.join().expect("server");
+        assert_eq!(
+            startup,
+            AttachedStartup::OpenConsole {
+                session: "sess-pinned".to_string()
+            }
+        );
+        let identity_at = requests
+            .iter()
+            .position(|request| request.starts_with("post /owner/desktop-pairings/identity "))
+            .expect("identity probe");
+        let first_session_at = requests
+            .iter()
+            .position(|request| request.contains("pdpp_owner_session=sess-pinned"))
+            .expect("session check");
+        assert!(identity_at < first_session_at, "{requests:?}");
+    }
+
+    #[tokio::test]
+    async fn a_changed_identity_sends_nothing_and_keeps_the_pairing() {
+        use crate::attach::tests::{pdpp_route, response, serve_with, server_id, test_key};
+        use crate::attach::SessionStore;
+        let pinned_key = test_key(32);
+        let other = test_key(33);
+        // Another key answers; a missing route; a broken proof.
+        type Handler = Box<dyn Fn(&str, &crate::attach::tests::Request) -> String + Send>;
+        let signer = other.clone();
+        let cases: Vec<(Handler, Option<String>)> = vec![
+            (
+                Box::new(move |origin, request| pdpp_route(origin, request, Some(&signer))),
+                Some(server_id(&other)),
+            ),
+            (
+                Box::new(|origin, request| pdpp_route(origin, request, None)),
+                None,
+            ),
+            (
+                Box::new(|_, _| response("200 OK", "Content-Type: application/json\r\n", "{}")),
+                None,
+            ),
+        ];
+        for (handler, answering) in cases {
+            let (origin, server) = serve_with(1, handler);
+            let keychain = keychain_with(&origin, "sess-kept");
+            let memory = crate::attach::MemorySessionStore::default();
+            let startup =
+                resolve_attached_startup(&pinned(&origin, &pinned_key), &keychain, &memory, None)
+                    .await;
+            let requests = server.join().expect("server");
+            assert_eq!(requests.len(), 1, "only the identity probe: {requests:?}");
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !request.contains("pdpp_owner_session")),
+                "{requests:?}"
+            );
+            match startup {
+                AttachedStartup::IdentityChanged { prefill } => {
+                    let changed = prefill.identity_changed.expect("identity state");
+                    assert_eq!(changed.answering_id, answering);
+                    assert_eq!(prefill.input.as_deref(), Some(origin.as_str()));
+                }
+                other => panic!("expected IdentityChanged, got {other:?}"),
+            }
+            assert_eq!(
+                keychain.load(&origin),
+                Ok(Some("sess-kept".to_string())),
+                "the pairing record and session stay"
+            );
+        }
+    }
+
+    /// A pinned server that cannot be reached keeps the pairing and sends nothing.
+    #[tokio::test]
+    async fn a_pinned_start_with_an_unreachable_server_keeps_the_pairing() {
+        use crate::attach::tests::{closed_origin, test_key};
+        let origin = closed_origin();
+        let keychain = keychain_with(&origin, "sess-kept");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup =
+            resolve_attached_startup(&pinned(&origin, &test_key(34)), &keychain, &memory, None)
+                .await;
+        assert!(
+            matches!(startup, AttachedStartup::Unreachable { .. }),
+            "{startup:?}"
+        );
+    }
+
+    /// A proxy answering 503 while the server restarts is "cannot reach", not
+    /// "identity changed": the pairing, the pin and the session all stay.
+    #[tokio::test]
+    async fn a_pinned_start_while_the_server_restarts_behind_a_proxy_keeps_the_pairing() {
+        use crate::attach::tests::{response, serve_with, test_key};
+        use crate::attach::SessionStore;
+        let (origin, server) = serve_with(1, |_, _| response("503 Service Unavailable", "", ""));
+        let keychain = keychain_with(&origin, "sess-kept");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup =
+            resolve_attached_startup(&pinned(&origin, &test_key(35)), &keychain, &memory, None)
+                .await;
+        let requests = server.join().expect("server");
+        assert!(
+            matches!(&startup, AttachedStartup::Unreachable { error, .. } if error.contains("kept")),
+            "{startup:?}"
+        );
+        assert_eq!(requests.len(), 1, "only the identity probe: {requests:?}");
+        assert_eq!(keychain.load(&origin), Ok(Some("sess-kept".to_string())));
+    }
+
+    /// "Sign out everywhere" ends the stored session. The server still proves
+    /// its pinned key, answers 401 to the session, and the app asks to pair
+    /// again. It sends the session once, deletes it, and the next launch asks
+    /// again without any request, so there is no retry loop.
+    #[tokio::test]
+    async fn a_pinned_start_after_the_session_was_revoked_asks_to_pair_again_without_looping() {
+        use crate::attach::tests::{pdpp_route, response, serve_with, test_key};
+        use crate::attach::SessionStore;
+        let key = test_key(36);
+        let signer = key.clone();
+        let (origin, server) = serve_with(2, move |origin, request| {
+            if request.path == "/owner/session" {
+                response("401 Unauthorized", "", "")
+            } else {
+                pdpp_route(origin, request, Some(&signer))
+            }
+        });
+        let keychain = keychain_with(&origin, "sess-revoked");
+        let memory = crate::attach::MemorySessionStore::default();
+        let attachment = pinned(&origin, &key);
+
+        let first = resolve_attached_startup(&attachment, &keychain, &memory, None).await;
+        let requests = server.join().expect("server");
+        let AttachedStartup::PairAgain {
+            prefill,
+            forget_session,
+        } = first
+        else {
+            panic!("expected PairAgain, got {first:?}");
+        };
+        assert!(forget_session);
+        assert_eq!(prefill.notice.as_deref(), Some(crate::attach::PAIRING_ENDED_NOTICE));
+        assert_eq!(prefill.input.as_deref(), Some(origin.as_str()));
+        assert!(prefill.identity_changed.is_none(), "an ended session is not an identity change");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[0].starts_with("post /owner/desktop-pairings/identity "));
+        assert!(requests[1].contains("pdpp_owner_session=sess-revoked"));
+        assert_eq!(keychain.load(&origin), Ok(None), "the ended session is deleted");
+
+        // The server is gone now; a second launch must ask again with no request.
+        let second = resolve_attached_startup(&attachment, &keychain, &memory, None).await;
+        assert!(
+            matches!(
+                &second,
+                AttachedStartup::PairAgain { forget_session: false, prefill }
+                    if prefill.notice.as_deref() == Some(crate::attach::PAIRING_ENDED_NOTICE)
+            ),
+            "{second:?}"
+        );
+        assert_eq!(attachment.server_key, pinned(&origin, &key).server_key, "the pin is untouched");
+    }
+
+    /// A stored session the startup reads, as a keychain that works.
+    fn keychain_with(origin: &str, session: &str) -> crate::attach::MemorySessionStore {
+        use crate::attach::SessionStore;
+        let keychain = crate::attach::MemorySessionStore::default();
+        keychain.save(origin, session).expect("store");
+        keychain
+    }
+
+    #[tokio::test]
+    async fn an_attached_start_forgets_a_session_the_server_ended() {
+        use crate::attach::tests::{pdpp_metadata, response, serve};
+        use crate::attach::SessionStore;
+        let (origin, server) = serve(vec![pdpp_metadata(), response("401 Unauthorized", "", "")]);
+        let keychain = keychain_with(&origin, "sess-ended");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup = resolve_attached_startup(&unpinned(&origin), &keychain, &memory, None).await;
+        server.join().expect("server");
+        assert!(
+            matches!(
+                startup,
+                AttachedStartup::PairAgain {
+                    forget_session: true,
+                    ..
+                }
+            ),
+            "{startup:?}"
+        );
+        assert_eq!(keychain.load(&origin), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn an_attached_start_keeps_the_session_when_the_server_is_unreachable() {
+        use crate::attach::tests::{closed_origin, pdpp_metadata, response, serve};
+        use crate::attach::SessionStore;
+        let (origin, server) = serve(vec![
+            pdpp_metadata(),
+            response("500 Internal Server Error", "", ""),
+        ]);
+        let closed = closed_origin();
+        for origin in [origin, closed] {
+            let keychain = keychain_with(&origin, "sess-kept");
+            let memory = crate::attach::MemorySessionStore::default();
+            let startup =
+                resolve_attached_startup(&unpinned(&origin), &keychain, &memory, None).await;
+            assert!(
+                matches!(startup, AttachedStartup::Unreachable { .. }),
+                "{origin}: {startup:?}"
+            );
+            assert_eq!(keychain.load(&origin), Ok(Some("sess-kept".to_string())));
+        }
+        server.join().expect("server");
+    }
+
+    /// A locked keychain is not an ended pairing: nothing is deleted.
+    #[tokio::test]
+    async fn an_attached_start_with_a_locked_keychain_deletes_nothing() {
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup = resolve_attached_startup(
+            &unpinned("https://dc.example.com"),
+            &crate::attach::tests::BrokenKeychain,
+            &memory,
+            None,
+        )
+        .await;
+        match startup {
+            AttachedStartup::PairAgain {
+                prefill,
+                forget_session,
+            } => {
+                assert!(!forget_session);
+                assert_eq!(
+                    prefill.notice.as_deref(),
+                    Some(crate::attach::KEYCHAIN_LOST_NOTICE)
+                );
+            }
+            other => panic!("expected pair again, got {other:?}"),
+        }
+    }
+
+    /// The receiving side of a restart after a memory-only pairing: the
+    /// session leaves the environment once and opens the console.
+    #[tokio::test]
+    async fn a_handed_off_session_leaves_the_environment_and_opens_the_console() {
+        use crate::attach::tests::{pdpp_metadata, response, serve, BrokenKeychain};
+        use crate::attach::SESSION_HANDOFF_ENV;
+        let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
+        std::env::set_var(SESSION_HANDOFF_ENV, "sess-handed-off");
+        crate::attach::take_session_handoff_from_env();
+        assert_eq!(std::env::var_os(SESSION_HANDOFF_ENV), None);
+        let handed_off = crate::attach::take_handed_off_session();
+        assert_eq!(crate::attach::take_handed_off_session(), None, "taken once");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup =
+            resolve_attached_startup(&unpinned(&origin), &BrokenKeychain, &memory, handed_off)
+                .await;
+        let requests = server.join().expect("server");
+        assert_eq!(
+            startup,
+            AttachedStartup::OpenConsole {
+                session: "sess-handed-off".to_string()
+            }
+        );
+        assert!(
+            requests[1].contains("cookie: pdpp_owner_session=sess-handed-off"),
+            "{}",
+            requests[1]
+        );
+
+        std::env::set_var(SESSION_HANDOFF_ENV, "");
+        crate::attach::take_session_handoff_from_env();
+        assert_eq!(std::env::var_os(SESSION_HANDOFF_ENV), None);
+        assert_eq!(
+            crate::attach::take_handed_off_session(),
+            None,
+            "empty is ignored"
         );
     }
 }

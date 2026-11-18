@@ -5,12 +5,19 @@ mod webview_cookies;
 #[cfg(desktop)]
 mod atomic_write;
 #[cfg(desktop)]
+mod attach;
+mod attach_identity;
+#[cfg(desktop)]
+mod attach_window;
+#[cfg(desktop)]
 mod console_port;
 #[cfg(desktop)]
 mod main_thread_watchdog;
 #[cfg(desktop)]
 mod owner_credential;
 mod processors;
+#[cfg(desktop)]
+mod profile;
 #[cfg(desktop)]
 mod recovery_code;
 #[cfg(desktop)]
@@ -94,6 +101,11 @@ fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, before any thread exists: a test-profile build moves HOME and
+    // the XDG base directories here, and nothing may have read them yet.
+    #[cfg(desktop)]
+    profile::enter();
+
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
     // `aws-lc-rs` are present in the tree (they both are, transitively), and
     // it panics on first TLS use instead of failing gracefully. ngrok opens a
@@ -109,6 +121,11 @@ pub fn run() {
     // Load .env file into process environment so VITE_* vars are available
     // to std::env::var() calls (e.g. VITE_ACCOUNT_URL, VITE_CHAIN_ID).
     let _ = dotenvy::dotenv();
+
+    // Before any thread starts: a restart after attaching may pass a
+    // memory-only session in the environment. Take it out at once.
+    #[cfg(desktop)]
+    attach::take_session_handoff_from_env();
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -172,6 +189,18 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // Before the log plugin creates its directory: a profile build
+            // must find the Tauri paths inside its root or not start.
+            #[cfg(desktop)]
+            if profile::current().is_some() {
+                profile::require_identifier(&app.config().identifier);
+                profile::require_inside_root(
+                    "Tauri app data directory",
+                    &app.path().app_data_dir()?,
+                );
+                profile::require_inside_root("Tauri log directory", &app.path().app_log_dir()?);
+            }
+
             // Enable logging in both debug and release builds, writing to both stdout and a file
             // Default targets are already [Stdout, LogDir] — do NOT add
             // .target() calls or each log line gets written twice.
@@ -180,6 +209,14 @@ pub fn run() {
                     .level(log::LevelFilter::Info)
                     .build(),
             )?;
+
+            #[cfg(desktop)]
+            if let Some(profile) = profile::current() {
+                log::info!(
+                    "profile {profile}: root={}",
+                    profile::root().map(|root| root.display().to_string()).unwrap_or_default()
+                );
+            }
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
@@ -263,6 +300,10 @@ pub fn run() {
                 cleanup_personal_server();
                 cleanup_reference_server();
                 cleanup_installed_pdpp_connector_runs();
+                // Last: an attach or detach asked for a new process, and
+                // everything this one ran has stopped.
+                #[cfg(desktop)]
+                attach_window::relaunch_if_requested();
             }
             _ => {}
         });
@@ -351,9 +392,18 @@ pub(crate) fn app_invoke_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 's
 /// Commands served by `runtime_generic_invoke_handler`. The native
 /// owner-password window (`public/owner-password.html`) calls
 /// `set_desktop_owner_password`; v0.7.59 registered no handler for it, so
-/// saving a password there failed with "command not found".
+/// saving a password there failed with "command not found". The attach
+/// window (`public/attach.html`) calls the rest.
 #[cfg(desktop)]
-const RUNTIME_GENERIC_COMMANDS: &[&str] = &["set_desktop_owner_password"];
+const RUNTIME_GENERIC_COMMANDS: &[&str] = &[
+    "set_desktop_owner_password",
+    "attach_window_view",
+    "preview_attach_target",
+    "inspect_server",
+    "attach_with_pairing_code",
+    "attach_with_owner_password",
+    "detach_from_server",
+];
 #[cfg(not(desktop))]
 const RUNTIME_GENERIC_COMMANDS: &[&str] = &[];
 
@@ -362,6 +412,18 @@ pub(crate) fn runtime_generic_invoke_handler<R: Runtime>(
     tauri::generate_handler![
         #[cfg(desktop)]
         owner_credential::set_desktop_owner_password,
+        #[cfg(desktop)]
+        attach_window::attach_window_view,
+        #[cfg(desktop)]
+        attach_window::preview_attach_target,
+        #[cfg(desktop)]
+        attach_window::inspect_server,
+        #[cfg(desktop)]
+        attach_window::attach_with_pairing_code,
+        #[cfg(desktop)]
+        attach_window::attach_with_owner_password,
+        #[cfg(desktop)]
+        attach_window::detach_from_server,
     ]
 }
 
@@ -408,13 +470,24 @@ pub(crate) fn invoke_from(
     command: &str,
     body: serde_json::Value,
 ) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
+    invoke_from_url(webview, command, body, "tauri://localhost")
+}
+
+/// Like `invoke_from`, but the call carries the URL of the page that made it,
+/// so a test can say a window has navigated away from the app's own pages.
+pub(crate) fn invoke_from_url(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    command: &str,
+    body: serde_json::Value,
+    page_url: &str,
+) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
     tauri::test::get_ipc_response(
         webview,
         tauri::webview::InvokeRequest {
             cmd: command.into(),
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
-            url: "tauri://localhost".parse().expect("app URL"),
+            url: page_url.parse().expect("page URL"),
             body: tauri::ipc::InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: tauri::test::INVOKE_KEY.to_string(),

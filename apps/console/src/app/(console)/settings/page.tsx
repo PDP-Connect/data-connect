@@ -7,6 +7,7 @@ import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroo
 import { getProductIdentity } from "@/app/(console)/lib/product-identity.ts"
 import { hasValidLocalOwnerCredentialRevealProofCookie } from "../lib/owner-credential-client.ts"
 import { AboutSection } from "./about-section.tsx"
+import { DesktopPairingSetting } from "./desktop-pairing-setting.tsx"
 import { DesktopSettingsSetting } from "./desktop-settings-setting.tsx"
 import { DeveloperModeSetting } from "./developer-mode-setting.tsx"
 import { RecoveryKeySetting } from "./recovery-key-setting.tsx"
@@ -22,6 +23,9 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const identity = getProductIdentity()
+  // Desktop and vault-recovery settings write command files only the managed
+  // desktop host answers; on a server they would do nothing.
+  const managedDesktopHost = process.env.PDPP_MANAGED_DESKTOP_HOST === "1"
   const [hasLocalRevealProof, ownerSessions, ownerPasswordSource] =
     await Promise.all([
       hasValidLocalOwnerCredentialRevealProofCookie(),
@@ -60,7 +64,7 @@ export default async function SettingsPage() {
           >
             <OwnerPasswordSetting
               canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
-              managedDesktop={process.env.PDPP_MANAGED_DESKTOP_HOST === "1"}
+              managedDesktop={managedDesktopHost}
               source={ownerPasswordSource}
             />
           </Section>
@@ -76,18 +80,30 @@ export default async function SettingsPage() {
             />
           </Section>
         ) : null}
-        <Section
-          description="Control how DataConnect starts on this computer."
-          title="Desktop"
-        >
-          <DesktopSettingsSetting />
-        </Section>
-        <Section
-          description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
-          title="Vault recovery code"
-        >
-          <RecoveryKeySetting />
-        </Section>
+        {ownerSessions.enabled ? (
+          <Section
+            description="Pair the DataConnect desktop app with this server. The desktop shows this server's console and signs in as you."
+            title="Attach a desktop app"
+          >
+            <DesktopPairingSetting />
+          </Section>
+        ) : null}
+        {managedDesktopHost ? (
+          <>
+            <Section
+              description="Control how DataConnect starts on this computer."
+              title="Desktop"
+            >
+              <DesktopSettingsSetting />
+            </Section>
+            <Section
+              description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
+              title="Vault recovery code"
+            >
+              <RecoveryKeySetting />
+            </Section>
+          </>
+        ) : null}
         <AboutSection identity={identity} />
       </main>
     </RecordroomShellWithPalette>
