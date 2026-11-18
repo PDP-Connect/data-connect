@@ -10,6 +10,7 @@ mod console_port;
 mod main_thread_watchdog;
 #[cfg(desktop)]
 mod owner_credential;
+mod private_data_dir;
 mod processors;
 #[cfg(desktop)]
 mod recovery_code;
@@ -183,6 +184,17 @@ pub fn run() {
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
+
+            #[cfg(unix)]
+            {
+                let app_data_dir = app.path().app_data_dir()?;
+                private_data_dir::ensure_private(&app_data_dir).map_err(|error| {
+                    std::io::Error::other(format!(
+                        "could not secure the app data directory {}: {error}",
+                        app_data_dir.display()
+                    ))
+                })?;
+            }
 
             #[cfg(desktop)]
             if main_thread_watchdog::is_enabled() {
