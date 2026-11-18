@@ -1074,7 +1074,7 @@ export function Home() {
                   type="text"
                   value={deepLinkInput}
                   onChange={e => setDeepLinkInput(e.target.value)}
-                  placeholder="vana://connect?sessionId=...&secret=..."
+                  placeholder="https://example.test/connect?sessionId=...&secret=..."
                   className="rounded border px-2 py-1 text-xs"
                 />
                 <Button type="submit" size="xs" variant="outline">
