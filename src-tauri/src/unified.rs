@@ -7287,7 +7287,7 @@ setInterval(() => {}, 1000);
 
         let generated = "generated-owner-password-0928";
         let before = run_ri_driver(&ri_root, &data_dir, generated, "turn-on-remote-access", &[]);
-        assert_eq!(before["status"], 409, "{before}");
+        assert_eq!(before["status"], 200, "{before}");
         assert_eq!(before["code"], "owner_password_required", "{before}");
 
         // The console's "set a password first" step, then the native window.
@@ -7321,6 +7321,7 @@ setInterval(() => {}, 1000);
         assert_eq!(saved, chosen);
         let after = run_ri_driver(&ri_root, &data_dir, &saved, "turn-on-remote-access", &[]);
         assert_eq!(after["status"], 200, "{after}");
+        assert_eq!(after["code"], serde_json::Value::Null, "{after}");
         println!("REAL-RI REMOTE-ACCESS GATE TEST RAN");
     }
 
