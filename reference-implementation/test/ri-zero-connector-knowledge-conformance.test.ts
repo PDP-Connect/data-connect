@@ -69,6 +69,36 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(dirname(__dirname));
 
+test("the pinned observation schema has one exact loader and cannot carry connector identity", () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "ri-protocol-schema-resource-"));
+  const sourceRel = "reference-implementation/runtime/observations.ts";
+  const sourceFile = join(fixtureRoot, sourceRel);
+  const schemaFile = join(dirname(sourceFile), "observation.schema.json");
+  const source = 'import schema from "./observation.schema.json" with { type: "json" };\nexport default schema;\n';
+  try {
+    mkdirSync(dirname(sourceFile), { recursive: true });
+    writeFileSync(sourceFile, source);
+    writeFileSync(schemaFile, JSON.stringify({ enum: ["matched", "absent"] }));
+    assert.deepEqual(scanFileDataLoads(sourceFile, sourceRel, fixtureRoot), [],
+      "the protocol schema is a generic resource, not connector-specific policy");
+
+    writeFileSync(schemaFile, JSON.stringify({ nested: { enum: ["synthetic_provider_identity"] } }));
+    const injected = scanFileDataLoads(sourceFile, sourceRel, fixtureRoot, new Set(["synthetic_provider_identity"]));
+    assert.ok(injected.some((violation) => violation.rule === "hardcoded-connector-literal-in-ri-owned-json"),
+      "sanctioning the schema path must retain the provider-content check");
+
+    writeFileSync(schemaFile, JSON.stringify({ enum: ["matched"] }));
+    const otherRel = "reference-implementation/runtime/other-loader.ts";
+    const otherFile = join(fixtureRoot, otherRel);
+    writeFileSync(otherFile, source);
+    assert.ok(scanFileDataLoads(otherFile, otherRel, fixtureRoot)
+      .some((violation) => violation.rule === "unsanctioned-policy-resource-path"),
+      "a different loader does not inherit the schema exception");
+  } finally {
+    rmSync(fixtureRoot, { force: true, recursive: true });
+  }
+});
+
 test("manifest-derived connector identity set is non-trivial (sanity check on the derivation itself)", () => {
   const keys = manifestDerivedConnectorKeys({ repoRoot });
   // A hardcoded lower-bound count would itself be exactly the kind of

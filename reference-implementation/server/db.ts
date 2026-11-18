@@ -2029,6 +2029,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_coverage_horizons_current
 CREATE INDEX IF NOT EXISTS idx_connector_coverage_horizons_instance
   ON connector_coverage_horizons(connector_instance_id);
 
+-- Collection Profile v0.2.0 diagnostic record per completed run (data-connectors
+-- spec sections 5.10.3-5.10.4). Holds the runtime's ObservationSnapshot and
+-- Diagnosis as JSON and nothing else. server/stores/connector-observation-store.ts
+-- keeps at most 8 rows per connector_id, across its instances, and prunes in the
+-- write transaction. recorded_seq is the store's per-connector order, never a
+-- connector timestamp. Deleting a connection cascades its rows.
+CREATE TABLE IF NOT EXISTS connector_observation_runs (
+  connector_id          TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  run_id                TEXT NOT NULL,
+  recorded_seq          INTEGER NOT NULL,
+  record_version        INTEGER NOT NULL CHECK (record_version = 1),
+  recorded_at           TEXT NOT NULL,
+  payload_json          TEXT NOT NULL,
+  PRIMARY KEY (connector_id, connector_instance_id, run_id),
+  FOREIGN KEY(connector_instance_id) REFERENCES connector_instances(connector_instance_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_observation_runs_seq
+  ON connector_observation_runs(connector_id, recorded_seq);
+
 -- Cross-invocation half of STREAM_EVIDENCE rule 5 ("at most one accepted
 -- STREAM_EVIDENCE per stream per run_id"): a durable record of every
 -- (run_id, stream) pair this runtime has ever accepted a STREAM_EVIDENCE

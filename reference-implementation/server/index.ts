@@ -510,6 +510,7 @@ import {
   type ProviderAuthExchanger,
 } from "./routes/ref-provider-auth.ts";
 import { mountRefRecordRejections } from "./routes/ref-record-rejections.ts";
+import { mountRefRunObservations } from "./routes/ref-run-observations.ts";
 import { mountRefRunStatus } from "./routes/ref-run-status.ts";
 import { mountRefGrants, mountRefRuns, mountRefTraces } from "./routes/ref-spine-correlations.ts";
 import { mountRefGrantTimeline, mountRefRunTimeline, mountRefTraceTimeline } from "./routes/ref-spine-timelines.ts";
@@ -5953,6 +5954,14 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
     requireOwnerSession: ownerAuth.requireOwnerSession,
   } as unknown as Parameters<typeof mountRefRunStatus>[1]);
+  // Owner-only diagnostic read of a run's OBSERVATION record (Collection Profile 0.2.0 Section 5.10).
+  mountRefRunObservations(app, {
+    createRequestConnectorInstanceStore,
+    getOwnerSubjectId,
+    handleError,
+    pdppError,
+    requireOwnerSession: ownerAuth.requireOwnerSession,
+  } as unknown as Parameters<typeof mountRefRunObservations>[1]);
 
   // Run-interaction streaming companion (reference-only). The store and
   // companion factory live in this AS app so the mint route, the SSE viewer

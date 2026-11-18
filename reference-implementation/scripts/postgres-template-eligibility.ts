@@ -27,6 +27,9 @@
  * here (or missing from both) fails the inventory test.
  */
 export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
+  // Same process-wire and durable diagnostic journeys on seeded SQLite/Postgres, not schema bootstrap.
+  "test/collection-profile-020.test.ts",
+  "test/collection-profile-owner-journey.test.ts",
   "test/accepted-provider-native-consent.test.ts",
   "test/acknowledged-loss-store-postgres.test.ts",
   "test/active-run-summary-zero-spine.test.ts",
@@ -58,6 +61,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-instance-writer-paths.test.ts",
   "test/connector-maintenance-cursor-postgres-race.test.ts",
   "test/connector-manifest-revision-fence.test.ts",
+  // Uses Postgres as a fixture for the diagnostic run store's writes, retention and locking, not schema bootstrap.
+  "test/connector-observation-store.test.ts",
   "test/connector-summary-dirty-hooks.test.ts",
   "test/connector-summary-evidence-canonical-count-cancel-isolation.test.ts",
   "test/connector-summary-evidence-direct-write-source-revision-detection.test.ts",
