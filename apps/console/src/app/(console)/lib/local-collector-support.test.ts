@@ -56,6 +56,7 @@ test("resolver rejects templates with no plan, no enrollment key, or a blank enr
     { connector_key: "empty-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: "" } },
     { connector_key: "blank-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: "   " } },
   ];
+  assert.deepEqual(localCollectorEnrollmentKeys(templates), []);
   for (const id of ["no-plan", "no-key", "null-key", "empty-key", "blank-key"]) {
     assert.equal(resolveLocalCollectorEnrollmentKey(templates, id), null, id);
     assert.equal(resolveLocalCollectorEnrollmentKey(templates, `https://registry.pdpp.dev/connectors/${id}`), null, id);
