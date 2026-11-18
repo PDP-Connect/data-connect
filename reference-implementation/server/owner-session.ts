@@ -74,6 +74,11 @@ export interface OwnerSessionIssueMetadata {
   readonly userAgent?: string | null;
 }
 
+export interface OwnerSessionToken {
+  readonly expiresAtSeconds: number;
+  readonly sessionId: string;
+}
+
 export type OwnerSessionSameSite = "lax" | "strict";
 
 export interface OwnerSessionControllerOptions {
@@ -99,6 +104,12 @@ export interface OwnerSessionController {
   clearSessionCookieHeader: (opts?: OwnerSessionCookieOptions) => string;
   readonly enabled: boolean;
   issueSessionCookieHeader: (opts?: OwnerSessionCookieOptions, metadata?: OwnerSessionIssueMetadata) => Promise<string | null>;
+  /**
+   * Mints a session with a caller-chosen TTL and returns the opaque id (the
+   * value the session cookie would carry) for a caller that delivers it
+   * outside a cookie. Null when owner auth is disabled or the store refuses.
+   */
+  issueSessionToken: (metadata: OwnerSessionIssueMetadata, ttlSeconds: number) => Promise<OwnerSessionToken | null>;
   readSessionFromCookieValue: (raw?: string | null) => Promise<OwnerSessionPayload | null>;
   readSessionFromCookieHeader: (header?: string | null) => Promise<OwnerSessionPayload | null>;
   readSessionRecordFromCookieHeader: (header?: string | null) => Promise<OwnerSessionRecord | null>;
@@ -419,18 +430,19 @@ export function createOwnerSessionController({
     return record ? { exp: record.exp, iat: record.iat, sub: record.sub } : null;
   }
 
-  async function issueSessionCookieHeader(
-    opts: OwnerSessionCookieOptions = {},
-    metadata: OwnerSessionIssueMetadata = {}
-  ): Promise<string | null> {
+  async function issueSessionToken(
+    metadata: OwnerSessionIssueMetadata,
+    ttlSeconds: number
+  ): Promise<OwnerSessionToken | null> {
     if (!enabled) {
       return null;
     }
     const now = Math.floor(Date.now() / 1000);
     const sessionId = generateOwnerSessionId();
     const idHash = hashOwnerSessionId(sessionId);
+    const expiresAtSeconds = now + ttlSeconds;
     const created = await store.createSession({
-      exp: now + sessionTtlSeconds,
+      exp: expiresAtSeconds,
       idHash,
       iat: now,
       publicId: crypto.randomBytes(12).toString("base64url"),
@@ -443,8 +455,17 @@ export function createOwnerSessionController({
       sub: resolvedSubjectId,
     }, metadata.credentialRevision);
     if (created === false) return null;
+    return { expiresAtSeconds, sessionId };
+  }
+
+  async function issueSessionCookieHeader(
+    opts: OwnerSessionCookieOptions = {},
+    metadata: OwnerSessionIssueMetadata = {}
+  ): Promise<string | null> {
+    const token = await issueSessionToken(metadata, sessionTtlSeconds);
+    if (!token) return null;
     const flags = resolveCookieFlags(opts);
-    return buildOwnerSessionSetCookie(sessionId, {
+    return buildOwnerSessionSetCookie(token.sessionId, {
       maxAgeSeconds: sessionTtlSeconds,
       sameSite: flags.sameSite,
       secure: flags.secure,
@@ -517,6 +538,7 @@ export function createOwnerSessionController({
     listSessions,
     listOwnerBearers,
     issueSessionCookieHeader,
+    issueSessionToken,
     readSessionFromCookieValue,
     readSessionFromCookieHeader,
     readSessionRecordFromCookieHeader,

@@ -31,6 +31,13 @@ import {
   renderSurface,
 } from "./hosted-ui.ts";
 import {
+  createDesktopPairingStore,
+  DESKTOP_PAIRING_SESSION_TTL_SECONDS,
+  DESKTOP_PAIRING_TTL_SECONDS,
+  sanitizeDesktopPairingLabel,
+  type DesktopPairingStore,
+} from "./owner-desktop-pairing.ts";
+import {
   buildOwnerCsrfClearCookie,
   buildOwnerCsrfSetCookie,
   generateOwnerCsrfSecret,
@@ -187,6 +194,13 @@ export interface OwnerAuthPlaceholderOptions {
   passwordManagedByDesktop?: boolean;
   passwordVerifier?: OwnerPasswordVerifier | null;
   providerName?: string;
+  /**
+   * Resolves this server's canonical public origin for a request, the same way
+   * OAuth metadata does (never from an untrusted Host header on a hosted
+   * server). The desktop-pairing routes are mounted only when the host
+   * supplies it.
+   */
+  resolvePublicOrigin?: (req: AuthRequest) => string;
   sameSite?: OwnerSessionSameSite;
   sessionTtlSeconds?: number;
   subjectId?: string | null;
@@ -482,6 +496,11 @@ function readReturnToFromBodyOrQuery(req: AuthRequest): string {
 interface SessionHelpers {
   clearSession: (res: AuthResponse, req: AuthRequest) => void;
   issueSession: (res: AuthResponse, req: AuthRequest, credentialRevision?: string) => Promise<boolean>;
+  issueToken: (
+    req: AuthRequest,
+    label: string,
+    ttlSeconds: number
+  ) => ReturnType<OwnerSessionController["issueSessionToken"]>;
   readSession: (req: AuthRequest) => Promise<OwnerSessionPayload | null>;
   readSessionRecord: (req: AuthRequest) => Promise<OwnerSessionRecord | null>;
   revokeSession: (req: AuthRequest) => Promise<boolean>;
@@ -532,6 +551,16 @@ function buildSessionHelpers(controller: OwnerSessionController): SessionHelpers
       if (!cookieHeader) return false;
       appendSetCookie(res, cookieHeader);
       return true;
+    },
+    issueToken(req: AuthRequest, label: string, ttlSeconds: number) {
+      return controller.issueSessionToken(
+        {
+          ipAddress: req.ip ?? req.socket?.remoteAddress ?? req.connection?.remoteAddress ?? null,
+          label,
+          userAgent: req.headers["user-agent"] ?? null,
+        },
+        ttlSeconds
+      );
     },
     readSession(req: AuthRequest): Promise<OwnerSessionPayload | null> {
       return controller.readSessionFromCookieHeader(req.headers.cookie);
@@ -596,6 +625,7 @@ interface OwnerAuthRouteContext {
   readonly notifySessionLogout: (req: AuthRequest) => void;
   readonly passwordMatches: (submitted: string) => Promise<OwnerPasswordMatch>;
   readonly credentialSource: () => OwnerCredentialSource;
+  readonly desktopPairings: DesktopPairingStore;
   readonly changeAppPassword: (
     password: string,
     subjectId: string,
@@ -991,6 +1021,106 @@ function isCsrfAuthorized(req: AuthRequest, res: AuthResponse, context: OwnerAut
   return true;
 }
 
+function replyInvalidPairingCode(res: AuthResponse): void {
+  res.status(401).setHeader("Content-Type", "application/json").json({
+    error: {
+      code: "invalid_pairing_code",
+      message: "This pairing code is not valid. Create a new one in the server's settings.",
+    },
+  });
+}
+
+async function handleDesktopPairingCreate(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext,
+  resolvePublicOrigin: (req: AuthRequest) => string
+): Promise<void> {
+  if (!isCsrfAuthorized(req, res, context)) return;
+  if (!(await requireSignedInSession(req, res, context))) return;
+  const { code, expiresAtMs } = context.desktopPairings.create();
+  const serverOrigin = new URL(resolvePublicOrigin(req)).origin;
+  res
+    .status(201)
+    .setHeader("Cache-Control", "no-store")
+    .setHeader("Content-Type", "application/json")
+    .json({
+      object: "desktop_pairing",
+      code,
+      expires_at: new Date(expiresAtMs).toISOString(),
+      expires_in_seconds: DESKTOP_PAIRING_TTL_SECONDS,
+      server_origin: serverOrigin,
+      link: `vana://attach?server=${encodeURIComponent(serverOrigin)}&code=${code}`,
+    });
+}
+
+async function handleDesktopPairingRedeem(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext
+): Promise<void> {
+  if (!context.enabled) {
+    res.status(404).json({
+      error: { code: "owner_auth_disabled", message: "Desktop pairing is unavailable." },
+    });
+    return;
+  }
+  const body: Record<string, unknown> | undefined =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : undefined;
+  const code = body?.code;
+  const label = body?.label;
+  if (
+    typeof code !== "string" ||
+    code.trim() === "" ||
+    code.length > 64 ||
+    (label !== undefined && typeof label !== "string")
+  ) {
+    res.status(400).json({
+      error: { code: "invalid_request", message: "Send a JSON body with a pairing code." },
+    });
+    return;
+  }
+  // Same throttle as sign-in: checked before the comparison so every guess counts.
+  const retryAfterSeconds = context.loginRateLimiter.check(req);
+  if (retryAfterSeconds !== null) {
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    res.status(429).json({
+      error: {
+        code: "owner_login_rate_limited",
+        message: "Too many attempts. Retry after the indicated delay.",
+        type: "slow_down",
+      },
+    });
+    return;
+  }
+  // One answer for unknown, expired and used codes: no oracle.
+  if (!context.desktopPairings.redeem(code)) {
+    replyInvalidPairingCode(res);
+    return;
+  }
+  context.loginRateLimiter.recordSuccess(req);
+  const sessionLabel = sanitizeDesktopPairingLabel(label);
+  const minted = await context.session.issueToken(req, sessionLabel, DESKTOP_PAIRING_SESSION_TTL_SECONDS);
+  if (!minted) {
+    res.status(503).json({
+      error: { code: "pairing_unavailable", message: "Could not start a session. Create a new pairing code." },
+    });
+    return;
+  }
+  // The session id leaves only in this body: never a Set-Cookie, never logged.
+  res
+    .status(200)
+    .setHeader("Cache-Control", "no-store")
+    .setHeader("Content-Type", "application/json")
+    .json({
+      object: "desktop_pairing_session",
+      session: minted.sessionId,
+      expires_at: new Date(minted.expiresAtSeconds * 1000).toISOString(),
+      expires_in_seconds: DESKTOP_PAIRING_SESSION_TTL_SECONDS,
+      label: sessionLabel,
+    });
+}
+
 function handleDisabledOwnerSession(
   req: AuthRequest,
   res: AuthResponse,
@@ -1035,6 +1165,7 @@ export function createOwnerAuthPlaceholder({
   allowUnauthenticatedWhenDisabled = true,
   csrfSecret: csrfSecretOverride = null,
   loginRateLimit = {},
+  resolvePublicOrigin,
   sessionStore,
   passwordVerifierStore,
 }: OwnerAuthPlaceholderOptions = {}): OwnerAuthPlaceholder {
@@ -1059,6 +1190,7 @@ export function createOwnerAuthPlaceholder({
   const { enabled, subjectId: resolvedSubjectId } = sessionController;
   const session = buildSessionHelpers(sessionController);
   const logoutListeners = new Map<string, Set<() => void>>();
+  const desktopPairings = createDesktopPairingStore();
 
   function ownerSessionKey(req: AuthRequest): string | null {
     const cookie = parseCookieHeader(req.headers.cookie)[OWNER_SESSION_COOKIE_NAME];
@@ -1231,6 +1363,7 @@ export function createOwnerAuthPlaceholder({
       csrfPairValid,
       credentialSource: () => credentialSource,
       changeAppPassword,
+      desktopPairings,
       enabled,
       ensureCsrfToken,
       loginRateLimiter,
@@ -1450,6 +1583,15 @@ export function createOwnerAuthPlaceholder({
       }
       res.status(204).end();
     });
+
+    if (resolvePublicOrigin) {
+      app.post("/owner/desktop-pairings", async (req, res) => {
+        await handleDesktopPairingCreate(req, res, context, resolvePublicOrigin);
+      });
+      app.post("/owner/desktop-pairings/redeem", async (req, res) => {
+        await handleDesktopPairingRedeem(req, res, context);
+      });
+    }
   }
 
   async function requireOwnerSession(req: AuthRequest, res: AuthResponse, next: AuthNextFunction): Promise<void> {

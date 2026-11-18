@@ -5090,6 +5090,13 @@ export function buildAsApp(opts: ServerOpts = {}) {
     allowUnauthenticatedWhenDisabled: allowUnauthenticatedOwnerWhenDisabled,
     loginRateLimit: ownerAuthConfig.loginRateLimit,
     providerName,
+    // Same resolver as OAuth metadata: PDPP_REFERENCE_ORIGIN on a hosted server,
+    // otherwise the configured public URL, then the request.
+    resolvePublicOrigin: (req) =>
+      resolvePublicUrl(
+        req as unknown as Parameters<typeof resolvePublicUrl>[0],
+        opts.asPublicUrl || (opts.ignoreAmbientPublicUrls ? null : process.env.AS_PUBLIC_URL)
+      ),
   });
   app.use((..._args: never[]) => {
     const [req, res, next] = _args as unknown as [ReqLike, ResLike, () => void];
