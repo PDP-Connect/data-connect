@@ -50,9 +50,10 @@ export async function installTarball({ env = process.env, cwd = process.cwd(), r
 		if (difference)
 			throw new Error(`Installed package differs from the staged tarball: ${difference.kind} ${difference.path}`);
 		await rm(extraction, { recursive: true });
+		// The receipt is written before the package is linked, so a published package always has one.
+		await writeFile(resolve(prefix, "receipt.json"), JSON.stringify({ sourceSha, sha256: actual, artifact }, null, 2), { flag: "wx" });
 		const installed = await linkInstalledPackage(source, resolve(modules, "@tnunamak/gozar"));
 		published = true;
-		await writeFile(resolve(prefix, "receipt.json"), JSON.stringify({ sourceSha, sha256: actual, artifact }, null, 2), { flag: "wx" });
 		return { status: 0, prefix, installed };
 	} finally {
 		if (!published) await rm(prefix, { recursive: true, force: true });
