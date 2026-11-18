@@ -120,6 +120,12 @@ function text(input: unknown): string {
   }
   return input;
 }
+function boundedIdentifier(input: unknown): string {
+  if (typeof input !== "string" || input.length === 0 || input.length > 200 || /[^A-Za-z0-9._:-]/.test(input)) {
+    throw new ReachabilityError("invalid_input");
+  }
+  return input;
+}
 function generation(input: unknown): number {
   if (!Number.isSafeInteger(input) || (input as number) < 0) {
     throw new ReachabilityError("invalid_input");
@@ -376,31 +382,44 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   get("/drafts/:id", async (request) =>
     projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id)))
   );
+  // Per-router single flight includes the journal read, host effect and durable record.
+  // Once settled, a later request follows the normal resume path below.
+  const draftFlights = new Map<string, Promise<ReturnType<typeof projectDraft>>>();
   // A service has one draft. Asking again for a service that has one resumes it.
   post("/drafts", async (request) => {
     const input = body(request);
     const current = service();
     const providerId = text(input.providerId);
     const usage = typeof input.usage === "string" && input.usage ? input.usage : null;
-    const known = await ctx.setups.get(providerId);
-    if (known?.draftId && !known.committed) {
-      try {
-        const draft = await current.resume(providerId, known.draftId);
-        await ctx.setups.recordDraft({ providerId, providerLabel: known.providerLabel, draftId: known.draftId, usage });
-        return projectDraft(draft);
-      } catch (error) {
-        if (!(error && typeof error === "object" && "code" in error && error.code === "draft_not_found")) throw error;
-        // The draft no longer exists on the host: start a fresh one below.
+    const pending = draftFlights.get(providerId);
+    if (pending) return pending;
+    const flight = (async () => {
+      const known = await ctx.setups.get(providerId);
+      if (known?.draftId && !known.committed) {
+        try {
+          const draft = await current.resume(providerId, known.draftId);
+          await ctx.setups.recordDraft({ providerId, providerLabel: known.providerLabel, draftId: known.draftId, usage });
+          return projectDraft(draft);
+        } catch (error) {
+          if (!(error && typeof error === "object" && "code" in error && error.code === "draft_not_found")) throw error;
+          // The draft no longer exists on the host: start a fresh one below.
+        }
       }
+      const draft = await current.begin(providerId, text(input.expectedRevision));
+      await ctx.setups.recordDraft({
+        providerId,
+        providerLabel: known?.providerLabel ?? (await current.providerLabel(providerId)),
+        draftId: draft.draftId,
+        usage,
+      });
+      return projectDraft(draft);
+    })();
+    draftFlights.set(providerId, flight);
+    try {
+      return await flight;
+    } finally {
+      draftFlights.delete(providerId);
     }
-    const draft = await current.begin(providerId, text(input.expectedRevision));
-    await ctx.setups.recordDraft({
-      providerId,
-      providerLabel: known?.providerLabel ?? (await current.providerLabel(providerId)),
-      draftId: draft.draftId,
-      usage,
-    });
-    return projectDraft(draft);
   });
   post("/drafts/:id/actions/:actionId", async (request) => {
     const input = body(request);
@@ -449,8 +468,8 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   post("/operations", async (request) => {
     const input = body(request);
     const current = service();
-    const reviewId = text(input.reviewId);
-    const digest = text(input.consentFactsDigest);
+    const reviewId = boundedIdentifier(input.reviewId);
+    const digest = boundedIdentifier(input.consentFactsDigest);
     if (input.kind !== "route") {
       throw new ReachabilityError("consent_kind_mismatch");
     }

@@ -108,7 +108,7 @@ async function harness(dir: string, setups = new ReachabilitySetups(dir), passwo
     await routes.get(`${method} /v1/owner/reachability${path}`)!({ body, params, query }, response);
     return { status, payload: payload as { data?: any; error?: any } };
   }
-  return { call, calls, hooks, known, setups };
+  return { call, calls, hooks, known, setups, service };
 }
 
 const start = { providerId: "svc", draftId: "d1", actionId: "a", expectedConfigurationRevision: "r0", usage: "durable" };
@@ -446,4 +446,97 @@ test("approving a route logs the review id and consent digest it received, and n
   );
   assert.deepEqual(logged, ["[reachability] approve reviewId=rev-9 consentFactsDigest=consent-v1:abc"]);
   assert.deepEqual(applied, [["rev-9", { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" }]]);
+});
+
+test("concurrent draft creation shares one host draft and one journal record", { timeout: 5000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "svc-journal-"));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const { call, service, setups } = await harness(dir);
+    let begins = 0, records = 0;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    service.begin = async () => { begins++; entered(); await gate; return draftFor("shared-draft"); };
+    const record = setups.recordDraft.bind(setups);
+    setups.recordDraft = async (input) => { records++; return record(input); };
+    const input = { providerId: "svc", expectedRevision: "r0" };
+    const first = call("POST", "/drafts", input);
+    await started;
+    let secondSettled = false;
+    const second = call("POST", "/drafts", input).finally(() => { secondSettled = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const settledBeforeRelease = secondSettled, beginsBeforeRelease = begins;
+    release();
+    const answers = await Promise.all([first, second]);
+    assert.equal(settledBeforeRelease, false);
+    assert.equal(beginsBeforeRelease, 1);
+    assert.deepEqual(answers.map((item) => item.status), [200, 200]);
+    assert.deepEqual(answers.map((item) => item.payload.data.draftId), ["shared-draft", "shared-draft"]);
+    assert.equal(records, 1);
+    assert.equal((await setups.get("svc"))?.draftId, "shared-draft");
+  } finally {
+    release();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed shared draft creation permits a later retry", { timeout: 5000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "svc-journal-"));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    const { call, service, setups } = await harness(dir);
+    let begins = 0, records = 0;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    service.begin = async () => {
+      begins++;
+      if (begins === 1) { entered(); await gate; throw new ReachabilityError("host_runtime_unavailable"); }
+      return draftFor("retry-draft");
+    };
+    const record = setups.recordDraft.bind(setups);
+    setups.recordDraft = async (input) => { records++; return record(input); };
+    const input = { providerId: "svc", expectedRevision: "r0" };
+    const first = call("POST", "/drafts", input);
+    await started;
+    const second = call("POST", "/drafts", input);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const beginsBeforeRelease = begins;
+    release();
+    const answers = await Promise.all([first, second]);
+    assert.equal(beginsBeforeRelease, 1);
+    for (const answer of answers) {
+      assert.equal(answer.status, 409);
+      assert.equal(answer.payload.error.code, "host_runtime_unavailable");
+    }
+    assert.equal(records, 0);
+    const retry = await call("POST", "/drafts", input);
+    assert.equal(retry.status, 200);
+    assert.equal(retry.payload.data.draftId, "retry-draft");
+    assert.equal(begins, 2);
+    assert.equal(records, 1);
+  } finally {
+    release();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("approval rejects unsafe or oversized identifiers before any logging", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "svc-journal-"));
+  const logged: unknown[] = [];
+  t.mock.method(console, "info", (...args: unknown[]) => { logged.push(args); });
+  try {
+    const { call } = await harness(dir);
+    for (const field of ["reviewId", "consentFactsDigest"]) {
+      for (const invalid of ["line\nforged", "trailing\n", "x".repeat(201), "", "contains space"]) {
+        const answer = await call("POST", "/operations", {
+          kind: "route", reviewId: "rev-9", consentFactsDigest: "consent-v1:abc", [field]: invalid,
+        });
+        assert.equal(answer.status, 409);
+        assert.equal(answer.payload.error.code, "invalid_input");
+        assert.deepEqual(logged, []);
+      }
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
