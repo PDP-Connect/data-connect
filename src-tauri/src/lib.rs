@@ -37,6 +37,8 @@ mod test_executable;
 #[cfg(desktop)]
 mod unified;
 #[cfg(target_os = "linux")]
+pub mod linux_app_id;
+#[cfg(target_os = "linux")]
 pub mod wayland_titlebar;
 
 pub use commands::browser_surface_host_env_pairs;
@@ -94,6 +96,14 @@ fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // GTK reports the program name as the Wayland app_id; it must match the
+    // packaged desktop file for the compositor to show the app icon.
+    #[cfg(target_os = "linux")]
+    {
+        linux_app_id::set_program_name();
+        linux_app_id::integrate_appimage_if_needed();
+    }
+
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
     // `aws-lc-rs` are present in the tree (they both are, transitively), and
     // it panics on first TLS use instead of failing gracefully. ngrok opens a
