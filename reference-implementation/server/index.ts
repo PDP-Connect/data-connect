@@ -211,8 +211,8 @@ import {
 import { composeFleetHealthVerdict } from "./fleet-health.ts";
 import { deriveReferenceFreshness } from "./freshness.ts";
 import {
+  pinnedLocalCollectorManifest,
   readLocalCollectorArtifactDigest,
-  readLocalCollectorProfile,
   readLocalCollectorRelease,
 } from "./local-collector-profiles.ts";
 import {
@@ -1550,17 +1550,7 @@ function generateReferenceSecret(prefix: string, bytes = 24) {
 function readReferenceLocalConnectorCatalogManifest(connectorId: string) {
   const connectorKey = canonicalConnectorKey(connectorId) ?? connectorId;
   try {
-    const manifest = readLocalCollectorProfile(connectorKey);
-    if (!manifest) {
-      return null;
-    }
-    return {
-      ...manifest,
-      connector_id: connectorKey,
-      // The manifest is the only source of the owner-facing name; there is no
-      // RI-side fallback string to disagree with it.
-      display_name: manifest.display_name || connectorKey,
-    };
+    return pinnedLocalCollectorManifest(connectorId);
   } catch {
     return {
       connector_id: connectorKey,
