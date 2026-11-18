@@ -4524,6 +4524,7 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
         .domain(host)
         .path("/")
         .http_only(true)
+        .secure(url.scheme() == "https")
         .build())
 }
 
@@ -8761,6 +8762,18 @@ setInterval(() => {}, 1000);
         let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
         let cookie = owner_session_cookie(&url, "session-value").expect("session cookie");
         assert_eq!(cookie.http_only(), Some(true));
+    }
+
+    /// Like the server's own cookie (`owner-session.ts`), the session cookie
+    /// is Secure on an https origin, so it is never sent over plain http.
+    #[test]
+    fn owner_session_cookie_is_secure_on_https_only() {
+        let https: tauri::Url = "https://dc.example.com/".parse().expect("test url");
+        let cookie = owner_session_cookie(&https, "session-value").expect("session cookie");
+        assert_eq!(cookie.secure(), Some(true));
+        let http: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
+        let cookie = owner_session_cookie(&http, "session-value").expect("session cookie");
+        assert_ne!(cookie.secure(), Some(true));
     }
 
     /// The console webview must send both cookies the desktop sets on it.
