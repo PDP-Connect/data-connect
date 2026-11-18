@@ -7314,14 +7314,14 @@ setInterval(() => {}, 1000);
             serde_json::json!({ "password": chosen }),
         )
         .expect("the window saves the password");
-        // First-time setup does not restart now or revoke: the remote-access
-        // save that follows restarts the stack through the config watcher.
+        // First-time setup restarts now, so the server reads the new password
+        // at once, and revokes nothing: no remote device can be signed in.
         let restart: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(data_dir.join("owner-password-stack-restart-request.json"))
                 .expect("restart request"),
         )
         .expect("restart request is JSON");
-        assert!(restart["notBeforeUnixMs"].is_u64(), "{restart}");
+        assert_eq!(restart["notBeforeUnixMs"], serde_json::Value::Null, "{restart}");
         assert_eq!(restart["revokeSessions"], serde_json::Value::Null, "{restart}");
 
         // The next start reads the saved password, as `load_bootstrap_secrets`
@@ -7472,7 +7472,7 @@ setInterval(() => {}, 1000);
         assert_eq!(
             restart["notBeforeUnixMs"],
             serde_json::Value::Null,
-            "a change restarts now, not after the first-setup delay: {restart}"
+            "a change restarts now: {restart}"
         );
         println!("REAL-RI PASSWORD CHANGE TEST RAN");
     }
