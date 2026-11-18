@@ -97,8 +97,9 @@ fn parse_attach_link(input: &str) -> Result<AttachInput, String> {
 
 /// `scheme://host[:port]` of an `http(s)` URL, without a default port.
 pub(crate) fn normalize_origin(raw: &str) -> Result<String, String> {
-    let url = url::Url::parse(raw.trim())
-        .map_err(|_| "Enter a server address such as https://dataconnect.example.com.".to_string())?;
+    let url = url::Url::parse(raw.trim()).map_err(|_| {
+        "Enter a server address such as https://dataconnect.example.com.".to_string()
+    })?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err("Use an http:// or https:// address.".to_string());
     }
@@ -120,7 +121,9 @@ pub(crate) fn normalize_pairing_code(raw: &str) -> Result<String, String> {
         .map(|character| character.to_ascii_uppercase())
         .collect();
     if code.chars().count() == PAIRING_CODE_LENGTH
-        && code.chars().all(|character| PAIRING_CODE_ALPHABET.contains(character))
+        && code
+            .chars()
+            .all(|character| PAIRING_CODE_ALPHABET.contains(character))
     {
         Ok(code)
     } else {
@@ -430,7 +433,10 @@ pub(crate) fn take_session_handoff_from_env() {
 }
 
 pub(crate) fn take_handed_off_session() -> Option<String> {
-    HANDED_OFF_SESSION.lock().ok().and_then(|mut slot| slot.take())
+    HANDED_OFF_SESSION
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
 }
 
 /// The label the server shows for this desktop's session.
@@ -447,7 +453,10 @@ fn local_hostname() -> String {
         let result =
             unsafe { libc::gethostname(buffer.as_mut_ptr().cast::<libc::c_char>(), buffer.len()) };
         if result == 0 {
-            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+            let end = buffer
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(buffer.len());
             if let Ok(name) = std::str::from_utf8(&buffer[..end]) {
                 if !name.trim().is_empty() {
                     return name.trim().to_string();
@@ -583,15 +592,16 @@ pub(crate) async fn redeem_pairing(
         _ if is_gateway_failure(status) => return Err(AttachError::Unreachable),
         other => return Err(AttachError::Server { status: other }),
     }
-    let body: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|_| AttachError::Server { status: status.as_u16() })?;
+    let body: serde_json::Value = response.json().await.map_err(|_| AttachError::Server {
+        status: status.as_u16(),
+    })?;
     let session = body
         .get("session")
         .and_then(serde_json::Value::as_str)
         .filter(|session| !session.is_empty())
-        .ok_or(AttachError::Server { status: status.as_u16() })?;
+        .ok_or(AttachError::Server {
+            status: status.as_u16(),
+        })?;
     Ok(RedeemedSession {
         session: session.to_string(),
         expires_at: body
@@ -605,7 +615,10 @@ pub(crate) async fn redeem_pairing(
 /// password over the existing `POST /owner/login` path. The password is
 /// not kept. No session label is sent: "This computer" would replace the
 /// remote server's own desktop-shell session.
-pub(crate) async fn login_with_password(origin: &str, password: &str) -> Result<String, AttachError> {
+pub(crate) async fn login_with_password(
+    origin: &str,
+    password: &str,
+) -> Result<String, AttachError> {
     crate::commands::login_reference_server_with_password_and_host(
         origin.to_string(),
         password,
@@ -630,7 +643,9 @@ fn password_login_error(error: &str) -> AttachError {
         .and_then(|code| code.parse::<u16>().ok());
     match status {
         Some(401) | Some(403) => AttachError::WrongPassword,
-        Some(429) => AttachError::RateLimited { retry_after_seconds: None },
+        Some(429) => AttachError::RateLimited {
+            retry_after_seconds: None,
+        },
         Some(502..=504) => AttachError::Unreachable,
         Some(status) => AttachError::Server { status },
         None => AttachError::Server { status: 0 },
@@ -711,11 +726,17 @@ const KEYCHAIN_LOST_NOTICE: &str =
 /// What a launch in the attached state does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AttachedLaunch {
-    OpenConsole { session: String },
+    OpenConsole {
+        session: String,
+    },
     /// Open the attach window with this notice. Never retried on its own.
-    PairAgain { notice: String },
+    PairAgain {
+        notice: String,
+    },
     /// Keep the pairing; say which origin did not answer.
-    Unreachable { message: String },
+    Unreachable {
+        message: String,
+    },
 }
 
 pub(crate) async fn decide_attached_launch(origin: &str, lookup: SessionLookup) -> AttachedLaunch {
@@ -748,4 +769,4 @@ pub(crate) async fn decide_attached_launch(origin: &str, lookup: SessionLookup) 
 
 #[cfg(test)]
 #[path = "attach_tests.rs"]
-mod tests;
+pub(crate) mod tests;

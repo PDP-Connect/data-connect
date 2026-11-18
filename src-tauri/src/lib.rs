@@ -7,6 +7,8 @@ mod atomic_write;
 #[cfg(desktop)]
 mod attach;
 #[cfg(desktop)]
+mod attach_window;
+#[cfg(desktop)]
 mod console_port;
 #[cfg(desktop)]
 mod main_thread_watchdog;
@@ -111,6 +113,11 @@ pub fn run() {
     // Load .env file into process environment so VITE_* vars are available
     // to std::env::var() calls (e.g. VITE_ACCOUNT_URL, VITE_CHAIN_ID).
     let _ = dotenvy::dotenv();
+
+    // Before any thread starts: a restart after attaching may pass a
+    // memory-only session in the environment. Take it out at once.
+    #[cfg(desktop)]
+    attach::take_session_handoff_from_env();
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -265,6 +272,10 @@ pub fn run() {
                 cleanup_personal_server();
                 cleanup_reference_server();
                 cleanup_installed_pdpp_connector_runs();
+                // Last: an attach or detach asked for a new process, and
+                // everything this one ran has stopped.
+                #[cfg(desktop)]
+                attach_window::relaunch_if_requested();
             }
             _ => {}
         });
@@ -353,9 +364,17 @@ pub(crate) fn app_invoke_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 's
 /// Commands served by `runtime_generic_invoke_handler`. The native
 /// owner-password window (`public/owner-password.html`) calls
 /// `set_desktop_owner_password`; v0.7.59 registered no handler for it, so
-/// saving a password there failed with "command not found".
+/// saving a password there failed with "command not found". The attach
+/// window (`public/attach.html`) calls the rest.
 #[cfg(desktop)]
-const RUNTIME_GENERIC_COMMANDS: &[&str] = &["set_desktop_owner_password"];
+const RUNTIME_GENERIC_COMMANDS: &[&str] = &[
+    "set_desktop_owner_password",
+    "attach_window_view",
+    "preview_attach_target",
+    "attach_with_pairing_code",
+    "attach_with_owner_password",
+    "detach_from_server",
+];
 #[cfg(not(desktop))]
 const RUNTIME_GENERIC_COMMANDS: &[&str] = &[];
 
@@ -364,6 +383,16 @@ pub(crate) fn runtime_generic_invoke_handler<R: Runtime>(
     tauri::generate_handler![
         #[cfg(desktop)]
         owner_credential::set_desktop_owner_password,
+        #[cfg(desktop)]
+        attach_window::attach_window_view,
+        #[cfg(desktop)]
+        attach_window::preview_attach_target,
+        #[cfg(desktop)]
+        attach_window::attach_with_pairing_code,
+        #[cfg(desktop)]
+        attach_window::attach_with_owner_password,
+        #[cfg(desktop)]
+        attach_window::detach_from_server,
     ]
 }
 
