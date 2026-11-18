@@ -1,6 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
@@ -181,3 +181,18 @@ describe("windowIsGranted window-pattern matching", () => {
 // invoke() (see remote-access-setting.tsx's module doc comment). Asserting a
 // capability grant for commands that no longer exist would test a premise
 // that is no longer true.
+
+describe("capability scoping of app commands", () => {
+  // Tauri refuses an app command from a page that is not the app's own unless
+  // a capability lists that page under `remote`. The attach window's commands
+  // rely on that refusal (attach_window_tests.rs), so no capability may add it.
+  it("no capability grants remote pages access to app commands", () => {
+    const directory = resolve(process.cwd(), "src-tauri/capabilities")
+    const files = readdirSync(directory).filter(name => name.endsWith(".json"))
+    expect(files).toContain("default.json")
+    for (const name of files) {
+      const document = JSON.parse(readFileSync(resolve(directory, name), "utf-8")) as { remote?: unknown }
+      expect(document.remote, name).toBeUndefined()
+    }
+  })
+})

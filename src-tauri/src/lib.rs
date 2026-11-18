@@ -470,13 +470,24 @@ pub(crate) fn invoke_from(
     command: &str,
     body: serde_json::Value,
 ) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
+    invoke_from_url(webview, command, body, "tauri://localhost")
+}
+
+/// Like `invoke_from`, but the call carries the URL of the page that made it,
+/// so a test can say a window has navigated away from the app's own pages.
+pub(crate) fn invoke_from_url(
+    webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+    command: &str,
+    body: serde_json::Value,
+    page_url: &str,
+) -> Result<tauri::ipc::InvokeResponseBody, serde_json::Value> {
     tauri::test::get_ipc_response(
         webview,
         tauri::webview::InvokeRequest {
             cmd: command.into(),
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
-            url: "tauri://localhost".parse().expect("app URL"),
+            url: page_url.parse().expect("page URL"),
             body: tauri::ipc::InvokeBody::Json(body),
             headers: Default::default(),
             invoke_key: tauri::test::INVOKE_KEY.to_string(),

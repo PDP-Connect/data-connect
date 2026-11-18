@@ -7,7 +7,7 @@ use crate::attach::tests::{
     test_key, BrokenKeychain,
 };
 use crate::attach::MemorySessionStore;
-use crate::{invoke_from, mock_app_with_data_dir};
+use crate::{invoke_from, invoke_from_url, mock_app_with_data_dir};
 use serde_json::{json, Value};
 use tauri::test::MockRuntime;
 
@@ -98,6 +98,58 @@ fn only_the_attach_window_may_use_the_attach_commands() {
     }
     assert!(relaunches(&app).is_empty());
     assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+}
+
+/// The label check is not the only gate: Tauri refuses an app command from a
+/// page that is not the app's own, because no capability grants `remote`
+/// access. Same window, same arguments; only the page URL changes.
+#[test]
+fn the_attach_window_is_refused_once_its_page_is_not_the_apps_own() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let key = test_key(12);
+    let signer = key.clone();
+    let (origin, server) = serve_with(3, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    // The view was created from the app's own page.
+    invoke_from(&attach_window, "attach_window_view", json!({})).expect("view");
+
+    // The window then navigated to another site.
+    for command in COMMANDS {
+        let refused = invoke_from_url(
+            &attach_window,
+            command,
+            connect_args(&origin, &key),
+            "https://other.example.test/attach.html",
+        )
+        .expect_err("refused: not the app's own page");
+        assert!(
+            refused.as_str().is_some_and(|text| text.contains("not allowed")),
+            "{command}: {refused}"
+        );
+    }
+    assert!(relaunches(&app).is_empty());
+    assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+
+    // Back on the app's own page the same call reaches pairing, once. The
+    // server saw nothing from the refused calls.
+    invoke_from(
+        &attach_window,
+        "attach_with_pairing_code",
+        connect_args(&origin, &key),
+    )
+    .expect("connected");
+    let requests = server.join().expect("server");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.starts_with("post /owner/desktop-pairings/redeem "))
+            .count(),
+        1
+    );
 }
 
 #[test]

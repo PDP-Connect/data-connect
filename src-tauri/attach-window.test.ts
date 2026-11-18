@@ -14,7 +14,21 @@ const settle = () => new Promise(done => setTimeout(done, 0))
 
 // Runs the real inline script of the "Connect to a server" window against a
 // scripted Tauri bridge.
-async function openWindow(inspections: Scripted[], attachError?: string, options: { bridge?: boolean } = {}) {
+// What the app's native side answers when it refuses a command because the
+// calling window or page is not the attach window. The checks themselves are
+// native and are tested in Rust (attach_window_tests.rs); this suite checks
+// what the window does with a refusal.
+const REFUSED_WINDOW = "Only the DataConnect attach window can do this."
+const REFUSED_PAGE = "Command attach_with_pairing_code not allowed by ACL"
+
+async function openWindow(
+  inspections: Scripted[],
+  attachError?: string,
+  options: { bridge?: boolean; refuse?: string } = {}
+) {
+  // `policy.refuse` can change after the window loaded, as it does when the
+  // window's page navigates away from the app.
+  const policy = { refuse: options.refuse as string | undefined }
   const calls: Call[] = []
   const queue = [...inspections]
   const dom = new JSDOM(html, {
@@ -22,6 +36,7 @@ async function openWindow(inspections: Scripted[], attachError?: string, options
     beforeParse(window) {
       const invoke = async (command: string, args: Record<string, unknown> = {}) => {
         calls.push({ command, args })
+        if (policy.refuse) throw policy.refuse
         if (command === "attach_window_view") return { input: "" }
         if (command === "preview_attach_target") return null
         if (command === "inspect_server") return queue.shift()
@@ -46,6 +61,7 @@ async function openWindow(inspections: Scripted[], attachError?: string, options
     calls,
     code,
     server,
+    policy,
     text: (id: string) => $(id).textContent ?? "",
     visible,
     disabled: (id: string) => $<HTMLButtonElement>(id).disabled,
@@ -165,14 +181,17 @@ describe("attach window pairing code", () => {
     await page.type(page.server, "https://b.example.test/attach?code=code-b")
     await page.continueClick()
     expect(page.text("confirm-server")).toBe("https://b.example.test")
+    expect(page.attachCalls()).toEqual([])
 
     resolveA({ ...serverA, code: "code-a" })
     await settle()
+    expect(page.attachCalls()).toEqual([])
 
     expect(page.text("confirm-server")).toBe("https://b.example.test")
     expect(page.text("confirm-id")).toBe("id-b")
     expect(page.code.value).toBe("code-b")
     await page.connect()
+    expect(page.attachCalls()).toHaveLength(1)
     expect(page.lastAttach()).toMatchObject({
       input: "https://b.example.test/attach?code=code-b",
       confirmedKey: "key-b",
@@ -206,9 +225,56 @@ describe("attach window pairing code", () => {
     expect(page.text("error")).toContain("cannot reach DataConnect")
     expect(page.disabled("continue-button")).toBe(true)
     expect(page.disabled("attach-button")).toBe(true)
-    await page.continueWith("https://a.example.test/attach?code=code-a")
     await page.connect()
     expect(page.calls).toEqual([])
     expect(page.visible("confirm")).toBe(false)
+  })
+
+  // Same bridge, same pairing input; only whether the native side accepts the
+  // calling window or page changes.
+  describe("which window may attach", () => {
+    const link = "https://a.example.test/attach?code=code-a"
+
+    it("the attach window reaches pairing once and reports success", async () => {
+      const page = await openWindow([{ ...serverA, code: "code-a" }])
+      await page.continueWith(link)
+      await page.connect()
+
+      expect(page.attachCalls()).toHaveLength(1)
+      expect(page.attachCalls()[0]?.args).toMatchObject({ input: link, confirmedKey: "key-a", code: "code-a" })
+      expect(page.text("notice")).toContain("Connected to https://a.example.test")
+      expect(page.visible("error")).toBe(false)
+    })
+
+    it("a window that is refused from the start shows the refusal and reports no success", async () => {
+      const page = await openWindow([{ ...serverA, code: "code-a" }], undefined, { refuse: REFUSED_WINDOW })
+      expect(page.text("error")).toBe(REFUSED_WINDOW)
+
+      await page.continueWith(link)
+      await page.connect()
+
+      expect(page.visible("confirm")).toBe(false)
+      expect(page.text("error")).toBe(REFUSED_WINDOW)
+      expect(page.attachCalls()).toEqual([])
+      expect(page.visible("notice")).toBe(false)
+    })
+
+    it("a page that is refused after the view was created shows the refusal and reports no success", async () => {
+      const page = await openWindow([{ ...serverA, code: "code-a" }])
+      await page.continueWith(link)
+      expect(page.visible("confirm")).toBe(true)
+
+      // The window navigated away from the app's own page.
+      page.policy.refuse = REFUSED_PAGE
+      await page.connect()
+
+      expect(page.text("error")).toBe(REFUSED_PAGE)
+      expect(page.visible("notice")).toBe(false)
+      expect(page.text("notice")).not.toContain("Connected")
+      expect(page.disabled("attach-button")).toBe(false)
+      // Each attempt is refused again; none is reported as a success.
+      await page.connect()
+      expect(page.visible("notice")).toBe(false)
+    })
   })
 })
