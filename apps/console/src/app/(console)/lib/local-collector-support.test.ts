@@ -48,6 +48,32 @@ test("a connector without the local-collector-enroll disposition does not resolv
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, "signal"), null);
 });
 
+test("resolver rejects templates with no plan, no enrollment key, or a blank enrollment key", () => {
+  const templates: LocalCollectorTemplate[] = [
+    { connector_key: "no-plan" },
+    { connector_key: "no-key", setup_plan: { catalog_disposition: "local_collector_enroll" } },
+    { connector_key: "null-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: null } },
+    { connector_key: "empty-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: "" } },
+    { connector_key: "blank-key", setup_plan: { catalog_disposition: "local_collector_enroll", enrollment_key: "   " } },
+  ];
+  for (const id of ["no-plan", "no-key", "null-key", "empty-key", "blank-key"]) {
+    assert.equal(resolveLocalCollectorEnrollmentKey(templates, id), null, id);
+    assert.equal(resolveLocalCollectorEnrollmentKey(templates, `https://registry.pdpp.dev/connectors/${id}`), null, id);
+  }
+});
+
+test("canonical key and enrollment key are separate forms; an unadvertised alias does not resolve", () => {
+  const templates = [enrollable("notes-app", "notes-collector")];
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes-collector"), "notes-collector");
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes-app"), "notes-collector");
+  assert.equal(
+    resolveLocalCollectorEnrollmentKey(templates, "https://registry.pdpp.dev/connectors/notes-app"),
+    "notes-collector"
+  );
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes"), null);
+  assert.equal(resolveLocalCollectorEnrollmentKey(templates, "notes-app-legacy"), null);
+});
+
 test("empty and missing ids do not resolve", () => {
   const templates = [enrollable("codex", "codex")];
   assert.equal(resolveLocalCollectorEnrollmentKey(templates, ""), null);
