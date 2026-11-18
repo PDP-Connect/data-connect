@@ -34,6 +34,7 @@ import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseManifestJsonText } from "../runtime/binding-declarations.ts";
 import {
   type ConnectorInstallStore,
   createConnectorInstallStore,
@@ -97,7 +98,8 @@ export interface PolyfillManifest {
 
 async function readManifestJson(path: string): Promise<PolyfillManifest> {
   const raw = await readFile(path, "utf8");
-  return JSON.parse(raw) as PolyfillManifest;
+  // A repeated key would otherwise collapse to its last value before any validation runs.
+  return parseManifestJsonText(raw) as PolyfillManifest;
 }
 
 function canonicalize(value: unknown): string {
