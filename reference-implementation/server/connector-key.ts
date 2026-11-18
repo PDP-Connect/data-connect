@@ -88,7 +88,7 @@ export function connectorKeyFromRegistryUrl(value: unknown): string | null {
   if (!CONNECTOR_KEY_PATTERN.test(tail)) {
     return null;
   }
-  return tail;
+  return canonicalConnectorKey(tail);
 }
 
 /**
@@ -139,6 +139,23 @@ export function isConnectorKey(value: unknown): boolean {
 }
 
 /**
+ * True iff a `connector_id` must resolve to a valid connector key: anything
+ * but a URL on a non-registry host (a bare id, a registry URL, or a
+ * non-string or empty value). A URL on any other host is an opaque legacy identity that
+ * installed manifests may carry; it is left exactly as it was spelled.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function connectorIdMustBeKeyShaped(value: unknown): boolean {
+  const trimmed = trimOrNull(value);
+  if (!trimmed) {
+    return true;
+  }
+  return isRegistryUrlConnectorId(trimmed) || !/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed);
+}
+
+/**
  * Derive the canonical connector key from a parsed connector manifest
  * object. Reads explicit top-level `connector_key` first, then falls back
  * to top-level `connector_id` (legacy polyfill-style manifest), then
@@ -162,16 +179,18 @@ export function canonicalConnectorKeyFromManifest(manifest: unknown): string | n
     // `as string` assertion on the narrowed-but-not-narrowed-by-TS value.
     const trimmed = trimOrNull(record.connector_key);
     if (trimmed) {
-      return trimmed;
+      return canonicalConnectorKey(trimmed);
     }
   }
   const topLevel = canonicalConnectorKey(record.connector_id);
-  if (topLevel) {
+  if (topLevel && (!connectorIdMustBeKeyShaped(record.connector_id) || isConnectorKey(topLevel))) {
     return topLevel;
   }
   const storageBinding = record.storage_binding;
   if (storageBinding && typeof storageBinding === "object") {
-    return canonicalConnectorKey((storageBinding as Record<string, unknown>).connector_id);
+    const bindingId = (storageBinding as Record<string, unknown>).connector_id;
+    const key = canonicalConnectorKey(bindingId);
+    return key && (!connectorIdMustBeKeyShaped(bindingId) || isConnectorKey(key)) ? key : null;
   }
   return null;
 }

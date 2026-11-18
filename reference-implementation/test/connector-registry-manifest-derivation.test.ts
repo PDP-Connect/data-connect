@@ -73,7 +73,7 @@ import {
   buildConnectionSetupPlan,
   classifyConnectorSetupModality,
 } from "../server/connection-setup-plan.ts";
-import { canonicalConnectorKey, isConnectorKey } from "../server/connector-key.ts";
+import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey, REGISTRY_CONNECTOR_PREFIX } from "../server/connector-key.ts";
 import {
   FIRST_PARTY_CONNECTOR_KEYS,
   LEGACY_LOCAL_ALIASES,
@@ -333,4 +333,39 @@ test("classifyConnectorSetupModality never special-cases a specific connector id
     })
   );
   assert.equal(firstPartyLike, thirdPartyLike);
+});
+
+test("the generator and runtime share trailing-slash and malformed-tail identity rules", () => {
+  const scratchDir = mkdtempSync(join(tmpdir(), "connector-registry-key-parity-"));
+  const outputDir = mkdtempSync(join(tmpdir(), "connector-registry-key-output-"));
+  try {
+    for (const { file, manifest } of readPolyfillManifests()) {
+      writeFileSync(join(scratchDir, file), JSON.stringify(manifest));
+    }
+    const probes = [
+      { connector_id: `${REGISTRY_CONNECTOR_PREFIX}zzz-parity-acme/` },
+      { connector_id: `${REGISTRY_CONNECTOR_PREFIX}zzz-parity-extra/extra` },
+      { connector_id: `${REGISTRY_CONNECTOR_PREFIX}zzz-parity-query?x=1` },
+      { connector_id: `${REGISTRY_CONNECTOR_PREFIX}zzz-parity-percent%2Fextra` },
+    ];
+    probes.forEach((manifest, index) => {
+      writeFileSync(join(scratchDir, `zzz-parity-${index}.json`), JSON.stringify(manifest));
+    });
+    const output = join(outputDir, "connector-registry.generated.ts");
+    execFileSync("node", ["--experimental-strip-types", generatorScript, output], {
+      cwd: riRoot,
+      env: { ...process.env, PDPP_POLYFILL_MANIFESTS_DIR: scratchDir },
+      stdio: "pipe",
+    });
+    const generated = readFileSync(output, "utf8");
+    const match = generated.match(/FIRST_PARTY_CONNECTOR_KEYS: readonly string\[\] = Object\.freeze\((\[[^\n]*\])\);/);
+    assert.ok(match, "generator emitted its key list");
+    const keys = JSON.parse(match[1]!) as string[];
+    const expected = probes.map(canonicalConnectorKeyFromManifest).filter((key): key is string => key !== null);
+    assert.deepEqual(expected, ["zzz-parity-acme"]);
+    assert.deepEqual(keys.filter((key) => key.startsWith("zzz-parity-")), expected);
+  } finally {
+    rmSync(scratchDir, { force: true, recursive: true });
+    rmSync(outputDir, { force: true, recursive: true });
+  }
 });

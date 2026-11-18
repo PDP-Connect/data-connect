@@ -64,6 +64,7 @@ const UNKNOWN_CAPABILITY_PATTERN = /protocol_capabilities must be an array of kn
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { canonicalConnectorKeyFromManifest, legacyLocalAliasMap } from "../server/connector-key.ts";
 
 import {
   invalidConnectorManifest,
@@ -874,4 +875,49 @@ test("a connector_id on another host that differs from connector_key is refused 
       ),
     /connector_id must match connector_key; use manifest_uri/
   );
+});
+
+test("accepted legacy id forms derive one key and explicit keys must be canonical", () => {
+  for (const [alias, key] of Object.entries(legacyLocalAliasMap())) {
+    for (const connectorId of [alias, key, `${REGISTRY_URL_PREFIX}${alias}`, `${REGISTRY_URL_PREFIX}${alias}/`, `${REGISTRY_URL_PREFIX}${key}`]) {
+      for (const identity of [{ connector_id: connectorId }, { connector_id: connectorId, connector_key: key }]) {
+        const manifest = manifestWithIdentity(identity);
+        assert.doesNotThrow(() => validateConnectorManifest(manifest), connectorId);
+        assert.equal(canonicalConnectorKeyFromManifest(manifest), key, connectorId);
+      }
+    }
+    if (alias !== key) {
+      for (const identity of [{ connector_key: alias }, { connector_id: `${REGISTRY_URL_PREFIX}${alias}`, connector_key: alias }]) {
+        assert.throws(
+          () => validateConnectorManifest(manifestWithIdentity(identity)),
+          /connector_key must use its canonical spelling/
+        );
+      }
+    }
+  }
+});
+
+test("a non-registry URL connector_id without connector_key still validates and keeps its spelling", () => {
+  const url = "https://test.pdpp.dev/connectors/acme";
+  const manifest = manifestWithIdentity({ connector_id: url });
+  assert.doesNotThrow(() => validateConnectorManifest(manifest));
+  assert.equal(canonicalConnectorKeyFromManifest(manifest), url);
+});
+
+test("id-only malformed identities are refused even without a connector_key comparison", () => {
+  for (const connectorId of ["bad key", ".", "..", "-gmail", "Gmail",
+    `${REGISTRY_URL_PREFIX}gmail/extra`, `${REGISTRY_URL_PREFIX}gmail?x=1`,
+    `${REGISTRY_URL_PREFIX}gmail#fragment`, `${REGISTRY_URL_PREFIX}gmail%2Fextra`]) {
+    assert.throws(
+      () => validateConnectorManifest(manifestWithIdentity({ connector_id: connectorId })),
+      /connector_id must resolve to a valid connector key/,
+      connectorId
+    );
+  }
+  for (const connectorId of ["", "   ", null, 42]) {
+    assert.throws(
+      () => validateConnectorManifest({ ...manifestWithStream(), connector_id: connectorId }),
+      /connector_id must resolve to a valid connector key/
+    );
+  }
 });

@@ -54,6 +54,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalConnectorKeyFromManifest as manifestKey } from "../server/connector-key.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const riRoot = resolve(scriptDir, "..");
@@ -96,21 +97,6 @@ function readPolyfillManifests(): { file: string; manifest: ManifestLike }[] {
   return out;
 }
 
-const REGISTRY_URL_PREFIX = "https://registry.pdpp.dev/connectors/";
-
-function canonicalSlug(connectorId: string): string {
-  return connectorId.startsWith(REGISTRY_URL_PREFIX) ? connectorId.slice(REGISTRY_URL_PREFIX.length) : connectorId;
-}
-
-function manifestKey(manifest: ManifestLike): string | null {
-  if (typeof manifest.connector_key === "string" && manifest.connector_key.trim()) {
-    return manifest.connector_key.trim();
-  }
-  if (typeof manifest.connector_id === "string" && manifest.connector_id.trim()) {
-    return canonicalSlug(manifest.connector_id.trim());
-  }
-  return null;
-}
 
 const polyfillManifests = readPolyfillManifests();
 // First-party connector keys: every polyfill manifest's canonical key.
