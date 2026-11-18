@@ -23,6 +23,9 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const identity = getProductIdentity()
+  // Desktop and vault-recovery settings write command files only the managed
+  // desktop host answers; on a server they would do nothing.
+  const managedDesktopHost = process.env.PDPP_MANAGED_DESKTOP_HOST === "1"
   const [hasLocalRevealProof, ownerSessions, ownerPasswordSource] =
     await Promise.all([
       hasValidLocalOwnerCredentialRevealProofCookie(),
@@ -61,7 +64,7 @@ export default async function SettingsPage() {
           >
             <OwnerPasswordSetting
               canReveal={ownerPasswordSource === "desktop" && hasLocalRevealProof}
-              managedDesktop={process.env.PDPP_MANAGED_DESKTOP_HOST === "1"}
+              managedDesktop={managedDesktopHost}
               source={ownerPasswordSource}
             />
           </Section>
@@ -85,18 +88,22 @@ export default async function SettingsPage() {
             <DesktopPairingSetting />
           </Section>
         ) : null}
-        <Section
-          description="Control how DataConnect starts on this computer."
-          title="Desktop"
-        >
-          <DesktopSettingsSetting />
-        </Section>
-        <Section
-          description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
-          title="Vault recovery code"
-        >
-          <RecoveryKeySetting />
-        </Section>
+        {managedDesktopHost ? (
+          <>
+            <Section
+              description="Control how DataConnect starts on this computer."
+              title="Desktop"
+            >
+              <DesktopSettingsSetting />
+            </Section>
+            <Section
+              description="Export a printable code that can restore access to your Personal Server vault if your system keychain ever loses its key."
+              title="Vault recovery code"
+            >
+              <RecoveryKeySetting />
+            </Section>
+          </>
+        ) : null}
         <AboutSection identity={identity} />
       </main>
     </RecordroomShellWithPalette>

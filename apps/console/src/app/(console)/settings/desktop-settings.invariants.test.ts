@@ -117,3 +117,14 @@ test("close-to-tray copy states it is on by default, not off", async () => {
 
   assert.match(setting, /On by default\./)
 })
+
+test("the Desktop and Vault recovery sections render only on the managed desktop host", async () => {
+  const page = await readFile(PAGE_FILE, "utf8")
+  const gate = page.indexOf("managedDesktopHost ? (")
+  assert.ok(gate > 0, "page must branch on managedDesktopHost")
+  for (const marker of ["<DesktopSettingsSetting />", "<RecoveryKeySetting />"]) {
+    assert.ok(page.indexOf(marker) > gate, `${marker} must sit inside the managedDesktopHost branch`)
+  }
+  // Remote access stays visible on a server.
+  assert.ok(page.indexOf("<RemoteAccessSetting />") < gate)
+})
