@@ -12,7 +12,11 @@ import {
   credentialValidationMode,
 } from "./polyfill-connectors-runtime.ts";
 import type { CredentialValidationMode } from "./polyfill-connectors-runtime.ts";
-import { canonicalConnectorKey as serverCanonicalConnectorKey, legacyLocalAliasMap } from "./connector-key.ts";
+import {
+  canonicalConnectorKey as serverCanonicalConnectorKey,
+  canonicalConnectorKeyFromManifest,
+  legacyLocalAliasMap,
+} from "./connector-key.ts";
 
 export type ConnectorIntentModality = "local_collector" | "browser_bound" | "api_network" | "unknown";
 
@@ -400,9 +404,12 @@ export function canonicalConnectorKey(connectorId: string): string {
 }
 
 export function connectorKeyFromManifest(manifest: ConnectorManifestLike, fallback?: string | null): string | null {
-  const raw =
-    manifest.connector_key?.trim() || manifest.connector_id?.trim() || (typeof fallback === "string" ? fallback : "");
-  return raw ? canonicalConnectorKey(raw) : null;
+  // The manifest rule lives in connector-key.ts; this adds only the caller's fallback.
+  const fromManifest = canonicalConnectorKeyFromManifest(manifest);
+  if (fromManifest) {
+    return fromManifest;
+  }
+  return typeof fallback === "string" && fallback.trim() ? canonicalConnectorKey(fallback) : null;
 }
 
 // Two canonical keys have a registry-URL slug that differs from the
