@@ -193,6 +193,27 @@ describe("capability scoping of app commands", () => {
     expect(document.windows).toEqual(["main", "connector-*"])
   })
 
+  // Every capability file and the exact window patterns it may name. A new
+  // file, or a new window in an existing file, fails here until someone adds it
+  // on purpose. The attach window ("attach") is deliberately in no file: its
+  // commands check the window label themselves, and any capability that lists
+  // it would widen who can reach them.
+  const ALLOWED_CAPABILITY_WINDOWS: Record<string, string[]> = {
+    "default.json": ["main", "connector-*"],
+    "console.json": ["console"],
+    "mcp-bridge.json": ["main", "connector-*"],
+  }
+
+  it("every capability file and window is on the explicit allow-list", () => {
+    const directory = resolve(process.cwd(), "src-tauri/capabilities")
+    const actual: Record<string, string[]> = {}
+    for (const name of readdirSync(directory).filter(entry => entry.endsWith(".json")).sort()) {
+      const document = JSON.parse(readFileSync(resolve(directory, name), "utf-8")) as { windows?: string[] }
+      actual[name] = document.windows ?? []
+    }
+    expect(actual).toEqual(ALLOWED_CAPABILITY_WINDOWS)
+  })
+
   // Tauri refuses an app command from a page that is not the app's own unless
   // a capability lists that page under `remote`. The attach window's commands
   // rely on that refusal (attach_window_tests.rs), so no capability may add it.
