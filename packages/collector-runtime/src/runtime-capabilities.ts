@@ -26,6 +26,12 @@ import {
 export type RuntimeBindingName = "network" | "browser" | "filesystem" | "local_device";
 
 export interface RuntimeCapabilityProfile {
+  /**
+   * Features this runtime supplies per binding (Collection Profile 3.3.8). A
+   * required binding that declares a feature absent here is not satisfied. A
+   * binding with no entry supplies no features.
+   */
+  readonly bindingFeatures?: ReadonlyMap<RuntimeBindingName, ReadonlySet<string>>;
   /** Bindings this runtime advertises as available. */
   readonly bindings: ReadonlySet<RuntimeBindingName>;
   /** Stable identifier of the runtime. Used in diagnostics. */
@@ -35,6 +41,24 @@ export interface RuntimeCapabilityProfile {
   /** Connector-protocol version this runtime recognizes. */
   readonly protocolVersion: string;
 }
+
+// Features of an unrestricted Node host that drives Playwright. They declare
+// what the host can do. They are not independently enforced authority limits.
+const NODE_BROWSER_FEATURES: ReadonlySet<string> = new Set([
+  "page_navigation",
+  "page_script_evaluation",
+  "page_content_read",
+  "page_condition_wait",
+  "page_input",
+  "cookie_read",
+  "page_response_observation",
+  "host_download_capture",
+  "host_archive_extraction",
+  "host_archive_entry_chunk_read",
+  "host_cookie_jar_request",
+  "host_http_request",
+]);
+const NODE_NETWORK_FEATURES: ReadonlySet<string> = new Set(["same_origin_page_fetch", "host_http_request"]);
 
 /**
  * Default capability profile for the provider/control-plane runtime.
@@ -51,6 +75,7 @@ export interface RuntimeCapabilityProfile {
  * profile to `evaluatePlacement`.
  */
 export const PROVIDER_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
+  bindingFeatures: new Map<RuntimeBindingName, ReadonlySet<string>>([["network", NODE_NETWORK_FEATURES]]),
   bindings: new Set<RuntimeBindingName>(["network", "filesystem"]),
   id: "provider",
   protocolCapabilities: new Set<ConnectorProtocolCapability>(),
@@ -77,6 +102,10 @@ export const PROVIDER_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
  * transport. The runner rejects any BLOB line before it can accept a RECORD.
  */
 export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
+  bindingFeatures: new Map<RuntimeBindingName, ReadonlySet<string>>([
+    ["browser", NODE_BROWSER_FEATURES],
+    ["network", NODE_NETWORK_FEATURES],
+  ]),
   bindings: new Set<RuntimeBindingName>(["network", "browser", "filesystem", "local_device"]),
   id: "collector",
   protocolCapabilities: new Set<ConnectorProtocolCapability>(),
@@ -84,7 +113,9 @@ export const COLLECTOR_RUNTIME_CAPABILITIES: RuntimeCapabilityProfile = {
 };
 
 export interface ConnectorRuntimeRequirements {
-  readonly bindings?: Partial<Record<RuntimeBindingName, { readonly required?: boolean }>>;
+  readonly bindings?: Partial<
+    Record<RuntimeBindingName, { readonly features?: readonly string[]; readonly required?: boolean }>
+  >;
 }
 
 /**
@@ -117,8 +148,16 @@ export type RuntimeCapabilityName = RuntimeBindingName | ConnectorProtocolCapabi
 export type PlacementDecision =
   | { readonly kind: "ok"; readonly satisfied: readonly RuntimeBindingName[] }
   | {
+      /** A JSON caller supplied binding requirements the matcher cannot read. */
+      readonly kind: "malformed_bindings";
+      readonly runtime: string;
+      readonly connectorId: string;
+    }
+  | {
       readonly kind: "missing_capability";
       readonly missing: readonly RuntimeCapabilityName[];
+      /** Features a required binding declares that the runtime does not supply. */
+      readonly missingFeatures?: readonly MissingBindingFeatures[];
       readonly runtime: string;
       readonly connectorId: string;
     }
@@ -139,9 +178,24 @@ export type PlacementDecision =
       readonly connectorId: string;
     };
 
+export interface MissingBindingFeatures {
+  readonly binding: RuntimeBindingName;
+  readonly features: readonly string[];
+}
+
+/** The features a required binding declares that the runtime does not supply. */
+function unsuppliedFeatures(
+  binding: RuntimeBindingName,
+  declared: readonly string[] | undefined,
+  runtime: RuntimeCapabilityProfile
+): string[] {
+  const supplied = runtime.bindingFeatures?.get(binding);
+  return (declared ?? []).filter((feature) => !supplied?.has(feature));
+}
+
 /**
  * Returns the list of bindings the connector requires that the runtime
- * does NOT advertise. Empty array means the connector is eligible to
+ * does NOT advertise, or advertises without a feature the declaration names. Empty array means the connector is eligible to
  * run in this runtime.
  */
 export function diffRequiredBindings(
@@ -150,9 +204,32 @@ export function diffRequiredBindings(
 ): RuntimeBindingName[] {
   const declared = connector.runtime_requirements?.bindings ?? {};
   const missing: RuntimeBindingName[] = [];
-  for (const [name, decl] of Object.entries(declared) as [RuntimeBindingName, { required?: boolean }][]) {
-    if (decl.required && !runtime.bindings.has(name)) {
+  for (const [name, decl] of Object.entries(declared) as [
+    RuntimeBindingName,
+    { features?: readonly string[]; required?: boolean },
+  ][]) {
+    if (decl.required && (!runtime.bindings.has(name) || unsuppliedFeatures(name, decl.features, runtime).length > 0)) {
       missing.push(name);
+    }
+  }
+  return missing;
+}
+
+/** The unsupplied features of each required binding the runtime does advertise. */
+function diffRequiredBindingFeatures(
+  connector: ConnectorPlacementInput,
+  runtime: RuntimeCapabilityProfile
+): MissingBindingFeatures[] {
+  const declared = connector.runtime_requirements?.bindings ?? {};
+  const missing: MissingBindingFeatures[] = [];
+  for (const [binding, decl] of Object.entries(declared) as [
+    RuntimeBindingName,
+    { features?: readonly string[]; required?: boolean },
+  ][]) {
+    const features =
+      decl.required && runtime.bindings.has(binding) ? unsuppliedFeatures(binding, decl.features, runtime) : [];
+    if (features.length > 0) {
+      missing.push({ binding, features });
     }
   }
   return missing;
@@ -199,6 +276,45 @@ function hasMalformedCapabilities(connector: ConnectorPlacementInput): boolean {
   return !isConnectorProtocolCapabilityArray(connector.protocol_capabilities);
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * True when the requirements a JSON caller supplied cannot be matched: a
+ * non-object, a binding that is not an object, a non-boolean `required`, or
+ * `features` that is not a list of unique non-empty strings. Placement refuses
+ * them instead of reading a string as a list of characters.
+ */
+function hasMalformedBindings(requirements: unknown): boolean {
+  if (requirements === undefined) {
+    return false;
+  }
+  if (!isObject(requirements)) {
+    return true;
+  }
+  const { bindings } = requirements;
+  if (bindings === undefined) {
+    return false;
+  }
+  if (!isObject(bindings)) {
+    return true;
+  }
+  return Object.values(bindings).some((decl) => {
+    if (!isObject(decl)) {
+      return true;
+    }
+    const { features, required } = decl;
+    return (
+      (required !== undefined && typeof required !== "boolean") ||
+      (features !== undefined &&
+        (!Array.isArray(features) ||
+          features.some((feature) => typeof feature !== "string" || feature.trim().length === 0) ||
+          new Set(features).size !== features.length))
+    );
+  });
+}
+
 /**
  * Pre-spawn placement decision. Compares connector requirements against
  * runtime capabilities and returns a typed result the orchestrator can
@@ -215,6 +331,13 @@ export function evaluatePlacement(
       runtime: runtime.id,
     };
   }
+  if (hasMalformedBindings(connector.runtime_requirements)) {
+    return {
+      connectorId: connector.connector_id,
+      kind: "malformed_bindings",
+      runtime: runtime.id,
+    };
+  }
   const missingBindings = diffRequiredBindings(connector, runtime);
   const missingProtocolCapabilities = diffRequiredProtocolCapabilities(connector, runtime);
   const missing: RuntimeCapabilityName[] = [...missingBindings, ...missingProtocolCapabilities];
@@ -225,10 +348,12 @@ export function evaluatePlacement(
     );
     return { kind: "ok", satisfied };
   }
+  const missingFeatures = diffRequiredBindingFeatures(connector, runtime);
   return {
     connectorId: connector.connector_id,
     kind: "missing_capability",
     missing,
+    ...(missingFeatures.length > 0 ? { missingFeatures } : {}),
     runtime: runtime.id,
   };
 }
@@ -242,6 +367,7 @@ export const RUNTIME_CAPABILITY_MISMATCH_CODE = "runtime_capability_mismatch";
 export class RuntimeCapabilityMismatchError extends Error {
   readonly code: typeof RUNTIME_CAPABILITY_MISMATCH_CODE;
   readonly missing: readonly RuntimeCapabilityName[];
+  readonly missingFeatures: readonly MissingBindingFeatures[];
   readonly runtime: string;
   readonly connectorId: string;
 
@@ -249,14 +375,19 @@ export class RuntimeCapabilityMismatchError extends Error {
     connectorId: string;
     runtime: string;
     missing: readonly RuntimeCapabilityName[];
+    missingFeatures?: readonly MissingBindingFeatures[];
   }) {
     super(
       `Runtime '${args.runtime}' cannot satisfy connector '${args.connectorId}': missing capabilities [${args.missing.join(", ")}]. ` +
+        (args.missingFeatures?.length
+          ? `Missing binding features: ${args.missingFeatures.map(({ binding, features }) => `${binding} [${features.join(", ")}]`).join("; ")}. `
+          : "") +
         "Run this connector in a runtime that advertises the required bindings (typically the local collector runtime)."
     );
     this.name = "RuntimeCapabilityMismatchError";
     this.code = RUNTIME_CAPABILITY_MISMATCH_CODE;
     this.missing = args.missing;
+    this.missingFeatures = args.missingFeatures ?? [];
     this.runtime = args.runtime;
     this.connectorId = args.connectorId;
   }
@@ -296,6 +427,25 @@ export class RuntimeCapabilityUndeclaredError extends Error {
   }
 }
 
+export const RUNTIME_BINDING_INVALID_CODE = "runtime_binding_invalid";
+
+export class RuntimeBindingInvalidError extends Error {
+  readonly code = RUNTIME_BINDING_INVALID_CODE;
+  readonly runtime: string;
+  readonly connectorId: string;
+
+  constructor(args: { connectorId: string; runtime: string }) {
+    super(
+      `Connector '${args.connectorId}' has malformed 'runtime_requirements.bindings' for runtime '${args.runtime}'. ` +
+        "Each binding must be an object with an optional boolean 'required' and an optional " +
+        "'features' array of unique non-empty strings."
+    );
+    this.name = "RuntimeBindingInvalidError";
+    this.runtime = args.runtime;
+    this.connectorId = args.connectorId;
+  }
+}
+
 /**
  * Convenience: throw a typed mismatch error if placement is not ok.
  * Returns the satisfied bindings on success so callers can record them
@@ -309,6 +459,12 @@ export function assertPlacementOrThrow(
   if (decision.kind === "ok") {
     return decision.satisfied;
   }
+  if (decision.kind === "malformed_bindings") {
+    throw new RuntimeBindingInvalidError({
+      connectorId: decision.connectorId,
+      runtime: decision.runtime,
+    });
+  }
   if (decision.kind === "undeclared_capabilities") {
     throw new RuntimeCapabilityUndeclaredError({
       connectorId: decision.connectorId,
@@ -318,6 +474,7 @@ export function assertPlacementOrThrow(
   throw new RuntimeCapabilityMismatchError({
     connectorId: decision.connectorId,
     missing: decision.missing,
+    ...(decision.missingFeatures ? { missingFeatures: decision.missingFeatures } : {}),
     runtime: decision.runtime,
   });
 }
