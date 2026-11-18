@@ -1,3 +1,5 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
 import { appendFileSync } from "node:fs";
 import { statfs } from "node:fs/promises";
 
