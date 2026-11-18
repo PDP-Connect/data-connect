@@ -735,6 +735,7 @@ async function installStagedEntry(options: {
     const record = readVerifiedRecord(staged, verifiedEntry);
     renameSync(staged, options.root);
     published = true;
+    crashPoint("connector-install:after-publish");
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
@@ -895,19 +896,10 @@ export function createConnectorInstallService(options: {
           );
         } else {
           // A crash can leave the published directory between rename and the
-          // active-record commit. Do not delete a valid retained root only
-          // because its active record is missing.
-          try {
-            readVerifiedRecord(root, entry);
-            throw new Error("Connector digest root already exists without a matching active record.");
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message === "Connector digest root already exists without a matching active record."
-            ) {
-              throw error;
-            }
-          }
+          // active-record commit. No record means no retained verification: hashing
+          // the bytes found here into a new record would make whatever is on disk the
+          // verified bytes. The leftover is removed and the install below takes the
+          // bytes from the verified artifact again.
           removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
           if (existsSync(root)) {
             throw new Error("Connector digest root already exists without a matching active record.");
