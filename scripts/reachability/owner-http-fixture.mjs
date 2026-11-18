@@ -8,6 +8,7 @@ import { createOwnerAuthPlaceholder } from "../../reference-implementation/serve
 import { createMemoryOwnerSessionStore } from "../../reference-implementation/server/owner-session.ts";
 import { ReachabilityOperations } from "../../reference-implementation/server/reachability/operations.ts";
 import { ReachabilityService } from "../../reference-implementation/server/reachability/service.ts";
+import { ReachabilitySetups } from "../../reference-implementation/server/reachability/setups.ts";
 import { mountOwnerReachability } from "../../reference-implementation/server/routes/owner-reachability.ts";
 import { mountOwnerRemoteAccess } from "../../reference-implementation/server/routes/owner-remote-access.ts";
 import { createApp } from "../../reference-implementation/server/transport.ts";
@@ -76,6 +77,7 @@ export async function createOwnerHttpFixture(
 	const context = {
 		service,
 		operations: new ReachabilityOperations(join(root, "host-operations")),
+		setups: new ReachabilitySetups(join(root, "reachability-setups")),
 		requireToken: auth.requireOwnerSession,
 		requireOwner: auth.requireOwnerSession,
 		requireCsrf: auth.requireCookieMutationCsrf,
