@@ -23,7 +23,7 @@
  * guard → preRunGate → launchRun), pre-run gate, or dispatch governor.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   BROWSER_SURFACE_LEASE_STATUSES,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -87,6 +87,7 @@ export interface RunExecutorDeps {
     | null;
   approvedEnvironmentBindings?: readonly ConnectorEnvironmentBinding[];
   approvedProxyConnectorIds?: readonly string[];
+  blobUploadCredentialHooks?: import("../scheduler-domain-types.ts").SchedulerOptions["blobUploadCredentialHooks"];
   getState: GetStateHandler;
   handleGrantFailureDisable: (reason: string | null | undefined, connectorInstanceId: string) => void;
   isManagedConnector: IsManagedConnectorHandler;
@@ -292,6 +293,7 @@ interface RunConnectorCall {
   approvedEnvironmentBindings?: readonly ConnectorEnvironmentBinding[];
   approvedProxyConnectorIds?: readonly string[];
   automationMode?: RunAutomationMode;
+  blobUploadToken?: string | null;
   cancelSignal?: AbortSignal | null;
   collectionMode: "full_refresh" | "incremental";
   connectorId: string;
@@ -753,6 +755,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     admitRunConnection,
     approvedEnvironmentBindings,
     approvedProxyConnectorIds,
+    blobUploadCredentialHooks,
     getState,
     handleGrantFailureDisable,
     isManagedConnector,
@@ -1028,6 +1031,37 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     });
   }
 
+  // Per-attempt blob upload credential for runs this scheduler launches through
+  // `runConnector` directly. Controller-routed runs mint their own.
+  function mintAttemptBlobUploadToken(schedule: ConnectorSchedule, call: RunConnectorCall, runId: string): string | null {
+    if (!blobUploadCredentialHooks) {
+      return null;
+    }
+    const token = randomBytes(32).toString("hex");
+    try {
+      blobUploadCredentialHooks.register({
+        connectorId: schedule.connectorId,
+        connectorInstanceId: schedule.connectorInstanceId ?? schedule.connectorId,
+        ownerSubjectId: call.ownerSubjectId,
+        runId,
+        token,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[scheduler] blob upload credential register failed for ${runId}: ${message}`);
+      return null;
+    }
+    return token;
+  }
+
+  function revokeAttemptBlobUploadToken(runId: string): void {
+    try {
+      blobUploadCredentialHooks?.revoke({ runId });
+    } catch {
+      /* registry shutdown raced run end */
+    }
+  }
+
   // The durable active-run lease + wall-clock watchdog for one attempt. Wraps the
   // caller's RunConnectorCall so `onStarted` persists an active-run row and
   // `onProgress` feeds the watchdog; `clear()` (run in runSingleAttempt's finally)
@@ -1065,9 +1099,11 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       traceContext
     );
     const unregisterCancellationBox: { value: (() => void) | null } = { value: null };
+    const blobUploadToken = mintAttemptBlobUploadToken(schedule, call, runId);
 
     const leasedCall: RunConnectorCall = {
       ...call,
+      blobUploadToken,
       cancelSignal: watchdog.signal,
       onProgress: (msg) => {
         const suppressedWallClock = watchdog.markProgress(extractPhaseBoundary(msg));
@@ -1102,6 +1138,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
       unregisterCancellationBox.value?.();
       unregisterCancellationBox.value = null;
       watchdog.clear();
+      if (blobUploadToken) {
+        revokeAttemptBlobUploadToken(runId);
+      }
       if (admitted && activeRunStore) {
         await Promise.resolve(activeRunStore.deleteActiveRun(connectorInstanceId, runId)).catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);

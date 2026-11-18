@@ -840,6 +840,12 @@ export interface Controller {
    * closure) succeeds. Exposing it makes scheduled runs lease the warm surface.
    */
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager | undefined;
+  /**
+   * The run-scoped blob upload credential hooks this controller mints with.
+   * Exposed so the scheduler's direct (non-controller) run path mints from the
+   * same registry; without them a scheduled run's child could not upload blobs.
+   */
+  blobUploadCredentialHooks?: RunBlobUploadCredentialHooks | undefined;
   cancelBrowserSurfaceRun: (runId: string) => Promise<BrowserSurfaceProjection | null>;
   /**
    * Owner-only single-run cancellation. Aborts only the targeted run's
@@ -4976,6 +4982,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // is the in-scope const from createController's options; exposing it makes
     // server/index.ts's scheduler seam + isManagedConnector predicate live.
     browserSurfaceLeaseManager,
+    blobUploadCredentialHooks: opts.blobUploadCredentialHooks,
     cancelBrowserSurfaceRun: (runId: string) => browserSurface.cancelBrowserSurfaceRun(runId),
     cancelRun,
     cleanupIdleBrowserSurfaces: () => browserSurface.cleanupIdleBrowserSurfaces(),

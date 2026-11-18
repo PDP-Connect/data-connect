@@ -10490,6 +10490,7 @@ function createReferenceSchedulerManager({
         }) as RunManagedFn)
       : null;
     scheduler = createScheduler({
+      ...(controller?.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       connectors,
       ...(connectorEnvironmentPolicy?.approvedBindings.length
         ? {

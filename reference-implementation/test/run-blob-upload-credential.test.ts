@@ -20,6 +20,7 @@ import { closeDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createRunBlobUploadCredentialRegistry } from "../server/run-blob-upload-credentials.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { closeTestServer } from "./helpers/close-test-server.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NOW = "2026-05-18T12:00:00.000Z";
@@ -149,21 +150,6 @@ test("controller without credential hooks gives the child no blob credential", a
 // Route scope: the credential works on POST /v1/blobs for its own instance only.
 // ---------------------------------------------------------------------------
 
-type TestServer = Awaited<ReturnType<typeof startServer>> & {
-  asServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-  rsServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-};
-
-async function closeServer(server: TestServer): Promise<void> {
-  server.schedulerManager?.stop?.();
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  await Promise.allSettled([
-    new Promise<void>((resolve) => server.asServer.close(() => resolve())),
-    new Promise<void>((resolve) => server.rsServer.close(() => resolve())),
-  ]);
-}
-
 async function seedSpotify(asUrl: string): Promise<string> {
   const manifest: { connector_id: string } = JSON.parse(
     readFileSync(join(__dirname, "..", "fixtures/seed-manifests/spotify.json"), "utf8")
@@ -215,7 +201,7 @@ test("run credential uploads blobs for its own connector instance only, and is r
     dbPath: ":memory:",
     quiet: true,
     rsPort: 0,
-  })) as TestServer;
+  }));
   try {
     const asUrl = `http://localhost:${server.asPort}`;
     const rsUrl = `http://localhost:${server.rsPort}`;
@@ -273,7 +259,7 @@ test("run credential uploads blobs for its own connector instance only, and is r
     registry.revoke({ runId: "run_route_1" });
     assert.equal((await uploadBlob(rsUrl, token, canonicalId, "cin_spotify_work")).status, 401);
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -285,7 +271,7 @@ test("a credential from an earlier run stays rejected after a later run starts f
     dbPath: ":memory:",
     quiet: true,
     rsPort: 0,
-  })) as TestServer;
+  }));
   try {
     const asUrl = `http://localhost:${server.asPort}`;
     const rsUrl = `http://localhost:${server.rsPort}`;
@@ -301,6 +287,6 @@ test("a credential from an earlier run stays rejected after a later run starts f
     assert.equal((await uploadBlob(rsUrl, "token-run-a", canonicalId, "cin_spotify_work")).status, 401);
     assert.equal((await uploadBlob(rsUrl, "token-run-b", canonicalId, "cin_spotify_work")).status, 200);
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
