@@ -112,6 +112,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { canonicalConnectorKeyFromManifest, REGISTRY_CONNECTOR_PREFIX } from "../server/connector-key.ts";
 import { readPolyfillManifests } from "../server/polyfill-connectors-runtime.ts";
 
 // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -169,18 +170,6 @@ interface ManifestLike {
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const riRoot = resolve(scriptDir, "..");
 
-const REGISTRY_ID_PREFIX = "https://registry.pdpp.dev/connectors/";
-
-function connectorKeyFromManifest(manifest: ManifestLike): string | null {
-  if (typeof manifest.connector_key === "string" && manifest.connector_key.length > 0) {
-    return manifest.connector_key;
-  }
-  if (typeof manifest.connector_id === "string" && manifest.connector_id.startsWith(REGISTRY_ID_PREFIX)) {
-    return manifest.connector_id.slice(REGISTRY_ID_PREFIX.length);
-  }
-  return null;
-}
-
 /** Every manifest the `@pdpp/polyfill-connectors` package ships, parsed. This
  * package owns that manifest set — this reference-implementation tool must
  * not walk its `manifests/` directory itself, so it goes through the
@@ -235,7 +224,7 @@ function buildPolicyFromManifestStream(
   declaration: CompactionFingerprintDeclaration
 ): CompactionPolicy {
   const policy: CompactionPolicy = {
-    connectorIds: [connectorKey, `${REGISTRY_ID_PREFIX}${connectorKey}`, `local-device:${connectorKey}`],
+    connectorIds: [connectorKey, `${REGISTRY_CONNECTOR_PREFIX}${connectorKey}`, `local-device:${connectorKey}`],
     connectorSource: `manifest-declared compaction_fingerprint (${connectorKey}/${streamName})`,
     excludeKeys: [...declaration.exclude_keys],
     stream: streamName,
@@ -274,7 +263,7 @@ function isPresentFieldValue(value: unknown): boolean {
 function buildCompactionPoliciesFromManifests(): CompactionPolicy[] {
   const policies: CompactionPolicy[] = [];
   for (const manifest of readAllManifests()) {
-    const connectorKey = connectorKeyFromManifest(manifest);
+    const connectorKey = canonicalConnectorKeyFromManifest(manifest);
     if (!connectorKey) {
       continue;
     }

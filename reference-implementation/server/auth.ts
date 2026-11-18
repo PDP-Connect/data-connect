@@ -32,7 +32,6 @@ import {
 } from "../lib/db.ts";
 import { deriveTokenAuditId, postgresEmitSpineEventInTransaction } from "../lib/postgres-spine.ts";
 import { createTraceContext, emitSpineEvent as emitRawSpineEvent, type SpineEventInput } from "../lib/spine.ts";
-import { tuningNamespacePrefix } from "../runtime/connector-child-environment.ts";
 import type { CimdFetchDependencies, CimdTransportFailureEvent } from "./cimd.ts";
 import {
   OAUTH_JWT_BEARER_CLIENT_ASSERTION_TYPE,
@@ -5545,10 +5544,8 @@ export async function registerConnector(
     skipManifestPersistence?: boolean;
   } = {}
 ): Promise<string> {
-  const installedConnectorKeys = await listInstalledConnectorKeys();
-  validateConnectorManifest(manifest, "invalid_request", { installedConnectorKeys });
+  validateConnectorManifest(manifest);
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
-  await warnOnReassignedTuningKeys(connectorId, installedConnectorKeys);
   if (!options.skipManifestPersistence) {
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
       queueDerivedRepair: options.queueDerivedRepair === true,
@@ -5690,51 +5687,6 @@ export function normalizeConnectorManifestForStorage(manifest: Record<string, un
 export async function listRegisteredConnectorIds(): Promise<string[]> {
   const rows = await getConnectorCatalogStore().listIds();
   return rows.flatMap((row) => (isNonEmptyString(row.connector_id) ? [row.connector_id] : []));
-}
-
-/**
- * A connector installed with a longer key takes the tuning keys inside its
- * namespace from an installed connector with a shorter one. The shorter
- * manifest stays valid and readable; its keys stop reaching its process. Say
- * so at registration, because nothing else shows it. Advisory only: a
- * manifest that cannot be read here never blocks registration.
- */
-async function warnOnReassignedTuningKeys(connectorKey: string, installedConnectorKeys: readonly string[]) {
-  const prefix = tuningNamespacePrefix(connectorKey);
-  for (const other of installedConnectorKeys) {
-    const otherPrefix = tuningNamespacePrefix(other);
-    if (other === connectorKey || otherPrefix.length >= prefix.length || !prefix.startsWith(otherPrefix)) {
-      continue;
-    }
-    try {
-      const requirements = (await getConnectorManifest(other))?.runtime_requirements as
-        | { tuning_environment?: unknown }
-        | undefined;
-      const declared = requirements?.tuning_environment;
-      const moved = (Array.isArray(declared) ? declared : []).filter(
-        (key): key is string => typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length
-      );
-      if (moved.length > 0) {
-        console.warn(
-          `Installed connector ${other} declares ${moved.join(", ")}; the installed connector ${connectorKey} owns the longer namespace ${prefix}, so ${other} no longer receives ${moved.length === 1 ? "it" : "them"}.`
-        );
-      }
-    } catch {
-      // Advisory: an unreadable stored manifest is reported where it is read.
-    }
-  }
-}
-
-/**
- * Canonical keys of every installed connector: vendored manifests the server
- * reconciles, connectors installed from the signed catalog, and local sources.
- * All of them are registered in the connector catalog, so one read covers them.
- * Tuning-namespace ownership uses it to give a key to the connector with the
- * longest matching namespace.
- */
-export async function listInstalledConnectorKeys(): Promise<string[]> {
-  const ids = await listRegisteredConnectorIds();
-  return [...new Set(ids.map((id) => canonicalConnectorKey(id) ?? id))];
 }
 
 /**

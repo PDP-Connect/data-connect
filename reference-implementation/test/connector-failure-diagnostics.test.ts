@@ -247,7 +247,6 @@ async function runStub({
         return null;
       },
     },
-    installedConnectorKeys: [],
     manifest: TEST_MANIFEST,
     onInteraction: () => ({ status: "cancelled", type: "INTERACTION_RESPONSE" }),
     // biome-ignore lint/suspicious/noEmptyBlockStatements: localized test assertion preserves its explicit contract.

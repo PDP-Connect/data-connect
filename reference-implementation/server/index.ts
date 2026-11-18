@@ -99,7 +99,11 @@ import { createRemoteAccessConfigStore, remoteAccessConfigPath } from "./remote-
 import { ownerPasswordManagedByDesktop, ownerPasswordOwnerSet } from "./owner-password-owner-set.ts";
 import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
-import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
+import {
+  type BrowserProfilePurger,
+  countOtherConnectionsOfConnector as countOtherConnectorInstances,
+  createBrowserProfilePurger,
+} from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
@@ -2314,11 +2318,7 @@ function createOwnerBrowserProfilePurger(opts: ServerOpts): BrowserProfilePurger
     createBrowserProfilePurger({
       countOtherConnections: async ({ connectorKey, connectorInstanceId, ownerSubjectId }) => {
         const instances = await createRequestConnectorInstanceStore().listByOwnerIncludingDrafts(ownerSubjectId);
-        return instances.filter(
-          (instance) =>
-            instance.connectorInstanceId !== connectorInstanceId &&
-            canonicalConnectorKey(instance.connectorId) === connectorKey
-        ).length;
+        return countOtherConnectorInstances(instances, { connectorInstanceId, connectorKey }, canonicalConnectorKey);
       },
       isConnectionRunActive: async (connectorInstanceId) =>
         Boolean(await createRequestConnectorInstanceStore().getActiveRun(connectorInstanceId)),
@@ -2337,12 +2337,9 @@ async function countOtherConnectionsOfConnector(connectorInstanceId: string): Pr
   if (!instance) {
     return null;
   }
-  const connectorKey = canonicalConnectorKey(instance.connectorId);
+  const connectorKey = canonicalConnectorKey(instance.connectorId) ?? instance.connectorId;
   const instances = await store.listByOwnerIncludingDrafts(instance.ownerSubjectId);
-  return instances.filter(
-    (other) =>
-      other.connectorInstanceId !== connectorInstanceId && canonicalConnectorKey(other.connectorId) === connectorKey
-  ).length;
+  return countOtherConnectorInstances(instances, { connectorInstanceId, connectorKey }, canonicalConnectorKey);
 }
 
 async function isOnlyConnectionOfItsConnector(connectorInstanceId: string): Promise<boolean> {
