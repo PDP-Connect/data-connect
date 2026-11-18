@@ -63,7 +63,13 @@ export function createRecheckLoop(deps: RecheckDeps) {
     } finally {
       running = false;
     }
-    if (stopped || latest?.id !== target.id) return;
+    if (stopped || !latest) return;
+    if (latest.id !== target.id || latest.generation !== target.generation) {
+      // The page moved on while this check was out. Its outcome belongs to the
+      // old target, and track() left the new one unscheduled: start its wait.
+      schedule(latest.delay);
+      return;
+    }
     if (outcome.ok) {
       failures = 0;
       schedule(Math.max(latest.delay, MIN_REPEAT_MS));
