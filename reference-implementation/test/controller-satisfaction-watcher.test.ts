@@ -456,13 +456,14 @@ test("credential auto-resume uses the repair owner's connection, credential, tok
     assert.equal(resumed.terminal_status, "succeeded");
     assert.deepEqual(admittedOwners, [OWNER_B], "controller closure owner A must not admit the repair run");
     assert.deepEqual(resolverOwners, [OWNER_B], "credential recovery must use the repair owner");
-    // The repair owner's run credential, not the owner bearer, reaches the child.
+    // The repair owner's run credential, not the owner bearer, reaches the
+    // child under both names (older connectors read PDPP_OWNER_TOKEN).
     assert.equal(registrations.length, 1);
     assert.equal(registrations[0]?.ownerSubjectId, OWNER_B, "run credential is bound to the repair owner");
     assert.equal(registrations[0]?.connectorInstanceId, "cin_self_heal_owner_b");
     assert.deepEqual(JSON.parse(readFileSync(snapshotPath, "utf8")), {
       blobUploadToken: registrations[0]?.token,
-      ownerToken: null,
+      ownerToken: registrations[0]?.token,
       secret: `${OWNER_B}-secret`,
     });
     assert.equal(admittedOwners.includes(OWNER_A), false);
@@ -556,12 +557,12 @@ test("managed controller recovery preserves two per-run owners across a stale cl
     assert.notEqual(credentialA.runId, credentialB.runId);
     assert.deepEqual(JSON.parse(readFileSync(snapshotA, "utf8")), {
       blobUploadToken: credentialA.token,
-      ownerToken: null,
+      ownerToken: credentialA.token,
       secret: `${OWNER_A}-secret`,
     });
     assert.deepEqual(JSON.parse(readFileSync(snapshotB, "utf8")), {
       blobUploadToken: credentialB.token,
-      ownerToken: null,
+      ownerToken: credentialB.token,
       secret: `${OWNER_B}-secret`,
     });
   } finally {
