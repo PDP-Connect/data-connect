@@ -124,6 +124,45 @@ fn the_window_view_reports_prefill_once_and_the_saved_attachment() {
     assert_eq!(again["notice"], Value::Null);
 }
 
+/// A second instance started by a pairing link both routes the link and
+/// re-runs the saved-attachment start, which asks for the window again
+/// without a code. That second request must only focus the window.
+#[test]
+fn a_pairing_link_code_survives_a_later_request_without_a_code() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let link = |code: &str| AttachPrefill {
+        input: Some("https://dc.example.com".to_string()),
+        code: Some(code.to_string()),
+        notice: None,
+    };
+    let pair_again = AttachPrefill {
+        input: Some("https://dc.example.com".to_string()),
+        code: None,
+        notice: Some(attach::PAIRING_ENDED_NOTICE.to_string()),
+    };
+    let view = |app: &tauri::App<MockRuntime>| {
+        let attach_window = app
+            .get_webview_window(ATTACH_WINDOW_LABEL)
+            .expect("attach window open");
+        body(invoke_from(&attach_window, "attach_window_view", json!({})).expect("view"))
+    };
+
+    open_attach_window(app.handle(), link("ABCDEFGHJKMN"));
+    open_attach_window(app.handle(), pair_again.clone());
+    assert_eq!(view(&app)["code"], json!("ABCDEFGHJKMN"));
+
+    // A newer link still replaces the code it shows.
+    open_attach_window(app.handle(), link("NMKJHGFEDCBA"));
+    assert_eq!(view(&app)["code"], json!("NMKJHGFEDCBA"));
+
+    // After the page loaded the code, a request without one changes nothing.
+    open_attach_window(app.handle(), pair_again);
+    let after = view(&app);
+    assert_eq!(after["code"], Value::Null);
+    assert_eq!(after["notice"], Value::Null, "the window was not reloaded");
+}
+
 #[test]
 fn an_environment_override_disables_attaching() {
     let data_root = tempfile::tempdir().expect("tempdir");

@@ -31,18 +31,38 @@ pub(crate) struct AttachPrefill {
 
 #[derive(Default)]
 pub(crate) struct AttachWindowState {
+    /// What the next page load shows; `attach_window_view` takes it.
     prefill: Mutex<AttachPrefill>,
+    /// What the open window was last given, kept after the page took it.
+    shown: Mutex<AttachPrefill>,
     busy: AtomicBool,
+}
+
+/// Whether `incoming` may replace what the open window shows. A pairing
+/// link's code is never replaced by a request without one: a second
+/// instance started by the link also re-runs the saved-attachment start,
+/// which asks for this window without a code.
+fn replaces_shown_prefill(shown: &AttachPrefill, incoming: &AttachPrefill) -> bool {
+    shown.code.is_none() || incoming.code.is_some()
 }
 
 /// Open (or reload) the attach window with `prefill`. Never submits.
 pub(crate) fn open_attach_window<R: Runtime>(app: &AppHandle<R>, prefill: AttachPrefill) {
+    let open_window = app.get_webview_window(ATTACH_WINDOW_LABEL);
     if let Some(state) = app.try_state::<AttachWindowState>() {
-        if let Ok(mut slot) = state.prefill.lock() {
+        if let (Ok(mut slot), Ok(mut shown)) = (state.prefill.lock(), state.shown.lock()) {
+            if open_window.is_some() && !replaces_shown_prefill(&shown, &prefill) {
+                if let Some(window) = open_window {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+                return;
+            }
+            *shown = prefill.clone();
             *slot = prefill;
         }
     }
-    if let Some(window) = app.get_webview_window(ATTACH_WINDOW_LABEL) {
+    if let Some(window) = open_window {
         // The page reads the prefill on load.
         let _ = window.eval("window.location.reload()");
         let _ = window.show();
