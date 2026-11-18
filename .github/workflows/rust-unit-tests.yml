@@ -168,20 +168,30 @@ jobs:
           test_bin="$(cargo test --lib --no-run --message-format=json 2>/dev/null \
             | jq -r 'select(.profile.test == true and .executable != null) | .executable' | tail -n 1)"
           test -x "$test_bin"
-          # The stall is intermittent and was seen only through `cargo test | tee`
-          # (30 direct runs of the binary all exited), so repeat the test through
-          # Cargo, each time on a fresh display and bus, and stop at the first failure.
-          for attempt in $(seq 1 20); do
-            echo "probe: attempt $attempt"
-            PROBE_VIA=cargo timeout --signal=TERM --kill-after=5s 120s xvfb-run -a dbus-run-session -- \
+          # Two CI runs stalled here (once before any phase, once after RAN) and
+          # 51 later probe runs did not. On a stall (exit 124) the probe records
+          # stacks first, then the step retries once: a rare stall leaves its
+          # evidence and a warning without failing the job. Any other failure
+          # is not retried.
+          for attempt in 1 2; do
+            set +e
+            timeout --signal=TERM --kill-after=5s 240s xvfb-run -a dbus-run-session -- \
               ../scripts/ci/webkitgtk-cookie-probe.sh "$test_bin" "$RUNNER_TEMP/webkitgtk-cookie-test.log" \
               2>&1 | tee -a "$RUNNER_TEMP/webkitgtk-cookie-probe.log"
-            grep -q '^WEBKITGTK COOKIE TEST RAN$' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
-              echo "::error::WebKitGTK cookie test did not print its RAN marker (attempt $attempt)"
-              exit 1
-            }
-            grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
-              echo "::error::WebKitGTK cookie test did not report a passing result (attempt $attempt)"
-              exit 1
-            }
+            code=$?
+            set -e
+            [ "$code" = 124 ] && [ "$attempt" = 1 ] || break
+            echo "::warning::WebKitGTK cookie test stalled; its stacks are in this step's log. Retrying once."
           done
+          [ "$code" = 0 ] || {
+            echo "::error::WebKitGTK cookie test failed (exit $code)"
+            exit 1
+          }
+          grep -q '^WEBKITGTK COOKIE TEST RAN$' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
+            echo "::error::WebKitGTK cookie test did not print its RAN marker"
+            exit 1
+          }
+          grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
+            echo "::error::WebKitGTK cookie test did not report a passing result"
+            exit 1
+          }
