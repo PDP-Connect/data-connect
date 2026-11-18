@@ -306,7 +306,9 @@ test("PostgreSQL: a succeeded terminal event stores no runtime failure fields (r
       assert.equal(row?.status, "failed", runId);
       assert.equal(row?.failure_reason, "stale runtime failure", runId);
       assert.deepEqual(
-        typeof row?.connector_error_json === "string" ? JSON.parse(row.connector_error_json) : row?.connector_error_json,
+        typeof row?.connector_error_json === "string"
+          ? JSON.parse(row.connector_error_json)
+          : row?.connector_error_json,
         { code: "runtime_code", message: "stale runtime failure", origin: "runtime", retryable: true },
         runId
       );
