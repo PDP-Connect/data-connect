@@ -111,6 +111,17 @@ const codeOf = (failure: unknown) => (failure instanceof ReachabilityFailure ? f
 type Choice = { providerId: string; usage: string };
 
 /**
+ * The preparation may no longer send a positive request: its screen went away,
+ * a newer preparation replaced it, or the password is gone. Not a failure to
+ * show; the caller drops it.
+ */
+export class PreparationStopped extends Error {
+  constructor() {
+    super("preparation_stopped");
+  }
+}
+
+/**
  * Inventory, then the service's draft (reused by id), then each setup action
  * that has no effects, then commit, then review. It stops at the first human
  * step. If the host no longer knows the draft, it starts once more from a fresh
@@ -119,8 +130,13 @@ type Choice = { providerId: string; usage: string };
 export async function prepareTurnOn(
   request: Request,
   choice: Choice,
-  options: { restarted?: boolean; mayRunActions?: () => boolean } = {}
+  options: { restarted?: boolean; mayRunActions?: () => boolean; isCurrent?: () => boolean } = {}
 ): Promise<Prepared> {
+  // Checked before every positive request (draft, action, commit, review, discard).
+  // Reads are never guarded: a stopped chain may finish the read it already sent.
+  const proceed = () => {
+    if (options.isCurrent?.() === false || options.mayRunActions?.() === false) throw new PreparationStopped();
+  };
   const send = async <T>(path: string, body?: Record<string, unknown>): Promise<T> => {
     const result = await request(path, body);
     if (!result.ok) throw new ReachabilityFailure(result);
@@ -129,7 +145,9 @@ export async function prepareTurnOn(
   const inventory = await send<Inventory>("/catalog");
   const provider = inventory.providers.find((item) => item.providerId === choice.providerId);
   if (!provider) throw new ReachabilityFailure(publicError("configuration_stale"));
-  const state = await send<{ services?: ServiceEntry[] }>("/state");
+  const state = await send<{ services?: ServiceEntry[]; passwordSet?: boolean }>("/state");
+  // This read is newer than the caller's last poll. Without a password nothing positive runs.
+  if (state.passwordSet === false) throw new PreparationStopped();
   const entry = state.services?.find((item) => item.providerId === choice.providerId);
   let draft: Draft | null = null;
   let committed = false;
@@ -145,6 +163,7 @@ export async function prepareTurnOn(
   }
   try {
     if (!draft) {
+      proceed();
       // The host reuses a draft it already holds for this service.
       draft = await send<Draft>("/drafts", {
         providerId: choice.providerId,
@@ -163,20 +182,24 @@ export async function prepareTurnOn(
     if (!committed) {
       for (const action of draft.configuration.actions) {
         const needsInput = draft.configuration.inputRequirements.some((field) => field.actionId === action.id);
+        // The caller posts the setup for a sign-in step, so it only gets one while this may still act.
+        proceed();
         if (action.step) return { kind: "sign-in", draft, action };
-        // Without the password nothing positive runs, not even an effect-free step.
-        if (hasEffects(action, needsInput) || options.mayRunActions?.() === false) return { kind: "allow", draft, action };
+        if (hasEffects(action, needsInput)) return { kind: "allow", draft, action };
         draft = await runAction(send, draft, action);
       }
+      proceed();
       await send<Configuration>(`/drafts/${encodeURIComponent(draft.draftId)}/commit`, {
         expectedRevision: draft.configuration.revision,
       });
     }
+    proceed();
     const review = await send<Review>(`/drafts/${encodeURIComponent(draft.draftId)}/review`, { usage: choice.usage });
     return { kind: "ready", draft, review };
   } catch (failure) {
     const code = codeOf(failure);
     if (!options.restarted && code && restartCodes.has(code)) {
+      proceed();
       if (draft) await request(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
       return prepareTurnOn(request, choice, { ...options, restarted: true });
     }

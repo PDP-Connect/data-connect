@@ -8,7 +8,7 @@ import { JSDOM } from "jsdom";
 import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { type Action, hasEffects, operationOutcome, prepareTurnOn } from "./prepare-remote-access.ts";
+import { type Action, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn } from "./prepare-remote-access.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
 
@@ -222,6 +222,7 @@ async function withScreen<T>(
     press: (label: RegExp) => Promise<void>;
     settle: () => Promise<void>;
     text: () => string;
+    unmount: () => Promise<void>;
   }) => Promise<T>
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
@@ -236,6 +237,12 @@ async function withScreen<T>(
     return handler(call);
   }) as typeof requestReachability;
   const settle = () => act(async () => {});
+  let mounted = true;
+  const unmount = async () => {
+    if (!mounted) return;
+    mounted = false;
+    await act(async () => root.unmount());
+  };
   try {
     await act(async () => root.render(createElement(RemoteAccessSetting, { request, appVersion: "0.0.0-test" })));
     await settle();
@@ -243,6 +250,7 @@ async function withScreen<T>(
       container,
       calls,
       settle,
+      unmount,
       text: () => container.textContent ?? "",
       press: async (label) => {
         const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
@@ -252,7 +260,7 @@ async function withScreen<T>(
       },
     });
   } finally {
-    await act(async () => root.unmount());
+    await unmount();
     dom.window.close();
   }
 }
@@ -550,9 +558,13 @@ test("an open review cannot be approved once the password is reported missing", 
 
 test("with no password the chain runs no setup action, even one that declares no effects", async () => {
   const quiet = action({ effects: none });
-  const { request, urls } = recorder({ ...baseTable, "/drafts": ok(draftWith([quiet])) });
-  const result = await prepareTurnOn(request, choice, { mayRunActions: () => false });
-  assert.equal(result.kind, "allow");
+  const services = [{ providerId: "p-tunnel", providerLabel: "T", draftId: "d-1", usage: "session", committed: false, setup: null }];
+  const { request, urls } = recorder({
+    ...baseTable,
+    "/state": ok({ routes: [], reasons: {}, starting: false, services }),
+    "/drafts/d-1": ok(draftWith([quiet])),
+  });
+  await assert.rejects(prepareTurnOn(request, choice, { mayRunActions: () => false }), PreparationStopped);
   assert.ok(!urls().some((url) => url?.includes("/actions/") || url?.includes("/commit")));
 });
 
@@ -564,5 +576,184 @@ test("with no password, Cancel and Turn off stay available", async () => {
   await withScreen(handler, async ({ calls, press }) => {
     await press(/^Cancel$/);
     assert.ok(calls.some((call) => call.url === "/operations/op-1/reconcile"));
+  });
+});
+
+// ---------- hardening: one preparation at a time, no stale positive request ----------
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+const positives = (calls: Call[]) =>
+  calls.filter((call) => positive(call) || call.url.endsWith("/review")).map((call) => call.url);
+
+test("an expired review is refreshed once, however long the refresh takes", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const slow = deferred<Result>();
+  let reviews = 0;
+  const handler = host({
+    "/drafts/d-1/review": () => {
+      reviews += 1;
+      if (reviews === 1) return ok(review("rev-1", "digest-1", undefined, "2000-01-01T00:00:00.000Z"));
+      return slow.promise as unknown as Result;
+    },
+    "/operations": ok({ operationId: "op-1" }),
+  });
+  await withScreen(handler, async ({ calls, press, settle }) => {
+    for (let tick = 0; tick < 5; tick += 1) {
+      await act(async () => t.mock.timers.tick(1000));
+      await settle();
+    }
+    assert.equal(reviews, 2, "one refresh is in flight; the timer started no other");
+    assert.equal(calls.filter((call) => call.url === "/drafts").length, 2, "one chain per refresh");
+    await act(async () => slow.resolve(ok(review("rev-2", "digest-1"))));
+    await settle();
+    await press(/^Turn on remote access$/);
+    assert.deepEqual(approvals(calls).map((call) => call.body?.reviewId), ["rev-2"]);
+    assert.equal(reviews, 2);
+  });
+});
+
+test("password lost while the draft read is slow: no commit, review or setup follows", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const step = action({ kind: "open-url", step: { actor: "owner", permission: { id: "p", label: "p" }, verification: "provider", purpose: "authorize" } });
+  for (const [name, draft] of [["no action", draftWith()], ["a sign-in step", draftWith([step])]] as const) {
+    let passwordSet = true;
+    const slow = deferred<Result>();
+    const services = [{ providerId: "p-tunnel", providerLabel: "Tunnel service", draftId: "d-1", usage: "session", committed: false, setup: null }];
+    const handler = host({
+      "/state": () => ok({ ...idleState, passwordSet, services }),
+      "/drafts/d-1": () => slow.promise as unknown as Result,
+    });
+    await withScreen(handler, async ({ calls, settle }) => {
+      passwordSet = false;
+      await act(async () => t.mock.timers.tick(3000));
+      await settle();
+      await act(async () => slow.resolve(ok(draft)));
+      await settle();
+      assert.deepEqual(positives(calls), [], `${name}: ${positives(calls).join(",")}`);
+    });
+  }
+});
+
+test("a preparation that finds its own state without a password creates no draft", async () => {
+  const { request, urls } = recorder({ ...baseTable, "/state": ok({ routes: [], reasons: {}, starting: false, services: [], passwordSet: false }) });
+  await assert.rejects(prepareTurnOn(request, choice), PreparationStopped);
+  assert.deepEqual(urls(), ["/catalog", "/state"]);
+});
+
+test("with the guard closed, an actionless draft is not committed and a sign-in step is not returned", async () => {
+  const step = action({ kind: "open-url", step: { actor: "owner", permission: { id: "p", label: "p" }, verification: "provider", purpose: "authorize" } });
+  const services = [{ providerId: "p-tunnel", providerLabel: "T", draftId: "d-1", usage: "session", committed: false, setup: null }];
+  for (const draft of [draftWith(), draftWith([step])]) {
+    const { request, urls } = recorder({ ...baseTable, "/state": ok({ routes: [], reasons: {}, starting: false, services }), "/drafts/d-1": ok(draft) });
+    await assert.rejects(prepareTurnOn(request, choice, { mayRunActions: () => false }), PreparationStopped);
+    assert.ok(!urls().some((url) => url?.endsWith("/commit") || url?.endsWith("/review")), urls().join(","));
+  }
+});
+
+test("a preparation that stops being current sends nothing further after each awaited step", async () => {
+  const services = [{ providerId: "p-tunnel", providerLabel: "T", draftId: "d-1", usage: "session", committed: false, setup: null }];
+  const quiet = action({ effects: none });
+  const table = {
+    ...baseTable,
+    "/state": ok({ routes: [], reasons: {}, starting: false, services }),
+    "/drafts/d-1": ok(draftWith([quiet])),
+    "/drafts/d-1/actions/act-1": ok(draftWith().configuration),
+  };
+  // Close the guard after the Nth request; the chain must send nothing positive after it.
+  for (const after of ["/catalog", "/state", "/drafts/d-1", "/drafts/d-1/actions/act-1", "/drafts/d-1/commit"]) {
+    let current = true;
+    const calls: string[] = [];
+    const request = (async (url: string, body?: Record<string, unknown>) => {
+      const path = url.split("?")[0]!;
+      calls.push(path);
+      const hit = (table as Record<string, Result>)[path] ?? ok({});
+      if (path === after) current = false;
+      return hit;
+    }) as unknown as typeof requestReachability;
+    await assert.rejects(prepareTurnOn(request, choice, { isCurrent: () => current }), PreparationStopped, after);
+    const at = calls.indexOf(after);
+    const later = calls.slice(at + 1).filter((path) => path === "/drafts" || path.includes("/actions/") || path.endsWith("/commit") || path.endsWith("/review"));
+    assert.deepEqual(later, [], `after ${after}: ${later.join(",")}`);
+  }
+});
+
+test("unmounting mid-chain stops the chain: no setup, commit or review follows", async () => {
+  const step = action({ kind: "open-url", step: { actor: "owner", permission: { id: "p", label: "p" }, verification: "provider", purpose: "authorize" } });
+  for (const draft of [draftWith(), draftWith([step])]) {
+    const slow = deferred<Result>();
+    const handler = host({ "/drafts": () => slow.promise as unknown as Result });
+    await withScreen(handler, async ({ calls, unmount, settle }) => {
+      await unmount();
+      await slow.resolve(ok(draft));
+      await settle();
+      assert.deepEqual(positives(calls).filter((url) => url !== "/drafts"), []);
+    });
+  }
+});
+
+test("two overlapping preparations send one POST /drafts", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let passwordSet = true;
+  let created = false;
+  const slow = deferred<Result>();
+  const handler = host({
+    "/state": () =>
+      ok({
+        ...idleState,
+        passwordSet,
+        services: created
+          ? [{ providerId: "p-tunnel", providerLabel: "Tunnel service", draftId: "d-1", usage: "session", committed: false, setup: null }]
+          : [],
+      }),
+    "/drafts": () => slow.promise.then((result) => {
+      created = true;
+      return result;
+    }) as unknown as Result,
+    "/drafts/d-1": ok(draftWith()),
+  });
+  await withScreen(handler, async ({ calls, settle }) => {
+    // The first chain waits on POST /drafts. The password drops and returns, so
+    // a second chain starts while the first is still in flight.
+    passwordSet = false;
+    await act(async () => t.mock.timers.tick(3000));
+    await settle();
+    passwordSet = true;
+    await act(async () => t.mock.timers.tick(3000));
+    await settle();
+    await act(async () => slow.resolve(ok(draftWith())));
+    await settle();
+    assert.equal(calls.filter((call) => call.url === "/drafts").length, 1);
+  });
+});
+
+test("a review that expires between the console's check and the approve is refused, refreshed silently and approved on one click", async () => {
+  // The host side of this is tested in reachability-approve-precheck.test.ts:
+  // an expired review is refused before the 202 with consent_expired.
+  let serverNow = 0;
+  const issued = new Map<string, number>();
+  let n = 0;
+  const handler = host({
+    "/drafts/d-1/review": () => {
+      const id = `rev-${++n}`;
+      issued.set(id, serverNow + 60_000);
+      return ok(review(id, "digest-1"));
+    },
+    "/operations": (call) => {
+      const expiry = issued.get(String(call.body?.reviewId)) ?? 0;
+      return serverNow >= expiry ? fail("consent_expired") : ok({ operationId: "op-1" });
+    },
+  });
+  await withScreen(handler, async ({ calls, press, text }) => {
+    serverNow = 120_000; // the host clock passed the expiry; the console has not noticed
+    await press(/^Turn on remote access$/);
+    assert.deepEqual(approvals(calls).map((call) => call.body?.reviewId), ["rev-1", "rev-2"]);
+    assert.doesNotMatch(text(), /couldn.t turn on|Needs your action/);
+    assert.match(text(), /Turning on/);
   });
 });

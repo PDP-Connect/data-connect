@@ -30,6 +30,7 @@ import {
   type Action,
   type Draft,
   type Prepared,
+  PreparationStopped,
   type Review,
   changedFacts,
   operationOutcome,
@@ -131,6 +132,19 @@ export function RemoteAccessSetting({
   const againPending = useRef(false);
   // The digest of the facts the owner approved with the last Turn on click.
   const approvedDigest = useRef<string | null>(null);
+  // One preparation at a time. A newer one starts only after the one before it
+  // has settled, so two never overlap, and a replaced one is told to stop.
+  const preparing = useRef<Promise<unknown>>(Promise.resolve());
+  // The expired review whose refresh is under way. The expiry timer starts no
+  // second refresh for it.
+  const refreshing = useRef<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const reservations = setupCards(state.services);
   // Bumped when an action starts and when it ends. A poll started in an earlier
   // epoch is dropped. `loadSeq` and `appliedSeq` order the polls themselves.
@@ -274,6 +288,16 @@ export function RemoteAccessSetting({
   const requirePassword = () => {
     if (passwordMissingNow.current) throw new ReachabilityFailure(publicError("owner_password_required"));
   };
+  // Runs the preparation chain after any earlier one has settled. `isCurrent`
+  // is checked before each positive request the chain would send.
+  function prepare(providerId: string, usage: string, isCurrent: () => boolean): Promise<Prepared> {
+    const run = preparing.current.then(() => {
+      if (!isCurrent()) throw new PreparationStopped();
+      return prepareTurnOn(request, { providerId, usage }, { isCurrent, mayRunActions: () => !passwordMissingNow.current });
+    });
+    preparing.current = run.catch(() => undefined);
+    return run;
+  }
   const phaseOf = (route: Route) => (state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.phase ?? null) : null);
   const unsupportedOf = (route: Route) => state.reasons[route.handle.id] === "proof_refresh_unsupported";
   // The route whose proof the app renews before its window ends: still verified
@@ -334,19 +358,23 @@ export function RemoteAccessSetting({
 
   useEffect(() => {
     if (!readyToPrepare || !wayId || !wayUsage) {
+      refreshing.current = null;
       return;
     }
     let active = true;
+    const isCurrent = () => active && mounted.current;
     // A review already on screen for this way stays while it is refreshed.
     setPrep((current) =>
       current.status === "done" && current.providerId === wayId && current.result.kind === "ready"
         ? current
         : { status: "preparing" }
     );
-    void prepareTurnOn(request, { providerId: wayId, usage: wayUsage }, { mayRunActions: () => !passwordMissingNow.current })
+    void prepare(wayId, wayUsage, isCurrent)
       .then(async (result) => {
         if (result.kind === "sign-in") {
           // The host keeps one setup per service and returns it if one exists.
+          // Positive: only while this preparation is current and the password is set.
+          if (!isCurrent() || passwordMissingNow.current) throw new PreparationStopped();
           await send("/setups", {
             providerId: wayId,
             draftId: result.draft.draftId,
@@ -361,6 +389,7 @@ export function RemoteAccessSetting({
       })
       .then((result) => {
         if (!active) return;
+        refreshing.current = null;
         if (result.kind === "ready") {
           const before = shownReview.current;
           if (before && before.candidate.consentFactsDigest !== result.review.candidate.consentFactsDigest) {
@@ -373,7 +402,9 @@ export function RemoteAccessSetting({
       })
       .catch((failure) => {
         if (!active) return;
+        refreshing.current = null;
         setPrep({ status: "idle" });
+        if (failure instanceof PreparationStopped) return;
         setPrepError(toDisplayError(failure, "action", wayLabel));
       });
     return () => {
@@ -388,7 +419,11 @@ export function RemoteAccessSetting({
   useEffect(() => {
     if (!readyReview) return;
     const timer = setInterval(() => {
-      if (reviewExpired(readyReview, Date.now())) setPrepRun((n) => n + 1);
+      if (!reviewExpired(readyReview, Date.now())) return;
+      // One refresh per expired review, however long it takes.
+      if (refreshing.current === readyReview.id) return;
+      refreshing.current = readyReview.id;
+      setPrepRun((n) => n + 1);
     }, 1000);
     return () => clearInterval(timer);
   }, [readyReview]);
@@ -433,7 +468,12 @@ export function RemoteAccessSetting({
       let refresh = false;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         if (refresh || reviewExpired(target, Date.now())) {
-          const fresh = await prepareTurnOn(request, { providerId: shown.candidate.providerId, usage: wayUsage ?? "" }, { mayRunActions: () => !passwordMissingNow.current });
+          // Stopped means the screen went away or the password is gone; the screen already says so.
+          const fresh = await prepare(shown.candidate.providerId, wayUsage ?? "", () => mounted.current).catch((failure) => {
+            if (failure instanceof PreparationStopped) return null;
+            throw failure;
+          });
+          if (!fresh) return;
           if (fresh.kind !== "ready") {
             setPrep({ status: "done", providerId: shown.candidate.providerId, result: fresh });
             return;
