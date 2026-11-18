@@ -63,3 +63,24 @@ for (const [name, mutate, expected] of [
 		}
 	});
 }
+
+test("a real directory with an extra empty folder is refused and names the path", async () => {
+	const { root, source, target } = await fixture();
+	try {
+		await cp(source, target, { recursive: true });
+		await mkdir(join(target, "empty"));
+		await assert.rejects(linkInstalledPackage(source, target), /extra empty/);
+	} finally {
+		await rm(root, { recursive: true });
+	}
+});
+
+test("an existing file in place of the package is refused", async () => {
+	const { root, source, target } = await fixture();
+	try {
+		await writeFile(target, "not a package");
+		await assert.rejects(linkInstalledPackage(source, target), /not a directory or link/);
+	} finally {
+		await rm(root, { recursive: true });
+	}
+});

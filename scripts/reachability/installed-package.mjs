@@ -6,7 +6,7 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, symlink
 import { dirname, join } from "node:path";
 
 // Map of relative path -> "file:<sha256>" or "link:<target>" for every entry
-// under `root`. Directories are implied by their contents. Sorted so the first
+// under `root`, plus "dir" for each directory. Sorted so the first
 // difference between two trees is deterministic.
 async function digestTree(root) {
 	const entries = new Map();
@@ -15,7 +15,11 @@ async function digestTree(root) {
 		for (const name of names.sort()) {
 			const child = relative ? `${relative}/${name}` : name;
 			const stat = await lstat(join(root, child));
-			if (stat.isDirectory()) await walk(child);
+			if (stat.isDirectory()) {
+				// Record the directory itself so an extra or missing empty folder differs.
+				entries.set(child, "dir");
+				await walk(child);
+			}
 			else if (stat.isSymbolicLink())
 				entries.set(child, `link:${await readlink(join(root, child))}`);
 			else if (stat.isFile())
@@ -25,7 +29,7 @@ async function digestTree(root) {
 						.update(await readFile(join(root, child)))
 						.digest("hex")}`,
 				);
-			else entries.set(child, "other");
+			else throw new Error(`Unsupported file kind in package tree: ${join(root, child)}`);
 		}
 	}
 	await walk("");
@@ -77,6 +81,8 @@ export async function linkInstalledPackage(source, target) {
 			await rm(staging, { recursive: true, force: true });
 		}
 	}
+	if (!(await lstat(target)).isDirectory())
+		throw new Error(`Existing package is not a directory or link: ${target}`);
 	const difference = await firstTreeDifference(source, target);
 	if (difference)
 		throw new Error(
