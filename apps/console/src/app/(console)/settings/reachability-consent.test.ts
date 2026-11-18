@@ -101,11 +101,11 @@ test("setup card shows all typed disclosure groups from the action snapshot", ()
   }
 });
 
-test("setup approval shows every condition, including those that state a time", () => {
-  const conditions = ["Logs retained for 30 days", "Free for 7 days, then costs $10", "the plan limits a session to 15 minutes"];
-  const disclosures = { action: { ...actionDisclosure, conditions } };
-  const fact = (id: string, value: string) => ({
-    id,
+const timeStatingConditions = ["Logs retained for 30 days", "Free for 7 days, then costs $10", "the plan limits a session to 15 minutes"];
+
+test("setup approval shows time-stating conditions from facts alone", () => {
+  const facts = timeStatingConditions.map((value, index) => ({
+    id: `address-conditions-${index}`,
     label: "address conditions",
     group: "address",
     known: true as const,
@@ -113,11 +113,29 @@ test("setup approval shows every condition, including those that state a time", 
     affectsConsent: true,
     source: "fixture",
     asOf: null,
-  });
-  const facts = conditions.map((value, index) => fact(`address-conditions-${index}`, value));
-  const action = projectAction({ ...base, consent: { ...base.consent!, facts, disclosures } });
+  }));
+  const action = projectAction({ ...base, consent: { ...base.consent!, facts, disclosures: { action: actionDisclosure } } });
   const html = renderToStaticMarkup(createElement(SetupApprovalCard, { action, onApprove: () => {} }));
-  for (const text of conditions) {
+  for (const text of timeStatingConditions) {
+    assert.ok(html.includes(text), `"${text}" is shown`);
+  }
+});
+
+test("turn on card Details show time-stating conditions from disclosures alone", () => {
+  const review = projectCandidate({
+    configuration: fixture.configuration,
+    consentFactsDigest: "fixture-route",
+    consent: { scope: routeScope, consentFactsDigest: "fixture-route", facts: [], disclosures: { ownership: "external-owned" } },
+    disclosure: base.disclosure,
+    display: { label: "Fixture", description: "", needs: "" },
+    eligible: true, expiresAt: null, facts: [],
+    providerId: "fixture", ownership: "external-owned",
+  } as unknown as Parameters<typeof projectCandidate>[0]);
+  assert.ok(review.consent);
+  // Set after projection, as the test below does: the SDK payload shape is covered by the HTTP test.
+  review.consent.disclosures = { address: { conditions: timeStatingConditions } };
+  const html = renderToStaticMarkup(turnOnCard(review));
+  for (const text of timeStatingConditions) {
     assert.ok(html.includes(text), `"${text}" is shown`);
   }
 });

@@ -2,7 +2,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useState } from "react";
-import { ConsentFacts, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
+import { ConsentDisclosures, ConsentFacts, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import { type Action, type Draft, disclosureLines, effectLines, type Review } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
 
@@ -57,6 +57,7 @@ export function TurnOnCard({
           {consent.scope?.query.expectedOrigin ? (
             <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
           ) : null}
+          <ConsentDisclosures value={consent.disclosures} />
           <ConsentFacts facts={shown} providerId={candidate.providerId} />
           <UnknownFactsCount count={unknown} service={candidate.display.label} />
         </details>

@@ -19,8 +19,11 @@ export async function requestReachability(
     throw new Error("Invalid remote access path");
   }
   const token = await getOwnerToken();
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 15_000);
   try {
     const response = await fetch(url, {
+      signal: controller.signal,
       method: body === undefined ? "GET" : "POST",
       cache: "no-store",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -32,6 +35,9 @@ export async function requestReachability(
     }
     return { ok: true, data: payload.data };
   } catch {
-    return { ok: false, ...publicError("service_unreachable") };
+    // A request that outlived its deadline is slow, not proof the service is down: the owner may try again.
+    return { ok: false, ...publicError(controller.signal.aborted ? "reachability_unavailable" : "service_unreachable") };
+  } finally {
+    clearTimeout(deadline);
   }
 }

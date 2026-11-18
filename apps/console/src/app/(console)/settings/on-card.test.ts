@@ -288,7 +288,7 @@ test("the proof is re-checked before its window ends; the status stays On and 'c
   }, t);
 });
 
-test("a proof the host already calls stale is re-checked at once and never shown as stale", async (t) => {
+test("a proof the host already calls stale is re-checked after a bounded delay and never shown as stale", async (t) => {
   let phase = "stale";
   const handler = host({
     "/state": () => onState(routeAt({ observedAt: T0 - 60_000, validUntil: T0 - 30_000 }), phase),
@@ -298,8 +298,10 @@ test("a proof the host already calls stale is re-checked at once and never shown
     },
   });
   await withScreen(handler, async ({ calls, tick, text }) => {
+    await tick(1_999);
+    assert.equal(checks(calls).length, 0);
     await tick(1);
-    assert.equal(checks(calls).length, 1, "due immediately");
+    assert.equal(checks(calls).length, 1, "minimum positive delay");
     assert.doesNotMatch(text(), /Needs your action|stale/i);
   }, t);
 });
@@ -392,7 +394,7 @@ for (const skew of [120_000, -120_000]) {
     }, t);
   });
 
-  test(`with the browser clock ${skew > 0 ? "ahead" : "behind"} by 120 s, a host report of stale is checked at once and a failure needs the owner within one poll`, async (t) => {
+  test(`with the browser clock ${skew > 0 ? "ahead" : "behind"} by 120 s, a host report of stale is checked with a bounded delay and a failure needs the owner within one poll`, async (t) => {
     t.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: T0 + skew });
     let phase = "verified";
     const route = routeAt({ observedAt: Date.now() - skew, validUntil: Date.now() - skew + 30_000 });
@@ -403,8 +405,8 @@ for (const skew of [120_000, -120_000]) {
     await withScreen(handler, async ({ calls, tick, text }) => {
       phase = "stale";
       await tick(3_000);
-      await tick(1);
-      assert.equal(checks(calls).length, 1, "a stale report is due now, whatever the browser clock says");
+      await tick(2_000);
+      assert.equal(checks(calls).length, 1, "a stale report is checked promptly, whatever the browser clock says");
       assert.match(text(), /Needs your action/);
     }, t);
   });
@@ -451,20 +453,27 @@ test("a delayed state read after a re-check cannot bring back a route that was t
 for (const label of ["Turn on again", "Turn off"]) {
   test(`${label}: a refused stop keeps Needs your action, shows the error and keeps re-checking`, async (t) => {
     let phase = "stale";
+    let stopAccepted = false;
+    let stops = 0;
     let route = routeAt({ observedAt: T0 - 60_000, validUntil: T0 - 30_000 });
     const handler = host({
-      "/state": () => onState(route, phase),
+      "/state": () => stopAccepted ? offState : onState(route, phase),
       "/routes/route-1/check": () => ok(routeAt()),
-      "/routes/route-1/stop": () => fail("service_unreachable"),
+      "/routes/route-1/stop": () => {
+        if (++stops === 1) return fail("service_unreachable");
+        stopAccepted = true;
+        return ok({ operationId: "op-stop" });
+      },
+      "/operations/op-stop": ok({ operationId: "op-stop", kind: "stop", stage: "settled", recovery: null }),
     });
-    await withScreen(handler, async ({ calls, press, tick, text }) => {
+    await withScreen(handler, async ({ calls, press, tick, text, container }) => {
       await tick(3_000);
       assert.equal(checks(calls).length, 1);
       assert.match(text(), /Needs your action/, "the host still calls the proof stale after the check");
       await press(new RegExp(`^${label}$`));
       assert.ok(calls.some((call) => call.url === "/routes/route-1/stop"));
       assert.match(text(), /Needs your action/);
-      assert.match(text(), /background service isn.t running/, "the error is shown");
+      assert.ok(container.querySelector('[role="alert"]'), "the error is shown");
       // The host renews the proof; the next window must be re-checked.
       phase = "verified";
       route = routeAt({ observedAt: Date.now(), validUntil: Date.now() + 30_000 });
@@ -472,6 +481,15 @@ for (const label of ["Turn on again", "Turn off"]) {
       const before = checks(calls).length;
       await tick(30_000);
       assert.ok(checks(calls).length > before, "re-checks continue after the refused stop");
+      phase = "failed";
+      await tick(3_000);
+      await press(new RegExp(`^${label}$`));
+      await tick(3_000);
+      assert.equal(stops, 2, "the second click reaches the host");
+      assert.equal(stopAccepted, true);
+      // The fixture's unknown host settings print the same sentence as a status line, so the error itself is the alert.
+      assert.equal(container.querySelector('[role="alert"]'), null, "the error is gone once the stop is accepted");
+      assert.doesNotMatch(text(), /Needs your action/);
     }, t);
   });
 }
@@ -604,18 +622,20 @@ test("the Turn on card lists known-empty facts as None and counts only unknown o
   });
 });
 
-test("service conditions that state a time stay visible in the Turn on approval", async () => {
+for (const source of ["facts", "disclosures"] as const) {
+test(`time-stating conditions from ${source} alone stay visible in Turn on approval`, async () => {
   const withConditions = review("rev-1");
   const conditions = ["Logs retained for 30 days", "Free for 7 days, then costs $10", "the plan limits a session to 15 minutes"];
   const facts = conditions.map((value, index) => ({ ...fact(`address-conditions-${index}`, value), group: "address", label: "address conditions" }));
-  withConditions.candidate.consent.facts = facts;
-  (withConditions.candidate.consent.disclosures as Record<string, unknown>).address = { stability: "ephemeral", conditions };
+  withConditions.candidate.consent.facts = source === "facts" ? facts : [];
+  (withConditions.candidate.consent.disclosures as Record<string, unknown>).address = { stability: "ephemeral", ...(source === "disclosures" ? { conditions } : {}) };
   await withScreen(host({ "/drafts/d-1/review": ok(withConditions) }), async ({ allText }) => {
     for (const text of conditions) {
       assert.ok(allText().includes(text), `"${text}" is shown`);
     }
   });
 });
+}
 
 // ---------- Try again ----------
 
@@ -673,4 +693,28 @@ test("no source string the owner can read states a fixed lifetime", () => {
     visit(source);
   }
   assert.deepEqual(found, []);
+});
+
+test("distinct one-second proof windows stay rate bounded over thirty seconds", async (t) => {
+  let route = routeAt({ observedAt: T0, validUntil: T0 + 1_000 });
+  const pending: Array<() => void> = [];
+  const handler = host({
+    "/state": () => onState(route),
+    "/routes/route-1/check": () => new Promise<Result>((resolve) => {
+      pending.push(() => {
+        route = routeAt({ observedAt: Date.now(), validUntil: Date.now() + 1_000 });
+        resolve(ok(route));
+      });
+    }),
+  });
+  await withScreen(handler, async ({ calls, tick }) => {
+    for (let elapsed = 1_000; elapsed <= 30_000; elapsed += 1_000) {
+      await tick(1_000);
+      assert.ok(checks(calls).length <= Math.floor(elapsed / 2_000), "no faster than one check per two seconds");
+      await act(async () => {
+        for (const finish of pending.splice(0)) finish();
+      });
+    }
+    assert.ok(checks(calls).length >= 5, "renewal actually continues across distinct windows");
+  }, t);
 });
