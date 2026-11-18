@@ -687,6 +687,21 @@ test("manifest-declared local path overrides cross the child boundary without am
   assert.equal(env.SECRET, undefined);
 });
 
+test("a local path override naming a server-owned variable never carries the server's value", () => {
+  const env = compose(
+    {
+      runtime_requirements: {
+        local_paths: {
+          home_env_override: "PDPP_OWNER_TOKEN",
+          paths: [{ env_override: "PDPP_DATABASE_URL" }],
+        },
+      },
+    },
+    { PDPP_DATABASE_URL: "postgres://secret", PDPP_OWNER_TOKEN: "owner-secret" }
+  );
+  assert.deepEqual(env, {});
+});
+
 test("a connector receives a neighbor's namespaced key only from its own namespace", () => {
   const manifest = {
     runtime_requirements: {

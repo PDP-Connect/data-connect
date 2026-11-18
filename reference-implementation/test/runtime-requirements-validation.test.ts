@@ -229,6 +229,24 @@ test("validateRuntimeRequirements: rejects an unsupported local_paths key", () =
   );
 });
 
+test("validateRuntimeRequirements: rejects a local path override that names a server-owned variable", () => {
+  assertRejects(
+    withBindingsAndLocalPaths({
+      home_default_relative_to_user_home: ".x",
+      paths: [{ default_relative_to_home: "data", env_override: "PDPP_DATABASE_URL", label: "data directory" }],
+    }),
+    "local_paths.paths[0].env_override PDPP_DATABASE_URL is a server-owned environment variable"
+  );
+  assertRejects(
+    withBindingsAndLocalPaths({
+      home_default_relative_to_user_home: ".x",
+      home_env_override: "PDPP_OWNER_TOKEN",
+      paths: [],
+    }),
+    "local_paths.home_env_override PDPP_OWNER_TOKEN is a server-owned environment variable"
+  );
+});
+
 test("validateRuntimeRequirements: rejects a missing home_default_relative_to_user_home", () => {
   assertRejects(
     withBindingsAndLocalPaths({ paths: [] }),

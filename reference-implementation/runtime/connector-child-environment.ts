@@ -607,7 +607,7 @@ function declaredLocalPathValues(
   const out: Record<string, string> = {};
   for (const rawKey of keys) {
     const key = name(rawKey);
-    if (!key || reserved(key)) {
+    if (!key || reserved(key) || isServerOwnedEnvironmentKey(key)) {
       continue;
     }
     const value = sourceValue(source, key, platform);

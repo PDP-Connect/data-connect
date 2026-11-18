@@ -559,6 +559,12 @@ function validateLocalPathEntry(entry: unknown, index: number, code: string): vo
       code
     );
   }
+  if (typeof obj.env_override === "string" && isServerOwnedEnvironmentKey(obj.env_override)) {
+    throw invalidConnectorManifest(
+      `runtime_requirements.local_paths.paths[${index}].env_override ${obj.env_override} is a server-owned environment variable`,
+      code
+    );
+  }
   if (obj.required_for_readiness !== undefined && typeof obj.required_for_readiness !== "boolean") {
     throw invalidConnectorManifest(
       `runtime_requirements.local_paths.paths[${index}].required_for_readiness must be a boolean`,
@@ -595,6 +601,12 @@ function validateLocalPaths(req: Record<string, unknown>, code: string): void {
   if (obj.home_env_override !== undefined && !isNonEmptyString(obj.home_env_override)) {
     throw invalidConnectorManifest(
       "runtime_requirements.local_paths.home_env_override must be a non-empty string",
+      code
+    );
+  }
+  if (typeof obj.home_env_override === "string" && isServerOwnedEnvironmentKey(obj.home_env_override)) {
+    throw invalidConnectorManifest(
+      `runtime_requirements.local_paths.home_env_override ${obj.home_env_override} is a server-owned environment variable`,
       code
     );
   }
