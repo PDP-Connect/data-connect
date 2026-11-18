@@ -416,6 +416,7 @@ test("approving a route logs the review id and consent digest it received, and n
   const service = {
     authorizeDisconnect: async () => undefined,
     operationIntent: () => null,
+    precheckApply: async () => undefined,
     apply: async (_operation: string, reviewId: string, approval: unknown) => applied.push([reviewId, approval]),
   };
   const operations = {

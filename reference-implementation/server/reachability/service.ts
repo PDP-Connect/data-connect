@@ -583,11 +583,15 @@ export class ReachabilityService {
       ? this.stop(route.handle.id, route.handle.generation, acknowledged)
       : this.check(route.handle.id, route.handle.generation);
   }
-  async apply(
+  // Every consent check apply makes before it has any effect, with no effect of
+  // its own: nothing is written, started or deleted. The approve route runs it
+  // before it answers 202, so a review that expired or changed since the owner
+  // saw it is refused at once and the console can fetch a new one.
+  private async checkApply(
     operationId: string,
     reviewId: string,
-    input: { kind: unknown; consentFactsDigest: string; acknowledgeDisconnect: boolean }
-  ): Promise<Route> {
+    input: { kind: unknown; consentFactsDigest: string }
+  ): Promise<{ review: Review; approval: ReturnType<typeof requireRouteApproval>; event: ReturnType<typeof reduceLifecycle> }> {
     if (input.kind !== "route") {
       throw new ReachabilityError("consent_kind_mismatch");
     }
@@ -605,7 +609,6 @@ export class ReachabilityService {
       throw new ReachabilityError("configuration_in_use");
     }
     if (this.host.currentTarget && (await this.host.currentTarget()) !== review.query.target) {
-      this.reviews.delete(reviewId);
       throw new ReachabilityError("candidate_stale");
     }
     const expiry = review.candidate.expiresAt ? Date.parse(review.candidate.expiresAt) : Number.NaN;
@@ -617,9 +620,29 @@ export class ReachabilityService {
       type: "apply",
     });
     if (!(event.accepted && event.effects.includes("start-route"))) {
-      this.reviews.delete(reviewId);
       throw new ReachabilityError("consent_expired");
     }
+    return { approval, event, review };
+  }
+  /** Refuses a stale or changed review before the approval is accepted. Changes nothing. */
+  async precheckApply(reviewId: string, input: { kind: unknown; consentFactsDigest: string }): Promise<void> {
+    await this.checkApply("precheck", reviewId, input);
+  }
+  async apply(
+    operationId: string,
+    reviewId: string,
+    input: { kind: unknown; consentFactsDigest: string; acknowledgeDisconnect: boolean }
+  ): Promise<Route> {
+    let checked: Awaited<ReturnType<ReachabilityService["checkApply"]>>;
+    try {
+      checked = await this.checkApply(operationId, reviewId, input);
+    } catch (error) {
+      // A review the host can no longer approve is dropped, so it is not offered again.
+      const code = error instanceof ReachabilityError ? error.code : null;
+      if (code === "candidate_stale" || code === "consent_expired") this.reviews.delete(reviewId);
+      throw error;
+    }
+    const { approval, event, review } = checked;
     this.lifecycle = event.state;
     const epoch = ++this.epoch;
     this.starting = true;

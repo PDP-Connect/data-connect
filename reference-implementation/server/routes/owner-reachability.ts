@@ -458,6 +458,9 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     // a log reader can compare them with what the screen showed.
     console.info(`[reachability] approve reviewId=${reviewId} consentFactsDigest=${digest}`);
     await current.authorizeDisconnect(input.acknowledgeDisconnect === true);
+    // Consent is checked here, before the 202: a review that expired or changed
+    // is refused now, so the console can fetch a new one. Apply checks again.
+    await current.precheckApply(reviewId, { consentFactsDigest: digest, kind: "route" });
     return ctx.operations.start(
       "start",
       null,
