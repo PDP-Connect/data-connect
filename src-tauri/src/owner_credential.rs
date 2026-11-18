@@ -29,6 +29,11 @@ const CREDENTIAL_ENCRYPTION_KEY_FILE: &str = "credential-encryption-key";
 const DATABASE_ENCRYPTION_KEY_FILE: &str = "database-encryption-key";
 const GENERATED_SECRET_BYTES: usize = 32;
 const OWNER_PASSWORD_MIN_LENGTH: usize = 15;
+/// The same list the server checks, so a password the desktop saves is held to
+/// the rule the server applies (`owner-password-blocklist.ts`).
+const COMMON_PASSWORDS: &str = include_str!("../../reference-implementation/server/data/common-passwords.txt");
+const OWNER_PASSWORD_TOO_COMMON_MESSAGE: &str =
+    "That password is too common. Choose a longer or less predictable one.";
 const OWNER_PASSWORD_WINDOW_LABEL: &str = "owner-password";
 const OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const OWNER_OS_REAUTH_GRANT_TTL: Duration = Duration::from_secs(120);
@@ -1414,6 +1419,28 @@ fn configured_owner_password_for<R: Runtime>(app: &AppHandle<R>) -> Option<Strin
     configured_owner_password()
 }
 
+/// True when a new owner password is a common one: a listed entry, a listed
+/// entry repeated, or a listed entry followed only by digits. This is the only
+/// hard reject besides length (NIST SP 800-63B-4 section 3.1.1.2); there are no
+/// composition rules. It runs when a password is set, never on a stored one.
+fn owner_password_is_common(password: &str) -> bool {
+    let candidate = password.to_lowercase();
+    let listed = |value: &str| !value.is_empty() && COMMON_PASSWORDS.lines().any(|line| line == value);
+    if listed(&candidate) {
+        return true;
+    }
+    let without_digits = candidate.trim_end_matches(|c: char| c.is_ascii_digit());
+    if without_digits.len() != candidate.len() && listed(without_digits) {
+        return true;
+    }
+    let chars: Vec<char> = candidate.chars().collect();
+    (1..=chars.len() / 2).any(|unit| {
+        chars.len() % unit == 0
+            && chars.chunks(unit).all(|chunk| chunk == &chars[..unit])
+            && listed(&chars[..unit].iter().collect::<String>())
+    })
+}
+
 /// Every local-origin webview passes the IPC ACL for app commands, so the
 /// legacy `main` window and the recovery window could reach this command
 /// too. Only the password window may save a password.
@@ -1437,6 +1464,9 @@ pub(crate) async fn set_desktop_owner_password<R: Runtime>(
         return Err(format!(
             "Owner passwords must be at least {OWNER_PASSWORD_MIN_LENGTH} characters long."
         ));
+    }
+    if owner_password_is_common(&password) {
+        return Err(OWNER_PASSWORD_TOO_COMMON_MESSAGE.to_string());
     }
     let purpose = consume_owner_password_window_authority(&app, window_request_id)?;
     save_owner_credential(&app, &password)?;
@@ -1857,6 +1887,23 @@ use std::os::unix::fs::PermissionsExt;
 
 #[cfg(test)]
 mod tests {
+    use super::owner_password_is_common;
+
+    #[test]
+    fn a_common_password_is_listed_repeated_or_digit_tailed() {
+        assert!(owner_password_is_common("password"));
+        assert!(owner_password_is_common("PASSWORD"));
+        assert!(owner_password_is_common("passwordpassword"));
+        assert!(owner_password_is_common("password1234567890"));
+    }
+
+    #[test]
+    fn long_unlisted_passwords_are_accepted_with_no_composition_rules() {
+        assert!(!owner_password_is_common("maple orbit canyon velvet"));
+        assert!(!owner_password_is_common(&"x".repeat(80)));
+        assert!(!owner_password_is_common("abcdefghijklmnopqrstuvwxyz"));
+    }
+
     use super::*;
     use tempfile::tempdir;
 
