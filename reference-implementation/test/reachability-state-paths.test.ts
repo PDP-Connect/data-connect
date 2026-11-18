@@ -12,6 +12,8 @@ import {
   inspectStatePaths,
   isFixable,
 } from "../server/reachability/state-paths.ts";
+import { createReachabilityService } from "../server/reachability/factory.ts";
+import { createHostSecretBackend, createSealedSecretBackend } from "../server/reachability/secret-backend.ts";
 import { mountOwnerReachability, publicReachabilityError } from "../server/routes/owner-reachability.ts";
 
 const uid = process.getuid!();
@@ -239,4 +241,54 @@ test("the routes inspect and fix through the owner guards, and answer with data 
   const fixed = await call("POST /v1/owner/reachability/state-paths/fix");
   assert.deepEqual(fixed.data.paths.filter((item: { path: string }) => item.path.startsWith(data)), []);
   assert.equal(await mode(home), 0o755);
+});
+
+// The real Gozar host, not a hand-made error: an unsafe state folder reaches the route as a
+// `setup_required` error with the fix named in `nextAction` (gozar error-normalizer.mjs:27-35).
+test("a group-writable state folder, read through the real Gozar host, answers unsafe_state_path", async (t) => {
+  const { data, home, done } = await layout();
+  t.after(done);
+  await chmod(home, 0o775);
+  const known = (value: unknown) => ({ known: true, value });
+  const service = await createReachabilityService(
+    {
+      identity: { instanceId: "a".repeat(64), bootId: "boot-1" },
+      hostCapabilities: {
+        "installer.execute": known(false),
+        "privilege.elevate": known(false),
+        "runtime.attached": known(true),
+        "runtime.durable": known(false),
+        "secrets.backend": known(true),
+      },
+      secretBackend: createHostSecretBackend(createSealedSecretBackend(join(home, "custody"))),
+    } as never,
+    {
+      hostSettings: { read: async () => ({}), apply: async () => ({}) } as never,
+      query: {
+        schemaVersion: 1,
+        home,
+        owner: "owner",
+        requirements: { reach: "this-device", transport: "any", payloadAccess: "allow-provider", address: "any", setup: "allow", protocols: [] },
+        target: "",
+      } as never,
+      prepare: async () => undefined,
+      currentTarget: async () => "127.0.0.1:1",
+      acknowledgeDisconnect: async () => undefined,
+    } as never
+  );
+  const thrown = await service.inventory().then(() => null, (error: unknown) => error);
+  assert.ok(thrown, "the real host refuses an unsafe state folder");
+  assert.equal(publicReachabilityError(thrown).code, "unsafe_state_path");
+  void data;
+});
+
+test("an unsafe-path code or fix action is found anywhere in a bounded cause chain, never in the message", () => {
+  const inner = Object.assign(new Error("x"), { code: "unsafe_state_path" });
+  const wrapped = Object.assign(new Error("a"), { code: "internal_error", cause: Object.assign(new Error("b"), { cause: inner }) });
+  assert.equal(publicReachabilityError(wrapped).code, "unsafe_state_path");
+  const loop: { cause?: unknown; code: string } = { code: "internal_error" };
+  loop.cause = loop;
+  assert.equal(publicReachabilityError(loop).code, "internal_error");
+  const mentioned = Object.assign(new Error("Unsafe service state path /x"), { code: "setup_required" });
+  assert.equal(publicReachabilityError(mentioned).code, "setup_required");
 });

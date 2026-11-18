@@ -66,3 +66,21 @@ export const trialConsentAction = {
     },
   },
 };
+
+/**
+ * What the host throws when a state folder is group-writable.
+ * Source: @tnunamak/gozar packages/gozar-node/error-normalizer.mjs:27-35 (`stateAction`, mapping
+ * `unsafe_state_path` to `setup_required`), read back through the real host in
+ * reference-implementation/test/reachability-state-paths.test.ts. It has no `cause`.
+ */
+export const unsafeStateFolderError = Object.assign(new Error("The state folder can be written by others"), {
+  code: "setup_required",
+  nextAction: {
+    id: "fix-state-permissions",
+    kind: "instructions",
+    label: "Fix the state directory permissions",
+    digest: "sha256:gozar-fix-state-permissions",
+    instructions: "Make the invoking user own the Gozar state directory, with no group or world write.",
+    disclosure: { revision: "gozar-local-1", text: "Gozar changes nothing; you fix the directory yourself.", links: [] },
+  },
+});

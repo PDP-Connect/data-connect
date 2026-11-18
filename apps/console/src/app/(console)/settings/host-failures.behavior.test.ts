@@ -10,6 +10,8 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
+import { unsafeStateFolderError } from "./real-gozar-shapes.fixture.ts";
+import { publicReachabilityError } from "../../../../../../reference-implementation/server/routes/owner-reachability.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -304,5 +306,20 @@ test("a confirmed cleanup returns to Off", async () => {
     await press(/^Turn off$/);
     assert.match(mainText(), /Turn on remote access/);
     assert.doesNotMatch(mainText(), /We lost track/);
+  });
+});
+
+// The error the real host throws, through the server's own mapping, reaches the card as the fix.
+test("the real host's unsafe-folder error becomes the permissions card with its fix button", async () => {
+  const code = publicReachabilityError(unsafeStateFolderError).code;
+  assert.equal(code, "unsafe_state_path");
+  const handler = host({
+    "/catalog": fail(code),
+    "/state-paths": ok({ paths: [{ path: "/data", reason: "writable-by-others", fixable: true }], command: null }),
+  });
+  await withScreen(handler, async ({ mainText, buttons }) => {
+    assert.match(mainText(), UNSAFE_WORDS);
+    assert.doesNotMatch(mainText(), /setup required|A step is needed/);
+    assert.ok(buttons().includes("Fix permissions"));
   });
 });

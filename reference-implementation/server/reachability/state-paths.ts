@@ -125,7 +125,18 @@ export async function fixStatePaths(home: string, dataDir: string, uid = process
   return inspectStatePaths(home, dataDir, uid);
 }
 
+// Gozar reports an unsafe state folder as `setup_required` and names the fix in a structured
+// `nextAction` (error-normalizer.mjs, stateAction). The original code survives only on a
+// `cause` when a layer keeps it, so match any of the three. Never read the message.
+const FIX_ACTION_ID = "fix-state-permissions";
+const MAX_CAUSE_DEPTH = 5;
 export const unsafeStatePathCause = (error: unknown): boolean => {
-  const cause = error && typeof error === "object" && "cause" in error ? error.cause : null;
-  return !!cause && typeof cause === "object" && "code" in cause && cause.code === "unsafe_state_path";
+  let current: unknown = error;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current && typeof current === "object"; depth += 1) {
+    const { code, nextAction, cause } = current as { code?: unknown; nextAction?: unknown; cause?: unknown };
+    if (code === "unsafe_state_path") return true;
+    if (nextAction && typeof nextAction === "object" && (nextAction as { id?: unknown }).id === FIX_ACTION_ID) return true;
+    current = cause;
+  }
+  return false;
 };
