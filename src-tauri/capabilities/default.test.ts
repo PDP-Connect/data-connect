@@ -302,14 +302,61 @@ describe("capability scoping of app commands", () => {
     expect(actual).toEqual(ALLOWED_CAPABILITIES)
   })
 
-  // "connector-*" is a prefix match, so any window whose label starts with
-  // "connector-" gets the shared capability. No code creates such a window
-  // today: connector runs use no window of their own, and the only
-  // "connector-" label in the Rust sources is the lookup that closes one. A
-  // window created under that prefix would gain core:default and the other
-  // shared grants with no change to this file, so creating one has to be a
-  // decision made here.
-  it("no code creates a window labelled connector-*", () => {
+  // "connector-*" is a prefix match, so a window whose label starts with
+  // "connector-" gets the shared capability with no change to this file. Nothing
+  // creates one today (the "connector-" string in lib.rs only looks a window up
+  // in order to close it). A search for the literal can be dodged by building
+  // the label in another form (a raw string, a constant, concat!), so this pins
+  // the other end instead: every place that creates a window or webview, and the
+  // expression it passes as the label. A new creation site, or a changed label
+  // expression, fails until someone lists it here and looks at the label.
+  const CREATION_CALLS: Array<{ pattern: RegExp; labelArg: number }> = [
+    { pattern: /WebviewWindowBuilder::new\(/g, labelArg: 1 },
+    { pattern: /WebviewWindowBuilder::from_config\(/g, labelArg: 0 },
+    { pattern: /WebviewWindow::builder\(/g, labelArg: 1 },
+    { pattern: /(?<![A-Za-z])WindowBuilder::new\(/g, labelArg: 1 },
+    { pattern: /WebviewBuilder::new\(/g, labelArg: 0 },
+    { pattern: /new\s+(?:WebviewWindow|Webview|Window)\(/g, labelArg: 0 },
+  ]
+
+  // The arguments of the call whose "(" ends at `open`, split at top-level commas.
+  const callArguments = (source: string, open: number): string[] => {
+    const args: string[] = []
+    let depth = 0
+    let quote = ""
+    let current = ""
+    for (let i = open; i < source.length; i += 1) {
+      const char = source[i]
+      if (quote) {
+        current += char
+        if (char === "\\") current += source[++i]
+        else if (char === quote) quote = ""
+        continue
+      }
+      if (char === '"' || char === "'" || char === "`") {
+        quote = char
+        current += char
+      } else if ("([{".includes(char)) {
+        depth += 1
+        if (depth > 1) current += char
+      } else if (")]}".includes(char)) {
+        depth -= 1
+        if (depth === 0) {
+          args.push(current)
+          return args.map(arg => arg.replace(/\s+/g, " ").trim())
+        }
+        current += char
+      } else if (char === "," && depth === 1) {
+        args.push(current)
+        current = ""
+      } else {
+        current += char
+      }
+    }
+    throw new Error("unbalanced call")
+  }
+
+  const sourceFiles = (): string[] => {
     const files: string[] = []
     const walk = (dir: string) => {
       for (const name of readdirSync(dir)) {
@@ -320,16 +367,65 @@ describe("capability scoping of app commands", () => {
     }
     walk(resolve(process.cwd(), "src-tauri/src"))
     walk(resolve(process.cwd(), "src"))
-    // A label built with a connector- prefix, or a window builder given one.
-    const labelBuilt = /format!\(\s*"connector-|WebviewWindowBuilder::new\([^,]+,\s*"connector-|new WebviewWindow\(\s*[`"']connector-/
-    const hits = files
-      .filter(path => labelBuilt.test(readFileSync(path, "utf-8")))
-      .map(path => path.replace(`${process.cwd()}/`, ""))
-    // The one known use only looks a window up in order to close it.
-    expect(hits).toEqual(["src-tauri/src/lib.rs"])
-    const lib = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf-8")
-    expect(lib.match(/connector-\{\}/g)).toHaveLength(1)
-    expect(lib).toContain('app_handle.get_webview_window(&window_label)')
+    return files
+  }
+
+  const EXPECTED_WINDOW_CREATIONS = [
+    'src-tauri/src/attach_window.rs: ATTACH_WINDOW_LABEL',
+    'src-tauri/src/attach_window_tests.rs: label',
+    'src-tauri/src/bin/new_window_repro.rs: "repro"',
+    'src-tauri/src/bin/titlebar_repro.rs: "titlebar-repro"',
+    'src-tauri/src/commands/ref_server_view.rs: REF_SERVER_VIEW_LABEL',
+    'src-tauri/src/lib.rs: "owner-password"',
+    'src-tauri/src/lib.rs: "owner-password"',
+    'src-tauri/src/lib.rs: label',
+    // Builds the legacy main window from tauri.conf.json, so its label is the
+    // one pinned by the configuration test below.
+    'src-tauri/src/lib.rs: app.handle()',
+    'src-tauri/src/owner_credential.rs: OWNER_PASSWORD_WINDOW_LABEL',
+    'src-tauri/src/stall_repro.rs: "stall-repro"',
+    'src-tauri/src/unified.rs: "owner-password"',
+    'src-tauri/src/unified.rs: "owner-password"',
+    'src-tauri/src/unified.rs: "owner-password"',
+    'src-tauri/src/unified.rs: CONSOLE_WINDOW_LABEL',
+    'src-tauri/src/unified.rs: RECOVERY_WINDOW_LABEL',
+    'src-tauri/src/winclose_repro.rs: "winclose-repro"',
+  ]
+
+  it("every window or webview creation site and its label expression is listed", () => {
+    const found: string[] = []
+    for (const path of sourceFiles()) {
+      const source = readFileSync(path, "utf-8")
+      for (const { pattern, labelArg } of CREATION_CALLS) {
+        for (const match of source.matchAll(pattern)) {
+          const args = callArguments(source, match.index + match[0].length - 1)
+          found.push(`${path.replace(`${process.cwd()}/`, "")}: ${args[labelArg] ?? "(no label)"}`)
+        }
+      }
+    }
+    expect(found.sort()).toEqual([...EXPECTED_WINDOW_CREATIONS].sort())
+  })
+
+  // The listed label constants and literals must not start with "connector-".
+  it("no listed window label starts with connector-", () => {
+    for (const entry of EXPECTED_WINDOW_CREATIONS) {
+      expect(entry.split(": ")[1]).not.toMatch(/^"connector-/)
+    }
+    const labelConstant = /const\s+\w*LABEL\w*\s*:\s*&str\s*=\s*(?:r#*)?"([^"]*)"/g
+    const labels: string[] = []
+    for (const path of sourceFiles().filter(file => file.endsWith(".rs"))) {
+      for (const match of readFileSync(path, "utf-8").matchAll(labelConstant)) labels.push(match[1])
+    }
+    expect(labels.length).toBeGreaterThan(0)
+    expect(labels.filter(label => label.startsWith("connector-"))).toEqual([])
+  })
+
+  // Windows declared in tauri.conf.json are created without any Rust call.
+  it("tauri.conf.json declares only the main window", () => {
+    const config = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf-8")) as {
+      app?: { windows?: Array<{ label?: string }> }
+    }
+    expect((config.app?.windows ?? []).map(window => window.label)).toEqual(["main"])
   })
 
   // Tauri refuses an app command from a page that is not the app's own unless
