@@ -18,7 +18,19 @@ import {
 } from "./diagnostics.tsx"
 import { plain } from "./plain-text.ts"
 import { type ActionKind, publicError } from "./reachability-errors.ts"
-import { approvalFor, safeSignInUrl, signInCopy, signInStage } from "./sign-in.ts"
+import {
+  adminStepCopy,
+  approvalFor,
+  chainAsksFields,
+  computerMatchesEmail,
+  isInputStep,
+  isSignInChain,
+  linkInHelp,
+  observedComputer,
+  safeSignInUrl,
+  signInCopy,
+  signInStage,
+} from "./sign-in.ts"
 
 type SetupView = ReturnType<typeof projectSetupOperation>
 type Request = typeof requestReachability
@@ -158,6 +170,116 @@ function SetupOperationAction({
         </label>
       ) : null}
     </SetupApprovalCard>
+  )
+}
+
+type Consent = NonNullable<NonNullable<SetupView["nextAction"]>["consent"]>
+
+// The plain-words facts of the steps one click may cover.
+function WhatThisDoes({ consents }: { consents: Consent[] }) {
+  const shown = consents.filter(consent => consent.facts !== undefined && consent.disclosures != null)
+  if (shown.length === 0) return null
+  return (
+    <details>
+      <summary>What this does</summary>
+      <div className="grid gap-3">
+        {shown.map(consent => (
+          <div className="grid gap-2" key={consent.consentFactsDigest}>
+            <ConsentDisclosures value={consent.disclosures} />
+            <ConsentFacts facts={consent.facts!} providerId={consent.scope.providerId} />
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+// An account token or another typed value. A pasted secret is held by the
+// field alone: it is never in state, text or a log, and it leaves only in the
+// submit.
+function InputCard({
+  action,
+  service,
+  busy,
+  onSubmit,
+}: {
+  action: NonNullable<SetupView["nextAction"]>
+  service: string
+  busy: boolean
+  onSubmit: (approval: Approval, input: Record<string, string>) => void
+}) {
+  const secret = action.kind === "provide-secret"
+  const secretField = useRef<HTMLInputElement>(null)
+  const [typed, setTyped] = useState("")
+  const [filled, setFilled] = useState(false)
+  const approval = approvalFor(action)
+  const label = plain((secret ? action.secretLabel : action.valueLabel) ?? action.label)
+  const obtain = action.obtainUrl ? safeSignInUrl(action.obtainUrl) : null
+  const options = action.step?.options
+  return (
+    <section aria-label={`Details for ${service}`} className="grid gap-3">
+      <h3 className="pdpp-label">Needs your action</h3>
+      <p role="status">{secret ? `Add your ${service} token to finish.` : `Add your ${service} details to finish.`}</p>
+      {action.help ? <p>{action.help}</p> : null}
+      <label className="grid gap-2">
+        {label}
+        {secret ? (
+          <input
+            autoComplete="off"
+            disabled={busy}
+            onChange={() => setFilled(secretField.current?.value !== "")}
+            ref={secretField}
+            type="password"
+          />
+        ) : options ? (
+          <select disabled={busy} onChange={event => setTyped(event.target.value)} value={typed}>
+            <option value="">Choose an option</option>
+            {options.map(option => (
+              <option key={option.value} value={option.value}>
+                {plain(option.label)}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            autoComplete="off"
+            disabled={busy}
+            onChange={event => setTyped(event.target.value)}
+            placeholder={action.valuePlaceholder}
+            type="text"
+            value={typed}
+          />
+        )}
+      </label>
+      {obtain ? (
+        <a href={obtain.href} rel="noreferrer" target="_blank">
+          {secret ? "Get a token" : "Where to get it"}
+        </a>
+      ) : null}
+      {action.consent ? <WhatThisDoes consents={[action.consent]} /> : null}
+      {approval ? null : <p role="status">We couldn't load this service's details. Try again.</p>}
+      <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          disabled={busy || !approval || (secret ? !filled : typed.trim() === "")}
+          onClick={() => {
+            if (!approval) return
+            if (secret) {
+              const value = secretField.current?.value ?? ""
+              if (secretField.current) secretField.current.value = ""
+              setFilled(false)
+              onSubmit(approval, { secret: value })
+            } else {
+              const value = typed.trim()
+              setTyped("")
+              onSubmit(approval, { value })
+            }
+          }}
+        >
+          {secret ? "Save token" : "Save"}
+        </button>
+      </div>
+    </section>
   )
 }
 
@@ -337,16 +459,6 @@ export function ProviderSetup({
       setBusy(false)
     }
   }
-  const openSignIn = (setup: SetupView) =>
-    guarded(async () => {
-      const url = await signInLink(setup)
-      if (!url) return
-      if (!(await openResource(url.href, { kind: "external-url", newTab: false }))) {
-        setNotice("Your browser didn't open. Copy the sign-in link instead.")
-        return
-      }
-      setOpened(true)
-    })
   const copySignIn = (setup: SetupView) =>
     guarded(async () => {
       const url = await signInLink(setup)
@@ -372,9 +484,177 @@ export function ProviderSetup({
       setView(next)
     })
 
+  // The facts the card has shown. A step after the first runs from the same
+  // click only if its facts are in this list: nothing is approved unseen.
+  const [shown, setShown] = useState<Consent[]>([])
+  const shownDigests = useRef(new Set<string>())
+  // Whether a step's facts were already on the card when the step first arrived.
+  const arrival = useRef<{ key: string; covered: boolean }>({ key: "", covered: false })
+  const clicked = useRef(false)
+  const [account, setAccount] = useState("")
+  const [tailnet, setTailnet] = useState("")
+  const [dnsUrl, setDnsUrl] = useState<string | null>(null)
+  useEffect(() => {
+    const next = view?.nextAction
+    if (!view || !next) return
+    if (next.id === "tailscale-tailnet") {
+      const url = linkInHelp(next.help)
+      if (url) setDnsUrl(url)
+    }
+    const consent = next.consent
+    if (!consent?.facts || consent.disclosures == null) return
+    if (!(isSignInChain(view) || signInStage(view) === "sign-in")) return
+    const key = `${next.id}:${next.digest}`
+    if (arrival.current.key !== key) {
+      arrival.current = { key, covered: shownDigests.current.has(consent.consentFactsDigest) }
+    }
+    if (shownDigests.current.has(consent.consentFactsDigest)) return
+    shownDigests.current.add(consent.consentFactsDigest)
+    setShown(list => [...list, consent])
+  }, [view])
+
+  // One click on the sign-in card. Each step is approved from its own consent
+  // data, in the order the host returns the steps, and only if its facts were
+  // on the card when the owner clicked. A step with new facts stops the chain
+  // and the button comes back with the new facts shown.
+  const runChain = (start: SetupView) =>
+    guarded(async () => {
+      clicked.current = true
+      const onCard = new Set(shownDigests.current)
+      let at = start
+      for (let step = 0; step < 8 && isCurrentWay(); step++) {
+        const next = at.nextAction
+        const browser = signInStage(at) === "sign-in"
+        if (!next || !(isSignInChain(at) || browser)) break
+        const approval = approvalFor(next)
+        if (!approval) throw new ReachabilityFailure(publicError("consent_required"))
+        if (step > 0 && !onCard.has(approval.consentFactsDigest)) break
+        if (browser) {
+          const url = await signInLink(at)
+          if (!url) return
+          if (!(await openResource(url.href, { kind: "external-url", newTab: false }))) {
+            setNotice("Your browser didn't open. Copy the sign-in link instead.")
+            break
+          }
+          setOpened(true)
+          break
+        }
+        let input: Record<string, string> = {}
+        if (next.id === "tailscale-account" || next.id === "tailscale-tailnet") {
+          const typed = (next.id === "tailscale-account" ? account : tailnet).trim()
+          if (typed === "") {
+            setNotice(next.id === "tailscale-account" ? "Enter your Tailscale email." : "Enter your tailnet name.")
+            break
+          }
+          input = { value: typed }
+        } else if (next.id === "tailscale-node") {
+          const computer = observedComputer(next)
+          // The first step is the button the owner pressed. A later one is
+          // confirmed for them only when the one computer belongs to their email.
+          if (!computer || (step > 0 && !computerMatchesEmail(computer.label, account))) break
+          input = { value: computer.value }
+        }
+        at = await send<SetupView>(path, { ...input, ...command(at, next, approval) })
+        if (!isCurrentWay()) return
+        await onChange(at, true)
+        setView(at)
+      }
+    })
+  // After the browser sign-in the host asks to confirm the one computer it
+  // saw. If those facts were already on the card and the computer belongs to
+  // the email the owner typed, the owner's click covers it.
+  useEffect(() => {
+    const next = view?.nextAction
+    if (!view || !next || busy || !clicked.current || !isSignInChain(view) || !isCurrentWay()) return
+    const computer = observedComputer(next)
+    if (computer && arrival.current.covered && computerMatchesEmail(computer.label, account)) void runChain(view)
+  }, [view])
+  const checkAgain = () =>
+    guarded(async () => {
+      const next = await send<SetupView>(readPath)
+      if (!isCurrentWay()) return
+      await acceptObservation(next, () => isCurrentWay())
+    })
+  const openAdmin = (href: string) =>
+    guarded(async () => {
+      if (!(await openResource(href, { kind: "external-url", newTab: false }))) {
+        setNotice("Your browser didn't open.")
+      }
+    })
+
   const action = view?.nextAction
   // A finished setup has nothing left to show: the flow goes on to Turning on.
   if (view?.state === "complete" && !action) return null
+  if (view && isSignInChain(view) && action) {
+    if (!isCurrentWay()) return null
+    const service = plain(reservation.providerLabel)
+    const computer = observedComputer(action)
+    return (
+      <section aria-label={`Sign in to ${service}`} className="grid gap-3">
+        <h3 className="pdpp-label">Needs your action</h3>
+        <p role="status">{`Sign in to ${service} to finish.`}</p>
+        {notice ? <p role="status">{notice}</p> : null}
+        {chainAsksFields(action) ? (
+          <>
+            <label className="grid gap-2">
+              Tailscale email
+              <input autoComplete="off" disabled={busy} onChange={event => setAccount(event.target.value)} type="email" value={account} />
+            </label>
+            <label className="grid gap-2">
+              Your tailnet name (ends in .ts.net)
+              <input autoComplete="off" disabled={busy} onChange={event => setTailnet(event.target.value)} type="text" value={tailnet} />
+            </label>
+            {dnsUrl ? (
+              <a href={dnsUrl} rel="noreferrer" target="_blank">
+                Find it in Tailscale
+              </a>
+            ) : null}
+          </>
+        ) : null}
+        {computer ? <p>{`Tailscale found this computer: ${computer.label}.`}</p> : null}
+        <WhatThisDoes consents={shown} />
+        <div className="flex flex-wrap gap-3">
+          <button type="button" disabled={busy || disabled} onClick={() => void runChain(view)}>
+            {computer ? `Use this computer (${computer.host})` : `Sign in to ${service}`}
+          </button>
+        </div>
+      </section>
+    )
+  }
+  const adminCopy = view ? adminStepCopy(view) : null
+  if (view && adminCopy) {
+    if (!isCurrentWay()) return null
+    const service = plain(reservation.providerLabel)
+    return (
+      <section aria-label={`Finish setting up ${service}`} className="grid gap-3">
+        <h3 className="pdpp-label">Needs your action</h3>
+        <p role="status">{adminCopy.line}</p>
+        {notice ? <p role="status">{notice}</p> : null}
+        <div className="flex flex-wrap gap-3">
+          <button type="button" disabled={busy} onClick={() => void openAdmin(adminCopy.href)}>
+            Open Tailscale admin
+          </button>
+          <button type="button" disabled={busy} onClick={() => void checkAgain()}>
+            Check again
+          </button>
+        </div>
+      </section>
+    )
+  }
+  if (view && action && isInputStep(view)) {
+    if (!isCurrentWay()) return null
+    return (
+      <InputCard
+        key={`${view.revision}:${action.id}`}
+        action={action}
+        busy={busy || disabled}
+        service={plain(reservation.providerLabel)}
+        onSubmit={(approval, input) =>
+          void change(() => send<SetupView>(path, { ...input, ...command(view, action, approval) }), true)
+        }
+      />
+    )
+  }
   if (view && stage) {
     // A way the owner has left shows nothing and opens nothing.
     if (!isCurrentWay()) return null
@@ -385,12 +665,13 @@ export function ProviderSetup({
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{copy.line}</p>
         {notice ? <p role="status">{notice}</p> : null}
+        {stage === "sign-in" ? <WhatThisDoes consents={shown} /> : null}
         <div className="flex flex-wrap gap-3">
           {copy.button ? (
             <button
               type="button"
               disabled={busy || disabled}
-              onClick={() => void (stage === "sign-in" ? openSignIn(view) : tryAgain(view))}
+              onClick={() => void (stage === "sign-in" ? runChain(view) : tryAgain(view))}
             >
               {copy.button}
             </button>
