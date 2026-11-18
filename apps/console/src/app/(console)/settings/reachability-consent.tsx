@@ -27,7 +27,7 @@ export function ConsentFacts({ facts }: { facts: Fact[] }) {
                 <div key={fact.id}>
                   <dt className="pdpp-label">{plain(fact.label)}</dt>
                   <dd className="pdpp-caption whitespace-pre-wrap break-words">
-                    {fact.known ? (fact.value === null ? "None" : plain(String(fact.value))) : `Unknown: ${plain(fact.reason)}`}
+                    {fact.known ? (fact.value === null ? "None" : plain(String(fact.value))) : (fact.reason ? `Unknown: ${plain(fact.reason)}` : "Unknown")}
                   </dd>
                   <dd className="pdpp-caption text-muted-foreground">
                     {plain(fact.source)}

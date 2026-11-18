@@ -5,6 +5,7 @@ import type { Usage } from "@tnunamak/gozar";
 import { ReachabilityError } from "../reachability/approvals.ts";
 import { projectHostSettings, validateHostSettingsInput } from "../reachability/host-settings.ts";
 import type { ReachabilityOperations } from "../reachability/operations.ts";
+import type { ReachabilitySetups } from "../reachability/setups.ts";
 import {
   projectCandidate,
   projectConfiguration,
@@ -35,6 +36,7 @@ interface App {
 export type OwnerReachabilityContext = {
   service: ReachabilityService | null;
   operations: ReachabilityOperations;
+  setups: ReachabilitySetups;
   requireToken: MiddlewareHandler;
   requireOwner: MiddlewareHandler;
   requireCsrf: MiddlewareHandler;
@@ -206,16 +208,80 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       ...(input.secret === undefined ? {} : { secret: text(input.secret) }),
     };
   }
+  // A cancelled setup with nothing left to remove has ended: forget it.
+  async function settled(view: ReturnType<typeof projectSetupOperation>) {
+    const removing = view.resources.some((item) => item.removal === "required" || item.removal === "unconfirmed");
+    if (view.state === "cancelled" && !removing) await ctx.setups.dropSetup(view.operationId);
+    return view;
+  }
   get("/setup-operations/:id", async (request) =>
-    projectSetupOperation(await service().readSetupOperation(setupReference(request, request.query?.providerId)))
+    settled(projectSetupOperation(await service().readSetupOperation(setupReference(request, request.query?.providerId))))
   );
   post("/setup-operations/:id", async (request) => {
     const input = body(request);
     return projectSetupOperation(await service().runSetupOperation(setupReference(request, input.providerId), setupCommand(input)));
   });
   post("/setup-operations/:id/cancel", async (request) =>
-    projectSetupOperation(await service().cancelSetupOperation(setupReference(request, body(request).providerId)))
+    settled(projectSetupOperation(await service().cancelSetupOperation(setupReference(request, body(request).providerId))))
   );
+  // Starts a service's setup. A service has one setup: calling this again resumes it.
+  post("/setups", async (request) => {
+    const input = body(request);
+    const current = service();
+    const providerId = text(input.providerId);
+    const draftId = text(input.draftId);
+    const actionId = text(input.actionId);
+    const expectedConfigurationRevision = text(input.expectedConfigurationRevision);
+    const usage = typeof input.usage === "string" && input.usage ? input.usage : null;
+    const known = await ctx.setups.get(providerId);
+    const { entry, created } = await ctx.setups.reserveSetup({
+      providerId,
+      providerLabel: known?.providerLabel ?? (await current.providerLabel(providerId)),
+      draftId,
+      usage,
+      actionId,
+      expectedConfigurationRevision,
+    });
+    const operationId = entry.setup!.operationId;
+    // The id is saved before the effect runs, so a retry reuses it.
+    const view = created
+      ? await current.runSetupOperation(
+          { operationId, providerId },
+          { actionId, expectedConfigurationRevision, expectedSetupRevision: 0, draftId: entry.draftId ?? draftId }
+        )
+      : await current.readSetupOperation({ operationId, providerId });
+    return { created, entry, view: await settled(projectSetupOperation(view)) };
+  });
+  // One-time takeover of a setup an older console kept in the browser.
+  post("/setups/adopt", async (request) => {
+    const input = body(request);
+    const providerId = text(input.providerId);
+    const operationId = text(input.operationId);
+    let view: ReturnType<typeof projectSetupOperation>;
+    try {
+      view = projectSetupOperation(await service().readSetupOperation({ operationId, providerId }));
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "route_not_found") {
+        return { adopted: false, reason: "unknown" };
+      }
+      throw error;
+    }
+    const removing = view.resources.some((item) => item.removal === "required" || item.removal === "unconfirmed");
+    if (view.state === "cancelled" && !removing) return { adopted: false, reason: "ended" };
+    const { adopted } = await ctx.setups.adoptSetup({
+      providerId,
+      providerLabel: text(input.providerLabel),
+      draftId: text(input.draftId),
+      usage: typeof input.usage === "string" && input.usage ? input.usage : null,
+      committed: false,
+      setup: {
+        operationId,
+        actionId: text(input.actionId),
+        expectedConfigurationRevision: text(input.expectedConfigurationRevision),
+      },
+    });
+    return adopted ? { adopted: true } : { adopted: false, reason: "service_has_setup" };
+  });
   post("/setup-operations/:id/handoff", async (request) => {
     const input = body(request);
     return service().setupHandoff(setupReference(request, input.providerId), setupCommand(input));
@@ -263,15 +329,38 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       operations,
       reasons: state.reasons,
       routes: state.routes.map(projectRoute),
+      services: await ctx.setups.list(),
       starting: state.starting,
     };
   });
   get("/drafts/:id", async (request) =>
     projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id)))
   );
+  // A service has one draft. Asking again for a service that has one resumes it.
   post("/drafts", async (request) => {
     const input = body(request);
-    return projectDraft(await service().begin(text(input.providerId), text(input.expectedRevision)));
+    const current = service();
+    const providerId = text(input.providerId);
+    const usage = typeof input.usage === "string" && input.usage ? input.usage : null;
+    const known = await ctx.setups.get(providerId);
+    if (known?.draftId && !known.committed) {
+      try {
+        const draft = await current.resume(providerId, known.draftId);
+        await ctx.setups.recordDraft({ providerId, providerLabel: known.providerLabel, draftId: known.draftId, usage });
+        return projectDraft(draft);
+      } catch (error) {
+        if (!(error && typeof error === "object" && "code" in error && error.code === "draft_not_found")) throw error;
+        // The draft no longer exists on the host: start a fresh one below.
+      }
+    }
+    const draft = await current.begin(providerId, text(input.expectedRevision));
+    await ctx.setups.recordDraft({
+      providerId,
+      providerLabel: known?.providerLabel ?? (await current.providerLabel(providerId)),
+      draftId: draft.draftId,
+      usage,
+    });
+    return projectDraft(draft);
   });
   post("/drafts/:id/actions/:actionId", async (request) => {
     const input = body(request);
@@ -301,10 +390,18 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       })
     );
   });
-  post("/drafts/:id/discard", async (request) => service().discard(text(request.params.id)));
-  post("/drafts/:id/commit", async (request) =>
-    projectConfiguration(await service().commit(text(request.params.id), text(body(request).expectedRevision)))
-  );
+  post("/drafts/:id/discard", async (request) => {
+    const result = await service().discard(text(request.params.id));
+    await ctx.setups.dropDraft(text(request.params.id));
+    return result;
+  });
+  post("/drafts/:id/commit", async (request) => {
+    const configuration = projectConfiguration(
+      await service().commit(text(request.params.id), text(body(request).expectedRevision))
+    );
+    await ctx.setups.markCommitted(text(request.params.id));
+    return configuration;
+  });
   post("/drafts/:id/review", async (request) => {
     const review = await service().review(text(request.params.id), ctx.usage(text(body(request).usage)));
     return { candidate: projectCandidate(review.candidate), id: review.id, kind: "route" };
