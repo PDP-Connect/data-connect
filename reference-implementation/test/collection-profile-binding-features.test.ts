@@ -149,6 +149,20 @@ test("placement: a page-context fetch needs a browser placed in the same plan", 
   }
 });
 
+// Browser-only features cannot reach placement on a network binding: the schema
+// gives each feature one kind (section 3.3.8), so normalization rejects them.
+// Placement therefore needs no kind check for them.
+for (const feature of ["page_navigation", "page_script_evaluation", "page_content_read", "page_condition_wait"]) {
+  for (const required of [true, false]) {
+    test(`normalization: a ${required ? "required" : "optional"} network binding cannot declare browser-only ${feature}`, () => {
+      assert.throws(
+        () => normalizeBindingDeclarations({ network: { features: [feature], required } }),
+        /network\.features\.0 must be equal to one of the allowed values/
+      );
+    });
+  }
+}
+
 test("placement: a host-side request does not need a browser", () => {
   const placement = plan({ network: { features: ["host_http_request"], required: true } });
   assert.deepEqual(
