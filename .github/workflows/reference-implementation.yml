@@ -135,11 +135,12 @@ jobs:
             echo "No reference-impacting changes detected (or reference-implementation/ does not exist in this repo yet); required context will pass without heavy reference tests."
           fi
 
+  # Patchright needs supported Ubuntu; keep native modules/browser caches on the same pinned ABI.
   typecheck-reference:
     name: typecheck reference implementation
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -167,7 +168,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-ubuntu24.04-${{ runner.os }}-${{ runner.arch }}-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -205,7 +206,7 @@ jobs:
     name: test reference implementation shard ${{ matrix.shard }}
     needs: classify
     if: needs.classify.outputs.reference_impacting == 'true' && needs.classify.outputs.has_content == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -237,7 +238,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v2-${{ runner.os }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-ubuntu24.04-${{ runner.os }}-${{ runner.arch }}-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'

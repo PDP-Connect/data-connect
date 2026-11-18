@@ -8408,23 +8408,51 @@ setInterval(() => {}, 1000);
     fn the_console_webview_sends_the_session_and_reveal_cookies() {
         use gtk::prelude::*;
         use std::io::{BufRead, BufReader, Write};
-        use wry::WebViewBuilderExtUnix;
-        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
         use std::time::Instant;
+        use wry::WebViewBuilderExtUnix;
 
         // Diagnostic only: observe synchronous stalls without changing the GTK pump.
         const PHASES: &[&str] = &[
-            "START", "GTK_BEGIN", "GTK_END", "WINDOW_BEGIN", "WINDOW_END",
-            "BUILD_BEGIN", "BUILD_END", "SHOW_BEGIN", "SHOW_END",
-            "COOKIE_0_BEGIN", "COOKIE_0_END", "COOKIE_1_BEGIN", "COOKIE_1_END",
-            "NAVIGATE_BEGIN", "NAVIGATE_END", "WAIT_ENTER", "DRAIN_BEGIN",
-            "ITER_BEGIN", "ITER_END", "DRAIN_END", "ASSERT_BEGIN", "ASSERT_END",
-            "DROP_WEBVIEW_BEGIN", "DROP_WEBVIEW_END", "DROP_WINDOW_BEGIN",
-            "DROP_WINDOW_END", "TEST_EXIT",
+            "START",
+            "GTK_BEGIN",
+            "GTK_END",
+            "WINDOW_BEGIN",
+            "WINDOW_END",
+            "BUILD_BEGIN",
+            "BUILD_END",
+            "SHOW_BEGIN",
+            "SHOW_END",
+            "COOKIE_0_BEGIN",
+            "COOKIE_0_END",
+            "COOKIE_1_BEGIN",
+            "COOKIE_1_END",
+            "NAVIGATE_BEGIN",
+            "NAVIGATE_END",
+            "WAIT_ENTER",
+            "DRAIN_BEGIN",
+            "ITER_BEGIN",
+            "ITER_END",
+            "DRAIN_END",
+            "ASSERT_BEGIN",
+            "ASSERT_END",
+            "DROP_WEBVIEW_BEGIN",
+            "DROP_WEBVIEW_END",
+            "DROP_WINDOW_BEGIN",
+            "DROP_WINDOW_END",
+            "TEST_EXIT",
         ];
         fn log_phase(start: Instant, name: &str) {
             let mut out = std::io::stderr().lock();
-            let _ = writeln!(out, "WEBKITGTK PHASE {} elapsed_ms={}", name, start.elapsed().as_millis());
+            let _ = writeln!(
+                out,
+                "WEBKITGTK PHASE {} elapsed_ms={}",
+                name,
+                start.elapsed().as_millis()
+            );
             let _ = out.flush();
         }
         struct Watchdog {
@@ -8448,12 +8476,18 @@ setInterval(() => {}, 1000);
         let watchdog = Watchdog {
             stop,
             thread: Some(std::thread::spawn(move || {
-                while matches!(stopped.recv_timeout(Duration::from_secs(1)),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                while matches!(
+                    stopped.recv_timeout(Duration::from_secs(1)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
                     let mut out = std::io::stderr().lock();
-                    let _ = writeln!(out, "WEBKITGTK PROGRESS elapsed_ms={} phase={} completed_iterations={}",
-                        started.elapsed().as_millis(), PHASES[watched_phase.load(Ordering::SeqCst)],
-                        watched_iterations.load(Ordering::SeqCst));
+                    let _ = writeln!(
+                        out,
+                        "WEBKITGTK PROGRESS elapsed_ms={} phase={} completed_iterations={}",
+                        started.elapsed().as_millis(),
+                        PHASES[watched_phase.load(Ordering::SeqCst)],
+                        watched_iterations.load(Ordering::SeqCst)
+                    );
                     let _ = out.flush();
                 }
             })),
@@ -8533,7 +8567,10 @@ setInterval(() => {}, 1000);
         for (index, cookie) in [
             owner_session_cookie(&url, "session-value").expect("session cookie"),
             owner_credential_reveal_cookie(&url, "reveal-value").expect("reveal cookie"),
-        ].into_iter().enumerate() {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             mark(9 + index * 2);
             webview.set_cookie(&cookie).expect("set cookie");
             mark(10 + index * 2);
@@ -8549,7 +8586,9 @@ setInterval(() => {}, 1000);
         let mut first_drain = true;
         let cookie = loop {
             phase.store(16, Ordering::SeqCst);
-            if first_drain { log_phase(started, "DRAIN_BEGIN"); }
+            if first_drain {
+                log_phase(started, "DRAIN_BEGIN");
+            }
             while gtk::events_pending() {
                 phase.store(17, Ordering::SeqCst);
                 gtk::main_iteration_do(false);
