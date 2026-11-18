@@ -9636,6 +9636,79 @@ setInterval(() => {}, 1000);
         );
     }
 
+    /// A proxy answering 503 while the server restarts is "cannot reach", not
+    /// "identity changed": the pairing, the pin and the session all stay.
+    #[tokio::test]
+    async fn a_pinned_start_while_the_server_restarts_behind_a_proxy_keeps_the_pairing() {
+        use crate::attach::tests::{response, serve_with, test_key};
+        use crate::attach::SessionStore;
+        let (origin, server) = serve_with(1, |_, _| response("503 Service Unavailable", "", ""));
+        let keychain = keychain_with(&origin, "sess-kept");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup =
+            resolve_attached_startup(&pinned(&origin, &test_key(35)), &keychain, &memory, None)
+                .await;
+        let requests = server.join().expect("server");
+        assert!(
+            matches!(&startup, AttachedStartup::Unreachable { error, .. } if error.contains("kept")),
+            "{startup:?}"
+        );
+        assert_eq!(requests.len(), 1, "only the identity probe: {requests:?}");
+        assert_eq!(keychain.load(&origin), Ok(Some("sess-kept".to_string())));
+    }
+
+    /// "Sign out everywhere" ends the stored session. The server still proves
+    /// its pinned key, answers 401 to the session, and the app asks to pair
+    /// again. It sends the session once, deletes it, and the next launch asks
+    /// again without any request, so there is no retry loop.
+    #[tokio::test]
+    async fn a_pinned_start_after_the_session_was_revoked_asks_to_pair_again_without_looping() {
+        use crate::attach::tests::{pdpp_route, response, serve_with, test_key};
+        use crate::attach::SessionStore;
+        let key = test_key(36);
+        let signer = key.clone();
+        let (origin, server) = serve_with(2, move |origin, request| {
+            if request.path == "/owner/session" {
+                response("401 Unauthorized", "", "")
+            } else {
+                pdpp_route(origin, request, Some(&signer))
+            }
+        });
+        let keychain = keychain_with(&origin, "sess-revoked");
+        let memory = crate::attach::MemorySessionStore::default();
+        let attachment = pinned(&origin, &key);
+
+        let first = resolve_attached_startup(&attachment, &keychain, &memory, None).await;
+        let requests = server.join().expect("server");
+        let AttachedStartup::PairAgain {
+            prefill,
+            forget_session,
+        } = first
+        else {
+            panic!("expected PairAgain, got {first:?}");
+        };
+        assert!(forget_session);
+        assert_eq!(prefill.notice.as_deref(), Some(crate::attach::PAIRING_ENDED_NOTICE));
+        assert_eq!(prefill.input.as_deref(), Some(origin.as_str()));
+        assert!(prefill.identity_changed.is_none(), "an ended session is not an identity change");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[0].starts_with("post /owner/desktop-pairings/identity "));
+        assert!(requests[1].contains("pdpp_owner_session=sess-revoked"));
+        assert_eq!(keychain.load(&origin), Ok(None), "the ended session is deleted");
+
+        // The server is gone now; a second launch must ask again with no request.
+        let second = resolve_attached_startup(&attachment, &keychain, &memory, None).await;
+        assert!(
+            matches!(
+                &second,
+                AttachedStartup::PairAgain { forget_session: false, prefill }
+                    if prefill.notice.as_deref() == Some(crate::attach::PAIRING_ENDED_NOTICE)
+            ),
+            "{second:?}"
+        );
+        assert_eq!(attachment.server_key, pinned(&origin, &key).server_key, "the pin is untouched");
+    }
+
     /// A stored session the startup reads, as a keychain that works.
     fn keychain_with(origin: &str, session: &str) -> crate::attach::MemorySessionStore {
         use crate::attach::SessionStore;

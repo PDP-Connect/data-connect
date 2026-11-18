@@ -126,7 +126,9 @@ fn the_attach_window_is_refused_once_its_page_is_not_the_apps_own() {
         )
         .expect_err("refused: not the app's own page");
         assert!(
-            refused.as_str().is_some_and(|text| text.contains("not allowed")),
+            refused
+                .as_str()
+                .is_some_and(|text| text.contains("not allowed")),
             "{command}: {refused}"
         );
     }
@@ -382,6 +384,40 @@ fn inspecting_a_server_shows_its_id_and_sends_no_code() {
     assert_eq!(inspection["code"], json!("ABCDEFGHJKMN"));
     assert!(relaunches(&app).is_empty());
     assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+}
+
+/// After a session ended, the owner pairs the same server again. The saved
+/// pin matches, so the window raises no identity warning. After the server's
+/// identity changed, the same inspection names the Server ID the owner
+/// connected to before, so connecting again is an explicit, informed choice.
+#[test]
+fn re_pairing_warns_only_when_the_server_is_not_the_one_saved() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let saved_key = test_key(13);
+    let other_key = test_key(14);
+    for (answering, expected) in [
+        (&saved_key, Value::Null),
+        (&other_key, json!(server_id(&saved_key))),
+    ] {
+        let signer = answering.clone();
+        let (origin, server) = serve_with(2, move |origin, request| {
+            pdpp_route(origin, request, Some(&signer))
+        });
+        saved_with_key(data_root.path(), &origin, Some(key_text(&saved_key)));
+        let inspection = body(
+            invoke_from(
+                &attach_window,
+                "inspect_server",
+                json!({"input": origin, "trustPlainHttp": false}),
+            )
+            .expect("inspected"),
+        );
+        server.join().expect("server");
+        assert_eq!(inspection["previouslyConnectedId"], expected);
+        assert_eq!(inspection["serverId"], json!(server_id(answering)));
+    }
 }
 
 #[test]
