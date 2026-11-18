@@ -168,3 +168,82 @@ test("failed install still blocks every later step", async (t) => {
 	assert.equal(r.spawns.length, 1);
 	assert.equal(r.steps[0].exitCode, 7);
 });
+// The runner's step floor is not the only check: the installer and the e2e
+// fixture are separate processes and must apply the same helper and waiver.
+async function standalone(t, script, available, overrides, nodeArgs = []) {
+	const root = await mkdtemp(join(tmpdir(), "standalone-disk-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	const tarball = join(root, "package.tgz"),
+		preload = join(root, "preload.mjs");
+	await writeFile(tarball, "x");
+	await writeFile(
+		preload,
+		`
+import fs from 'node:fs/promises';
+import cp from 'node:child_process';
+import {appendFileSync} from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
+fs.statfs=async()=>({bavail:${available},bsize:1});
+cp.spawnSync=()=>{appendFileSync(${JSON.stringify(join(root, "npm"))},'ran\\n');return {status:9};};
+syncBuiltinESMExports();
+`,
+	);
+	const env = { ...process.env };
+	for (const key of Object.keys(env))
+		if (
+			key.startsWith("PDPP_LOCAL_DISK_") ||
+			["CI", "GITHUB_ACTIONS", "RELEASE", "SEMANTIC_RELEASE", "NODE_OPTIONS", "PDPP_DATA_DIR"].includes(key)
+		)
+			delete env[key];
+	const child = spawnSync(
+		process.execPath,
+		["--import", preload, ...nodeArgs, fileURLToPath(new URL(script, import.meta.url))],
+		{
+			cwd: root,
+			env: {
+				...env,
+				GOZAR_TARBALL: tarball,
+				GOZAR_TARBALL_SHA256:
+					"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4f1",
+				GOZAR_SOURCE_SHA: "a".repeat(40),
+				...overrides,
+			},
+			encoding: "utf8",
+			timeout: 20000,
+		},
+	);
+	assert.ifError(child.error);
+	let npmRan = false;
+	try {
+		npmRan = (await readFile(join(root, "npm"), "utf8")).length > 0;
+	} catch (e) {
+		if (e.code !== "ENOENT") throw e;
+	}
+	return { status: child.status, stderr: child.stderr, npmRan };
+}
+test("installer applies the release floor and the local waiver", async (t) => {
+	const sha = (await import("node:crypto")).createHash("sha256").update("x").digest("hex");
+	const base = { GOZAR_TARBALL_SHA256: sha };
+	const refused = await standalone(t, "./install-tarball.mjs", 50_000_000_000, base);
+	assert.notEqual(refused.status, 0);
+	assert.match(refused.stderr, /NOT RUN \(disk\): need 105 GB free/);
+	assert.equal(refused.npmRan, false);
+	const atFloor = await standalone(t, "./install-tarball.mjs", 105_000_000_000, base);
+	assert.doesNotMatch(atFloor.stderr, /NOT RUN \(disk\)/);
+	assert.equal(atFloor.npmRan, true);
+	const waived = await standalone(t, "./install-tarball.mjs", 50_000_000_000, { ...base, ...waiver });
+	assert.doesNotMatch(waived.stderr, /NOT RUN \(disk\)/);
+	assert.equal(waived.npmRan, true);
+	assert.match(waived.stderr, /DISK_PREFLIGHT_WAIVED/);
+	const below = await standalone(t, "./install-tarball.mjs", 14_999_999_999, { ...base, ...waiver });
+	assert.match(below.stderr, /NOT RUN \(disk\): need 15 GB free/);
+	assert.equal(below.npmRan, false);
+});
+test("e2e fixture applies the 110 GB floor and the local waiver", async (t) => {
+	const args = ["--import", import.meta.resolve("tsx")];
+	const refused = await standalone(t, "./reference-fixture.mjs", 50_000_000_000, {}, args);
+	assert.match(refused.stderr, /NOT RUN \(disk\): need 110 GB free/);
+	const waived = await standalone(t, "./reference-fixture.mjs", 50_000_000_000, waiver, args);
+	assert.doesNotMatch(waived.stderr, /NOT RUN \(disk\)/);
+	assert.match(waived.stderr, /Use the owned e2e harness/);
+});

@@ -7,11 +7,11 @@ import {
 	mkdir,
 	readFile,
 	realpath,
-	statfs,
 	symlink,
 	writeFile,
 } from "node:fs/promises";
 import { resolve } from "node:path";
+import { RELEASE_DISK_FLOOR_BYTES, requireDiskFloor } from "./disk-floor.mjs";
 
 const path = process.env.GOZAR_TARBALL;
 const expected = process.env.GOZAR_TARBALL_SHA256;
@@ -31,12 +31,14 @@ const actual = createHash("sha256")
 	.digest("hex");
 if (actual !== expected)
 	throw new Error("Tarball checksum mismatch; nothing installed");
-const disk = await statfs(process.cwd());
 // This isolated package install has no dependency lifecycle builds. Reserve
 // space for package expansion and metadata above the mandatory disk floor.
 const reserve = 100_000_000 + (await readFile(absolute)).byteLength * 20;
-if (disk.bavail * disk.bsize < 100_000_000_000 + reserve)
-	throw new Error("Insufficient disk space above the 100 GB floor");
+await requireDiskFloor(
+	process.env,
+	process.cwd(),
+	Math.max(RELEASE_DISK_FLOOR_BYTES, 100_000_000_000 + reserve),
+);
 const prefix = resolve("node_modules/.reachability-artifact");
 await mkdir(prefix, { recursive: true });
 const result = spawnSync(

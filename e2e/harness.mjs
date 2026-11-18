@@ -4,7 +4,7 @@ import { spawn } from "node:child_process"
 import { createRequire } from "node:module"
 import { randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdir, mkdtemp, rm, writeFile, statfs } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { createServer, Socket } from "node:net"
 import { createInterface } from "node:readline"
 import { homedir, tmpdir } from "node:os"
@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { once } from "node:events"
 import { setTimeout as delay } from "node:timers/promises"
+import { requireDiskFloor } from "../scripts/reachability/disk-floor.mjs"
 import {
   assertLoopbackOnly,
   MARKER,
@@ -52,6 +53,12 @@ export function cleanEnvironment(env = process.env) {
         "PLAYWRIGHT_EXECUTABLE_PATH",
       ].includes(name)
     )
+  )
+}
+
+function diskWaiverEnvironment(env = process.env) {
+  return Object.fromEntries(
+    Object.entries(env).filter(([name]) => name.startsWith("PDPP_LOCAL_DISK_"))
   )
 }
 
@@ -285,7 +292,9 @@ async function startStack({ root, launch, signal }, args) {
   }
   const reference = launch(["--import", "tsx", ...(reachabilityMode ? [join(repo, "scripts/reachability/reference-fixture.mjs"), reachabilityMode] : ["server/index.ts"])], {
     cwd: join(repo, "reference-implementation"),
-    extraEnv: shared,
+    // cleanEnvironment drops the local disk waiver; the fixture applies the same
+    // floor check, so hand it the waiver the harness already honoured.
+    extraEnv: { ...shared, ...diskWaiverEnvironment() },
   })
   console.log(
     `Reference startup: ${await waitReady(`${shared.PDPP_AS_URL}/.well-known/oauth-authorization-server`, reference, signal)}s`
@@ -302,8 +311,7 @@ async function startStack({ root, launch, signal }, args) {
     extraEnv: { ...shared, NEXT_TELEMETRY_DISABLED: "1" },
   }
   if (reachabilityMode) {
-    const disk = await statfs(repo)
-    if (disk.bavail * disk.bsize < 110_000_000_000) throw new Error("NOT RUN (disk): browser build requires 110 GB free")
+    await requireDiskFloor(process.env, repo, 110_000_000_000)
   }
   const buildStarted = performance.now()
   const build = launch([next, "build", "--webpack"], consoleOptions)
