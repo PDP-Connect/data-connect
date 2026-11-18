@@ -1046,9 +1046,7 @@ export function RemoteAccessSetting({
                 Lifecycle: {phase ?? "none"} · route{" "}
                 {route.routeState}
               </p>
-              {/* projectRoute does not expose provider identity. The selected
-                  way need not be the provider that created this live route. */}
-              <ConsentFacts facts={knownFacts} providerId={undefined} />
+              <ConsentFacts facts={knownFacts} providerId={route.providerId} />
               <UnknownFactsCount count={unknownFacts} service={serviceLabel} />
             </Diagnostics>
           );

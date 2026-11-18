@@ -4,7 +4,7 @@
 import type { Usage } from "@tnunamak/gozar";
 import { ReachabilityError } from "../reachability/approvals.ts";
 import { projectHostSettings, validateHostSettingsInput } from "../reachability/host-settings.ts";
-import type { ReachabilityOperations } from "../reachability/operations.ts";
+import type { OperationRecord, ReachabilityOperations } from "../reachability/operations.ts";
 import type { ReachabilitySetups } from "../reachability/setups.ts";
 import {
   projectCandidate,
@@ -144,6 +144,31 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     }
     return ctx.service;
   }
+  // Attribution is bound to the journaled creation, never the current selection.
+  type Route = Parameters<typeof projectRoute>[0];
+  type Records = Map<string, Promise<OperationRecord | null>>;
+  async function projectOwnedRoute(route: Route, records: Records = new Map()) {
+    let creator: { providerId: string } | null = null;
+    if (route.operationId) {
+      let pending = records.get(route.operationId);
+      if (!pending) {
+        pending = Promise.resolve().then(() => ctx.operations.read(route.operationId!)).catch(() => null);
+        records.set(route.operationId, pending);
+      }
+      const record = await pending;
+      if (record?.kind === "start" && record.operationId === route.operationId &&
+          record.handle?.kind === route.handle.kind && record.handle.id === route.handle.id &&
+          record.handle.generation === route.handle.generation &&
+          typeof record.intent?.providerId === "string" && record.intent.providerId.length > 0) {
+        creator = { providerId: record.intent.providerId };
+      }
+    }
+    return projectRoute(route, creator);
+  }
+  function projectRoutes(routes: Route[], known: OperationRecord[] = []) {
+    const records: Records = new Map(known.map((record) => [record.operationId, Promise.resolve(record)]));
+    return Promise.all(routes.map((route) => projectOwnedRoute(route, records)));
+  }
   const guarded = [ctx.requireToken, ctx.requireOwner];
   function get(path: string, run: (request: Request) => Promise<unknown>) {
     app.get(`/v1/owner/reachability${path}`, ...guarded, wrap(run));
@@ -190,7 +215,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     if (input.action === "stop") {
       await current.authorizeDisconnect(input.acknowledgeDisconnect === true);
     }
-    if (terminal) return projectRoute(terminal);
+    if (terminal) return projectOwnedRoute(terminal);
     if (input.action === "stop") {
       await ctx.operations.requestStop(id);
     }
@@ -204,7 +229,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
           record.stopTombstone
         );
     await ctx.operations.recordRecovered(record.operationId, route);
-    return projectRoute(route);
+    return projectOwnedRoute(route);
   });
   function setupReference(request: Request, providerId: unknown) {
     return { operationId: text(request.params.id), providerId: text(providerId) };
@@ -365,13 +390,14 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       evidenceSource: state.evidenceSource,
       lifecycle: state.lifecycle,
       reasons: state.reasons,
-      routes: state.routes.map(projectRoute),
+      routes: await projectRoutes(state.routes),
       type: "snapshot",
     };
   });
   get("/state", async () => {
     const state = service().state();
-    const operations = (await ctx.operations.list())
+    const records = await ctx.operations.list();
+    const operations = records
       .filter((record) => record.stage !== "settled")
       .map((record) => ({
         failureCode: record.failureCode,
@@ -386,7 +412,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       lifecycle: state.lifecycle,
       operations,
       reasons: state.reasons,
-      routes: state.routes.map(projectRoute),
+      routes: await projectRoutes(state.routes, records),
       passwordSet: ctx.passwordSet ? await ctx.passwordSet() : true,
       services: await ctx.setups.list(),
       starting: state.starting,
@@ -506,7 +532,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     );
   });
   post("/routes/:id/check", async (request) =>
-    projectRoute(await service().check(text(request.params.id), generation(body(request).generation)))
+    projectOwnedRoute(await service().check(text(request.params.id), generation(body(request).generation)))
   );
   post("/routes/:id/stop", async (request) => {
     const input = body(request);
@@ -527,7 +553,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     if (input.kind !== "route") {
       throw new ReachabilityError("consent_kind_mismatch");
     }
-    return projectRoute(
+    return projectOwnedRoute(
       await service().approveRuntime(
         text(request.params.id),
         generation(input.generation),

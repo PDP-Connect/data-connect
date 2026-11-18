@@ -277,7 +277,7 @@ export function projectInventory(list: ProviderList) {
     schemaVersion: list.schemaVersion,
   };
 }
-export function projectRoute(route: Route) {
+export function projectRoute(route: Route, creator?: { providerId: string } | null) {
   const proof = route.verification;
   return {
     actions: route.actions,
@@ -300,6 +300,7 @@ export function projectRoute(route: Route) {
       origin: observation(route.hostConfiguration.origin),
     },
     operationId: route.operationId,
+    providerId: creator?.providerId ?? null,
     origin: route.origin,
     ownership: route.ownership,
     published: route.published,

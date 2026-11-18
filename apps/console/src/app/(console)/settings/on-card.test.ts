@@ -42,12 +42,13 @@ const fact = (id: string, value: string | null, known = true) => ({
   asOf: null,
 });
 
-type RouteOver = { id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string };
+type RouteOver = { providerId?: string | null; id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string };
 function routeAt(over: RouteOver = {}) {
   const observedAt = over.observedAt ?? T0;
   const validUntil = over.validUntil === undefined ? observedAt + 30_000 : over.validUntil;
   const expiresAt = over.expiresAt === undefined ? T0 + 3_600_000 : over.expiresAt;
   return {
+    providerId: over.providerId ?? null,
     handle: { id: over.id ?? "route-1", generation: 1, kind: "session" },
     origin: over.origin ?? "https://one.example.invalid",
     binding: { authority: "host", remedy: null, target: { known: false, reason: "x" } },
@@ -719,12 +720,12 @@ test("distinct one-second proof windows stay rate bounded over thirty seconds", 
   }, t);
 });
 
-// Live routes do not carry provider identity in projectRoute. Never borrow it
-// from the catalog selection, even when that selection has a known-false line.
+// An unidentified route must never borrow identity from the catalog selection.
 for (const providerId of ["localhost-run", "cloudflare-named"]) {
   test(`live-route facts remain unfiltered when the catalog selects ${providerId}`, async (t) => {
     const line = "the plan limits a session to 15 minutes";
     const live = routeAt({
+      providerId: null,
       facts: [{ ...fact("address conditions", line), group: "address", affectsConsent: false }],
     });
     const selectedCatalog = {
@@ -745,3 +746,24 @@ for (const providerId of ["localhost-run", "cloudflare-named"]) {
     }, t);
   });
 }
+
+test("live localhost.run facts use the creating provider, not the selected way", async (t) => {
+  const line = "the plan limits a session to 15 minutes";
+  const retained = "Another provider condition";
+  const live = routeAt({
+    providerId: "localhost-run",
+    facts: [line, retained].map((value, index) => ({
+      ...fact("address condition " + index, value), group: "address", affectsConsent: false,
+    })),
+  });
+  await withScreen(host({
+    "/catalog": ok({ ...catalog, providers: [{ ...provider, providerId: "cloudflare-named" }] }),
+    "/state": onState(live),
+  }), async ({ container }) => {
+    const address = container.querySelector("[aria-label='Your address']");
+    assert.ok(address, "the live route is mounted");
+    const values = [...address.querySelectorAll("dd")].map((node) => node.textContent);
+    assert.ok(!values.includes(line), "known-false localhost.run condition is removed");
+    assert.ok(values.includes(retained), "other route facts remain visible");
+  }, t);
+});

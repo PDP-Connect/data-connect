@@ -176,3 +176,81 @@ test("route projections retain required proof and cleanup keys, including unknow
     assert.equal(projected.cleanup.state, route.cleanup.state)
   }
 })
+
+test("state and event projections bind provider identity to the exact journaled creation handle", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { ReachabilityOperations } = await import("../server/reachability/operations.ts");
+  const { mountOwnerReachability } = await import("../server/routes/owner-reachability.ts");
+  type Context = Parameters<typeof mountOwnerReachability>[1];
+  const root = await mkdtemp(join(tmpdir(), "reachability-provider-projection-"));
+  try {
+    const operations = new ReachabilityOperations(root);
+    const seed = fakeRouteScenarios()[0]!;
+    let created!: Route;
+    const start = await operations.start("start", null, async (operationId) => {
+      created = { ...seed, operationId };
+      return created;
+    }, {
+      instanceId: "fixture-instance", bootId: "fixture-boot", providerId: "localhost-run",
+      configurationRevision: "fixture-revision", target: "127.0.0.1:37807",
+      usage: { kind: "session", lifetimeMs: 3_600_000 },
+      expectedOrigin: null, consentFactsDigest: "fixture-digest",
+    });
+    // Await the actual journal settlement, not just the start response.
+    let settled = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await operations.read(start.operationId)).stage === "settled") { settled = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(settled, "creation handle is durably bound before projection");
+    assert.equal(projectRoute(created).providerId, null, "a bare RouteView never implies a provider");
+    const missing = "00000000-0000-0000-0000-000000000000";
+    const routes = [
+      created,
+      { ...created, handle: { ...created.handle, generation: created.handle.generation + 1 } },
+      { ...created, operationId: missing },
+      { ...created, handle: { ...created.handle, id: created.handle.id + "-other" } },
+    ];
+    const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+    const app = {
+      get(path: string, ...args: any[]) { handlers.set(path, args.at(-1)); },
+      post() {},
+    };
+    const noop = () => undefined;
+    mountOwnerReachability(app as Parameters<typeof mountOwnerReachability>[0], {
+      operations,
+      service: { state: () => ({ routes, reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
+      setups: { list: async () => [] } as unknown as Context["setups"],
+      requireToken: noop, requireOwner: noop, requireCsrf: noop,
+      usage: () => ({ kind: "session", lifetimeMs: 3_600_000 }),
+    });
+    const read = operations.read.bind(operations);
+    const counts = new Map<string, number>();
+    operations.read = async (id) => {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+      return read(id);
+    };
+    for (const path of ["/state", "/events"]) {
+      counts.clear();
+      let response: any;
+      const res = { setHeader() {}, status() { return res; }, json(body: unknown) { response = body; } };
+      await handlers.get("/v1/owner/reachability" + path)!({ params: {} }, res);
+      assert.deepEqual(response.data.routes.map((route: { providerId: string | null }) => route.providerId),
+        ["localhost-run", null, null, null]);
+      // State reuses its existing journal list; events deduplicate per operation ID.
+      assert.equal(counts.get(start.operationId), 1);
+      assert.equal(counts.get(missing), 1);
+    }
+    operations.read = async () => { throw new Error("journal read unavailable"); };
+    // Events need only the guarded creator lookup, not the separate operation-list endpoint.
+    let response: any;
+    const res = { setHeader() {}, status() { return res; }, json(body: unknown) { response = body; } };
+    await handlers.get("/v1/owner/reachability/events")!({ params: {} }, res);
+    assert.deepEqual(response.data.routes.map((route: { providerId: string | null }) => route.providerId),
+      [null, null, null, null]);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
