@@ -40,6 +40,7 @@ import {
   semanticIndexUpsert,
 } from "../server/search-semantic.ts";
 import { listDirtySearchIndexScopes } from "../server/stores/search-index-dirty-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function target(connectorInstanceId: string) {
   return {
@@ -57,36 +58,42 @@ function record(stream: string, key: string, subject: string) {
   };
 }
 
-const baseManifest = {
-  capabilities: { human_interaction: [] },
-  connector_id: "crash-gap",
-  display_name: "Crash gap probe",
-  manifest_uri: "https://registry.pdpp.dev/connectors/crash-gap",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "items",
-      primary_key: ["id"],
-      query: { search: {} },
-      schema: {
-        properties: { id: { type: "string" }, subject: { type: "string" } },
-        required: ["id", "subject"],
-        type: "object",
+const baseManifest = withFixtureSourceDeclaration(
+  {
+    capabilities: { human_interaction: [] },
+    connector_id: "crash-gap",
+    display_name: "Crash gap probe",
+    manifest_uri: "https://registry.pdpp.dev/connectors/crash-gap",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        query: { search: {} },
+        schema: {
+          properties: { id: { type: "string" }, subject: { type: "string" } },
+          required: ["id", "subject"],
+          type: "object",
+        },
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://registry.pdpp.dev/connectors/crash-gap" }
+);
 
-const semanticManifest = {
-  ...baseManifest,
-  streams: baseManifest.streams.map((stream) => ({
-    ...stream,
-    query: { search: { semantic_fields: ["subject"] } },
-  })),
-};
+const semanticManifest = withFixtureSourceDeclaration(
+  {
+    ...baseManifest,
+    streams: baseManifest.streams.map((stream) => ({
+      ...stream,
+      query: { search: { semantic_fields: ["subject"] } },
+    })),
+  },
+  { sourceId: baseManifest.manifest_uri }
+);
 
 /**
  * A real publisher in a separate Node process, therefore a separate
@@ -279,17 +286,20 @@ test("a 501-field manifest publishes bounded batches and restart embeds only the
   initDb(":memory:");
   const fields = Array.from({ length: 501 }, (_, index) => `field_${index}`);
   const properties = Object.fromEntries(fields.map((field) => [field, { type: "string" }]));
-  const manifest = {
-    ...semanticManifest,
-    connector_id: "semantic-field-batches",
-    streams: [
-      {
-        ...semanticManifest.streams[0],
-        query: { search: { semantic_fields: fields } },
-        schema: { properties: { id: { type: "string" }, ...properties }, type: "object" },
-      },
-    ],
-  };
+  const manifest = withFixtureSourceDeclaration(
+    {
+      ...semanticManifest,
+      connector_id: "semantic-field-batches",
+      streams: [
+        {
+          ...semanticManifest.streams[0],
+          query: { search: { semantic_fields: fields } },
+          schema: { properties: { id: { type: "string" }, ...properties }, type: "object" },
+        },
+      ],
+    },
+    { sourceId: baseManifest.manifest_uri }
+  );
   let calls = 0;
   const stub = makeStubBackend({ dimensions: 8 });
   configureSemanticBackend({
@@ -389,15 +399,18 @@ for (const kind of ["blob-flat", "sqlite-vec", "postgres"] as const) {
         });
       const instance = `cin_identity_${kind.replaceAll("-", "_")}_${runId}_${++sequence}`;
       const connector = `identity-${kind}-${runId}-${sequence}`;
-      const manifest = {
-        ...semanticManifest,
-        connector_id: connector,
-        display_name: connector,
-        streams: ["items", "item_", "item%", "itemX"].map((name) => ({
-          ...required(semanticManifest.streams[0]),
-          name,
-        })),
-      };
+      const manifest = withFixtureSourceDeclaration(
+        {
+          ...semanticManifest,
+          connector_id: connector,
+          display_name: connector,
+          streams: ["items", "item_", "item%", "itemX"].map((name) => ({
+            ...required(semanticManifest.streams[0]),
+            name,
+          })),
+        },
+        { sourceId: baseManifest.manifest_uri }
+      );
       const inputs: string[] = [];
       const stub = makeStubBackend({ dimensions: 8 });
       const embedding = {

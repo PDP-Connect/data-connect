@@ -74,7 +74,7 @@ test("validateRuntimeRequirements: returns when runtime_requirements is absent",
 test("validateRuntimeRequirements: accepts valid bindings", () => {
   assert.equal(
     validateRuntimeRequirements(
-      { runtime_requirements: { bindings: { browser: { required: true }, network: {} } } },
+      { runtime_requirements: { bindings: { browser: { required: true }, network: { required: false } } } },
       CODE
     ),
     undefined
@@ -95,18 +95,18 @@ test("validateRuntimeRequirements: accepts a valid external tool (with bindings 
 
 test("validateRuntimeRequirements: rejects non-object requirements or bindings", () => {
   assertRejects({ runtime_requirements: "x" }, "runtime_requirements must be an object");
-  assertRejects({ runtime_requirements: { bindings: "x" } }, "runtime_requirements.bindings must be an object");
+  assertRejects({ runtime_requirements: { bindings: "x" } }, "runtime_requirements.bindings must be object");
 });
 
 test("validateRuntimeRequirements: rejects an unsupported binding key", () => {
-  assertRejects({ runtime_requirements: { bindings: { gpu: {} } } }, "bindings has unsupported keys: gpu");
+  assertRejects({ runtime_requirements: { bindings: { gpu: {} } } }, "gpu must have required property 'required'");
 });
 
 test("validateRuntimeRequirements: rejects a non-object binding value and a non-boolean required", () => {
-  assertRejects({ runtime_requirements: { bindings: { browser: "x" } } }, "bindings.browser must be an object");
+  assertRejects({ runtime_requirements: { bindings: { browser: "x" } } }, "bindings.browser must be object");
   assertRejects(
     { runtime_requirements: { bindings: { browser: { required: "yes" } } } },
-    "bindings.browser.required must be a boolean"
+    "bindings.browser.required must be boolean"
   );
 });
 
@@ -269,13 +269,11 @@ test("validateRuntimeRequirements: rejects an unsupported local_paths.paths entr
 
 // --- short-circuit contract -------------------------------------------------
 
-test("validateRuntimeRequirements: external_tools is NOT validated when bindings is absent (early return)", () => {
-  // No bindings => the function returns before ever reaching external_tools, so
-  // an otherwise-invalid external_tools value is not rejected here.
-  assert.equal(
-    validateRuntimeRequirements({ runtime_requirements: { external_tools: "not-an-array" } }, CODE),
-    undefined,
-    "absent bindings short-circuits external_tools validation"
+test("validateRuntimeRequirements: external_tools is validated when bindings is absent", () => {
+  // Formerly an early return skipped external_tools when bindings was absent.
+  assertRejects(
+    { runtime_requirements: { external_tools: "not-an-array" } },
+    "runtime_requirements.external_tools must be an array"
   );
 });
 

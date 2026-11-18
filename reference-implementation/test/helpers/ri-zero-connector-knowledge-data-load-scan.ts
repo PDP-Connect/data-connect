@@ -150,7 +150,7 @@ const MANIFEST_ROOTS = [
  * external state read at request time, never RI-committed source or
  * RI-committed JSON, so it was never a candidate for this allowlist either
  * (see `reference-implementation/server/version-disposition.ts`'s own module
- * doc comment). The canonical Collection Profile observation schema is
+ * doc comment). The canonical Collection Profile observation schema is now
  * registered for its exact runtime loader. It describes protocol shapes, not
  * provider policy; the content check still rejects connector identity in it.
  * Additional entries require the same review as the generic read sites below.
@@ -158,6 +158,9 @@ const MANIFEST_ROOTS = [
 const SANCTIONED_POLICY_RESOURCES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ["reference-implementation/runtime/observations.ts", new Set([
     "reference-implementation/runtime/observation.schema.json",
+  ])],
+  ["reference-implementation/runtime/binding-declarations.ts", new Set([
+    "reference-implementation/runtime/connector-manifest.schema.json",
   ])],
 ]);
 

@@ -44,6 +44,7 @@ import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { type ConnectorManifestLike, classifyConnectorIntentModality } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
+import { snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest } from "../server/source-declaration-legacy-collection.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
@@ -285,27 +286,23 @@ function loadPackageManifest(name: string): PackageManifest {
   return entry.manifest as PackageManifest;
 }
 
+/**
+ * Test-only explicit attribution. The declaration is the production legacy projection of the manifest's
+ * own content (streams keep only the Core members), not a copy of connector-only stream fields, which
+ * Core refuses. Source and publisher are fixture identities, never a production source.
+ */
 function withExplicitTestSourceDeclaration(manifest: PackageManifest): PackageManifest {
   if (manifest.source_declaration && typeof manifest.source_declaration === "object") {
     return manifest;
   }
   const connectorKey = canonicalConnectorKey(manifest.connector_id) ?? manifest.connector_id;
-  const streams = Array.isArray(manifest.streams)
-    ? manifest.streams.map((stream) => ({
-        ...stream,
-        ...(stream.semantics === "append" ? { semantics: "append_only" } : {}),
-      }))
-    : [];
   return {
     ...manifest,
-    source_declaration: {
-      declaration_version: `owner-connection-intent-test:${connectorKey}:v1`,
-      display: { name: typeof manifest.display_name === "string" ? manifest.display_name : connectorKey },
-      protocol_version: manifest.protocol_version,
-      publisher: { id: "https://pdpp.dev/reference-implementation/tests" },
-      source: { id: `https://sources.example/connectors/${encodeURIComponent(connectorKey)}`, kind: "connector" },
-      streams,
-    },
+    source_declaration: snapshotContentAddressedSourceDeclarationFromLegacyConnectorManifest(manifest, {
+      connectorImplementationId: `https://implementations.example/connectors/${encodeURIComponent(connectorKey)}`,
+      publisherId: "https://pdpp.dev/reference-implementation/tests",
+      sourceId: `https://sources.example/connectors/${encodeURIComponent(connectorKey)}`,
+    }),
   };
 }
 
