@@ -3,14 +3,9 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-	mkdir,
-	readFile,
-	realpath,
-	symlink,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { linkInstalledPackage } from "./installed-package.mjs";
 import { RELEASE_DISK_FLOOR_BYTES, requireDiskFloor } from "./disk-floor.mjs";
 
 const path = process.env.GOZAR_TARBALL;
@@ -60,23 +55,15 @@ const result = spawnSync(
 if (result.error) throw result.error;
 if (result.status !== 0) process.exitCode = result.status ?? 1;
 else {
-	await mkdir("node_modules/@tnunamak", { recursive: true });
-	try {
-		await symlink(
-			resolve(prefix, "node_modules/@tnunamak/gozar"),
-			"node_modules/@tnunamak/gozar",
-			"dir",
-		);
-	} catch (error) {
-		if (error.code !== "EEXIST") throw error;
-		if (
-			(await realpath("node_modules/@tnunamak/gozar")) !==
-			(await realpath(resolve(prefix, "node_modules/@tnunamak/gozar")))
-		)
-			throw new Error(
-				"Existing package differs from the selected tarball prefix",
-			);
-	}
+	const installed = await linkInstalledPackage(
+		resolve(prefix, "node_modules/@tnunamak/gozar"),
+		resolve("node_modules/@tnunamak/gozar"),
+	);
+	console.log(
+		installed.mode === "linked"
+			? `Gozar installed as a link to the checked tarball prefix`
+			: `Gozar already installed as a directory with the same file tree (relative paths and SHA-256) as the checked tarball`,
+	);
 	await writeFile(
 		resolve(prefix, "receipt.json"),
 		JSON.stringify({ sourceSha, sha256: actual, artifact: absolute }, null, 2),
