@@ -561,6 +561,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     // passes should_show = true regardless of this preference.
     let should_show = !crate::commands::read_start_minimized_preference();
     let app_handle = app.handle().clone();
+    let _ = NAVIGATION_DIALOG_APP.set(app_handle.clone());
     // Before anything is spawned: a previous session's orphan may still be
     // holding the loopback port this session is about to ask for.
     reap_orphans_from_dead_sessions(&app_handle);
@@ -4349,28 +4350,133 @@ fn open_external_dry_run_is_enabled() -> bool {
 /// `opened-externally` (denied in-app, handed to `open::that_detached`),
 /// `refused` (denied, non-`https:` scheme, nothing opened). This is the
 /// single place all three are decided, so this is also the single place
-/// that needs to log them.
+/// that needs to log them. While attached to a remote server a fourth,
+/// `declined`, logs an owner's "Cancel" on the confirm dialog.
 fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
+    decide_console_navigation_with(
+        url,
+        console_origin,
+        matches!(
+            crate::attach::current_target(),
+            crate::attach::AttachTarget::Saved(_)
+        ),
+        ask_before_opening_externally,
+        open_external_url,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NavigationPolicy {
+    AllowInternal,
+    OpenExternally,
+    /// Attached to a remote server: the page comes from that server, and
+    /// the webview gives no signal that the owner clicked, so the owner
+    /// confirms before the system browser opens anything.
+    ConfirmThenOpen,
+    Refuse,
+}
+
+fn console_navigation_policy(
+    url: &tauri::Url,
+    console_origin: &tauri::Url,
+    attached: bool,
+) -> NavigationPolicy {
     if is_console_origin(url, console_origin) {
-        log::info!("{}", console_navigation_notice(url, "allowed-internal"));
-        return true;
-    }
-    if url.scheme() == "https" {
-        if open_external_dry_run_is_enabled() {
-            log::info!("{}", console_navigation_notice(url, "opened-externally (dry run)"));
-        } else {
-            match open::that_detached(url.as_str()) {
-                Ok(()) => log::info!("{}", console_navigation_notice(url, "opened-externally")),
-                // Opener errors may echo the raw URL argument.
-                Err(_) => log::error!(
-                    "{}", console_navigation_notice(url, "opened-externally failed to open")
-                ),
-            }
-        }
+        NavigationPolicy::AllowInternal
+    } else if url.scheme() != "https" {
+        NavigationPolicy::Refuse
+    } else if attached {
+        NavigationPolicy::ConfirmThenOpen
     } else {
-        log::warn!("{}", console_navigation_notice(url, "refused (non-https scheme)"));
+        NavigationPolicy::OpenExternally
+    }
+}
+
+/// `decide_console_navigation` with the confirm dialog and the opener
+/// injected. `confirm` gets the target origin and a reply callback; it must
+/// not block, because navigation handlers run on the UI thread.
+fn decide_console_navigation_with(
+    url: &tauri::Url,
+    console_origin: &tauri::Url,
+    attached: bool,
+    confirm: impl FnOnce(String, Box<dyn FnOnce(bool) + Send>),
+    open: impl FnOnce(&tauri::Url) + Send + 'static,
+) -> bool {
+    match console_navigation_policy(url, console_origin, attached) {
+        NavigationPolicy::AllowInternal => {
+            log::info!("{}", console_navigation_notice(url, "allowed-internal"));
+            return true;
+        }
+        NavigationPolicy::OpenExternally => open(url),
+        NavigationPolicy::ConfirmThenOpen => {
+            let target = url.clone();
+            confirm(
+                url.origin().ascii_serialization(),
+                Box::new(move |accepted| {
+                    if accepted {
+                        open(&target);
+                    } else {
+                        log::info!("{}", console_navigation_notice(&target, "declined"));
+                    }
+                }),
+            );
+        }
+        NavigationPolicy::Refuse => {
+            log::warn!(
+                "{}",
+                console_navigation_notice(url, "refused (non-https scheme)")
+            );
+        }
     }
     false
+}
+
+/// Hand an `https:` URL to the system browser, or only log it when
+/// `PDPP_OPEN_EXTERNAL_DRY_RUN=1`.
+fn open_external_url(url: &tauri::Url) {
+    if open_external_dry_run_is_enabled() {
+        log::info!(
+            "{}",
+            console_navigation_notice(url, "opened-externally (dry run)")
+        );
+        return;
+    }
+    match open::that_detached(url.as_str()) {
+        Ok(()) => log::info!("{}", console_navigation_notice(url, "opened-externally")),
+        // Opener errors may echo the raw URL argument.
+        Err(_) => log::error!(
+            "{}",
+            console_navigation_notice(url, "opened-externally failed to open")
+        ),
+    }
+}
+
+/// The app handle the navigation confirm dialog needs. Set once in `setup`.
+static NAVIGATION_DIALOG_APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
+/// The confirm text. `decide_console_navigation_with` passes the origin
+/// only: a path or query can carry tokens, and the owner decides on the
+/// site, not the page.
+fn external_open_question(origin: &str) -> String {
+    format!("The attached server's page wants to open {origin} in your browser.")
+}
+
+fn ask_before_opening_externally(origin: String, reply: Box<dyn FnOnce(bool) + Send>) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let Some(app) = NAVIGATION_DIALOG_APP.get() else {
+        log::warn!("on_navigation: no app handle for the confirm dialog; not opening");
+        reply(false);
+        return;
+    };
+    app.dialog()
+        .message(external_open_question(&origin))
+        .title("Open in your browser?")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Open".to_string(),
+            "Cancel".to_string(),
+        ))
+        .show(reply);
 }
 
 /// Never format the raw URL (or an opener error) into a navigation log.
@@ -8779,5 +8885,94 @@ setInterval(() => {}, 1000);
             "decide_console_navigation must still deny in-app navigation for an \
              https: external url even in dry-run mode"
         );
+    }
+
+    /// Runs one navigation through the injectable decision and records
+    /// whether it asked, what the question named, and whether it opened.
+    fn navigate(url: &str, attached: bool, answer: bool) -> (bool, Option<String>, Vec<String>) {
+        use std::sync::{Arc, Mutex};
+        let console: tauri::Url = "http://127.0.0.1:4310/".parse().expect("console url");
+        let url: tauri::Url = url.parse().expect("test url");
+        let asked = Arc::new(Mutex::new(None));
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let asked_in = Arc::clone(&asked);
+        let opened_in = Arc::clone(&opened);
+        let allowed = decide_console_navigation_with(
+            &url,
+            &console,
+            attached,
+            move |origin, reply| {
+                *asked_in.lock().unwrap() = Some(origin);
+                reply(answer);
+            },
+            move |url: &tauri::Url| opened_in.lock().unwrap().push(url.to_string()),
+        );
+        let asked = asked.lock().unwrap().clone();
+        let opened = opened.lock().unwrap().clone();
+        (allowed, asked, opened)
+    }
+
+    #[test]
+    fn local_console_opens_https_links_without_asking() {
+        let (allowed, asked, opened) = navigate("https://pdpp.dev/docs?x=1", false, false);
+        assert!(!allowed);
+        assert_eq!(asked, None);
+        assert_eq!(opened, vec!["https://pdpp.dev/docs?x=1".to_string()]);
+    }
+
+    #[test]
+    fn attached_console_opens_https_links_only_after_the_owner_confirms() {
+        let (allowed, asked, opened) = navigate("https://pdpp.dev/docs?token=SECRET", true, true);
+        assert!(!allowed);
+        assert_eq!(asked.as_deref(), Some("https://pdpp.dev"));
+        assert_eq!(opened, vec!["https://pdpp.dev/docs?token=SECRET".to_string()]);
+    }
+
+    #[test]
+    fn attached_console_opens_nothing_when_the_owner_declines() {
+        let (allowed, asked, opened) = navigate("https://pdpp.dev/docs", true, false);
+        assert!(!allowed);
+        assert_eq!(asked.as_deref(), Some("https://pdpp.dev"));
+        assert!(opened.is_empty());
+    }
+
+    #[test]
+    fn non_https_navigation_is_refused_without_asking_local_or_attached() {
+        for attached in [false, true] {
+            for url in ["http://127.0.0.1:1/", "file:///etc/passwd", "javascript:alert(1)"] {
+                let (allowed, asked, opened) = navigate(url, attached, true);
+                assert!(!allowed, "{url} attached={attached}");
+                assert_eq!(asked, None, "{url} attached={attached}");
+                assert!(opened.is_empty(), "{url} attached={attached}");
+            }
+        }
+    }
+
+    #[test]
+    fn same_origin_navigation_is_allowed_without_asking_local_or_attached() {
+        for attached in [false, true] {
+            let (allowed, asked, opened) =
+                navigate("http://127.0.0.1:4310/settings", attached, false);
+            assert!(allowed, "attached={attached}");
+            assert_eq!(asked, None);
+            assert!(opened.is_empty());
+        }
+    }
+
+    #[test]
+    fn external_open_question_names_only_the_origin() {
+        let (_, asked, _) = navigate(
+            "https://user:pw@pdpp.dev:8443/a/b?token=SECRET#frag",
+            true,
+            false,
+        );
+        let question = external_open_question(&asked.expect("asked"));
+        assert!(question.contains("https://pdpp.dev:8443"), "{question}");
+        for leaked in ["SECRET", "frag", "/a/b", "user", "pw@"] {
+            assert!(
+                !question.contains(leaked),
+                "question leaked {leaked}: {question}"
+            );
+        }
     }
 }
