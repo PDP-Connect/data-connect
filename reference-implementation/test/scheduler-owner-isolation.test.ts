@@ -80,6 +80,7 @@ interface SeedConnection {
 
 interface OwnerScenarioResult {
   records: RunRecord[];
+  registrations: { connectorInstanceId: string; ownerSubjectId: string; token: string }[];
   resolverCalls: { connectorInstanceId: string; ownerSubjectId: string }[];
 }
 
@@ -146,6 +147,7 @@ rl.on('line', (line) => {
   if (msg.type !== 'START') return;
   writeFileSync(${JSON.stringify(spawnMarkerPath)}, 'spawned', 'utf8');
   writeFileSync(${JSON.stringify(snapshotPath)}, JSON.stringify({
+    blobUploadToken: process.env.PDPP_BLOB_UPLOAD_TOKEN ?? null,
     githubToken: process.env.GITHUB_PERSONAL_ACCESS_TOKEN ?? null,
     ownerToken: process.env.PDPP_OWNER_TOKEN ?? null,
   }), 'utf8');
@@ -198,7 +200,14 @@ async function runSchedules({
 }): Promise<OwnerScenarioResult> {
   const records: RunRecord[] = [];
   const resolverCalls: OwnerScenarioResult["resolverCalls"] = [];
+  const registrations: OwnerScenarioResult["registrations"] = [];
   const scheduler = createScheduler({
+    blobUploadCredentialHooks: {
+      register: ({ connectorInstanceId, ownerSubjectId, token }) => {
+        registrations.push({ connectorInstanceId, ownerSubjectId, token });
+      },
+      revoke: () => undefined,
+    },
     admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId }) => {
       if (typeof ownerSubjectId !== "string") {
         throw new Error("test admission requires a scheduler ownerSubjectId");
@@ -248,7 +257,7 @@ async function runSchedules({
         { cause: error }
       );
     }
-    return { records, resolverCalls };
+    return { records, registrations, resolverCalls };
   } finally {
     scheduler.stop();
   }
@@ -282,13 +291,27 @@ async function assertOwnerIsolation(
       ["succeeded", "succeeded"],
       "both owners should complete their own scheduled run"
     );
+    // The child holds a run-scoped blob credential minted for its own owner
+    // and instance, never the owner bearer.
+    const credentialFor = (instanceId: string, ownerId: string): string => {
+      const matches = result.registrations.filter(
+        (entry) => entry.connectorInstanceId === instanceId && entry.ownerSubjectId === ownerId
+      );
+      assert.equal(matches.length, 1, `exactly one run credential minted for ${instanceId}`);
+      return matches[0]?.token ?? "";
+    };
+    const blobTokenA = credentialFor(INSTANCE_A, OWNER_A);
+    const blobTokenB = credentialFor(INSTANCE_B, OWNER_B);
+    assert.notEqual(blobTokenA, blobTokenB, "each owner's run gets a distinct credential");
     assert.deepEqual(JSON.parse(readFileSync(snapshotA, "utf8")), {
+      blobUploadToken: blobTokenA,
       githubToken: SECRET_A,
-      ownerToken: `token-${OWNER_A}`,
+      ownerToken: null,
     });
     assert.deepEqual(JSON.parse(readFileSync(snapshotB, "utf8")), {
+      blobUploadToken: blobTokenB,
       githubToken: SECRET_B,
-      ownerToken: `token-${OWNER_B}`,
+      ownerToken: null,
     });
     assert.notEqual(
       JSON.parse(readFileSync(snapshotA, "utf8")).githubToken,

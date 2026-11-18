@@ -65,6 +65,7 @@ interface Logger {
 
 interface Controller {
   awaitRun: (runId: string) => Promise<string>;
+  blobUploadCredentialHooks?: SchedulerOptions["blobUploadCredentialHooks"];
   browserSurfaceLeaseManager?: {
     isManagedConnector: (connectorId: string) => boolean;
   };
@@ -626,6 +627,7 @@ export function createReferenceSchedulerManager({
         : runtimeContext.referenceBaseUrl;
     const schedulerRsUrl = "selfCallRsUrl" in runtimeContext ? runtimeContext.selfCallRsUrl : runtimeContext.rsUrl;
     scheduler = createScheduler({
+      ...(controller.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       admitRunConnection: async ({ connectorId, connectorInstanceId, ownerSubjectId: requestedOwnerSubjectId }) => {
         if (typeof requestedOwnerSubjectId !== "string" || requestedOwnerSubjectId.trim().length === 0) {
           throw new Error("scheduler ownerSubjectId is required for connection admission");
