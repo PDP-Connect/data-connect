@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Acceptance: a connector in the signed catalog whose key no build of this
- * server has seen installs, validates, runs with its declared tuning
- * environment and gets a manifest-derived setup plan, with no rebuild and no
- * code change. `catalog-only-example` appears nowhere else in the repository.
+ * Acceptance: a connector whose key no build of this server has seen installs
+ * from a catalog entry, validates, runs with its declared tuning environment
+ * and gets a manifest-derived setup plan, with no rebuild and no code change.
+ * `catalog-only-example` appears nowhere else in the repository. The catalog
+ * entry comes from an injected loader, so "in the signed catalog" is not
+ * claimed here: see the last paragraph.
  *
  * What each test catches:
  * - validation: a key outside the old list had no tuning namespace, so a
@@ -24,7 +26,11 @@
  *   not catch the removal of the old one.
  *
  * The catalog loader and the artifact writer are injected, so this does not
- * exercise catalog signature verification or artifact download.
+ * exercise catalog signature verification, artifact download, or whether a
+ * newly published catalog entry is picked up by a running server. The
+ * production loader delegates to the pinned core's verified OCI catalog and
+ * needs a signed catalog and a registry, so that path belongs in an
+ * integration test, not in this unit-speed file.
  */
 
 import assert from "node:assert/strict";
@@ -149,7 +155,7 @@ async function runCapture(options: {
   }
 }
 
-test("install and run: the installed catalog connector registers under its key and runs with its declared knob", async () => {
+test("install and run: a connector from an injected catalog entry registers under its key and runs with its declared knob", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-catalog-without-rebuild-"));
   const capturePath = join(dataDir, "env.json");
   const entry: ConnectorCatalogEntry = {
