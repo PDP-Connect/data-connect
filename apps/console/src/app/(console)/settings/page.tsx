@@ -43,10 +43,10 @@ export default async function SettingsPage() {
           <DeveloperModeSetting />
         </Section>
         <Section
-          description="Choose a local-only posture or configure a proxy you control. Remote access always keeps the Personal Server on loopback."
+          description="Use DataConnect from your phone, or let AI apps like ChatGPT reach it."
           title="Remote access"
         >
-          <RemoteAccessSetting />
+          <RemoteAccessSetting appVersion={identity.version} />
         </Section>
         {ownerPasswordSource ? (
           <Section

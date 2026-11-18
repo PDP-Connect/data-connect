@@ -241,7 +241,7 @@ for (const viaPoll of [false, true]) {
       await act(async () =>
         root.render(createElement(RemoteAccessSetting, { request }))
       )
-      assert.equal(button("Commit and review route").disabled, true)
+      assert.equal(button("Save and review").disabled, true)
       assert.equal(draftReads, 1)
       if (viaPoll) {
         rev = "from-other-client"
@@ -256,7 +256,7 @@ for (const viaPoll of [false, true]) {
         await act(async () => button("Allocate workshop").click())
       }
       assert.equal(draftReads, 2)
-      const commit = button("Commit and review route")
+      const commit = button("Save and review")
       assert.equal(commit.disabled, false)
       await act(async () => commit.click())
       assert.equal(commits, 1)

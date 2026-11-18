@@ -58,7 +58,7 @@ test("missing action snapshot blocks setup approval even if inventory facts exis
     inventoryFacts: [{ label: "Unrelated inventory fact" }],
   };
   const html = renderToStaticMarkup(createElement(SetupApprovalCard, props));
-  assert.match(html, /Consent details unavailable from provider library/);
+  assert.match(html, /couldn.{1,6}t load this service.{1,6}s details/);
   assert.match(html, /disabled=""/);
   assert.ok(!html.includes("Unrelated inventory fact"));
 });
@@ -84,13 +84,13 @@ test("setup card shows all typed disclosure groups from the action snapshot", ()
   const action = projectAction({ ...base, consent: { ...base.consent!, facts: [], disclosures } });
   const html = renderToStaticMarkup(createElement(SetupApprovalCard, { action, onApprove: () => {} }));
   for (const text of [
-    "effects",
+    "Effects",
     "fixture storage",
     "full disclosure ".repeat(200),
-    "artifact",
-    "requiresPrivilege",
+    "Artifact",
+    "Requires privilege",
     "false",
-    "sha256",
+    "Sha256",
     "a".repeat(64),
   ]) {
     assert.ok(html.includes(text));
@@ -111,7 +111,7 @@ test("route card rejects a digest alias mismatch without showing unrelated catal
   };
   const review = projectCandidate(candidate as unknown as Parameters<typeof projectCandidate>[0]);
   const html = renderToStaticMarkup(createElement(RouteConsentCard, { review, onApprove: () => {} }));
-  assert.match(html, /Consent details unavailable from provider library/);
+  assert.match(html, /couldn.{1,6}t load this service.{1,6}s details/);
   assert.match(html, /disabled=""/);
 });
 
@@ -135,8 +135,8 @@ test("route card shows the exact address and target covered by approval", () => 
   assert.ok(review.consent);
   review.consent.disclosures = { ownership: "external-owned" };
   const html = renderToStaticMarkup(createElement(RouteConsentCard, { review, onApprove: () => {} }));
-  assert.match(html, /Expected origin: https:\/\/owner\.fixture\.invalid/);
-  assert.match(html, /Requested target: fixture-target/);
+  assert.match(html, /Your address will be: https:\/\/owner\.fixture\.invalid/);
+  assert.match(html, /Connects to: fixture-target/);
 });
 
 test("canary private fields are absent from projected setup and route snapshots", () => {

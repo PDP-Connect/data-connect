@@ -8,6 +8,7 @@ import type {
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react";
+import { formatLocalTime, humanizeKey, plain } from "./plain-text.ts";
 
 type Fact = ReturnType<typeof projectFact>;
 type Action = ReturnType<typeof projectAction>;
@@ -17,20 +18,20 @@ export function ConsentFacts({ facts }: { facts: Fact[] }) {
   return (
     <div className="grid gap-4">
       {groups.map((group) => (
-        <section aria-label={group} key={group}>
-          <h4 className="pdpp-label">{group}</h4>
+        <section aria-label={plain(group)} key={group}>
+          <h4 className="pdpp-label">{plain(group)}</h4>
           <dl className="grid gap-3">
             {facts
               .filter((fact) => fact.group === group)
               .map((fact) => (
                 <div key={fact.id}>
-                  <dt className="pdpp-label">{fact.label}</dt>
+                  <dt className="pdpp-label">{plain(fact.label)}</dt>
                   <dd className="pdpp-caption whitespace-pre-wrap break-words">
-                    {fact.known ? (fact.value === null ? "None" : String(fact.value)) : `Unknown: ${fact.reason}`}
+                    {fact.known ? (fact.value === null ? "None" : plain(String(fact.value))) : `Unknown: ${plain(fact.reason)}`}
                   </dd>
                   <dd className="pdpp-caption text-muted-foreground">
-                    {fact.source}
-                    {fact.asOf ? ` · ${fact.asOf}` : " · Evidence date not recorded"}
+                    {plain(fact.source)}
+                    {fact.asOf ? ` · ${formatLocalTime(fact.asOf)}` : " · Date not recorded"}
                   </dd>
                 </div>
               ))}
@@ -63,7 +64,7 @@ export function ConsentDisclosures({ value }: { value: unknown }) {
       <dl className="grid gap-3">
         {Object.entries(value).map(([key, item]) => (
           <div key={key}>
-            <dt className="pdpp-label">{key}</dt>
+            <dt className="pdpp-label">{humanizeKey(key)}</dt>
             <dd>
               <ConsentDisclosures value={item} />
             </dd>
@@ -72,7 +73,7 @@ export function ConsentDisclosures({ value }: { value: unknown }) {
       </dl>
     );
   }
-  return <span className="pdpp-caption whitespace-pre-wrap break-words">{String(value)}</span>;
+  return <span className="pdpp-caption whitespace-pre-wrap break-words">{plain(String(value))}</span>;
 }
 
 export function SetupApprovalCard({
@@ -105,7 +106,7 @@ export function SetupApprovalCard({
   const checked = approvedDigest === consent?.consentFactsDigest;
   return (
     <section aria-label="Setup approval" className="grid gap-4 rounded-lg border p-4">
-      <h3 className="pdpp-label">{action.label}</h3>
+      <h3 className="pdpp-label">{plain(action.label)}</h3>
       {children}
       {complete ? (
         <>
@@ -122,7 +123,7 @@ export function SetupApprovalCard({
         </>
       ) : (
         <p className="pdpp-caption" role="status">
-          Consent details unavailable from provider library.
+          We couldn't load this service's details. Try again.
         </p>
       )}
       <button
@@ -163,13 +164,13 @@ export function RouteConsentCard({
     review.consentFactsDigest === consent.consentFactsDigest;
   const checked = approvedDigest === consent?.consentFactsDigest;
   return (
-    <section aria-label="Route consent" className="grid gap-4 rounded-lg border p-4">
-      <h3 className="pdpp-label">Review reachability</h3>
+    <section aria-label="Remote access approval" className="grid gap-4 rounded-lg border p-4">
+      <h3 className="pdpp-label">Review before turning on</h3>
       {complete ? (
         <>
-          <p className="pdpp-caption break-words">Requested target: {consent.scope?.query.target}</p>
+          <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
           {consent.scope?.query.expectedOrigin ? (
-            <p className="pdpp-caption break-words">Expected origin: {consent.scope.query.expectedOrigin}</p>
+            <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
           ) : null}
           <ConsentDisclosures value={consent.disclosures} />
           <ConsentFacts facts={consent.facts} />
@@ -179,12 +180,12 @@ export function RouteConsentCard({
               onChange={(event) => setApprovedDigest(event.target.checked ? consent.consentFactsDigest : null)}
               type="checkbox"
             />
-            I approve this route and every disclosure shown above.
+            I approve the details shown above.
           </label>
         </>
       ) : (
         <p className="pdpp-caption" role="status">
-          Consent details unavailable from provider library.
+          We couldn't load this service's details. Try again.
         </p>
       )}
       <button
@@ -194,7 +195,7 @@ export function RouteConsentCard({
         }
         type="button"
       >
-        Apply reachability
+        Turn on remote access
       </button>
     </section>
   );
@@ -222,13 +223,13 @@ export function RuntimeRouteConsentCard({
     review.disclosures !== null &&
     Date.parse(review.expiresAt) > now;
   return (
-    <section aria-label="Runtime route consent" className="grid gap-4 rounded-lg border p-4">
-      <h3 className="pdpp-label">Review changed reachability</h3>
+    <section aria-label="Changed details approval" className="grid gap-4 rounded-lg border p-4">
+      <h3 className="pdpp-label">Details of this connection changed</h3>
       {valid ? (
         <>
-          <p className="pdpp-caption break-words">Requested target: {review.scope?.query.target}</p>
+          <p className="pdpp-caption break-words">Connects to: {review.scope?.query.target}</p>
           {review.scope?.query.expectedOrigin ? (
-            <p className="pdpp-caption break-words">Expected origin: {review.scope.query.expectedOrigin}</p>
+            <p className="pdpp-caption break-words">Your address will be: {review.scope.query.expectedOrigin}</p>
           ) : null}
           <ConsentDisclosures value={review.disclosures} />
           <ConsentFacts facts={review.facts} />
@@ -238,11 +239,11 @@ export function RuntimeRouteConsentCard({
               onChange={(event) => setApprovedDigest(event.target.checked ? review.consentFactsDigest : null)}
               type="checkbox"
             />{" "}
-            I approve the current route disclosures.
+            I approve the changed details.
           </label>
         </>
       ) : (
-        <p>Fresh consent details are required.</p>
+        <p>These details have expired. Reload to see the new ones.</p>
       )}
       <button
         type="button"
@@ -253,7 +254,7 @@ export function RuntimeRouteConsentCard({
           onApprove({ kind: "route", consentFactsDigest: review.consentFactsDigest })
         }
       >
-        Approve current route
+        Turn on again
       </button>
     </section>
   );

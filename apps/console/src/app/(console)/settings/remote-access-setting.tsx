@@ -13,7 +13,17 @@ import type {
 import { useCallback, useEffect, useState } from "react";
 import { ProviderSetup, readSetupReservations, reserveSetupOperation, saveSetupReservation, type SetupReservation } from "./provider-setup.tsx";
 import { requestReachability } from "./reachability-actions.ts";
-import { proofLine, routeHeadline } from "./route-display.ts";
+import { proofLine, routeHeadline, routeSentence } from "./route-display.ts";
+import {
+  type DisplayError,
+  Diagnostics,
+  DiagnosticsContext,
+  ErrorNotice,
+  ReachabilityFailure,
+  toDisplayError,
+} from "./diagnostics.tsx";
+import { formatLocalTime, plain } from "./plain-text.ts";
+import { ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
 import { ConsentFacts, RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 
 type Draft = ReturnType<typeof projectDraft>;
@@ -47,7 +57,27 @@ type State = {
   starting: boolean;
 };
 
-export function RemoteAccessSetting({ request = requestReachability }: { request?: typeof requestReachability }) {
+// How a way reaches people, in the owner's words. Unlisted values pass through `plain`.
+const reachLabels: Record<string, string> = { lan: "Same Wi-Fi only" };
+const kindLabels: Record<string, string> = {
+  session: "Temporary",
+  durable: "Lasting",
+  attached: "While DataConnect runs",
+};
+const availabilityLabels: Record<string, string> = {
+  "action-required": "Needs setup",
+  "detect-only": "Not available yet",
+  unsupported: "Not supported",
+};
+const kindLabel = (kind: string) => kindLabels[kind] ?? plain(kind.charAt(0).toUpperCase() + kind.slice(1));
+
+export function RemoteAccessSetting({
+  request = requestReachability,
+  appVersion,
+}: {
+  request?: typeof requestReachability;
+  appVersion?: string;
+}) {
   const [host, setHost] = useState<{ known: true; value: HostSettings } | { known: false; reason: string }>({
     known: false,
     reason: "loading",
@@ -72,7 +102,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [stale, setStale] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<DisplayError | null>(null);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
   const [reservations, setReservations] = useState<SetupReservation[]>([]);
@@ -84,7 +114,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   async function send<T>(path: string, input?: Record<string, unknown>): Promise<T> {
     const result = await request(path, input);
     if (!result.ok) {
-      throw new Error(`${result.code}: ${result.message}`);
+      throw new ReachabilityFailure(result);
     }
     return result.data as T;
   }
@@ -113,7 +143,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
               setUsage(saved.usage);
               setCommitted(saved.committed === true);
             } else {
-              setError(result.message);
+              setError(toDisplayError(new ReachabilityFailure(result), "load"));
             }
           });
         }
@@ -152,7 +182,11 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         setStale(false);
       } else {
         setStale(true);
-        setError(catalogResult.message);
+        setError((current) =>
+          current?.source === "load" && current.code === catalogResult.code
+            ? current
+            : toDisplayError(new ReachabilityFailure(catalogResult), "load")
+        );
       }
       if (hostResult.ok) {
         setHost(hostResult.data as typeof host);
@@ -168,6 +202,10 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         }
       } else {
         setStale(true);
+      }
+      // A load that succeeds retires the load error it replaced; an action error stays until the next action.
+      if (catalogResult.ok && stateResult.ok) {
+        setError((current) => (current?.source === "load" ? null : current));
       }
     };
     void load();
@@ -228,7 +266,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     try {
       await run();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "Reachability failed");
+      setError(toDisplayError(failure, "action", provider ? plain(provider.label) : undefined));
     } finally {
       setBusy(false);
       setValues({});
@@ -251,7 +289,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     if (!draft || !draftProviderId) return;
     const nextInventory = await send<Inventory>("/catalog");
     const matches = nextInventory.providers.filter(item => item.providerId === draftProviderId);
-    if (matches.length !== 1 || !matches[0]) throw new Error("Choose the configuration to edit again.");
+    if (matches.length !== 1 || !matches[0]) throw new ReachabilityFailure(publicError("configuration_stale"));
     const current = matches[0];
     await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
     const next = await send<Draft>("/drafts", { providerId: current.providerId, expectedRevision: current.configuration.revision });
@@ -303,7 +341,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         word.toString(16).padStart(8, "0")
       ).join(""),
       providerId: draftProviderId,
-      providerLabel: inventory?.providers.find((item) => item.providerId === draftProviderId)?.label ?? "Selected provider",
+      providerLabel: inventory?.providers.find((item) => item.providerId === draftProviderId)?.label ?? "Selected service",
       draftId: draft.draftId, actionId: setupAction.id,
       expectedConfigurationRevision: draft.configuration.revision,
       usage,
@@ -311,117 +349,66 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     const next = saveSetupReservation(reservation);
     try {
       const result = await reserveSetupOperation(request, reservation);
-      if (!result.ok) throw new Error(result.message);
+      if (!result.ok) throw new ReachabilityFailure(result);
     } finally {
       setReservations(next);
     }
   }
+  const hostReasonShown = !host.known && host.reason !== "loading";
+  const newestObservation = inventory?.providers
+    .flatMap((item) => item.prerequisites.map((prerequisite) => prerequisite.observedAt))
+    .filter((value): value is string => typeof value === "string")
+    .sort()
+    .at(-1);
   return (
+    <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
     <section aria-label="Remote access" className="grid gap-6">
       <div>
         <h2 className="pdpp-heading">Remote access</h2>
-        <p className="pdpp-caption text-muted-foreground">Choose how other devices can reach this instance.</p>
       </div>
-      {error ? (
-        <p className="pdpp-caption text-destructive" role="alert">
-          {error}
-        </p>
-      ) : null}
-      {stale ? <p role="status">Current observations are unavailable. Changes are disabled.</p> : null}
+      {error ? <ErrorNotice error={error} /> : null}
+      {stale ? <p role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
+      {hostReasonShown ? <p role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
       {state.lifecycle?.cleanup === "unconfirmed" ? (
-        <p role="status">Cleanup remains unconfirmed. An unavailable ownership record does not establish absence.</p>
+        <p role="status">We couldn't confirm your address is closed. It may still work.</p>
       ) : null}
-      <section aria-label="Host settings" className="grid gap-3">
-        <h3 className="pdpp-label">This instance</h3>
-        {Object.entries(capabilities).map(([id, observation]) => (
-          <p className="pdpp-caption" key={id}>
-            {id}: {observation.known ? String(observation.value) : `Unknown: ${observation.reason}`}
-          </p>
-        ))}
-        {host.known ? (
-          <>
-            <p>
-              Owner password:{" "}
-              {host.value.password.known
-                ? host.value.password.value
-                  ? "Set"
-                  : "Not set"
-                : `Unknown: ${host.value.password.reason}`}
-            </p>
-            <p className="break-words">
-              Target: {host.value.target.known ? host.value.target.value : `Unknown: ${host.value.target.reason}`}
-            </p>
-            <label>
-              Console port
-              <input
-                inputMode="numeric"
-                onChange={(event) => setPort(event.target.value)}
-                placeholder={host.value.port.known ? String(host.value.port.value ?? "Unpinned") : "Unknown"}
-                value={port}
-              />
-            </label>
-            <button
-              disabled={mutationBlocked}
-              onClick={() =>
-                void change(async () => {
-                  const value = port.trim() === "" ? null : Number(port);
-                  if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
-                    throw new Error("Enter a port between 1 and 65535.");
-                  }
-                  const updated = await send<HostSettings>("/host-settings", {
-                    expectedRevision: host.value.revision,
-                    mode: host.value.mode,
-                    port: value,
-                    acknowledgeDisconnect: acknowledged,
-                  });
-                  setHost({ known: true, value: updated });
-                })
-              }
-            >
-              Save port
-            </button>
-          </>
-        ) : (
-          <p role="status">Host settings unavailable: {host.reason}. Listener changes need the host supervisor.</p>
-        )}
-      </section>
       <fieldset className="grid gap-3" disabled={mutationBlocked || draft !== null}>
-        <legend className="pdpp-label">Reachability choices</legend>
+        <legend className="pdpp-label">Ways to connect</legend>
         <label>
           <input
             checked={selected === ""}
-            name="reachability"
+            name="way"
             onChange={() => {
               setSelected("");
               setUsage(null);
             }}
             type="radio"
           />{" "}
-          Off — this device only
+          Off · Only this computer can open DataConnect.
         </label>
         {providers.map((item) => (
           <label className="grid gap-1 rounded-lg border p-3" key={choiceKey(item, usage)}>
             <span>
               <input
                 checked={selected === choiceKey(item, usage)}
-                name="reachability"
+                name="way"
                 onChange={() => {
                   setSelected(choiceKey(item, null));
                   setUsage(null);
                 }}
                 type="radio"
               />{" "}
-              {item.label}
+              {plain(item.label)}
             </span>
-            <span className="pdpp-caption text-muted-foreground">
-              {item.reach === "lan" ? "Local network (LAN)" : item.reach} · {item.transport}
-            </span>
-            {Object.entries(item.availability).map(([kind, available]) => (
-              <span className="pdpp-caption" key={kind}>
-                {kind}: {available.state}
-                {available.reason ? ` — ${available.reason}` : ""}
-              </span>
-            ))}
+            <span className="pdpp-caption text-muted-foreground">{reachLabels[item.reach] ?? plain(item.reach)}</span>
+            {Object.entries(item.availability)
+              .filter(([, available]) => available.state !== "available")
+              .map(([kind, available]) => (
+                <span className="pdpp-caption" key={kind}>
+                  {kindLabel(kind)}: {availabilityLabels[available.state] ?? plain(available.state)}
+                  {available.reason && available.state !== "detect-only" ? ` — ${plain(available.reason)}` : ""}
+                </span>
+              ))}
           </label>
         ))}
       </fieldset>
@@ -443,36 +430,38 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
             })
           }
         >
-          Apply Off
+          Turn off
         </button>
       ) : null}
       {inventory ? null : (
-        <p role="status">{stale ? "Reachability choices are unavailable." : "Loading reachability choices…"}</p>
+        <p role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
       {provider ? (
         <>
           <section aria-label="Prerequisites" className="grid gap-3">
-            <h3 className="pdpp-label">Before setup</h3>
+            <h3 className="pdpp-label">Before turning on</h3>
             {provider.prerequisites.map((item) => (
               <div key={item.id}>
                 <p>
-                  {item.label}: {item.state}
-                </p>
-                <p className="pdpp-caption text-muted-foreground">
-                  {item.version.known ? item.version.value : item.version.reason} · {item.observedAt}
+                  {plain(item.label)}: {plain(item.state)}
                 </p>
                 {item.remedy ? (
                   <p className="pdpp-caption whitespace-pre-wrap break-words">
-                    {item.remedy.instructions ?? item.remedy.label}
+                    {plain(item.remedy.instructions ?? item.remedy.label)}
                   </p>
                 ) : (
                   <p className="pdpp-caption">No automatic fix is available.</p>
                 )}
               </div>
             ))}
+            {newestObservation ? (
+              <p className="pdpp-caption text-muted-foreground">
+                Checked this computer · {formatLocalTime(newestObservation)}
+              </p>
+            ) : null}
           </section>
           <fieldset disabled={mutationBlocked}>
-            <legend className="pdpp-label">Route lifetime</legend>
+            <legend className="pdpp-label">How long</legend>
             {Object.entries(provider.availability).map(([kind, available]) => (
               <label className="mr-4" key={kind}>
                 <input
@@ -486,7 +475,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                   }}
                   type="radio"
                 />{" "}
-                {kind === "session" ? "session (1 hour)" : kind}
+                {kindLabel(kind)}
               </label>
             ))}
           </fieldset>
@@ -498,13 +487,13 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         </>
       ) : null}
       {draft ? (
-        <section aria-label="Configuration draft" className="grid gap-4">
-          <h3 className="pdpp-label">Staged configuration</h3>
+        <section aria-label="Setup" className="grid gap-4">
+          <h3 className="pdpp-label">Setup details</h3>
           <button disabled={busy} onClick={() => void change(reloadDraft)}>
-            Reload draft
+            Reload
           </button>
           {committed ? (
-            <p>Configuration applied. Open a new draft to edit or rotate inputs.</p>
+            <p>Saved. Choose Change settings to edit.</p>
           ) : (
             !hasReservation && draft.configuration.actions.filter((action) => !action.step).map((action) => (
               <SetupApprovalCard
@@ -518,7 +507,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                   .map((field) => (
                     <label className="grid gap-2" key={field.id}>
                       <span>
-                        {field.label}
+                        {plain(field.label)}
                         {field.required ? " (required)" : ""}
                       </span>
                       <input
@@ -528,7 +517,9 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                         type={field.secret ? "password" : "text"}
                         value={values[field.id] ?? (field.secret ? "" : (draft.configuration.values[field.id] ?? ""))}
                       />
-                      <span className="pdpp-caption text-muted-foreground">{field.help} Validation: syntax only.</span>
+                      <span className="pdpp-caption text-muted-foreground">
+                        {plain(field.help)} We only check the format.
+                      </span>
                       {field.obtainUrl && /^https?:\/\//.test(field.obtainUrl) ? (
                         <a className="underline" href={field.obtainUrl} rel="noreferrer" target="_blank">
                           Where to get it
@@ -538,9 +529,9 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                         <span className="pdpp-caption">
                           {draft.configuration.credentials[field.id]?.known
                             ? draft.configuration.credentials[field.id]?.value
-                              ? "Credential saved; validity not checked."
-                              : "No saved credential."
-                            : "Credential presence unknown."}
+                              ? "Saved. We haven't checked that it works."
+                              : "Nothing saved yet."
+                            : "We can't tell whether anything is saved."}
                         </span>
                       ) : null}
                     </label>
@@ -550,11 +541,11 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
           )}
           {!committed && setupAction && !hasReservation ? (
             <button type="button" disabled={mutationBlocked} onClick={() => void change(reserveSetup)}>
-              Start provider setup
+              Start setup
             </button>
           ) : null}
           <div className="flex flex-wrap gap-3">
-            {committed ? <button type="button" disabled={mutationBlocked} onClick={() => void change(editApplied)}>Edit or rotate inputs</button> : null}
+            {committed ? <button type="button" disabled={mutationBlocked} onClick={() => void change(editApplied)}>Change settings</button> : null}
             <button
               disabled={mutationBlocked || !usage || (!committed && !!setupNeedsInput)}
               onClick={() =>
@@ -573,7 +564,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                 })
               }
             >
-              {committed ? "Review route" : "Commit and review route"}
+              {committed ? "Review" : "Save and review"}
             </button>
             <button
               disabled={busy}
@@ -586,7 +577,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                 })
               }
             >
-              Discard draft
+              Discard changes
             </button>
           </div>
         </section>
@@ -619,7 +610,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
       ))}
       <label className="pdpp-caption flex items-start gap-2">
         <input checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} type="checkbox" />I
-        understand a remote change may disconnect this device and require local recovery.
+        understand this page may disconnect while remote access changes.
       </label>
       {review ? (
         <RouteConsentCard
@@ -640,14 +631,20 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         />
       ) : null}
       {operation ? (
-        <section aria-label="Reachability operation" className="grid gap-3">
+        <section aria-label="Remote access activity" className="grid gap-3">
           <p role="status">
-            {operation.stage === "unknown-possibly-live" ? "Unknown, possibly live" : operation.stage}
+            {operation.stage === "applying"
+              ? "Working on it…"
+              : operation.stage === "settled"
+                ? "Done"
+                : operation.stage === "unknown-possibly-live"
+                  ? "We lost track of the address. It may still be on."
+                  : plain(operation.stage)}
           </p>
-          {operation.failureCode ? <p>{operation.failureCode}</p> : null}
+          {operation.failureCode ? <p>{publicError(operation.failureCode).message}</p> : null}
           {operation.recovery ? (
             <>
-              <p>{operation.recovery.reason}</p>
+              <p>{publicError(operation.recovery.reason).message}</p>
               <button
                 disabled={!operation.recovery.available || busy}
                 onClick={() =>
@@ -659,7 +656,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                   })
                 }
               >
-                Check / clean up
+                Check and turn off
               </button>
             </>
           ) : (
@@ -671,9 +668,15 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                 )
               }
             >
-              Check operation
+              Check again
             </button>
           )}
+          {operation.failureCode || operation.recovery ? (
+            <Diagnostics>
+              {operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}
+              {operation.recovery ? <p>Recovery: {operation.recovery.reason}</p> : null}
+            </Diagnostics>
+          ) : null}
         </section>
       ) : null}
       {runtimeReview ? (
@@ -691,57 +694,36 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
           review={runtimeReview.snapshot}
         />
       ) : null}
-      <section aria-label="Live routes" className="grid gap-4">
-        {state.routes.map((route) => (
+      <section aria-label="Your address" className="grid gap-4">
+        {state.routes.map((route) => {
+          const unsupportedRefresh = state.reasons[route.handle.id] === "proof_refresh_unsupported";
+          const phase = state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.phase ?? null) : null;
+          const headline = routeHeadline(route, phase, unsupportedRefresh);
+          const sentence = routeSentence(route, headline);
+          return (
           <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
-            <h3 className="pdpp-label">
-              {routeHeadline(
-                route,
-                state.lifecycle?.handle?.id === route.handle.id ? state.lifecycle.phase : null,
-                state.reasons[route.handle.id] === "proof_refresh_unsupported"
-              )}
-            </h3>
-            {state.reasons[route.handle.id] === "proof_refresh_unsupported" ? (
-              <p role="status">
-                This route cannot safely refresh proof. It remains unpublished. Stop it before starting a new route.
-              </p>
-            ) : null}
-            <p className="pdpp-caption break-words">Detected address: {route.origin ?? "Unknown"}</p>
-            <p className="pdpp-caption break-words">
-              Requested target:{" "}
-              {route.hostConfiguration.target.known
-                ? route.hostConfiguration.target.value
-                : `Unknown: ${route.hostConfiguration.target.reason}`}
-            </p>
-            <p className="pdpp-caption break-words">
-              Observed binding ({route.binding.authority}):{" "}
-              {route.binding.target.known ? route.binding.target.value : `Unknown: ${route.binding.target.reason}`}
-            </p>
+            <h3 className="pdpp-label">{headline}</h3>
+            {sentence ? <p role="status">{sentence}</p> : null}
+            {unsupportedRefresh ? <p role="status">{ERROR_MESSAGES.proof_refresh_unsupported}</p> : null}
+            <p className="pdpp-caption break-words">Your address: {route.origin ?? "Not available yet"}</p>
             <p className="pdpp-caption">
-              {proofLine(route, state.evidenceSource === "synthetic" ? "Synthetic fixture proof" : "Proof", Date.now())}
+              {proofLine(route, Date.now(), { synthetic: state.evidenceSource === "synthetic" })}
             </p>
-            <p className="pdpp-caption">
-              {state.lifecycle?.stopRequested && state.lifecycle.confinement.known && state.lifecycle.confinement.value
-                ? "Stopped locally"
-                : "Local confinement not observed"}{" "}
-              · Cleanup: {route.cleanup.state}
-            </p>
-            <ConsentFacts facts={route.facts} />
             {route.binding.remedy ? (
               <div className="grid gap-2">
-                <h4 className="pdpp-label">{route.binding.remedy.label}</h4>
+                <h4 className="pdpp-label">{plain(route.binding.remedy.label)}</h4>
                 <p className="pdpp-caption whitespace-pre-wrap break-words">
-                  {route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text}
+                  {plain(route.binding.remedy.instructions ?? route.binding.remedy.help ?? route.binding.remedy.disclosure.text)}
                 </p>
               </div>
             ) : null}
             {route.cleanup.nextAction ? (
               <p className="pdpp-caption whitespace-pre-wrap break-words">
-                {route.cleanup.nextAction.instructions ?? route.cleanup.nextAction.label}
+                {plain(route.cleanup.nextAction.instructions ?? route.cleanup.nextAction.label)}
               </p>
             ) : null}
             {route.cleanup.state !== "confirmed" ? <div className="flex flex-wrap gap-3">
-              {state.lifecycle?.phase === "review" && state.reasons[route.handle.id] !== "proof_refresh_unsupported" ? (
+              {state.lifecycle?.phase === "review" && !unsupportedRefresh ? (
                 <button
                   disabled={busy}
                   onClick={() =>
@@ -754,10 +736,10 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                     })
                   }
                 >
-                  Review current route
+                  Review changes
                 </button>
               ) : null}
-              {!state.lifecycle?.stopRequested && state.reasons[route.handle.id] !== "proof_refresh_unsupported" ? (
+              {!state.lifecycle?.stopRequested && !unsupportedRefresh ? (
                 <button
                   disabled={busy}
                   onClick={() =>
@@ -783,12 +765,111 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
                   })
                 }
               >
-                {route.cleanup.state === "unconfirmed" ? "Retry cleanup" : "Stop reachability"}
+                {route.cleanup.state === "unconfirmed" ? "Try turning off again" : "Turn off"}
               </button>
             </div> : null}
+            <Diagnostics>
+              <p className="break-words">
+                Requested target:{" "}
+                {route.hostConfiguration.target.known
+                  ? route.hostConfiguration.target.value
+                  : `Unknown: ${route.hostConfiguration.target.reason}`}
+              </p>
+              <p className="break-words">
+                Observed binding ({route.binding.authority}):{" "}
+                {route.binding.target.known ? route.binding.target.value : `Unknown: ${route.binding.target.reason}`}
+              </p>
+              <p>
+                {state.lifecycle?.stopRequested && state.lifecycle.confinement.known && state.lifecycle.confinement.value
+                  ? "Stopped locally"
+                  : "Local confinement not observed"}{" "}
+                · Cleanup: {route.cleanup.state}
+              </p>
+              <p>
+                Lifecycle: {phase ?? "none"} · route{" "}
+                {route.routeState}
+              </p>
+              <ConsentFacts facts={route.facts} />
+            </Diagnostics>
+          </div>
+          );
+        })}
+      </section>
+      <Diagnostics>
+        <h3 className="pdpp-label">This computer</h3>
+        {Object.entries(capabilities).map(([id, observation]) => (
+          <p key={id}>
+            {id}: {observation.known ? String(observation.value) : `Unknown: ${observation.reason}`}
+          </p>
+        ))}
+        {host.known ? (
+          <>
+            <p>
+              Password:{" "}
+              {host.value.password.known
+                ? host.value.password.value
+                  ? "Set"
+                  : "Not set"
+                : `Unknown: ${host.value.password.reason}`}
+            </p>
+            <p className="break-words">
+              Target: {host.value.target.known ? host.value.target.value : `Unknown: ${host.value.target.reason}`}
+            </p>
+            <label>
+              Port
+              <input
+                inputMode="numeric"
+                onChange={(event) => setPort(event.target.value)}
+                placeholder={host.value.port.known ? String(host.value.port.value ?? "Unpinned") : "Unknown"}
+                value={port}
+              />
+            </label>
+            <button
+              disabled={mutationBlocked}
+              onClick={() =>
+                void change(async () => {
+                  const value = port.trim() === "" ? null : Number(port);
+                  if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
+                    throw new ReachabilityFailure({ code: "invalid_input", message: "Enter a port between 1 and 65535." });
+                  }
+                  const updated = await send<HostSettings>("/host-settings", {
+                    expectedRevision: host.value.revision,
+                    mode: host.value.mode,
+                    port: value,
+                    acknowledgeDisconnect: acknowledged,
+                  });
+                  setHost({ known: true, value: updated });
+                })
+              }
+            >
+              Save port
+            </button>
+          </>
+        ) : (
+          <p>Host settings unavailable: {host.reason}.</p>
+        )}
+        {inventory?.providers.map((item) => (
+          <div key={`${item.providerId}-${item.reach}`}>
+            <p>
+              {item.label} · {item.providerId} · {item.reach} · {item.transport}
+            </p>
+            {Object.entries(item.availability).map(([kind, available]) => (
+              <p key={kind}>
+                {kind}: {available.state}
+                {available.reason ? ` — ${available.reason}` : ""}
+              </p>
+            ))}
+            {item.prerequisites.map((prerequisite) => (
+              <p key={prerequisite.id}>
+                {prerequisite.id}: {prerequisite.state} ·{" "}
+                {prerequisite.version.known ? prerequisite.version.value : prerequisite.version.reason} ·{" "}
+                {prerequisite.observedAt}
+              </p>
+            ))}
           </div>
         ))}
-      </section>
+      </Diagnostics>
     </section>
+    </DiagnosticsContext.Provider>
   );
 }

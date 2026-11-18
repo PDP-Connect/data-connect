@@ -10,6 +10,14 @@ import {
   ConsentFacts,
   SetupApprovalCard,
 } from "./reachability-consent.tsx"
+import {
+  type DisplayError,
+  ErrorNotice,
+  ReachabilityFailure,
+  toDisplayError,
+} from "./diagnostics.tsx"
+import { plain } from "./plain-text.ts"
+import { publicError } from "./reachability-errors.ts"
 
 type SetupView = ReturnType<typeof projectSetupOperation>
 type Request = typeof requestReachability
@@ -78,15 +86,15 @@ export function reserveSetupOperation(
   })
 }
 
-const status: Record<SetupView["state"], string> = {
-  "authorization-required": "Approval or input required",
-  pending: "Waiting for verification",
-  denied: "Authorization denied",
-  expired: "Authorization expired",
-  blocked: "Setup needs attention",
-  reconciling: "Checking what remains",
-  complete: "Setup complete",
-  cancelled: "Setup cancelled",
+const status: Record<SetupView["state"], (service: string) => string> = {
+  "authorization-required": service => `Sign in to ${service} to finish`,
+  pending: () => "Waiting for you to finish signing in…",
+  denied: service => `${service} sign-in was cancelled.`,
+  expired: service => `${service} sign-in took too long. Try again.`,
+  blocked: () => "Needs your action",
+  reconciling: () => "Turning off…",
+  complete: () => "Ready to turn on",
+  cancelled: () => "Setup cancelled",
 }
 
 function SetupOperationAction({
@@ -102,7 +110,7 @@ function SetupOperationAction({
   const secret = action.kind === "provide-secret"
   const needsInput = secret || action.kind === "provide-value"
   const label =
-    (secret ? action.secretLabel : action.valueLabel) ?? action.label
+    plain((secret ? action.secretLabel : action.valueLabel) ?? action.label)
   const consent = action.consent
   const obtain = action.obtainUrl ? URL.parse(action.obtainUrl) : null
   if (
@@ -112,11 +120,11 @@ function SetupOperationAction({
     const url = action.href ? URL.parse(action.href) : null
     return (
       <div className="grid gap-2">
-        <h4 className="pdpp-label">{action.label}</h4>
-        <p>{action.instructions ?? action.help ?? action.disclosure.text}</p>
+        <h4 className="pdpp-label">{plain(action.label)}</h4>
+        <p>{plain(action.instructions ?? action.help ?? action.disclosure.text)}</p>
         {url?.protocol === "https:" && !url.username && !url.password ? (
           <a href={url.href} rel="noreferrer" target="_blank">
-            {action.label}
+            {plain(action.label)}
           </a>
         ) : null}
         {consent?.disclosures ? (
@@ -133,7 +141,7 @@ function SetupOperationAction({
       buttonLabel={
         action.kind === "open-url"
           ? "Approve and open in browser"
-          : action.label
+          : plain(action.label)
       }
       onApprove={approval => {
         setValue("")
@@ -144,7 +152,7 @@ function SetupOperationAction({
       }}
     >
       {action.instructions || action.help ? (
-        <p>{action.instructions ?? action.help}</p>
+        <p>{plain(action.instructions ?? action.help ?? "")}</p>
       ) : null}
       {obtain?.protocol === "https:" && !obtain.username && !obtain.password ? (
         <a href={obtain.href} rel="noreferrer" target="_blank">
@@ -163,7 +171,7 @@ function SetupOperationAction({
               <option value="">Choose an option</option>
               {action.step.options.map(option => (
                 <option key={option.value} value={option.value}>
-                  {option.label}
+                  {plain(option.label)}
                 </option>
               ))}
             </select>
@@ -202,7 +210,7 @@ export function ProviderSetup({
 }) {
   const [view, setView] = useState<SetupView | null>(null)
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<DisplayError | null>(null)
   const [missing, setMissing] = useState(false)
   const { operationId, providerId, draftId } = reservation
   const path = `/setup-operations/${encodeURIComponent(operationId)}`
@@ -222,7 +230,13 @@ export function ProviderSetup({
     } catch {
       if (current()) {
         setView(null)
-        setError("The current draft could not be refreshed.")
+        setError(
+          toDisplayError(
+            new ReachabilityFailure(publicError("configuration_stale")),
+            "load",
+            reservation.providerLabel
+          )
+        )
       }
     }
   })
@@ -238,7 +252,13 @@ export function ProviderSetup({
         await acceptObservation(result.data as SetupView, current)
       } else {
         setMissing(result.code === "route_not_found")
-        setError(result.message)
+        setError(
+          toDisplayError(
+            new ReachabilityFailure(result),
+            "load",
+            reservation.providerLabel
+          )
+        )
       }
     }
     void load()
@@ -252,7 +272,7 @@ export function ProviderSetup({
     body?: Record<string, unknown>
   ): Promise<T> {
     const result = await request(target, body)
-    if (!result.ok) throw new Error(result.message)
+    if (!result.ok) throw new ReachabilityFailure(result)
     return result.data as T
   }
 
@@ -267,11 +287,7 @@ export function ProviderSetup({
       setMissing(false)
     } catch (failure) {
       setView(null)
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "Check the current setup status."
-      )
+      setError(toDisplayError(failure, "action", reservation.providerLabel))
     } finally {
       setBusy(false)
     }
@@ -316,24 +332,24 @@ export function ProviderSetup({
   const action = view?.nextAction
   return (
     <section
-      aria-label={`Provider setup for ${reservation.providerLabel}`}
+      aria-label={`Setup for ${plain(reservation.providerLabel)}`}
       className="grid gap-3"
     >
-      <h3 className="pdpp-label">{reservation.providerLabel} setup</h3>
+      <h3 className="pdpp-label">{plain(reservation.providerLabel)} setup</h3>
       <p role="status">
         {view
-          ? status[view.state]
+          ? status[view.state](plain(reservation.providerLabel))
           : error
             ? "Current setup status unavailable"
             : "Checking setup status…"}
       </p>
-      {error ? <p role="alert">{error}</p> : null}
-      {view?.evidence.known ? <p>{view.evidence.value.summary}</p> : null}
+      {error ? <ErrorNotice error={error} /> : null}
+      {view?.evidence.known ? <p>{plain(view.evidence.value.summary)}</p> : null}
       {view?.resources.length ? (
         <ul aria-label="Setup resources">
           {view.resources.map(resource => (
             <li key={resource.handle}>
-              {resource.label} · {resource.ownership} ·{" "}
+              {plain(resource.label)} · {plain(resource.ownership)} ·{" "}
               {resource.removal === "required"
                 ? "Removal pending"
                 : resource.removal === "unconfirmed"
@@ -380,9 +396,10 @@ export function ProviderSetup({
                     newTab: false,
                   }))
                 ) {
-                  throw new Error(
-                    "The browser did not open. Check setup status before retrying."
-                  )
+                  throw new ReachabilityFailure({
+                    code: "browser_not_opened",
+                    message: "Your browser didn't open. Try again.",
+                  })
                 }
                 return send<SetupView>(readPath)
               }
@@ -396,7 +413,7 @@ export function ProviderSetup({
         view?.scope.draftId &&
         !["cancelled", "denied", "expired"].includes(view.state) ? (
           <button type="button" disabled={busy || disabled} onClick={onResume}>
-            Resume configuration
+            Resume setup
           </button>
         ) : null}
         <button
@@ -413,13 +430,13 @@ export function ProviderSetup({
             onClick={() =>
               void change(() =>
                 reserveSetupOperation(request, reservation).then(result => {
-                  if (!result.ok) throw new Error(result.message)
+                  if (!result.ok) throw new ReachabilityFailure(result)
                   return result.data as SetupView
                 })
               )
             }
           >
-            Retry setup reservation
+            Retry setup
           </button>
         ) : null}
         {view && view.state !== "cancelled" ? (
@@ -432,7 +449,7 @@ export function ProviderSetup({
               )
             }
           >
-            {view.state === "complete" ? "Prepare removal" : "Cancel setup"}
+            {view.state === "complete" ? "Undo setup" : "Cancel setup"}
           </button>
         ) : null}
       </div>
