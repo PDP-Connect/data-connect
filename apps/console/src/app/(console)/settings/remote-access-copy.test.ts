@@ -19,7 +19,8 @@ import { ERROR_MESSAGES, GENERIC_ERROR, genericErrorFor, publicError } from "./r
 import { ReachabilityFailure, toDisplayError } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
-import { RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
+import { RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
+import { TurnOnCard } from "./turn-on.tsx";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -259,8 +260,11 @@ test("instructions the owner must copy are shown exactly as given", async () => 
     assert.ok(text.includes(instructions), text);
   });
   const html = renderToStaticMarkup(
-    createElement(RouteConsentCard, {
-      review: {
+    createElement(TurnOnCard, {
+      busy: false,
+      changed: null,
+      review: { id: "r", kind: "route", candidate: {
+        display: { label: "Service" },
         consent: {
           facts: [{ id: "v", group: "address", label: "Address", known: true, value: "host.example.com", source: "provider", asOf: null }],
           disclosures: {},
@@ -268,8 +272,9 @@ test("instructions the owner must copy are shown exactly as given", async () => 
           scope: { kind: "route", query: { target: "127.0.0.1:37807", expectedOrigin: "https://abc.example.invalid" } },
         },
         consentFactsDigest: "d",
-      } as never,
-      onApprove: () => {},
+        facts: [],
+      } } as never,
+      onTurnOn: () => {},
     })
   );
   assert.ok(html.includes(">host.example.com<"), html);
@@ -384,6 +389,38 @@ function world(overrides: Partial<Record<string, Result>> = {}): Handler {
   return (url) => table[url.split("?")[0]!] ?? fail("route_not_found");
 }
 
+const readyCandidate = {
+  providerId: "p-tunnel",
+  display: { label: "Tunnel service", description: "", needs: "" },
+  consentFactsDigest: "digest-1",
+  expiresAt: "2999-01-01T00:00:00.000Z",
+  eligible: true,
+  facts: [{ id: "cost", group: "cost", label: "Cost", known: true, value: "free", source: "provider", asOf: null }],
+  consent: {
+    consentFactsDigest: "digest-1",
+    scope: {
+      kind: "route",
+      query: { target: "127.0.0.1:37807", expectedOrigin: null, usage: { kind: "session", lifetimeMs: 3_600_000 } },
+    },
+    facts: [{ id: "cost", group: "cost", label: "Cost", known: true, value: "free", source: "provider", asOf: null }],
+    disclosures: {
+      traffic: { providerCanReadPayload: true },
+      cost: { kind: "free", summary: "Free" },
+      address: { stability: "ephemeral" },
+    },
+  },
+};
+const readyDraft = { draftId: "d-1", configuration: { revision: "r2", actions: [], inputRequirements: [], values: {}, credentials: {} } };
+// An idle host with a ready review, so the card opens at Turn on.
+const readyWorld = (overrides: Partial<Record<string, Result>> = {}) =>
+  world({
+    "/state": ok({ routes: [], reasons: {}, starting: false }),
+    "/drafts": ok(readyDraft),
+    "/drafts/d-1/commit": ok(readyDraft.configuration),
+    "/drafts/d-1/review": ok({ id: "rev-1", kind: "route", candidate: readyCandidate }),
+    ...overrides,
+  });
+
 function visibleText(container: Element): string {
   const clone = container.cloneNode(true) as Element;
   for (const node of clone.querySelectorAll("[data-diagnostics]")) node.remove();
@@ -436,49 +473,19 @@ test("the main state, with library and server values full of codes, shows none",
   });
 });
 
-test("a chosen way shows its prerequisites and duration choices in plain words", async () => {
-  await withScreen(world({ "/state": ok({ routes: [], reasons: {}, starting: false }) }), async ({ container, act: run, settle }) => {
-    const radios = [...container.querySelectorAll<HTMLInputElement>('input[name="way"]')];
-    await run(async () => radios[1]!.click());
+test("the default way opens at Turn on, in plain words, with no old setup screens", async () => {
+  await withScreen(readyWorld(), async ({ container, settle }) => {
     await settle();
-    const usage = [...container.querySelectorAll<HTMLInputElement>('input[name="usage"]')];
-    await run(async () => usage[0]!.click());
     const text = visibleText(container);
-    assertClean("chosen way", text);
-    assert.match(text, /Before turning on/);
-    assert.match(text, /Checked this computer · \d{1,2}:\d{2}/);
-    assert.match(text, /Temporary/);
+    assertClean("ready to turn on", text);
+    assert.match(text, /Step 2 of 2 · Turn on/);
+    assert.match(text, /Tunnel service can see what passes through\./);
+    assert.match(text, /Turns off after 1 hour\./);
+    assert.match(text, /Turn on remote access/);
+    assert.doesNotMatch(text, /Continue setup|Staged configuration|Reload|Start setup|Save and review|Discard|Review reachability|Apply reachability/);
+    assert.doesNotMatch(text, /\b(draft|route|attached|session|durable)\b/i);
+    assert.equal(container.querySelector('input[type="checkbox"]'), null, "there is no approval checkbox");
   });
-});
-
-test("an open setup shows no draft, route or lifetime words", async () => {
-  const draft = {
-    draftId: "d-1",
-    configuration: {
-      revision: "r2",
-      actions: [],
-      inputRequirements: [],
-      values: {},
-      credentials: {},
-    },
-  };
-  await withScreen(
-    world({ "/state": ok({ routes: [], reasons: {}, starting: false }), "/drafts": ok(draft) }),
-    async ({ container, act: run, settle }) => {
-      const radios = [...container.querySelectorAll<HTMLInputElement>('input[name="way"]')];
-      await run(async () => radios[1]!.click());
-      const usage = [...container.querySelectorAll<HTMLInputElement>('input[name="usage"]')];
-      await run(async () => usage[0]!.click());
-      const next = [...container.querySelectorAll("button")].find((node) => node.textContent === "Continue setup")!;
-      await run(async () => next.click());
-      await settle();
-      const text = visibleText(container);
-      assertClean("open setup", text);
-      assert.match(text, /Setup details/);
-      assert.match(text, /Save and review/);
-      assert.doesNotMatch(text, /\b(draft|route|attached|session|durable)\b/i);
-    }
-  );
 });
 
 test("a failed first load says what to do, keeps the code in Details, and clears on the next good load", async (t) => {
@@ -506,15 +513,9 @@ test("a failed first load says what to do, keeps the code in Details, and clears
 
 test("an unknown error code shows the generic message, and an action error survives a later load", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
-  const handler = world({ "/state": ok({ routes: [], reasons: {}, starting: false }), "/drafts": fail("brand_new_server_code") });
+  const handler = readyWorld({ "/operations": fail("brand_new_server_code") });
   await withScreen(handler, async ({ container, act: run, settle }) => {
-    const radios = [...container.querySelectorAll<HTMLInputElement>('input[name="way"]')];
-    await run(async () => radios[1]!.click());
-    const usage = [...container.querySelectorAll<HTMLInputElement>('input[name="usage"]')];
-    await run(async () => usage[0]!.click());
-    const next = [...container.querySelectorAll("button")].find((node) => node.textContent === "Continue setup")!;
-    await run(async () => next.click());
-    await settle();
+    await failFirstAction(container, run, settle);
     const text = visibleText(container);
     assertClean("action error", text);
     assert.match(text, /Remote access couldn.t turn on\. Try again, or copy the details for support\./);
@@ -533,7 +534,7 @@ test("setup, approval and consent cards show no codes, flags or ISO times", () =
   const consent = { facts, disclosures, consentFactsDigest: "d", scope: { kind: "route", query: { target: "127.0.0.1:37807", expectedOrigin: "https://abc.example.invalid" } } };
   const html = [
     renderToStaticMarkup(
-      createElement(RouteConsentCard, { review: { consent, consentFactsDigest: "d" } as never, onApprove: () => {} })
+      createElement(TurnOnCard, { busy: false, changed: null, review: { id: "r", kind: "route", candidate: { consent, consentFactsDigest: "d", facts: [], display: { label: "Service" } } } as never, onTurnOn: () => {} })
     ),
     renderToStaticMarkup(
       createElement(RuntimeRouteConsentCard, {
@@ -609,13 +610,11 @@ test("setup status cards show no codes in any state", async () => {
 
 // ---------- 4. polls and actions ----------
 
-async function failFirstDraft(container: Element, run: typeof act, settle: () => Promise<void>) {
-  const radios = [...container.querySelectorAll<HTMLInputElement>('input[name="way"]')];
-  await run(async () => radios[1]!.click());
-  const usage = [...container.querySelectorAll<HTMLInputElement>('input[name="usage"]')];
-  await run(async () => usage[0]!.click());
-  const next = [...container.querySelectorAll("button")].find((node) => node.textContent === "Continue setup")!;
-  await run(async () => next.click());
+// Presses Turn on, which the test host refuses.
+async function failFirstAction(container: Element, run: typeof act, settle: () => Promise<void>) {
+  await settle();
+  const turnOn = [...container.querySelectorAll("button")].find((node) => node.textContent === "Turn on remote access")!;
+  await run(async () => turnOn.click());
   await settle();
 }
 const alertText = (container: Element) => container.querySelector("[role=alert]")?.textContent ?? "";
@@ -623,10 +622,10 @@ const alertText = (container: Element) => container.querySelector("[role=alert]"
 test("a failed background poll does not replace an action error, and a good poll does not erase it", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   let catalog: Result | null = null;
-  const base = world({ "/state": ok({ routes: [], reasons: {}, starting: false }), "/drafts": fail("brand_new_server_code") });
+  const base = readyWorld({ "/operations": fail("brand_new_server_code") });
   const handler: Handler = (url, body) => (url === "/catalog" && catalog ? catalog : base(url, body));
   await withScreen(handler, async ({ container, act: run, settle }) => {
-    await failFirstDraft(container, run, settle);
+    await failFirstAction(container, run, settle);
     assert.match(alertText(container), /couldn.t turn on/);
     catalog = fail("owner_password_required");
     await run(async () => t.mock.timers.tick(3000));
@@ -644,7 +643,7 @@ test("a poll that started before an action cannot overwrite the action's error w
   t.mock.timers.enable({ apis: ["setInterval"] });
   let release: (value: Result) => void = () => {};
   let hold = false;
-  const base = world({ "/state": ok({ routes: [], reasons: {}, starting: false }), "/drafts": fail("brand_new_server_code") });
+  const base = readyWorld({ "/operations": fail("brand_new_server_code") });
   const handler = ((url: string, body?: Record<string, unknown>) => {
     if (hold && url === "/catalog") {
       hold = false;
@@ -657,7 +656,7 @@ test("a poll that started before an action cannot overwrite the action's error w
   await withScreen(handler, async ({ container, act: run, settle }) => {
     hold = true;
     await run(async () => t.mock.timers.tick(3000)); // poll starts and waits
-    await failFirstDraft(container, run, settle); // the action fails meanwhile
+    await failFirstAction(container, run, settle); // the action fails meanwhile
     assert.match(alertText(container), /couldn.t turn on/);
     await run(async () => release(fail("owner_password_required"))); // the old poll lands late, as a failure
     await settle();
@@ -670,7 +669,8 @@ test("polls that finish out of order apply the newest answer only", async (t) =>
   t.mock.timers.enable({ apis: ["setInterval"] });
   const releases: Array<(value: Result) => void> = [];
   let stateCalls = 0;
-  const base = world({ "/state": ok({ routes: [], reasons: {}, starting: false }) });
+  // No ways, so the page runs no preparation of its own to confuse the poll count.
+  const base = world({ "/state": ok({ routes: [], reasons: {}, starting: false }), "/catalog": ok({ catalogRevision: "c1", observedAt: isoA, schemaVersion: 1, providers: [] }) });
   const closed = ok({
     routes: [],
     reasons: {},

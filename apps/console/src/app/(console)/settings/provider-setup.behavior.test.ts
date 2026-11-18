@@ -105,7 +105,7 @@ mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
 })
 
 for (const viaPoll of [false, true]) {
-  test(`the active draft can commit after ${viaPoll ? "a changed revision observed by polling" : "a resource-only mutation at the same revision"}`, async t => {
+  test(`the chain commits the draft after ${viaPoll ? "a changed revision observed by polling" : "a resource-only mutation at the same revision"}`, async t => {
     const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
     Object.assign(globalThis, {
       React,
@@ -214,7 +214,20 @@ for (const viaPoll of [false, true]) {
         }
       }
       const observations: Record<string, unknown> = {
-        "/catalog": { providers: [] },
+        "/catalog": {
+          providers: [
+            {
+              providerId: reservation.providerId,
+              label: reservation.providerLabel,
+              reach: "public",
+              transport: "https",
+              availability: { attached: { state: "available", reason: "" } },
+              configuration: { revision: "config", actions: [], inputRequirements: [], values: {}, credentials: {} },
+              facts: [],
+              prerequisites: [],
+            },
+          ],
+        },
         "/state": {
           routes: [],
           reasons: {},
@@ -249,7 +262,8 @@ for (const viaPoll of [false, true]) {
       await act(async () =>
         root.render(createElement(RemoteAccessSetting, { request }))
       )
-      assert.equal(button("Save and review").disabled, true)
+      // The service's setup is still open, so nothing is committed.
+      assert.equal(commits, 0)
       assert.equal(draftReads, 1)
       if (viaPoll) {
         rev = "from-other-client"
@@ -263,10 +277,9 @@ for (const viaPoll of [false, true]) {
         await act(async () => approval.click())
         await act(async () => button("Allocate workshop").click())
       }
+      await act(async () => {})
       assert.equal(draftReads, 2)
-      const commit = button("Save and review")
-      assert.equal(commit.disabled, false)
-      await act(async () => commit.click())
+      // The setup finished: the chain read the new draft and committed it on its own.
       assert.equal(commits, 1)
     } finally {
       await act(async () => root.unmount())

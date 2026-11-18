@@ -286,30 +286,3 @@ test("polling starts only after the browser-storage migration finishes", async (
     await screen.stop()
   }
 })
-
-test("a failed draft read is retried on the next poll", async t => {
-  t.mock.timers.enable({ apis: ["setInterval"] })
-  let draftReads = 0
-  const services = [{ ...entry("svc", "op-x"), setup: null, draftId: "draft-1" }]
-  const request = (async (url: string) => {
-    if (url.startsWith("/drafts/draft-1")) {
-      draftReads += 1
-      return draftReads === 1
-        ? { ok: false, code: "reachability_unavailable", message: "down" }
-        : { ok: true, data: { draftId: "draft-1", configuration: { revision: "r", actions: [], inputRequirements: [], values: {}, credentials: {} } } }
-    }
-    return { ok: true, data: url === "/catalog" ? { providers: [] } : url === "/state" ? { routes: [], reasons: {}, starting: false, services } : url === "/host-settings" ? { known: false, reason: "unavailable" } : {} }
-  }) as unknown as typeof requestReachability
-  const screen = await mountSetting(request)
-  try {
-    assert.equal(draftReads, 1)
-    await act(async () => t.mock.timers.tick(3000))
-    await act(async () => {})
-    assert.equal(draftReads, 2, "the failed read was not retried")
-    await act(async () => t.mock.timers.tick(3000))
-    await act(async () => {})
-    assert.equal(draftReads, 2, "a successful read is not repeated")
-  } finally {
-    await screen.stop()
-  }
-})

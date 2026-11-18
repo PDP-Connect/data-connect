@@ -356,6 +356,8 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       .filter((record) => record.stage !== "settled")
       .map((record) => ({
         failureCode: record.failureCode,
+        handle: record.handle ? { id: record.handle.id, kind: record.handle.kind, generation: record.handle.generation } : null,
+        kind: record.kind,
         operationId: record.operationId,
         recovery: record.recovery ? { available: record.recovery.available, reason: record.recovery.reason } : null,
         stage: record.stage,
@@ -452,6 +454,9 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     if (input.kind !== "route") {
       throw new ReachabilityError("consent_kind_mismatch");
     }
+    // The review id and the digest the owner approved. Neither is a secret, so
+    // a log reader can compare them with what the screen showed.
+    console.info(`[reachability] approve reviewId=${reviewId} consentFactsDigest=${digest}`);
     await current.authorizeDisconnect(input.acknowledgeDisconnect === true);
     return ctx.operations.start(
       "start",

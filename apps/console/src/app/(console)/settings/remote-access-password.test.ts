@@ -54,19 +54,19 @@ test("step 1 shows only while no password is set, and nothing can be turned on",
     const text = screen.container.textContent ?? ""
     assert.match(text, /Step 1: Set a password/)
     assert.match(text, /only\s+thing stopping them/)
-    assert.equal(screen.container.querySelector("fieldset")?.disabled, true)
+    assert.doesNotMatch(text, /Step 2 of 2|Turn on remote access/)
     assert.doesNotMatch(text, /Password saved/)
   } finally {
     await screen.stop()
   }
 })
 
-test("with a password set there is no step 1 and the ways are open", async () => {
+test("with a password set there is no step 1 and step 2 is open", async () => {
   for (const passwordSet of [true, undefined]) {
     const screen = await mount(passwordSet)
     try {
       assert.doesNotMatch(screen.container.textContent ?? "", /Set a password|Password saved/)
-      assert.equal(screen.container.querySelector("fieldset")?.disabled, false)
+      assert.match(screen.container.textContent ?? "", /Step 2 of 2 · Turn on/)
     } finally {
       await screen.stop()
     }

@@ -1,7 +1,6 @@
 "use client";
 import type {
   projectAction,
-  projectCandidate,
   projectFact,
   projectRuntimeReview,
 } from "pdpp-reference-implementation/reachability-projection";
@@ -141,61 +140,6 @@ export function SetupApprovalCard({
         type="button"
       >
         {buttonLabel}
-      </button>
-    </section>
-  );
-}
-
-export function RouteConsentCard({
-  review,
-  busy,
-  onApprove,
-}: {
-  review: ReturnType<typeof projectCandidate>;
-  busy?: boolean;
-  onApprove: (approval: { kind: "route"; consentFactsDigest: string }) => void;
-}) {
-  const [approvedDigest, setApprovedDigest] = useState<string | null>(null);
-  const consent = review.consent;
-  const complete =
-    consent?.scope?.kind === "route" &&
-    consent.facts !== undefined &&
-    consent.disclosures != null &&
-    review.consentFactsDigest === consent.consentFactsDigest;
-  const checked = approvedDigest === consent?.consentFactsDigest;
-  return (
-    <section aria-label="Remote access approval" className="grid gap-4 rounded-lg border p-4">
-      <h3 className="pdpp-label">Review before turning on</h3>
-      {complete ? (
-        <>
-          <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
-          {consent.scope?.query.expectedOrigin ? (
-            <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
-          ) : null}
-          <ConsentDisclosures value={consent.disclosures} />
-          <ConsentFacts facts={consent.facts} />
-          <label className="pdpp-caption flex items-start gap-2">
-            <input
-              checked={checked}
-              onChange={(event) => setApprovedDigest(event.target.checked ? consent.consentFactsDigest : null)}
-              type="checkbox"
-            />
-            I approve the details shown above.
-          </label>
-        </>
-      ) : (
-        <p className="pdpp-caption" role="status">
-          We couldn't load this service's details. Try again.
-        </p>
-      )}
-      <button
-        disabled={busy || !complete || !checked}
-        onClick={() =>
-          complete && checked && onApprove({ kind: "route", consentFactsDigest: consent.consentFactsDigest })
-        }
-        type="button"
-      >
-        Turn on remote access
       </button>
     </section>
   );

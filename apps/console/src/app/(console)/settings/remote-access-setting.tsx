@@ -3,9 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { HostSettings } from "pdpp-reference-implementation/reachability-host-settings";
 import type {
-  projectCandidate,
-  projectConfiguration,
-  projectDraft,
   projectInventory,
   projectRoute,
   projectRuntimeReview,
@@ -27,24 +24,33 @@ import {
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { type ActionKind, ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
-import { ConsentFacts, RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
+import { ConsentFacts, RuntimeRouteConsentCard } from "./reachability-consent.tsx";
+import {
+  type Action,
+  type Draft,
+  type Prepared,
+  type Review,
+  changedFacts,
+  defaultProvider,
+  operationOutcome,
+  pickUsage,
+  prepareTurnOn,
+  reviewExpired,
+  runAction,
+  staleReviewCodes,
+} from "./prepare-remote-access.ts";
+import { AllowCard, TurnOnCard, TurningOnChecklist, checklistStep } from "./turn-on.tsx";
 
-type Draft = ReturnType<typeof projectDraft>;
-function choiceKey(
-  provider: { providerId: string; reach: string; configuration: { revision: string } },
-  usage: string | null
-): string {
-  return JSON.stringify([provider.providerId, provider.reach, usage, provider.configuration.revision]);
-}
 type Inventory = ReturnType<typeof projectInventory>;
 type Route = ReturnType<typeof projectRoute>;
 type Operation = {
   failureCode?: string | null;
+  handle?: unknown;
+  kind?: "start" | "stop" | "check";
   operationId: string;
   stage: string;
   recovery: { available: boolean; reason: string } | null;
 };
-type Review = { id: string; kind: "route"; candidate: ReturnType<typeof projectCandidate> };
 type State = {
   evidenceSource?: "synthetic" | null;
   operations?: Operation[];
@@ -62,6 +68,11 @@ type State = {
   passwordSet?: boolean;
   starting: boolean;
 };
+// What the preparation chain has produced for the way on screen.
+type Prep =
+  | { status: "idle" }
+  | { status: "preparing" }
+  | { status: "done"; providerId: string; result: Prepared };
 
 // How a way reaches people, in the owner's words. Unlisted values pass through `plain`.
 const reachLabels: Record<string, string> = { lan: "Same Wi-Fi only" };
@@ -94,36 +105,36 @@ export function RemoteAccessSetting({
   >({});
   const [inventory, setInventory] = useState<Inventory | null>(null);
   const [state, setState] = useState<State>({ routes: [], reasons: {}, starting: false });
-  const [selected, setSelected] = useState<string | null>(null);
-  const [draftProviderId, setDraftProviderId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [stateLoaded, setStateLoaded] = useState(false);
+  // The way the owner picked under Other ways. Until then the default one is used.
+  const [chosen, setChosen] = useState<string | null>(null);
+  const [showOtherWays, setShowOtherWays] = useState(false);
+  const [declined, setDeclined] = useState<string | null>(null);
+  const [prep, setPrep] = useState<Prep>({ status: "idle" });
+  const [prepError, setPrepError] = useState<DisplayError | null>(null);
+  // Bumped to run the preparation chain again.
+  const [prepRun, setPrepRun] = useState(0);
+  // Labels of facts that changed since the owner last saw the review.
+  const [changed, setChanged] = useState<string[] | null>(null);
+  const shownReview = useRef<Review | null>(null);
   const [runtimeReview, setRuntimeReview] = useState<{
     routeId: string;
     generation: number;
     snapshot: ReturnType<typeof projectRuntimeReview>;
   } | null>(null);
-  const [committed, setCommitted] = useState(false);
-  const [review, setReview] = useState<Review | null>(null);
-  const [usage, setUsage] = useState<string | null>(null);
-  const [values, setValues] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [stale, setStale] = useState(false);
   const [error, setError] = useState<DisplayError | null>(null);
   const [operation, setOperation] = useState<Operation | null>(null);
-  const [acknowledged, setAcknowledged] = useState(false);
+  // After Cancel: the host is turning it off, or could not confirm it is off.
+  const [cancel, setCancel] = useState<"stopping" | "unconfirmed" | null>(null);
   const reservations = setupCards(state.services);
-  const draftHydrated = useRef(false);
-  const draftRef = useRef<Draft | null>(null);
-  draftRef.current = draft;
   // Bumped when an action starts and when it ends. A poll started in an earlier
   // epoch is dropped. `loadSeq` and `appliedSeq` order the polls themselves.
   const actionEpoch = useRef(0);
   const loadSeq = useRef(0);
   const appliedSeq = useRef(0);
-  const [setupReadiness, setSetupReadiness] = useState<Record<string, string | null>>({});
-  const onSetupReadiness = useCallback((draftId: string, revision: string | null) => {
-    setSetupReadiness((current) => ({ ...current, [draftId]: revision }));
-  }, []);
+  const seenSetup = useRef<string | null>(null);
 
   async function send<T>(path: string, input?: Record<string, unknown>): Promise<T> {
     const result = await request(path, input);
@@ -152,9 +163,6 @@ export function RemoteAccessSetting({
         return;
       }
       appliedSeq.current = seq;
-      // A background failure never replaces an error that an action owns.
-      const showLoadError = (failure: Parameters<typeof toDisplayError>[0]) =>
-        setError((current) => (current?.source === "action" ? current : toDisplayError(failure, "load")));
       if (catalogResult.ok) {
         setInventory(catalogResult.data as Inventory);
         setStale(false);
@@ -175,31 +183,7 @@ export function RemoteAccessSetting({
       if (stateResult.ok) {
         const next = stateResult.data as State;
         setState(next);
-        if (!draftHydrated.current) {
-          // The host holds the draft. Pick it up after a reload or restart.
-          // Hydration is done only once a read has succeeded; a failed read is
-          // tried again on the next poll. A draft the owner already has stays.
-          const saved = next.services?.find((item) => item.draftId && !item.committed);
-          if (draftRef.current) {
-            draftHydrated.current = true;
-          } else if (saved?.draftId) {
-            const result = await request(
-              `/drafts/${encodeURIComponent(saved.draftId)}?providerId=${encodeURIComponent(saved.providerId)}`
-            );
-            if (!active || startedInEpoch !== actionEpoch.current) {
-              return;
-            }
-            if (result.ok && !draftRef.current) {
-              draftHydrated.current = true;
-              setDraft(result.data as Draft);
-              setDraftProviderId(saved.providerId);
-              setUsage(saved.usage);
-              setCommitted(false);
-            } else if (!result.ok) {
-              showLoadError(new ReachabilityFailure(result));
-            }
-          }
-        }
+        setStateLoaded(true);
         if (next.operations?.length) {
           setOperation((current) => (current?.stage === "applying" ? current : (next.operations?.[0] ?? current)));
         }
@@ -242,7 +226,7 @@ export function RemoteAccessSetting({
     const timer = setInterval(() => {
       void request(`/operations/${encodeURIComponent(operation.operationId)}`).then((result) => {
         if (active && result.ok) {
-          setOperation(result.data as Operation);
+          setOperation((current) => ({ ...(result.data as Operation), kind: (result.data as Operation).kind ?? current?.kind }));
         }
       });
     }, 500);
@@ -269,13 +253,108 @@ export function RemoteAccessSetting({
     return () => { active = false; };
   }, [operation, request]);
 
-  const provider = inventory?.providers.find((item) => choiceKey(item, usage) === selected);
   const providers = [...(inventory?.providers ?? [])].sort(
     (a, b) =>
       Number(b.reach === "lan") - Number(a.reach === "lan") ||
       a.label.localeCompare(b.label) ||
       a.providerId.localeCompare(b.providerId)
   );
+  const way = inventory
+    ? ((chosen ? inventory.providers.find((item) => item.providerId === chosen) : undefined) ??
+      defaultProvider(inventory, capabilities))
+    : undefined;
+  const wayUsage = way ? pickUsage(way, capabilities) : null;
+  const wayId = way?.providerId ?? null;
+  const wayLabel = way ? plain(way.label) : undefined;
+
+  const mutationBlocked = busy || stale || state.starting;
+  // The password is the only gate on an address reachable from the internet,
+  // so nothing can be turned on until the owner has chosen one.
+  const passwordMissing = state.passwordSet === false;
+  // Read by actions already under way, which can outlive the state they started in.
+  const passwordMissingNow = useRef(false);
+  passwordMissingNow.current = passwordMissing;
+  const requirePassword = () => {
+    if (passwordMissingNow.current) throw new ReachabilityFailure(publicError("owner_password_required"));
+  };
+  const phaseOf = (route: Route) => (state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.phase ?? null) : null);
+  const routesOff = state.routes.every(
+    (route) => routeHeadline(route, phaseOf(route), state.reasons[route.handle.id] === "proof_refresh_unsupported") === "Off"
+  );
+  const outcome = operation ? operationOutcome(operation) : null;
+  // Preparation runs only while nothing is on or on its way. A finished
+  // start waits for the next state read to show its address.
+  const idle =
+    stateLoaded &&
+    !stale &&
+    !state.starting &&
+    routesOff &&
+    (!operation ||
+      outcome === "did-not-turn-on" ||
+      (outcome === "done" && state.routes.length > 0 && operation.kind !== "start"));
+  const readyToPrepare = idle && !passwordMissing && wayId !== null && wayUsage !== null && declined !== wayId;
+
+  useEffect(() => {
+    if (!readyToPrepare || !wayId || !wayUsage) {
+      return;
+    }
+    let active = true;
+    // A review already on screen for this way stays while it is refreshed.
+    setPrep((current) =>
+      current.status === "done" && current.providerId === wayId && current.result.kind === "ready"
+        ? current
+        : { status: "preparing" }
+    );
+    void prepareTurnOn(request, { providerId: wayId, usage: wayUsage }, { mayRunActions: () => !passwordMissingNow.current })
+      .then(async (result) => {
+        if (result.kind === "sign-in") {
+          // The host keeps one setup per service and returns it if one exists.
+          await send("/setups", {
+            providerId: wayId,
+            draftId: result.draft.draftId,
+            actionId: result.action.id,
+            expectedConfigurationRevision: result.draft.configuration.revision,
+            usage: wayUsage,
+          });
+          const fresh = await request("/state");
+          if (active && fresh.ok) setState(fresh.data as State);
+        }
+        return result;
+      })
+      .then((result) => {
+        if (!active) return;
+        if (result.kind === "ready") {
+          const before = shownReview.current;
+          if (before && before.candidate.consentFactsDigest !== result.review.candidate.consentFactsDigest) {
+            setChanged(changedFacts(before.candidate, result.review.candidate));
+          }
+          shownReview.current = result.review;
+        }
+        setPrep({ status: "done", providerId: wayId, result });
+        setPrepError(null);
+      })
+      .catch((failure) => {
+        if (!active) return;
+        setPrep({ status: "idle" });
+        setPrepError(toDisplayError(failure, "action", wayLabel));
+      });
+    return () => {
+      active = false;
+    };
+    // `send` only wraps `request`.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: see above
+  }, [readyToPrepare, wayId, wayUsage, prepRun, request]);
+
+  // An expired review is replaced without a click.
+  const readyReview = prep.status === "done" && prep.result.kind === "ready" ? prep.result.review : null;
+  useEffect(() => {
+    if (!readyReview) return;
+    const timer = setInterval(() => {
+      if (reviewExpired(readyReview, Date.now())) setPrepRun((n) => n + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [readyReview]);
+
   async function change(run: () => Promise<void>, kind: ActionKind = "turn-on") {
     actionEpoch.current += 1;
     setBusy(true);
@@ -283,80 +362,102 @@ export function RemoteAccessSetting({
     try {
       await run();
     } catch (failure) {
-      setError(toDisplayError(failure, "action", provider ? plain(provider.label) : undefined, kind));
+      setError(toDisplayError(failure, "action", wayLabel, kind));
     } finally {
       actionEpoch.current += 1;
       setBusy(false);
-      setValues({});
     }
   }
   // The same runner, told what the owner was doing, so a failure says so.
   const turnOff = (run: () => Promise<void>) => change(run, "turn-off");
   const checkIt = (run: () => Promise<void>) => change(run, "check");
   const edit = (run: () => Promise<void>) => change(run, "change");
-  async function openDraft() {
-    if (!provider) {
-      return;
-    }
-    const next = await send<Draft>("/drafts", {
-      providerId: provider.providerId,
-      expectedRevision: provider.configuration.revision,
-      ...(usage === null ? {} : { usage }),
-    });
-    setDraft(next);
-    setDraftProviderId(provider.providerId);
-    setCommitted(false);
-    setReview(null);
-  }
-  async function editApplied() {
-    if (!draft || !draftProviderId) return;
-    const nextInventory = await send<Inventory>("/catalog");
-    const matches = nextInventory.providers.filter(item => item.providerId === draftProviderId);
-    if (matches.length !== 1 || !matches[0]) throw new ReachabilityFailure(publicError("configuration_stale"));
-    const current = matches[0];
-    await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
-    const next = await send<Draft>("/drafts", {
-      providerId: current.providerId,
-      expectedRevision: current.configuration.revision,
-      ...(usage === null ? {} : { usage }),
-    });
-    setInventory(nextInventory); setSelected(choiceKey(current, usage));
-    setDraft(next); setCommitted(false); setReview(null);
-  }
-  async function setup(action: Draft["configuration"]["actions"][number], approval: unknown) {
-    if (!draft) {
-      return;
-    }
-    const field = draft.configuration.inputRequirements.find((item) => item.actionId === action.id);
-    const value = field ? values[field.id] : undefined;
-    const configuration = await send<ReturnType<typeof projectConfiguration>>(
-      `/drafts/${encodeURIComponent(draft.draftId)}/${action.kind === "clear-input" ? "clear" : "actions"}/${encodeURIComponent(action.id)}`,
-      {
-        expectedRevision: draft.configuration.revision,
-        approval,
-        ...(value === undefined ? {} : field?.secret ? { secret: value } : { value }),
+
+  // Sends the approval for the review whose facts are on screen, then applies.
+  // `shown` is the review the owner saw: its digest is what is approved. If the
+  // host holds a newer review of the same facts, only its id is newer.
+  async function turnOn(shown: Review) {
+    await change(async () => {
+      let target = shown;
+      let refresh = false;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (refresh || reviewExpired(target, Date.now())) {
+          const fresh = await prepareTurnOn(request, { providerId: shown.candidate.providerId, usage: wayUsage ?? "" }, { mayRunActions: () => !passwordMissingNow.current });
+          if (fresh.kind !== "ready") {
+            setPrep({ status: "done", providerId: shown.candidate.providerId, result: fresh });
+            return;
+          }
+          if (fresh.review.candidate.consentFactsDigest !== shown.candidate.consentFactsDigest) {
+            shownReview.current = fresh.review;
+            setChanged(changedFacts(shown.candidate, fresh.review.candidate));
+            setPrep({ status: "done", providerId: fresh.review.candidate.providerId, result: fresh });
+            return;
+          }
+          target = fresh.review;
+        }
+        requirePassword();
+        try {
+          const pending = await send<{ operationId: string }>("/operations", {
+            reviewId: target.id,
+            kind: "route",
+            consentFactsDigest: shown.candidate.consentFactsDigest,
+            acknowledgeDisconnect: true,
+          });
+          setOperation({ ...pending, kind: "start", stage: "applying", recovery: null });
+          setCancel(null);
+          setChanged(null);
+          shownReview.current = null;
+          setPrep({ status: "idle" });
+          return;
+        } catch (failure) {
+          const code = failure instanceof ReachabilityFailure ? failure.detail.code : null;
+          if (!(code && staleReviewCodes.has(code)) || attempt === 1) throw failure;
+          // The host no longer holds that review. Get a new one and compare.
+          refresh = true;
+        }
       }
-    );
-    setDraft({ ...draft, configuration });
-    setCommitted(false);
-    setReview(null);
+    });
   }
-  async function reloadDraft() {
-    if (!(draft && draftProviderId)) {
-      return;
-    }
-    const next = await send<Draft>(
-      `/drafts/${encodeURIComponent(draft.draftId)}?providerId=${encodeURIComponent(draftProviderId)}`
-    );
-    setDraft(next);
-    setCommitted(false);
-    setReview(null);
+  async function allow(draft: Draft, action: Action, input: { value?: string; secret?: string }) {
+    await change(async () => {
+      requirePassword();
+      await runAction(send, draft, action, input);
+      setPrepRun((n) => n + 1);
+    });
   }
-  const mutationBlocked = busy || stale || state.starting;
-  // The password is the only gate on an address reachable from the internet,
-  // so nothing can be turned on until the owner has chosen one.
-  const passwordMissing = state.passwordSet === false;
-  const turnOnBlocked = mutationBlocked || passwordMissing;
+  function chooseAnotherWay() {
+    if (wayId) setDeclined(wayId);
+    setShowOtherWays(true);
+    setPrep({ status: "idle" });
+  }
+  async function stopOperation(current: Operation) {
+    setCancel("stopping");
+    await change(async () => {
+      try {
+        const route = await send<Route>(`/operations/${encodeURIComponent(current.operationId)}/reconcile`, {
+          action: "stop",
+          acknowledgeDisconnect: true,
+        });
+        if (route.cleanup.state === "confirmed") {
+          setCancel(null);
+          setOperation(null);
+          setPrepRun((n) => n + 1);
+        } else {
+          setCancel("unconfirmed");
+        }
+      } catch (failure) {
+        setCancel("unconfirmed");
+        throw failure;
+      }
+    }, "turn-off");
+  }
+  // After it failed or after Cancel: Off and a fresh review, once the owner asks.
+  function startOver() {
+    setOperation(null);
+    setCancel(null);
+    setPrepRun((n) => n + 1);
+  }
+
   // After the desktop restarts for a new password it reopens this card by its
   // fragment. Remember that once, then clear the fragment.
   const [returnedFromPassword] = useState(
@@ -374,31 +475,9 @@ export function RemoteAccessSetting({
       if (!result.ok) throw new ReachabilityFailure(publicError("owner_password_required", result.message, "change"));
     }, "change");
   }
-  const setupAction = draft?.configuration.actions.find((action) => action.step);
-  const hasReservation = reservations.some((item) => item.draftId === draft?.draftId);
-  const setupNeedsInput = draft && (setupAction || hasReservation) && setupReadiness[draft.draftId] !== draft.configuration.revision;
-  async function reserveSetup() {
-    if (!draft || !draftProviderId || !usage || !setupAction || hasReservation) return;
-    try {
-      // The host keeps one setup per service and returns it if one exists.
-      await send("/setups", {
-        providerId: draftProviderId,
-        draftId: draft.draftId,
-        actionId: setupAction.id,
-        expectedConfigurationRevision: draft.configuration.revision,
-        usage,
-      });
-    } finally {
-      const fresh = await request("/state");
-      if (fresh.ok) setState(fresh.data as State);
-    }
-  }
   const hostReasonShown = !host.known && host.reason !== "loading";
-  const newestObservation = inventory?.providers
-    .flatMap((item) => item.prerequisites.map((prerequisite) => prerequisite.observedAt))
-    .filter((value): value is string => typeof value === "string")
-    .sort()
-    .at(-1);
+  const serviceLabel = wayLabel ?? "the service";
+  const done = prep.status === "done" ? prep.result : null;
   return (
     <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
     <section aria-label="Remote access" className="grid gap-6">
@@ -417,319 +496,153 @@ export function RemoteAccessSetting({
           </button>
         </div>
       ) : returnedFromPassword ? (
-        <p role="status">Password saved ✓ Step 2: choose a way to connect.</p>
+        <p role="status">Password saved ✓ Step 2: turn on.</p>
       ) : null}
       {error ? <ErrorNotice error={error} /> : null}
+      {prepError ? (
+        <>
+          <ErrorNotice error={prepError} />
+          <button disabled={busy} onClick={() => setPrepRun((n) => n + 1)} type="button">
+            Try again
+          </button>
+        </>
+      ) : null}
       {stale ? <p role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
       {hostReasonShown ? <p role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
       {state.lifecycle?.cleanup === "unconfirmed" ? (
         <p role="status">We couldn't confirm your address is closed. It may still work.</p>
       ) : null}
-      <fieldset className="grid gap-3" disabled={turnOnBlocked || draft !== null}>
-        <legend className="pdpp-label">Ways to connect</legend>
-        <label>
-          <input
-            checked={selected === ""}
-            name="way"
-            onChange={() => {
-              setSelected("");
-              setUsage(null);
-            }}
-            type="radio"
-          />{" "}
-          Off · Only this computer can open DataConnect.
-        </label>
-        {providers.map((item) => (
-          <label className="grid gap-1 rounded-lg border p-3" key={choiceKey(item, usage)}>
-            <span>
-              <input
-                checked={selected === choiceKey(item, usage)}
-                name="way"
-                onChange={() => {
-                  setSelected(choiceKey(item, null));
-                  setUsage(null);
-                }}
-                type="radio"
-              />{" "}
-              {plain(item.label)}
-            </span>
-            <span className="pdpp-caption text-muted-foreground">{reachLabels[item.reach] ?? plain(item.reach)}</span>
-            {Object.entries(item.availability)
-              .filter(([, available]) => available.state !== "available")
-              .map(([kind, available]) => (
-                <span className="pdpp-caption" key={kind}>
-                  {kindLabel(kind)}: {availabilityLabels[available.state] ?? plain(available.state)}
-                  {available.reason && available.state !== "detect-only" ? ` — ${plain(available.reason)}` : ""}
-                </span>
-              ))}
-          </label>
-        ))}
-      </fieldset>
-      {selected === "" ? (
-        <button
-          disabled={mutationBlocked || !host.known || !host.value.port.known}
-          onClick={() =>
-            void edit(async () => {
-              if (!(host.known && host.value.port.known)) {
-                return;
-              }
-              const updated = await send<HostSettings>("/host-settings", {
-                expectedRevision: host.value.revision,
-                mode: "off",
-                port: host.value.port.value,
-                acknowledgeDisconnect: acknowledged,
-              });
-              setHost({ known: true, value: updated });
-            })
-          }
-        >
-          Turn off
-        </button>
-      ) : null}
       {inventory ? null : (
         <p role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
-      {provider ? (
-        <>
-          <section aria-label="Prerequisites" className="grid gap-3">
-            <h3 className="pdpp-label">Before turning on</h3>
-            {provider.prerequisites.map((item) => (
-              <div key={item.id}>
-                <p>
-                  {plain(item.label)}: {plain(item.state)}
-                </p>
-                {item.remedy ? (
-                  <p className="pdpp-caption whitespace-pre-wrap break-words">
-                    {item.remedy.instructions ?? plain(item.remedy.label)}
-                  </p>
-                ) : (
-                  <p className="pdpp-caption">No automatic fix is available.</p>
-                )}
-              </div>
-            ))}
-            {newestObservation ? (
-              <p className="pdpp-caption text-muted-foreground">
-                Checked this computer · {formatLocalTime(newestObservation)}
-              </p>
-            ) : null}
-          </section>
-          <fieldset disabled={mutationBlocked}>
-            <legend className="pdpp-label">How long</legend>
-            {Object.entries(provider.availability).map(([kind, available]) => (
-              <label className="mr-4" key={kind}>
-                <input
-                  checked={usage === kind}
-                  disabled={available.state === "unsupported" || available.state === "detect-only" ||
-                    (kind === "durable" && capabilities["runtime.durable"]?.value === false)}
-                  name="usage"
-                  onChange={() => {
-                    setUsage(kind);
-                    setSelected(choiceKey(provider, kind));
-                  }}
-                  type="radio"
-                />{" "}
-                {kindLabel(kind)}
-              </label>
-            ))}
-          </fieldset>
-          {draft ? null : (
-            <button disabled={turnOnBlocked || !usage} onClick={() => void change(openDraft)}>
-              Continue setup
-            </button>
-          )}
-        </>
+      {idle && state.routes.length === 0 && !operation ? (
+        <p role="status">Off · Only this computer can open DataConnect.</p>
       ) : null}
-      {draft ? (
-        <section aria-label="Setup" className="grid gap-4">
-          <h3 className="pdpp-label">Setup details</h3>
-          <button disabled={busy} onClick={() => void edit(reloadDraft)}>
-            Reload
-          </button>
-          {committed ? (
-            <p>Saved. Choose Change settings to edit.</p>
-          ) : (
-            !hasReservation && draft.configuration.actions.filter((action) => !action.step).map((action) => (
-              <SetupApprovalCard
-                action={action}
-                busy={mutationBlocked}
-                key={`${action.id}-${action.consent?.consentFactsDigest}`}
-                onApprove={(approval) => void change(() => setup(action, approval))}
-              >
-                {draft.configuration.inputRequirements
-                  .filter((field) => field.actionId === action.id)
-                  .map((field) => (
-                    <label className="grid gap-2" key={field.id}>
-                      <span>
-                        {plain(field.label)}
-                        {field.required ? " (required)" : ""}
-                      </span>
-                      <input
-                        autoComplete="off"
-                        onChange={(event) => setValues((current) => ({ ...current, [field.id]: event.target.value }))}
-                        required={field.required}
-                        type={field.secret ? "password" : "text"}
-                        value={values[field.id] ?? (field.secret ? "" : (draft.configuration.values[field.id] ?? ""))}
-                      />
-                      <span className="pdpp-caption text-muted-foreground">
-                        {field.help} We only check the format.
-                      </span>
-                      {field.obtainUrl && /^https?:\/\//.test(field.obtainUrl) ? (
-                        <a className="underline" href={field.obtainUrl} rel="noreferrer" target="_blank">
-                          Where to get it
-                        </a>
-                      ) : null}
-                      {field.secret ? (
-                        <span className="pdpp-caption">
-                          {draft.configuration.credentials[field.id]?.known
-                            ? draft.configuration.credentials[field.id]?.value
-                              ? "Saved. We haven't checked that it works."
-                              : "Nothing saved yet."
-                            : "We can't tell whether anything is saved."}
-                        </span>
-                      ) : null}
-                    </label>
-                  ))}
-              </SetupApprovalCard>
-            ))
-          )}
-          {!committed && setupAction && !hasReservation ? (
-            <button type="button" disabled={turnOnBlocked} onClick={() => void change(reserveSetup)}>
-              Start setup
-            </button>
+      {idle && !passwordMissing ? (
+        <section aria-label="Turn on remote access" className="grid gap-4">
+          <h3 className="pdpp-label">Step 2 of 2 · Turn on</h3>
+          {prep.status === "preparing" ? <p role="status">Checking this computer…</p> : null}
+          {done?.kind === "allow" && declined !== wayId ? (
+            <AllowCard
+              action={done.action}
+              busy={mutationBlocked}
+              draft={done.draft}
+              onAllow={(action, input) => void allow(done.draft, action, input)}
+              onOther={chooseAnotherWay}
+            />
           ) : null}
-          <div className="flex flex-wrap gap-3">
-            {committed ? <button type="button" disabled={mutationBlocked} onClick={() => void change(editApplied)}>Change settings</button> : null}
-            <button
-              disabled={turnOnBlocked || !usage || (!committed && !!setupNeedsInput)}
-              onClick={() =>
-                void change(async () => {
-                  if (!committed) {
-                    const applied = await send<ReturnType<typeof projectConfiguration>>(
-                      `/drafts/${encodeURIComponent(draft.draftId)}/commit`,
-                      { expectedRevision: draft.configuration.revision }
-                    );
-                    setCommitted(true);
-                    if (provider) {
-                      setSelected(choiceKey({ ...provider, configuration: applied }, usage));
-                    }
-                  }
-                  setReview(await send<Review>(`/drafts/${encodeURIComponent(draft.draftId)}/review`, { usage }));
-                })
-              }
-            >
-              {committed ? "Review" : "Save and review"}
-            </button>
-            <button
-              disabled={busy}
-              onClick={() =>
-                void edit(async () => {
-                  await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
-                  setDraft(null);
-                  setReview(null);
-                })
-              }
-            >
-              Discard changes
-            </button>
-          </div>
+          {done?.kind === "ready" ? (
+            <TurnOnCard
+              busy={mutationBlocked}
+              changed={changed}
+              key={done.review.id}
+              onTurnOn={(review) => void turnOn(review)}
+              review={done.review}
+            />
+          ) : null}
+          {wayId && wayUsage === null ? <p role="status">Remote access can't start with this way on this computer.</p> : null}
+          <button aria-expanded={showOtherWays} disabled={busy} onClick={() => setShowOtherWays((open) => !open)} type="button">
+            Other ways
+          </button>
+          {showOtherWays ? (
+            <fieldset className="grid gap-3" disabled={mutationBlocked}>
+              <legend className="pdpp-label">Other ways</legend>
+              {providers.map((item) => (
+                <label className="grid gap-1 rounded-lg border p-3" key={`${item.providerId}-${item.reach}`}>
+                  <span>
+                    <input
+                      checked={wayId === item.providerId}
+                      disabled={pickUsage(item, capabilities) === null}
+                      name="way"
+                      onChange={() => {
+                        setChosen(item.providerId);
+                        setDeclined(null);
+                        setChanged(null);
+                        shownReview.current = null;
+                        setPrepRun((n) => n + 1);
+                      }}
+                      type="radio"
+                    />{" "}
+                    {plain(item.label)}
+                  </span>
+                  <span className="pdpp-caption text-muted-foreground">{reachLabels[item.reach] ?? plain(item.reach)}</span>
+                  {Object.entries(item.availability)
+                    .filter(([, available]) => available.state !== "available")
+                    .map(([kind, available]) => (
+                      <span className="pdpp-caption" key={kind}>
+                        {kindLabel(kind)}: {availabilityLabels[available.state] ?? plain(available.state)}
+                        {available.reason && available.state !== "detect-only" ? ` — ${plain(available.reason)}` : ""}
+                      </span>
+                    ))}
+                </label>
+              ))}
+            </fieldset>
+          ) : null}
         </section>
       ) : null}
       {reservations.map((reservation) => (
         <ProviderSetup
-          acknowledgeDisconnect={acknowledged}
-          disabled={turnOnBlocked}
+          acknowledgeDisconnect
+          disabled={mutationBlocked || passwordMissing}
           key={reservation.operationId}
           reservation={reservation}
           request={request}
-          onReadiness={onSetupReadiness}
-          {...(!draft && reservation.draftId !== null ? { onResume: () => void edit(async () => {
-            const resumedDraftId = reservation.draftId as string;
-            const restored = await send<Draft>(
-              `/drafts/${encodeURIComponent(resumedDraftId)}?providerId=${encodeURIComponent(reservation.providerId)}`
-            );
-            setDraft(restored);
-            setDraftProviderId(reservation.providerId);
-            setUsage(reservation.usage);
-            setCommitted(false);
-            setReview(null);
-          }) } : {})}
+          onReadiness={() => undefined}
           onChange={async (view, mutation) => {
-            if (!draft || committed || draft.draftId !== view.scope.draftId ||
-                (!mutation && view.state !== "complete" && draft.configuration.revision === view.scope.configurationRevision)) return;
-            setReview(null);
-            await reloadDraft();
+            // A finished or changed setup moves the chain on.
+            const mark = `${view.operationId}:${view.revision}:${view.state}`;
+            if ((mutation || view.state === "complete") && seenSetup.current !== mark) {
+              seenSetup.current = mark;
+              setPrepRun((n) => n + 1);
+            }
           }}
         />
       ))}
-      <label className="pdpp-caption flex items-start gap-2">
-        <input checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} type="checkbox" />I
-        understand this page may disconnect while remote access changes.
-      </label>
-      {review ? (
-        <RouteConsentCard
-          busy={mutationBlocked}
-          key={review.id}
-          onApprove={(approval) =>
-            void change(async () => {
-              const pending = await send<{ operationId: string }>("/operations", {
-                reviewId: review.id,
-                ...approval,
-                acknowledgeDisconnect: acknowledged,
-              });
-              setOperation({ ...pending, stage: "applying", recovery: null });
-              setReview(null);
-            })
-          }
-          review={review.candidate}
+      {operation && operation.kind === "stop" && outcome === "turning-on" ? (
+        <p role="status">Turning off…</p>
+      ) : null}
+      {operation && operation.kind !== "stop" && cancel === "stopping" ? <p role="status">Turning off…</p> : null}
+      {operation && operation.kind !== "stop" && cancel === null && outcome === "turning-on" ? (
+        <TurningOnChecklist
+          busy={busy}
+          onCancel={() => void stopOperation(operation)}
+          service={serviceLabel}
+          step={checklistStep(state.lifecycle?.phase ?? null)}
         />
       ) : null}
-      {operation ? (
-        <section aria-label="Remote access activity" className="grid gap-3">
+      {operation && (cancel === "unconfirmed" || (cancel === null && outcome === "needs-action")) ? (
+        <section aria-label="Needs your action" className="grid gap-3">
+          <h3 className="pdpp-label">Needs your action</h3>
           <p role="status">
-            {operation.stage === "applying"
-              ? "Working on it…"
-              : operation.stage === "settled"
-                ? "Done"
-                : operation.stage === "unknown-possibly-live"
-                  ? "We lost track of the address. It may still be on."
-                  : plain(operation.stage)}
+            {cancel === "unconfirmed"
+              ? "Couldn't confirm remote access is off. This address may still work."
+              : "We lost track of the address. It may still be on."}
           </p>
-          {operation.failureCode ? <p>{publicError(operation.failureCode).message}</p> : null}
-          {operation.recovery ? (
-            <>
-              <p>{publicError(operation.recovery.reason).message}</p>
-              <button
-                disabled={!operation.recovery.available || busy}
-                onClick={() =>
-                  void turnOff(async () => {
-                    await send(`/operations/${encodeURIComponent(operation.operationId)}/reconcile`, {
-                      action: "stop",
-                      acknowledgeDisconnect: acknowledged,
-                    });
-                  })
-                }
-              >
-                Check and turn off
-              </button>
-            </>
-          ) : (
-            <button
-              disabled={busy}
-              onClick={() =>
-                void checkIt(async () =>
-                  setOperation(await send<Operation>(`/operations/${encodeURIComponent(operation.operationId)}`))
-                )
-              }
-            >
-              Check again
-            </button>
-          )}
+          {cancel === null && operation.failureCode ? <p>{publicError(operation.failureCode).message}</p> : null}
+          {cancel === null && operation.recovery ? <p>{publicError(operation.recovery.reason).message}</p> : null}
+          <button
+            disabled={busy || (cancel === null && operation.recovery !== null && !operation.recovery.available)}
+            onClick={() => void stopOperation(operation)}
+            type="button"
+          >
+            Check and turn off
+          </button>
           {operation.failureCode || operation.recovery ? (
             <Diagnostics>
               {operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}
               {operation.recovery ? <p>Recovery: {operation.recovery.reason}</p> : null}
             </Diagnostics>
           ) : null}
+        </section>
+      ) : null}
+      {operation && operation.kind !== "stop" && cancel === null && outcome === "did-not-turn-on" ? (
+        <section aria-label="Did not turn on" className="grid gap-3">
+          <h3 className="pdpp-label">Remote access did not turn on</h3>
+          {operation.failureCode ? <p role="status">{publicError(operation.failureCode).message}</p> : null}
+          <button disabled={busy} onClick={startOver} type="button">
+            Try again
+          </button>
+          <Diagnostics>{operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}</Diagnostics>
         </section>
       ) : null}
       {runtimeReview ? (
@@ -812,9 +725,9 @@ export function RemoteAccessSetting({
                   void turnOff(async () => {
                     const pending = await send<{ operationId: string }>(
                       `/routes/${encodeURIComponent(route.handle.id)}/stop`,
-                      { generation: route.handle.generation, acknowledgeDisconnect: acknowledged }
+                      { generation: route.handle.generation, acknowledgeDisconnect: true }
                     );
-                    setOperation({ ...pending, stage: "applying", recovery: null });
+                    setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
                   })
                 }
               >
@@ -889,7 +802,7 @@ export function RemoteAccessSetting({
                     expectedRevision: host.value.revision,
                     mode: host.value.mode,
                     port: value,
-                    acknowledgeDisconnect: acknowledged,
+                    acknowledgeDisconnect: true,
                   });
                   setHost({ known: true, value: updated });
                 })

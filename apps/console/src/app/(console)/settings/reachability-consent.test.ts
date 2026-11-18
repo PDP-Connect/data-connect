@@ -9,7 +9,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import fixture from "../../../../../../reference-implementation/test/fixtures/reachability/configuration.json" with {
   type: "json",
 };
-import { RouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
+import { SetupApprovalCard } from "./reachability-consent.tsx";
+import { TurnOnCard } from "./turn-on.tsx";
+
+const turnOnCard = (candidate: ReturnType<typeof projectCandidate>) =>
+  createElement(TurnOnCard, { review: { id: "review-1", kind: "route", candidate }, busy: false, changed: null, onTurnOn: () => {} });
 
 const base = fixture.configuration.actions[0] as SetupAction;
 const { consent: _baseConsent, step: _step, review: _review, ...actionDisclosure } = base;
@@ -97,7 +101,7 @@ test("setup card shows all typed disclosure groups from the action snapshot", ()
   }
 });
 
-test("route card rejects a digest alias mismatch without showing unrelated catalog facts", () => {
+test("turn on card rejects a digest alias mismatch without showing unrelated catalog facts", () => {
   const candidate = {
     providerId: base.consent!.scope.providerId,
     display: { label: "Fixture", description: "", needs: "" },
@@ -110,12 +114,12 @@ test("route card rejects a digest alias mismatch without showing unrelated catal
     consent: { scope: routeScope, consentFactsDigest: "alias-two", facts: [], disclosures: {} },
   };
   const review = projectCandidate(candidate as unknown as Parameters<typeof projectCandidate>[0]);
-  const html = renderToStaticMarkup(createElement(RouteConsentCard, { review, onApprove: () => {} }));
+  const html = renderToStaticMarkup(turnOnCard(review));
   assert.match(html, /couldn.{1,6}t load this service.{1,6}s details/);
   assert.match(html, /disabled=""/);
 });
 
-test("route card shows the exact address and target covered by approval", () => {
+test("turn on card shows the exact address and target covered by approval", () => {
   const expectedOrigin = "https://owner.fixture.invalid";
   const review = projectCandidate({
     configuration: fixture.configuration,
@@ -134,7 +138,7 @@ test("route card shows the exact address and target covered by approval", () => 
   // A minimal projected disclosure is enough; the HTTP test covers the SDK payload.
   assert.ok(review.consent);
   review.consent.disclosures = { ownership: "external-owned" };
-  const html = renderToStaticMarkup(createElement(RouteConsentCard, { review, onApprove: () => {} }));
+  const html = renderToStaticMarkup(turnOnCard(review));
   assert.match(html, /Your address will be: https:\/\/owner\.fixture\.invalid/);
   assert.match(html, /Connects to: fixture-target/);
 });

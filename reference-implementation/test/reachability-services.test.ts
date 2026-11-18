@@ -405,3 +405,44 @@ test("state reports whether the owner has set a password", async () => {
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("approving a route logs the review id and consent digest it received, and nothing else", async (t) => {
+  const routes = new Map<string, Handler>();
+  const app = {
+    get: (path: string, ...args: Handler[]) => routes.set(`GET ${path}`, args.at(-1) as Handler),
+    post: (path: string, ...args: Handler[]) => routes.set(`POST ${path}`, args.at(-1) as Handler),
+  };
+  const applied: unknown[] = [];
+  const service = {
+    authorizeDisconnect: async () => undefined,
+    operationIntent: () => null,
+    apply: async (_operation: string, reviewId: string, approval: unknown) => applied.push([reviewId, approval]),
+  };
+  const operations = {
+    start: async (_kind: string, _handle: unknown, effect: (id: string) => Promise<unknown>) => {
+      await effect("op-1");
+      return { operationId: "op-1" };
+    },
+  };
+  const pass = async (_r: unknown, _s: unknown, next?: () => void) => next?.();
+  mountOwnerReachability(app as never, {
+    service: service as never,
+    operations: operations as never,
+    setups: {} as never,
+    requireToken: pass,
+    requireOwner: pass,
+    requireCsrf: pass,
+    usage: () => {
+      throw new Error("unused");
+    },
+  } as never);
+  const logged: string[] = [];
+  t.mock.method(console, "info", (line: string) => logged.push(line));
+  const response = { setHeader: () => undefined, status: () => response, json: () => response };
+  await routes.get("POST /v1/owner/reachability/operations")!(
+    { body: { reviewId: "rev-9", kind: "route", consentFactsDigest: "consent-v1:abc", acknowledgeDisconnect: true }, params: {} },
+    response
+  );
+  assert.deepEqual(logged, ["[reachability] approve reviewId=rev-9 consentFactsDigest=consent-v1:abc"]);
+  assert.deepEqual(applied, [["rev-9", { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" }]]);
+});
