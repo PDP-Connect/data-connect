@@ -329,9 +329,7 @@ fn serve_then_stall(stall: std::time::Duration) -> (String, std::thread::JoinHan
             .expect("answer the identity check");
         drop(stream);
         let (mut stalled, _) = listener.accept().expect("accept the login");
-        stalled
-            .set_read_timeout(Some(stall))
-            .expect("read timeout");
+        stalled.set_read_timeout(Some(stall)).expect("read timeout");
         // Returns when the client hangs up or `stall` passes.
         while matches!(stalled.read(&mut buffer), Ok(read) if read > 0) {}
     });
