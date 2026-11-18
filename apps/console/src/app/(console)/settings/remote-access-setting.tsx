@@ -13,6 +13,7 @@ import type {
 import { useCallback, useEffect, useState } from "react";
 import { ProviderSetup, readSetupReservations, reserveSetupOperation, saveSetupReservation, type SetupReservation } from "./provider-setup.tsx";
 import { requestReachability } from "./reachability-actions.ts";
+import { proofLine, routeHeadline } from "./route-display.ts";
 import { ConsentFacts, RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 
 type Draft = ReturnType<typeof projectDraft>;
@@ -694,9 +695,11 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         {state.routes.map((route) => (
           <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
             <h3 className="pdpp-label">
-              {state.reasons[route.handle.id] === "proof_refresh_unsupported"
-                ? "Unpublished"
-                : (state.lifecycle?.handle?.id === route.handle.id ? state.lifecycle.phase : route.routeState)}
+              {routeHeadline(
+                route,
+                state.lifecycle?.handle?.id === route.handle.id ? state.lifecycle.phase : null,
+                state.reasons[route.handle.id] === "proof_refresh_unsupported"
+              )}
             </h3>
             {state.reasons[route.handle.id] === "proof_refresh_unsupported" ? (
               <p role="status">
@@ -715,8 +718,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
               {route.binding.target.known ? route.binding.target.value : `Unknown: ${route.binding.target.reason}`}
             </p>
             <p className="pdpp-caption">
-              {state.evidenceSource === "synthetic" ? "Synthetic fixture proof" : "Proof"}: {route.verification.status} · {route.verification.vantage} ·{" "}
-              {route.verification.observedAt ?? "Unknown check time"}
+              {proofLine(route, state.evidenceSource === "synthetic" ? "Synthetic fixture proof" : "Proof", Date.now())}
             </p>
             <p className="pdpp-caption">
               {state.lifecycle?.stopRequested && state.lifecycle.confinement.known && state.lifecycle.confinement.value
