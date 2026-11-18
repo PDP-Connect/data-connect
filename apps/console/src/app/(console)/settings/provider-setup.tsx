@@ -21,41 +21,10 @@ export type SetupReservation = {
   operationId: string
   providerId: string
   providerLabel: string
-  draftId: string
+  draftId: string | null
   actionId: string
   expectedConfigurationRevision: string
-  usage: string
-}
-
-const storageKey = "reachability-setup-reservations-v1"
-
-export function readSetupReservations(): SetupReservation[] {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "[]")
-    if (!Array.isArray(value)) return []
-    return value.filter(
-      (item): item is SetupReservation =>
-        item &&
-        typeof item === "object" &&
-        [
-          "operationId",
-          "providerId",
-          "providerLabel",
-          "draftId",
-          "actionId",
-          "expectedConfigurationRevision",
-          "usage",
-        ].every(key => typeof item[key] === "string" && item[key].length > 0)
-    )
-  } catch {
-    return []
-  }
-}
-
-export function saveSetupReservation(next: SetupReservation) {
-  const reservations = [...readSetupReservations(), next]
-  localStorage.setItem(storageKey, JSON.stringify(reservations))
-  return reservations
+  usage: string | null
 }
 
 export function reserveSetupOperation(
@@ -71,7 +40,7 @@ export function reserveSetupOperation(
   } = reservation
   return request(`/setup-operations/${encodeURIComponent(operationId)}`, {
     providerId,
-    draftId,
+    ...(draftId === null ? {} : { draftId }),
     actionId,
     expectedConfigurationRevision,
     expectedSetupRevision: 0,
@@ -208,7 +177,9 @@ export function ProviderSetup({
   const path = `/setup-operations/${encodeURIComponent(operationId)}`
   const readPath = `${path}?providerId=${encodeURIComponent(providerId)}`
   const revision = view?.state === "complete" && !busy ? view.scope.configurationRevision : null
-  useEffect(() => onReadiness(draftId, revision), [draftId, onReadiness, revision])
+  useEffect(() => {
+    if (draftId !== null) onReadiness(draftId, revision)
+  }, [draftId, onReadiness, revision])
 
   const readEpoch = useRef(0)
   const acceptObservation = useEffectEvent(async (next: SetupView, current: () => boolean) => {

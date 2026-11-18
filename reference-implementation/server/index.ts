@@ -393,6 +393,7 @@ import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
 import { startDesktopReachability } from "./reachability/desktop-host.ts";
 import { ReachabilityOperations } from "./reachability/operations.ts";
+import { ReachabilitySetups } from "./reachability/setups.ts";
 import { mountOwnerReachability, type OwnerReachabilityContext } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
@@ -8522,6 +8523,7 @@ function buildRsApp(opts: ServerOpts = {}) {
   mountOwnerReachability(app, {
     service: opts.reachability?.service ?? null,
     operations: new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
+    setups: new ReachabilitySetups(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-setups")),
     usage: opts.reachability?.usage ?? (() => { throw Object.assign(new Error("unsupported"), { code: "unsupported" }); }),
     requireToken, requireOwner, requireCsrf: requireReachabilityMutationCsrf,
   } as unknown as Parameters<typeof mountOwnerReachability>[1]);

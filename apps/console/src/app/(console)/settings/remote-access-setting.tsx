@@ -10,8 +10,10 @@ import type {
   projectRoute,
   projectRuntimeReview,
 } from "pdpp-reference-implementation/reachability-projection";
-import { useCallback, useEffect, useState } from "react";
-import { ProviderSetup, readSetupReservations, reserveSetupOperation, saveSetupReservation, type SetupReservation } from "./provider-setup.tsx";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { migrateLegacySetupReservations } from "../../../lib/legacy-setup-reservations.ts";
+import { ProviderSetup } from "./provider-setup.tsx";
+import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-actions.ts";
 import { proofLine, routeHeadline } from "./route-display.ts";
 import { ConsentFacts, RouteConsentCard, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
@@ -44,6 +46,7 @@ type State = {
   };
   routes: Route[];
   reasons: Record<string, string>;
+  services?: ServiceEntry[];
   starting: boolean;
 };
 
@@ -75,7 +78,8 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   const [error, setError] = useState<string | null>(null);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
-  const [reservations, setReservations] = useState<SetupReservation[]>([]);
+  const reservations = setupCards(state.services);
+  const draftHydrated = useRef(false);
   const [setupReadiness, setSetupReadiness] = useState<Record<string, string | null>>({});
   const onSetupReadiness = useCallback((draftId: string, revision: string | null) => {
     setSetupReadiness((current) => ({ ...current, [draftId]: revision }));
@@ -88,53 +92,6 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     }
     return result.data as T;
   }
-  useEffect(() => {
-    let active = true;
-    setReservations(readSetupReservations());
-    const pointer = sessionStorage.getItem("reachability-draft");
-    if (pointer) {
-      try {
-        const saved = JSON.parse(pointer) as {
-          providerId: string;
-          draftId: string;
-          usage: string | null;
-          committed: boolean;
-        };
-        if (typeof saved.providerId === "string" && typeof saved.draftId === "string") {
-          void request(
-            `/drafts/${encodeURIComponent(saved.draftId)}?providerId=${encodeURIComponent(saved.providerId)}`
-          ).then((result) => {
-            if (!active) {
-              return;
-            }
-            if (result.ok) {
-              setDraft(result.data as Draft);
-              setDraftProviderId(saved.providerId);
-              setUsage(saved.usage);
-              setCommitted(saved.committed === true);
-            } else {
-              setError(result.message);
-            }
-          });
-        }
-      } catch {
-        sessionStorage.removeItem("reachability-draft");
-      }
-    }
-    return () => {
-      active = false;
-    };
-  }, [request]);
-  useEffect(() => {
-    if (draft && draftProviderId && !committed) {
-      sessionStorage.setItem(
-        "reachability-draft",
-        JSON.stringify({ providerId: draftProviderId, draftId: draft.draftId, usage, committed })
-      );
-    } else if (committed) {
-      sessionStorage.removeItem("reachability-draft");
-    }
-  }, [draft, draftProviderId, usage, committed]);
   useEffect(() => {
     let active = true;
     const load = async () => {
@@ -163,6 +120,27 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
       if (stateResult.ok) {
         const next = stateResult.data as State;
         setState(next);
+        if (!draftHydrated.current) {
+          // The host holds the draft. Pick it up once, after a reload or restart.
+          draftHydrated.current = true;
+          const saved = next.services?.find((item) => item.draftId && !item.committed);
+          if (saved?.draftId) {
+            const result = await request(
+              `/drafts/${encodeURIComponent(saved.draftId)}?providerId=${encodeURIComponent(saved.providerId)}`
+            );
+            if (!active) {
+              return;
+            }
+            if (result.ok) {
+              setDraft(result.data as Draft);
+              setDraftProviderId(saved.providerId);
+              setUsage(saved.usage);
+              setCommitted(false);
+            } else {
+              setError(result.message);
+            }
+          }
+        }
         if (next.operations?.length) {
           setOperation((current) => (current?.stage === "applying" ? current : (next.operations?.[0] ?? current)));
         }
@@ -170,7 +148,10 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
         setStale(true);
       }
     };
-    void load();
+    // Setups an older console kept in the browser move to the host first.
+    void migrateLegacySetupReservations(request)
+      .catch(() => undefined)
+      .then(() => load());
     const timer = setInterval(() => {
       void load();
     }, 3000);
@@ -241,6 +222,7 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     const next = await send<Draft>("/drafts", {
       providerId: provider.providerId,
       expectedRevision: provider.configuration.revision,
+      ...(usage === null ? {} : { usage }),
     });
     setDraft(next);
     setDraftProviderId(provider.providerId);
@@ -254,7 +236,11 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
     if (matches.length !== 1 || !matches[0]) throw new Error("Choose the configuration to edit again.");
     const current = matches[0];
     await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
-    const next = await send<Draft>("/drafts", { providerId: current.providerId, expectedRevision: current.configuration.revision });
+    const next = await send<Draft>("/drafts", {
+      providerId: current.providerId,
+      expectedRevision: current.configuration.revision,
+      ...(usage === null ? {} : { usage }),
+    });
     setInventory(nextInventory); setSelected(choiceKey(current, usage));
     setDraft(next); setCommitted(false); setReview(null);
   }
@@ -293,27 +279,18 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
   const setupNeedsInput = draft && (setupAction || hasReservation) && setupReadiness[draft.draftId] !== draft.configuration.revision;
   async function reserveSetup() {
     if (!draft || !draftProviderId || !usage || !setupAction || hasReservation) return;
-    const saved = readSetupReservations();
-    if (saved.some((item) => item.draftId === draft.draftId)) {
-      setReservations(saved);
-      return;
-    }
-    const reservation = {
-      operationId: Array.from(crypto.getRandomValues(new Uint32Array(4)), (word) =>
-        word.toString(16).padStart(8, "0")
-      ).join(""),
-      providerId: draftProviderId,
-      providerLabel: inventory?.providers.find((item) => item.providerId === draftProviderId)?.label ?? "Selected provider",
-      draftId: draft.draftId, actionId: setupAction.id,
-      expectedConfigurationRevision: draft.configuration.revision,
-      usage,
-    };
-    const next = saveSetupReservation(reservation);
     try {
-      const result = await reserveSetupOperation(request, reservation);
-      if (!result.ok) throw new Error(result.message);
+      // The host keeps one setup per service and returns it if one exists.
+      await send("/setups", {
+        providerId: draftProviderId,
+        draftId: draft.draftId,
+        actionId: setupAction.id,
+        expectedConfigurationRevision: draft.configuration.revision,
+        usage,
+      });
     } finally {
-      setReservations(next);
+      const fresh = await request("/state");
+      if (fresh.ok) setState(fresh.data as State);
     }
   }
   return (
@@ -580,7 +557,6 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
               onClick={() =>
                 void change(async () => {
                   await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
-                  sessionStorage.removeItem("reachability-draft");
                   setDraft(null);
                   setReview(null);
                 })
@@ -599,9 +575,10 @@ export function RemoteAccessSetting({ request = requestReachability }: { request
           reservation={reservation}
           request={request}
           onReadiness={onSetupReadiness}
-          {...(!draft ? { onResume: () => void change(async () => {
+          {...(!draft && reservation.draftId !== null ? { onResume: () => void change(async () => {
+            const resumedDraftId = reservation.draftId as string;
             const restored = await send<Draft>(
-              `/drafts/${encodeURIComponent(reservation.draftId)}?providerId=${encodeURIComponent(reservation.providerId)}`
+              `/drafts/${encodeURIComponent(resumedDraftId)}?providerId=${encodeURIComponent(reservation.providerId)}`
             );
             setDraft(restored);
             setDraftProviderId(reservation.providerId);

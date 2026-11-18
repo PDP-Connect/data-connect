@@ -109,8 +109,6 @@ for (const viaPoll of [false, true]) {
       window: dom.window,
       document: dom.window.document,
       IS_REACT_ACT_ENVIRONMENT: true,
-      localStorage: dom.window.localStorage,
-      sessionStorage: dom.window.sessionStorage,
     })
     const container = dom.window.document.querySelector("#root")!
     const root = createRoot(container)
@@ -123,17 +121,6 @@ for (const viaPoll of [false, true]) {
       expectedConfigurationRevision: "config",
       usage: "attached",
     }
-    dom.window.sessionStorage.setItem(
-      "reachability-draft",
-      JSON.stringify({
-        ...reservation,
-        committed: false,
-      })
-    )
-    dom.window.localStorage.setItem(
-      "reachability-setup-reservations-v1",
-      JSON.stringify([reservation])
-    )
     const { RemoteAccessSetting } = await import("./remote-access-setting.tsx")
     const path = `/setup-operations/${reservation.operationId}`
     const draftPath = `/drafts/${reservation.draftId}`
@@ -225,7 +212,25 @@ for (const viaPoll of [false, true]) {
       }
       const observations: Record<string, unknown> = {
         "/catalog": { providers: [] },
-        "/state": { routes: [], reasons: {}, starting: false },
+        "/state": {
+          routes: [],
+          reasons: {},
+          starting: false,
+          services: [
+            {
+              providerId: reservation.providerId,
+              providerLabel: reservation.providerLabel,
+              draftId: reservation.draftId,
+              usage: reservation.usage,
+              committed: false,
+              setup: {
+                operationId: reservation.operationId,
+                actionId: reservation.actionId,
+                expectedConfigurationRevision: reservation.expectedConfigurationRevision,
+              },
+            },
+          ],
+        },
         "/host-settings": { known: false, reason: "unavailable" },
         "/host-capabilities": {},
       }

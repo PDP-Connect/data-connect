@@ -195,6 +195,17 @@ export class ReachabilityService {
     this.drafts.set(draftId, { providerId, session });
     return draft;
   }
+  // Picks up a draft the host already holds (for example after a restart) so the
+  // service keeps one draft. It enters the draft phase like `begin` does.
+  async resume(providerId: string, draftId: string): Promise<Draft> {
+    const draft = await this.reload(providerId, draftId);
+    this.transition({ type: "choose" });
+    return draft;
+  }
+  async providerLabel(providerId: string): Promise<string> {
+    const inventory = await this.inventory();
+    return inventory.providers.find((item) => item.providerId === providerId)?.label ?? "Selected provider";
+  }
   private setupReference(input: SetupReference): SetupOperationRef {
     return { ...input, home: this.host.query.home, owner: this.host.query.owner };
   }
