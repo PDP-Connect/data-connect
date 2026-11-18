@@ -3326,6 +3326,10 @@ fn console_path_before_restart(app: &AppHandle) -> Option<String> {
         path_and_query.push('?');
         path_and_query.push_str(query);
     }
+    if let Some(fragment) = url.fragment() {
+        path_and_query.push('#');
+        path_and_query.push_str(fragment);
+    }
     match ConsolePathAndQuery::parse(&path_and_query) {
         Some(_) => Some(path_and_query),
         None => {
@@ -4528,20 +4532,28 @@ fn console_url_preserving_path(
         return console_origin.clone();
     };
     let mut url = console_origin.clone();
+    // A fragment (for example `#remote-access`) is carried too, so a restart
+    // returns to the same place on the page. Like the query, it is split off
+    // first: `set_path` would percent-encode a literal `#` into the path.
+    let (path_and_query, fragment) = match path_and_query.0.split_once('#') {
+        Some((before, fragment)) => (before, Some(fragment)),
+        None => (path_and_query.0.as_str(), None),
+    };
     // `set_path` alone would percent-encode a literal `?` in the query
     // string into the path segment; splitting query off first keeps it in
     // `Url`'s own query slot, which is what `Url`'s output rendering and
     // every consumer of this URL (the webview, `is_console_origin`) expects.
-    match path_and_query.0.split_once('?') {
+    match path_and_query.split_once('?') {
         Some((path, query)) => {
             url.set_path(path);
             url.set_query(Some(query));
         }
         None => {
-            url.set_path(&path_and_query.0);
+            url.set_path(path_and_query);
             url.set_query(None);
         }
     }
+    url.set_fragment(fragment);
     url
 }
 
@@ -8704,6 +8716,22 @@ setInterval(() => {}, 1000);
         assert_eq!(result.host_str(), Some("127.0.0.1"));
         assert_eq!(result.port(), Some(9999));
         assert_eq!(result.path(), "/settings");
+    }
+
+    /// A fragment survives a restart too, so the password flow returns to
+    /// `/settings#remote-access` and not to the top of the page. It stays out
+    /// of the path segment.
+    #[test]
+    fn console_url_preserving_path_keeps_the_fragment() {
+        let new_origin: tauri::Url = "http://127.0.0.1:9999/".parse().expect("new origin");
+        let result = console_url_preserving_path(&new_origin, Some("/settings#remote-access"));
+        assert_eq!(result.host_str(), Some("127.0.0.1"));
+        assert_eq!(result.path(), "/settings");
+        assert_eq!(result.fragment(), Some("remote-access"));
+        let with_query = console_url_preserving_path(&new_origin, Some("/settings?a=1#remote-access"));
+        assert_eq!(with_query.path(), "/settings");
+        assert_eq!(with_query.query(), Some("a=1"));
+        assert_eq!(with_query.fragment(), Some("remote-access"));
     }
 
     /// Query strings survive too, and are kept out of the path segment
