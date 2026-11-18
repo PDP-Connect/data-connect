@@ -107,18 +107,22 @@ export function proofLine(
 }
 
 /**
- * When to re-check a proof that is still valid: before its window ends, with a
- * margin of a third of the window (at least five seconds, at most a minute).
- * Null when the server reports no window, so nothing is guessed.
+ * How long after the browser received a proof to re-check it: the window length
+ * the server reported (its end minus its observation, both on the server's
+ * clock) less a margin of a third of the window (at least five seconds, at most
+ * a minute). It never compares a server time with the browser's clock. Zero when
+ * the host already calls the proof stale. Null when the server reports no
+ * window, so nothing is guessed.
  */
-export function recheckAt(route: RouteDisplayInput): number | null {
+export function recheckDelay(route: RouteDisplayInput, lifecyclePhase: string | null): number | null {
   const until = route.verification.validUntil;
   if (!until?.known) return null;
+  if (lifecyclePhase === "stale") return 0;
   const end = Date.parse(until.value);
   if (!Number.isFinite(end)) return null;
   const start = route.verification.observedAt ? Date.parse(route.verification.observedAt) : Number.NaN;
   const window = Number.isFinite(start) && end > start ? end - start : 30_000;
-  return end - Math.min(60_000, Math.max(5_000, Math.floor(window / 3)));
+  return window - Math.min(60_000, Math.max(5_000, Math.floor(window / 3)));
 }
 
 /**
@@ -149,13 +153,6 @@ export function routeAttention(
   if (context.lifecyclePhase === "stale" && !context.recheckUnderWay) return "recheck-failed";
   return null;
 }
-
-// The service descriptor can carry a free-text condition about how long a
-// session lasts. The server's end time for the route is the one lifetime the
-// owner sees, so a condition that states a duration or a session limit is
-// dropped from every owner-facing list rather than shown beside it.
-const durationClaim = /\b\d+\s*(?:seconds?|minutes?|hours?|days?)\b|\bsession (?:limit|lifetime)\b|\blimits? a session\b/i;
-export const isLifetimeClaim = (text: string): boolean => durationClaim.test(text);
 
 /** What happened and what to do, for a route that needs the owner. */
 export function attentionSentence(attention: Attention, route: RouteDisplayInput, service: string, options: TimeOptions = {}): string {

@@ -101,6 +101,27 @@ test("setup card shows all typed disclosure groups from the action snapshot", ()
   }
 });
 
+test("setup approval shows every condition, including those that state a time", () => {
+  const conditions = ["Logs retained for 30 days", "Free for 7 days, then costs $10", "the plan limits a session to 15 minutes"];
+  const disclosures = { action: { ...actionDisclosure, conditions } };
+  const fact = (id: string, value: string) => ({
+    id,
+    label: "address conditions",
+    group: "address",
+    known: true as const,
+    value,
+    affectsConsent: true,
+    source: "fixture",
+    asOf: null,
+  });
+  const facts = conditions.map((value, index) => fact(`address-conditions-${index}`, value));
+  const action = projectAction({ ...base, consent: { ...base.consent!, facts, disclosures } });
+  const html = renderToStaticMarkup(createElement(SetupApprovalCard, { action, onApprove: () => {} }));
+  for (const text of conditions) {
+    assert.ok(html.includes(text), `"${text}" is shown`);
+  }
+});
+
 test("turn on card rejects a digest alias mismatch without showing unrelated catalog facts", () => {
   const candidate = {
     providerId: base.consent!.scope.providerId,

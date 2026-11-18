@@ -14,7 +14,7 @@ import { ProviderSetup } from "./provider-setup.tsx";
 import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-actions.ts";
 import { OnCard } from "./on-card.tsx";
-import { type Attention, attentionSentence, proofLine, recheckAt, routeAttention, routeHeadline, routeSentence } from "./route-display.ts";
+import { type Attention, attentionSentence, proofLine, recheckDelay, routeAttention, routeHeadline, routeSentence } from "./route-display.ts";
 import {
   type DisplayError,
   Diagnostics,
@@ -305,10 +305,10 @@ export function RemoteAccessSetting({
   const recheckTarget = (() => {
     for (const route of state.routes) {
       const phase = phaseOf(route);
-      const at = recheckAt(route);
+      const delay = recheckDelay(route, phase);
       if (
         (phase === "verified" || phase === "stale") &&
-        at !== null &&
+        delay !== null &&
         route.cleanup.state !== "confirmed" &&
         !state.lifecycle?.stopRequested &&
         !unsupportedOf(route) &&
@@ -317,7 +317,7 @@ export function RemoteAccessSetting({
       ) {
         const until = route.verification.validUntil;
         const key = `${route.handle.id}:${route.handle.generation}:${until?.known ? until.value : ""}`;
-        return { route, at, key };
+        return { route, delay, key };
       }
     }
     return null;
@@ -563,8 +563,14 @@ export function RemoteAccessSetting({
       }
       const checked = result.data as Route;
       if (checked.verification.status !== "verified" || !checked.published) fail(publicError("verification_failed").code);
+      // Same guard as a poll: a reply that an action or a newer poll has passed is dropped.
+      const seq = ++loadSeq.current;
+      const startedInEpoch = actionEpoch.current;
       const fresh = await request("/state");
-      if (fresh.ok) setState(fresh.data as State);
+      if (fresh.ok && mounted.current && seq >= appliedSeq.current && startedInEpoch === actionEpoch.current) {
+        appliedSeq.current = seq;
+        setState(fresh.data as State);
+      }
     } catch {
       fail(publicError("service_unreachable").code);
     } finally {
@@ -576,38 +582,48 @@ export function RemoteAccessSetting({
     }
   }
   const recheckKey = recheckTarget && !rechecked.has(recheckTarget.key) ? recheckTarget.key : null;
+  // When the browser first saw each proof window, on its own clock. The delay
+  // counts from here, so a browser clock that differs from the server's changes
+  // nothing.
+  const proofSeenAt = useRef(new Map<string, number>());
   // biome-ignore lint/correctness/useExhaustiveDependencies: one timer per proof window, keyed by `recheckKey`
   useEffect(() => {
     if (!recheckTarget || recheckKey === null || busy) return;
-    const { route, key, at } = recheckTarget;
+    const { route, key, delay } = recheckTarget;
+    const seen = proofSeenAt.current.get(key) ?? Date.now();
+    proofSeenAt.current.set(key, seen);
     const timer = setTimeout(() => {
       void runRecheck(route.handle.id, route.handle.generation, key);
-    }, Math.max(0, at - Date.now()));
+    }, Math.max(0, seen + delay - Date.now()));
     return () => clearTimeout(timer);
-  }, [recheckKey, busy, request]);
+  }, [recheckKey, recheckTarget?.delay, busy, request]);
 
-  async function stopRoute(route: Route) {
+  // `accepted` runs only once the host has accepted the stop. A refused stop
+  // leaves the route where it was, still needing the owner and still re-checked.
+  async function stopRoute(route: Route, accepted: () => void) {
     await turnOff(async () => {
       const pending = await send<{ operationId: string }>(`/routes/${encodeURIComponent(route.handle.id)}/stop`, {
         generation: route.handle.generation,
         acknowledgeDisconnect: true,
       });
+      accepted();
+      setAcknowledged((current) => new Set(current).add(route.handle.id));
       setOperation({ ...pending, kind: "stop", stage: "applying", recovery: null });
     });
   }
   function turnOffRoute(route: Route) {
-    setAcknowledged((current) => new Set(current).add(route.handle.id));
-    setPreviousOrigin(null);
-    againPending.current = false;
-    return stopRoute(route);
+    return stopRoute(route, () => {
+      setPreviousOrigin(null);
+      againPending.current = false;
+    });
   }
   // Turn off, then turn on again on the facts the owner already approved. If the
   // facts changed, the owner sees what changed and clicks again.
   function turnOnAgain(route: Route) {
-    setAcknowledged((current) => new Set(current).add(route.handle.id));
-    setPreviousOrigin(route.origin);
-    againPending.current = approvedDigest.current !== null;
-    return stopRoute(route);
+    return stopRoute(route, () => {
+      setPreviousOrigin(route.origin);
+      againPending.current = approvedDigest.current !== null;
+    });
   }
   // Same operation id: the host checks the route it already has and starts nothing new.
   async function retryOperation(current: Operation) {

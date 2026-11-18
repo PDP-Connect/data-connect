@@ -5,9 +5,8 @@ import { test } from "node:test";
 import {
   attentionSentence,
   expiryLine,
-  isLifetimeClaim,
   proofLine,
-  recheckAt,
+  recheckDelay,
   routeAttention,
   routeHeadline,
   routeSentence,
@@ -64,13 +63,14 @@ test("a route that ended at its expiry says when", () => {
   assert.equal(routeSentence(ended, "Off", { ...utc, now: Date.parse("2026-11-18T14:00:00Z") }), "Your address no longer works.");
 });
 
-test("the re-check is due before the proof window ends, and only when the server reports a window", () => {
+test("the re-check delay comes from the window length the server reports, never from a clock comparison", () => {
   // Window 07:08:13.767 to 07:08:43.767 is 30 s: a third is 10 s.
-  assert.equal(recheckAt(staleRoute), Date.parse("2026-11-18T07:08:33.767Z"));
+  assert.equal(recheckDelay(staleRoute, "verified"), 20_000);
   const longWindow = { ...staleRoute, verification: { ...staleRoute.verification, observedAt: "2026-11-18T07:00:00Z", validUntil: { known: true as const, value: "2026-11-18T08:00:00Z" } } };
-  assert.equal(recheckAt(longWindow), Date.parse("2026-11-18T07:59:00Z"), "the margin is capped at a minute");
+  assert.equal(recheckDelay(longWindow, "verified"), 3_540_000, "the margin is capped at a minute");
+  assert.equal(recheckDelay(staleRoute, "stale"), 0, "a stale report is due now");
   const noWindow = { ...staleRoute, verification: { ...staleRoute.verification, validUntil: { known: false as const, reason: "x" } } };
-  assert.equal(recheckAt(noWindow), null);
+  assert.equal(recheckDelay(noWindow, "verified"), null);
 });
 
 const base = { lifecycleReason: null, recheckFailed: false, acknowledged: false, now: Date.parse("2026-11-18T07:08:30Z"), lifecyclePhase: "verified", recheckUnderWay: false };
@@ -93,13 +93,6 @@ test("an address past its end time with a proof no longer verified needs the own
   assert.equal(routeAttention(unverified, base), "expired");
   assert.equal(routeAttention(ended, base), null);
   assert.match(attentionSentence("expired", unverified, "Tunnel service", utc), /^Your address turned off at 7:08 AM\./);
-});
-
-test("a duration claim in a service condition is recognised, and ordinary conditions are kept", () => {
-  assert.equal(isLifetimeClaim("the plan limits a session to 15 minutes"), true);
-  assert.equal(isLifetimeClaim("lasts 2 hours"), true);
-  assert.equal(isLifetimeClaim("trial: uptime and URL lifetime are not guaranteed"), false);
-  assert.equal(isLifetimeClaim("a new connection gets a new URL"), false);
 });
 
 test("a released route with confirmed cleanup reads Off, not unknown", () => {
