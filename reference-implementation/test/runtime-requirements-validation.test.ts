@@ -329,3 +329,23 @@ test("validateRuntimeRequirements: tuning_environment uses the connector_key ide
     undefined
   );
 });
+
+test("validateRuntimeRequirements: a manifest keyed database cannot declare a server-owned name", () => {
+  const declare = (...keys: string[]) => ({
+    connector_key: "database",
+    runtime_requirements: { tuning_environment: keys },
+  });
+  assertRejects(declare("PDPP_DATABASE_URL"), "PDPP_DATABASE_URL is a server-owned environment variable");
+  assertRejects(declare("PDPP_DATABASE_PAGE_SIZE"), "is a server-owned environment variable");
+});
+
+test("validateRuntimeRequirements: a key in a longer installed namespace is not the shorter connector's", () => {
+  const foo = { connector_key: "foo", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  assert.equal(validateRuntimeRequirements(foo, CODE), undefined, "no longer connector installed");
+  assert.throws(
+    () => validateRuntimeRequirements(foo, CODE, ["foo", "foo_bar"]),
+    /belongs to a longer installed namespace/
+  );
+  const fooBar = { connector_key: "foo_bar", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  assert.equal(validateRuntimeRequirements(fooBar, CODE, ["foo", "foo_bar"]), undefined);
+});
