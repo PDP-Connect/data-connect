@@ -14,6 +14,7 @@ import { ProviderSetup } from "./provider-setup.tsx";
 import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-actions.ts";
 import { OnCard } from "./on-card.tsx";
+import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
 import { type Attention, attentionSentence, proofLine, recheckDelay, routeAttention, routeHeadline, routeSentence } from "./route-display.ts";
 import {
   type DisplayError,
@@ -105,6 +106,8 @@ export function RemoteAccessSetting({
   >({});
   const [inventory, setInventory] = useState<Inventory | null>(null);
   const [state, setState] = useState<State>({ routes: [], reasons: {}, starting: false });
+  const stateNow = useRef(state);
+  stateNow.current = state;
   const [stateLoaded, setStateLoaded] = useState(false);
   // The way on screen, owned here. It is set when the owner picks a way and
   // when preparation starts for one. After that a catalog poll changes only
@@ -138,11 +141,10 @@ export function RemoteAccessSetting({
   // After Cancel: the host is turning it off, or could not confirm it is off.
   const [cancel, setCancel] = useState<"stopping" | "unconfirmed" | null>(null);
   // Automatic proof re-check. `rechecking` holds routes with a check under way;
-  // `recheckFailure` the code of one that failed; `rechecked` the proof windows
-  // already re-checked, so one window is checked once.
+  // `recheckFailure` the code of one that failed too often in a row, and the
+  // proof time it failed on: a later proof from the host clears it.
   const [rechecking, setRechecking] = useState<ReadonlySet<string>>(new Set());
-  const [recheckFailure, setRecheckFailure] = useState<Readonly<Record<string, string>>>({});
-  const [rechecked, setRechecked] = useState<ReadonlySet<string>>(new Set());
+  const [recheckFailure, setRecheckFailure] = useState<Readonly<Record<string, { code: string; observedAt: string | null }>>>({});
   // Routes the owner has moved past by choosing Turn on again or Turn off.
   const [acknowledged, setAcknowledged] = useState<ReadonlySet<string>>(new Set());
   // A stop the owner must confirm first: this page is open through the address being turned off.
@@ -357,6 +359,11 @@ export function RemoteAccessSetting({
   const unsupportedOf = (route: Route) => state.reasons[route.handle.id] === "proof_refresh_unsupported";
   // The route whose proof the app renews before its window ends: still verified
   // (or just past its window, with no check yet), not stopping, not given up on.
+  // A failure holds until the host reports a newer proof for the route.
+  const recheckFailedFor = (route: Route) => {
+    const failure = recheckFailure[route.handle.id];
+    return failure !== undefined && failure.observedAt === route.verification.observedAt;
+  };
   const recheckTarget = (() => {
     for (const route of state.routes) {
       const phase = phaseOf(route);
@@ -367,7 +374,7 @@ export function RemoteAccessSetting({
         route.cleanup.state !== "confirmed" &&
         !state.lifecycle?.stopRequested &&
         !unsupportedOf(route) &&
-        !(route.handle.id in recheckFailure) &&
+        !recheckFailedFor(route) &&
         !acknowledged.has(route.handle.id)
       ) {
         const until = route.verification.validUntil;
@@ -377,8 +384,7 @@ export function RemoteAccessSetting({
     }
     return null;
   })();
-  const recheckPending = (route: Route) =>
-    recheckTarget?.route.handle.id === route.handle.id && !rechecked.has(recheckTarget.key);
+  const recheckPending = (route: Route) => recheckTarget?.route.handle.id === route.handle.id;
   const recheckUnderWay = (route: Route) => rechecking.has(route.handle.id) || recheckPending(route);
   // While a re-check is pending or under way the status stays On: neither
   // "checking" nor "stale" reaches the owner.
@@ -389,7 +395,7 @@ export function RemoteAccessSetting({
   const attentionOf = (route: Route): Attention | null =>
     routeAttention(route, {
       lifecycleReason: state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.reason ?? null) : null,
-      recheckFailed: route.handle.id in recheckFailure,
+      recheckFailed: recheckFailedFor(route),
       acknowledged: acknowledged.has(route.handle.id),
       now: Date.now(),
       lifecyclePhase: phaseOf(route),
@@ -646,18 +652,12 @@ export function RemoteAccessSetting({
     }, "turn-off");
   }
   // Renews the proof before its window ends, with no click and no status change.
-  async function runRecheck(id: string, generation: number, key: string) {
-    setRechecked((current) => new Set(current).add(key));
+  async function runRecheck(id: string, generation: number): Promise<CheckOutcome> {
     setRechecking((current) => new Set(current).add(id));
-    const fail = (code: string) => setRecheckFailure((current) => ({ ...current, [id]: code }));
     try {
       const result = await request(`/routes/${encodeURIComponent(id)}/check`, { generation });
-      if (!result.ok) {
-        fail(result.code);
-        return;
-      }
+      if (!result.ok) return { ok: false, code: result.code };
       const checked = result.data as Route;
-      if (checked.verification.status !== "verified" || !checked.published) fail(publicError("verification_failed").code);
       // Same guard as a poll: a reply that an action or a newer poll has passed is dropped.
       const seq = ++loadSeq.current;
       const startedInEpoch = actionEpoch.current;
@@ -666,8 +666,10 @@ export function RemoteAccessSetting({
         appliedSeq.current = seq;
         setState(fresh.data as State);
       }
-    } catch {
-      fail(publicError("service_unreachable").code);
+      if (checked.verification.status !== "verified" || !checked.published) {
+        return { ok: false, code: publicError("verification_failed").code };
+      }
+      return { ok: true };
     } finally {
       setRechecking((current) => {
         const next = new Set(current);
@@ -676,22 +678,34 @@ export function RemoteAccessSetting({
       });
     }
   }
-  const recheckKey = recheckTarget && !rechecked.has(recheckTarget.key) ? recheckTarget.key : null;
-  // When the browser first saw each proof window, on its own clock. The delay
-  // counts from here, so a browser clock that differs from the server's changes
-  // nothing.
-  const proofSeenAt = useRef(new Map<string, number>());
-  // biome-ignore lint/correctness/useExhaustiveDependencies: one timer per proof window, keyed by `recheckKey`
+  // One loop for the page: each finished check schedules the next, and two
+  // failures in a row end it with a message for the owner.
+  const runRecheckRef = useRef(runRecheck);
+  runRecheckRef.current = runRecheck;
+  const recheckLoop = useRef<ReturnType<typeof createRecheckLoop> | null>(null);
+  if (recheckLoop.current === null) {
+    recheckLoop.current = createRecheckLoop({
+      run: (target) => runRecheckRef.current(target.id, target.generation),
+      giveUp: (id, code) => {
+        if (!mounted.current) return;
+        const route = stateNow.current.routes.find((item) => item.handle.id === id);
+        setRecheckFailure((current) => ({ ...current, [id]: { code, observedAt: route?.verification.observedAt ?? null } }));
+      },
+      now: () => Date.now(),
+      setTimer: (callback, ms) => setTimeout(callback, ms),
+      clearTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    });
+  }
+  useEffect(() => () => recheckLoop.current?.stop(), []);
+  const recheckId = recheckTarget && !busy ? recheckTarget.route.handle.id : null;
+  const recheckGeneration = recheckTarget?.route.handle.generation ?? 0;
+  const recheckWindow = recheckTarget?.key ?? "";
+  const recheckWait = recheckTarget?.delay ?? 0;
   useEffect(() => {
-    if (!recheckTarget || recheckKey === null || busy) return;
-    const { route, key, delay } = recheckTarget;
-    const seen = proofSeenAt.current.get(key) ?? Date.now();
-    proofSeenAt.current.set(key, seen);
-    const timer = setTimeout(() => {
-      void runRecheck(route.handle.id, route.handle.generation, key);
-    }, Math.max(0, seen + delay - Date.now()));
-    return () => clearTimeout(timer);
-  }, [recheckKey, recheckTarget?.delay, busy, request]);
+    recheckLoop.current?.track(
+      recheckId === null ? null : { id: recheckId, generation: recheckGeneration, key: recheckWindow, delay: recheckWait }
+    );
+  }, [recheckId, recheckGeneration, recheckWindow, recheckWait]);
 
   // `accepted` runs only once the host has accepted the stop. A refused stop
   // leaves the route where it was, still needing the owner and still re-checked.

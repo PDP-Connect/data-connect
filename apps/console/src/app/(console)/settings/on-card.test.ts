@@ -315,12 +315,15 @@ test("a re-check that fails becomes Needs your action with Turn on again", async
   await withScreen(handler, async ({ calls, tick, text, container }) => {
     await tick(21_000);
     assert.equal(checks(calls).length, 1);
+    assert.doesNotMatch(text(), /Needs your action/, "one failed check is tried again first");
+    await tick(4_000);
+    assert.equal(checks(calls).length, 2);
     assert.match(text(), /Needs your action/);
     assert.match(text(), /We can't confirm the address still works\. Turn it on again to get a fresh one\./);
     assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Turn on again"));
     assert.doesNotMatch(text(), /Turns off at|Next: connect/);
     await tick(60_000);
-    assert.equal(checks(calls).length, 1, "a failed route is not re-checked in a loop");
+    assert.equal(checks(calls).length, 2, "a failed route is not re-checked in a loop");
   }, t);
 });
 
@@ -331,7 +334,75 @@ test("a re-check that returns an unverified route is a failure too", async (t) =
   });
   await withScreen(handler, async ({ tick, text }) => {
     await tick(21_000);
+    await tick(4_000);
     assert.match(text(), /Needs your action/);
+  }, t);
+});
+
+// The packaged-app walk: two checks moved the proof window, the third came back verified with the
+// old window, and the page sent no more checks while the address still answered.
+test("checks go on while the address answers, even when a check does not move the proof window", async (t) => {
+  let route = routeAt();
+  let answered = 0;
+  const phaseNow = () => {
+    const until = route.verification.validUntil;
+    return "value" in until && Date.parse(until.value as string) > Date.now() ? "verified" : "stale";
+  };
+  const handler = host({
+    "/state": () => onState(route, phaseNow()),
+    "/routes/route-1/check": () => {
+      answered += 1;
+      if (answered <= 2) route = routeAt({ observedAt: Date.now(), validUntil: Date.now() + 30_000 });
+      return ok(route);
+    },
+  });
+  await withScreen(handler, async ({ calls, tick, text }) => {
+    for (let second = 0; second < 150; second += 1) await tick(1_000);
+    assert.ok(checks(calls).length >= 6, `checks kept going: ${checks(calls).length} in 150 s`);
+    assert.ok(checks(calls).length <= 15, `and not in a tight loop: ${checks(calls).length} in 150 s`);
+    assert.doesNotMatch(text(), /Needs your action|can't confirm/i);
+    assert.match(text(), /On/);
+  }, t);
+});
+
+test("one failed check does not end the checking: the next one answers and the card stays On", async (t) => {
+  let n = 0;
+  let route = routeAt();
+  const handler = host({
+    "/state": () => onState(route),
+    "/routes/route-1/check": () => {
+      n += 1;
+      if (n === 2) return fail("verification_failed");
+      route = routeAt({ observedAt: Date.now(), validUntil: Date.now() + 30_000 });
+      return ok(route);
+    },
+  });
+  await withScreen(handler, async ({ calls, tick, text }) => {
+    for (let second = 0; second < 120; second += 1) await tick(1_000);
+    assert.ok(checks(calls).length >= 4, `${checks(calls).length} checks in 120 s`);
+    assert.doesNotMatch(text(), /Needs your action|can't confirm/i);
+  }, t);
+});
+
+test("a give-up after failed checks clears when the host reports a newer proof", async (t) => {
+  let down = true;
+  let route = routeAt();
+  const handler = host({
+    "/state": () => onState(route),
+    "/routes/route-1/check": () => (down ? fail("verification_failed") : ok(route)),
+  });
+  await withScreen(handler, async ({ calls, tick, text }) => {
+    await tick(21_000);
+    await tick(4_000);
+    assert.match(text(), /Needs your action/);
+    const sent = checks(calls).length;
+    // The host's own watcher renews the proof.
+    down = false;
+    route = routeAt({ observedAt: Date.now(), validUntil: Date.now() + 30_000 });
+    await tick(3_000);
+    assert.doesNotMatch(text(), /Needs your action/);
+    await tick(25_000);
+    assert.ok(checks(calls).length > sent, "checking resumed");
   }, t);
 });
 
@@ -433,6 +504,8 @@ for (const skew of [120_000, -120_000]) {
       await tick(3_000);
       await tick(2_000);
       assert.equal(checks(calls).length, 1, "a stale report is checked promptly, whatever the browser clock says");
+      await tick(4_000);
+      assert.equal(checks(calls).length, 2, "a failed check is tried once more");
       assert.match(text(), /Needs your action/);
     }, t);
   });
@@ -484,7 +557,7 @@ for (const label of ["Turn on again", "Turn off"]) {
     let route = routeAt({ observedAt: T0 - 60_000, validUntil: T0 - 30_000 });
     const handler = host({
       "/state": () => stopAccepted ? offState : onState(route, phase),
-      "/routes/route-1/check": () => ok(routeAt()),
+      "/routes/route-1/check": () => fail("verification_failed"),
       "/routes/route-1/stop": () => {
         if (++stops === 1) return fail("service_unreachable");
         stopAccepted = true;
@@ -494,8 +567,9 @@ for (const label of ["Turn on again", "Turn off"]) {
     });
     await withScreen(handler, async ({ calls, press, tick, text, container }) => {
       await tick(3_000);
-      assert.equal(checks(calls).length, 1);
-      assert.match(text(), /Needs your action/, "the host still calls the proof stale after the check");
+      await tick(4_000);
+      assert.equal(checks(calls).length, 2);
+      assert.match(text(), /Needs your action/, "both checks failed");
       await press(new RegExp(`^${label}$`));
       assert.ok(calls.some((call) => call.url === "/routes/route-1/stop"));
       assert.match(text(), /Needs your action/);
