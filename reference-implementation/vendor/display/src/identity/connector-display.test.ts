@@ -24,8 +24,8 @@ test("a registry URL display name is a fallback", () => {
 test("a local-device binding display name is a fallback", () => {
   assert.equal(
     isFallbackConnectionLabel({
-      connectorId: "claude_code",
-      displayName: "local-device:laptop:claude_code",
+      connectorId: "claude-code",
+      displayName: "local-device:laptop:claude-code",
     }),
     true
   );
@@ -40,7 +40,7 @@ test("a label equal to the connector type name is a fallback", () => {
   assert.equal(isFallbackConnectionLabel({ connectorId: "gmail", displayName: "gmail" }), true);
   assert.equal(isFallbackConnectionLabel({ connectorId: "gmail", displayName: "Gmail" }), true);
   assert.equal(isFallbackConnectionLabel({ connectorId: "amazon", displayName: "Amazon", name: "Amazon" }), true);
-  assert.equal(isFallbackConnectionLabel({ connectorId: "claude_code", displayName: "Claude Code" }), true);
+  assert.equal(isFallbackConnectionLabel({ connectorId: "claude-code", displayName: "Claude Code" }), true);
 });
 
 test("an owner-meaningful label is not a fallback", () => {
@@ -90,7 +90,7 @@ test("deriveSourceDisplayNameFallback falls back to formatted connectorId when n
 test("deriveSourceDisplayNameFallback prioritizes manifest name over connectorId formatting", () => {
   assert.equal(
     deriveSourceDisplayNameFallback({
-      connectorId: "google_maps",
+      connectorId: "google-maps",
       name: "Google Maps",
     }),
     "Google Maps source"
