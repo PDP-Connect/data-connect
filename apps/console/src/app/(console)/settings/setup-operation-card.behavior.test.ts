@@ -334,6 +334,8 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
   const cases = [
     { name: "a step", props: { review: review(readableRoute), steps: [step] } },
     { name: "the route", props: { review: review({ ...readableRoute, retentionDays: 30, recurring: true }), steps: [] } },
+    { name: "a route list", props: { review: review([{ retentionDays: 30, recurring: true }]), steps: [] } },
+    { name: "a worded field", props: { review: review({ ...readableRoute, cost: { kind: "free", retentionDays: 30, recurring: true } }), steps: [] } },
   ]
   try {
     for (const { name, props } of cases) {
@@ -345,6 +347,7 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
       const text = shownText(container)
       assert.match(text, /Retention days/, `${name}: the raw key shows`)
       assert.match(text, /30/, `${name}: the raw value shows`)
+      assert.match(text, /Recurring/, `${name}: the second raw key shows`)
     }
   } finally {
     await act(async () => root.unmount())
