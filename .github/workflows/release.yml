@@ -159,8 +159,22 @@ jobs:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
 
+      # Windows pins sccache 0.16.0. With 0.19.0 the rustc command for sigstore 0.14
+      # carries 248 per-dependency `-L dependency=...\build\<crate>\out` arguments,
+      # 624 arguments and about 40,000 UTF-16 units in all (job 134658784389; the longest
+      # single argument is 249). sccache expands Cargo's @argfile and spawns rustc with
+      # the whole line, so CreateProcess fails with os error 206 (32,767 unit limit).
+      # Upstream: mozilla/sccache#2397; 0.14 and 0.16 are reported to work. Remove the
+      # pin when a fixed sccache ships. Linux and macOS keep the latest sccache.
       - name: Setup sccache
+        if: matrix.os_family != 'windows'
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - name: Setup sccache (Windows, pinned)
+        if: matrix.os_family == 'windows'
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
 
       - name: Stage Node.js runtime sidecar
         shell: bash
