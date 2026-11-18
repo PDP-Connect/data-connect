@@ -59,6 +59,12 @@ test("owner can discover profile support and read diagnostics through the real s
     assert.deepEqual(
       await supportResponse.json(),
       {
+        bindings: {
+          constraint_kinds: [],
+          features: [],
+          interface_versions: { browser: [1], filesystem: [1], network: [1] },
+          kinds: ["browser", "filesystem", "network"],
+        },
         compatible_protocol_versions: ["0.1.0", "0.2.0"],
         conformance: { outstanding: ["binding_authority"], status: "partial" },
         object: "collection_profile_support",

@@ -15,10 +15,33 @@ import {
   OBSERVATION_CAPABILITY,
   STREAM_EVIDENCE_CAPABILITY,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
+import { RUNTIME_BINDING_SUPPORT } from "./binding-declarations.ts";
 import { type DiagnosticDescriptors, ObservationContractError, validateDiagnosticDescriptors } from "./observations.ts";
+
+const sorted = <T>(values: Iterable<T>): readonly T[] => Object.freeze([...values].sort());
+
+/**
+ * What the runtime supplies for `runtime_requirements.bindings`, derived from
+ * `RUNTIME_BINDING_SUPPORT`, the set placement checks a manifest against. This
+ * is a view of that set and holds no list of its own, so the document served to
+ * the owner cannot disagree with what the runtime refuses or places.
+ */
+const BINDING_SUPPORT_DOCUMENT = Object.freeze({
+  constraint_kinds: sorted(RUNTIME_BINDING_SUPPORT.constraintKinds),
+  features: sorted(RUNTIME_BINDING_SUPPORT.features),
+  interface_versions: Object.freeze(
+    Object.fromEntries(
+      [...RUNTIME_BINDING_SUPPORT.interfaceVersions]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([kind, versions]) => [kind, sorted(versions)])
+    )
+  ),
+  kinds: sorted(RUNTIME_BINDING_SUPPORT.kinds),
+});
 
 /** Implemented wire features, with outstanding full-profile obligations disclosed. */
 export const REFERENCE_COLLECTION_PROFILE_SUPPORT = Object.freeze({
+  bindings: BINDING_SUPPORT_DOCUMENT,
   compatible_protocol_versions: Object.freeze([...COLLECTION_PROFILE_VERSIONS]),
   conformance: Object.freeze({ outstanding: Object.freeze(["binding_authority"]), status: "partial" }),
   protocol_capabilities: Object.freeze([OBSERVATION_CAPABILITY, STREAM_EVIDENCE_CAPABILITY]),
