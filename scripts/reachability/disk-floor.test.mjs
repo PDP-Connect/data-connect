@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fsPromises from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import {
 	LOCAL_DISK_FLOOR_ENV,
 	LOCAL_DISK_REASON_ENV,
@@ -33,21 +35,55 @@ test("a waived floor needs a reason, a sane value and stays below release", () =
 		true,
 	);
 });
-test("a waived floor still refuses when real free bytes are below it", async () => {
-	const quiet = process.stderr.write;
-	process.stderr.write = () => true;
-	try {
-		await assert.rejects(
-			requireDiskFloor({
-				[LOCAL_DISK_FLOOR_ENV]: "104999999999",
-				[LOCAL_DISK_REASON_ENV]: "r",
-			}),
-			{ code: "disk_floor" },
-		);
-	} finally {
-		process.stderr.write = quiet;
-	}
-});
+for (const { name, env, floor, waived } of [
+	{ name: "default", env: {}, floor: RELEASE_DISK_FLOOR_BYTES, waived: false },
+	{
+		name: "local waiver",
+		env: { [LOCAL_DISK_FLOOR_ENV]: "15000000000", [LOCAL_DISK_REASON_ENV]: "local test" },
+		floor: 15_000_000_000,
+		waived: true,
+	},
+]) {
+	test(`${name} checks measured bytes at the boundary without depending on host disk`, async (t) => {
+		let available = floor - 1;
+		const measurement = t.mock.method(fsPromises, "statfs", async () => ({
+			bavail: available,
+			bsize: 1,
+		}));
+		const lines = [];
+		const output = t.mock.method(process.stderr, "write", (line) => {
+			lines.push(String(line));
+			return true;
+		});
+		syncBuiltinESMExports();
+		try {
+			await assert.rejects(requireDiskFloor(env), { code: "disk_floor" });
+			available = floor;
+			assert.deepEqual(await requireDiskFloor(env), { available, floor, waived });
+			available = 2 * RELEASE_DISK_FLOOR_BYTES;
+			assert.deepEqual(await requireDiskFloor(env), { available, floor, waived });
+			assert.equal(measurement.mock.calls.length, 3);
+			if (waived) {
+				const records = lines.map((line) => JSON.parse(line));
+				assert.deepEqual(records.map((row) => row.availableBytes), [
+					floor - 1, floor, 2 * RELEASE_DISK_FLOOR_BYTES,
+				]);
+				for (const row of records) {
+					assert.equal(row.status, "DISK_PREFLIGHT_WAIVED");
+					assert.equal(row.waivedFloorBytes, floor);
+					assert.equal(row.releaseFloorBytes, RELEASE_DISK_FLOOR_BYTES);
+					assert.equal(row.reason, "local test");
+				}
+			} else {
+				assert.deepEqual(lines, []);
+			}
+		} finally {
+			measurement.mock.restore();
+			syncBuiltinESMExports();
+			output.mock.restore();
+		}
+	});
+}
 test("release and CI environments refuse the waiver", () => {
 	for (const marker of ["CI", "GITHUB_ACTIONS", "RELEASE", "SEMANTIC_RELEASE"])
 		assert.throws(
