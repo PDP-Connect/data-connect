@@ -68,6 +68,13 @@ pub(crate) fn keyring_service(base: &str) -> String {
     keyring_service_for(base, current())
 }
 
+/// An identifier that must not be shared with the installed app (a tray id,
+/// which names a file in the user's runtime directory): `base` unchanged
+/// without a profile, `<base>.<profile>` with one.
+pub(crate) fn scoped_id(base: &str) -> String {
+    keyring_service_for(base, current())
+}
+
 fn keyring_service_for(base: &str, profile: Option<&str>) -> String {
     match profile {
         Some(profile) => format!("{base}.{profile}"),

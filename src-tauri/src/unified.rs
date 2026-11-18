@@ -42,6 +42,14 @@ use tauri_plugin_notification::NotificationExt;
 pub(crate) const CONSOLE_WINDOW_LABEL: &str = "console";
 pub(crate) const RECOVERY_WINDOW_LABEL: &str = "recovery";
 const TRAY_ICON_ID: &str = "dataconnect-tray";
+
+/// The tray id names the icon file the desktop environment reads
+/// (`$XDG_RUNTIME_DIR/tray-icon/tray-icon-<id>-0.png`), and that directory is
+/// shared by every app of the user. A profile build gets its own id so it never
+/// rewrites or deletes the installed app's icon file.
+fn tray_icon_id() -> String {
+    crate::profile::scoped_id(TRAY_ICON_ID)
+}
 const DEFAULT_CONSOLE_URL: &str = "http://localhost:3001";
 /// How long one readiness ROUND waits before reporting the console as not
 /// yet answering. Reaching it is not a verdict that the console is broken
@@ -658,7 +666,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     crate::attach::init_keyring_service(&app.config().identifier);
     crate::attach::init_saved_attachment(&app.path().app_data_dir()?);
     let menu = build_tray_menu(app, UnifiedStatus::Starting)?;
-    let mut tray_builder = TrayIconBuilder::with_id(TRAY_ICON_ID)
+    let mut tray_builder = TrayIconBuilder::with_id(tray_icon_id())
         .menu(&menu)
         .tooltip(crate::profile::decorate("DataConnect"))
         .on_menu_event(handle_tray_menu_event);
@@ -5186,7 +5194,7 @@ fn set_status(app: &AppHandle, status: UnifiedStatus) {
         let mut state = state;
         *state = status;
     }
-    let Some(tray) = app.tray_by_id(TRAY_ICON_ID) else {
+    let Some(tray) = app.tray_by_id(&tray_icon_id()) else {
         return;
     };
     match build_tray_menu(app, status) {
