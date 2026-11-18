@@ -1022,7 +1022,7 @@ export function createSqliteSchedulerStore(): SchedulerStore {
         assertConnectorLifecycleAvailable(connectorLifecycleDataDir(), record.connector_id);
         try {
           return writeTransaction(() => {
-            exec(referenceQueries.connectorInstancesDeleteConnectorStateByInstance, [connectorInstanceId]);
+            exec(referenceQueries.controllerResetConnectorStateByInstance, [connectorInstanceId]);
             const result = exec(referenceQueries.controllerUpsertActiveRun, activeRunInsertParameters(record));
             if (result.changes === 0) throw new ActiveRunConflictRollback();
             return true;
@@ -1675,7 +1675,10 @@ export function createPostgresSchedulerStore(): SchedulerStore {
         assertConnectorLifecycleAvailable(connectorLifecycleDataDir(), record.connector_id);
         try {
           await withPostgresTransaction(async (client) => {
-            await client.query("DELETE FROM connector_state WHERE connector_instance_id = $1", [connectorInstanceId]);
+            await client.query(
+              "DELETE FROM connector_state WHERE connector_instance_id = $1 AND stream <> '$collection_scope'",
+              [connectorInstanceId]
+            );
             const result = await client.query(
               `INSERT INTO controller_active_runs(connector_instance_id, connector_id, run_id, trace_id, scenario_id, started_at, run_generation)
                VALUES($1, $2, $3, $4, $5, $6, $7)

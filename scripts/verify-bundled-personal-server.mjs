@@ -19,6 +19,7 @@ import {
 import { createInterface } from "node:readline"
 import { assertStagedConsoleConnectors } from "./check-staged-console-connectors.mjs"
 import { isMainModule } from "./is-main-module.js"
+import { MACOS_NODE_HELPER } from "./package-macos-node-helper.mjs"
 
 const REQUIRED_PATH_FRAGMENTS = [
   "connectors/lock.json",
@@ -153,7 +154,7 @@ function packagedEntryPath(entry, platform) {
 export function assertPackagedNode(entries, artifactName, platform) {
   const expectedPath = {
     linux: "usr/bin/pdpp-node",
-    macos: "contents/macos/pdpp-node",
+    macos: MACOS_NODE_HELPER.toLowerCase(),
     windows: "pdpp-node.exe",
   }[platform]
   if (!expectedPath) fail(`Unsupported Node sidecar platform: ${platform}`)
@@ -555,9 +556,9 @@ export function selectMacAppExecutables(
     )
   }
 
-  const nodeMatches = executableNames.filter(name => name === "pdpp-node")
+  const nodeMatches = executableNames.filter(name => name === MACOS_NODE_HELPER)
   if (nodeMatches.length !== 1) {
-    fail(`${artifactName} must contain exactly one pdpp-node sidecar`)
+    fail(`${artifactName} must contain exactly one background Node helper`)
   }
   if (declaredExecutable === "pdpp-node") {
     fail(`${artifactName} app executable must be distinct from pdpp-node`)
@@ -566,6 +567,21 @@ export function selectMacAppExecutables(
   return {
     appExecutable: declaredExecutable,
     nodeSidecar: nodeMatches[0],
+  }
+}
+
+export function assertMacNodeHelperInfo(info, artifactName) {
+  const expected = {
+    CFBundleExecutable: "DataConnect",
+    CFBundleIdentifier: "dev.dataconnect.node",
+    CFBundleName: "DataConnect",
+    CFBundleDisplayName: "DataConnect",
+    CFBundlePackageType: "APPL",
+    LSBackgroundOnly: true,
+  }
+  for (const [key, value] of Object.entries(expected)) {
+    if (info[key] !== value)
+      fail(`${artifactName} Node helper has invalid ${key}`)
   }
 }
 
@@ -639,6 +655,28 @@ function verifyMacApp(
   const declaredExecutable = readMacBundleExecutable(
     join(app, "Contents", "Info.plist")
   )
+  if (existsSync(join(executableDirectory, "pdpp-node"))) {
+    fail(`${artifactName} still carries a foreground Node sidecar`)
+  }
+  const helperStat = lstatSync(join(app, MACOS_NODE_HELPER))
+  if (!helperStat.isFile() || !(helperStat.mode & 0o111)) {
+    fail(
+      `${artifactName} Node helper must be a regular executable with execute permission`
+    )
+  }
+  assertMacNodeHelperInfo(
+    JSON.parse(
+      run("plutil", [
+        "-convert",
+        "json",
+        "-o",
+        "-",
+        join(app, dirname(MACOS_NODE_HELPER), "../Info.plist"),
+      ])
+    ),
+    artifactName
+  )
+  executableNames.push(MACOS_NODE_HELPER)
   const { appExecutable, nodeSidecar } = selectMacAppExecutables(
     executableNames,
     declaredExecutable,
@@ -647,7 +685,7 @@ function verifyMacApp(
 
   const binaries = [
     join(executableDirectory, appExecutable),
-    join(executableDirectory, nodeSidecar),
+    join(app, nodeSidecar),
     join(
       app,
       "Contents",
@@ -677,6 +715,63 @@ function verifyMacApp(
   }
 }
 
+// hdiutil fails transiently on GitHub's macOS runners: attach can exit with an
+// empty message, and detach can report "Resource busy" while the volume is
+// still in use. Each call gets three tries with a growing pause between them.
+// The last detach try adds -force, so a volume that stays busy is still
+// unmounted. When every try fails, the error carries each try's message.
+const HDIUTIL_ATTEMPTS = 3
+const HDIUTIL_RETRY_DELAY_MS = 1000
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
+}
+
+function runHdiutil(args, lastAttemptArgs, runCommand, pause) {
+  const failures = []
+  for (let attempt = 1; attempt <= HDIUTIL_ATTEMPTS; attempt += 1) {
+    const attemptArgs = attempt === HDIUTIL_ATTEMPTS ? lastAttemptArgs : args
+    try {
+      return runCommand("hdiutil", attemptArgs)
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error))
+      if (attempt < HDIUTIL_ATTEMPTS) pause(attempt * HDIUTIL_RETRY_DELAY_MS)
+    }
+  }
+  fail(
+    [
+      `hdiutil ${args[0]} failed after ${HDIUTIL_ATTEMPTS} attempts:`,
+      ...failures.map((message, index) => `  attempt ${index + 1}: ${message}`),
+    ].join("\n")
+  )
+}
+
+export function attachDmg(
+  dmgPath,
+  mountRoot,
+  runCommand = run,
+  pause = sleepSync
+) {
+  const args = [
+    "attach",
+    "-readonly",
+    "-nobrowse",
+    "-mountpoint",
+    mountRoot,
+    dmgPath,
+  ]
+  runHdiutil(args, args, runCommand, pause)
+}
+
+export function detachDmg(mountRoot, runCommand = run, pause = sleepSync) {
+  runHdiutil(
+    ["detach", mountRoot],
+    ["detach", "-force", mountRoot],
+    runCommand,
+    pause
+  )
+}
+
 function verifyMacArtifacts(
   bundleRoot,
   expectedArch,
@@ -703,14 +798,7 @@ function verifyMacArtifacts(
   )
   let attached = false
   try {
-    run("hdiutil", [
-      "attach",
-      "-readonly",
-      "-nobrowse",
-      "-mountpoint",
-      mountRoot,
-      dmgArtifacts[0],
-    ])
+    attachDmg(dmgArtifacts[0], mountRoot)
     attached = true
     const mountedApps = findAppBundles(mountRoot)
     if (mountedApps.length !== 1) {
@@ -724,7 +812,7 @@ function verifyMacArtifacts(
       verifyReferenceStacks
     )
   } finally {
-    if (attached) run("hdiutil", ["detach", mountRoot])
+    if (attached) detachDmg(mountRoot)
     rmSync(mountRoot, { recursive: true, force: true })
   }
 }

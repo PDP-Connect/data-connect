@@ -1,5 +1,6 @@
 {
   "kind": "request",
   "query": "connection_id=account-b",
-  "expected": "context.instance_mismatch"
+  "expected": "grant_instance_not_allowed",
+  "status": 403
 }

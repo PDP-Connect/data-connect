@@ -2289,7 +2289,13 @@ fn resolve_node_program_from(executable: &Path, path: Option<&OsStr>) -> Result<
     let executable_dir = executable
         .parent()
         .ok_or("DataConnect executable has no parent directory")?;
-    let bundled = executable_dir.join(BUNDLED_NODE_NAME);
+    let helper =
+        executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+    let bundled = if helper.is_file() {
+        helper
+    } else {
+        executable_dir.join(BUNDLED_NODE_NAME)
+    };
     if bundled.exists() {
         if !bundled.is_file() {
             return Err(format!(
@@ -5222,6 +5228,24 @@ setInterval(() => {}, 1000);
     }
 
     #[test]
+    fn prefers_background_node_helper_without_path() {
+        let ambient_node = PathBuf::from(resolve_node_program().unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("Contents/MacOS/dataconnect");
+        let executable_dir = executable.parent().unwrap();
+        let helper =
+            executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+        fs::create_dir_all(executable_dir).unwrap();
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        crate::test_executable::copy(&ambient_node, &helper);
+        fs::write(executable_dir.join(BUNDLED_NODE_NAME), "invalid old runtime").unwrap();
+        assert_eq!(
+            Path::new(&resolve_node_program_from(&executable, None).unwrap()),
+            helper
+        );
+    }
+
+    #[test]
     fn starts_connector_with_bundled_node_and_no_node_on_path() {
         let ambient_node = PathBuf::from(resolve_node_program().unwrap());
         let app_dir = tempfile::tempdir().unwrap();
@@ -5232,9 +5256,7 @@ setInterval(() => {}, 1000);
         });
         fs::write(&fake_app, b"fixture app").unwrap();
         let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
-        let staged_node = app_dir.path().join(format!(".{BUNDLED_NODE_NAME}.staged"));
-        fs::copy(&ambient_node, &staged_node).unwrap();
-        fs::rename(&staged_node, &bundled_node).unwrap();
+        crate::test_executable::copy(&ambient_node, &bundled_node);
 
         let resolved_node = resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
         assert_eq!(Path::new(&resolved_node), bundled_node);

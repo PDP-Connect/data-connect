@@ -18,6 +18,7 @@ import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { deriveDeviceAuditId } from "../lib/postgres-spine.ts";
 
 const REGEXP_1 = /Confirm each source/;
 const REGEXP_2 = /Reference-experimental batch consent/;
@@ -73,7 +74,7 @@ function countConsentEvents(deviceCode: string, eventType: string): number {
       .prepare(
         "SELECT COUNT(*) AS count FROM spine_events WHERE object_id = ? AND object_type = 'pending_consent' AND event_type = ?"
       )
-      .get(deviceCode, eventType) as { count: number }
+      .get(deriveDeviceAuditId(deviceCode), eventType) as { count: number }
   ).count;
 }
 
@@ -515,7 +516,7 @@ test("batch consent gate: suppressed approve-all cannot silently approve every s
 
 test("batch consent gate: sensitive source with no time bound suppresses approve-all", async () => {
   await withHarness(async ({ asUrl, spotify, reddit }) => {
-    await registerManifest(asUrl, { ...spotify, sensitivity: "sensitive" });
+    await registerManifest(asUrl, { ...spotify, sensitivity: "sensitive", version: "sensitive" });
     const body = unwrapBody(
       await par(asUrl, [
         detail({ id: spotify.connector_id, kind: "connector" }, [{ name: "top_artists" }], {
@@ -535,7 +536,7 @@ test("batch consent gate: three sensitive sources suppress approve-all", async (
   await withHarness(async ({ asUrl, spotify, reddit, github }) => {
     for (const manifest of [spotify, reddit, github]) {
       // biome-ignore lint/performance/noAwaitInLoops: Sequential test setup and assertion order is intentional.
-      await registerManifest(asUrl, { ...manifest, sensitivity: "sensitive" });
+      await registerManifest(asUrl, { ...manifest, sensitivity: "sensitive", version: "sensitive" });
     }
     const body = unwrapBody(
       await par(asUrl, [

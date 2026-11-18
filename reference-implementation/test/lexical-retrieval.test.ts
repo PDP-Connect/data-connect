@@ -1073,6 +1073,7 @@ test("a current manifest without a granted stream returns typed not found on eve
     const currentManifest = {
       ...REDDITISH_MANIFEST_A,
       streams: REDDITISH_MANIFEST_A.streams.filter((stream) => stream.name !== "posts"),
+      version: "without-posts",
     };
     const updated = await fetch(`${asUrl}/connectors`, {
       body: JSON.stringify(currentManifest),

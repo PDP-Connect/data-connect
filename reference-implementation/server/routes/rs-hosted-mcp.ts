@@ -291,7 +291,7 @@ export function mountRsHostedMcp(app: AppLike, ctx: MountRsHostedMcpContext): vo
       if (typeof metadataUrl === "string" && metadataUrl) {
         res.setHeader(
           "WWW-Authenticate",
-          `Bearer error="invalid_token", resource_metadata="${metadataUrl.replace(/["\\]/g, "\\$&")}"`
+          `Bearer resource_metadata="${metadataUrl.replace(/["\\]/g, "\\$&")}", error="invalid_token"`
         );
       }
       ctx.pdppError(res, 401, "authentication_error", "Grant package is revoked or has no active members");

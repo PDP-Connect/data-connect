@@ -3,4 +3,5 @@ DELETE FROM semantic_search_blob
 WHERE connector_id = ?
   AND connector_instance_id = ?
   AND record_key = ?
-  AND scope_key LIKE ?
+  AND scope_key COLLATE BINARY >= ?
+  AND scope_key COLLATE BINARY < ?

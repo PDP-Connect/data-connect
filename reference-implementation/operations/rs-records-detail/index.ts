@@ -36,7 +36,7 @@
  *   - response writing.
  */
 
-import { normalizeProjectionFields, projectRecordEnvelope } from "../read-projection.ts";
+import { normalizeProjectionFields, projectRecordEnvelope, withOwnerRequiredFields } from "../read-projection.ts";
 
 export interface RecordDetailSourceDescriptor {
   id: string;
@@ -55,7 +55,7 @@ export type RecordDetailActor =
 
 export interface RecordDetailManifestStream {
   name: string;
-  schema?: { properties?: Record<string, unknown> };
+  schema?: { properties?: Record<string, unknown>; required?: string[] };
   [extra: string]: unknown;
 }
 
@@ -214,7 +214,11 @@ export async function executeRecordDetail(
 
   const record = projectRecordEnvelope(
     dependencies.decorateRecord(rawRecord),
-    normalizeProjectionFields(expandOptions.fields)
+    withOwnerRequiredFields(
+      normalizeProjectionFields(expandOptions.fields),
+      input.actor.kind,
+      manifestStream?.schema?.required
+    )
   );
 
   return {

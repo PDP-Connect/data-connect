@@ -72,7 +72,11 @@ import {
   synthesizeConnectorVerdict,
   type ManifestStreamLike as VerdictManifestStreamLike,
 } from "../runtime/connector-verdict-input.ts";
-import type { BrowserSurfaceRuntimeInventorySnapshot, BrowserSurfaceRuntimeManagement } from "../runtime/controller.ts";
+import type {
+  BrowserSurfaceRuntimeInventorySnapshot,
+  BrowserSurfaceRuntimeManagement,
+  ConnectorImplementationState,
+} from "../runtime/controller.ts";
 import type { ConnectionCoverageHorizon } from "../runtime/coverage-horizon.ts";
 import {
   type ClassifiedRunForOwnerState,
@@ -540,6 +544,11 @@ export interface RuntimeCollectionFact {
   readonly covered: number | null;
   readonly pending_detail_gaps: number;
   /**
+   * Permanent (`retryable: false`) source-loss gaps. Accounted but never hydrated and
+   * never recoverable: they are NOT part of `pending_detail_gaps`. Omitted when zero.
+   */
+  readonly permanent_detail_gaps?: number;
+  /**
    * Whether the run's declared collection boundary was actually enforceable on
    * this stream. `false` marks a stream collected WHOLE under a bounded run —
    * it holds real data but proves nothing about the declared region, so it must
@@ -655,6 +664,8 @@ export interface PendingDetailGapSummary {
   readonly last_error?: unknown;
   readonly next_attempt_after?: unknown;
   readonly reason?: unknown;
+  /** `false` = permanent source loss; excluded from every recovery-derived field. */
+  readonly retryable?: unknown;
   readonly source?: unknown;
   readonly status?: unknown;
   readonly stream?: unknown;
@@ -718,6 +729,8 @@ export interface ConnectorDetailGapStoreLike {
   listPendingGaps: (input: {
     connectorId: string;
     connectorInstanceId?: string;
+    /** Read-only inspection of permanent (`retryable: false`) rows; never feeds scheduling. */
+    includeNonRetryable?: boolean;
     limit?: number;
     now?: string;
   }) => Promise<readonly PendingDetailGapSummary[]> | readonly PendingDetailGapSummary[];
@@ -772,6 +785,10 @@ interface ScheduleLike {
 
 export interface ControllerLike {
   getBrowserSurfaceRuntimeAllocatorScopeId?: () => string | null;
+  /** See `Controller.inspectConnectorImplementations` in runtime/controller.ts. */
+  inspectConnectorImplementations?: (
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ) => Promise<ReadonlyMap<string, ConnectorImplementationState>>;
   getBrowserSurfaceRuntimeManagement?: (connectorId: string) => BrowserSurfaceRuntimeManagement;
   getSchedule?: (connectorId: string) => Promise<unknown>;
   /**
@@ -849,6 +866,11 @@ export interface AcquisitionCoverageSummary {
   readonly recent_batches: readonly AcquisitionBatchSummary[];
 }
 
+export interface ConnectorImplementationSummary {
+  readonly connector_id: string;
+  readonly state: ConnectorImplementationState | "unknown";
+}
+
 export interface ConnectorSummary {
   /**
    * Owner/control-plane acquisition evidence. This is how manual exports,
@@ -872,6 +894,17 @@ export interface ConnectorSummary {
   readonly connection_id: string;
   readonly connector_display_name: string;
   readonly connector_id: string;
+  /**
+   * Whether this server has an implementation to run this connection's
+   * connector, from `Controller.inspectConnectorImplementations`. `state:
+   * "not_installed"` is the condition in which a run is refused with
+   * `connector_not_installed`; `connector_id` is the bare key the owner
+   * install route (`POST /v1/owner/connector-install/update`) accepts. `null`
+   * for local-device connections (they never run through the controller) and
+   * when the controller cannot answer; `state: "unknown"` when the lookup
+   * failed. Presence only: install bytes are verified when a run starts.
+   */
+  readonly connector_implementation: ConnectorImplementationSummary | null;
   readonly connector_instance_id: string;
   /**
    * Provider coverage-horizon/provenance disclosures for this connection —
@@ -1889,7 +1922,12 @@ async function getConnectorDetailGapProjection(
     let gaps: readonly PendingDetailGapSummary[];
     if (connectorInstanceId) {
       gaps = await Promise.resolve(
-        store.listPendingGaps({ connectorId, connectorInstanceId, limit: DETAIL_GAP_PROJECTION_LIMIT })
+        store.listPendingGaps({
+          connectorId,
+          connectorInstanceId,
+          includeNonRetryable: true,
+          limit: DETAIL_GAP_PROJECTION_LIMIT,
+        })
       );
     } else if (typeof store.listPendingGapsForConnector === "function") {
       gaps = await Promise.resolve(
@@ -1898,7 +1936,9 @@ async function getConnectorDetailGapProjection(
         })
       );
     } else {
-      gaps = await Promise.resolve(store.listPendingGaps({ connectorId, limit: DETAIL_GAP_PROJECTION_LIMIT }));
+      gaps = await Promise.resolve(
+        store.listPendingGaps({ connectorId, includeNonRetryable: true, limit: DETAIL_GAP_PROJECTION_LIMIT })
+      );
     }
     return {
       gaps,
@@ -3703,7 +3743,11 @@ function resolveEffectiveStreamFacts(input: {
     // two independent monotonicity guards).
     factByStream.set(stream, {
       evidenceAsOf: record.evidenceAsOf,
-      fact: { ...record.fact, pending_detail_gaps: 0 },
+      fact: {
+        ...record.fact,
+        pending_detail_gaps: 0,
+        ...(record.fact.permanent_detail_gaps ? { permanent_detail_gaps: 0 } : {}),
+      },
       runId: record.runId,
       source: "stored",
     });
@@ -3927,6 +3971,7 @@ interface IndexedCollectionReportInputs {
   readonly localCoverageConditionByStream: ReadonlyMap<string, CoverageAxis>;
   readonly manifestByStream: ReadonlyMap<string, ManifestStream>;
   readonly pendingGapCountByStream: ReadonlyMap<string, number>;
+  readonly permanentGapCountByStream: ReadonlyMap<string, number>;
   readonly pendingGapReadHitLimit: boolean;
   readonly requiredCoverageEvidenceAuthoritative: boolean;
   readonly terminalGapCountByStream: ReadonlyMap<string, number>;
@@ -3961,6 +4006,7 @@ function indexCollectionReportInputs(input: {
       ? Math.floor(input.pendingDetailGapsReadLimit)
       : null;
   const pendingGapCountByStream = pendingDetailGapCountsByStream(pendingDetailGaps);
+  const permanentGapCountByStream = pendingDetailGapCountsByStream(pendingDetailGaps, true);
   const terminalGapCountByStream = input.terminalDetailGapsByStream ?? new Map<string, number>();
   return {
     factByStream,
@@ -3971,11 +4017,13 @@ function indexCollectionReportInputs(input: {
       ...manifestByStream.keys(),
       ...factByStream.keys(),
       ...pendingGapCountByStream.keys(),
+      ...permanentGapCountByStream.keys(),
       ...terminalGapCountByStream.keys(),
     ]),
     localCoverageConditionByStream: localCoverageConditionsByStream(input.localCoverage, manifestByStream),
     manifestByStream,
     pendingGapCountByStream,
+    permanentGapCountByStream,
     pendingGapReadHitLimit: pendingReadLimit !== null && pendingDetailGaps.length >= pendingReadLimit,
     requiredCoverageEvidenceAuthoritative: input.requiredCoverageEvidenceAuthoritative !== false,
     terminalGapCountByStream,
@@ -3997,6 +4045,7 @@ function buildCollectionReportEntry(input: {
   readonly stream: string;
   readonly factByStream: ReadonlyMap<string, EffectiveStreamFact>;
   readonly pendingGapCountByStream: ReadonlyMap<string, number>;
+  readonly permanentGapCountByStream: ReadonlyMap<string, number>;
   readonly terminalGapCountByStream: ReadonlyMap<string, number>;
   readonly unfillableAccountedByStream: ReadonlyMap<string, boolean>;
   readonly pendingGapReadHitLimit: boolean;
@@ -4070,6 +4119,7 @@ function deriveCollectionReportEntryCoverage(input: {
   readonly stream: string;
   readonly factByStream: ReadonlyMap<string, EffectiveStreamFact>;
   readonly pendingGapCountByStream: ReadonlyMap<string, number>;
+  readonly permanentGapCountByStream: ReadonlyMap<string, number>;
   readonly terminalGapCountByStream: ReadonlyMap<string, number>;
   readonly unfillableAccountedByStream: ReadonlyMap<string, boolean>;
   readonly manifestByStream: ReadonlyMap<string, ManifestStream>;
@@ -4087,9 +4137,14 @@ function deriveCollectionReportEntryCoverage(input: {
     skipped: null,
     stream: input.stream,
   };
+  const permanentGaps = Math.max(
+    baseFact.permanent_detail_gaps ?? 0,
+    input.permanentGapCountByStream.get(input.stream) ?? 0
+  );
   const fact: RuntimeCollectionFact = {
     ...baseFact,
     pending_detail_gaps: Math.max(baseFact.pending_detail_gaps, input.pendingGapCountByStream.get(input.stream) ?? 0),
+    ...(permanentGaps > 0 ? { permanent_detail_gaps: permanentGaps } : {}),
   };
   const manifestStream = input.manifestByStream.get(input.stream);
   const effectiveFact = applyStateStreamCheckpointInheritance({
@@ -4100,7 +4155,7 @@ function deriveCollectionReportEntryCoverage(input: {
     parentFacts: input.factByStream,
   });
   const localCoverageCondition =
-    !hasRuntimeFact && effectiveFact.pending_detail_gaps === 0
+    !hasRuntimeFact && effectiveFact.pending_detail_gaps === 0 && permanentGaps === 0
       ? input.localCoverageConditionByStream.get(input.stream)
       : null;
   const terminalDetailGaps = input.terminalGapCountByStream.get(input.stream) ?? 0;
@@ -4446,10 +4501,21 @@ function isLocalCollectorRunnerGap(gap: PendingDetailGapSummary): boolean {
   return stream.startsWith("local-collector/") || stream.startsWith("local_collector/");
 }
 
-function pendingDetailGapCountsByStream(gaps: readonly PendingDetailGapSummary[]): Map<string, number> {
+/**
+ * Per-stream pending gap counts. `permanent` selects the explicit-false
+ * (`retryable: false`) rows; the default counts only recoverable pending gaps so a
+ * permanent loss never reads as retryable work.
+ */
+function pendingDetailGapCountsByStream(
+  gaps: readonly PendingDetailGapSummary[],
+  permanent = false
+): Map<string, number> {
   const counts = new Map<string, number>();
   for (const gap of gaps) {
     if (!gap || typeof gap !== "object" || Array.isArray(gap) || gap.status !== "pending") {
+      continue;
+    }
+    if ((gap.retryable === false) !== permanent) {
       continue;
     }
     // B9: a collector-runner condition is not a data stream. Excluded here so it
@@ -6419,6 +6485,12 @@ function refreshConnectorSummariesCache(
 // path, so the two cannot drift.
 interface ConnectorSummaryProjectionDeps {
   readonly activeRunsByInstanceId: ReadonlyMap<string, ActiveRunRecord>;
+  /**
+   * Which registered connectors the controller can run, read ONCE per
+   * projection pass (see `readConnectorImplementationStates`), never per row.
+   * Feeds `ConnectorSummary.connector_implementation`.
+   */
+  readonly connectorImplementationStates: ReadonlyMap<string, ConnectorImplementationState> | "failed" | null;
   readonly controller?: ControllerLike | null | undefined;
   /**
    * The maintained connector-summary evidence row per connection, read AFTER
@@ -6763,6 +6835,8 @@ interface ConnectorSummarySynthesisInput {
   readonly attention: Awaited<ReturnType<typeof getConnectorAttentionProjection>>;
   readonly collectionRate: Awaited<ReturnType<typeof readLatestCollectionRateForRun>>;
   readonly connectorId: string;
+  /** Pre-resolved by the caller; see `ConnectorSummary.connector_implementation`. */
+  readonly connectorImplementation: ConnectorImplementationSummary | null;
   readonly connectorInstanceId: string;
   /**
    * Provider coverage-horizon/provenance disclosures for this connection,
@@ -7205,6 +7279,7 @@ function synthesizeConnectorSummary(input: ConnectorSummarySynthesisInput): Conn
     connection_id: connectorInstanceId,
     connector_display_name: connectorDisplayName,
     connector_id: connectorId,
+    connector_implementation: input.connectorImplementation,
     connector_instance_id: connectorInstanceId,
     // Read from `ConnectorCoverageHorizonStore` by the caller
     // (`projectConnectorSummaryForInstance`/`loadPageProductEvidence`) and
@@ -7722,6 +7797,44 @@ function deriveCredentialEvidence(
   return { capable: true, present, rejected };
 }
 
+/**
+ * Ask the controller, once per projection pass, which connectors it has an
+ * implementation to run. `null` when the controller lacks the seam (test
+ * doubles, older wiring): the field is then absent evidence. A failed lookup
+ * yields `"failed"`, which every row reports as `state: "unknown"` rather than
+ * failing the page or claiming the connector is missing.
+ */
+async function readConnectorImplementationStates(
+  controller: ControllerLike | null | undefined,
+  connectorRows: readonly { readonly connector_id: string }[],
+  manifestsByConnectorId: ReadonlyMap<string, ConnectorManifest>
+): Promise<ReadonlyMap<string, ConnectorImplementationState> | "failed" | null> {
+  if (!controller?.inspectConnectorImplementations) {
+    return null;
+  }
+  try {
+    return await controller.inspectConnectorImplementations(
+      connectorRows.map((row) => {
+        const manifest = manifestsByConnectorId.get(row.connector_id);
+        return manifest ? { connectorId: row.connector_id, manifest } : { connectorId: row.connector_id };
+      })
+    );
+  } catch {
+    return "failed";
+  }
+}
+
+function connectorImplementationForSummary(
+  states: ReadonlyMap<string, ConnectorImplementationState> | "failed" | null,
+  connectorId: string
+): ConnectorImplementationSummary | null {
+  if (states === null) {
+    return null;
+  }
+  const state = states === "failed" ? undefined : states.get(connectorId);
+  return { connector_id: connectorId, state: state ?? "unknown" };
+}
+
 // Project one configured connection into its summary, or `null` when the
 // connection is not a public reference connector / has no registered manifest.
 // This is the single source of truth for a connection-summary item: both
@@ -7950,12 +8063,16 @@ async function projectConnectorSummaryForInstance(
           deps.latestRunFactsJsonByRunIdentity.get(runFactsCacheKey(lastRun.run_id, connectorInstanceId)) ?? null
         )
       : null;
+  const connectorImplementation = localDeviceBacked
+    ? null
+    : connectorImplementationForSummary(deps.connectorImplementationStates, connectorId);
   return synthesizeConnectorSummary({
     acquisitionCoverage,
     activeRun,
     attention,
     collectionRate,
     connectorId,
+    connectorImplementation,
     connectorInstanceId,
     coverageHorizons,
     credential,
@@ -8292,12 +8409,14 @@ async function loadConnectorSummaryProjectionDeps(
   // three full-table reads inside every loop iteration (3N -> 3). This path runs on
   // every records-dashboard poll, so the saved reads compound under the active-run
   // poll cadence.
-  const [sharedBrowserSurfaceReader, runtimeInventory] = await Promise.all([
+  const [sharedBrowserSurfaceReader, runtimeInventory, connectorImplementationStates] = await Promise.all([
     loadSharedBrowserSurfaceReader(),
     readBrowserSurfaceRuntimeInventory(controller),
+    readConnectorImplementationStates(controller, connectorRows, manifestsByConnectorId),
   ]);
   return {
     activeRunsByInstanceId,
+    connectorImplementationStates,
     controller,
     evidenceByInstanceId,
     evidenceReadFailed,
@@ -9483,6 +9602,7 @@ function pendingGapToRecoveryRow(gap: PendingDetailGapSummary, connectorId: stri
     last_attempt_at: typeof gap.last_attempt_at === "string" ? gap.last_attempt_at : null,
     next_attempt_after: typeof gap.next_attempt_after === "string" ? gap.next_attempt_after : null,
     reason: typeof gap.reason === "string" ? gap.reason : null,
+    ...(typeof gap.retryable === "boolean" ? { retryable: gap.retryable } : {}),
     status: typeof gap.status === "string" ? gap.status : null,
     stream: typeof gap.stream === "string" ? gap.stream : null,
     updated_at: typeof gap.updated_at === "string" ? gap.updated_at : null,
@@ -9510,6 +9630,7 @@ async function buildOwnerConnectionDiagnosticsRecovery(
       store.listPendingGaps({
         connectorId,
         connectorInstanceId,
+        includeNonRetryable: true,
         limit: RECOVERY_DIAGNOSTICS_READ_LIMIT,
         now: "9999-12-31T23:59:59.999Z",
       })

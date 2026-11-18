@@ -10,16 +10,22 @@
  * public-URL remote-access posture, and a blocked-IPC error banner leaking
  * onto Settings. It asserts on the rendered page, not on component internals.
  *
- * Target a running console with:
- *   E2E_BASE_URL=http://127.0.0.1:PORT E2E_OWNER_PASSWORD=... npm run test:e2e
- *
- * See e2e/README.md for how to find the port and password for a given
- * console instance.
+ * Run npm run test:e2e to start a disposable console. See e2e/README.md.
  */
 import { expect, test } from "@playwright/test"
 
 const BASE_URL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:1421"
 const OWNER_PASSWORD = process.env.E2E_OWNER_PASSWORD ?? ""
+
+// The hermetic harness (E2E_HARNESS_NONCE) runs in a private network namespace
+// against an empty vault. /sources/add loads the Sigstore-verified catalog from
+// ghcr.io on each request (reference-implementation/server/connector-install/
+// index.ts), so it returns 500 there. Skip only the checks that need either.
+const HERMETIC = Boolean(process.env.E2E_HARNESS_NONCE)
+const CATALOG_REASON =
+  "needs the signed connector catalog from ghcr.io, unreachable in the hermetic network namespace"
+const RECORDS_REASON =
+  "needs records: the hermetic vault is empty and its Explore page renders only the empty state"
 
 const CONNECTOR_ROW_FLOOR = 20
 const MIN_SVG_ROW_PROPORTION = 0.5
@@ -28,21 +34,31 @@ const LOADING_OR_SKELETON_TEXT = /\b(?:Loading(?:…|\.\.\.)|Skeleton)\b/i
 const OWNER_SURFACES: readonly {
   path: string
   labels: readonly RegExp[]
+  // Controls the empty-vault render lacks (no sort, no facets, no search hint
+  // text), so the hermetic run, which has no records, cannot assert them.
+  labelsNeedingRecords?: readonly RegExp[]
 }[] = [
   {
     path: "/",
-    labels: [/\bWhere you stand\b/i, /\bSource attention\b/i, /\bNotifications\b/i],
+    labels: [
+      /\bWhere you stand\b/i,
+      /\bSource attention\b/i,
+      /\bNotifications\b/i,
+    ],
   },
   { path: "/connect", labels: [/\bConnect apps\b/i] },
   {
     path: "/sources",
-    labels: [/\bSources\b/i, /\bNo sources yet\b|\brecords?\b[\s\S]*\bstreams?\b/i],
+    labels: [
+      /\bSources\b/i,
+      /\bNo sources yet\b|\brecords?\b[\s\S]*\bstreams?\b/i,
+    ],
   },
   { path: "/sources/add", labels: [/\bAdd source\b/i] },
   {
     path: "/explore",
-    labels: [
-      /\bExplore\b/i,
+    labels: [/\bExplore\b/i],
+    labelsNeedingRecords: [
       /Search or filter|Search records|text across every searchable stream|\boperators\b.*\bcon:/i,
       /\bFilters\b/i,
       /\bnewest\b.*\boldest\b/i,
@@ -75,11 +91,7 @@ async function loginAsOwner(
   page: import("@playwright/test").Page
 ): Promise<void> {
   if (!OWNER_PASSWORD) {
-    throw new Error(
-      "E2E_OWNER_PASSWORD is not set. Pass the console's actual owner password " +
-        "(not necessarily the contents of ~/.tmp/unified-owner-password - that file can be stale for a " +
-        "given running instance; read PDPP_OWNER_PASSWORD from the target process's environment if unsure)."
-    )
+    throw new Error("Run npm run test:e2e to start a disposable console.")
   }
   await page.goto(`${BASE_URL}/owner/login?return_to=%2F`)
   await page.getByLabel("Owner password").fill(OWNER_PASSWORD)
@@ -103,6 +115,13 @@ test("owner routes render resolved labels instead of login or skeleton shells", 
   await loginAsOwner(page)
 
   for (const surface of OWNER_SURFACES) {
+    if (HERMETIC && surface.path === "/sources/add") {
+      test.info().annotations.push({
+        type: "skipped surface",
+        description: `${surface.path} ${CATALOG_REASON}`,
+      })
+      continue
+    }
     await page.goto(`${BASE_URL}${surface.path}`, { waitUntil: "networkidle" })
 
     const url = new URL(page.url())
@@ -111,13 +130,27 @@ test("owner routes render resolved labels instead of login or skeleton shells", 
       `${surface.path} must not redirect an authenticated owner to login`
     ).not.toContain("/owner/login")
 
-    const text = (await page.locator("main").innerText()).replace(/\s+/g, " ").trim()
-    expect(text, `${surface.path} must render visible owner content`).not.toBe("")
+    const text = (await page.locator("main").innerText())
+      .replace(/\s+/g, " ")
+      .trim()
+    expect(text, `${surface.path} must render visible owner content`).not.toBe(
+      ""
+    )
     expect(text, `${surface.path} must render resolved content`).not.toMatch(
       LOADING_OR_SKELETON_TEXT
     )
 
-    for (const label of surface.labels) {
+    const needsRecords = surface.labelsNeedingRecords ?? []
+    if (HERMETIC && needsRecords.length) {
+      test.info().annotations.push({
+        type: "skipped labels",
+        description: `${surface.path} ${RECORDS_REASON}`,
+      })
+    }
+    for (const label of [
+      ...surface.labels,
+      ...(HERMETIC ? [] : needsRecords),
+    ]) {
       expect(text, `${surface.path} must render ${label}`).toMatch(label)
     }
   }
@@ -126,6 +159,7 @@ test("owner routes render resolved labels instead of login or skeleton shells", 
 test("sources/add renders many connectors, not the empty-catalog regression", async ({
   page,
 }) => {
+  test.skip(HERMETIC, CATALOG_REASON)
   await loginAsOwner(page)
   await page.goto(`${BASE_URL}/sources/add`, { waitUntil: "networkidle" })
 

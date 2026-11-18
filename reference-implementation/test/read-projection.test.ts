@@ -21,6 +21,8 @@
  *     - null/empty fields => identity (returns the SAME object reference);
  *     - when record.data is a plain object, projects INSIDE record.data and
  *       preserves the outer envelope keys;
+ *     - a tombstone (object "record", deleted true, no data) is returned
+ *       unchanged (spec-core §4 "Tombstones");
  *     - otherwise projects the top-level record;
  *     - only own-enumerable keys that actually exist are copied (no undefined
  *       holes; prototype keys are never leaked).

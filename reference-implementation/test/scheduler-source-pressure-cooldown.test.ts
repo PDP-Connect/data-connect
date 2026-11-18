@@ -173,6 +173,75 @@ test("mixed gaps count only the pressure-reason subset", () => {
 
 // ─── next_attempt_after floor ─────────────────────────────────────────────
 
+test("an explicit retryable:false pressure-reason gap is permanent loss, not pressure", () => {
+  const permanent = {
+    attemptCount: 9,
+    lastPressureAt: "1970-01-01T00:00:20.000Z",
+    nextAttemptAfter: null,
+    reason: "rate_limited",
+    retryable: false,
+  } satisfies PendingPressureGap;
+  const decision = computeSourcePressureCooldown([permanent], 1_000, 0);
+  assert.equal(decision.pendingPressureGapCount, 0);
+  assert.equal(decision.maxAttemptCount, 0);
+  assert.equal(decision.cooldownApplied, false);
+  assert.equal(decision.identity, null);
+  assert.equal(decision.effectiveIntervalMs, 1_000);
+  assert.equal(decision.nextRunAt, "1970-01-01T00:00:01.000Z");
+  assert.equal(decision.recommendedHealthState, null);
+});
+
+test("mixed retryable true and false gaps count and anchor only the true gap", () => {
+  const retryable = {
+    attemptCount: 2,
+    lastPressureAt: "1970-01-01T00:00:00.500Z",
+    nextAttemptAfter: null,
+    reason: "upstream_pressure",
+    retryable: true,
+  } satisfies PendingPressureGap;
+  const permanent = {
+    attemptCount: 9,
+    lastPressureAt: "1970-01-01T00:00:20.000Z",
+    nextAttemptAfter: null,
+    reason: "rate_limited",
+    retryable: false,
+  } satisfies PendingPressureGap;
+  const mixed = computeSourcePressureCooldown([retryable, permanent], 1_000, 0);
+  const onlyRetryable = computeSourcePressureCooldown([retryable], 1_000, 0);
+  assert.deepEqual(mixed, onlyRetryable);
+  assert.equal(mixed.pendingPressureGapCount, 1);
+  assert.equal(mixed.maxAttemptCount, 2);
+  assert.equal(mixed.cooldownApplied, true);
+  assert.equal(mixed.effectiveIntervalMs, 4_000);
+  assert.equal(mixed.nextRunAt, "1970-01-01T00:00:04.500Z");
+  assert.equal(mixed.identity, "source_pressure:upstream_pressure:gaps=1:attempt=2");
+  assert.equal(mixed.recommendedHealthState, "cooling_off");
+});
+
+test("null and absent retryable keep the legacy pressure behaviour", () => {
+  const absent = {
+    attemptCount: 0,
+    lastPressureAt: null,
+    nextAttemptAfter: null,
+    reason: "rate_limited",
+  } satisfies PendingPressureGap;
+  const explicitNull = {
+    attemptCount: 0,
+    lastPressureAt: null,
+    nextAttemptAfter: null,
+    reason: "rate_limited",
+    retryable: null,
+  } satisfies PendingPressureGap;
+  const absentDecision = computeSourcePressureCooldown([absent], 1_000, 0);
+  const nullDecision = computeSourcePressureCooldown([explicitNull], 1_000, 0);
+  assert.deepEqual(nullDecision, absentDecision);
+  assert.equal(absentDecision.pendingPressureGapCount, 1);
+  assert.equal(absentDecision.cooldownApplied, true);
+  assert.equal(absentDecision.identity, "source_pressure:rate_limited:gaps=1:attempt=0");
+  assert.equal(absentDecision.effectiveIntervalMs, 1_000);
+  assert.equal(absentDecision.nextRunAt, "1970-01-01T00:00:01.000Z");
+});
+
 test("an explicit next_attempt_after later than the computed cooldown is honoured as the floor", () => {
   const farFuture = new Date(T0 + BASE_INTERVAL_MS * 100).toISOString();
   const decision = computeSourcePressureCooldown(

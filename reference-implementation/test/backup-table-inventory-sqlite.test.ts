@@ -24,6 +24,7 @@ import {
   SQLITE_POSTGRES_ONLY_STORAGE_TABLES,
 } from "../server/backup-table-policy.ts";
 import { closeDb, getDb, initDb } from "../server/db.ts";
+import { ISSUANCE_CUTOVER_VERSION, migrateSqliteIssuanceCutover } from "../server/issuance-cutover.ts";
 
 function sorted(values: Iterable<string>): string[] {
   return [...values].sort((a, b) => a.localeCompare(b));
@@ -108,6 +109,23 @@ test("SQLite stopped backup preserves every required durable table", () => {
   try {
     initDb(sourcePath);
     const source = getDb();
+    migrateSqliteIssuanceCutover(source);
+    source
+      .prepare(
+        `INSERT INTO as_issuance_cohort(kind, row_id, version, original_expires_at, enrollment)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("grant", "backup_inventory_cutover_grant", ISSUANCE_CUTOVER_VERSION, "2031-01-02T03:04:05.000Z", "cutover");
+    const cutoverMarker = sqliteQueryRows(
+      sourcePath,
+      `SELECT version || '|' || completed_at FROM as_issuance_cutover WHERE version = '${ISSUANCE_CUTOVER_VERSION}'`
+    );
+    const cutoverCohort = sqliteQueryRows(
+      sourcePath,
+      "SELECT kind || '|' || row_id || '|' || version || '|' || original_expires_at || '|' || enrollment FROM as_issuance_cohort WHERE row_id = 'backup_inventory_cutover_grant'"
+    );
+    assert.equal(cutoverMarker.length, 1, "cutover marker fixture must be initialized");
+    assert.equal(cutoverCohort.length, 1, "cohort fixture must be initialized");
     source.prepare("INSERT INTO connectors(connector_id, manifest) VALUES (?, ?)").run("connector_backup", "{}");
     source
       .prepare(
@@ -191,6 +209,20 @@ test("SQLite stopped backup preserves every required durable table", () => {
     assert.equal(sqliteQueryRows(backupPath, "SELECT COUNT(*) FROM source_webhook_run_receipts")[0], "1");
     assert.equal(sqliteQueryRows(backupPath, "SELECT COUNT(*) FROM record_rejections")[0], "1");
     assert.equal(sqliteQueryRows(backupPath, "SELECT pending_payload_bytes FROM record_rejection_quota")[0], "7");
+    assert.deepEqual(
+      sqliteQueryRows(
+        backupPath,
+        `SELECT version || '|' || completed_at FROM as_issuance_cutover WHERE version = '${ISSUANCE_CUTOVER_VERSION}'`
+      ),
+      cutoverMarker
+    );
+    assert.deepEqual(
+      sqliteQueryRows(
+        backupPath,
+        "SELECT kind || '|' || row_id || '|' || version || '|' || original_expires_at || '|' || enrollment FROM as_issuance_cohort WHERE row_id = 'backup_inventory_cutover_grant'"
+      ),
+      cutoverCohort
+    );
   } finally {
     closeDb();
     rmSync(dir, { force: true, recursive: true });

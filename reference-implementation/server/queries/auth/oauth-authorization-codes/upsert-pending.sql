@@ -18,3 +18,4 @@ ON CONFLICT(device_code) DO UPDATE SET
   expires_at = excluded.expires_at,
   issued_at = NULL,
   consumed_at = NULL
+WHERE oauth_authorization_codes.status NOT IN ('issued', 'consumed')

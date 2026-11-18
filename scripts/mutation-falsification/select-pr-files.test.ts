@@ -130,6 +130,27 @@ describe("classifyForCohort", () => {
     ).toEqual({ selected: false, reason: "deleted" })
   })
 
+  it("excludes generated sources, whose authored source is their generator", () => {
+    // The drift test pins a generated file to a fresh regeneration byte for
+    // byte, so an instrumented copy fails it in the baseline (PR #141).
+    expect(
+      classifyForCohort(
+        {
+          status: "M",
+          path: "reference-implementation/server/generated/connector-registry.generated.ts",
+        },
+        referenceCohort
+      )
+    ).toEqual({ selected: false, reason: "generated_source" })
+    // A name that merely contains the word is still authored code.
+    expect(
+      classifyForCohort(
+        { status: "M", path: "reference-implementation/server/generated-ids.ts" },
+        referenceCohort
+      )
+    ).toEqual({ selected: true })
+  })
+
   it("excludes non-source files and declaration files", () => {
     expect(classifyForCohort({ status: "M", path: "src/styles.css" }, clientCohort)).toEqual({
       selected: false,
@@ -386,6 +407,23 @@ describe("selectCohortTests", () => {
       "R100\0reference-implementation/test/old.test.ts\0reference-implementation/test/new.test.ts\0"
     )
     expect(selectCohortTests(diff, referenceCohort)).toEqual(["test/new.test.ts"])
+  })
+
+  it("selects only executable test files, never fixtures or helpers under test/", () => {
+    // PR #141 touched child-process fixtures under `test/fixtures/`. They are
+    // not tests: each exits non-zero when started without the arguments its
+    // parent test passes. Selected because they sat under `test/`, three of
+    // them ran as tests and rejected the baseline.
+    const diff = parseNameStatusZ(
+      "M\0reference-implementation/test/fixtures/device-ingest-failstop-server.ts\0" +
+        "M\0reference-implementation/test/helpers/legacy-upgrade.ts\0" +
+        "M\0reference-implementation/test/device-ingest.test.ts\0" +
+        "A\0reference-implementation/test/seam-spike/seam.conformance.test.ts\0"
+    )
+    expect(selectCohortTests(diff, referenceCohort)).toEqual([
+      "test/device-ingest.test.ts",
+      "test/seam-spike/seam.conformance.test.ts",
+    ])
   })
 
   it("omits a deleted test, which cannot be run", () => {

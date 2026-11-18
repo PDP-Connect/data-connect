@@ -18,6 +18,7 @@ import {
   describeInteractionStatLabel,
   describeProgressStatLabel,
   describeTerminalRunStatus,
+  resolveRunConnectionId,
 } from "./run-detail-labels.ts";
 
 test("assistance progress posture never leaks the raw snake_case value", () => {
@@ -60,4 +61,63 @@ test("stat-card row labels are Title Case, not the raw field name", () => {
   assert.equal(describeProgressStatLabel("skipped"), "Skipped items");
   assert.equal(describeInteractionStatLabel("required"), "Required");
   assert.equal(describeInteractionStatLabel("completed"), "Completed");
+});
+
+test("run status connection id wins over legacy aliases and event ids", () => {
+  assert.equal(
+    resolveRunConnectionId({ connection_id: "cin_status", connector_instance_id: "cin_legacy" }, [
+      { data: { connection_id: "cin_event" } },
+    ]),
+    "cin_status"
+  );
+  assert.equal(
+    resolveRunConnectionId({ connector_instance_id: "cin_status_legacy" }, [{ data: { connection_id: "cin_event" } }]),
+    "cin_status_legacy"
+  );
+});
+
+test("event fallback uses the first valid id and prefers its canonical field", () => {
+  assert.equal(
+    resolveRunConnectionId(null, [
+      { data: { message: "started" } },
+      { data: { connection_id: "cin_first", connector_instance_id: "cin_alias" } },
+      { data: { connection_id: "cin_later" } },
+    ]),
+    "cin_first"
+  );
+  assert.equal(
+    resolveRunConnectionId({}, [
+      { data: { connector_instance_id: "cin_legacy" } },
+      { data: { connection_id: "cin_later" } },
+    ]),
+    "cin_legacy"
+  );
+});
+
+test("invalid ids are skipped without treating a connector as a connection", () => {
+  for (const invalid of [undefined, null, 42, false, {}, [], "", "  "]) {
+    assert.equal(
+      resolveRunConnectionId({ connection_id: invalid }, [
+        { data: { connection_id: invalid } },
+        { data: { connector_instance_id: "cin_fallback" } },
+      ]),
+      "cin_fallback"
+    );
+  }
+  assert.equal(resolveRunConnectionId({ connection_id: "", connector_instance_id: "cin_alias" }, []), "cin_alias");
+  assert.equal(resolveRunConnectionId(null, []), null);
+  assert.equal(
+    resolveRunConnectionId({ connector_id: "chatgpt" }, [
+      {},
+      { data: null },
+      { data: [] },
+      { data: "cin_not_a_record" },
+      { data: { actor_id: "chatgpt", connector_id: "chatgpt" } },
+    ]),
+    null
+  );
+});
+
+test("connection ids remain opaque strings, with surrounding whitespace removed", () => {
+  assert.equal(resolveRunConnectionId({ connection_id: "  cin/a ?#%  " }, []), "cin/a ?#%");
 });

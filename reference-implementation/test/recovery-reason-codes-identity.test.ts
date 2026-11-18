@@ -27,6 +27,7 @@ test("recovery reason consumers share the authoritative pressure set", () => {
     ...INFORMATIONAL_RECOVERY_REASONS,
     "retry_exhausted",
     "run_cap_deferred",
+    "source_unrepresentable",
     "temporary_unavailable",
   ]);
   assert.deepStrictEqual(

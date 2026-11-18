@@ -4924,6 +4924,7 @@ rl.on('line', (line) => {
         reason: "temporary_unavailable",
         record_key: "i1",
         retryable: true,
+        status: "pending",
         stream: "other_items",
         type: "DETAIL_GAP",
       },

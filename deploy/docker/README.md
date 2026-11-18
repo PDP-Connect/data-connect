@@ -57,14 +57,20 @@ docker build --target core \
 
 ## Quickstart
 
+The commands below pin `core:0.7.62`, the newest published Core image.
+`core:latest` does not exist yet: so far only prerelease images are published,
+and `:latest` moves only on a stable release. After the first stable release
+this guide switches to `core:latest`.
+
 ```sh
 docker run -d --name pdpp --restart unless-stopped \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
   -p 127.0.0.1:7662:3000 \
   -e PDPP_BIND_HOST=127.0.0.1 \
   -e PDPP_REFERENCE_ORIGIN=http://localhost:7662 \
   -e PDPP_TRUSTED_HOSTS=localhost,127.0.0.1 \
   -v pdpp_data:/var/lib/pdpp \
-  ghcr.io/pdp-connect/data-connect/core:latest && docker logs -f pdpp
+  ghcr.io/pdp-connect/data-connect/core:0.7.62 && docker logs -f pdpp
 ```
 
 The command keeps the container running in the background and follows its logs
@@ -105,12 +111,13 @@ origin and allow it as a trusted host when you start Core:
 ```sh
 export TUNNEL_HOST=your-subdomain.example-tunnel.com
 docker run -d --name pdpp --restart unless-stopped \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=5 \
   -p 127.0.0.1:7662:3000 \
   -e PDPP_BIND_HOST=0.0.0.0 \
   -e PDPP_REFERENCE_ORIGIN="https://${TUNNEL_HOST}" \
   -e PDPP_TRUSTED_HOSTS="localhost,127.0.0.1,${TUNNEL_HOST}" \
   -v pdpp_data:/var/lib/pdpp \
-  ghcr.io/pdp-connect/data-connect/core:latest
+  ghcr.io/pdp-connect/data-connect/core:0.7.62
 ```
 
 If the container already exists, recreate it with the same volume and updated
@@ -122,41 +129,25 @@ address above; do not publish the container port directly.
 [`docker-compose.yml`](./docker-compose.yml) runs one Core application service
 plus Postgres with pgvector. No repository clone required:
 
+Download the Compose file, example configuration, and secret helper into an empty directory. OpenSSL and Docker Compose are required.
+
 ```sh
 mkdir pdpp && cd pdpp
-curl -fsSLO https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/docker-compose.yml
+for file in docker-compose.yml .env.example generate-secrets.sh; do
+  curl -fsSLO "https://raw.githubusercontent.com/PDP-Connect/data-connect/main/deploy/docker/$file"
+done
 umask 077
-PDPP_CREDENTIAL_ENCRYPTION_KEY="$(openssl rand -hex 32)"
-printf 'PDPP_CREDENTIAL_ENCRYPTION_KEY=%s\n' "$PDPP_CREDENTIAL_ENCRYPTION_KEY" > .env
-echo PDPP_CORE_IMAGE=ghcr.io/pdp-connect/data-connect/core:latest >> .env
-docker compose up -d && printf '\nPDPP is running at http://localhost:7662/\nOpen /setup and use the one-time setup token from: docker compose logs core\n\n'
+cp .env.example .env
+bash generate-secrets.sh --write .env
+docker compose --env-file .env pull
+docker compose --env-file .env up -d
 ```
 
-The encryption key is saved but never printed. With no
-`PDPP_OWNER_PASSWORD`, the hosted instance boots locked; open
-`http://localhost:7662/setup` and use the one-time setup token from
-`docker compose logs core` to choose the owner password. For scripted
-deployments, add an owner password to `.env` before starting the stack:
+The helper fills the credential encryption key and Postgres password without printing their values. It preserves any value already set. Both values are used by `docker-compose.yml`; the credential encryption key is required for Core to boot. The Postgres password otherwise defaults to `pdpp`, so generate it before starting a production node. Keep `.env` with your backups and out of version control.
 
-```sh
-printf 'PDPP_OWNER_PASSWORD=%s\n' "$(openssl rand -base64 24)" >> .env
-```
+Leave `PDPP_OWNER_PASSWORD` empty to claim the node at `http://localhost:7662/setup` with the one-time setup token from `docker compose --env-file .env logs core`. Set an owner password in `.env` before starting if you manage that secret separately. A nonempty value bypasses the setup wizard.
 
-The compose file refuses to boot until the credential encryption key exists in
-`.env`; it seals any connector credentials you store. Keep `.env` with your
-backups. `PDPP_OWNER_PASSWORD` is optional: set it for scripted deployments or
-leave it unset to claim the install at `/setup`.
-
-Configuration knobs (all optional, set in `.env`):
-
-```sh
-PDPP_REFERENCE_ORIGIN=https://pdpp.example.com  # public origin; default http://localhost:7662
-PDPP_BIND_HOST=127.0.0.1                        # default; use 0.0.0.0 for hosted public-origin setup
-PDPP_TRUSTED_HOSTS=localhost,127.0.0.1          # include your tunnel or reverse-proxy host
-PDPP_WEB_PORT=7662                              # host port mapped to container port 3000
-PDPP_POSTGRES_PASSWORD=...                      # change if you ever publish Postgres
-PDPP_EMBEDDING_DOWNLOAD_ALLOWED=0               # opt out of semantic search model download
-```
+For a local port other than 7662, set `PDPP_WEB_PORT` and `PDPP_REFERENCE_ORIGIN` to the same host port in `.env`. The optional variables in `.env.example` are all read by this Compose file. For public access, configure HTTPS and the trusted host as described below.
 
 For a public tunnel or reverse proxy, set `PDPP_REFERENCE_ORIGIN` to its HTTPS
 origin and add its hostname to `PDPP_TRUSTED_HOSTS`. Keep
@@ -186,9 +177,39 @@ advanced deployment-wide headless/minimal path. n.eko remains optional and
 headed: when configured, the runtime attaches to its remote CDP browser.
 `reference` and `reference-browser` remain split-runtime compatibility images.
 
+The image installs Chromium into `/opt/patchright-browsers` and sets
+`PLAYWRIGHT_BROWSERS_PATH` to match; do not set that variable in the
+deployment. If a deployment sets it to a path without the Chromium revision the
+bundled Patchright expects, connectors use `/opt/patchright-browsers` instead
+and the server logs one warning. If neither path has it, the server logs an
+error at startup naming the path and revision.
+
 Serve a real domain through your HTTPS reverse proxy (Caddy, Traefik, nginx)
 pointed at the Core port, and set `PDPP_REFERENCE_ORIGIN` to that domain so
 owner-session cookies and OAuth metadata are correct.
+
+## Logs
+
+Docker keeps a container's output in a log file that is never rotated unless
+you ask for rotation. Every command and Compose file in this repository asks
+for it: the `json-file` driver, rotated at 10 MiB across 5 files (50 MiB per
+container). The Neko allocator applies the same limit to the browser
+containers it creates, and the canary deploy script applies it to the
+replacement container it starts.
+
+- Keep `--log-driver json-file --log-opt max-size=10m --log-opt max-file=5` on
+  any `docker run` you write yourself, or `logging:` on your own Compose
+  services. Use a different driver or larger limits only if you have chosen a
+  bound for them; leaving the options out means no limit.
+- The limit applies when a container is created. A container that already
+  exists keeps the logging it was created with, so an existing node keeps
+  growing its log until you recreate it. Recreating is an outage and
+  needs your approval; `docker compose up -d` does it for Compose services
+  whose configuration changed, and the upgrade command above does it for the
+  quickstart container. A Docker daemon default in `/etc/docker/daemon.json`
+  also covers only containers created after it takes effect.
+- Check a container with
+  `docker inspect --format '{{json .HostConfig.LogConfig}}' pdpp`.
 
 ## Verification
 
@@ -213,17 +234,20 @@ runtime diagnostics surface (`GET /_ref/deployment`).
   files and first-boot state live in `pdpp-data`, and secrets live in `.env`.
   Back up all three together.
 
-Upgrade by pulling and recreating; volumes persist:
+Upgrade by pulling a newer tag and recreating; volumes persist. Replace
+`<version>` with the newer release tag here and in your `docker run` command.
+For Compose, set `PDPP_CORE_IMAGE` in `.env` first:
 
 ```sh
-docker pull ghcr.io/pdp-connect/data-connect/core:latest && docker rm -f pdpp && <your docker run>
+docker pull ghcr.io/pdp-connect/data-connect/core:<version> && docker rm -f pdpp && <your docker run>
 # or, compose:
 docker compose pull && docker compose up -d
 ```
 
-`:latest` is the released channel: it moves only when a release succeeds, and
-it always resolves to the same image as that release's own version tag. Prefer
-it for a node you want to keep current.
+`:latest` is the released channel: it moves only when a stable release
+succeeds, and it always resolves to the same image as that release's own
+version tag. It does not exist until the first stable release; after that,
+prefer it for a node you want to keep current.
 
 For a reproducible deployment — pinning a known-good build, or reproducing a
 bug against one exact image — name an immutable tag instead. Both the release

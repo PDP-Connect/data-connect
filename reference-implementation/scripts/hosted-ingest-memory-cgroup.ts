@@ -22,6 +22,7 @@ import { issueOwnerToken } from "../server/auth.ts";
 import { closeDb } from "../server/db.ts";
 import { HOSTED_INGEST_MAX_REQUEST_BYTES } from "../server/hosted-ingest-limits.ts";
 import { startServer } from "../server/index.ts";
+import { BOUNDED_LOG_RUN_ARGS } from "./canary/container-spec.ts";
 
 const CONNECTOR_ID = "memory-oracle";
 const STREAM = "items";
@@ -348,6 +349,7 @@ async function runParent(): Promise<void> {
       "-d",
       "--name",
       name,
+      ...BOUNDED_LOG_RUN_ARGS,
       "--memory",
       memoryLimit(),
       "--memory-swap",

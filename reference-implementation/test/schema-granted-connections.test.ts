@@ -751,6 +751,7 @@ test("client schema and stream metadata remain a closed resolved-grant projectio
       assert.ok(approved.token, JSON.stringify(approved));
 
       const changedManifest = structuredClone(baseManifest) as Record<string, unknown>;
+      changedManifest.version = "2";
       const [changedStream] = changedManifest.streams as Record<string, unknown>[];
       assert.ok(changedStream);
       const changedSchema = changedStream.schema as Record<string, unknown>;
@@ -835,6 +836,7 @@ test("client relationship metadata checks has_many foreign keys against the rela
   await withHttpHarness(
     async ({ asUrl, rsUrl }) => {
       const manifest = structuredClone(baseManifest) as Record<string, unknown>;
+      manifest.version = "2";
       const [parent] = manifest.streams as Record<string, unknown>[];
       assert.ok(parent);
       parent.relationships = [

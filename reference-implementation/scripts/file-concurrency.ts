@@ -4,7 +4,7 @@
 /**
  * How many test files the gate runs at once: a per-profile cap, clamped by
  * available CPUs and by the number of selected files, never below 1. A
- * positive explicit override wins and is not clamped. The override arrives
+ * positive explicit override is subject to the same safety caps. The override arrives
  * already parsed with `Number.parseInt` in run-tests.ts (so `1.5` is 1 and
  * `abc` is NaN); non-positive or NaN falls back to the profile default, which
  * is then clamped by CPUs and file count.
@@ -24,13 +24,15 @@ export interface FileConcurrencyInput {
 }
 
 /**
- * Per-profile ceiling before the clamps. `postgres` stays at 2: that lane's
- * restore target is shared across files. The measurement behind 8 is in
- * reference-implementation/docs/gate-concurrency.md.
+ * Per-profile ceiling before the clamps. Both profiles cap at 8. Postgres was
+ * held at 2 while files shared one restore database and one test dropped every
+ * test database on the cluster; the runner now owns a restore database per
+ * file and each run can use its own cluster (`npm run test:postgres`). The
+ * measurements are in reference-implementation/docs/gate-concurrency.md.
  */
 const PROFILE_CAPS: Record<TestProfile, number> = {
   "memory-default": 8,
-  postgres: 2,
+  postgres: 8,
 };
 
 /** Cap for a profile, exposed so callers can report the policy they ran under. */
@@ -41,10 +43,8 @@ export function fileConcurrencyCap(profile: TestProfile): number {
 export function resolveFileConcurrency(input: FileConcurrencyInput): number {
   const { availableCpus, profile, requestedConcurrency, selectedFileCount } = input;
 
-  // An explicit positive override is authoritative and unclamped.
-  if (Number.isInteger(requestedConcurrency) && requestedConcurrency > 0) {
-    return requestedConcurrency;
-  }
-
-  return Math.max(1, Math.min(PROFILE_CAPS[profile], availableCpus ?? 1, selectedFileCount || 1));
+  const requested = Number.isSafeInteger(requestedConcurrency) && requestedConcurrency > 0
+    ? requestedConcurrency
+    : PROFILE_CAPS[profile];
+  return Math.max(1, Math.min(requested, PROFILE_CAPS[profile], availableCpus ?? 1, selectedFileCount || 1));
 }

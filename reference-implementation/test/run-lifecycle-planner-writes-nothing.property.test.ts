@@ -37,7 +37,7 @@ import test from "node:test";
 test("run lifecycle: the planner writes nothing", async (t) => {
   await t.test(
     "dispatch eligibility performs no durable write in any run state",
-    { todo: "requires the planner/executor split (D4)" },
+    { skip: "requires the planner/executor split (D4)" },
     () => {
       // Instrument the storage layer and assert zero writes -- do not infer
       // from absence of observable change.
@@ -46,7 +46,7 @@ test("run lifecycle: the planner writes nothing", async (t) => {
 
   await t.test(
     "dispatch eligibility acquires no connector-instance write lock",
-    { todo: "requires the planner/executor split" },
+    { skip: "requires the planner/executor split" },
     () => {
       // The lock acquisition IS the defect: contention on the per-instance
       // mutex with a 2s wait budget turned committed batches into retryable
@@ -56,7 +56,7 @@ test("run lifecycle: the planner writes nothing", async (t) => {
 
   await t.test(
     "the guard holds for a run owned by a foreign epoch",
-    { todo: "requires durable admission state, not an in-process Set" },
+    { skip: "requires durable admission state, not an in-process Set" },
     () => {
       // Start a run under epoch A; evaluate dispatch from a process holding
       // epoch B with an empty activeRuns Set. Today this probes and writes.
@@ -65,7 +65,7 @@ test("run lifecycle: the planner writes nothing", async (t) => {
 
   await t.test(
     "planner-written skip records are never read as run outcomes",
-    { todo: "requires the owner module to exclude dispatch outcomes" },
+    { skip: "requires the owner module to exclude dispatch outcomes" },
     () => {
       // The scheduler writes `status:"skipped"` rows to run_history
       // (scheduler.ts:432). Those are dispatch outcomes, not run states. The

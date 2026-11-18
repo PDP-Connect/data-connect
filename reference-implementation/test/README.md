@@ -1,0 +1,194 @@
+# Reference implementation tests
+
+Run the hosted MCP existing-client compatibility gate from a fresh shell with:
+
+```sh
+npm --prefix reference-implementation run test:mcp-existing-client-gate
+```
+
+The gate starts the real reference AS and RS, obtains a client token and a
+two-child MCP package token through the hosted OAuth flows, then replays
+initialize, tool and resource discovery, schema, search, fetch, query, aggregate,
+and bounded field reads over HTTP. It checks nested structured output, model
+visible text, search evidence, search-to-fetch identity, pagination, annotations,
+legacy `connection_id` handles, record resource URIs, Unicode, large bounded
+reads, error results, and empty search. `content[]` text behavior is pinned to
+the base: summaries stay non-empty, and any base JSON mirror must remain a JSON
+mirror of `structuredContent`.
+Package-token selection may become explicit only when `tools/list` also offers
+`list_package_children` and every data tool requires `grant_id`; the gate
+discovers ids from that tool's result. The runner rejects every skipped or TODO
+scenario unless its title names the explicit P2 or P4 identity-lane dependency,
+and prints those pending scenarios.
+
+The package resource scenario replays every record and field-window URI captured
+on the base and compares its text and MIME type with the captured content. An
+unchanged advertised resource contract is valid on any revision. When the
+candidate advertises grant-scoped templates, the gate expands those templates
+using its child discovery output, verifies matching-child reads, and rejects
+wrong-child reads. Only a reported `ambiguous_legacy_resource_uri` refusal backed
+by independently seeded membership and multiple discovered children, with
+`isError: true` and no contents, is permitted. This fixture seeds exactly one
+package child per connection, so candidate-discovered duplicate membership
+cannot justify ambiguity. Removed
+templates or resource read support (B1) and broken stored content remain failures.
+Client-token resource discovery must remain equal to base.
+
+The comparator mutation scenario first accepts synthetic unchanged and selected
+observations, then removes templates, removes read support, changes old-URI
+content, breaks a selected read and falsely claims ambiguity. Each mutation must
+throw. These are comparator checks, not production-server mutation runs. Run
+them with the gate command above; full server mutations require the same fixture
+replayed against a deliberately changed candidate.
+
+## Canonical local MCP host
+
+The gate connects through the server's canonical advertised localhost URL.
+The explicit SDK resource-selection scenario accepts
+`http://localhost:PORT/mcp` and rejects a client configured at
+`http://127.0.0.1:PORT/mcp` when metadata advertises localhost. The two hosts are
+not OAuth resource aliases. Do not introduce Host-based resource aliases to
+make the latter pass; a future policy change must update this visible scenario.
+
+The committed golden contract was generated from
+`3282ac2f5e4687419bf391c2294d2118dd63fd7c`. One narrow baseline exception removes
+`next_step` and `resource_metadata` from the client `unknown_stream` error shapes:
+[PR #450](https://github.com/PDP-Connect/data-connect/pull/450)
+(`827f8281cfa54d31a3d4c64f7e336200ea4902f7`) changed an ungranted stream denial
+from 401 to Core's 403 `grant_stream_not_allowed`; `pdppError` adds those fields
+only to 401 responses. The generator refuses to run from another revision.
+To refresh deliberately, first check out the gate revision so
+the generator and helper exist, then apply the gate to a detached worktree at
+the exact integration base and run the copied generator there:
+
+```sh
+export GATE_SOURCE="$HOME/.tmp/wt-g0"
+export BASE_WORKTREE="$HOME/.tmp/wt-g0-contract-base"
+git -C "$GATE_SOURCE" worktree add --detach "$BASE_WORKTREE" 3282ac2f5e4687419bf391c2294d2118dd63fd7c
+"$GATE_SOURCE/reference-implementation/test/scripts/apply-mcp-existing-client-gate.sh" "$BASE_WORKTREE"
+npm --prefix "$BASE_WORKTREE/reference-implementation" run refresh:mcp-existing-client-contract
+cp "$BASE_WORKTREE/reference-implementation/test/fixtures/mcp-existing-client-contract.json" \
+  "$GATE_SOURCE/reference-implementation/test/fixtures/mcp-existing-client-contract.json"
+```
+
+Review the fixture diff. A commit that updates this contract must include a
+commit-body line beginning `Contract update justification:` that explains why
+the existing-client contract has changed.
+
+To run this gate on any candidate worktree, check out this gate revision first,
+then use its apply script. The script copies the five gate test files, shared
+helper, seeder, runner, fixture and test README, then adds the npm script. It
+does not commit candidate changes.
+
+```sh
+export GATE_SOURCE="$HOME/.tmp/wt-g0"
+export CANDIDATE_WORKTREE="$HOME/.tmp/wt-candidate"
+"$GATE_SOURCE/reference-implementation/test/scripts/apply-mcp-existing-client-gate.sh" "$CANDIDATE_WORKTREE"
+npm --prefix "$CANDIDATE_WORKTREE/reference-implementation" run test:mcp-existing-client-gate
+```
+
+## Audience migration gate (waiting for identity-lane P2)
+
+The P2→P3→P7 permanent-token scenario is marked TODO and skipped until the
+identity lane has a worktree to run it against. It models the production
+census: a non-expiring `mcp_package` token with no refresh family, its active
+package children, non-expiring per-child Core `client` tokens with
+`package_id = NULL`, and a non-expiring client token with no refresh family.
+Audience semantics are checked through MCP replay and HTTP acceptance/refusal,
+not a persisted audience-column name. The seeder performs no audience-column
+write; it uses OAuth issuance. The scenario checks that package and MCP client
+audiences resolve to
+`/mcp`, child Core tokens resolve to the RS base audience and fail at `/mcp`,
+undecidable legacy rows are dual-accepted and counted, and package MCP calls
+continue after P7 retires the child tokens.
+
+Run one migration boundary from its matching worktree. Export absolute paths
+before using them:
+
+```sh
+export MCP_AUDIENCE_MIGRATION_WORKTREE="$HOME/.tmp/wt-identity-p2"
+export MCP_AUDIENCE_MIGRATION_BASE_WORKTREE="$HOME/.tmp/wt-g0-base"
+export MCP_AUDIENCE_MIGRATION_STAGE=P2
+npm --prefix "$MCP_AUDIENCE_MIGRATION_WORKTREE/reference-implementation" run test:mcp-audience-migration
+```
+
+`MCP_AUDIENCE_MIGRATION_WORKTREE` names the identity-lane candidate checkout;
+`MCP_AUDIENCE_MIGRATION_BASE_WORKTREE` names a checkout whose server code is
+still at `3282ac2f5e` and seeds the SQLite database with real OAuth flows before
+the candidate server starts. It seeds an MCP `/mcp` client token, a package
+token and its internal child tokens, plus an unscoped OAuth code token whose
+audience cannot be inferred. The test then restarts the database under the
+candidate code so its startup migration sees actual PRE-P2 token rows. Set
+`MCP_AUDIENCE_MIGRATION_STAGE` to `P2`, `P3`, or `P7` for the matching
+identity-lane checkout. The test checks the selected candidate path is the
+current test worktree. The seeder HEAD is pinned to the full base SHA above,
+and its path and revision must differ from the candidate. Runtime files must
+be clean before seeding; only test overlays and package.json script changes
+are allowed. P7 retires the fixture's internal child token rows and
+replays the package tool session to prove package access remains independent of
+those bearers. This scenario does not use OAuth refresh: the census has no
+active refresh tokens. The base branch has no audience column or migration
+counter, so these assertions stay skipped until P2 exists.
+
+## Stored-ID resolution gate (waiting for identity-lane P4)
+
+This scenario captures the handles a client can store from a base session:
+`connection_id` values, search and fetch ids, record URIs, and the bounded
+`read_record_field` arguments. It seeds real hosted OAuth tokens and fixture
+records on the unchanged base, saves the captured session beside the SQLite
+database, then restarts that database under the candidate server and replays the
+saved handles for both the client and package sessions. It requires every
+captured handle to resolve and the observed legacy `connection_id` values to
+remain the same.
+
+The scenario is explicitly pending until an identity-lane P4 worktree exists.
+Run it from that worktree with absolute worktree paths:
+
+```sh
+export MCP_STORED_ID_WORKTREE="$HOME/.tmp/wt-identity-p4"
+export MCP_STORED_ID_BASE_WORKTREE="$HOME/.tmp/wt-g0-base"
+export MCP_STORED_ID_BASE_REV=3282ac2f5e4687419bf391c2294d2118dd63fd7c
+npm --prefix "$HOME/.tmp/wt-identity-p4/reference-implementation" run test:mcp-existing-client-gate
+```
+
+The scenario verifies that the seeder is exactly
+`MCP_STORED_ID_BASE_REV` (default `3282ac2f5e4687419bf391c2294d2118dd63fd7c`)
+and that the candidate is a different revision. It requires nonzero captured
+counts for connection ids, search ids, fetch ids, record URIs, and field-window
+arguments. The normal runner validates every expected TAP scenario and prints
+the P2 and P4 scenarios that remain pending. It fails if an active scenario is
+missing, renamed, skipped, or not executed.
+
+## Other observed base behavior
+
+The active gate records error-result shapes for a bad tool call, an unknown
+stream and an unknown fetch id. Bad calls return MCP `isError: true`; empty
+search returns a successful empty `results` array. `resources/list` and
+`resources/templates/list` are captured in the golden discovery contract. The
+long fixture contains more than 2,000 characters and Unicode; a 240-character
+window returns 241 characters at most because the base window uses an inclusive
+end offset. The gate asserts those characters appear in the model-visible text.
+Record fetch handles do not have an expiry field; they identify records and are
+resolved under the current bearer grant. The gate covers an unknown record id.
+The production census found non-expiring bearer tokens, so an expired-bearer
+scenario is outside this base contract until token expiry is introduced.
+
+## Hardening baseline requirement
+
+Full input schemas (including nested constraints and union branches) and HTTP
+auth observations must be recaptured on the pinned base before this hardened
+gate can pass. Missing baseline fields fail closed; candidate observations are
+never substituted for base evidence. Schema comparison is conservative: all
+validation-keyword changes fail, including some compatible widenings; descriptive
+schema text is ignored. The package grant_id transition remains explicit.
+
+The active captures probe missing, malformed and revoked bearers, record 401
+WWW-Authenticate and response bodies, and fetch MCP protected-resource metadata.
+Only local AS/RS origins are normalized. The comparison uses observed base
+challenges rather than requiring a future E4 challenge format.
+
+Saved fetch handles are checked against their own seeded identities; a separate
+fetch checks the fresh search hit. Page identities must be disjoint, field
+continuation offsets and text must advance, and the selected connection's count
+must be exactly two. Synthetic controls cover narrowing, replay misassociation,
+repeated pages, stalled windows, incorrect counts, and changed HTTP observations.

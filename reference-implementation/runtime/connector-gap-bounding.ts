@@ -452,6 +452,19 @@ export function boundConsideredCount(value: unknown): number | null {
 }
 
 /**
+ * Cap a connector-declared `covered` count at the denominator minus the items
+ * the runtime cannot show were covered (see `coveredRequiredKeys` in
+ * checkpoint-commit-decision.ts). The declared count may be lower; it is never
+ * raised. null stays unknown.
+ */
+export function capCoveredCount(covered: number | null, denominator: number, knownUncovered: number): number | null {
+  if (covered === null) {
+    return null;
+  }
+  return Math.min(covered, Math.max(denominator - knownUncovered, 0));
+}
+
+/**
  * Normalize a top-level `considered` key inside a bounded diagnostics object
  * (SKIP_RESULT.diagnostics). `boundGapDiagnostics` already preserved numbers as
  * raw leaves; this re-validates the one denominator key so an unsafe,
@@ -547,9 +560,9 @@ interface BuildCollectionFactsInput {
    * SAME unmodified `evaluateStreamCoherence` rule 2 that already gates every
    * other stream shape — no change to the shared contract was needed. Folded
    * into that stream's own considered/covered ONLY — never merged into
-   * detailCoverageByStateStream, so it can never reach
-   * missingDetailCoverageReports/recordDetailCoverageShortfalls or influence
-   * checkpoint commit eligibility. DETAIL_COVERAGE wins when both are present
+   * detailCoverageByStateStream, so it never reaches the coverage checks of
+   * decideCheckpointCommits (runtime/checkpoint-commit-decision.ts); only its
+   * unaccounted count withholds a checkpoint. DETAIL_COVERAGE wins when both are present
    * for the same stream (structurally impossible in a conformant run, since
    * STREAM_EVIDENCE is exclusive to state_stream-declared streams and
    * DETAIL_COVERAGE is rejected for them, but the precedence is made explicit
@@ -736,8 +749,14 @@ export function buildCollectionFacts({
     return projectRuntimeSkip(gap);
   };
 
+  // `pending_detail_gaps` keeps meaning "recoverable pending gaps". A permanent
+  // (`retryable: false`) loss is accounted separately so it stays visible without
+  // ever reading as retryable work.
+  const isPermanentGap = (gap: KnownGap): boolean => (gap as { retryable?: boolean | null }).retryable === false;
   const pendingDetailGapsForStream = (stream: string): number =>
-    durableDetailGaps.filter((gap) => gap.stream === stream && gap.status === "pending").length;
+    durableDetailGaps.filter((gap) => gap.stream === stream && gap.status === "pending" && !isPermanentGap(gap)).length;
+  const permanentDetailGapsForStream = (stream: string): number =>
+    durableDetailGaps.filter((gap) => gap.stream === stream && gap.status === "pending" && isPermanentGap(gap)).length;
 
   // STREAM_EVIDENCE is exclusive to state_stream-declared streams, which are
   // themselves forbidden from emitting DETAIL_COVERAGE — so
@@ -770,6 +789,9 @@ export function buildCollectionFacts({
       checkpoint: checkpointForStateStreams(stateStreams),
       ...(continuation ? { collection_scope: continuation.boundary } : {}),
       pending_detail_gaps: pendingDetailGapsForStream(stream),
+      ...(permanentDetailGapsForStream(stream) > 0
+        ? { permanent_detail_gaps: permanentDetailGapsForStream(stream) }
+        : {}),
       skipped: streamSkip,
     };
   });

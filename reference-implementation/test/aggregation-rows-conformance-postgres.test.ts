@@ -17,7 +17,7 @@
  * registered so the suite remains visible in CI output without failing.
  *
  * Target for local runs:
- *   docker run --rm -d --name pg-pilot -p 55463:5432 \
+ *   docker run --rm -d --name pg-pilot --log-driver none -p 55463:5432 \
  *     -e POSTGRES_USER=pdpp -e POSTGRES_PASSWORD=pdpp \
  *     -e POSTGRES_DB=pdpp_pilot \
  *     pgvector/pgvector:pg16

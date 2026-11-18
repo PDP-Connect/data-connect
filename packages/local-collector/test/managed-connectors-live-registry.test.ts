@@ -17,7 +17,7 @@
  * It is skipped unless `PDPP_TEST_OCI_REGISTRY` names a running registry, so
  * CI and ordinary `npm test` runs are unaffected. To run it:
  *
- *   docker run -d --rm -p 5556:5000 registry:2
+ *   docker run -d --rm --log-driver none -p 5556:5000 registry:2
  *   node scripts/build-connector-oci-artifact.mjs --connector oura --out /tmp/oura   # in data-connectors
  *   oras push --plain-http localhost:5556/pdp-connect/connector/oura:0.1.0 \
  *     --artifact-type application/vnd.pdpp.connector.v1+json \

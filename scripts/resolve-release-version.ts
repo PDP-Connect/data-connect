@@ -47,7 +47,7 @@ import { lockstepRegistryState, LOCKSTEP_PACKAGES } from "./release-registry-sta
 
 const run = promisify(execFile)
 
-const TAG_PATTERN = /^v(\d+\.\d+\.\d+)$/
+const TAG_PATTERN = /^npm-v(\d+\.\d+\.\d+)$/
 
 function fail(message: string): never {
   process.stderr.write(`[resolve-release-version] ${message}\n`)
@@ -67,7 +67,7 @@ export function versionFromTag(tag: string): string | null {
 // `-v:refname`, which orders 2.10.0 above 2.9.0 correctly — plain lexical
 // sorting does not.
 export async function newestReleaseTag(cwd: string): Promise<string | null> {
-  const { stdout } = await run("git", ["tag", "--list", "v*", "--sort=-v:refname", "--merged", "HEAD"], { cwd })
+  const { stdout } = await run("git", ["tag", "--list", "npm-v*", "--sort=-v:refname", "--merged", "HEAD"], { cwd })
   for (const line of stdout.split("\n")) {
     const tag = line.trim()
     if (tag && versionFromTag(tag)) return tag
@@ -94,7 +94,7 @@ export async function decide(cwd: string): Promise<Decision> {
   if (!version) {
     // newestReleaseTag only returns tags that parse, so this is unreachable;
     // kept as an explicit refusal rather than a non-null assertion.
-    fail(`newest release tag ${tag} is not of the form vX.Y.Z`)
+    fail(`newest release tag ${tag} is not of the form npm-vX.Y.Z`)
   }
 
   // Throws RegistryUnknownError if any read is unanswerable — see the SAFETY

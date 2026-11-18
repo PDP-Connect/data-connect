@@ -42,6 +42,7 @@ import {
   syncActionIdleLabel,
 } from "../../lib/connection-evidence.ts";
 import { isBrowserBoundConnector, isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
+import { connectorInstallKey, isConnectorNotInstalled } from "../../lib/connector-implementation.ts";
 import { connectorRunSummaryId, isActiveConnectorRunSummaryStatus } from "../../lib/connector-run-summary-status.ts";
 import { getReferencePublicOrigin, ReferenceServerUnreachableError } from "../../lib/owner-token.ts";
 import { isRevokedConnection } from "../../lib/records-list-classification.ts";
@@ -88,6 +89,7 @@ import { ConnectionConfiguration } from "./connection-configuration.tsx";
 import { ConnectionConfirmation } from "./connection-confirmation.tsx";
 import { ConnectionDangerZone } from "./connection-danger-zone.tsx";
 import { ConnectionDiagnostics } from "./connection-diagnostics.tsx";
+import { ConnectorInstallPrompt } from "./connector-install-prompt.tsx";
 import { RenameConnection } from "./rename-connection.tsx";
 import { StreamCollectionFactsLine } from "./stream-collection-facts.tsx";
 import { SyncNowButton } from "./sync-now-button.tsx";
@@ -165,7 +167,15 @@ export interface ConnectorPageModel {
   connectionPrimaryAction: RefRequiredAction | null;
   connectionRenderedVerdict: RefRenderedVerdict | null;
   connectorId: string;
+  /** Bare key the owner install route accepts for this source's connector. */
+  connectorInstallKey: string;
   connectorInstanceId: string | null;
+  /**
+   * True when the reference reports no implementation to run this connector
+   * (`connector_implementation.state: "not_installed"`). The page then says so
+   * up front and offers Install, instead of letting Sync fail.
+   */
+  connectorNotInstalled: boolean;
   /** Current durable horizon disclosures from the reference owner projection. */
   coverageHorizons: readonly RefCoverageHorizon[];
   deviceLabels: string[];
@@ -492,9 +502,10 @@ async function loadConnectorPageModel(
   // (absent on references predating the field → empty map → Streams section
   // renders unchanged). Indexed by stream name to join with the resource-server
   // stream list below.
+  const connectorNotInstalled = isConnectorNotInstalled(summary);
   const collectionFactsByStream = new Map<string, StreamCollectionFacts>();
   for (const [stream, entry] of indexCollectionReportByStream(summary.collection_report)) {
-    collectionFactsByStream.set(stream, formatStreamCollectionFacts(entry));
+    collectionFactsByStream.set(stream, formatStreamCollectionFacts(entry, { connectorNotInstalled }));
   }
   const actionability = projectSourceActionability(summary);
   const collectionOwnerActionByStream = actionability.ownerActionByStream;
@@ -548,7 +559,9 @@ async function loadConnectorPageModel(
     connectionPrimaryAction: actionability.primaryAction,
     connectionRenderedVerdict: summary.rendered_verdict ?? null,
     connectorId,
+    connectorInstallKey: connectorInstallKey(summary),
     connectorInstanceId,
+    connectorNotInstalled,
     coverageHorizons: summary.coverage_horizons ?? [],
     deviceLabels,
     displayName,
@@ -687,7 +700,9 @@ function ConnectorPageView({
     connectionId,
     connectionPrimaryAction,
     connectorId,
+    connectorInstallKey: installKey,
     connectorInstanceId,
+    connectorNotInstalled,
     connectionLabelSeed,
     coverageHorizons,
     deviceLabels,
@@ -714,6 +729,9 @@ function ConnectorPageView({
   });
   const revoked = isRevokedConnection(overview);
   const paused = !revoked && overview.connectionStatus === "paused";
+  // A revoked or never-set-up source has no sync to unblock, so the install
+  // prompt only shows where installing lets the next run start.
+  const installPromptShown = connectorNotInstalled && !revoked && !setupFailed;
   // A recovered historical-archive row: paused (never revoked), landed by the
   // archive-recovery operation rather than an owner revoke. It gets the
   // credential-repair notice INSTEAD of a plain Resume action — see
@@ -787,6 +805,7 @@ function ConnectorPageView({
             connectorId={connectorId}
             credentialUpdateHref={credentialUpdateHref}
             displayName={displayName}
+            installPromptShown={installPromptShown}
             hasStaticSecretCredentialUpdate={
               storedCredentialUpdateHref !== null && !sessionBound && primaryActionSurface !== "stored_credential"
             }
@@ -838,6 +857,15 @@ function ConnectorPageView({
           </span>
         }
       />
+
+      {installPromptShown ? (
+        <ConnectorInstallPrompt
+          connectorKey={installKey}
+          displayName={displayName}
+          routeId={connectionId}
+          variant="notice"
+        />
+      ) : null}
 
       {streakDots.length > 0 ? <StreakStrip dots={streakDots} /> : null}
 
@@ -948,6 +976,7 @@ function ConnectorPageView({
         connectionHealth={connectionHealth}
         connectionId={connectorInstanceId ?? connectionId}
         connectorId={connectorId}
+        connectorNotInstalled={connectorNotInstalled}
         localDeviceProgress={overview.localDeviceProgress ?? null}
         now={now}
         providerOrigin={providerOrigin}
@@ -978,6 +1007,7 @@ function ConnectorHeaderActions({
   connectorId,
   credentialUpdateHref,
   displayName,
+  installPromptShown,
   hasStaticSecretCredentialUpdate,
   manualUploadHref,
   primaryAction,
@@ -994,6 +1024,7 @@ function ConnectorHeaderActions({
   connectorId: string;
   credentialUpdateHref: string | null;
   displayName: string;
+  installPromptShown: boolean;
   hasStaticSecretCredentialUpdate: boolean;
   manualUploadHref: string | null;
   primaryAction: PrimaryRowAction;
@@ -1033,6 +1064,7 @@ function ConnectorHeaderActions({
         connectorId={connectorId}
         credentialUpdateHref={credentialUpdateHref}
         displayName={displayName}
+        installPromptShown={installPromptShown}
         manualUploadHref={manualUploadHref}
         primaryAction={primaryAction}
         renderedAction={renderedAction}
@@ -1052,6 +1084,7 @@ function ConnectorPrimaryHeaderAction({
   connectorId,
   credentialUpdateHref,
   displayName,
+  installPromptShown,
   manualUploadHref,
   primaryAction,
   renderedAction,
@@ -1066,6 +1099,7 @@ function ConnectorPrimaryHeaderAction({
   connectorId: string;
   credentialUpdateHref: string | null;
   displayName: string;
+  installPromptShown: boolean;
   manualUploadHref: string | null;
   primaryAction: PrimaryRowAction;
   renderedAction: RefRequiredAction | null;
@@ -1099,12 +1133,15 @@ function ConnectorPrimaryHeaderAction({
       <RenderedVerdictHeaderAction
         action={renderedOwnerAction}
         browserSessionRepairHref={browserSessionRepairHref}
+        canSync={primaryAction.kind === "sync"}
         connectionId={connectionId}
         connectorId={connectorId}
         credentialUpdateHref={credentialUpdateHref}
         displayName={displayName}
+        installPromptShown={installPromptShown}
         running={running}
         storedCredentialUpdateHref={storedCredentialUpdateHref}
+        syncIdleLabel={syncIdleLabel}
       />
     );
   }
@@ -1123,6 +1160,7 @@ function ConnectorPrimaryHeaderAction({
             connectionId={connectionId}
             connectorId={connectorId}
             displayName={displayName}
+            installPromptShown={installPromptShown}
             idleLabel="Reprocess all exports"
             initialRunning={running}
             runningLabel="Import running"
@@ -1137,6 +1175,7 @@ function ConnectorPrimaryHeaderAction({
         connectionId={connectionId}
         connectorId={connectorId}
         displayName={displayName}
+        installPromptShown={installPromptShown}
         idleLabel={syncIdleLabel}
         initialRunning={running}
       />
@@ -1149,6 +1188,7 @@ function ConnectorPrimaryHeaderAction({
         connectionId={connectionId}
         connectorId={connectorId}
         displayName={displayName}
+        installPromptShown={installPromptShown}
         running={running}
       />
     );
@@ -1212,21 +1252,27 @@ function reauthActionPresentation({
 function RenderedVerdictHeaderAction({
   action,
   browserSessionRepairHref,
+  canSync,
   connectionId,
   connectorId,
   credentialUpdateHref,
   displayName,
+  installPromptShown,
   running,
   storedCredentialUpdateHref,
+  syncIdleLabel,
 }: {
   action: RefRequiredAction;
   browserSessionRepairHref: string | null;
+  canSync: boolean;
   connectionId: string | null;
   connectorId: string;
   credentialUpdateHref: string | null;
   displayName: string;
+  installPromptShown: boolean;
   running: boolean;
   storedCredentialUpdateHref: string | null;
+  syncIdleLabel: string;
 }) {
   if (action.audience !== "owner" || action.satisfied_when.kind === "none") {
     return null;
@@ -1329,20 +1375,30 @@ function RenderedVerdictHeaderAction({
     );
   }
   if (action.kind === "reattach_schedule") {
-    // The owner paused this connection's automatic schedule. `Sync now`
-    // would run once but leave the schedule disabled — it does not satisfy
-    // `schedule_attached_and_enabled`, the action's real contract. Wire the
-    // existing `resumeConnectorScheduleAction` server action (already
-    // reaches the real instance-scoped `/schedule/resume` endpoint) instead
-    // of falling through to the sync-now button below.
+    // Resume remains the primary action that satisfies
+    // `schedule_attached_and_enabled`. An owner-runnable connection can also
+    // sync once without re-enabling its automatic schedule.
     return (
-      <form action={resumeConnectorScheduleAction}>
-        <input name="connector_id" type="hidden" value={connectorId} />
-        {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
-        <IcButton data-testid="detail-action-reattach-schedule" size="sm" type="submit" variant="default">
-          {action.cta}
-        </IcButton>
-      </form>
+      <>
+        <form action={resumeConnectorScheduleAction}>
+          <input name="connector_id" type="hidden" value={connectorId} />
+          {connectionId ? <input name="connection_id" type="hidden" value={connectionId} /> : null}
+          <IcButton data-testid="detail-action-reattach-schedule" size="sm" type="submit" variant="default">
+            {action.cta}
+          </IcButton>
+        </form>
+        {canSync ? (
+          <SyncNowButton
+            connectionId={connectionId}
+            connectorId={connectorId}
+            displayName={displayName}
+            installPromptShown={installPromptShown}
+            idleLabel={syncIdleLabel}
+            initialRunning={running}
+            variant="outline"
+          />
+        ) : null}
+      </>
     );
   }
   return (
@@ -1350,6 +1406,7 @@ function RenderedVerdictHeaderAction({
       connectionId={connectionId}
       connectorId={connectorId}
       displayName={displayName}
+      installPromptShown={installPromptShown}
       idleLabel={action.cta}
       initialRunning={running}
       runningLabel="Repair running"
@@ -1569,12 +1626,14 @@ function CooldownPrimaryAction({
   connectionId,
   connectorId,
   displayName,
+  installPromptShown,
   running,
 }: {
   action: Extract<PrimaryRowAction, { kind: "cooldown_wait" }>;
   connectionId: string | null;
   connectorId: string;
   displayName: string;
+  installPromptShown: boolean;
   running: boolean;
 }) {
   return (
@@ -1590,6 +1649,7 @@ function CooldownPrimaryAction({
         connectionId={connectionId}
         connectorId={connectorId}
         displayName={displayName}
+        installPromptShown={installPromptShown}
         force
         idleLabel="Force run anyway"
         initialRunning={running}

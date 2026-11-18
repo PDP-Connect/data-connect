@@ -1,13 +1,13 @@
 name: npm-release
 
-# Publishes @pdpp/connector-protocol and @pdpp/collector-runtime to npm via
+# Publishes the three @pdpp collector packages to npm via
 # semantic-release, using OIDC trusted publishing (id-token: write, no
 # NPM_TOKEN) — the same mechanism PDP-Connect/pdpp already runs for
 # @pdpp/cli, @pdpp/mcp-server, and @pdpp/read-core. See .releaserc.yaml for
 # which commits actually trigger a release: this workflow's `quality` and
 # `release` jobs only run at all when resolve-version's dry run found one.
 #
-# Scoped to just these two npm packages: this repo also ships a Tauri
+# Scoped to these npm packages: this repo also ships a Tauri
 # desktop app via .github/workflows/release.yml (a completely separate
 # artifact class — GitHub Release installers, not npm packages), which this
 # workflow does not touch.
@@ -22,6 +22,14 @@ name: npm-release
 # analysis it always did. A forced run still goes through the SAME `quality`
 # job and the same OIDC trusted publishing; the only thing bypassed is which
 # commits count as releasable. See scripts/forced-release-config.ts.
+
+env:
+  # onnxruntime-node's install script downloads the CUDA 12 provider binaries
+  # from nuget.org on linux/x64 even on CPU-only runners; that download is the
+  # ETIMEDOUT flake that fails `npm ci`. No job here requests the CUDA execution
+  # provider and the CPU binding ships in the package tarball, so skip it.
+  # scripts/ci-onnxruntime-install.test.ts guards this setting.
+  ONNXRUNTIME_NODE_INSTALL: "skip"
 
 on:
   push:
@@ -75,9 +83,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -96,6 +104,11 @@ jobs:
       # version supersedes it. There is no retry that completes the partial
       # one: its tag is already on the commit it ran at, so a run there
       # resolves zero commits and no version at all.
+      - name: Migrate legacy npm tag namespace once
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/npm-release-tags.mjs
+
       - name: Resolve release mode
         id: mode
         run: node --import tsx scripts/resolve-release-version.ts
@@ -147,18 +160,22 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
       - name: Verify connector-protocol package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm run --workspace packages/connector-protocol verify
 
       - name: Verify collector-runtime package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm run --workspace packages/collector-runtime verify
 
       # @pdpp/local-collector is published by this workflow as of the change
@@ -183,6 +200,8 @@ jobs:
       # that made every published 1.3.0-1.5.4 unrunnable. Because `quality`
       # must pass before `release`, a failure here blocks publication.
       - name: Verify local-collector package
+        env:
+          TEST_SANDBOX_DISABLE: "1"
         run: npm run --workspace packages/local-collector verify
 
       - name: Test commit-analyzer scope gate
@@ -209,9 +228,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -311,9 +330,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies

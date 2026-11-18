@@ -101,6 +101,7 @@ import {
   classifyRecoveryGap,
   filterFreshPressureRows,
   hasForwardEvidenceDebt,
+  isRecoverableDetailGapRow,
   type RecoveryAdmissionDenialReason,
   resolveRecoveryAdmission,
   resolveRecoveryFirstMode,
@@ -480,6 +481,17 @@ export interface PendingInteractionProjection {
 export interface BrowserSurfaceRunProjection extends BrowserSurfaceProjection {
   readonly connector_id: string;
 }
+
+/**
+ * Which implementation a run of this connector would execute, as far as
+ * presence goes. `installed`/`local_source` mean a record exists (its bytes
+ * are verified only when a run starts, which fails `connector_install_invalid`
+ * if they no longer match). `built_in` means the path resolver supplies code
+ * without an install (the reference fixture seed, or an injected resolver).
+ * `not_installed` is the state in which `runNow` refuses with
+ * `connector_not_installed`.
+ */
+export type ConnectorImplementationState = "built_in" | "installed" | "local_source" | "not_installed";
 
 export type ConnectorPathResolver = (
   connectorId: string,
@@ -895,6 +907,18 @@ export interface Controller {
   ) => Promise<BrowserSurfaceRuntimeSurfaceObservation>;
   promoteBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
   reconcileBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
+  /**
+   * Presence-only answer to "would `runNow` find an implementation for these
+   * connectors?" — the same local-source → install → path-resolver order
+   * `runNow` uses, without starting a run or hashing install bytes. Lets owner
+   * summaries say a connector is not installed before the owner taps Sync.
+   * Batched so a summary page costs one install-store read, not one per row,
+   * and read-only so a summary GET stays write-free. Optional so test doubles
+   * that never project summaries need not supply it.
+   */
+  inspectConnectorImplementations?: (
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ) => Promise<ReadonlyMap<string, ConnectorImplementationState>>;
   respondToInteraction: (runId: string, input?: RunInteractionResponseInput) => RunInteractionAck;
   runNow: (connectorId: string, options?: RunNowOptions) => Promise<RunNowResult>;
   setScheduleEnabled: (
@@ -976,6 +1000,12 @@ interface ActiveRunInteraction {
 // typed instanceof checks instead of sniffing duck-typed properties.
 export class ControllerError extends Error {
   readonly code: string;
+  /**
+   * Bare connector key the error is about. Set on `connector_not_installed`
+   * so the HTTP layer can surface `connector_id` in the error envelope and a
+   * client can offer the install action without parsing the message.
+   */
+  readonly connectorId: string | undefined;
   readonly details: readonly { param: string; message: string }[] | undefined;
   /**
    * ISO timestamp of the next eligible retry window. Set on
@@ -995,6 +1025,7 @@ export class ControllerError extends Error {
     message: string,
     code: string,
     extra: {
+      connectorId?: string;
       details?: readonly { param: string; message: string }[];
       nextEligibleAt?: string;
       pendingPressureGapCount?: number;
@@ -1004,6 +1035,7 @@ export class ControllerError extends Error {
   ) {
     super(message);
     this.code = code;
+    this.connectorId = extra.connectorId;
     this.details = extra.details;
     this.nextEligibleAt = extra.nextEligibleAt;
     this.pendingPressureGapCount = extra.pendingPressureGapCount;
@@ -1464,11 +1496,15 @@ interface PendingDetailGapRow {
   readonly attempt_count?: number | null;
   readonly connector_id?: string | null;
   readonly connector_instance_id?: string | null;
+  /** Keyset cursor parts (`created_at`, `gap_id`) when the store returns them. */
+  readonly created_at?: string | null;
   readonly detail_class?: string | null;
+  readonly gap_id?: string | null;
   readonly last_attempt_at?: string | null;
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
   readonly reason?: string | null;
+  readonly retryable?: boolean | null;
   readonly status?: string | null;
   readonly stream?: string | null;
   readonly updated_at?: string | null;
@@ -1478,16 +1514,53 @@ interface PendingDetailGapRow {
  * The read surface of the detail-gap store the controller depends on for the
  * cooldown projection. Kept to one method so a test fake is trivial.
  */
+interface ConnectorDetailGapReadOptions {
+  /** Keyset cursor: only rows strictly after (`created_at`, `gap_id`). */
+  readonly after?: { readonly createdAt: string; readonly gapId: string };
+  /** Connector-wide reads only: scope to one connection in SQL, before the LIMIT. */
+  readonly connectorInstanceId?: string;
+  /** Applied in SQL before the LIMIT: keep only reasons NOT in this list. */
+  readonly excludeReasons?: readonly string[];
+  readonly limit?: number;
+  /** Applied in SQL before the LIMIT: keep only these reasons. */
+  readonly reasons?: readonly string[];
+  /** Applied in SQL before the LIMIT: drop explicit-false (permanent) rows. */
+  readonly recoverableOnly?: boolean;
+}
+
 interface ConnectorDetailGapReadStore {
   listPendingGapsForConnector: (
     connectorId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
   listPendingGapsForConnectorInstance?: (
     connectorId: string,
     connectorInstanceId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
+}
+
+/** `next` is strictly after `previous` in the stable (`created_at`, `gap_id`) read order. */
+function gapCursorAdvances(
+  previous: { readonly createdAt: string; readonly gapId: string },
+  next: { readonly createdAt: string; readonly gapId: string }
+): boolean {
+  if (next.createdAt !== previous.createdAt) {
+    return next.createdAt > previous.createdAt;
+  }
+  return next.gapId > previous.gapId;
+}
+
+/**
+ * The detail-gap store override could not be scanned to exhaustion, so whether an
+ * eligible recovery row exists is unknown. Distinct from "none exists".
+ */
+function recoveryScanUnsupported(connectorId: string, connectorInstanceId: string, detail: string): ControllerError {
+  return new ControllerError(
+    `Recovery eligibility could not be established for ${connectorId} (connection ${connectorInstanceId}): ${detail}. ` +
+      "A detail-gap store must return stable keyset pages ordered by (created_at, gap_id) and honor `after`.",
+    "recovery_scan_unsupported"
+  );
 }
 
 function isConnectorDetailGapReadStore(value: unknown): value is ConnectorDetailGapReadStore {
@@ -1621,6 +1694,9 @@ function bucketPressureGapsByInstance(
   ensure: EnsureScheduleFacts
 ): void {
   for (const gap of gaps) {
+    if (!isRecoverableDetailGapRow(gap)) {
+      continue;
+    }
     if (typeof gap.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)) {
       continue;
     }
@@ -2906,7 +2982,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     await Promise.all(
       [...connectorIds].map(async (connectorId) => {
         try {
-          const gaps = (await detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })) ?? [];
+          const gaps =
+            (await detailGapStore.listPendingGapsForConnector(connectorId, {
+              limit: 200,
+              reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+              recoverableOnly: true,
+            })) ?? [];
           bucketPressureGapsByInstance(gaps, connectorId, ensure);
         } catch (err) {
           console.error(
@@ -3351,30 +3432,34 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // Safe to delete unconditionally here: the guard above already proved
     // activeRuns.get(input.key)?.run_id === input.runId.
     activeRuns.delete(input.key);
-    activeRunPromises.delete(input.runId);
-    activeRunTraceContexts.delete(input.runId);
-    activeRunCancellations.delete(input.runId);
-    clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
-    });
     try {
-      await opts.beforeRunCleanup?.({ runId: input.runId });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn?.(`[controller] run cleanup barrier failed for ${input.runId}: ${message}`);
-    }
-    clearStreamingNonceForRun(input.runId);
-    if (input.browserSurfaceLease) {
+      activeRunTraceContexts.delete(input.runId);
+      activeRunCancellations.delete(input.runId);
+      clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
+      });
       try {
-        await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+        await opts.beforeRunCleanup?.({ runId: input.runId });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+        log.warn?.(`[controller] run cleanup barrier failed for ${input.runId}: ${message}`);
       }
-      await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+      clearStreamingNonceForRun(input.runId);
+      if (input.browserSurfaceLease) {
+        try {
+          await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+        }
+        await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+      }
+      resolveCancelledInteraction(input.runId);
+    } finally {
+      // Keep shutdown drain tracking until lease release has been persisted.
+      activeRunPromises.delete(input.runId);
     }
-    resolveCancelledInteraction(input.runId);
   }
 
   /**
@@ -3467,11 +3552,20 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     connectorInstanceId: string
   ): Promise<PendingPressureGap[]> {
+    // Eligibility (this connection, pressure reasons, recoverable) is applied in the
+    // store before the 200-row LIMIT, so older permanent or non-pressure rows, or
+    // another connection's rows, cannot hide this connection's pressure gaps.
     const pendingGapRows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })
+      detailGapStore.listPendingGapsForConnector(connectorId, {
+        connectorInstanceId,
+        limit: 200,
+        reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+        recoverableOnly: true,
+      })
     );
     const pendingPressureRows = pendingGapRows
       .filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId)
+      .filter(isRecoverableDetailGapRow)
       .filter((row) => typeof row.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason));
     return filterFreshPressureRows(pendingPressureRows, Date.now()).map((row) =>
       projectPendingPressureGap(row, row.reason as string)
@@ -3522,31 +3616,104 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   async function listPendingGapsForContinuation(
     connectorId: string,
-    connectorInstanceId: string
+    connectorInstanceId: string,
+    readOptions: {
+      readonly after?: { readonly createdAt: string; readonly gapId: string };
+      readonly limit?: number;
+      readonly recoverableOnly?: boolean;
+    } = {}
   ): Promise<readonly PendingDetailGapRow[]> {
+    // `connectorInstanceId` is passed to BOTH reads so the connector-wide fallback also
+    // scopes to this connection in SQL, before the LIMIT.
+    const options = { connectorInstanceId, limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT, ...readOptions };
     if (detailGapStore.listPendingGapsForConnectorInstance) {
       return await Promise.resolve(
-        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, {
-          limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT,
-        })
+        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, options)
       );
     }
-    const rows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT })
-    );
+    const rows = await Promise.resolve(detailGapStore.listPendingGapsForConnector(connectorId, options));
     return rows.filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId);
+  }
+
+  // An explicit recovery-only request is a request to refetch pending detail
+  // gaps. When the connection's ONLY pending gaps are permanent source loss
+  // (`retryable: false`) there is nothing to refetch, and a runtime must not
+  // request or offer a refetch of such a gap: refuse, rather than silently run an
+  // ordinary collection labelled as gap recovery. No pending-gap evidence at all
+  // keeps the existing behavior.
+  async function assertRecoveryOnlyHasRecoverableWork(connectorId: string, connectorInstanceId: string): Promise<void> {
+    // Evidence of "pending exists AND recoverable is absent", not an every() over a
+    // truncated diagnostic page: the recoverable read applies eligibility in SQL
+    // before its LIMIT, and only an empty result makes the second, any-pending read.
+    const recoverable = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+      limit: 1,
+      recoverableOnly: true,
+    });
+    if (recoverable.some(isRecoverableDetailGapRow)) {
+      return;
+    }
+    const anyPending = await listPendingGapsForContinuation(connectorId, connectorInstanceId, { limit: 1 });
+    if (anyPending.length > 0) {
+      throw new ControllerError(
+        "Recovery-only run refused: every pending detail gap is permanent source loss (non-retryable) and cannot be refetched.",
+        "invalid_request",
+        { recoveryAdmissionReason: "permanent_loss" }
+      );
+    }
   }
 
   async function hasEligibleNonPressureRecoveryWork(
     connectorId: string,
     connectorInstanceId: string
   ): Promise<boolean> {
-    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
+    // Eligibility is `resolveRecoveryAdmission` over a row, which depends on the row's
+    // recovery class, its own retry floor and its work domain, so no fixed-size page of
+    // the OLDEST recoverable rows can decide it: they may all be retryable pressure,
+    // still inside their floor, or owner-required / connector-defect. Walk the
+    // connection's recoverable pending gaps in stable keyset pages until an admissible
+    // non-pressure row is found or the pending set is proven exhausted (a short page).
     const nowMs = Date.now();
-    return rows.some((row) => {
-      const classification = classifyRecoveryGap(row);
-      return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
-    });
+    let after: { createdAt: string; gapId: string } | undefined;
+    for (;;) {
+      // biome-ignore lint/performance/noAwaitInLoops: each page depends on the previous cursor.
+      const page = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+        recoverableOnly: true,
+        ...(after ? { after } : {}),
+      });
+      if (
+        page.some((row) => {
+          const classification = classifyRecoveryGap(row);
+          return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
+        })
+      ) {
+        return true;
+      }
+      if (page.length < RECOVERY_CONTINUATION_PENDING_READ_LIMIT) {
+        return false;
+      }
+      // A FULL page of inadmissible rows only proves "no eligible row yet". The next
+      // cursor must come from the store and must strictly advance; an adapter that gives
+      // no cursor, ignores `after`, or answers with a backwards / repeating cursor leaves
+      // rows beyond this page unexamined. That is scan uncertainty, not absence: it must
+      // never be read as "no eligible work" (which would pick forward collection or stop
+      // a continuation), so it is reported as its own error.
+      const last = page[page.length - 1];
+      if (!(last?.created_at && last.gap_id)) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "a full page carried no created_at/gap_id cursor"
+        );
+      }
+      if (after && !gapCursorAdvances(after, { createdAt: last.created_at, gapId: last.gap_id })) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "the page cursor did not strictly advance (the store ignored `after`, repeated or went backwards)"
+        );
+      }
+      after = { createdAt: last.created_at, gapId: last.gap_id };
+    }
   }
 
   // Forward-evidence-debt probe for `resolveEffectiveRecoveryOnly` (mirrors
@@ -3605,6 +3772,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     options: RunNowOptions,
     scopedToResources: boolean
   ): Promise<boolean> {
+    if (options.recoveryOnly === true) {
+      await assertRecoveryOnlyHasRecoverableWork(connectorId, connectorInstanceId);
+    }
     const nonPressureRecoveryEligible =
       options.recoveryOnly === undefined && !scopedToResources
         ? await hasEligibleNonPressureRecoveryWork(connectorId, connectorInstanceId)
@@ -3653,8 +3823,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
       return;
     }
-    if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
-      return;
+    try {
+      if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
+        return;
+      }
+    } catch (err) {
+      // Scan uncertainty is not "drained": report it by its own code and start nothing
+      // (no continuation, and never forward collection). Any other failure keeps its
+      // existing path.
+      if (err instanceof ControllerError && err.code === "recovery_scan_unsupported") {
+        log.warn?.(`[controller] recovery continuation not started (${err.code}): ${err.message}`);
+        return;
+      }
+      throw err;
     }
     // Manifest automation policy gate. A recovery continuation is started BY
     // THE CONTROLLER, not by an owner gesture: it is an unattended automatic
@@ -3842,6 +4023,39 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
   }
 
+  async function inspectConnectorImplementations(
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ): Promise<ReadonlyMap<string, ConnectorImplementationState>> {
+    const states = new Map<string, ConnectorImplementationState>();
+    if (connectors.length === 0) {
+      return states;
+    }
+    const installed = new Set(
+      (await activeConnectorInstallStore.listActive()).map((record) => record.connectorId)
+    );
+    // Developer-local sources are rare; skip the per-connector selection
+    // lookup entirely when none are registered.
+    const hasLocalSources = (await localSourceStore.list()).length > 0;
+    // The fallback `runNow` reaches when neither a local source nor an install
+    // is active. Calling the default resolver here would re-read both stores
+    // per connector, so use its seed-fixture tail directly.
+    const fallbackResolver = opts.connectorPathResolver || resolveDefaultConnectorPath;
+    for (const { connectorId, manifest } of connectors) {
+      if (states.has(connectorId)) {
+        continue;
+      }
+      if (hasLocalSources && (await localSourceStore.getSelectedForConnector(connectorId))) {
+        states.set(connectorId, "local_source");
+      } else if (installed.has(connectorId)) {
+        states.set(connectorId, "installed");
+      } else {
+        const path = await Promise.resolve(fallbackResolver(connectorId, manifest));
+        states.set(connectorId, path ? "built_in" : "not_installed");
+      }
+    }
+    return states;
+  }
+
   async function validateRunNowPreconditions(
     connectorId: string,
     options: RunNowOptions,
@@ -3891,7 +4105,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (!connectorPath) {
       throw new ControllerError(
         `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
-        "not_found"
+        "connector_not_installed",
+        { connectorId }
       );
     }
     return {
@@ -4719,6 +4934,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     getSchedule,
     isNeedsHuman: (connectorId: string, options: ConnectorInstanceOptions = {}) =>
       needsHumanAttention.has(runtimeKey(connectorId, options.connectorInstanceId)),
+    inspectConnectorImplementations,
     issueRuntimeOwnerToken,
     listBrowserSurfaceRunProjections,
     listSchedules,

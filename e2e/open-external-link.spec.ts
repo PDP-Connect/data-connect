@@ -42,9 +42,7 @@
  * request to any bridge endpoint occurs (there is no such endpoint left to
  * call).
  *
- * Target a running console with:
- *   E2E_BASE_URL=http://127.0.0.1:PORT E2E_OWNER_PASSWORD=... \
- *     npx playwright test open-external-link.spec.ts
+ * Run npm run test:e2e to start a disposable console. See e2e/README.md.
  */
 import { expect, test } from "@playwright/test"
 
@@ -87,10 +85,16 @@ test("in a plain browser, clicking an OpenExternalLink navigates to its href wit
     }
   })
 
-  // No target="_blank" anymore -- a plain click navigates the current tab,
-  // so the assertion is on navigation, not a popup. Catch the (expected)
-  // cross-origin navigation failure from Playwright's own network
-  // interception rather than letting it hang.
+  // Serve the destination locally: navigation semantics do not require internet access.
+  await page.route("https://pdpp.dev/**", route =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Documentation target</title>",
+    })
+  )
+
+  // A plain anchor navigates the current tab rather than opening a popup.
   await docsLink.click({ noWaitAfter: true }).catch(() => {})
   await page.waitForURL(url => url.href.startsWith("https://pdpp.dev"), {
     timeout: 5000,

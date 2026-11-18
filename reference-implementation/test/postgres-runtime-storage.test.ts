@@ -287,7 +287,8 @@ test("Postgres bootstrap lock contention waits for release without a crash-loop 
   const delays: number[] = [];
   const logs: string[] = [];
   const client = {
-    query: async () => ({ rows: [{ locked: outcomes.shift() ?? false }] }),
+    query: async (sql: string) =>
+      sql.includes("pg_try_advisory_lock") ? { rows: [{ locked: outcomes.shift() ?? false }] } : { rows: [] },
   };
 
   await __acquirePostgresBootstrapLockForTest(client as never, {
@@ -305,6 +306,45 @@ test("Postgres bootstrap lock contention waits for release without a crash-loop 
   assert.equal(outcomes.length, 0);
   assert.ok(logs.some((line) => line.includes("bootstrap lock waiting")));
   assert.ok(logs.some((line) => line.includes("bootstrap lock acquired")));
+});
+
+test("Postgres bootstrap lock loser cancels derived-index maintenance on every failed poll", async () => {
+  const outcomes = [false, false, true];
+  let now = 0;
+  const logs: string[] = [];
+  const cancelQueries: string[] = [];
+  const client = {
+    query: async (sql: string) => {
+      if (sql.includes("pg_try_advisory_lock")) {
+        return { rows: [{ locked: outcomes.shift() ?? false }] };
+      }
+      cancelQueries.push(sql);
+      // A cancel that lands between two maintenance statements has no effect,
+      // so the same holder is signalled again on the next poll.
+      return { rows: [{ cancelled: true, pid: 4242 }] };
+    },
+  };
+
+  await __acquirePostgresBootstrapLockForTest(client as never, {
+    budget: { databaseSizeBytes: 128 * 1024 * 1024, timeoutMs: 10_000 },
+    log: (line) => logs.push(line),
+    now: () => now,
+    sleep: (delayMs) => {
+      now += delayMs;
+      return Promise.resolve();
+    },
+  });
+
+  assert.equal(cancelQueries.length, 2, "one cancel attempt per failed poll");
+  for (const sql of cancelQueries) {
+    assert.match(sql, /mode = 'ShareLock'/, "only shared holders, which are maintenance runs, are cancelled");
+    assert.match(sql, /current_database\(\)/, "only holders in this database are cancelled");
+  }
+  assert.equal(
+    logs.filter((line) => line.includes("cancelled derived-index maintenance in backend pid 4242")).length,
+    1,
+    "each cancelled backend is logged once"
+  );
 });
 
 test("Postgres bootstrap lock loser has one bounded outer deadline", async () => {

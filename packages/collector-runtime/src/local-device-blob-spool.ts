@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import type { Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 /**
@@ -175,6 +176,17 @@ async function* toByteChunks(content: LocalDeviceBlobSpoolContent): AsyncIterabl
 }
 
 /**
+ * Resolve once `stream` has emitted `close`, including when it emitted it earlier.
+ * A destroyed file stream closes only after its pending `open()` has settled.
+ */
+function waitForClose(stream: Writable): Promise<void> {
+  if (stream.closed) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => stream.once("close", () => resolve()));
+}
+
+/**
  * Hard precondition for enabling spool reclamation: every queue that can name
  * a body in this spool must be represented in the reference set.
  *
@@ -276,6 +288,9 @@ export class LocalDeviceBlobSpool {
     const hash = createHash("sha256");
     let sizeBytes = 0;
     const tempPath = join(this.#tempDir(), `spool-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    // flush: true fsyncs the file content before close resolves. Without
+    // it the rename can publish a name over bytes still only in cache.
+    const sink = createWriteStream(tempPath, { flush: true });
     try {
       await pipeline(
         (async function* (source: AsyncIterable<Buffer>) {
@@ -285,11 +300,13 @@ export class LocalDeviceBlobSpool {
             yield chunk;
           }
         })(toByteChunks(content)),
-        // flush: true fsyncs the file content before close resolves. Without
-        // it the rename can publish a name over bytes still only in cache.
-        createWriteStream(tempPath, { flush: true })
+        sink
       );
     } catch (error) {
+      // pipeline rejects once the source fails, not once the sink has closed.
+      // The sink's open() may still be in flight: an unlink that runs before it
+      // lands finds nothing, and the file then appears with nothing to remove it.
+      await waitForClose(sink);
       this.#discardTemp(tempPath);
       throw error;
     }

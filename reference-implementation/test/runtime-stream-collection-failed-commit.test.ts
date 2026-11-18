@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,6 +41,7 @@ import { admitOwnerRunConnection } from "../server/stores/connector-instance-sto
 // the resolved result directly.
 
 const CHILD_B_STREAM_NAME_PATTERN = /child_b/;
+const STREAMLESS_OMISSION_PATTERN = /an unnamed stream reported an omission \(retryable_skip\)/;
 
 interface ClosableServer {
   asPort: number;
@@ -773,6 +774,320 @@ test("runConnector discards every staged checkpoint when the connector crashes w
     });
     const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
     assert.deepEqual(stateBody.state ?? {}, {});
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+// A retryable SKIP_RESULT is a reported omission. On a SUCCESSFUL DONE the
+// runtime previously recorded it only as a known gap and still committed the
+// stream's staged cursor, so the omitted rows sat behind a committed
+// checkpoint with no durable work item to replay them. The stream's cursor
+// must be withheld so the next run starts from the prior checkpoint.
+test("runConnector withholds a stream's cursor after a retryable SKIP_RESULT on a successful DONE, and the next run replays from the prior checkpoint", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-retryable-skip-withholds-cursor-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-retryable-skip-"));
+  const startStatePath = join(tmpDir, "start-state.json");
+  const firstRunPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'sibling_a', key: 'a-1', data: { id: 'a-1' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'sibling_b', key: 'b-1', data: { id: 'b-1' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'beyond_withheld_rows' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'upstream_pressure', message: 'withheld rows after 429', recovery_hint: 'retry_by_runtime' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 2 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runStub({ asUrl, connectorPath: firstRunPath, manifest, ownerToken, rsUrl });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+    assert.equal(
+      result.checkpoint_summary?.state_streams_committed,
+      1,
+      "the stream that reported a retryable omission must not commit its cursor"
+    );
+
+    const stateResp = await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    const stateBody = (await stateResp.json()) as { state?: Record<string, unknown> };
+    assert.deepEqual(stateBody.state, { sibling_a: { cursor: "sibling_a_cursor" } });
+
+    // Next run: START carries the committed state. sibling_b has no
+    // checkpoint, so the connector re-collects the omitted rows.
+    const replayPath = join(tmpDir, "replay-connector.mjs");
+    writeFileSync(
+      replayPath,
+      `
+import { writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.type !== 'START') return;
+  writeFileSync(${JSON.stringify(startStatePath)}, JSON.stringify(msg));
+  process.stdout.write(JSON.stringify({ type: 'RECORD', stream: 'sibling_b', key: 'b-2', data: { id: 'b-2' }, emitted_at: new Date().toISOString() }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'replayed' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 1 }) + '\\n');
+  rl.close();
+  process.exit(0);
+});
+`,
+      "utf8"
+    );
+    const replay = (await runConnector({
+      admitRunConnection: fakeAdmitRunConnection(),
+      collectionMode: "incremental",
+      connectorId: manifest.connector_id,
+      connectorPath: replayPath,
+      manifest,
+      onInteraction: async () => ({}),
+      ownerToken,
+      persistState: true,
+      rsUrl,
+      state: stateBody.state ?? null,
+    })) as RunResult;
+    assert.equal(replay.status, "succeeded");
+    const replayStart = JSON.parse(readFileSync(startStatePath, "utf8")) as {
+      protocol_capabilities?: string[];
+      state?: Record<string, unknown> | null;
+      type: string;
+    };
+    assert.equal(replayStart.type, "START");
+    assert.ok(
+      replayStart.protocol_capabilities?.includes("DETAIL_COVERAGE_KEY_SETS"),
+      "START must advertise support before connectors emit empty_keys/unchanged_keys"
+    );
+    const replayStartState = replayStart.state;
+    assert.ok(
+      !("sibling_b" in (replayStartState ?? {})),
+      "the replay run must start sibling_b from its prior checkpoint"
+    );
+
+    const afterReplay = (await (
+      await fetch(`${rsUrl}/v1/state/${encodeURIComponent(manifest.connector_id)}`, {
+        headers: { Authorization: `Bearer ${ownerToken}` },
+      })
+    ).json()) as { state?: Record<string, unknown> };
+    assert.deepEqual(afterReplay.state, {
+      sibling_a: { cursor: "sibling_a_cursor" },
+      sibling_b: { cursor: "replayed" },
+    });
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+// A retryable SKIP_RESULT that names no stream still omitted rows that some
+// staged cursor owns. Nothing proves which, so no staged cursor may move; the
+// run stays successful and says why each cursor was withheld.
+test("runConnector withholds every staged cursor after a retryable SKIP_RESULT that names no stream", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-streamless-retryable-skip-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-streamless-skip-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'beyond_withheld_rows' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', reason: 'upstream_pressure', message: 'withheld rows after 429', recovery_hint: 'retry_by_runtime' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+    assert.equal(
+      result.checkpoint_summary?.state_streams_committed,
+      0,
+      "no staged cursor is proven clear of the omission"
+    );
+    const withheld = (result.known_gaps ?? []).filter((gap) => gap.kind === "checkpoint_withheld");
+    assert.deepEqual(withheld.map((gap) => gap.stream).sort(), ["sibling_a", "sibling_b"]);
+    for (const gap of withheld) {
+      assert.match(String(gap.message), STREAMLESS_OMISSION_PATTERN);
+    }
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+test("runConnector still commits a stream whose SKIP_RESULT is not retryable (counterweight)", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-permanent-skip-commits-cursor-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-permanent-skip-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'sibling_b_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'not_available', message: 'provider never exposes this', recovery_hint: 'not_retriable' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
+  rl.close();
+  process.exit(0);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+    assert.equal(result.status, "succeeded");
+    assert.equal(result.checkpoint_summary?.state_streams_staged, 2);
+    assert.equal(result.checkpoint_summary?.state_streams_committed, 2);
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+// The scheduler decides whether a failed run still counts toward back-off by
+// reading `connector_error.code` and `checkpoint_summary.commit_status` off the
+// run result (scheduler-backoff.ts, isCertifiedStreamFailureWithCommittedSiblings).
+// Pin that those two facts are what a certified failure with committed siblings
+// reports, and that, for a failed stream that staged a cursor before its
+// SKIP_RESULT, `checkpoint_stalled` still appears on the third consecutive run.
+// The next test covers the shape where the failed stream stages no cursor.
+test("a certified failure with committed siblings reports the scheduler's facts and stalls the failed stream's checkpoint at 3 runs", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-stream-isolation-certified-stall-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-stream-isolation-stall-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_b', cursor: { cursor: 'sibling_b_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'stream_collection_failed', message: 'upstream 500' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 0, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
+  rl.close();
+  process.exit(1);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    const reasons: (string | undefined)[] = [];
+    for (let run = 1; run <= 3; run += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: the stall streak is defined by run order.
+      const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+      assert.equal(result.status, "failed", `run ${run}`);
+      assert.equal(result.connector_error?.code, "stream_collection_failed", `run ${run}`);
+      assert.equal(
+        (result.checkpoint_summary as { commit_status?: string } | undefined)?.commit_status,
+        "partially_committed",
+        `run ${run}: the sibling committed, the failed stream did not`
+      );
+      assert.equal(result.checkpoint_summary?.state_streams_committed, 1, `run ${run}`);
+      const withheld = (result.known_gaps ?? []).find((gap) => gap.kind === "checkpoint_withheld");
+      reasons.push(withheld?.reason as string | undefined);
+    }
+    assert.deepEqual(reasons, ["checkpoint_withheld", "checkpoint_withheld", "checkpoint_stalled"]);
+  } finally {
+    rmSync(tmpDir, { force: true, recursive: true });
+    await closeServer(server);
+  }
+});
+
+// The natural early-failure shape: the failed stream never reaches a STATE, so
+// it stages no cursor and there is nothing to withhold. `checkpoint_stalled`
+// is a property of a staged-then-withheld cursor, so it does NOT fire here, however
+// many runs repeat. Pin what the owner does see on every run instead: the run is
+// failed and carries the failed stream's SKIP_RESULT gap plus the commit status.
+test("a certified failure whose failed stream stages no cursor reports the failure on every run and never stalls a checkpoint", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  const manifest = testManifest("runtime-stream-isolation-certified-natural-shape-test");
+  const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-runtime-stream-isolation-natural-"));
+  const connectorPath = writeConnectorStub(
+    tmpDir,
+    `
+  process.stdout.write(JSON.stringify({ type: 'STATE', stream: 'sibling_a', cursor: { cursor: 'sibling_a_cursor' } }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'SKIP_RESULT', stream: 'sibling_b', reason: 'stream_collection_failed', message: 'upstream 500' }) + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'DONE', status: 'failed', records_emitted: 0, error: { code: 'stream_collection_failed', message: 'stream collection failed: sibling_b: upstream 500', retryable: true } }) + '\\n');
+  rl.close();
+  process.exit(1);
+`
+  );
+
+  try {
+    const registerResp = await fetch(`${asUrl}/connectors`, {
+      body: JSON.stringify(manifest),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    assert.equal(registerResp.status, 201);
+    const ownerToken = await issueOwnerToken(asUrl);
+
+    for (let run = 1; run <= 4; run += 1) {
+      // biome-ignore lint/performance/noAwaitInLoops: the streak is defined by run order.
+      const result = await runStub({ asUrl, connectorPath, manifest, ownerToken, rsUrl });
+      const gaps = result.known_gaps ?? [];
+      assert.equal(result.status, "failed", `run ${run}`);
+      assert.equal(
+        (result.checkpoint_summary as { commit_status?: string } | undefined)?.commit_status,
+        "committed",
+        `run ${run}: the one staged cursor is the sibling's and it committed`
+      );
+      assert.deepEqual(
+        gaps.filter((gap) => gap.kind === "checkpoint_withheld"),
+        [],
+        `run ${run}: no staged cursor is withheld, so no checkpoint_withheld or checkpoint_stalled gap`
+      );
+      const skipGap = gaps.find((gap) => gap.kind === "skip_result");
+      assert.equal(skipGap?.reason, "stream_collection_failed", `run ${run}: the failed stream stays reported`);
+      assert.equal(skipGap?.stream, "sibling_b", `run ${run}`);
+    }
   } finally {
     rmSync(tmpDir, { force: true, recursive: true });
     await closeServer(server);

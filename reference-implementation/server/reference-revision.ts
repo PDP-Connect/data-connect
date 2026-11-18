@@ -25,6 +25,7 @@ function gitOutput(args: string[]): string {
   try {
     return execFileSync("git", args, {
       cwd: REPO_ROOT,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 500,

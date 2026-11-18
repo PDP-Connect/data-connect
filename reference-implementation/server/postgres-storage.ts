@@ -120,6 +120,43 @@ const POSTGRES_INTERACTIVE_POOL_MAX = 8;
 const POSTGRES_BULK_POOL_MAX = 3;
 
 /**
+ * PostgreSQL notices that a client has gone only when it next reads from the
+ * socket, and a long statement such as VACUUM, REINDEX or a bulk DELETE never
+ * does. When this process dies, its statements keep their locks and run to
+ * completion. Observed in production on v0.7.62: a stopped container left
+ * `VACUUM (ANALYZE) semantic_search_blob` running for more than 41 minutes,
+ * and the next boot's schema batch waited behind it on an AccessExclusiveLock
+ * until an operator cancelled it. `client_connection_check_interval`
+ * (PostgreSQL 14+, Linux) makes the server poll the socket while a statement
+ * runs and end the backend when the client is gone, so a dead process's work
+ * releases its locks within this interval.
+ */
+const POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS = 5_000;
+
+/**
+ * A pooled client whose backend is terminated (`pg_terminate_backend`,
+ * `idle_in_transaction_session_timeout`, a Postgres restart) emits `error`.
+ * pg-pool listens only while the client is idle, and then re-emits on the pool.
+ * An `error` event with no listener throws, and the process exits. The pool
+ * reports it instead: the query in flight already rejects, the client is no
+ * longer queryable, and pg-pool discards it on release.
+ */
+function createPostgresPool(databaseUrl: string, max: number, log: StorageLog): PgPool {
+  const created = new Pool({ connectionString: databaseUrl, max });
+  const reportLostConnection = (error: Error) => log(`[postgres] pooled connection lost: ${error.message}`);
+  created.on("error", reportLostConnection);
+  created.on("connect", (client) => {
+    client.on("error", reportLostConnection);
+    // Best effort: a server older than PostgreSQL 14, or a platform without
+    // socket polling, rejects the setting. Those servers keep the old behavior.
+    client
+      .query(`SET client_connection_check_interval = ${POSTGRES_CLIENT_CONNECTION_CHECK_INTERVAL_MS}`)
+      .catch(() => undefined);
+  });
+  return created;
+}
+
+/**
  * Hard per-statement ceiling for the bulk lane. Postgres cannot preempt a
  * transaction once admitted (see the PostgreSQL wiki's own "Priorities"
  * page: there are no facilities to limit or prioritize resources per
@@ -143,7 +180,17 @@ const POSTGRES_BULK_POOL_MAX = 3;
  * into a failed backfill. 15s is ~14x the observed write cost and still an
  * order of magnitude under the 44.5s incident.
  */
-const POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+const DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS = 15_000;
+
+/**
+ * The bulk-lane statement ceiling. `PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS`
+ * overrides the default, so an operator can raise it on a slow database
+ * without a release. It is read per transaction, so a test can lower it.
+ */
+export function postgresBulkStatementTimeoutMs(): number {
+  const configured = Number(process.env.PDPP_POSTGRES_BULK_STATEMENT_TIMEOUT_MS);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_POSTGRES_BULK_STATEMENT_TIMEOUT_MS;
+}
 /**
  * Bulk work must not sit in a lock queue either. Kept well under the
  * statement bound so a contended chunk fails fast and is retried on the next
@@ -584,7 +631,13 @@ const POSTGRES_LEASE_PRIORITY_MIGRATION_LOCK = [482_571, 151];
 // individually concurrency-safe. Keep their DDL from racing a fully
 // bootstrapped legacy-priority starter; the priority migration retains its own
 // transaction-scoped lock below so its catalog decision is independently safe.
-const POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK = [482_571, 150];
+//
+// Derived-index maintenance (VACUUM, REINDEX CONCURRENTLY) holds this same key
+// in SHARED mode for its whole run. Maintenance therefore never starts while a
+// bootstrap is in progress, and a bootstrap that finds the key held in shared
+// mode cancels that maintenance instead of waiting behind it. See
+// cancelDerivedIndexMaintenanceBlockingBootstrap.
+export const POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK = [482_571, 150];
 const POSTGRES_BOOTSTRAP_LOCK_INITIAL_DELAY_MS = 25;
 const POSTGRES_BOOTSTRAP_LOCK_MAX_DELAY_MS = 250;
 // The bootstrap DDL batch takes an AccessExclusiveLock on tables (connectors,
@@ -1130,7 +1183,7 @@ export async function postgresBulkQuery<Row extends QueryResultRow = QueryResult
     // SET LOCAL, never bare SET: it reverts at COMMIT/ROLLBACK and so cannot
     // leak this bulk ceiling onto whichever caller the pool hands this
     // physical connection to next.
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
     const result = await client.query<Row>(sql, params);
     await client.query("COMMIT");
@@ -1370,13 +1423,57 @@ export async function withPostgresTransaction<T>(
   }
 }
 
+export interface BulkChunkBudget {
+  chunkSize: number;
+}
+
+/**
+ * Run `items` through `runChunk` in chunks that keep each bulk statement well
+ * under `postgresBulkStatementTimeoutMs()`. A chunk slower than a quarter of
+ * the timeout halves the next chunk. A chunk that the timeout cancels is
+ * retried at half its size; a single item that still times out is rethrown.
+ * `runChunk` must commit each chunk on its own and be idempotent, so a crash
+ * keeps every committed chunk. The caller keeps one budget across calls, so
+ * a learned size carries over to its later pages.
+ */
+export async function runBulkChunksWithinStatementBudget<T>(
+  items: readonly T[],
+  budget: BulkChunkBudget,
+  runChunk: (chunk: readonly T[]) => Promise<unknown>
+): Promise<void> {
+  let offset = 0;
+  while (offset < items.length) {
+    const chunk = items.slice(offset, offset + Math.max(1, budget.chunkSize));
+    const startedAt = Date.now();
+    try {
+      await runChunk(chunk);
+    } catch (error) {
+      if (!(error instanceof PostgresStatementTimeoutError) || chunk.length === 1) {
+        throw error;
+      }
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+      continue;
+    }
+    offset += chunk.length;
+    if (Date.now() - startedAt > postgresBulkStatementTimeoutMs() / 4) {
+      budget.chunkSize = Math.max(1, Math.floor(chunk.length / 2));
+    }
+  }
+}
+
 /** Keep a bounded derived-index page on the bulk lane while it shares its manifest fence and write transaction. */
-export async function withPostgresBulkTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+export async function withPostgresBulkTransaction<T>(
+  fn: (client: PoolClient) => Promise<T>,
+  options?: { lockConnectorInstanceId?: string }
+): Promise<T> {
   const client = await getPostgresBulkPool().connect();
   try {
     await client.query("BEGIN");
-    await client.query(`SET LOCAL statement_timeout = ${POSTGRES_BULK_STATEMENT_TIMEOUT_MS}`);
+    await client.query(`SET LOCAL statement_timeout = ${postgresBulkStatementTimeoutMs()}`);
     await client.query(`SET LOCAL lock_timeout = ${POSTGRES_BULK_LOCK_TIMEOUT_MS}`);
+    if (options?.lockConnectorInstanceId) {
+      await acquireConnectorInstanceXactLock(client, options.lockConnectorInstanceId);
+    }
     const value = await fn(client);
     await client.query("COMMIT");
     return value;
@@ -1437,10 +1534,10 @@ export async function initExistingPostgresRepairStorage(
   if (pool) {
     await closePostgresStorage();
   }
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
-  bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, NOOP_STORAGE_LOG);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, NOOP_STORAGE_LOG);
   lockPoolCapacity = 1;
-  lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, NOOP_STORAGE_LOG);
   activeBackend = "postgres";
   try {
     const result = await pool.query<{ table_name: string }>(
@@ -1496,10 +1593,10 @@ export async function initPostgresStorage(
   }
 
   // Two lanes, not one shared pool: see POSTGRES_INTERACTIVE_POOL_MAX.
-  pool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_INTERACTIVE_POOL_MAX });
-  bulkPool = new Pool({ connectionString: config.databaseUrl, max: POSTGRES_BULK_POOL_MAX });
+  pool = createPostgresPool(config.databaseUrl, POSTGRES_INTERACTIVE_POOL_MAX, log);
+  bulkPool = createPostgresPool(config.databaseUrl, POSTGRES_BULK_POOL_MAX, log);
   lockPoolCapacity = 1;
-  lockPool = new Pool({ connectionString: config.databaseUrl, max: lockPoolCapacity });
+  lockPool = createPostgresPool(config.databaseUrl, lockPoolCapacity, log);
   activeBackend = "postgres";
   // Storage-lifecycle fence (server/storage-generation.ts): a fresh pool
   // means any deferred work scheduled against a prior pool (this function's
@@ -1594,6 +1691,13 @@ async function bootstrapPostgresSchemaOnce({
         connector_id TEXT PRIMARY KEY,
         manifest JSONB NOT NULL,
         created_at TEXT NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::text
+      );
+
+      CREATE TABLE IF NOT EXISTS connector_accepted_declarations (
+        connector_id TEXT NOT NULL,
+        declaration_version TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        PRIMARY KEY (connector_id, declaration_version)
       );
 
       CREATE TABLE IF NOT EXISTS connector_installs (
@@ -2097,6 +2201,91 @@ async function bootstrapPostgresSchemaOnce({
         trace_id TEXT,
         scenario_id TEXT
       );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
+        issuer TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+        source_id TEXT NOT NULL,
+        internal_id TEXT NOT NULL,
+        client_sector TEXT,
+        scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+        handle TEXT NOT NULL UNIQUE,
+        PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
+      );
+      ALTER TABLE pairwise_identity_handles ADD COLUMN IF NOT EXISTS client_sector TEXT;
+      ALTER TABLE pairwise_identity_handles
+        ADD COLUMN IF NOT EXISTS scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'));
+      -- A legacy row and its v1 successor share the original six-column tuple,
+      -- so the key must include scheme. Rows and handles are untouched; this
+      -- batch's transaction and the bootstrap lock make the swap atomic.
+      DO $$
+      DECLARE
+        key_name TEXT;
+        key_columns TEXT;
+      BEGIN
+        SELECT c.conname, string_agg(a.attname, ',' ORDER BY k.position)
+          INTO key_name, key_columns
+          FROM pg_constraint c
+          CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, position)
+          JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+         WHERE c.conrelid = 'pairwise_identity_handles'::regclass AND c.contype = 'p'
+         GROUP BY c.conname;
+        IF key_columns = 'issuer,subject_id,client_id,kind,source_id,internal_id' THEN
+          EXECUTE format('ALTER TABLE pairwise_identity_handles DROP CONSTRAINT %I', key_name);
+          ALTER TABLE pairwise_identity_handles
+            ADD CONSTRAINT pairwise_identity_handles_pkey
+            PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme);
+        ELSIF key_columns IS DISTINCT FROM 'issuer,subject_id,client_id,kind,source_id,internal_id,scheme' THEN
+          RAISE EXCEPTION 'Unsupported pairwise_identity_handles primary key; refusing an unsafe migration.';
+        END IF;
+      END
+      $$;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pg_pairwise_identity_handles_v1_scope
+        ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+        WHERE scheme = 'v1';
+      CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
+        issuer TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        client_sector TEXT NOT NULL,
+        PRIMARY KEY (issuer, client_id)
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority (
+        subject_id TEXT NOT NULL,
+        internal_instance_id TEXT NOT NULL,
+        canonical_source_id TEXT NOT NULL,
+        declaration_version TEXT NOT NULL,
+        accepted_legacy_source_aliases_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        PRIMARY KEY (subject_id, internal_instance_id)
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority_versions (
+        subject_id TEXT NOT NULL,
+        internal_instance_id TEXT NOT NULL,
+        canonical_source_id TEXT NOT NULL,
+        declaration_version TEXT NOT NULL,
+        accepted_legacy_source_aliases_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+        PRIMARY KEY (subject_id, internal_instance_id, declaration_version)
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_root_keys (
+        issuer TEXT PRIMARY KEY,
+        key_version INTEGER NOT NULL CHECK (key_version = 1),
+        root_key_hex TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_legacy_backfills (
+        issuer TEXT PRIMARY KEY,
+        completed_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_issuer_migrations (
+        from_issuer TEXT NOT NULL,
+        to_issuer TEXT NOT NULL,
+        migrated_at TEXT NOT NULL,
+        PRIMARY KEY (from_issuer, to_issuer)
+      );
+      CREATE TABLE IF NOT EXISTS pairwise_identity_deployment (
+        singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+        issuer TEXT NOT NULL
+      );
       ALTER TABLE grants ADD COLUMN IF NOT EXISTS trust_signal_json JSONB;
       CREATE INDEX IF NOT EXISTS idx_pg_grants_client_status
         ON grants(client_id, status, issued_at);
@@ -2570,6 +2759,7 @@ async function bootstrapPostgresSchemaOnce({
         lease_id TEXT,
         lease_attempted INTEGER NOT NULL DEFAULT 0,
         lease_expires_at TEXT,
+        retryable INTEGER,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -2629,6 +2819,19 @@ async function bootstrapPostgresSchemaOnce({
 
       CREATE INDEX IF NOT EXISTS idx_pg_stream_evidence_run_registry_instance
         ON stream_evidence_run_registry(connector_instance_id);
+
+      -- See the SQLite DDL comment in server/db.ts (connector_checkpoint_withholds).
+      CREATE TABLE IF NOT EXISTS connector_checkpoint_withholds (
+        connector_id TEXT NOT NULL,
+        connector_instance_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL,
+        state_stream TEXT NOT NULL,
+        reason_key TEXT NOT NULL,
+        consecutive_runs INTEGER NOT NULL CHECK(consecutive_runs >= 1),
+        last_run_id TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (connector_id, connector_instance_id, grant_id, state_stream)
+      );
 
       CREATE TABLE IF NOT EXISTS connector_attention_records (
         attention_id TEXT PRIMARY KEY,
@@ -2883,7 +3086,9 @@ async function bootstrapPostgresSchemaOnce({
         ADD COLUMN IF NOT EXISTS profile_volume TEXT;
 
       ALTER TABLE browser_surfaces
-        ADD COLUMN IF NOT EXISTS browser_generation_hash TEXT;
+        ADD COLUMN IF NOT EXISTS browser_generation_hash TEXT,
+        ADD COLUMN IF NOT EXISTS allocator_metadata_json TEXT,
+        ADD COLUMN IF NOT EXISTS retained INTEGER CHECK (retained IS NULL OR retained IN (0, 1));
 
       -- Kind-neutral, run-grain durable projection. Historically
       -- scheduler-only (scheduler_run_history); generalized so the
@@ -3018,6 +3223,18 @@ async function bootstrapPostgresSchemaOnce({
       CREATE UNIQUE INDEX IF NOT EXISTS uniq_blobs_sha256
         ON blobs(sha256);
 
+      CREATE TABLE IF NOT EXISTS rs_opaque_cursors (
+        token_digest TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK (kind IN ('page', 'changes_page', 'changes_since')),
+        scope_digest TEXT NOT NULL,
+        context_digest TEXT NOT NULL,
+        internal_cursor TEXT NOT NULL,
+        created_at BIGINT NOT NULL,
+        expires_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_expiry ON rs_opaque_cursors(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_scope ON rs_opaque_cursors(scope_digest, kind, created_at);
+
       CREATE TABLE IF NOT EXISTS spine_events (
         event_id TEXT PRIMARY KEY,
         event_seq BIGSERIAL UNIQUE,
@@ -3112,8 +3329,10 @@ async function bootstrapPostgresSchemaOnce({
         scope_key TEXT NOT NULL,
         record_key TEXT NOT NULL,
         embedding JSONB NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
+      ALTER TABLE semantic_search_blob ADD COLUMN IF NOT EXISTS input_identity TEXT;
       CREATE TABLE IF NOT EXISTS semantic_search_snapshots (
         snapshot_id TEXT PRIMARY KEY,
         query TEXT NOT NULL,
@@ -3364,13 +3583,46 @@ async function bootstrapPostgresSchemaOnce({
         last_error TEXT,
         attempts INTEGER NOT NULL DEFAULT 0,
         next_attempt_at TEXT,
+        operator_parked INTEGER DEFAULT 0,
         PRIMARY KEY(connector_instance_id, stream)
       );
       CREATE INDEX IF NOT EXISTS idx_pg_search_index_dirty_pending
         ON search_index_dirty(dirty);
+      -- Pending re-derivation of manifest-derived record columns
+      -- (cursor_value, primary_key_text, semantic_time) for one stream of one
+      -- connection, queued with a manifest publication. job_id is new on every
+      -- queue write and is never reused, so a round holding an older job can
+      -- not move or delete a newer one. after_record_key is the durable
+      -- resume cursor; the row is deleted once the stream is done.
+      CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+        connector_instance_id TEXT NOT NULL,
+        connector_id TEXT NOT NULL,
+        stream TEXT NOT NULL,
+        job_id TEXT NOT NULL,
+        after_record_key TEXT,
+        marked_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
+        PRIMARY KEY(connector_instance_id, stream)
+      );
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS next_attempt_at TEXT;
       ALTER TABLE search_index_dirty ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'search_index_dirty'
+            AND column_name = 'operator_parked'
+        ) THEN
+          ALTER TABLE search_index_dirty ADD COLUMN operator_parked INTEGER;
+          UPDATE search_index_dirty
+          SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END;
+        END IF;
+      END $$;
+      ALTER TABLE search_index_dirty ALTER COLUMN operator_parked SET DEFAULT 0;
 
       ALTER TABLE connector_summary_evidence
         ADD COLUMN IF NOT EXISTS last_record_updated_at TEXT;
@@ -4088,6 +4340,62 @@ async function describeBootstrapLockHolders(client: PoolClient): Promise<string>
   }
 }
 
+/**
+ * Cancels derived-index maintenance that holds the bootstrap key in shared
+ * mode, in this database only. Maintenance is rebuildable work and records the
+ * cancellation as a failed window; the schema bootstrap gates the listener.
+ * Observed cost of waiting instead: a 41-minute VACUUM of a 14 GB
+ * semantic_search_blob held its ShareUpdateExclusiveLock, the boot batch
+ * queued for an AccessExclusiveLock on the same table, and the app served 503
+ * for six minutes until an operator cancelled the VACUUM.
+ *
+ * Called on every failed poll: a cancel that reaches a maintenance session
+ * between two statements has no effect, and the next poll repeats it.
+ */
+interface MaintenanceCancellationLog {
+  cancelledPids: Set<number>;
+  failureLogged: boolean;
+}
+
+async function cancelDerivedIndexMaintenanceBlockingBootstrap(
+  client: PoolClient,
+  log: StorageLog,
+  logged: MaintenanceCancellationLog
+): Promise<void> {
+  try {
+    // The holders are filtered in a materialized CTE so pg_cancel_backend runs
+    // only on rows that passed every predicate.
+    const result = await client.query<{ cancelled: boolean; pid: number }>(
+      `WITH holders AS MATERIALIZED (
+         SELECT l.pid
+           FROM pg_locks AS l
+          WHERE l.locktype = 'advisory'
+            AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+            AND l.classid = $1::int::oid
+            AND l.objid = $2::int::oid
+            AND l.objsubid = 2
+            AND l.mode = 'ShareLock'
+            AND l.granted
+            AND l.pid <> pg_backend_pid()
+       )
+       SELECT pid, pg_cancel_backend(pid) AS cancelled FROM holders`,
+      POSTGRES_BOOTSTRAP_SERIALIZATION_LOCK
+    );
+    for (const row of result.rows.filter((holder) => holder.cancelled && !logged.cancelledPids.has(holder.pid))) {
+      logged.cancelledPids.add(row.pid);
+      log(`postgres bootstrap cancelled derived-index maintenance in backend pid ${row.pid} to proceed`);
+    }
+  } catch (error) {
+    // A role without permission to signal the holder keeps the old behavior:
+    // wait for the lock within the bootstrap budget.
+    if (!logged.failureLogged) {
+      logged.failureLogged = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      log(`postgres bootstrap could not cancel derived-index maintenance: ${reason}`);
+    }
+  }
+}
+
 interface BootstrapLockWaitOptions {
   budget: PostgresBootstrapLockBudget;
   log?: StorageLog;
@@ -4108,6 +4416,7 @@ async function acquirePostgresBootstrapLock(
   const deadline = startedAt + budget.timeoutMs;
   let attempt = 0;
   let nextProgressAt = startedAt;
+  const maintenanceCancellationLog: MaintenanceCancellationLog = { cancelledPids: new Set(), failureLogged: false };
 
   for (;;) {
     // biome-ignore lint/performance/noAwaitInLoops: This is the bounded polling loop whose deadline is the behavior under test.
@@ -4119,6 +4428,8 @@ async function acquirePostgresBootstrapLock(
       log(`postgres bootstrap lock acquired after ${now() - startedAt}ms (attempt=${attempt})`);
       return;
     }
+
+    await cancelDerivedIndexMaintenanceBlockingBootstrap(client, log, maintenanceCancellationLog);
 
     // pg_try_advisory_lock completes before this application-side sleep. A
     // contender therefore has no active virtual transaction that could block
@@ -4802,6 +5113,10 @@ async function migratePostgresConnectorDetailGapInstanceColumns(client: PoolClie
   }
   if (!(await hasPostgresColumn(client, "connector_detail_gaps", "lease_expires_at"))) {
     await client.query("ALTER TABLE connector_detail_gaps ADD COLUMN lease_expires_at TEXT");
+  }
+  // Additive, nullable, never backfilled: NULL = legacy / unclassified keeps its old eligibility.
+  if (!(await hasPostgresColumn(client, "connector_detail_gaps", "retryable"))) {
+    await client.query("ALTER TABLE connector_detail_gaps ADD COLUMN retryable INTEGER");
   }
   await client.query(`
     UPDATE connector_detail_gaps
@@ -5553,6 +5868,14 @@ async function ensurePostgresRecordsBlobSearchInstanceIndexes(client: PoolClient
         "CREATE INDEX IF NOT EXISTS idx_pg_semantic_search_scope ON semantic_search_blob(connector_instance_id, scope_key)",
       expectedFragments: ["semantic_search_blob USING btree (connector_instance_id, scope_key)"],
       name: "idx_pg_semantic_search_scope",
+    });
+    await ensurePostgresIndexDefinition(client, {
+      createSql:
+        'CREATE INDEX IF NOT EXISTS idx_pg_semantic_search_scope_c ON semantic_search_blob(connector_instance_id, (scope_key COLLATE "C"), (record_key COLLATE "C"))',
+      expectedFragments: [
+        'semantic_search_blob USING btree (connector_instance_id, scope_key COLLATE "C", record_key COLLATE "C")',
+      ],
+      name: "idx_pg_semantic_search_scope_c",
     });
   });
 }
@@ -6388,12 +6711,14 @@ async function enqueuePostgresLocalDeviceProjectionRepair(
     // equivalent, so a drift in either shows up as a test failure rather
     // than a silently un-reconciled scope.
     await client.query(
-      `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision)
-       VALUES ($1, $2, $3, 1, $4, 1)
+      `INSERT INTO search_index_dirty(connector_instance_id, connector_id, stream, dirty, marked_at, revision, operator_parked)
+       VALUES ($1, $2, $3, 1, $4, 1, 0)
        ON CONFLICT(connector_instance_id, stream) DO UPDATE SET
          connector_id = excluded.connector_id,
          dirty = 1,
          marked_at = excluded.marked_at,
+         attempts = CASE WHEN search_index_dirty.operator_parked = 0 THEN 0 ELSE search_index_dirty.attempts END,
+         next_attempt_at = CASE WHEN search_index_dirty.operator_parked = 0 THEN NULL ELSE search_index_dirty.next_attempt_at END,
          revision = search_index_dirty.revision + 1`,
       [repairConnectorInstanceId, newConnectorId, stream, nowIso]
     );

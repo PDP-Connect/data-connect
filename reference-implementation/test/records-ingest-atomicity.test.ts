@@ -14,21 +14,17 @@ const TOP_LEVEL_REGEX_1 = /injected fault/;
  *     `version_counter`
  *   - repeated delete does not append a duplicate delete change or advance
  *     `version_counter`
- *   - if any error occurs after the durable mutation begins (here, simulated
- *     between record-write and `record_changes` append via a test-only fault
- *     hook), `records`, `record_changes`, and `version_counter` are *all*
- *     rolled back together — a subsequent ingest must not collide with or
- *     skip around a partially written version
+ *   - an injected exception after the live-row and `record_changes` writes
+ *     still rolls `records`, `record_changes`, and `version_counter` back
+ *     together; the hook is later than the test name historically claimed and
+ *     does not simulate a process kill or an fsync failure; a subsequent
+ *     ingest must not collide with or skip around a partial version
  *   - consumers reading `record_changes` directly see a contiguous version
  *     sequence after the tested writes
  *
- * Old failure mode the rollback test pins: prior to this change, the durable
- * writes ran outside an explicit SQLite transaction. If the process crashed
- * between the live `records` mutation and the `record_changes` append (or
- * between the change-log append and the `version_counter` advance), the
- * three tables drifted: live state could move while the change feed and
- * counter did not, so `changes_since` cursors could observe gaps,
- * collisions, or stale max_versions on the next ingest.
+ * The historical failure mode was a non-transactional durable write sequence.
+ * This test checks rollback on a thrown exception after the writes. It does
+ * not prove recovery from process termination, power loss or fsync failure.
  *
  * Spec: openspec/changes/harden-record-ingest-atomicity/specs/
  *       reference-implementation-architecture/spec.md
@@ -199,7 +195,7 @@ test("repeated delete does not append duplicate delete or advance version_counte
   }
 });
 
-test("failure between live mutation and record_changes append rolls back the whole durable unit", async () => {
+test("injected failure after the record_changes append rolls back the durable unit", async () => {
   setup();
   try {
     // Seed a record so the failing ingest is an *update* on top of a known
@@ -212,12 +208,12 @@ test("failure between live mutation and record_changes append rolls back the who
     assert.equal(baselineLive.version, 1);
     assert.equal(baselineCounter, 1);
 
-    // Inject a failure *after* the records mutation runs but *before* the
-    // record_changes append. Without an explicit transaction the first exec
-    // would persist; with the new atomic boundary the whole unit rolls back.
+    // `writeRecordChange` has already appended history when this hook runs.
+    // Throwing still rolls back the transaction, but this is not the earlier
+    // cut between the live-row mutation and history append.
     __setIngestFaultHookForTest((point: string) => {
       if (point === "after-records-mutation") {
-        throw new Error("injected fault between records and record_changes");
+        throw new Error("injected fault after record_changes append");
       }
     });
 

@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { useEffect } from "react"
 import { describe, expect, it, vi, beforeEach, type Mock } from "vitest"
 import { render, waitFor } from "@testing-library/react"

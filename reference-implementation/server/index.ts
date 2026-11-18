@@ -52,8 +52,8 @@ import type {
 import { SourceWebhookError } from "../operations/ref-source-webhook-ingest/index.ts";
 import { deriveClientEventsFromRecordChange } from "../operations/rs-client-event-derive/index.ts";
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
+import { checkBrowserExecutableAtBoot } from "../runtime/browser-executable.ts";
 import { createOptionalBrowserSurfaceLeaseManager } from "../runtime/browser-surface/remote-surface-optional.ts";
-import { connectorRetainsSurfaceProcess } from "../runtime/browser-surface/retained-surface-connectors.ts";
 import {
   type BrowserSurfaceLeaseSweepCloseSource,
   type BrowserSurfaceLeaseSweepTimer,
@@ -88,6 +88,8 @@ import {
   reconcileConnectorUninstalls,
 } from "./connector-install/index.ts";
 import { removeConnectorActivation } from "./connector-install/activation-authority.ts";
+import { installedConnectorManifestRegistration } from "./connector-install/manifest-registration.ts";
+import { validateConnectorManifest } from "./connector-manifest-validation.ts";
 import {
   connectorLifecycleDataDir,
   withConnectorLifecycleLock,
@@ -100,14 +102,13 @@ import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
+import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
 import { NekoSurfaceAllocatorClient } from "../runtime/neko-surface-allocator.ts";
 import { isClosedPipeWriteError } from "../runtime/pipe-errors.ts";
 import { hasForwardEvidenceDebt } from "../runtime/recovery-decision.ts";
 import { projectRunAutomationPolicy } from "../runtime/run-automation-policy.ts";
-import { matchesRecoveryInstance } from "../runtime/scheduler/recovery-instance-scope.ts";
 import { createScheduler } from "../runtime/scheduler.ts";
-import { SOURCE_PRESSURE_GAP_REASONS } from "../runtime/scheduler-source-pressure-cooldown.ts";
 import { isVendoredUndiciParserAssertion } from "../runtime/undici-parser-errors.ts";
 import {
   buildPendingConsentRequestUri,
@@ -120,9 +121,11 @@ import {
   createHostedMcpGrantPackage,
   deleteCimdDocument,
   deleteRegisteredClient,
+  connectorDeclarationDigest,
   exchangeGrantScopedDeviceCode,
   exchangeOAuthAuthorizationCode,
   exchangeOAuthRefreshToken,
+  getAcceptedDeclarationDigest,
   getCimdDocument,
   getConfiguredNativeManifest,
   getConnectorManifest,
@@ -138,12 +141,12 @@ import {
   listGrantPackagesForOwner,
   listOwnerIssuedClients,
   listRegisteredConnectorIds,
+  normalizeConnectorManifestForStorage,
   registerConnector,
   registerDynamicClient,
   requireGrantContractAgainstManifest,
   requireResolvedPersistedGrantState,
   resolveOAuthClient,
-  retireFormerPreRegisteredClientsAtStartup,
   revokeGrant,
   revokeGrantPackage,
   revokeOwnerClientTokenByPublicId,
@@ -315,8 +318,8 @@ import {
   listDatasetSummaryStreamProjectionSeeds,
   listDatasetTopConnectorCandidates,
   listLocalCoverageDiagnostics,
-  listStreams,
   listStreamsAcrossBindings,
+  listStreamsByResolvedBindings,
   maintainRecordIndexes,
   prepareDeviceFinalRecords,
   putSyncState,
@@ -428,6 +431,7 @@ import {
   mountRefConnectionSchedulePause,
   mountRefConnectionScheduleResume,
   mountRefConnectionScheduleUpsert,
+  mountRefConnectionSearchIndexControl,
   mountRefConnectionSetDisplayName,
   mountRefConnectionsList,
   mountRefConnectorDetail,
@@ -472,7 +476,12 @@ import {
   mountRefDeviceExporterSourceInstances,
   mountRefDeviceExportersList,
 } from "./routes/ref-device-exporters.ts";
-import { codeToStatus, recoveryAdmissionExtrasForWire, typeFor } from "./routes/ref-error-status.ts";
+import {
+  codeToStatus,
+  connectorNotInstalledExtrasForWire,
+  recoveryAdmissionExtrasForWire,
+  typeFor,
+} from "./routes/ref-error-status.ts";
 import {
   mountRefEventSubscriptionsDisable,
   mountRefEventSubscriptionsGet,
@@ -628,7 +637,11 @@ import {
   runStartupRunHistoryBackfillToCompletion,
 } from "./stores/run-history-backfill-stage.ts";
 import { getDefaultSchedulerStore, type SchedulerStore } from "./stores/scheduler-store.ts";
-import { countDirtySearchIndexScopes } from "./stores/search-index-dirty-store.ts";
+import {
+  countDirtySearchIndexScopes,
+  parkSearchIndexDirtyScope,
+  rearmSearchIndexDirtyScope,
+} from "./stores/search-index-dirty-store.ts";
 import { getDefaultSourceWebhookEventStore } from "./stores/source-webhook-event-store.ts";
 import {
   isStaticSecretProfileManifest,
@@ -724,6 +737,7 @@ interface PdppErrorBody {
   active_run_id?: string;
   available_connections?: unknown[];
   code: unknown;
+  connector_id?: string;
   message: unknown;
   next_eligible_at?: string;
   next_step?: string;
@@ -1429,6 +1443,9 @@ function pdppError(
     if (typeof extras.pending_pressure_gap_count === "number") {
       body.error.pending_pressure_gap_count = extras.pending_pressure_gap_count;
     }
+    if (typeof extras.connector_id === "string") {
+      body.error.connector_id = extras.connector_id;
+    }
   }
   const resourceMetadataUrl = status === 401 ? getProtectedResourceMetadataUrl(typedRes) : null;
   if (resourceMetadataUrl) {
@@ -1489,15 +1506,20 @@ function getProtectedResourceMetadataUrl(res: ResLike) {
   return typeof metadataUrl === "string" && metadataUrl ? metadataUrl : null;
 }
 
-function setProtectedResourceMetadataChallenge(res: ResLike, invalidToken = false) {
+/**
+ * spec-core §8 "Protected resource metadata": every RS 401 carries a
+ * `WWW-Authenticate: Bearer` challenge (RFC 6750 §3). It names the metadata
+ * document in `resource_metadata` (RFC 9728 §5.1) when the RS has a trusted
+ * URL for it, and it adds `error="invalid_token"` when a token was presented
+ * and rejected. An untrusted, host-derived URL is never echoed.
+ */
+function setProtectedResourceMetadataChallenge(res: ResLike, { tokenRejected }: { tokenRejected: boolean }) {
   const metadataUrl = getProtectedResourceMetadataUrl(res);
-  if (!metadataUrl) {
-    return;
-  }
-  res.setHeader(
-    "WWW-Authenticate",
-    `Bearer ${invalidToken ? 'error="invalid_token", ' : ""}resource_metadata="${httpQuotedString(metadataUrl)}"`
-  );
+  const params = [
+    ...(metadataUrl ? [`resource_metadata="${httpQuotedString(metadataUrl)}"`] : []),
+    ...(tokenRejected ? ['error="invalid_token"'] : []),
+  ];
+  res.setHeader("WWW-Authenticate", params.length ? `Bearer ${params.join(", ")}` : "Bearer");
 }
 
 function sha256Hex(value: string) {
@@ -1557,6 +1579,9 @@ async function ensureReferenceConnectorCatalogEntry(
     // decouple-device-enrollment-from-ingest-writer-admission design D1.
     await registerConnector(localCollectorManifest, {
       backfillRetrievalIndexes: false,
+      // The server's own shipped manifest: a trusted publication, so it may
+      // supersede the accepted content recorded for its version.
+      replaceAcceptedDigest: true,
     });
     return;
   }
@@ -1605,7 +1630,7 @@ function handleError(res: ResLike, err: ApiError) {
   if (code === "connection_run_active" && typeof err.active_run_id === "string") {
     extras.active_run_id = err.active_run_id;
   }
-  Object.assign(extras, recoveryAdmissionExtrasForWire(err));
+  Object.assign(extras, recoveryAdmissionExtrasForWire(err), connectorNotInstalledExtrasForWire(err));
   pdppError(res, status, code, err.message, err.param || null, extras);
 }
 
@@ -2074,7 +2099,7 @@ async function requireTokenWithIntrospection(
 ) {
   const auth = req.headers?.authorization;
   if (!auth || typeof auth !== "string" || !auth.startsWith("Bearer ")) {
-    setProtectedResourceMetadataChallenge(res);
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: false });
     return pdppError(res, 401, "authentication_error", "Missing Bearer token");
   }
   const token = auth.slice(7);
@@ -2087,57 +2112,52 @@ async function requireTokenWithIntrospection(
         stream: req.params.stream,
       });
     } catch (error: unknown) {
-      if (error instanceof SourceIntrospectionContextError) {
-        info.active = false;
-        info.inactive_reason = error.code;
-      } else {
+      if (!(error instanceof SourceIntrospectionContextError)) {
         throw error;
       }
+      // A valid token asking for a stream or connection outside its grant is
+      // an authorization denial, not a token failure: spec-core §8 Errors
+      // (403 grant_stream_not_allowed) and §9 RS item 2 (the RS enforces the
+      // explicit instance handles). The token stays valid, so no
+      // invalid_token challenge.
+      const denial = grantDenialForContextError(error.code, req.params.stream, requestedConnection);
+      if (denial) {
+        if (info.trace_id) {
+          setReferenceTraceId(res, info.trace_id);
+        }
+        await emitAuthGateQueryRejection(req, res, info, {
+          code: denial.code,
+          message: denial.message,
+          sourceDescriptor: buildClientSourceDescriptor(info),
+        });
+        return pdppError(res, 403, denial.code, denial.message, denial.param);
+      }
+      info.active = false;
+      info.inactive_reason = error.code;
     }
   }
   if (!info.active) {
-    setProtectedResourceMetadataChallenge(res, true);
+    setProtectedResourceMetadataChallenge(res, { tokenRejected: true });
     if (info.trace_id) {
       setReferenceTraceId(res, info.trace_id);
     }
-    const authGateQuery = inferAuthGateQueryContext(req, info);
-    if (authGateQuery && info.trace_id) {
-      const authGateContext: QueryContext = {
-        actorId: info.client_id ?? null,
-        actorType: "client",
-        queryData: {
-          auth_gate: true,
-          query_shape: authGateQuery.queryShape,
-          ...(authGateQuery.queryShape === "record_list"
-            ? {
-                // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
-                has_changes_since: authGateQuery.hasChangesSince ?? false,
-                limit: authGateQuery.limit ?? null,
-              }
-            : {}),
-          ...(authGateQuery.requestedRecordId ? { requested_record_id: authGateQuery.requestedRecordId } : {}),
-        },
-        queryId: ensureRequestId(res),
-        scenarioId: info.scenario_id ?? null,
-        streamId: authGateQuery.streamId ?? null,
-        tokenInfo: info,
-        traceId: info.trace_id ?? null,
-      };
-      await emitQueryReceived(authGateContext, req);
-      const gateErrMsg =
-        info.inactive_reason === "grant_revoked"
-          ? "Grant has been revoked"
+    const gateErrMsg =
+      info.inactive_reason === "grant_revoked"
+        ? "Grant has been revoked"
+        : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
+          info.inactive_reason === "grant_expired"
+          ? "Grant has expired"
           : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-            info.inactive_reason === "grant_expired"
-            ? "Grant has expired"
-            : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-              info.inactive_reason === "grant_invalid"
-              ? "Grant is malformed or no longer valid"
-              : "Invalid or expired token";
-      const inactiveReason = info.inactive_reason || "authentication_error";
-      const gateErr = Object.assign(new Error(gateErrMsg), { code: inactiveReason }) as ApiError;
-      await emitQueryRejected(authGateContext, req, gateErr, 401);
-    }
+            info.inactive_reason === "grant_invalid"
+            ? "Grant is malformed or no longer valid"
+            : "Invalid or expired token";
+    await emitAuthGateQueryRejection(req, res, info, {
+      code: info.inactive_reason || "authentication_error",
+      message: gateErrMsg,
+      // The token is rejected, so the recorded status is the 401 sent below
+      // even where the internal code (grant_invalid) maps to 403.
+      status: 401,
+    });
     if (info.inactive_reason === "grant_revoked") {
       return pdppError(res, 401, "grant_revoked", "Grant has been revoked");
     }
@@ -2157,6 +2177,71 @@ async function requireTokenWithIntrospection(
   }
   req.tokenInfo = info;
   next();
+}
+
+/**
+ * Map a request-selector failure from the resolved grant to its 403 grant
+ * denial. Other context failures mean the token or its context is unusable
+ * and stay 401.
+ */
+function grantDenialForContextError(
+  code: string,
+  stream: string,
+  requestedConnection: string | null
+): { code: string; message: string; param: string | null } | null {
+  if (code === "context.stream_not_allowed") {
+    return { code: "grant_stream_not_allowed", message: `Stream '${stream}' not in grant`, param: null };
+  }
+  if (code === "context.instance_mismatch") {
+    return {
+      code: "grant_instance_not_allowed",
+      message: `connection_id '${requestedConnection ?? ""}' is not in the grant for stream '${stream}'`,
+      param: "connection_id",
+    };
+  }
+  return null;
+}
+
+/**
+ * Record an auth-gate rejection of a client stream read on the grant timeline
+ * as a correlated query.received / query.rejected pair. Reads that are not
+ * stream-scoped GETs, or that carry no trace id, are not recorded.
+ */
+async function emitAuthGateQueryRejection(
+  req: ReqLike,
+  res: ResLike,
+  info: TokenInfo,
+  rejection: { code: string; message: string; sourceDescriptor?: unknown; status?: number }
+) {
+  const authGateQuery = inferAuthGateQueryContext(req, info);
+  if (!(authGateQuery && info.trace_id)) {
+    return;
+  }
+  const authGateContext: QueryContext = {
+    actorId: info.client_id ?? null,
+    actorType: "client",
+    queryData: {
+      auth_gate: true,
+      query_shape: authGateQuery.queryShape,
+      ...(authGateQuery.queryShape === "record_list"
+        ? {
+            // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
+            has_changes_since: authGateQuery.hasChangesSince ?? false,
+            limit: authGateQuery.limit ?? null,
+          }
+        : {}),
+      ...(authGateQuery.requestedRecordId ? { requested_record_id: authGateQuery.requestedRecordId } : {}),
+    },
+    queryId: ensureRequestId(res),
+    scenarioId: info.scenario_id ?? null,
+    ...(Object.hasOwn(rejection, "sourceDescriptor") ? { sourceDescriptor: rejection.sourceDescriptor } : {}),
+    streamId: authGateQuery.streamId ?? null,
+    tokenInfo: info,
+    traceId: info.trace_id ?? null,
+  };
+  await emitQueryReceived(authGateContext, req);
+  const gateErr = Object.assign(new Error(rejection.message), { code: rejection.code }) as ApiError;
+  await emitQueryRejected(authGateContext, req, gateErr, rejection.status);
 }
 
 function requireOwner(req: ReqLike, res: ResLike, next: () => void) {
@@ -3102,12 +3187,6 @@ function resolveDynamicClientRegistrationInitialAccessTokensForRequest(req: ReqL
 
 function resolvePreRegisteredPublicClients(opts: ServerOpts = {}) {
   return opts.preRegisteredPublicClients || defaultPreRegisteredPublicClients();
-}
-
-function preRegisteredClientIds(clients: unknown): string[] {
-  return (Array.isArray(clients) ? clients : [])
-    .map((client: { client_id?: unknown } | null) => client?.client_id)
-    .filter((id): id is string => typeof id === "string");
 }
 
 function createPublicDcrRateLimiter(config: { windowMs?: number; max?: number } | false = {}) {
@@ -4142,52 +4221,38 @@ async function listSubjectVisibleStreamSummaries({
   const grantStreams = Array.isArray(effectiveGrant.streams)
     ? (effectiveGrant.streams as Record<string, unknown>[])
     : [];
-  const summaries = new Map<string, Record<string, unknown>>();
-  await Promise.all(
-    grantStreams.map(async (streamGrant) => {
-      const streamName = typeof streamGrant.name === "string" ? streamGrant.name : null;
-      if (!streamName) {
-        return;
-      }
-      let bindings: Array<{ connectorId: string; connectorInstanceId: string }>;
+  const typedGrant = {
+    ...effectiveGrant,
+    streams: grantStreams.filter((streamGrant) => typeof streamGrant.name === "string" && streamGrant.name),
+  } as unknown as Parameters<typeof listStreamsByResolvedBindings>[0];
+  const rows = await listStreamsByResolvedBindings(
+    typedGrant,
+    manifest as Parameters<typeof listStreamsByResolvedBindings>[1],
+    async (streamGrant) => {
       try {
         const resolved = await resolveReadRequestBindings({
-          grant: effectiveGrant as unknown as Parameters<typeof resolveReadRequestBindings>[0]["grant"],
+          grant: typedGrant,
           ownerRead: grant === null,
           ...(ownerSubjectId ? { ownerSubjectId } : {}),
           requestParams: {},
           storageBinding: storageBinding as unknown as NonNullable<
             Parameters<typeof resolveReadRequestBindings>[0]["storageBinding"]
           >,
-          streamName,
+          streamName: streamGrant.name,
         });
-        bindings = resolved.bindings as Array<{
-          connectorId: string;
-          connectorInstanceId: string;
-        }>;
+        return resolved.bindings;
       } catch (error) {
         if (error instanceof Error && (error as Error & { code?: string }).code === "connection_not_found") {
-          return;
+          return [];
         }
         throw error;
       }
-      const perBinding = await Promise.all(
-        bindings.map((binding) =>
-          listStreams(
-            {
-              connector_id: binding.connectorId,
-              connector_instance_id: binding.connectorInstanceId,
-            },
-            { streams: [streamGrant] } as unknown as Parameters<typeof listStreams>[1],
-            manifest as Parameters<typeof listStreams>[2]
-          )
-        )
-      );
-      for (const summary of perBinding.flat() as unknown as Record<string, unknown>[]) {
-        summaries.set(streamName, mergeStreamSummary(summaries.get(streamName), summary));
-      }
-    })
+    }
   );
+  const summaries = new Map<string, Record<string, unknown>>();
+  for (const summary of rows) {
+    summaries.set(summary.name, mergeStreamSummary(summaries.get(summary.name), { ...summary }));
+  }
   return [...summaries.values()];
 }
 
@@ -5509,6 +5574,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
         },
         {
           baseUrl: opts2.baseUrl,
+          deviceAuthorization: true,
           ...(opts.cimdFetchDependencies ? { cimdFetchDependencies: opts.cimdFetchDependencies } : {}),
           nativeManifest: resolveNativeManifest(opts),
           onCimdTransportFailure,
@@ -6484,7 +6550,9 @@ export function buildAsApp(opts: ServerOpts = {}) {
     listSchedules: async () => (controller ? await controller.listSchedules() : []),
     markConnectorSummaryEvidenceDirty,
     onScheduleMutation: opts.onScheduleMutation,
+    parkSearchIndexDirtyScope,
     pdppError,
+    rearmSearchIndexDirtyScope,
     reconcileDirtyConnectorSummaryEvidence,
     requireOwnerSession: ownerAuth.requireOwnerSession,
     resolveOwnerConnectorNamespace,
@@ -6799,7 +6867,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      ...installedConnectorManifestRegistration,
     });
 
   {
@@ -7127,6 +7195,10 @@ export function buildAsApp(opts: ServerOpts = {}) {
   );
   mountRefConnectionDelete(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionDelete>[1]);
   mountRefConnectionResetState(app, refConnectorsContext as unknown as Parameters<typeof mountRefConnectionResetState>[1]);
+  mountRefConnectionSearchIndexControl(
+    app,
+    refConnectorsContext as unknown as Parameters<typeof mountRefConnectionSearchIndexControl>[1]
+  );
   mountRefConnectionBrowserProfilePurge(
     app,
     refConnectorsContext as unknown as Parameters<typeof mountRefConnectionBrowserProfilePurge>[1]
@@ -7147,11 +7219,15 @@ export function buildAsApp(opts: ServerOpts = {}) {
     // GET /connectors/:id (manifest read) is unchanged — it exposes no user
     // data and is needed by the unauthenticated client-side connect flow.
     const asPolyfillConnectorsContext = {
+      declarationDigest: connectorDeclarationDigest,
+      getAcceptedDeclarationDigest,
       getConnectorManifest,
       handleError,
+      normalizeManifestForStorage: normalizeConnectorManifestForStorage,
       pdppError,
       registerConnector,
       requireOwnerSessionForRegister: lockConnectorRegistry ? ownerAuth.requireOwnerSession : null,
+      validateManifest: (manifest: Record<string, unknown>) => validateConnectorManifest(manifest),
     };
     mountAsPolyfillConnectorRegister(
       app,
@@ -8386,13 +8462,16 @@ function buildRsApp(opts: ServerOpts = {}) {
   // and registers only a verified installed manifest.
   mountOwnerConnectorInstall(app, {
     handleError,
+    // Installing or removing an implementation flips the summaries'
+    // `connector_implementation`; drop the cached list so the next read shows it.
+    onImplementationChanged: invalidateConnectorSummariesCache,
     pdppError,
     requireOwner,
     requireToken,
     service:
       opts.connectorInstallService ??
       createConnectorInstallService({
-        registerManifest: (manifest) => registerConnector(manifest),
+        ...installedConnectorManifestRegistration,
         removeActivation: removeConnectorActivation,
         assertUninstallAllowed: async (connectorId) => {
           const activeRun = isPostgresStorageBackend()
@@ -8748,19 +8827,6 @@ export async function startServer(opts: ServerOpts = {}) {
     logger,
     subjectId: earlyOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID,
   });
-  // Before the scheduler and console start and before the desktop signs in,
-  // so nothing holds a credential this revokes.
-  const retired = await retireFormerPreRegisteredClientsAtStartup(
-    Math.floor(Date.now() / 1000),
-    preRegisteredClientIds(resolvePreRegisteredPublicClients(opts))
-  );
-  if (Object.keys(retired.clients).length > 0 || retired.sessions > 0) {
-    logger.warn(
-      { owner_sessions_revoked: retired.sessions, retired_clients: retired.clients },
-      "revoked the credentials of clients earlier versions pre-registered, and the unlabelled desktop sessions earlier starts left"
-    );
-  }
-
   // Boot-epoch reconciliation — STAGE 5.
   // Emit `controller.booted` as the FIRST spine event of this process
   // incarnation, then stash {boot_epoch, seq, controller_id} in the
@@ -8813,6 +8879,11 @@ export async function startServer(opts: ServerOpts = {}) {
   // the other boot reconciliations and before HTTP routes mount, so a restart
   // can never leave the system silently inconsistent (P1).
   await checkOrphanedRecordsAtBoot(logger);
+
+  // Browser-image preflight: log, once, whether the Chromium the bundled
+  // Patchright expects exists. Non-fatal and skipped outside browser images; a
+  // missing browser fails browser connectors, not the server.
+  checkBrowserExecutableAtBoot(logger);
 
   // H5: manual-upload artifacts left stuck at uploaded/validating by a
   // process that died mid-upload/mid-validation (crash, OOM, kill -9, an
@@ -9318,7 +9389,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectorInstallService =
     opts.connectorInstallService ??
     createConnectorInstallService({
-      registerManifest: (manifest) => registerConnector(manifest),
+      ...installedConnectorManifestRegistration,
     });
   const asApp = buildAsApp({
     acceptedCollectorProtocolVersions: opts.acceptedCollectorProtocolVersions,
@@ -9840,33 +9911,6 @@ export async function startServer(opts: ServerOpts = {}) {
   };
 }
 
-// Deterministically re-derive credential-boundary retention on rehydrated
-// surfaces at boot, BEFORE the lease manager can run any idle-cleanup or
-// capacity-reclaim. `retained` is not a persisted column; it is a pure function
-// of the surface's connector via the RI retention registry. Fail-closed: a
-// surface whose connector is not registered stays non-retained.
-function rederiveRetainedSurfaces(surfaces: Record<string, unknown>[]) {
-  return surfaces.map((surface: Record<string, unknown>) =>
-    connectorRetainsSurfaceProcess(surface.connector_id as string) ? { ...surface, retained: true } : surface
-  );
-}
-
-// Same re-derivation, for rehydrated NON-TERMINAL LEASES. A queued
-// (waiting_for_browser_surface) or starting_surface ChatGPT lease that has not
-// yet materialized a surface carries no surface row for
-// rederiveRetainedSurfaces to mark — without this, that lease rehydrates as an
-// ordinary (non-retained) lease, and once it does materialize a surface (via
-// #resolveNewLease / queue promotion) that surface would be created without
-// the retained flag, making it evictable by routine idle-TTL or
-// capacity-pressure reap. `retained` is not a persisted lease column either;
-// it is re-derived the same way, by connector_id, fail-closed for an
-// unregistered connector.
-function rederiveRetainedLeases(leases: Record<string, unknown>[]) {
-  return leases.map((lease: Record<string, unknown>) =>
-    connectorRetainsSurfaceProcess(lease.connector_id as string) ? { ...lease, retained: true } : lease
-  );
-}
-
 // Independent periodic sweep for the managed browser-surface lease
 // lifecycle: expires past-TTL waiting leases, reconciles surfaces against the
 // Constructs (but never starts) the periodic browser-surface lease sweep
@@ -9975,21 +10019,8 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
   }
 
   await browserSurfaceLeaseStore.repairStaleSurfaceActiveLeases();
-  // The per-connection fair-slot invariant is enforced in the lease manager at
-  // retained-surface CREATION time (typed retained_capacity_reserved), NOT by
-  // counting these rehydrated surfaces — observed surfaces are not demand.
-  const rehydratedSurfaces = rederiveRetainedSurfaces(
-    (await browserSurfaceLeaseStore.listSurfaces()) as unknown as Record<string, unknown>[]
-  );
-  // Re-derive retention on rehydrated NON-TERMINAL LEASES too, not only
-  // surfaces: a queued/starting ChatGPT lease with no surface row yet would
-  // otherwise rehydrate non-retained and later materialize an evictable
-  // surface. Both re-derivations must run before the manager is constructed,
-  // so no idle-cleanup or capacity-reclaim can ever see a retaining
-  // lease/surface without the flag.
-  const rehydratedLeases = rederiveRetainedLeases(
-    (await browserSurfaceLeaseStore.listNonTerminalLeases()) as unknown as Record<string, unknown>[]
-  );
+  const rehydratedSurfaces = await browserSurfaceLeaseStore.listSurfaces();
+  const rehydratedLeases = await browserSurfaceLeaseStore.listNonTerminalLeases();
   // Optional: null when @opendatalabs/remote-surface is not installed, which
   // disables the browser-surface / streaming path rather than crashing boot.
   const browserSurfaceLeaseManager = await (
@@ -10381,6 +10412,9 @@ function createReferenceSchedulerManager({
             terminalData.connector_error_retryable !== undefined
           ) {
             connectorError = {};
+            if (typeof terminalData.connector_error_code === "string" && terminalData.connector_error_code.length > 0) {
+              connectorError.code = terminalData.connector_error_code;
+            }
             if (typeof terminalData.connector_error_message === "string") {
               connectorError.message = terminalData.connector_error_message;
             }
@@ -10388,7 +10422,14 @@ function createReferenceSchedulerManager({
               connectorError.retryable = terminalData.connector_error_retryable;
             }
           }
+          // The runtime reports the checkpoint outcome as the flat
+          // `checkpoint_commit_status`; scheduler records read `commit_status`.
+          const checkpointSummary =
+            typeof terminalData.checkpoint_commit_status === "string"
+              ? { commit_status: terminalData.checkpoint_commit_status }
+              : null;
           return {
+            checkpoint_summary: checkpointSummary,
             connector_error: connectorError,
             failure_reason: terminalData.reason || null,
             known_gaps: Array.isArray(terminalData.known_gaps) ? terminalData.known_gaps : [],
@@ -10508,30 +10549,11 @@ function createReferenceSchedulerManager({
         // whether recovery work exists, do not bypass the cooldown — the next clean
         // tick recovers it.
         try {
-          const store = getDefaultConnectorDetailGapStore() as {
-            listPendingGapsForConnector: (
-              id: string,
-              opts: { limit: number }
-            ) => Promise<Record<string, unknown>[] | null | undefined>;
-          };
-          const rows = await store.listPendingGapsForConnector(connectorId, {
-            limit: 200,
-          });
-          const instanceKey = connectorInstanceId || connectorId;
-          let count = 0;
-          for (const row of rows ?? []) {
-            // Exclude source-pressure reasons — they belong to Governor A (cooldown),
-            // not to the recovery lane.
-            if (typeof row?.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
-              continue;
-            }
-            // Scope to this connection's instance (same guard as the pressure probe).
-            if (!matchesRecoveryInstance(row.connector_instance_id, instanceKey, connectorId)) {
-              continue;
-            }
-            count += 1;
-          }
-          return count;
+          return await probeNonPressureRecoverableCount(
+            getDefaultConnectorDetailGapStore() as Parameters<typeof probeNonPressureRecoverableCount>[0],
+            connectorId,
+            connectorInstanceId
+          );
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logger.error({ err: message }, `[scheduler] non-pressure recovery probe failed for ${connectorId}`);
@@ -10551,41 +10573,11 @@ function createReferenceSchedulerManager({
         // A probe failure is surfaced as "no pressure" (empty list) so an
         // unreadable gap store cannot silently pause a schedule — same
         // fail-open stance as the attention probe above.
-        const store = getDefaultConnectorDetailGapStore() as {
-          listPendingGapsForConnector: (
-            id: string,
-            opts: { limit: number }
-          ) => Promise<Record<string, unknown>[] | null | undefined>;
-        };
-        const rows = await store.listPendingGapsForConnector(connectorId, {
-          limit: 200,
-        });
-        const instanceKey = connectorInstanceId || connectorId;
-        // biome-ignore lint/suspicious/noEvolvingTypes: This runtime-untyped boundary requires staged type narrowing.
-        const gaps = [];
-        for (const row of rows ?? []) {
-          if (typeof row?.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(row.reason)) {
-            continue;
-          }
-          // `listPendingGapsForConnector` spans every instance of the connector
-          // type; keep only this connection's gaps so cooldown stays per-source.
-          if (!matchesRecoveryInstance(row.connector_instance_id, instanceKey, connectorId)) {
-            continue;
-          }
-          gaps.push({
-            attemptCount: typeof row.attempt_count === "number" ? row.attempt_count : null,
-            lastPressureAt:
-              typeof row.last_attempt_at === "string"
-                ? row.last_attempt_at
-                : // biome-ignore lint/style/noNestedTernary: The existing expression mirrors the protocol’s compact value selection contract.
-                  typeof row.updated_at === "string"
-                  ? row.updated_at
-                  : null,
-            nextAttemptAfter: typeof row.next_attempt_after === "string" ? row.next_attempt_after : null,
-            reason: row.reason,
-          });
-        }
-        return gaps;
+        return await probeSourcePressureGaps(
+          getDefaultConnectorDetailGapStore() as Parameters<typeof probeSourcePressureGaps>[0],
+          connectorId,
+          connectorInstanceId
+        );
       },
       getState: async (connectorId, connectorInstanceId) => {
         // Read scheduler state from the connection-instance namespace by

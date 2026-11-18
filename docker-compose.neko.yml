@@ -1,3 +1,11 @@
+# Docker keeps every container's stdout/stderr in an unrotated file by default.
+# Rotate at 10 MiB x 5 files (50 MiB per container). Values are strings.
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   reference:
     depends_on:
@@ -42,6 +50,7 @@ services:
       NEKO_PASSWORD: ${NEKO_PASSWORD:-neko}
 
   neko:
+    logging: *bounded-logging
     image: ${NEKO_IMAGE:-pdpp-neko:local}
     build:
       context: .
@@ -85,6 +94,7 @@ services:
       start_period: 20s
 
   neko-allocator:
+    logging: *bounded-logging
     image: ${NEKO_ALLOCATOR_IMAGE:-pdpp-neko-allocator:local}
     build:
       context: .
@@ -152,10 +162,32 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Bind the host profile root at the same absolute path so allocator
       # mkdir/chown/chmod calls affect the Docker bind source, not sidecar-only
-      # storage. Docker-created bind sources are root-owned and break Chromium.
-      - ${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}:${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}
+      # storage. The root must be a durable, operator-provisioned directory
+      # (not /tmp, ~/.tmp or any cleanup-managed path) owned by
+      # PDPP_NEKO_PROFILE_OWNER_UID:GID. create_host_path: false makes Compose
+      # fail instead of silently creating a root-owned directory (which breaks
+      # Chromium) when the host path is missing.
+      - type: bind
+        source: ${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}
+        target: ${PDPP_NEKO_PROFILE_STORAGE_ROOT:-/var/lib/pdpp/neko-profiles}
+        bind:
+          create_host_path: false
+    # /readyz fails when the profile root is missing, unlinked, or read-only.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:' + (process.env.PDPP_NEKO_ALLOCATOR_PORT || 7331) + '/readyz').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   coturn:
+    logging: *bounded-logging
     image: ${TURN_IMAGE:-coturn/coturn:4.6.3-alpine}
     profiles: ["turn"]
     command:
@@ -178,6 +210,7 @@ services:
       - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
 
   registry-mock:
+    logging: *bounded-logging
     image: nginx:1.27-alpine
     volumes:
       - ./packages/polyfill-connectors/manifests:/usr/share/nginx/html/connectors:ro

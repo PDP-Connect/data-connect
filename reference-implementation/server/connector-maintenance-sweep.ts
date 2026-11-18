@@ -29,6 +29,7 @@
  */
 
 import { retireExpiredBrowserEnrollmentShellsForMaintenance } from "./ref-control.ts";
+import { runRecordDerivedRepairRound } from "./record-derived-repair.ts";
 import { runSearchIndexDirtyReconcileRound } from "./search-index-reconcile.ts";
 import { getDefaultConnectorAttentionStore } from "./stores/connector-attention-store.ts";
 import {
@@ -87,7 +88,14 @@ export interface ConnectorMaintenanceSweepOptions {
    */
   readonly onDeviceSilenceOpened?: (result: DeviceSilenceRoundResult) => void | Promise<void>;
   readonly onPhaseError?: (
-    phase: "attention" | "device_silence" | "evidence" | "run_history_backfill" | "search_index_dirty" | "shells",
+    phase:
+      | "attention"
+      | "device_silence"
+      | "evidence"
+      | "record_derived_repair"
+      | "run_history_backfill"
+      | "search_index_dirty"
+      | "shells",
     err: unknown
   ) => void;
   /** Emits non-secret evidence after the TTL phase actually revoked shells. */
@@ -111,6 +119,7 @@ export interface ConnectorMaintenanceSweepOptions {
    * engine, no new table.
    */
   readonly runHistoryBackfillStage?: ResumableRunHistoryBackfillStage;
+  readonly recordDerivedRepairMaxDurationMs?: number;
   readonly searchIndexDirtyReconcileMaxDurationMs?: number;
   readonly searchIndexDirtyReconcilePageSize?: number;
 }
@@ -513,6 +522,11 @@ export async function runConnectorMaintenanceSweep(options: ConnectorMaintenance
       pageSize: options.searchIndexDirtyReconcilePageSize ?? 25,
     }).catch((err) => {
       onPhaseError?.("search_index_dirty", err);
+    }),
+    // Resumes record-column repairs a manifest publication queued (for
+    // example after the server stopped mid-repair), one bounded slice a tick.
+    runRecordDerivedRepairRound({ maxDurationMs: options.recordDerivedRepairMaxDurationMs ?? 2000 }).catch((err) => {
+      onPhaseError?.("record_derived_repair", err);
     }),
   ]);
 }

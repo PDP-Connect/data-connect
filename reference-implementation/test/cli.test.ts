@@ -105,8 +105,8 @@ const TOP_LEVEL_REGEX_73 = /Request ID: (req_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_74 = /Reference trace ID: (trc_[A-Za-z0-9_]+)/;
 const TOP_LEVEL_REGEX_CLIENT_FILTER_UNSUPPORTED =
   /filter\[\.\.\.\] is not supported for client-token reads in PDPP v0\.1/;
-const TOP_LEVEL_REGEX_INTROSPECTION_FAILED = /Token introspection failed closed/;
-const TOP_LEVEL_REGEX_INVALID_TOKEN = /Invalid or expired token/;
+const TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT = /Stream 'recently_played' not in grant/;
+const TOP_LEVEL_REGEX_STREAM_SAVED_TRACKS_NOT_IN_GRANT = /Stream 'saved_tracks' not in grant/;
 const TOP_LEVEL_REGEX_77 = /Record not found/;
 const TOP_LEVEL_REGEX_78 = /Record not found/;
 const TOP_LEVEL_REGEX_82 = /Record not found/;
@@ -1566,10 +1566,10 @@ test("PDPP CLI smoke", async (t) => {
       assert.ok(requestSubmitted, "trace show should include owner-device request.submitted");
       assert.equal(requestSubmitted.request_id, requestId);
       assert.equal(requestSubmitted.client_id, "cli_longview");
-      // Public _ref redacts bearer-equivalent device_code / user_code on
-      // owner_device_auth (harden-reference-auth-surfaces §7).
+      // Public _ref redacts the device-code object id on owner_device_auth
+      // (harden-reference-auth-surfaces §7); user_code is dropped at ingress.
       assert.equal(requestSubmitted.object_id, "<redacted-device-code>");
-      assert.equal(requestSubmitted.data?.user_code, "<redacted-bearer>");
+      assert.equal(requestSubmitted.data?.user_code, undefined);
 
       const approved = (result.json.data || []).find(
         (event) => event.event_type === "consent.approved" && event.object_type === "owner_device_auth"
@@ -1578,7 +1578,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(approved.request_id, requestId);
       assert.equal(approved.client_id, "cli_longview");
       assert.equal(approved.object_id, "<redacted-device-code>");
-      assert.equal(approved.data?.user_code, "<redacted-bearer>");
+      assert.equal(approved.data?.user_code, undefined);
 
       const tokenIssued = (result.json.data || []).find(
         (event) => event.event_type === "token.issued" && event.data?.issuance_path === "owner_device_flow"
@@ -1586,7 +1586,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.ok(tokenIssued, "trace show should include owner-device token.issued");
       assert.equal(tokenIssued.request_id, requestId);
       assert.equal(tokenIssued.client_id, "cli_longview");
-      assert.equal(tokenIssued.data?.user_code, "<redacted-bearer>");
+      assert.equal(tokenIssued.data?.user_code, undefined);
       assert.equal(result.stderr, "");
     });
   });
@@ -1643,7 +1643,7 @@ test("PDPP CLI smoke", async (t) => {
       assert.equal(rejected.client_id, "cli_longview");
       assert.equal(rejected.object_id, "<redacted-device-code>");
       assert.equal(rejected.data?.issuance_path, "owner_device_flow");
-      assert.equal(rejected.data?.user_code, "<redacted-bearer>");
+      assert.equal(rejected.data?.user_code, undefined);
       assert.equal(asRecord(rejected.data?.error).code, "access_denied");
       assert.match(String(asRecord(rejected.data?.error).message ?? ""), TOP_LEVEL_REGEX_14);
       assert.equal(result.stderr, "");
@@ -4597,10 +4597,10 @@ test("PDPP CLI smoke", async (t) => {
 
         const scenarios = [
           {
-            expectedBodyMessage: TOP_LEVEL_REGEX_INTROSPECTION_FAILED,
-            expectedCode: "context.stream_not_allowed",
-            expectedTimelineMessage: TOP_LEVEL_REGEX_INVALID_TOKEN,
-            expectStatus: 401,
+            expectedBodyMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectedCode: "grant_stream_not_allowed",
+            expectedTimelineMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectStatus: 403,
             label: "stream-metadata reads",
             queryShape: "stream_metadata",
             streamId: "recently_played",
@@ -4610,10 +4610,10 @@ test("PDPP CLI smoke", async (t) => {
               }),
           },
           {
-            expectedBodyMessage: TOP_LEVEL_REGEX_INTROSPECTION_FAILED,
-            expectedCode: "context.stream_not_allowed",
-            expectedTimelineMessage: TOP_LEVEL_REGEX_INVALID_TOKEN,
-            expectStatus: 401,
+            expectedBodyMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectedCode: "grant_stream_not_allowed",
+            expectedTimelineMessage: TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+            expectStatus: 403,
             label: "record-list reads",
             queryShape: "record_list",
             streamId: "recently_played",
@@ -4623,10 +4623,10 @@ test("PDPP CLI smoke", async (t) => {
               }),
           },
           {
-            expectedBodyMessage: TOP_LEVEL_REGEX_INTROSPECTION_FAILED,
-            expectedCode: "context.stream_not_allowed",
-            expectedTimelineMessage: TOP_LEVEL_REGEX_INVALID_TOKEN,
-            expectStatus: 401,
+            expectedBodyMessage: TOP_LEVEL_REGEX_STREAM_SAVED_TRACKS_NOT_IN_GRANT,
+            expectedCode: "grant_stream_not_allowed",
+            expectedTimelineMessage: TOP_LEVEL_REGEX_STREAM_SAVED_TRACKS_NOT_IN_GRANT,
+            expectStatus: 403,
             label: "record-detail reads",
             queryShape: "record_detail",
             requestedRecordId: hiddenRecord.id,
@@ -7767,6 +7767,45 @@ rl.on('line', (line) => {
       assert.ok(result.json.request_id?.startsWith("req_"));
       assert.ok(typeof result.json.reference_trace_id === "string" && result.json.reference_trace_id.length > 0);
       assert.equal(result.stderr, "");
+    });
+  });
+
+  await t.test("client query commands exit 4 on a grant denial and 3 on a rejected token", async () => {
+    await withHarness(async ({ asUrl, rsUrl, spotifyManifest }) => {
+      const ownerToken = await issueOwnerToken(asUrl, "cli_owner");
+      await seedSpotify(rsUrl, spotifyManifest, ownerToken);
+      const approved = await approveGrant(asUrl, "cli_owner", {
+        access_mode: "continuous",
+        client_id: "concert_recommendation_app",
+        purpose_code: "https://pdpp.dev/purpose/personalization",
+        purpose_description: "Maintain a concert-recommendation profile over time",
+        source: { id: spotifyManifest.connector_id, kind: "connector" },
+        streams: [{ name: "top_artists", view: "basic" }],
+      });
+
+      // A valid token naming a stream outside its grant is a 403 permission
+      // denial (spec-core §8 Errors), which the CLI reports as exit 4.
+      for (const [args, expectedMessage] of [
+        [
+          ["query", "records", "recently_played", "--rs-url", rsUrl, "--format", "json"],
+          TOP_LEVEL_REGEX_STREAM_RECENTLY_PLAYED_NOT_IN_GRANT,
+        ],
+        [
+          ["query", "get", "saved_tracks", "any-id", "--rs-url", rsUrl, "--format", "json"],
+          TOP_LEVEL_REGEX_STREAM_SAVED_TRACKS_NOT_IN_GRANT,
+        ],
+      ] as const) {
+        const denied = await runCliExpectFailure(args, { PDPP_CLIENT_TOKEN: approved.token });
+        assert.equal(denied.code, 4, `${args.join(" ")}: ${denied.stderr}${denied.stdout}`);
+        assert.match(denied.stderr, expectedMessage);
+      }
+
+      // A presented but rejected token is a 401, which the CLI reports as exit 3.
+      const rejected = await runCliExpectFailure(
+        ["query", "records", "top_artists", "--rs-url", rsUrl, "--format", "json"],
+        { PDPP_CLIENT_TOKEN: "not-a-real-token" }
+      );
+      assert.equal(rejected.code, 3, `${rejected.stderr}${rejected.stdout}`);
     });
   });
 

@@ -52,7 +52,7 @@
 #    before changing them.
 branches:
   - name: main
-tagFormat: "v${version}"
+tagFormat: "npm-v${version}"
 preset: "conventionalcommits"
 plugins:
   - - "@semantic-release/commit-analyzer"
@@ -160,18 +160,13 @@ plugins:
   # before release responsibility moved to this repository (see pdpp's
   # .releaserc.yaml). Joining this stream is what keeps the next publish
   # ABOVE that line rather than colliding with it: semantic-release derives
-  # the version from this repo's `v${version}` git tags, whose highest is
-  # already v2.1.0 (= the published @pdpp/connector-protocol@2.1.0), so the
+  # the version from this repo's `npm-v${version}` git tags (migrated from legacy
+  # v* tags by scripts/npm-release-tags.mjs), whose original baseline was
+  # v2.1.0 (= the published @pdpp/connector-protocol@2.1.0), so the
   # next release is >= 2.1.1 and strictly greater than 1.5.4. The version
   # field in each package.json stays a placeholder; the npm publish plugin
   # sets the real version at publish time.
   - - "@semantic-release/npm"
     - pkgRoot: "packages/local-collector"
-  - - "@semantic-release/github"
-    - successComment: false
-      failComment: false
-      failTitle: false
-      labels: false
-      releasedLabels: false
   - - "@semantic-release/exec"
     - publishCmd: "node --import tsx scripts/semantic-release-github-output.ts publish ${nextRelease.version} ${nextRelease.gitTag}"

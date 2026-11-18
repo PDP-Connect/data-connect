@@ -1,7 +1,18 @@
 name: Encrypted SQLite and sqlite-vec matrix
 
+env:
+  # onnxruntime-node's install script downloads the CUDA 12 provider binaries
+  # from nuget.org on linux/x64 even on CPU-only runners; that download is the
+  # ETIMEDOUT flake that fails `npm ci`. No job here requests the CUDA execution
+  # provider and the CPU binding ships in the package tarball, so skip it.
+  # scripts/ci-onnxruntime-install.test.ts guards this setting.
+  ONNXRUNTIME_NODE_INSTALL: "skip"
+
 on:
   pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
     paths:
       - ".github/workflows/encrypted-sqlite-matrix.yml"
       - "package-lock.json"
@@ -56,9 +67,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -72,7 +83,7 @@ jobs:
         run: |
           node -e '
             const [expectedPlatform, expectedArch] = process.argv.slice(1);
-            if (process.versions.node !== "24.21.0") throw new Error(`expected Node 24.21.0, got ${process.versions.node}`);
+            if (process.versions.node !== "24.22.1") throw new Error(`expected Node 24.22.1, got ${process.versions.node}`);
             if (process.platform !== expectedPlatform) throw new Error(`expected ${expectedPlatform}, got ${process.platform}`);
             if (process.arch !== expectedArch) throw new Error(`expected ${expectedArch}, got ${process.arch}`);
             console.log(`${process.version} ${process.platform}/${process.arch}`);

@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Platform } from "../types"
@@ -61,7 +62,7 @@ const TEST_PLATFORM: Platform = {
   connectSelector: null,
   exportFrequency: null,
   vectorize_config: null,
-  runtime: "playwright",
+  runtime: "pdpp-network",
 }
 
 describe("useConnector.startImport", () => {
@@ -91,7 +92,8 @@ describe("useConnector.startImport", () => {
       returnedRunId = await result.current.startImport(TEST_PLATFORM)
     })
 
-    expect(returnedRunId).toBeNull()
+    // The PDPP host command settles after the run id is returned.
+    expect(returnedRunId).toBe("chatgpt-1700000000000")
     expect(startRun).toHaveBeenCalledWith(
       expect.objectContaining({ id: "chatgpt-1700000000000" })
     )
@@ -171,6 +173,7 @@ describe("useConnector.startImport", () => {
       expect.objectContaining({
         runId: "chatgpt-1700000000000",
         status: "error",
+        onlyIfRunning: true,
       })
     )
     expect(deleteRun).not.toHaveBeenCalled()
@@ -237,10 +240,6 @@ describe("useConnector.startImport", () => {
           importDirectory: "/private/imports/run-1",
         },
       }
-    )
-    expect(mockInvoke).not.toHaveBeenCalledWith(
-      "start_connector_run",
-      expect.anything()
     )
   })
 
@@ -505,25 +504,21 @@ describe("useConnector.startImport", () => {
     )
   })
 
-  it("preserves the legacy connector command for non-PDPP platforms", async () => {
-    mockInvoke.mockResolvedValue(undefined)
+  it("starts no run for a platform without the installed PDPP runtime", async () => {
     const { useConnector } = await import("./useConnector")
     const { result } = renderHook(() => useConnector())
 
+    let returnedRunId: string | null | undefined
     await act(async () => {
-      await result.current.startImport(TEST_PLATFORM)
+      returnedRunId = await result.current.startImport({
+        ...TEST_PLATFORM,
+        runtime: "playwright",
+      })
     })
 
-    expect(mockInvoke).toHaveBeenCalledWith("start_connector_run", {
-      runId: "chatgpt-1700000000000",
-      platformId: "chatgpt",
-      filename: "chatgpt",
-      company: "OpenAI",
-      name: "ChatGPT",
-      connectUrl: "https://chatgpt.com",
-      runtime: "playwright",
-      simulateNoChrome: false,
-    })
+    expect(returnedRunId).toBeNull()
+    expect(startRun).not.toHaveBeenCalled()
+    expect(mockInvoke).not.toHaveBeenCalled()
   })
 
   it("uses the installed PDPP stop command for pdpp-network runs", async () => {
@@ -542,10 +537,6 @@ describe("useConnector.startImport", () => {
       {
         runId: "github-pdpp-run",
       }
-    )
-    expect(mockInvoke).not.toHaveBeenCalledWith(
-      "stop_connector_run",
-      expect.anything()
     )
   })
 })
