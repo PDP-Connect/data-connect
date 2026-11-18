@@ -19,9 +19,7 @@ export type ServiceEntry = {
   cleanup?: string[]
 }
 
-// One setup card per service, plus one card for each leftover setup the host
-// kept so it can be cancelled. The host keeps one entry per service; if a
-// response ever carries two, the later one wins, so two cards cannot show.
+// The last non-empty entry for a provider wins.
 export function setupCards(services: ServiceEntry[] | undefined): SetupReservation[] {
   const byService = new Map<string, ServiceEntry>()
   for (const entry of services ?? []) {
@@ -34,7 +32,9 @@ export function setupCards(services: ServiceEntry[] | undefined): SetupReservati
       usage: entry.usage,
     }
     const cards: SetupReservation[] = []
+    const seen = new Set<string>()
     if (entry.setup) {
+      seen.add(entry.setup.operationId)
       cards.push({
         ...base,
         operationId: entry.setup.operationId,
@@ -44,6 +44,8 @@ export function setupCards(services: ServiceEntry[] | undefined): SetupReservati
       })
     }
     for (const operationId of entry.cleanup ?? []) {
+      if (seen.has(operationId)) continue
+      seen.add(operationId)
       cards.push({
         ...base,
         operationId,

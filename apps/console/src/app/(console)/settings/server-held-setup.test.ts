@@ -67,6 +67,42 @@ test("one card per service even if a response carries two setups", () => {
   assert.deepEqual(setupCards([{ ...entry("svc", "x"), setup: null }]), [])
 })
 
+test("active setup takes precedence and cleanup operation ids are unique", () => {
+  const cards = setupCards([{ ...entry("svc", "A"), cleanup: ["A", "B", "B"] }])
+  assert.deepEqual(cards, [
+    {
+      providerId: "svc", draftId: "draft-1", usage: "durable",
+      operationId: "A", providerLabel: "Tunnel service",
+      actionId: "sign-in", expectedConfigurationRevision: "config",
+    },
+    {
+      providerId: "svc", draftId: "draft-1", usage: "durable",
+      operationId: "B", providerLabel: "Tunnel service (left over)",
+      actionId: "", expectedConfigurationRevision: "",
+    },
+  ])
+})
+
+test("cleanup-only setup cards retain input order", () => {
+  const cards = setupCards([{ ...entry("svc", "unused"), setup: null, cleanup: ["B", "C"] }])
+  assert.deepEqual(
+    cards.map(({ operationId, providerLabel, actionId, expectedConfigurationRevision }) =>
+      ({ operationId, providerLabel, actionId, expectedConfigurationRevision })),
+    ["B", "C"].map(operationId => ({
+      operationId, providerLabel: "Tunnel service (left over)",
+      actionId: "", expectedConfigurationRevision: "",
+    }))
+  )
+})
+
+test("a later empty service entry does not erase a non-empty entry", () => {
+  const earlier = { ...entry("svc", "A"), cleanup: ["B"] }
+  assert.deepEqual(
+    setupCards([earlier, { ...entry("svc", "unused"), setup: null, cleanup: [] }]),
+    setupCards([earlier])
+  )
+})
+
 function memoryStore(initial: Record<string, string> = {}) {
   const items = new Map(Object.entries(initial))
   return {
