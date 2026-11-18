@@ -409,15 +409,64 @@ interface DeclaredScope {
   readonly steps: ReadonlySet<string>;
 }
 
+function declaredScope(descriptors: DiagnosticDescriptors): DeclaredScope {
+  return {
+    expectationStep: new Map(descriptors.expectations.map((expectation) => [expectation.id, expectation.step])),
+    rules: new Set(descriptors.rules.map((rule) => rule.id)),
+    steps: new Set(descriptors.steps.map((step) => step.id)),
+  };
+}
+
+export interface DiagnosisInputs {
+  /** DONE.error.basis: the fact ids the connector cited. Empty when none, or when the owner ended the run. */
+  readonly basis: readonly string[];
+  /** The descriptors the run declared. */
+  readonly descriptors: DiagnosticDescriptors;
+  readonly facts: readonly ObservedFact[];
+}
+
+/**
+ * The owner diagnosis, derived from a run's recorded inputs. It is a pure
+ * function of those inputs, so a stored record keeps the inputs and derives the
+ * diagnosis on every read. No derived verdict is ever persisted.
+ */
+export function deriveDiagnosis(input: DiagnosisInputs): Diagnosis {
+  const scope = declaredScope(input.descriptors);
+  const cited = new Set(input.basis);
+  const findings: { readonly id: string; readonly category: Category }[] = [];
+  for (const fact of input.facts) {
+    if (fact.retired || !cited.has(fact.id)) {
+      continue;
+    }
+    const category = findingOf(fact, scope);
+    if (category !== undefined) {
+      findings.push({ category, id: fact.id });
+    }
+  }
+  for (const category of CATEGORY_ORDER) {
+    const supporting = findings.filter((finding) => finding.category === category).map((finding) => finding.id);
+    if (supporting.length === 0) {
+      continue;
+    }
+    return {
+      attribution: "connector",
+      basis: supporting,
+      category,
+      contributing: findings.filter((finding) => finding.category !== category).map((finding) => finding.id),
+    };
+  }
+  return {
+    attribution: "none",
+    basis: [],
+    category: "unknown",
+    contributing: [],
+  };
+}
+
 /** Creates the state of one run's OBSERVATION intake and diagnosis. */
 export function createObservationRun(input: CreateObservationRunInput): ObservationRun {
   const limits = resolveLimits(input.limits);
   const now = input.now ?? Date.now;
-  const scope: DeclaredScope = {
-    expectationStep: new Map(input.descriptors.expectations.map((expectation) => [expectation.id, expectation.step])),
-    rules: new Set(input.descriptors.rules.map((rule) => rule.id)),
-    steps: new Set(input.descriptors.steps.map((step) => step.id)),
-  };
 
   const facts: StoredFact[] = [];
   const factsById = new Map<string, StoredFact>();
@@ -570,35 +619,7 @@ export function createObservationRun(input: CreateObservationRunInput): Observat
   }
 
   function diagnose(basis: readonly string[] = []): Diagnosis {
-    const cited = new Set(basis);
-    const findings: { readonly id: string; readonly category: Category }[] = [];
-    for (const stored of facts) {
-      if (stored.retired || !cited.has(stored.fact.id)) {
-        continue;
-      }
-      const category = findingOf(stored.fact, scope);
-      if (category !== undefined) {
-        findings.push({ category, id: stored.fact.id });
-      }
-    }
-    for (const category of CATEGORY_ORDER) {
-      const supporting = findings.filter((finding) => finding.category === category).map((finding) => finding.id);
-      if (supporting.length === 0) {
-        continue;
-      }
-      return {
-        attribution: "connector",
-        basis: supporting,
-        category,
-        contributing: findings.filter((finding) => finding.category !== category).map((finding) => finding.id),
-      };
-    }
-    return {
-      attribution: "none",
-      basis: [],
-      category: "unknown",
-      contributing: [],
-    };
+    return deriveDiagnosis({ basis, descriptors: input.descriptors, facts: snapshot().facts });
   }
 
   return {

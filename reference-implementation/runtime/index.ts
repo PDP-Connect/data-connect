@@ -6592,8 +6592,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         .put({
           connectorId,
           connectorInstanceId: resolvedConnectorInstanceId,
+          descriptors: profileDeclaration.descriptors,
           // A cancelled run ended by the owner's choice, not by the connector's cause.
-          diagnosis: observationRun.diagnose(ownerCancelRequested ? [] : doneBasis),
+          doneBasis: ownerCancelRequested ? [] : doneBasis,
           runId,
           snapshot,
         })

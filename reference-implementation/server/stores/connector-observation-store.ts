@@ -5,10 +5,12 @@
  * Diagnostic records for completed connector runs (Collection Profile v0.2.0,
  * data-connectors docs spec sections 5.10.3 and 5.10.4).
  *
- * A record holds one run's ObservationSnapshot and Diagnosis, the typed values
- * `runtime/observations.ts` produces, with the run and connection identity.
- * The store writes no other field: no raw connector line, provider prose,
- * free-form DONE text or credential. Retirement flags and runtime defects are
+ * A record holds one run's ObservationSnapshot, the DONE.error.basis the
+ * connector cited and the diagnostic descriptors the run declared, with the run
+ * and connection identity. Those are the diagnosis inputs. The diagnosis itself
+ * is never stored: a read derives it with `deriveDiagnosis`, so it cannot
+ * disagree with the facts beside it. The store writes no other field: no raw
+ * connector line, provider prose, free-form DONE text or credential. Retirement flags and runtime defects are
  * stored as the typed runtime supplied them.
  *
  * Bounds:
@@ -30,9 +32,13 @@
 import { execDynamicSqlAcknowledged, iterateDynamicSqlAcknowledged, writeTransaction } from "../../lib/db.ts";
 import {
   type Diagnosis,
+  type DiagnosticDescriptors,
+  deriveDiagnosis,
   isObservedFact,
   isRuntimeDefect,
+  ObservationContractError,
   type ObservationSnapshot,
+  validateDiagnosticDescriptors,
 } from "../../runtime/observations.ts";
 import {
   getStorageBackendKind,
@@ -46,8 +52,6 @@ export const CONNECTOR_OBSERVATION_RECORD_MAX_BYTES = 1024 * 1024;
 
 const RECORD_VERSION = 1;
 export const OBSERVATION_IDENTITY_MAX_LENGTH = 256;
-const DIAGNOSIS_CATEGORIES: ReadonlySet<string> = new Set(["auth_rejected", "expectation_mismatch", "unknown"]);
-const DIAGNOSIS_ATTRIBUTIONS: ReadonlySet<string> = new Set(["connector", "none"]);
 const LOCK_NAMESPACE = "connector_observation_runs:";
 
 export type ConnectorObservationStoreErrorCode = "record_invalid" | "record_oversize" | "record_conflict";
@@ -70,11 +74,16 @@ export interface ConnectorObservationRunKey {
 }
 
 export interface ConnectorObservationRunInput extends ConnectorObservationRunKey {
-  readonly diagnosis: Diagnosis;
+  /** The descriptors the run declared, so a read can resolve the steps, rules and expectations facts name. */
+  readonly descriptors: DiagnosticDescriptors;
+  /** DONE.error.basis. Empty when the connector cited none, or when the owner ended the run. */
+  readonly doneBasis: readonly string[];
   readonly snapshot: ObservationSnapshot;
 }
 
 export interface ConnectorObservationRunRecord extends ConnectorObservationRunInput {
+  /** Derived from the stored inputs on every read. Never persisted. */
+  readonly diagnosis: Diagnosis;
   /** Runtime clock at write time. Ordering uses the store's recorded sequence, not this value. */
   readonly recordedAt: string;
 }
@@ -171,18 +180,6 @@ function hasValidElements(snapshot: ObservationSnapshot): boolean {
   return snapshot.facts.every(isObservedFact) && snapshot.defects.every(isRuntimeDefect);
 }
 
-function isDiagnosis(value: unknown): value is Diagnosis {
-  return (
-    isRecord(value) &&
-    typeof value.category === "string" &&
-    DIAGNOSIS_CATEGORIES.has(value.category) &&
-    typeof value.attribution === "string" &&
-    DIAGNOSIS_ATTRIBUTIONS.has(value.attribution) &&
-    isStringArray(value.basis) &&
-    isStringArray(value.contributing)
-  );
-}
-
 function invalid(message: string): ConnectorObservationStoreError {
   return new ConnectorObservationStoreError("record_invalid", message);
 }
@@ -223,13 +220,22 @@ function encodeRecord(input: ConnectorObservationRunInput): {
   payload: string;
 } {
   const key = requireKey(input);
-  if (!(isSnapshot(input.snapshot) && isDiagnosis(input.diagnosis))) {
-    throw invalid("connector observation snapshot and diagnosis must match the runtime shapes");
+  if (!(isSnapshot(input.snapshot) && isStringArray(input.doneBasis))) {
+    throw invalid("connector observation snapshot and basis must match the runtime shapes");
+  }
+  let descriptors: DiagnosticDescriptors;
+  try {
+    descriptors = validateDiagnosticDescriptors(input.descriptors);
+  } catch (error) {
+    if (error instanceof ObservationContractError) {
+      throw invalid("connector observation descriptors must match the runtime shape");
+    }
+    throw error;
   }
   const { facts, defects, truncated } = input.snapshot;
-  const { category, attribution, basis, contributing } = input.diagnosis;
   const payload = JSON.stringify({
-    diagnosis: { attribution, basis, category, contributing },
+    descriptors,
+    doneBasis: input.doneBasis,
     snapshot: { defects, facts, truncated },
   });
   if (Buffer.byteLength(payload, "utf8") > CONNECTOR_OBSERVATION_RECORD_MAX_BYTES) {
@@ -252,14 +258,27 @@ function decodeRow(row: RunRow): ConnectorObservationRunRecord {
     throw invalid("stored connector observation record is malformed");
   }
   if (
-    !(isRecord(parsed) && isSnapshot(parsed.snapshot) && hasValidElements(parsed.snapshot) && isDiagnosis(parsed.diagnosis))
+    !(
+      isRecord(parsed) &&
+      isSnapshot(parsed.snapshot) &&
+      hasValidElements(parsed.snapshot) &&
+      isStringArray(parsed.doneBasis)
+    )
   ) {
+    throw invalid("stored connector observation record is malformed");
+  }
+  let descriptors: DiagnosticDescriptors;
+  try {
+    descriptors = validateDiagnosticDescriptors(parsed.descriptors);
+  } catch {
     throw invalid("stored connector observation record is malformed");
   }
   return {
     connectorId: row.connector_id,
     connectorInstanceId: row.connector_instance_id,
-    diagnosis: parsed.diagnosis,
+    descriptors,
+    diagnosis: deriveDiagnosis({ basis: parsed.doneBasis, descriptors, facts: parsed.snapshot.facts }),
+    doneBasis: parsed.doneBasis,
     recordedAt: row.recorded_at,
     runId: row.run_id,
     snapshot: parsed.snapshot,

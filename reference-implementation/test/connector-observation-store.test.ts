@@ -20,6 +20,7 @@ import test from "node:test";
 import {
   createObservationRun,
   type Diagnosis,
+  type DiagnosticDescriptors,
   type ObservationSnapshot,
   validateDiagnosticDescriptors,
 } from "../runtime/observations.ts";
@@ -92,17 +93,18 @@ function inOrder<T>(items: readonly T[], step: (item: T) => Promise<unknown>): P
 
 /** Runtime-built snapshot: one retired fact, one auth failure, one runtime defect. */
 function observedRun(tag: string): {
-  snapshot: ObservationSnapshot;
+  descriptors: DiagnosticDescriptors;
   diagnosis: Diagnosis;
+  doneBasis: string[];
+  snapshot: ObservationSnapshot;
 } {
-  const run = createObservationRun({
-    declared: true,
-    descriptors: validateDiagnosticDescriptors({
-      expectations: [{ id: "login_button", step: "login" }],
-      rules: [{ id: "bad_password", kind: "auth", step: "login" }],
-      steps: [{ id: "login" }],
-    }),
+  const descriptors = validateDiagnosticDescriptors({
+    expectations: [{ id: "login_button", step: "login" }],
+    rules: [{ id: "bad_password", kind: "auth", step: "login" }],
+    steps: [{ id: "login" }],
   });
+  const doneBasis = [`${tag}-auth`, `${tag}-expect`];
+  const run = createObservationRun({ declared: true, descriptors });
   const expect = run.accept({
     attrs: {
       expectation: "login_button",
@@ -138,14 +140,12 @@ function observedRun(tag: string): {
   for (const outcome of [expect, auth, retry]) {
     assert.equal(outcome.status, "accepted", "runtime fixture fact must be accepted");
   }
-  return {
-    diagnosis: run.diagnose([`${tag}-auth`, `${tag}-expect`]),
-    snapshot: run.snapshot(),
-  };
+  return { descriptors, diagnosis: run.diagnose(doneBasis), doneBasis, snapshot: run.snapshot() };
 }
 
 function runInput(connectorId: string, connectorInstanceId: string, runId: string): ConnectorObservationRunInput {
-  return { connectorId, connectorInstanceId, runId, ...observedRun(runId) };
+  const { descriptors, doneBasis, snapshot } = observedRun(runId);
+  return { connectorId, connectorInstanceId, descriptors, doneBasis, runId, snapshot };
 }
 
 function storeOf(): ConnectorObservationRunStore {
@@ -341,7 +341,10 @@ async function contractPersistsExactSnapshot(harness: Harness): Promise<void> {
   const input = runInput(c, i, "run-persist");
   await storeOf().put(input);
 
-  const expected = JSON.parse(JSON.stringify(input)) as ConnectorObservationRunInput;
+  const expected = {
+    ...(JSON.parse(JSON.stringify(input)) as ConnectorObservationRunInput),
+    diagnosis: observedRun("run-persist").diagnosis,
+  };
   const readBack = await storeOf().get({
     connectorId: c,
     connectorInstanceId: i,
@@ -349,7 +352,9 @@ async function contractPersistsExactSnapshot(harness: Harness): Promise<void> {
   });
   assert.ok(readBack, "the record persists in the same process");
   assert.deepEqual(readBack.snapshot, expected.snapshot, "snapshot reads back exactly");
-  assert.deepEqual(readBack.diagnosis, expected.diagnosis, "diagnosis reads back exactly");
+  assert.deepEqual(readBack.diagnosis, expected.diagnosis, "the derived diagnosis equals the runtime's");
+  assert.deepEqual(readBack.doneBasis, expected.doneBasis, "the cited basis reads back exactly");
+  assert.deepEqual(readBack.descriptors, expected.descriptors, "the declared descriptors read back exactly");
   assert.equal(readBack.runId, "run-persist");
   assert.equal(readBack.connectorId, c);
   assert.equal(readBack.connectorInstanceId, i);
@@ -515,7 +520,8 @@ async function contractOversizeRejectedBeforeMutation(harness: Harness): Promise
   const oversize = {
     connectorId: c,
     connectorInstanceId: i,
-    diagnosis: base.diagnosis,
+    descriptors: base.descriptors,
+    doneBasis: base.doneBasis,
     runId: "run-oversize",
     snapshot: {
       ...base.snapshot,
@@ -568,15 +574,7 @@ async function contractRepeatPutIsIdempotent(harness: Harness): Promise<void> {
   await storeOf().put(original);
   assert.equal(await harness.rowCount(c1), 1, "a repeat put of the same run does not grow the row count");
 
-  const conflicting: ConnectorObservationRunInput = {
-    ...original,
-    diagnosis: {
-      attribution: "none",
-      basis: [],
-      category: "unknown",
-      contributing: [],
-    },
-  };
+  const conflicting: ConnectorObservationRunInput = { ...original, doneBasis: [] };
   await expectStoreError(
     storeOf().put(conflicting),
     "record_conflict",
@@ -587,7 +585,7 @@ async function contractRepeatPutIsIdempotent(harness: Harness): Promise<void> {
     connectorInstanceId: i1,
     runId: "dup",
   });
-  assert.equal(stored?.diagnosis.category, original.diagnosis.category, "the stored record keeps its original content");
+  assert.equal(stored?.diagnosis.category, "auth_rejected", "the stored record keeps its original content");
 
   const other = runInput(c2, i3, "dup");
   await storeOf().put(other);
@@ -763,6 +761,39 @@ async function contractRejectsMalformedElements(harness: Harness): Promise<void>
   assert.equal(await harness.rowCount(c), 1, "the runtime-built record is still accepted");
 }
 
+/**
+ * The diagnosis is not stored. Rewriting the stored inputs changes what a read
+ * derives, which a persisted verdict could not do.
+ */
+async function contractDiagnosisIsDerivedOnRead(harness: Harness): Promise<void> {
+  const c = uniq("c-derive");
+  const i = uniq("i-derive");
+  await harness.seedConnection(c, i);
+  const input = runInput(c, i, "run-derive");
+  await storeOf().put(input);
+  const key = { connectorId: c, connectorInstanceId: i, runId: "run-derive" };
+  assert.equal((await storeOf().get(key))?.diagnosis.category, "auth_rejected");
+
+  const stored = (inputs: { descriptors: unknown; doneBasis: unknown }): string =>
+    JSON.stringify({ ...inputs, snapshot: input.snapshot });
+  await harness.corruptPayload(c, "run-derive", stored({ descriptors: input.descriptors, doneBasis: [] }));
+  assert.equal((await storeOf().get(key))?.diagnosis.category, "unknown", "a run that cited nothing derives unknown");
+
+  await harness.corruptPayload(
+    c,
+    "run-derive",
+    stored({ descriptors: { expectations: [], rules: [], steps: [] }, doneBasis: input.doneBasis })
+  );
+  assert.equal(
+    (await storeOf().get(key))?.diagnosis.category,
+    "unknown",
+    "undeclared descriptors leave the cited facts supporting nothing"
+  );
+
+  await harness.corruptPayload(c, "run-derive", stored({ descriptors: { steps: "x" }, doneBasis: input.doneBasis }));
+  await expectStoreError(storeOf().get(key), "record_invalid", "stored descriptors that are not valid fail the read");
+}
+
 async function contractListSkipsCorruptRows(harness: Harness): Promise<void> {
   const c = uniq("c-corrupt");
   const i = uniq("i-corrupt");
@@ -785,6 +816,10 @@ async function contractListSkipsCorruptRows(harness: Harness): Promise<void> {
 
 test("SQLite connector observation store: persists, reopens and reads back the exact snapshot", async () => {
   await withSqlite(contractPersistsExactSnapshot);
+});
+
+test("SQLite connector observation store: derives the diagnosis from the stored inputs on every read", async () => {
+  await withSqlite(contractDiagnosisIsDerivedOnRead);
 });
 
 test("SQLite connector observation store: separates connector namespace and exact instance", async () => {
@@ -863,6 +898,12 @@ test("Postgres connector observation store: a repeat put is idempotent and never
   skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
 }, async () => {
   await withPostgres(contractRepeatPutIsIdempotent);
+});
+
+test("Postgres connector observation store: derives the diagnosis from the stored inputs on every read", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL unset",
+}, async () => {
+  await withPostgres(contractDiagnosisIsDerivedOnRead);
 });
 
 test("Postgres connector observation store: validates identity and clamps list limit to 8", {

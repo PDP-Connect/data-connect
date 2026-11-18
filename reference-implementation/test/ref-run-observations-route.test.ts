@@ -47,7 +47,9 @@ function fakeRecord(): ConnectorObservationRunRecord {
   return {
     connectorId: CONNECTOR_ID,
     connectorInstanceId: INSTANCE_ID,
+    descriptors: { expectations: [], rules: [], steps: [] },
     diagnosis: { attribution: "none", basis: [], category: "unknown", contributing: [] },
+    doneBasis: [],
     recordedAt: "2026-11-02T00:00:00.000Z",
     runId: RUN_ID,
     snapshot: { defects: [], facts: [], truncated: false },

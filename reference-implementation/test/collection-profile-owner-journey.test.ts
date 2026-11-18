@@ -71,7 +71,8 @@ test("owner can read diagnostics through the real session gate", async () => {
     await getDefaultConnectorObservationStore().put({
       connectorId,
       connectorInstanceId: namespace.connectorInstanceId,
-      diagnosis: { attribution: "none", basis: [], category: "unknown", contributing: [] },
+      descriptors: { expectations: [], rules: [], steps: [] },
+      doneBasis: [],
       runId,
       snapshot: { defects: [], facts: [], truncated: false },
     });
