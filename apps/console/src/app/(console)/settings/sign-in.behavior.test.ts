@@ -380,3 +380,42 @@ test("a completed cleanup card with retained resources still offers Undo setup",
     assert.ok(button("Undo setup"))
   } finally { await act(async () => root.unmount()); dom.window.close() }
 })
+
+test("a timed-out setup read releases the latch and ignores its late response", async t => {
+  const { dom, root, container } = setup()
+  let reads = 0
+  let release!: (result: Awaited<ReturnType<typeof requestReachability>>) => void
+  const seen: number[] = []
+  const request: typeof requestReachability = async () => {
+    reads++
+    if (reads === 1) return { ok: true, data: view("pending", browserAction, 3) }
+    if (reads === 2) return new Promise(resolve => { release = resolve })
+    return { ok: true, data: view("complete", null, 5) }
+  }
+  const extra = { onChange: async (next: { revision: number }) => { seen.push(next.revision) } }
+  try {
+    await render(root, request, extra)
+    t.mock.timers.enable({ apis: ["setTimeout"] })
+    await render(root, request, { ...extra, pollTick: 1 })
+    assert.equal(reads, 2)
+    await act(async () => { dom.window.dispatchEvent(new dom.window.Event("focus")) })
+    assert.equal(reads, 2)
+    await act(async () => t.mock.timers.tick(15_001))
+    // Codes may appear under Details only; scan the main text.
+    const main = container.cloneNode(true) as Element
+    for (const node of main.querySelectorAll("[data-diagnostics]")) node.remove()
+    assert.ok((main.textContent ?? "").trim().length > 0, "the timeout shows its message")
+    assert.deepEqual(bannedIn(main.textContent ?? ""), [])
+    await render(root, request, { ...extra, pollTick: 2 })
+    assert.equal(reads, 3, "the next tick starts a replacement read")
+    assert.deepEqual(seen, [3, 5])
+    assert.equal(container.textContent, "")
+    await act(async () => release({ ok: true, data: view("pending", browserAction, 4) }))
+    assert.deepEqual(seen, [3, 5], "late timed-out response cannot restore pending")
+    assert.equal(container.textContent, "")
+  } finally {
+    await act(async () => root.unmount())
+    t.mock.timers.reset()
+    dom.window.close()
+  }
+})

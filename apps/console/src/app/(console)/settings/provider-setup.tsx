@@ -324,6 +324,7 @@ export function ProviderSetup({
   const installedRevision = useRef(-1)
   const inFlight = useRef<object | null>(null)
   const trailingRead = useRef(false)
+  const readDeadline = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   function installView(next: SetupView) {
     installedRevision.current = Math.max(installedRevision.current, next.revision)
     setView(next)
@@ -357,8 +358,22 @@ export function ProviderSetup({
     inFlight.current = flight
     const epoch = ++readEpoch.current
     const current = () => mounted.current && readEpoch.current === epoch
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
-      const result = await request(readPath)
+      const result = await Promise.race([
+        request(readPath),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const failure = new ReachabilityFailure(publicError("reachability_unavailable"))
+            if (current()) {
+              ++readEpoch.current
+              setError(toDisplayError(failure, "load", reservation.providerLabel))
+            }
+            reject(failure)
+          }, 15_000)
+          readDeadline.current = timer
+        }),
+      ])
       if (!current()) return
       if (result.ok) {
         await acceptObservation(result.data as SetupView, current)
@@ -369,6 +384,8 @@ export function ProviderSetup({
     } catch (failure) {
       if (current()) setError(toDisplayError(failure, "load", reservation.providerLabel))
     } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      if (readDeadline.current === timer) readDeadline.current = undefined
       if (inFlight.current === flight) {
         inFlight.current = null
         const again = trailingRead.current
@@ -383,6 +400,8 @@ export function ProviderSetup({
     void readSetup()
     return () => {
       mounted.current = false
+      if (readDeadline.current !== undefined) clearTimeout(readDeadline.current)
+      readDeadline.current = undefined
       ++readEpoch.current
       inFlight.current = null
       trailingRead.current = false
@@ -578,6 +597,7 @@ export function ProviderSetup({
           input = { value: typed }
         } else if (next.id === "tailscale-node") {
           // The owner's click is the confirmation. The label proves only the email, not the tailnet or the computer.
+          if (step !== 0 || start.nextAction?.id !== "tailscale-node") break
           const computer = observedComputer(next)
           if (!computer) break
           input = { value: computer.value }

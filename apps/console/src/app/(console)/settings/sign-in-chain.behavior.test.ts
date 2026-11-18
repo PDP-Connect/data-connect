@@ -564,3 +564,30 @@ for (const mode of ["server message", "thrown error"] as const) {
     }
   })
 }
+
+test("a login jump to a known-digest node still requires its own computer click", async () => {
+  const { dom, container, root, button } = await setup()
+  const calls: Call[] = []
+  const all = actions(sharedFacts)
+  const node = { ...all["tailscale-node"], step: { actor: "owner", options: [{ value: "other-node", label: "other-host (someone-else@example.test)" }] } }
+  let current = view("authorization-required", all["tailscale-login"], 3)
+  const request = transport(() => current, calls, body => {
+    if (body.actionId === "tailscale-login") current = view("authorization-required", node, 4)
+    if (body.actionId === "tailscale-node") current = view("complete", null, 5)
+  })
+  try {
+    await render(root, request)
+    await act(async () => button("Sign in to Tailscale")!.click())
+    assert.deepEqual(posts(calls).map(call => call.body!.actionId), ["tailscale-login"])
+    assert.ok(button("Use this computer (other-host)"))
+    assert.deepEqual(bannedIn(container.textContent ?? ""), [])
+    await act(async () => button("Use this computer (other-host)")!.click())
+    const submitted = posts(calls).filter(call => call.body!.actionId === "tailscale-node")
+    assert.equal(submitted.length, 1)
+    assert.equal(submitted[0]!.body!.value, "other-node")
+    assert.equal(submitted[0]!.body!.approval.consentFactsDigest, node.consent!.consentFactsDigest)
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+  }
+})
