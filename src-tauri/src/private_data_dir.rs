@@ -32,6 +32,14 @@ pub(crate) fn ensure_private(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Secure the directories the managed host hands to Gozar: the app data
+/// directory and the `unified` directory inside it (the host's data
+/// directory, whose `reachability` folder is the Gozar state path).
+pub(crate) fn ensure_app_state(app_data_dir: &Path) -> io::Result<()> {
+    ensure_private(app_data_dir)?;
+    ensure_private(&app_data_dir.join(crate::unified::UNIFIED_DB_DIRECTORY))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -47,6 +55,20 @@ mod tests {
         let dir = root.path().join("dev.dataconnect");
         ensure_private(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[test]
+    fn secures_the_managed_host_data_directory_too() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("dev.dataconnect");
+        let unified = app.join("unified");
+        std::fs::create_dir_all(&unified).unwrap();
+        for dir in [&app, &unified] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        ensure_app_state(&app).unwrap();
+        assert_eq!(mode(&app), 0o700);
+        assert_eq!(mode(&unified), 0o700);
     }
 
     #[test]

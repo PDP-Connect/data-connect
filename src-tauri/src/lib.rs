@@ -10,6 +10,7 @@ mod console_port;
 mod main_thread_watchdog;
 #[cfg(desktop)]
 mod owner_credential;
+#[cfg(desktop)]
 mod private_data_dir;
 mod processors;
 #[cfg(desktop)]
@@ -188,7 +189,7 @@ pub fn run() {
             #[cfg(unix)]
             {
                 let app_data_dir = app.path().app_data_dir()?;
-                private_data_dir::ensure_private(&app_data_dir).map_err(|error| {
+                private_data_dir::ensure_app_state(&app_data_dir).map_err(|error| {
                     std::io::Error::other(format!(
                         "could not secure the app data directory {}: {error}",
                         app_data_dir.display()
