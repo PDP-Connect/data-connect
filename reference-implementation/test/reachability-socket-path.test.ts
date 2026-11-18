@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,6 +29,7 @@ test("Gozar home must leave room for its resolver socket inside the AF_UNIX limi
 
 test("a masked apply failure is logged with its original class and message", async (t) => {
   const parent = process.env.TEST_TMPDIR ?? join(homedir(), ".tmp");
+  await mkdir(parent, { recursive: true, mode: 0o700 });
   const root = await mkdtemp(join(parent, "rso-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const lines: string[] = [];
