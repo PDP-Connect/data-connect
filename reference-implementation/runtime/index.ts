@@ -5557,6 +5557,19 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       if (validatedDoneError instanceof Error) {
         throw invalidDoneEnvelope(validatedDoneError, msg);
       }
+      // A stream-scoped failure reported by SKIP_RESULT ends the run as a failed
+      // DONE that carries the same code. Any other DONE contradicts it.
+      if (
+        streamCollectionFailedStreams.size > 0 &&
+        (doneStatus !== "failed" || validatedDoneError?.code !== "stream_collection_failed")
+      ) {
+        throw invalidDoneEnvelope(
+          new Error(
+            "Connector emitted invalid DONE.error.code: SKIP_RESULT stream_collection_failed requires failed DONE with the same code"
+          ),
+          msg
+        );
+      }
       const normalizedDoneError = validatedDoneError === null ? null : withoutDoneBasis(validatedDoneError);
       doneBasis = validatedDoneError?.basis ?? [];
       doneRecoveryHint = gatedRecoveryHint(validatedDoneError?.recovery_hint ?? null, "done_error");

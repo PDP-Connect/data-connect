@@ -951,6 +951,20 @@ test("runConnector withholds every staged cursor after a retryable SKIP_RESULT t
   }
 });
 
+// A SKIP_RESULT{stream_collection_failed} is a promise that the run ends as a
+// failed DONE with the same code. A succeeded DONE after it contradicts the
+// report, so the runtime rejects the envelope instead of committing cursors.
+test("runConnector rejects a succeeded DONE after a stream_collection_failed SKIP_RESULT", async () => {
+  await assert.rejects(
+    runSingleSkipCase("runtime-succeeded-done-after-stream-failure-test", {
+      message: "upstream 500",
+      reason: "stream_collection_failed",
+      stream: "sibling_b",
+    }),
+    /stream_collection_failed requires failed DONE/
+  );
+});
+
 // A connector's `out_of_scope` reason is a claim, not proof. sibling_b is in the
 // requested collection scope (the manifest declares it and nothing narrows it),
 // so a skip with no continuation is an omission from the requested collection.
