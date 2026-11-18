@@ -86,6 +86,7 @@ const safeCodes = new Set([
   "proof_refresh_unsupported",
   "embedding_contract_unavailable",
   "owner_password_required",
+  "host_path_too_long",
   "remote_disconnect_acknowledgment_required",
   "unsupported",
   "cleanup_debt",

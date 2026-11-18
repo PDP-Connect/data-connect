@@ -179,6 +179,14 @@ export class ReachabilityOperations {
         ]);
         const supplied = error && typeof error === "object" && "code" in error ? error.code : null;
         const failureCode = typeof supplied === "string" && known.has(supplied) ? supplied : "reachability_unavailable";
+        // The record keeps only a public code. Log the original class and message
+        // (never the object, which can carry route or secret fields) so a masked
+        // failure stays diagnosable.
+        const original = error instanceof Error ? error : null;
+        console.error(
+          `[reachability] operation ${operationId} (${kind}) failed: code=${typeof supplied === "string" ? supplied : "none"} ` +
+          `name=${original?.name ?? typeof error} message=${(original?.message ?? "").slice(0, 300)}`
+        );
         await this.write({
           ...pending,
           failureCode,

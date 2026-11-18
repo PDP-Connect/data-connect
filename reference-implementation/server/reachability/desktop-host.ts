@@ -59,6 +59,19 @@ async function observedConsole(dataDir: string, proofKey: string): Promise<Lease
   return console;
 }
 
+// Gozar binds a Unix socket named `resolver-<12 hex>.sock` directly under its
+// home. Linux limits an AF_UNIX path (sun_path is 108 bytes with its NUL), and
+// Gozar's own control-socket check uses 103. A longer path makes the bind fail
+// with EINVAL after review, which the SDK hides as an unexpected fault and which
+// leaves an uncertain route. Reject it before any provider is contacted.
+const RESOLVER_SOCKET_NAME_BYTES = "resolver-".length + 12 + ".sock".length;
+const MAX_SOCKET_PATH_BYTES = 103;
+export function requireUsableSocketHome(home: string): void {
+  if (Buffer.byteLength(home) + 1 + RESOLVER_SOCKET_NAME_BYTES > MAX_SOCKET_PATH_BYTES) {
+    throw new ReachabilityError("host_path_too_long");
+  }
+}
+
 export async function startDesktopReachability(input: {
   dataDir: string;
   bindHost: string;
@@ -120,6 +133,7 @@ export async function startDesktopReachability(input: {
       target: "",
     },
     prepare: async () => {
+      requireUsableSocketHome(home);
       if (!await passwordReady()) throw new ReachabilityError("owner_password_required");
       if ((await config.load()).posture !== "off") throw new ReachabilityError("host_policy_denied");
     },
