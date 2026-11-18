@@ -145,13 +145,16 @@ jobs:
         # wry. WebKitGTK drops a cookie it will not send without an error, so
         # this ignored test builds a real webview on its own X display and
         # session bus and checks the Cookie header a local server receives.
-        # Bound synchronous GTK calls and teardown, not just the inner wait loop.
+        # Run the already-compiled test binary directly so the bound covers the
+        # run only, not Cargo or compilation. The probe script writes output to a
+        # file, and if the process outlives its RAN marker it records the process
+        # tree, thread states and symbol-only stacks before it kills only that tree.
         working-directory: src-tauri
         run: |
           set -euo pipefail
           test_home="$RUNNER_TEMP/dataconnect-rust-test-home"
           test_tmp="$RUNNER_TEMP/dataconnect-rust-test-tmp"
-          CARGO_HOME="$HOME/.cargo" \
+          export CARGO_HOME="$HOME/.cargo" \
             RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
             HOME="$test_home" \
             XDG_CONFIG_HOME="$test_home/.config" \
@@ -159,12 +162,20 @@ jobs:
             XDG_CACHE_HOME="$test_home/.cache" \
             TMPDIR="$test_tmp" TMP="$test_tmp" TEMP="$test_tmp" \
             CARGO_BUILD_JOBS=4 \
-            TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}' \
-            timeout --signal=TERM --kill-after=5s 90s xvfb-run -a dbus-run-session -- \
-            cargo test --lib -- --ignored --exact \
-            unified::tests::the_console_webview_sends_the_session_and_reveal_cookies \
-            --nocapture 2>&1 | tee "$RUNNER_TEMP/webkitgtk-cookie-test.log"
+            CARGO_MANIFEST_DIR="$PWD" \
+            TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}'
+          sudo apt-get install -y gdb
+          test_bin="$(cargo test --lib --no-run --message-format=json 2>/dev/null \
+            | jq -r 'select(.profile.test == true and .executable != null) | .executable' | tail -n 1)"
+          test -x "$test_bin"
+          timeout --signal=TERM --kill-after=5s 120s xvfb-run -a dbus-run-session -- \
+            ../scripts/ci/webkitgtk-cookie-probe.sh "$test_bin" "$RUNNER_TEMP/webkitgtk-cookie-test.log" \
+            2>&1 | tee "$RUNNER_TEMP/webkitgtk-cookie-probe.log"
           grep -q '^WEBKITGTK COOKIE TEST RAN$' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
             echo "::error::WebKitGTK cookie test did not print its RAN marker"
+            exit 1
+          }
+          grep -q '^test result: ok. 1 passed' "$RUNNER_TEMP/webkitgtk-cookie-test.log" || {
+            echo "::error::WebKitGTK cookie test did not report a passing result"
             exit 1
           }

@@ -8497,6 +8497,11 @@ setInterval(() => {}, 1000);
             log_phase(started, PHASES[id]);
         };
         mark(0);
+        eprintln!(
+            "WEBKITGTK PID pid={} thread={:?}",
+            std::process::id(),
+            std::thread::current().name()
+        );
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("local addr").port();
