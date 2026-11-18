@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { wayIds } from "./fixtures/real-catalog.ts"
 import assert from "node:assert/strict"
 import test, { mock } from "node:test"
 import { JSDOM } from "jsdom"
@@ -29,7 +30,7 @@ const EMAIL = "owner@example.test"
 const TAILNET = "tail-1234.ts.net"
 const reservation = {
   operationId: "op-1",
-  providerId: "tailscale-funnel",
+  providerId: wayIds.funnel,
   providerLabel: "Tailscale",
   draftId: "draft-1",
   actionId: "tailscale-setup",
@@ -349,7 +350,7 @@ for (const [id, line] of [
 }
 
 const SECRET = "tok-9f3a1c77-secret-value"
-const ngrokReservation = { ...reservation, providerId: "ngrok-https-edge", providerLabel: "ngrok", actionId: "ngrok-setup" }
+const ngrokReservation = { ...reservation, providerId: wayIds.ngrok, providerLabel: "ngrok", actionId: "ngrok-setup" }
 const tokenAction = step("auth", sharedFacts, {
   kind: "provide-secret",
   label: "Provide your ngrok agent authtoken",

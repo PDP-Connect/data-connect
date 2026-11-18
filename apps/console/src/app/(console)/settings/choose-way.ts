@@ -3,7 +3,7 @@
 // Which way Remote access recommends, and the "Other ways" list. A projection
 // of the host's catalog: it reads each way's availability and prerequisites and
 // nothing about the operating system.
-import { type Inventory, pickUsage } from "./prepare-remote-access.ts";
+import { type Inventory, mayReachInternet, offersLastingAddress, pickUsage } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
 
 type Provider = Inventory["providers"][number];
@@ -26,42 +26,22 @@ export type WayRow = {
 const tailscaleDownload = "https://tailscale.com/download";
 const funnelHelp = "https://tailscale.com/kb/1223/funnel";
 
-const copy: Record<string, { title: string; line: string; group: GroupId }> = {
-  "localhost-run": {
-    title: "Temporary address",
-    line: "Free, no account, ready in seconds. Good for a quick test. For everyday use with ChatGPT, pick a lasting address under Other ways.",
-    group: "advanced",
-  },
-  "tailscale-funnel": {
-    title: "Tailscale · public address",
-    line: "Lasting address. Tailscale's relay can't read what passes through. Needs a free account.",
-    group: "lasting",
-  },
-  "cloudflare-named": {
-    title: "Cloudflare",
-    line: "Lasting address on a web domain you own (bought separately). Cloudflare can see what passes through.",
-    group: "lasting",
-  },
-  "ngrok-https-edge": { title: "ngrok", line: "Lasting address. ngrok can see what passes through.", group: "lasting" },
-  "tailscale-private": {
-    title: "Tailscale · my devices only",
-    line: "Your phone and laptops signed in to Tailscale. AI apps can't use it.",
-    group: "own-devices",
-  },
-  lan: { title: "Same Wi-Fi only", line: "Devices on your home network. AI apps can't use it.", group: "own-devices" },
-  "own-address": { title: "Your own address", line: "You already run a web server or proxy.", group: "advanced" },
-  "ngrok-tls-passthrough": {
-    title: "ngrok (advanced, TLS)",
-    line: "Your computer handles encryption.",
-    group: "advanced",
-  },
-  "ngrok-tcp-passthrough": {
-    title: "ngrok (advanced, TCP)",
-    line: "Your computer handles encryption.",
-    group: "advanced",
-  },
-  "tunnl-gg": { title: "tunnl.gg", line: "Free, no account. Turns off after 2 hours idle.", group: "advanced" },
-};
+/**
+ * Where a way sits in the list, from what the catalog says about it and nothing
+ * about which service it is: a way that reaches only your own network or devices
+ * is "own-devices"; one that reaches the internet and offers an address that
+ * outlives a run is "lasting"; the rest are "advanced".
+ */
+export function groupOf(provider: Provider): GroupId {
+  if (!mayReachInternet(provider)) return "own-devices";
+  return provider.reach === "internet" && offersLastingAddress(provider) ? "lasting" : "advanced";
+}
+
+/** The catalog's own cost sentence for the way, shown as its one line. Empty when the catalog states none. */
+function lineOf(provider: Provider): string {
+  const cost = provider.facts.find((fact) => fact.group === "cost" && fact.known && typeof fact.value === "string");
+  return typeof cost?.value === "string" ? plain(cost.value) : "";
+}
 
 export const groupTitles: Record<GroupId, { title: string; note: string }> = {
   lasting: { title: "Lasting address for AI apps", note: "Needs a free account with the service." },
@@ -83,7 +63,7 @@ const isTailscale = (provider: Provider) => provider.providerId.startsWith("tail
 /**
  * What the host reports for Tailscale: `local-setup` is present when the
  * Tailscale app is installed and signed in. A prerequisite the host reports as
- * missing or denied (for example Funnel not allowed) blocks the way.
+ * missing or denied blocks the way.
  */
 function blockedStep(provider: Provider): Missing | null {
   if (!isTailscale(provider)) {
@@ -95,9 +75,7 @@ function blockedStep(provider: Provider): Missing | null {
     return { text: "Needs the Tailscale app, signed in.", link: { label: "Get Tailscale", href: tailscaleDownload } };
   }
   if (provider.prerequisites.some((item) => item.state === "denied" || item.state === "missing")) {
-    return provider.providerId === "tailscale-funnel"
-      ? { text: "Funnel isn't allowed on your Tailscale account yet.", link: { label: "How to allow it", href: funnelHelp } }
-      : { text: "Tailscale needs a step before this works." };
+    return { text: "Tailscale needs a step before this works." };
   }
   return null;
 }
@@ -143,15 +121,15 @@ export function wayUnusable(provider: Provider, capabilities: Capabilities, bloc
 }
 
 /**
- * Whether the host has positively seen this way's prerequisites met. Tailscale's
- * catalog entry reads `present` once the command-line tool is found, with the
- * version "not-observed" (gozar embedding-state.mjs prerequisitesFor). That is the
- * same whether the daemon is stopped, signed out or signed in, so it proves
- * nothing about sign-in. Only a way the owner already set up (`setUp`) or a
- * prerequisite the host observed with a version counts.
+ * Whether a lasting way is known to be set up. The catalog's prerequisite for a
+ * way that needs an account reads `present` once its command-line tool is found,
+ * with the version "not-observed" (gozar embedding-state.mjs prerequisitesFor),
+ * whether or not anyone is signed in, so that alone proves nothing. Only a way
+ * the owner already set up (`setUp`) or a prerequisite the host observed with a
+ * version counts. A way that is not lasting needs no such proof.
  */
 function confirmedReady(provider: Provider, setUp: ReadonlySet<string>): boolean {
-  if (!isTailscale(provider)) return true;
+  if (groupOf(provider) !== "lasting") return true;
   if (setUp.has(provider.providerId)) return true;
   const local = provider.prerequisites.find((item) => item.id === "local-setup");
   return local?.state === "present" && local.version.known === true;
@@ -160,8 +138,9 @@ function confirmedReady(provider: Provider, setUp: ReadonlySet<string>): boolean
 /**
  * The way to recommend: the best one this computer can finish now with its
  * prerequisites known to be met. A way that needs a sign-in is not recommended
- * over one that needs none. Tailscale public address when it is set up; otherwise
- * the temporary address. Falls back to the first way this computer can run.
+ * over one that needs none. A lasting address when it is set up; otherwise the
+ * first temporary address on the internet. Falls back to the first way this
+ * computer can run.
  */
 export function recommendedWay(
   inventory: Inventory,
@@ -172,27 +151,30 @@ export function recommendedWay(
   const visible = inventory.providers.filter((item) => !isDevelopmentOnly(item));
   const runnable = (item: Provider) => missingFor(item, capabilities, blocks) === null;
   const ready = (item: Provider) => runnable(item) && confirmedReady(item, setUp);
-  const funnel = visible.find((item) => item.providerId === "tailscale-funnel");
-  if (funnel && ready(funnel)) return funnel;
-  const temporary = visible.find((item) => item.providerId === "localhost-run");
-  if (temporary && ready(temporary)) return temporary;
+  // A lasting address the owner has already set up, then a temporary address on the internet that needs
+  // no setup, then anything else this computer can finish.
+  const lasting = visible.find((item) => groupOf(item) === "lasting" && ready(item));
+  if (lasting) return lasting;
+  const temporary = visible.find(
+    (item) => item.reach === "internet" && !offersLastingAddress(item) && pickUsage(item, capabilities) === "session" && ready(item)
+  );
+  if (temporary) return temporary;
   return (
-    visible.find((item) => ready(item) && item.reach !== "lan" && pickUsage(item, capabilities) === "session") ??
-    visible.find((item) => ready(item) && item.reach !== "lan") ??
+    visible.find((item) => ready(item) && mayReachInternet(item) && pickUsage(item, capabilities) === "session") ??
+    visible.find((item) => ready(item) && mayReachInternet(item)) ??
     visible.find(ready) ??
     visible.find(runnable)
   );
 }
 
 export function wayRow(provider: Provider, capabilities: Capabilities, blocks: Blocks = {}): WayRow {
-  const known = copy[provider.providerId];
   const missing = missingFor(provider, capabilities, blocks);
   return {
     providerId: provider.providerId,
     reach: provider.reach,
-    title: known?.title ?? plain(provider.label),
-    line: known?.line ?? "",
-    group: known?.group ?? "advanced",
+    title: plain(provider.label),
+    line: lineOf(provider),
+    group: groupOf(provider),
     usable: missing === null,
     missing,
   };

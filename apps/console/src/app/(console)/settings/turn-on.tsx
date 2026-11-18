@@ -74,13 +74,13 @@ export function TurnOnCard({
             <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
           ) : null}
           <ConsentDisclosures value={consent.disclosures} />
-          <ConsentFacts facts={shown} providerId={candidate.providerId} />
+          <ConsentFacts facts={shown} />
           <UnknownFactsCount count={unknown} service={candidate.display.label} />
           {steps.map((step) => (
             <div className="grid gap-2" key={step.id}>
               <h4 className="pdpp-label">{plain(step.label)}</h4>
               {step.instructions ? <p className="pdpp-caption break-words">{step.instructions}</p> : null}
-              <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} providerId={candidate.providerId} />
+              <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} />
             </div>
           ))}
         </details>

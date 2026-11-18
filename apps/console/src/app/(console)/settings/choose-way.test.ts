@@ -8,9 +8,10 @@ import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { otherWays, recommendedWay } from "./choose-way.ts";
-import { tailscaleFacts } from "./real-gozar-shapes.fixture.ts";
+import { tailscaleFacts } from "./fixtures/real-gozar-shapes.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
+import { realWay, wayIds } from "./fixtures/real-catalog.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -32,36 +33,25 @@ const fail = (code: string): Result => ({ ok: false, ...publicError(code, "serve
 const bannedPatterns = [/reachability/i, /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/i, /\b(?:installer|privilege|secrets|runtime|host)\.[a-z]/i, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, /detect-only|deferred|admitted|action-required/i];
 const bannedIn = (text: string) => bannedPatterns.filter((pattern) => pattern.test(text)).map(String);
 
-const available = { reason: "admitted", state: "available" };
-// "present" here is a prerequisite the host observed with a version: positive evidence. The real catalog shape is in real-gozar-shapes.fixture.ts.
+// "present" here is a prerequisite the host observed with a version: positive evidence. The real catalog shape is in fixtures/real-gozar-shapes.ts.
 const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt: "x", remedy: null, state, version: state === "present" ? { known: true, value: "1.80.0" } : { known: false, reason: "n" } });
-const way = (providerId: string, over: Record<string, unknown> = {}) => ({
-  providerId,
-  label: `Label ${providerId}`,
-  reach: providerId === "lan" ? "lan" : "public",
-  transport: "https",
-  availability: { session: available, durable: available },
-  configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
-  facts: [],
-  prerequisites: [],
-  ...over,
-});
+const way = realWay;
 const tailscale = (setup: string, extra: string[] = []) => [
   prerequisite("local-setup", setup),
   ...extra.map((state) => prerequisite("funnel", state)),
 ];
 const ids = [
-  "localhost-run",
-  "tailscale-funnel",
-  "cloudflare-named",
-  "ngrok-https-edge",
-  "tailscale-private",
-  "lan",
-  "own-address",
-  "ngrok-tls-passthrough",
-  "tunnl-gg",
+  wayIds.temporary,
+  wayIds.funnel,
+  wayIds.cloudflare,
+  wayIds.ngrok,
+  wayIds.tailnet,
+  wayIds.lan,
+  wayIds.ownAddress,
+  wayIds.ngrokTls,
+  wayIds.tunnl,
 ];
-const detectOnly = way("ngrok-tcp-passthrough", {
+const detectOnly = way(wayIds.ngrokTcp, {
   availability: { session: { reason: "deferred by Lead", state: "detect-only" } },
 });
 function catalogWith(tailscaleState: { setup: string; extra?: string[] }) {
@@ -78,11 +68,11 @@ type Inv = Parameters<typeof recommendedWay>[0];
 const inv = (value: unknown) => value as Inv;
 
 test("without Tailscale the temporary address is recommended", () => {
-  assert.equal(recommendedWay(inv(noTailscale), caps)?.providerId, "localhost-run");
+  assert.equal(recommendedWay(inv(noTailscale), caps)?.providerId, wayIds.temporary);
 });
 
 test("Tailscale installed, signed in and not blocked is recommended", () => {
-  assert.equal(recommendedWay(inv(tailscaleReady), caps)?.providerId, "tailscale-funnel");
+  assert.equal(recommendedWay(inv(tailscaleReady), caps)?.providerId, wayIds.funnel);
 });
 
 // The real catalog cannot tell a signed-out daemon from a signed-in one, so only a way the owner already set up is recommended.
@@ -96,49 +86,51 @@ test("with real Tailscale facts, a way that needs a sign-in is not recommended o
     ["not installed", tailscaleFacts.notInstalled],
     ["running, signed out", tailscaleFacts.signedOut],
   ] as const) {
-    assert.equal(recommendedWay(withTailscaleFacts([...facts]), caps)?.providerId, "localhost-run", name);
+    assert.equal(recommendedWay(withTailscaleFacts([...facts]), caps)?.providerId, wayIds.temporary, name);
   }
 });
 
 test("with real Tailscale facts, a Tailscale the owner already set up is recommended", () => {
   const signedIn = withTailscaleFacts([...tailscaleFacts.signedIn]);
-  assert.equal(recommendedWay(signedIn, caps, {}, new Set(["tailscale-funnel"]))?.providerId, "tailscale-funnel");
-  assert.equal(recommendedWay(signedIn, caps, {}, new Set())?.providerId, "localhost-run");
+  assert.equal(recommendedWay(signedIn, caps, {}, new Set([wayIds.funnel]))?.providerId, wayIds.funnel);
+  assert.equal(recommendedWay(signedIn, caps, {}, new Set())?.providerId, wayIds.temporary);
 });
 
 test("Tailscale with Funnel blocked is not recommended and its row shows the missing step", () => {
-  assert.equal(recommendedWay(inv(funnelBlocked), caps)?.providerId, "localhost-run");
-  const lasting = otherWays(inv(funnelBlocked), caps, "localhost-run").find((group) => group.id === "lasting")!;
-  const row = lasting.rows.find((item) => item.providerId === "tailscale-funnel")!;
+  assert.equal(recommendedWay(inv(funnelBlocked), caps)?.providerId, wayIds.temporary);
+  const lasting = otherWays(inv(funnelBlocked), caps, wayIds.temporary).find((group) => group.id === "lasting")!;
+  const row = lasting.rows.find((item) => item.providerId === wayIds.funnel)!;
   assert.equal(row.usable, false);
-  assert.match(row.missing!.text, /Funnel isn't allowed/);
-  assert.equal(lasting.rows.at(-1)!.providerId, "tailscale-funnel", "a way that cannot run comes last");
+  assert.match(row.missing!.text, /Tailscale needs a step/);
+  assert.equal(lasting.rows.at(-1)!.providerId, wayIds.funnel, "a way that cannot run comes last");
 });
 
 test("a missing Tailscale app shows Get Tailscale", () => {
-  const row = otherWays(inv(noTailscale), caps, "localhost-run")
+  const row = otherWays(inv(noTailscale), caps, wayIds.temporary)
     .flatMap((group) => group.rows)
-    .find((item) => item.providerId === "tailscale-funnel")!;
+    .find((item) => item.providerId === wayIds.funnel)!;
   assert.match(row.missing!.text, /Needs the Tailscale app/);
   assert.equal(row.missing!.link!.label, "Get Tailscale");
 });
 
 test("Other ways has three groups, no development row, and no code in any text", () => {
-  const groups = otherWays(inv(tailscaleReady), caps, "tailscale-funnel");
+  const groups = otherWays(inv(tailscaleReady), caps, wayIds.funnel);
   assert.deepEqual(groups.map((group) => group.title), ["Lasting address for AI apps", "Only my own devices", "Advanced"]);
   const rows = groups.flatMap((group) => group.rows);
-  assert.ok(!rows.some((row) => row.providerId === "ngrok-tcp-passthrough"), "detect-only row hidden");
-  assert.ok(!rows.some((row) => row.providerId === "tailscale-funnel"), "the recommended way is not repeated");
+  assert.ok(!rows.some((row) => row.providerId === wayIds.ngrokTcp), "detect-only row hidden");
+  assert.ok(!rows.some((row) => row.providerId === wayIds.funnel), "the recommended way is not repeated");
   for (const row of rows) {
     const text = [row.title, row.line, row.missing?.text ?? ""].join(" ");
     assert.deepEqual(bannedIn(text), [], text);
-    assert.doesNotMatch(text, /detect-only|deferred|admitted|action-required|unsupported|[a-z]+-[a-z]+-[a-z]+/);
+    assert.doesNotMatch(text, /detect-only|deferred|admitted|action-required|unsupported/);
+    // The line is the catalog's own sentence, which may hyphenate words; the title and the missing step may not carry a code.
+    assert.doesNotMatch([row.title, row.missing?.text ?? ""].join(" "), /[a-z]+-[a-z]+-[a-z]+/);
   }
 });
 
 test("a way the host cannot run says so in plain words", () => {
-  const broken = way("ngrok-https-edge", { availability: { session: { reason: "usage-not-supported", state: "unsupported" } } });
-  const row = otherWays(inv({ ...noTailscale, providers: [broken] }), caps, null)[0]!.rows[0]!;
+  const broken = way(wayIds.ngrok, { availability: { session: { reason: "usage-not-supported", state: "unsupported" } } });
+  const row = otherWays(inv({ ...noTailscale, providers: [broken] }), caps, null).flatMap((group) => group.rows)[0]!;
   assert.equal(row.usable, false);
   assert.equal(row.missing!.text, "Can't run on this computer.");
 });
@@ -224,9 +216,9 @@ const changesHostFor = (calls: Call[], providerId: string) =>
 test("the card recommends the temporary address and Other ways opens in three groups", async () => {
   await withScreen(noTailscale, async ({ container, press, text }) => {
     const card = container.querySelector("[aria-label='Recommended way']")!;
-    assert.match(card.textContent!, /Temporary address/);
+    assert.match(card.textContent!, /localhost.run trial/);
     assert.match(card.textContent!, /Recommended/);
-    assert.match(card.textContent!, /Free, no account, ready in seconds\. Good for a quick test\./);
+    assert.match(card.textContent!, /costs nothing and needs no signup/);
     assert.doesNotMatch(text(), /Needs the Tailscale app/, "Other ways is closed");
     await press(/^Other ways$/);
     const headings = [...container.querySelectorAll("fieldset h4, fieldset summary")].map((node) => node.textContent);
@@ -241,7 +233,7 @@ test("the card recommends the temporary address and Other ways opens in three gr
 
 test("choosing another way prepares that way and never approves without the click", async () => {
   await withScreen(tailscaleReady, async ({ calls, container, press, text, settle }) => {
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale · public address/);
+    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale Funnel/);
     await press(/^Other ways$/);
     const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
     const before = calls.filter((call) => call.url === "/drafts").length;
@@ -249,11 +241,11 @@ test("choosing another way prepares that way and never approves without the clic
     await settle();
     const drafts = calls.filter((call) => call.url === "/drafts");
     assert.equal(drafts.length, before + 1, "one new draft for the chosen way");
-    assert.equal(drafts.at(-1)!.body?.providerId, "cloudflare-named");
+    assert.equal(drafts.at(-1)!.body?.providerId, wayIds.cloudflare);
     assert.deepEqual(mutating(calls), []);
     // After the click, nothing positive goes to the way that was left.
-    const afterClick = calls.slice(calls.findIndex((call) => call.body?.providerId === "cloudflare-named"));
-    assert.deepEqual(changesHostFor(afterClick, "tailscale-funnel"), []);
+    const afterClick = calls.slice(calls.findIndex((call) => call.body?.providerId === wayIds.cloudflare));
+    assert.deepEqual(changesHostFor(afterClick, wayIds.funnel), []);
     assert.match(text(), /Turn on remote access/);
     await act(async () => radio.click());
     await settle();

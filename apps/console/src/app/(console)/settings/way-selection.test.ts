@@ -4,18 +4,13 @@
 // way stops the old preparation, a change in flight locks the radios, and a
 // Funnel setup blocked on an administrator demotes that way.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
 import test, { mock } from "node:test";
 import { JSDOM } from "jsdom";
 import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { renderToStaticMarkup } from "react-dom/server";
 import { recommendedWay, wayRow, wayUnusable } from "./choose-way.ts";
-import { knownFalseConditions } from "./known-false-conditions.ts";
-import { ConsentDisclosures, ConsentFacts } from "./reachability-consent.tsx";
+import { realWay, wayIds } from "./fixtures/real-catalog.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
 
@@ -43,21 +38,10 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const available = { reason: "admitted", state: "available" };
-// "present" here is a prerequisite the host observed with a version: positive evidence. The real catalog shape is in real-gozar-shapes.fixture.ts.
+// "present" here is a prerequisite the host observed with a version: positive evidence. The real catalog shape is in fixtures/real-gozar-shapes.ts.
 const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt: "x", remedy: null, state, version: state === "present" ? { known: true, value: "1.80.0" } : { known: false, reason: "n" } });
-const way = (providerId: string, over: Record<string, unknown> = {}) => ({
-  providerId,
-  label: `Label ${providerId}`,
-  reach: providerId === "lan" ? "lan" : "public",
-  transport: "https",
-  availability: { session: available, durable: available },
-  configuration: { revision: "r1", actions: [], inputRequirements: [], values: {}, credentials: {} },
-  facts: [],
-  prerequisites: [],
-  ...over,
-});
-const ids = ["localhost-run", "tailscale-funnel", "cloudflare-named", "tailscale-private", "lan"];
+const way = realWay;
+const ids = [wayIds.temporary, wayIds.funnel, wayIds.cloudflare, wayIds.tailnet, wayIds.lan];
 const catalogWith = (setup: string | null) => ({
   catalogRevision: "c1",
   observedAt: "x",
@@ -189,18 +173,18 @@ test("catalog polls do not switch the way being prepared", async (t) => {
   let catalog: unknown = tailscaleReady;
   const slow = deferred<Result>();
   const handler = host(() => catalog, {
-    "/drafts": (call) => (call.body?.providerId === "tailscale-funnel" ? slow.promise : ok(draftOf(String(call.body?.providerId)))),
+    "/drafts": (call) => (call.body?.providerId === wayIds.funnel ? slow.promise : ok(draftOf(String(call.body?.providerId)))),
   });
   await withScreen(handler, async ({ calls, container, settle, text }) => {
-    assert.deepEqual(draftsFor(calls), ["tailscale-funnel"]);
+    assert.deepEqual(draftsFor(calls), [wayIds.funnel]);
     for (const next of [tailscaleUnknown, tailscaleReady, tailscaleUnknown, tailscaleReady]) {
       catalog = next;
       await act(async () => t.mock.timers.tick(3000));
       await settle();
     }
-    await act(async () => slow.resolve(ok(draftOf("tailscale-funnel"))));
+    await act(async () => slow.resolve(ok(draftOf(wayIds.funnel))));
     await settle();
-    assert.deepEqual(draftsFor(calls), ["tailscale-funnel"], "one preparation, for one way");
+    assert.deepEqual(draftsFor(calls), [wayIds.funnel], "one preparation, for one way");
     assert.deepEqual(
       calls.filter((call) => call.url.endsWith("/review")).map((call) => call.url),
       ["/drafts/d-tailscale-funnel/review"]
@@ -214,12 +198,12 @@ test("a pinned way that truly becomes unusable is replaced, and the owner is tol
   t.mock.timers.enable({ apis: ["setInterval"] });
   let catalog: unknown = tailscaleReady;
   await withScreen(host(() => catalog), async ({ calls, settle, text }) => {
-    assert.deepEqual(draftsFor(calls), ["tailscale-funnel"]);
+    assert.deepEqual(draftsFor(calls), [wayIds.funnel]);
     catalog = noTailscale;
     await act(async () => t.mock.timers.tick(3000));
     await settle();
-    assert.deepEqual(draftsFor(calls), ["tailscale-funnel", "localhost-run"]);
-    assert.match(text(), /Tailscale · public address can't be used now: Needs the Tailscale app, signed in\. Using Temporary address instead\./);
+    assert.deepEqual(draftsFor(calls), [wayIds.funnel, wayIds.temporary]);
+    assert.match(text(), /Tailscale Funnel can't be used now: Needs the Tailscale app, signed in\. Using localhost.run trial instead\./);
   });
 });
 
@@ -233,15 +217,15 @@ test("choosing another way while the old draft is pending sends nothing further 
   ] as const) {
     const slow = deferred<Result>();
     const handler = host(() => tailscaleReady, {
-      "/drafts": (call) => (call.body?.providerId === "tailscale-funnel" ? slow.promise : ok(draftOf(String(call.body?.providerId)))),
+      "/drafts": (call) => (call.body?.providerId === wayIds.funnel ? slow.promise : ok(draftOf(String(call.body?.providerId)))),
     });
     await withScreen(handler, async ({ calls, press, pickRadio, settle }) => {
       await press(/^Other ways$/);
       await pickRadio(/^\s*Cloudflare/);
-      await act(async () => slow.resolve(ok(draftOf("tailscale-funnel", [...actions]))));
+      await act(async () => slow.resolve(ok(draftOf(wayIds.funnel, [...actions]))));
       await settle();
-      assert.deepEqual(positiveFor(calls, "tailscale-funnel"), [], name);
-      assert.ok(draftsFor(calls).includes("cloudflare-named"), `${name}: the chosen way is prepared`);
+      assert.deepEqual(positiveFor(calls, wayIds.funnel), [], name);
+      assert.ok(draftsFor(calls).includes(wayIds.cloudflare), `${name}: the chosen way is prepared`);
     });
   }
 });
@@ -260,7 +244,7 @@ test("the recommended radio is disabled and inert while Turn on is in flight", a
     assert.equal(radio.disabled, true);
     await act(async () => radio.click());
     assert.equal(draftsFor(calls).length, before, "no new preparation");
-    assert.equal(draftsFor(calls).at(-1), "cloudflare-named");
+    assert.equal(draftsFor(calls).at(-1), wayIds.cloudflare);
     assert.equal(radio.checked, false);
     assert.match(text(), /Cloudflare/);
     await act(async () => slow.resolve(fail("route_not_found")));
@@ -271,7 +255,7 @@ test("the recommended radio is disabled while Allow is in flight", async () => {
   const slow = deferred<Result>();
   const effectful = action({ effects: { writes: ["/opt/x"], networkOrigins: [], requiresPrivilege: false, restartRequired: false } });
   const handler = host(() => noTailscale, {
-    "/drafts": (call) => ok(draftOf(String(call.body?.providerId), call.body?.providerId === "cloudflare-named" ? [effectful] : [])),
+    "/drafts": (call) => ok(draftOf(String(call.body?.providerId), call.body?.providerId === wayIds.cloudflare ? [effectful] : [])),
     "/drafts/d-cloudflare-named/actions/act-1": () => slow.promise,
   });
   await withScreen(handler, async ({ calls, container, press, pickRadio }) => {
@@ -290,8 +274,8 @@ test("the recommended radio is disabled while Allow is in flight", async () => {
 // ---------- defect 4: Funnel not allowed ----------
 
 const funnelService = {
-  providerId: "tailscale-funnel",
-  providerLabel: "Tailscale · public address",
+  providerId: wayIds.funnel,
+  providerLabel: "Tailscale Funnel",
   draftId: "d-tailscale-funnel",
   usage: "session",
   committed: false,
@@ -301,7 +285,7 @@ const blockedView = (nextActionId: string, href = "https://login.tailscale.com/a
   operationId: "op-1",
   revision: 1,
   state: "blocked",
-  scope: { registryId: "r", scopeId: "s", providerId: "tailscale-funnel", configurationRevision: "r2", draftId: "d-tailscale-funnel" },
+  scope: { registryId: "r", scopeId: "s", providerId: wayIds.funnel, configurationRevision: "r2", draftId: "d-tailscale-funnel" },
   evidence: { known: false, reason: "n" },
   nextAction: action({ id: nextActionId, kind: "open-url", label: "Ask an administrator to allow Funnel on this exact node", href, instructions: "Allow the funnel attribute." }),
   resources: [],
@@ -309,17 +293,17 @@ const blockedView = (nextActionId: string, href = "https://login.tailscale.com/a
 const funnelHost = (view: unknown) =>
   host(() => tailscaleReady, {
     "/state": () => ok({ ...idleState, services: [funnelService] }),
-    "/drafts/d-tailscale-funnel": () => ok(draftOf("tailscale-funnel", [signIn])),
+    "/drafts/d-tailscale-funnel": () => ok(draftOf(wayIds.funnel, [signIn])),
     "/setup-operations/op-1": () => ok(view),
   });
 
 test("a Funnel setup blocked on the administrator step demotes Funnel and recommends the temporary address", async () => {
   await withScreen(funnelHost(blockedView("tailscale-funnel-policy")), async ({ calls, container, press, text }) => {
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Temporary address/);
-    assert.ok(draftsFor(calls).includes("localhost-run"), "the temporary address is prepared");
-    assert.match(text(), /Tailscale · public address can't be used now: Funnel isn't allowed on this Tailscale device yet\. Ask an administrator to allow it\. Using Temporary address instead\./);
+    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /localhost.run trial/);
+    assert.ok(draftsFor(calls).includes(wayIds.temporary), "the temporary address is prepared");
+    assert.match(text(), /Tailscale Funnel can't be used now: Funnel isn't allowed on this Tailscale device yet\. Ask an administrator to allow it\. Using localhost.run trial instead\./);
     await press(/^Other ways$/);
-    const row = [...container.querySelectorAll("label")].find((node) => /Tailscale · public address/.test(node.textContent ?? ""))!;
+    const row = [...container.querySelectorAll("label")].find((node) => /Tailscale Funnel/.test(node.textContent ?? ""))!;
     assert.match(row.textContent!, /Ask an administrator to allow it/);
     assert.equal(row.querySelector("input")!.disabled, true);
     const link = row.querySelector("a")!;
@@ -329,79 +313,34 @@ test("a Funnel setup blocked on the administrator step demotes Funnel and recomm
 
 test("only the Funnel policy outcome demotes: another blocked step leaves Funnel recommended", async () => {
   await withScreen(funnelHost(blockedView("tailscale-install")), async ({ calls, container }) => {
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale · public address/);
-    assert.ok(!draftsFor(calls).includes("localhost-run"));
+    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Tailscale Funnel/);
+    assert.ok(!draftsFor(calls).includes(wayIds.temporary));
   });
 });
 
 test("an administrator link that is not https falls back to the Funnel help page", async () => {
   await withScreen(funnelHost(blockedView("tailscale-funnel-policy", "javascript:alert(1)")), async ({ container, press }) => {
     await press(/^Other ways$/);
-    const row = [...container.querySelectorAll("label")].find((node) => /Tailscale · public address/.test(node.textContent ?? ""))!;
+    const row = [...container.querySelectorAll("label")].find((node) => /Tailscale Funnel/.test(node.textContent ?? ""))!;
     assert.equal(row.querySelector("a")!.getAttribute("href"), "https://tailscale.com/kb/1223/funnel");
   });
-});
-
-// ---------- defect 5: the known-false 15-minute line ----------
-
-// Resolved the way Node does from reference-implementation, so it works whether npm hoists the package or not.
-const gozarDir = new URL(
-  ".",
-  pathToFileURL(
-    createRequire(new URL("../../../../../../reference-implementation/package.json", import.meta.url)).resolve("@tnunamak/gozar/package.json")
-  )
-);
-const falseLine = "the plan limits a session to 15 minutes";
-const addressFact = (id: string, value: string) => ({
-  id, group: "address", label: "address conditions", known: true as const, value, affectsConsent: false, source: "provider", asOf: null,
-});
-const html = (providerId: string, values: string[]) =>
-  renderToStaticMarkup(createElement(ConsentFacts, { providerId, facts: values.map((value, index) => addressFact(`c-${index}`, value)) as never }));
-
-test("the known-false list matches the installed localhost.run definition, so an upgrade breaks here", () => {
-  const definition = JSON.parse(readFileSync(new URL("adapters/providers/localhost-run/definition.json", gozarDir), "utf8"));
-  assert.ok(
-    JSON.stringify(definition).includes(`"${falseLine}"`),
-    "gozar no longer says this; remove or update the entry in known-false-conditions.ts"
-  );
-  assert.deepEqual([...knownFalseConditions["localhost-run"]!], [falseLine]);
-  assert.deepEqual(Object.keys(knownFalseConditions), ["localhost-run"]);
-});
-
-test("the 15-minute line is hidden for localhost.run only; retention and cost terms with times stay", () => {
-  const others = ["Logs retained for 30 days", "Free for 7 days, then costs $10"];
-  const hidden = html("localhost-run", [...others, falseLine]);
-  assert.ok(!hidden.includes(falseLine));
-  for (const text of others) assert.ok(hidden.includes(text), text);
-  assert.ok(html("another-provider", [falseLine]).includes(falseLine), "another provider keeps its own text");
-  assert.ok(html("localhost-run", [`${falseLine}.`]).includes(`${falseLine}.`), "exact text only, never a pattern");
-  assert.ok(html("localhost-run", ["a session lasts up to 15 minutes"]).includes("15 minutes"));
-});
-
-test("typed disclosures hide only the exact localhost-run false condition", () => {
-  const value = { address: { conditions: [falseLine, "Logs retained for 30 days"] } };
-  for (const providerId of ["localhost-run", "another-provider", undefined]) {
-    const markup = renderToStaticMarkup(createElement(ConsentDisclosures, { value, providerId }));
-    assert.equal(markup.includes(falseLine), providerId !== "localhost-run");
-    assert.ok(markup.includes("Logs retained for 30 days"));
-  }
 });
 
 for (const alternative of [true, false]) {
   test("denied temporary prerequisite moves the pin only to a usable alternative: " + alternative, async (t) => {
     t.mock.timers.enable({ apis: ["setInterval"] });
-    let catalog = { ...noTailscale, providers: [way("localhost-run"), ...(alternative ? [way("cloudflare-named")] : [])] };
+    let catalog = { ...noTailscale, providers: [way(wayIds.temporary), ...(alternative ? [way(wayIds.cloudflare)] : [])] };
     await withScreen(host(() => catalog), async ({ calls, settle, text }) => {
-      assert.deepEqual(draftsFor(calls), ["localhost-run"]);
-      catalog = { ...catalog, providers: catalog.providers.map((row) => row.providerId === "localhost-run"
-        ? way("localhost-run", { prerequisites: [prerequisite("SSH permission", "denied")] }) : row) };
+      assert.deepEqual(draftsFor(calls), [wayIds.temporary]);
+      catalog = { ...catalog, providers: catalog.providers.map((row) => row.providerId === wayIds.temporary
+        ? way(wayIds.temporary, { prerequisites: [prerequisite("SSH permission", "denied")] }) : row) };
       for (let n = 0; n < 3; n++) {
         await act(async () => t.mock.timers.tick(3000));
         await settle();
       }
-      assert.deepEqual(draftsFor(calls), alternative ? ["localhost-run", "cloudflare-named"] : ["localhost-run"]);
+      assert.deepEqual(draftsFor(calls), alternative ? [wayIds.temporary, wayIds.cloudflare] : [wayIds.temporary]);
       assert.match(text(), /Needs SSH permission \(denied\)/);
-      if (alternative) assert.match(text(), /Using Cloudflare instead/);
+      if (alternative) assert.match(text(), /Using Cloudflare named tunnel instead/);
       else assert.doesNotMatch(text(), /Turn on remote access/);
     });
   });
@@ -410,11 +349,11 @@ for (const alternative of [true, false]) {
 test("a final review arriving after Funnel policy demotion cannot start the old way", async () => {
   const lateReview = deferred<Result>();
   const policy = deferred<Result>();
-  const initial = candidate("tailscale-funnel");
+  const initial = candidate(wayIds.funnel);
   let reviews = 0;
   const handler = host(() => tailscaleReady, {
     "/state": () => ok({ ...idleState, services: [{ ...funnelService, committed: true }] }),
-    "/drafts/d-tailscale-funnel": () => ok(draftOf("tailscale-funnel")),
+    "/drafts/d-tailscale-funnel": () => ok(draftOf(wayIds.funnel)),
     "/drafts/d-tailscale-funnel/review": () => ++reviews === 1
       ? ok({ id: "initial-review", kind: "route", candidate: initial }) : lateReview.promise,
     "/setup-operations/op-1": () => policy.promise,
@@ -427,8 +366,8 @@ test("a final review arriving after Funnel policy demotion cannot start the old 
     assert.equal(reviews, 2, "the final refresh is actually pending");
     await act(async () => policy.resolve(ok(blockedView("tailscale-funnel-policy"))));
     await settle();
-    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /Temporary address/);
-    await act(async () => lateReview.resolve(ok({ id: "late-review", kind: "route", candidate: candidate("tailscale-funnel") })));
+    assert.match(container.querySelector("[aria-label='Recommended way']")!.textContent!, /localhost.run trial/);
+    await act(async () => lateReview.resolve(ok({ id: "late-review", kind: "route", candidate: candidate(wayIds.funnel) })));
     await settle();
     assert.equal(calls.filter((call) => call.url === "/operations").length, 0);
     const other = [...container.querySelectorAll("button")].find((node) => node.textContent === "Other ways")!;
@@ -437,7 +376,7 @@ test("a final review arriving after Funnel policy demotion cannot start the old 
 });
 
 test("recommendation, rows and pinned usability agree on every provider prerequisite", () => {
-  for (const providerId of ["localhost-run", "cloudflare-named"]) {
+  for (const providerId of [wayIds.temporary, wayIds.cloudflare]) {
     for (const state of ["missing", "denied", "unknown", "present"]) {
       const provider = way(providerId, { prerequisites: [prerequisite("Client", state)] });
       const inventory = { ...noTailscale, providers: [provider] } as unknown as Parameters<typeof recommendedWay>[0];
@@ -459,7 +398,7 @@ for (const initialFailure of [false, true]) test(`setup polling survives ${initi
   const setupView = () => ({
     operationId: "setup-poll", revision: finished ? 9 : 1, state: finished ? "complete" : "pending",
     resources: [], evidence: { known: false }, nextAction: finished ? null : browser,
-    scope: { providerId: "tailscale-funnel", draftId: null, configurationRevision: "r2" },
+    scope: { providerId: wayIds.funnel, draftId: null, configurationRevision: "r2" },
   });
   const handler = host(() => tailscaleReady, {
     "/host-capabilities": () => {
@@ -469,7 +408,7 @@ for (const initialFailure of [false, true]) test(`setup polling survives ${initi
       return ok({});
     },
     "/state": () => ok({ ...idleState, services: [{
-      providerId: "tailscale-funnel", providerLabel: "Tailscale", draftId: null, usage: "session", committed: true,
+      providerId: wayIds.funnel, providerLabel: "Tailscale", draftId: null, usage: "session", committed: true,
       setup: { operationId: "setup-poll", actionId: "tailscale-browser", expectedConfigurationRevision: "r2" },
     }] }),
     "/setup-operations/setup-poll": () => { setupReads++; return ok(setupView()); },

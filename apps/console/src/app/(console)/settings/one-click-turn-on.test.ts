@@ -11,7 +11,8 @@ import { createRoot } from "react-dom/client";
 import { type Action, MAX_PREPARATION_RESTARTS, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn } from "./prepare-remote-access.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
-import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
+import { trialConsentAction } from "./fixtures/real-gozar-shapes.ts";
+import { wayIds } from "./fixtures/real-catalog.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -845,7 +846,7 @@ test("a review that expires between the console's check and the approve is refus
 test("a hung old draft does not block preparation of a newly selected way", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   const never = deferred<Result>();
-  const other = { ...provider, providerId: "cloudflare-named", label: "Cloudflare" };
+  const other = { ...provider, providerId: wayIds.cloudflare, label: "Cloudflare" };
   const nextDraft = { ...draftWith(), draftId: "d-next" };
   const nextReview = review("rev-next", "digest-next");
   nextReview.candidate.providerId = other.providerId;

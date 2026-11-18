@@ -7,7 +7,6 @@ import type {
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react";
-import { isKnownFalseCondition } from "./known-false-conditions.ts";
 import { formatLocalTime, humanizeKey, plain, verbatimValue } from "./plain-text.ts";
 
 type Fact = ReturnType<typeof projectFact>;
@@ -31,8 +30,7 @@ export function UnknownFactsCount({ count, service }: { count: number; service: 
 }
 
 // Every known fact is shown: the owner approves exactly what is listed here.
-export function ConsentFacts({ facts: all, providerId }: { facts: Fact[]; providerId: string | null | undefined }) {
-  const facts = all.filter((fact) => !isKnownFalseCondition(providerId, fact.value));
+export function ConsentFacts({ facts }: { facts: Fact[] }) {
   const groups = [...new Set(facts.map((fact) => fact.group))];
   return (
     <div className="grid gap-4">
@@ -63,17 +61,16 @@ export function ConsentFacts({ facts: all, providerId }: { facts: Fact[]; provid
 
 // Disclosures are library-owned typed data. Keep every item visible without
 // flattening objects, truncating long strings or interpreting provider prose.
-export function ConsentDisclosures({ value, providerId }: { value: unknown; providerId?: string | null }) {
-  if (isKnownFalseCondition(providerId, value)) return null;
+export function ConsentDisclosures({ value }: { value: unknown }) {
   if (value === null) {
     return <span>None</span>;
   }
   if (Array.isArray(value)) {
     return (
       <ol className="grid gap-3">
-        {value.filter((item) => !isKnownFalseCondition(providerId, item)).map((item, index) => (
+        {value.map((item, index) => (
           <li key={index}>
-            <ConsentDisclosures value={item} providerId={providerId} />
+            <ConsentDisclosures value={item} />
           </li>
         ))}
       </ol>
@@ -82,11 +79,11 @@ export function ConsentDisclosures({ value, providerId }: { value: unknown; prov
   if (typeof value === "object") {
     return (
       <dl className="grid gap-3">
-        {Object.entries(value).filter(([, item]) => !isKnownFalseCondition(providerId, item)).map(([key, item]) => (
+        {Object.entries(value).map(([key, item]) => (
           <div key={key}>
             <dt className="pdpp-label">{humanizeKey(key)}</dt>
             <dd>
-              <ConsentDisclosures value={item} providerId={providerId} />
+              <ConsentDisclosures value={item} />
             </dd>
           </div>
         ))}
@@ -162,11 +159,11 @@ export function disclosureSentences(value: unknown, except: readonly string[] = 
 }
 
 /** The structured disclosure, verbatim, for the owner who wants every field. Closed unless `open`. */
-export function DisclosureDetails({ value, providerId, open }: { value: unknown; providerId?: string | null; open?: boolean }) {
+export function DisclosureDetails({ value, open }: { value: unknown; open?: boolean }) {
   return (
     <details open={open}>
       <summary>Details</summary>
-      <ConsentDisclosures value={value} providerId={providerId} />
+      <ConsentDisclosures value={value} />
     </details>
   );
 }
@@ -206,8 +203,8 @@ export function ApprovalDisclosure({
   return (
     <>
       <PlainDisclosure value={bound} except={shown} />
-      {consent.facts ? <ConsentFacts facts={consent.facts} providerId={consent.scope.providerId} /> : null}
-      <DisclosureDetails open={open} value={consent.disclosures} providerId={consent.scope.providerId} />
+      {consent.facts ? <ConsentFacts facts={consent.facts} /> : null}
+      <DisclosureDetails open={open} value={consent.disclosures} />
     </>
   );
 }
@@ -311,8 +308,8 @@ export function RuntimeRouteConsentCard({
           {review.scope?.query.expectedOrigin ? (
             <p className="pdpp-caption break-words">Your address will be: {review.scope.query.expectedOrigin}</p>
           ) : null}
-          <ConsentDisclosures value={review.disclosures} providerId={review.scope?.providerId} />
-          <ConsentFacts facts={review.facts} providerId={review.scope?.providerId} />
+          <ConsentDisclosures value={review.disclosures} />
+          <ConsentFacts facts={review.facts} />
           <label>
             <input
               checked={approvedDigest === review.consentFactsDigest}

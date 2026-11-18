@@ -960,17 +960,17 @@ export function RemoteAccessSetting({
           onReadiness={() => undefined}
           onChange={async (view, mutation) => {
             // A finished or changed setup moves the chain on.
-            if (view.scope.providerId === "tailscale-funnel") {
-              const policy = view.state === "blocked" && view.nextAction?.id === funnelPolicyActionId;
-              setBlocks((current) => {
-                if (!policy) {
-                  if (!("tailscale-funnel" in current)) return current;
-                  const { "tailscale-funnel": _gone, ...rest } = current;
-                  return rest;
-                }
-                return { ...current, "tailscale-funnel": funnelPolicyBlock(view.nextAction?.href) };
-              });
-            }
+            // A setup the administrator must unblock demotes its own way until it moves on.
+            const setupWayId = view.scope.providerId;
+            const policy = view.state === "blocked" && view.nextAction?.id === funnelPolicyActionId;
+            setBlocks((current) => {
+              if (!policy) {
+                if (!(setupWayId in current)) return current;
+                const { [setupWayId]: _gone, ...rest } = current;
+                return rest;
+              }
+              return { ...current, [setupWayId]: funnelPolicyBlock(view.nextAction?.href) };
+            });
             const mark = `${view.operationId}:${view.revision}:${view.state}`;
             if ((mutation || view.state === "complete") && seenSetup.current !== mark) {
               seenSetup.current = mark;
@@ -1077,7 +1077,7 @@ export function RemoteAccessSetting({
                 Lifecycle: {phase ?? "none"} · route{" "}
                 {route.routeState}
               </p>
-              <ConsentFacts facts={knownFacts} providerId={route.providerId} />
+              <ConsentFacts facts={knownFacts} />
               <UnknownFactsCount count={unknownFacts} service={serviceLabel} />
             </Diagnostics>
           );

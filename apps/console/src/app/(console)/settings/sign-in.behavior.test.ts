@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { wayIds } from "./fixtures/real-catalog.ts"
 import assert from "node:assert/strict"
 import test, { mock } from "node:test"
 import { JSDOM } from "jsdom"
@@ -28,7 +29,7 @@ const loadProviderSetup = async () => (await import("./provider-setup.tsx")).Pro
 const LINK = "https://login.example.test/a/one-time-code-4711"
 const reservation = {
   operationId: "op-1",
-  providerId: "tailscale-funnel",
+  providerId: wayIds.funnel,
   providerLabel: "Tailscale",
   draftId: "draft-1",
   actionId: "tailscale-setup",
@@ -140,7 +141,7 @@ test("a sign-in step says Sign in to the service, with one button that calls the
         disclosureRevision: "1",
         consentFactsDigest: "facts-tailscale-browser",
       },
-      providerId: "tailscale-funnel",
+      providerId: wayIds.funnel,
       actionId: "tailscale-browser",
       draftId: "draft-1",
       expectedConfigurationRevision: "config-1",
@@ -213,7 +214,7 @@ for (const [state, line] of [
               disclosureRevision: "1",
               consentFactsDigest: "facts-tailscale-login",
             },
-            providerId: "tailscale-funnel",
+            providerId: wayIds.funnel,
             actionId: "tailscale-login",
             draftId: "draft-1",
             expectedConfigurationRevision: "config-1",

@@ -12,7 +12,7 @@ import {
   routeSentence,
   type RouteDisplayInput,
 } from "./route-display.ts";
-import { diedRoute } from "./real-gozar-shapes.fixture.ts";
+import { diedRoute } from "./fixtures/real-gozar-shapes.ts";
 
 // Values copied from the secret-free /v1/owner/reachability/state snapshots of
 // the packaged native walk (plan050 evidence state-snapshots-run2.jsonl, same

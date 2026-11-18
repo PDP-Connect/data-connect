@@ -11,6 +11,7 @@ import { createHostSecretBackend } from "../server/reachability/secret-backend.t
 import { projectRoute } from "../server/reachability/projection.ts";
 import { fakeRouteScenarios } from "@tnunamak/gozar/testing";
 import fixture from "./fixtures/reachability/configuration.json" with { type: "json" };
+import { temporaryWayId } from "./fixtures/reachability/real-way-ids.ts";
 
 const draft = fixture as Draft;
 const action = draft.configuration.actions[0]!;
@@ -193,7 +194,7 @@ test("state and event projections bind provider identity to the exact journaled 
       created = { ...seed, operationId };
       return created;
     }, {
-      instanceId: "fixture-instance", bootId: "fixture-boot", providerId: "localhost-run",
+      instanceId: "fixture-instance", bootId: "fixture-boot", providerId: temporaryWayId,
       configurationRevision: "fixture-revision", target: "127.0.0.1:37807",
       usage: { kind: "session", lifetimeMs: 3_600_000 },
       expectedOrigin: null, consentFactsDigest: "fixture-digest",
@@ -238,7 +239,7 @@ test("state and event projections bind provider identity to the exact journaled 
       const res = { setHeader() {}, status() { return res; }, json(body: unknown) { response = body; } };
       await handlers.get("/v1/owner/reachability" + path)!({ params: {} }, res);
       assert.deepEqual(response.data.routes.map((route: { providerId: string | null }) => route.providerId),
-        ["localhost-run", null, null, null]);
+        [temporaryWayId, null, null, null]);
       // State reuses its existing journal list; events deduplicate per operation ID.
       assert.equal(counts.get(start.operationId), 1);
       assert.equal(counts.get(missing), 1);

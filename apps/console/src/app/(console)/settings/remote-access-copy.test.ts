@@ -22,8 +22,9 @@ import { ProviderSetup } from "./provider-setup.tsx";
 import { ConsentDisclosures, PlainDisclosure, RuntimeRouteConsentCard, SetupApprovalCard } from "./reachability-consent.tsx";
 import { diagnosticsText } from "./diagnostics.tsx";
 import { setupCards } from "./setup-services.ts";
-import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
+import { trialConsentAction } from "./fixtures/real-gozar-shapes.ts";
 import { TurnOnCard } from "./turn-on.tsx";
+import { wayIds } from "./fixtures/real-catalog.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -374,7 +375,7 @@ function world(overrides: Partial<Record<string, Result>> = {}): Handler {
       schemaVersion: 1,
       providers: [
         provider("p-tunnel", "Tunnel for reachability", "public"),
-        provider("p-lan", "Local network", "lan"),
+        provider("p-lan", "Local network", wayIds.lan),
       ],
     }),
     "/state": ok({
@@ -781,7 +782,7 @@ test("the Tailscale setup card names the family, not the way", () => {
     providerId, providerLabel, draftId: null, usage: "durable", committed: false,
     setup: { operationId: `op-${providerId}`, actionId: "tailscale-setup", expectedConfigurationRevision: "r" },
   });
-  const cards = setupCards([entry("tailscale-funnel", "Tailscale Funnel"), entry("localhost-run", "localhost.run trial")]);
+  const cards = setupCards([entry(wayIds.funnel, "Tailscale Funnel"), entry(wayIds.temporary, "localhost.run trial")]);
   assert.deepEqual(cards.map((card) => card.providerLabel), ["Tailscale", "localhost.run trial"]);
 });
 

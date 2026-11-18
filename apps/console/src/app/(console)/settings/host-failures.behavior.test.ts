@@ -10,7 +10,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
-import { unsafeStateFolderError } from "./real-gozar-shapes.fixture.ts";
+import { unsafeStateFolderError } from "./fixtures/real-gozar-shapes.ts";
 import { publicReachabilityError } from "../../../../../../reference-implementation/server/routes/owner-reachability.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {

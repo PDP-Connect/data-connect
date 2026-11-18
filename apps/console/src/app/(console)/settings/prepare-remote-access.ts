@@ -86,13 +86,33 @@ export function pickUsage(provider: Inventory["providers"][number], capabilities
   return null;
 }
 
-/** A temporary address that needs no account comes first; then anything that is not local-only. */
+/**
+ * True for a way that can be opened from the internet, or whose reach the
+ * catalog cannot tell (the owner brings the address). A way that reaches only
+ * this device, the local network or a private network is not.
+ */
+export const mayReachInternet = (provider: Inventory["providers"][number]): boolean =>
+  provider.reach === "internet" || provider.reach === "unknown";
+
+/**
+ * Whether the way can give an address that outlives one run: the catalog offers
+ * it a lifetime kind beyond `session` and this host does not rule it out.
+ * `detect-only` and `unsupported` kinds do not count.
+ */
+export function offersLastingAddress(provider: Inventory["providers"][number]): boolean {
+  return (["attached", "durable"] as const).some((kind) => {
+    const state = provider.availability[kind]?.state;
+    return state === "available" || state === "action-required";
+  });
+}
+
+/** A temporary address on the internet comes first; then anything that can be opened from the internet. */
 export function defaultProvider(inventory: Inventory, capabilities: Capabilities): Inventory["providers"][number] | undefined {
   const usable = inventory.providers.filter((item) => pickUsage(item, capabilities) !== null);
   return (
-    usable.find((item) => item.providerId === "localhost-run" && pickUsage(item, capabilities) === "session") ??
-    usable.find((item) => item.reach !== "lan" && pickUsage(item, capabilities) === "session") ??
-    usable.find((item) => item.reach !== "lan") ??
+    usable.find((item) => item.reach === "internet" && !offersLastingAddress(item) && pickUsage(item, capabilities) === "session") ??
+    usable.find((item) => mayReachInternet(item) && pickUsage(item, capabilities) === "session") ??
+    usable.find((item) => mayReachInternet(item)) ??
     usable[0]
   );
 }

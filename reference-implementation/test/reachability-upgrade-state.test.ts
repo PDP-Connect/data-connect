@@ -12,6 +12,7 @@ import test from "node:test";
 import { createReachabilityService } from "../server/reachability/factory.ts";
 import { createHostSecretBackend, createSealedSecretBackend } from "../server/reachability/secret-backend.ts";
 import { ReachabilitySetups } from "../server/reachability/setups.ts";
+import { temporaryWayId } from "./fixtures/reachability/real-way-ids.ts";
 import { mountOwnerReachability } from "../server/routes/owner-reachability.ts";
 
 // The console's own chain and error shaper. Loaded by path so this package's type check does not walk the console.
@@ -148,7 +149,7 @@ async function boot(root: string, journal = "reachability-setups") {
   return { request, service, setups: new ReachabilitySetups(join(root, journal)) };
 }
 
-const choice = { providerId: "localhost-run", usage: "session" };
+const choice = { providerId: temporaryWayId, usage: "session" };
 
 test("a first Turn on on an empty profile reaches the review", async (t) => {
   const root = await scratch();
