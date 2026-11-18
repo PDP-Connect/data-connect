@@ -12,10 +12,10 @@
 // own user. It opens each folder without following a link, never recurses, and never changes an owner.
 import { constants } from "node:fs";
 import type { Stats } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
-import { dirname, sep } from "node:path";
+import { lstat, open } from "node:fs/promises";
+import { isAbsolute, resolve, sep } from "node:path";
 
-export type UnsafeReason = "writable-by-others" | "wrong-owner" | "not-directory";
+export type UnsafeReason = "writable-by-others" | "wrong-owner" | "not-directory" | "symlink-in-path";
 export type UnsafePath = { path: string; reason: UnsafeReason; fixable: boolean };
 export type StatePathReport = { paths: UnsafePath[]; command: string | null };
 
@@ -38,54 +38,78 @@ export function isFixable(stat: Stats, path: string, dataDir: string, uid: numbe
   return reasonFor(stat, uid) === "writable-by-others" && stat.uid === uid && inside(path, dataDir);
 }
 
-// Existing ancestors of the canonical home, root first. A missing tail is skipped: Gozar creates it private.
-async function chain(home: string): Promise<string[]> {
-  let existing = home;
-  for (;;) {
-    try {
-      existing = await realpath(existing);
+// Preserve components (including "..") until lstat has rejected symlinks.
+function chain(path: string): string[] {
+  const absolute = isAbsolute(path) ? path : process.cwd() + sep + path;
+  const names: string[] = [sep];
+  let current = "";
+  for (const part of absolute.split(sep).filter(Boolean)) {
+    current += sep + part;
+    names.push(current);
+  }
+  return names;
+}
+
+type StatPath = (path: string) => Promise<Stats>;
+async function inspect(home: string, dataDir: string, uid: number, statPath: StatPath): Promise<StatePathReport> {
+  const paths: UnsafePath[] = [];
+  const dataChain = chain(dataDir);
+  const ancestors = new Set(dataChain.slice(0, -1));
+  const root = resolve(dataDir);
+  let blocked = false;
+  for (const path of new Set([...dataChain, ...chain(home)])) {
+    let stat: Stats;
+    try { stat = await statPath(path); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      paths.push({ path, reason: "not-directory", fixable: false });
+      blocked = true;
       break;
-    } catch {
-      const parent = dirname(existing);
-      if (parent === existing) return [];
-      existing = parent;
     }
+    if (stat.isSymbolicLink()) {
+      paths.push({ path, reason: "symlink-in-path", fixable: false });
+      blocked = true;
+      break; // Never follow a discovered link to inspect its descendants.
+    }
+    const reason = reasonFor(stat, uid);
+    if (reason) paths.push({ path, reason, fixable: isFixable(stat, resolve(path), root, uid) });
+    if (!stat.isDirectory() || (ancestors.has(path) && reason !== null)) blocked = true;
   }
-  const names: string[] = [];
-  for (let path = existing; ; path = dirname(path)) {
-    names.unshift(path);
-    if (dirname(path) === path) return names;
-  }
+  if (blocked) for (const item of paths) item.fixable = false;
+  return { paths, command: fixCommand(paths) };
 }
 
 export function fixCommand(paths: readonly UnsafePath[]): string | null {
   const manual = paths.filter((item) => !item.fixable && item.reason === "writable-by-others");
+  const links = paths.filter((item) => item.reason === "symlink-in-path");
+  // chmod follows symlinks. Offer inspection, not a command that modifies their targets.
+  if (links.length) return `ls -ld -- ${links.map((item) => `'${item.path.replaceAll("'", `'\\''`)}'`).join(" ")}`;
   if (manual.length === 0) return null;
   return `chmod go-w -- ${manual.map((item) => `'${item.path.replaceAll("'", `'\\''`)}'`).join(" ")}`;
 }
 
 export async function inspectStatePaths(home: string, dataDir: string, uid = process.getuid!()): Promise<StatePathReport> {
-  const paths: UnsafePath[] = [];
-  const root = await realpath(dataDir).catch(() => dataDir);
-  for (const path of await chain(home)) {
-    const stat = await lstat(path).catch(() => null);
-    const reason = stat && reasonFor(stat, uid);
-    if (stat && reason) paths.push({ path, reason, fixable: isFixable(stat, path, root, uid) });
-  }
-  return { paths, command: fixCommand(paths) };
+  return inspect(home, dataDir, uid, lstat);
 }
 
-/** Removes group/other write from each named folder that passes the guard. Returns the folders it changed. */
-export async function fixNamedPaths(named: readonly UnsafePath[], dataDir: string, uid = process.getuid!()): Promise<string[]> {
-  const root = await realpath(dataDir).catch(() => dataDir);
+/** Revalidate namespace and descriptor identity; never follow a link or repair an unsafe parent. */
+export async function fixNamedPaths(
+  named: readonly UnsafePath[], dataDir: string, uid = process.getuid!(), statPath: StatPath = lstat,
+): Promise<string[]> {
   const changed: string[] = [];
   for (const { path } of named) {
-    // O_NOFOLLOW refuses a link in the last position; the checks run on the opened folder itself.
+    const report = await inspect(path, dataDir, uid, statPath);
+    if (!report.paths.some((item) => item.path === path && item.fixable)) continue;
+    // Repair parents first. Direct callers must not skip a writable directory
+    // inside the data root that could still let another account replace a child.
+    if (report.paths.some((item) => item.path !== path && inside(resolve(path), resolve(item.path)))) continue;
     const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW).catch(() => null);
     if (!handle) continue;
     try {
       const stat = await handle.stat();
-      if (!isFixable(stat, path, root, uid)) continue;
+      const current = await statPath(path).catch(() => null);
+      if (!current || current.isSymbolicLink() || stat.dev !== current.dev || stat.ino !== current.ino) continue;
+      if (!isFixable(stat, resolve(path), resolve(dataDir), uid)) continue;
       await handle.chmod(stat.mode & 0o7777 & ~OTHERS_WRITE);
       changed.push(path);
     } finally {

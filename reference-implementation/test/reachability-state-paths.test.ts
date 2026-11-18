@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   fixCommand,
+  fixNamedPaths,
   fixStatePaths,
   inspectStatePaths,
   isFixable,
@@ -99,6 +100,57 @@ test("a symlink is refused, even when it points at a writable folder in the data
   assert.equal(home.startsWith(data), true);
 });
 
+for (const target of ["data", "reachability"] as const) {
+  test(`a symlink at ${target} disables every automatic repair`, async (t) => {
+    const { base, data, home, done } = await layout();
+    t.after(done);
+    const outside = join(base, "outside");
+    await mkdir(outside, { mode: 0o700 });
+    await chmod(outside, 0o777);
+    const link = target === "data" ? data : home;
+    await rm(link, { recursive: true });
+    await symlink(outside, link);
+    const before = await inspectStatePaths(home, data, uid);
+    assert.ok(before.paths.some((p) => p.path === link && p.reason === "symlink-in-path"));
+    assert.ok(before.paths.every((p) => !p.fixable));
+    assert.match(before.command ?? "", /^ls -ld -- /);
+    await fixStatePaths(home, data, uid);
+    assert.equal(await mode(outside), 0o777);
+  });
+}
+
+test("a mutable ancestor blocks all repairs and is listed first", async (t) => {
+  const { base, data, home, done } = await layout();
+  t.after(done);
+  await chmod(base, 0o775);
+  await chmod(data, 0o775);
+  await chmod(home, 0o777);
+  const report = await fixStatePaths(home, data, uid);
+  assert.equal(within(base, report.paths)[0]?.path, base);
+  assert.ok(report.paths.every((p) => !p.fixable));
+  assert.ok(report.command?.includes("'" + base + "'"));
+  assert.equal(await mode(data), 0o775);
+  assert.equal(await mode(home), 0o777);
+});
+
+test("a changed dev or ino after open refuses repair", async (t) => {
+  const { data, home, done } = await layout();
+  t.after(done);
+  await chmod(home, 0o777);
+  for (const field of ["dev", "ino"] as const) {
+    let reads = 0;
+    const statPath = async (path: string) => {
+      const stat = await lstat(path);
+      if (path === home && ++reads === 2) stat[field] += 1;
+      return stat;
+    };
+    const changed = await fixNamedPaths([{ path: home, reason: "writable-by-others", fixable: true }], data, uid, statPath);
+    assert.deepEqual(changed, []);
+    assert.equal(reads, 2, "identity check follows the pre-open path inspection");
+    assert.equal(await mode(home), 0o777);
+  }
+});
+
 test("a path owned by another uid is never fixable", async (t) => {
   const { data, home, done } = await layout();
   t.after(done);
@@ -141,13 +193,25 @@ test("the routes inspect and fix through the owner guards, and answer with data 
   await chmod(home, 0o777);
   const routes = new Map<string, (request: unknown, response: unknown) => Promise<unknown>>();
   const guards: string[] = [];
-  const guard = (name: string) => async (_r: unknown, _s: unknown, next?: () => void) => {
-    guards.push(name);
-    next?.();
+  const registered = new Map<string, unknown[]>();
+  const guardFunctions = new Map<string, unknown>();
+  const guard = (name: string) => {
+    const fn = async (_r: unknown, _s: unknown, next?: () => void) => {
+      guards.push(name);
+      next?.();
+    };
+    guardFunctions.set(name, fn);
+    return fn;
   };
   const app = {
-    get: (path: string, ...args: never[]) => routes.set(`GET ${path}`, args.at(-1)!),
-    post: (path: string, ...args: never[]) => routes.set(`POST ${path}`, args.at(-1)!),
+    get: (path: string, ...args: never[]) => {
+      registered.set(`GET ${path}`, args.slice(0, -1));
+      routes.set(`GET ${path}`, args.at(-1)!);
+    },
+    post: (path: string, ...args: never[]) => {
+      registered.set(`POST ${path}`, args.slice(0, -1));
+      routes.set(`POST ${path}`, args.at(-1)!);
+    },
   };
   mountOwnerReachability(app as never, {
     service: null,
@@ -159,6 +223,11 @@ test("the routes inspect and fix through the owner guards, and answer with data 
     usage: () => ({}) as never,
     statePaths: { inspect: () => inspectStatePaths(home, data, uid), fix: () => fixStatePaths(home, data, uid) },
   } as never);
+  assert.deepEqual(registered.get("GET /v1/owner/reachability/state-paths"),
+    [guardFunctions.get("token"), guardFunctions.get("owner")]);
+  assert.deepEqual(registered.get("POST /v1/owner/reachability/state-paths/fix"),
+    [guardFunctions.get("token"), guardFunctions.get("owner"), guardFunctions.get("csrf")]);
+  assert.ok(guardFunctions.get("token"));
   const call = async (key: string) => {
     let payload: any;
     const response = { setHeader: () => undefined, status: () => response, json: (body: unknown) => ((payload = body), response) };
