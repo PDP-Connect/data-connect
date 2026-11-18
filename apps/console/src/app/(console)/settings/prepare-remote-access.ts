@@ -313,6 +313,17 @@ export async function runAction(
 
 /** One short line per material fact, all read from the review being shown. */
 export function disclosureLines(candidate: Candidate): string[] {
+  return formatDisclosures(candidate).lines;
+}
+
+export type ConsumedDisclosure = readonly [section: string, field: string];
+
+/**
+ * The route disclosure in words. `consumed` lists the [section, field] pairs the words say in full.
+ * `unread` is true when one of those fields holds a value the words do not know: the card then opens
+ * Details so the raw value is read before approval.
+ */
+export function formatDisclosures(candidate: Candidate): { lines: string[]; consumed: ConsumedDisclosure[]; unread: boolean } {
   const consent = candidate.consent;
   const service = candidate.display.label;
   const disclosures = consent?.disclosures as
@@ -325,6 +336,8 @@ export function disclosureLines(candidate: Candidate): string[] {
     | undefined;
   const usage = consent?.scope?.query.usage;
   const lines = ["People who open the address must sign in with your password. Apps also need your permission."];
+  const consumed: ConsumedDisclosure[] = [];
+  let unread = false;
   const reads = disclosures?.traffic?.providerCanReadPayload;
   lines.push(
     reads === true
@@ -333,15 +346,46 @@ export function disclosureLines(candidate: Candidate): string[] {
         ? `${service} can't read what passes through.`
         : `We can't tell whether ${service} can read what passes through.`
   );
+  if (typeof reads === "boolean") consumed.push(["traffic", "providerCanReadPayload"]);
+  else if (reads != null) unread = true;
   const cost = disclosures?.cost;
+  const priced =
+    cost?.kind === "paid" &&
+    typeof cost.amount === "number" &&
+    Number.isFinite(cost.amount) &&
+    typeof cost.currency === "string" &&
+    cost.currency.trim() !== "" &&
+    typeof cost.period === "string" &&
+    cost.period.trim() !== "";
   const price =
     cost?.kind === "free"
       ? "Free."
-      : cost?.kind === "paid"
+      : priced
         ? `Costs ${cost.amount} ${cost.currency} per ${cost.period}.`
-        : "We can't tell what this costs.";
-  const address = disclosures?.address?.stability === "ephemeral" ? " The address changes each time." : "";
-  lines.push(`${price}${address}`);
+        : cost?.kind === "paid"
+          ? "This costs money. The price is in Details."
+          : "We can't tell what this costs.";
+  if (cost?.kind === "free" || cost?.kind === "paid") consumed.push(["cost", "kind"]);
+  else if (cost?.kind != null) unread = true;
+  if (cost?.kind === "paid") {
+    if (typeof cost.amount === "number" && Number.isFinite(cost.amount)) consumed.push(["cost", "amount"]);
+    else unread = true;
+    if (typeof cost.currency === "string" && cost.currency.trim()) consumed.push(["cost", "currency"]);
+    else unread = true;
+    if (typeof cost.period === "string" && cost.period.trim()) consumed.push(["cost", "period"]);
+    else unread = true;
+  }
+  // Stable is the expected default; only the exact value may stay implicit.
+  const stability = disclosures?.address?.stability;
+  const addressWords: Record<string, string> = {
+    stable: "",
+    ephemeral: " The address changes each time.",
+    unknown: " We can't tell whether the address stays the same.",
+  };
+  const address = typeof stability === "string" && Object.hasOwn(addressWords, stability) ? addressWords[stability] : null;
+  if (address !== null) consumed.push(["address", "stability"]);
+  else if (stability != null) unread = true;
+  lines.push(`${price}${address ?? ""}`);
   lines.push(
     usage?.kind === "session"
       ? "Turns off by itself. The time shows once it's on."
@@ -351,7 +395,7 @@ export function disclosureLines(candidate: Candidate): string[] {
           ? "Stays on while DataConnect runs."
           : "We can't tell how long this lasts."
   );
-  return lines;
+  return { lines, consumed, unread };
 }
 
 /** The facts whose value differs between two reviews, by label. */

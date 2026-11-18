@@ -349,6 +349,29 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
       assert.match(text, /30/, `${name}: the raw value shows`)
       assert.match(text, /Recurring/, `${name}: the second raw key shows`)
     }
+    for (const { disclosures, values } of [
+      { disclosures: { ...readableRoute, cost: { kind: "free", amount: 12, currency: "USD", period: "month" } }, values: [/12/, /USD/, /month/] },
+      { disclosures: { ...readableRoute, address: { stability: "rotating" } }, values: [/Stability/, /rotating/] },
+      { disclosures: { ...readableRoute, cost: { kind: "paid", amount: 12, currency: "USD" } }, values: [/12/, /USD/, /price is in Details/] },
+      { disclosures: { ...readableRoute, traffic: { providerCanReadPayload: "yes" } }, values: [/yes/i] },
+    ]) {
+      await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
+      const section = container.querySelector('section[aria-label="Turn on"]')!
+      const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!
+      // Readable leftovers show as plain text and unreadable ones open Details; either way they precede the button.
+      const range = dom.window.document.createRange()
+      range.setStart(section, 0)
+      range.setEndBefore(button)
+      const visibleBeforeButton = range.toString()
+      const label = JSON.stringify(disclosures)
+      for (const value of values) assert.match(visibleBeforeButton, value, `${label}: the leftover value shows above the button`)
+    }
+    await act(async () => root.render(createElement(TurnOnCard, { review: review(readableRoute), busy: false, changed: null, onTurnOn: () => {} } as never)))
+    assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
+    // Gozar reports "unknown" stability for routes it did not create; the card says so in words.
+    await act(async () => root.render(createElement(TurnOnCard, { review: review({ ...readableRoute, address: { stability: "unknown" } }), busy: false, changed: null, onTurnOn: () => {} } as never)))
+    assert.match(shownText(container), /We can't tell whether the address stays the same\./)
+    assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
   } finally {
     await act(async () => root.unmount())
     dom.window.close()
