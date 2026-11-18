@@ -308,6 +308,23 @@ async fn attach_with<R: Runtime>(
     };
     let data_dir = app_data_dir(&app)?;
     let memory = attach::process_memory_store();
+    // A switch ends the old pairing at its server (best effort) before
+    // `save_pairing` deletes the local copy.
+    let previous = attach::load_attachment(&data_dir)
+        .ok()
+        .flatten()
+        .filter(|previous| previous.origin != origin);
+    if let Some(previous) = &previous {
+        if let SessionLookup::Found(old) =
+            attach::load_session(&KeychainSessionStore, memory, &previous.origin)
+        {
+            let confirmed = attach::revoke_session(&previous.origin, &old).await;
+            log::info!(
+                "Switching servers; {} confirmed the old session ended: {confirmed}",
+                previous.origin
+            );
+        }
+    }
     let stored = save_pairing(
         &data_dir,
         &KeychainSessionStore,
@@ -316,6 +333,9 @@ async fn attach_with<R: Runtime>(
         &session,
         chrono::Utc::now().to_rfc3339(),
     )?;
+    if let Some(previous) = &previous {
+        forget_console_session_cookie(&app, &previous.origin).await;
+    }
     log::info!("Attached to {origin}; restarting into the attached state");
     let (notice, handoff) = match stored {
         StoredIn::Keychain => (None, None),

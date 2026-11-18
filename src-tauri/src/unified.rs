@@ -134,6 +134,9 @@ enum UnifiedStatus {
     // open waiting for a recovery code), so the tray should say so rather
     // than reuse the generic "something went wrong, nothing to do" label.
     NeedsRecovery,
+    // Attached, and the server ended this computer's session: the attach
+    // window is open with "Pair again". Never retried on its own.
+    NeedsPairing,
 }
 
 impl UnifiedStatus {
@@ -146,6 +149,7 @@ impl UnifiedStatus {
             Self::Stopped => "Status: Stopped",
             Self::Error => "Status: Error",
             Self::NeedsRecovery => "Status: Needs recovery code",
+            Self::NeedsPairing => "Status: Pair again",
         }
     }
 }
@@ -333,6 +337,8 @@ enum TrayAction {
     OpenConsole,
     OpenBrowser,
     ShowLogs,
+    AttachServer,
+    DetachServer,
     Quit,
     Unknown,
 }
@@ -342,6 +348,8 @@ fn tray_action_for_menu_id(id: &str) -> TrayAction {
         "open-console" => TrayAction::OpenConsole,
         "open-browser" => TrayAction::OpenBrowser,
         "show-logs" => TrayAction::ShowLogs,
+        "attach-server" => TrayAction::AttachServer,
+        "detach-server" => TrayAction::DetachServer,
         "quit" => TrayAction::Quit,
         _ => TrayAction::Unknown,
     }
@@ -475,9 +483,22 @@ fn report_console_port_outcome(
     }
 }
 
+/// The console URL when no local stack runs: `DATACONNECT_CONSOLE_URL`,
+/// else the saved server (only without an environment override), else the
+/// default.
+fn console_url_source(environment: Option<String>, target: &crate::attach::AttachTarget) -> String {
+    match (environment, target) {
+        (Some(url), _) => url,
+        (None, crate::attach::AttachTarget::Saved(attachment)) => attachment.origin.clone(),
+        (None, _) => DEFAULT_CONSOLE_URL.to_string(),
+    }
+}
+
 fn configured_console_url() -> Result<String, String> {
-    let raw = std::env::var("DATACONNECT_CONSOLE_URL")
-        .unwrap_or_else(|_| DEFAULT_CONSOLE_URL.to_string());
+    let raw = console_url_source(
+        std::env::var("DATACONNECT_CONSOLE_URL").ok(),
+        &crate::attach::current_target(),
+    );
     let mut url: tauri::Url = raw
         .parse()
         .map_err(|error| format!("Invalid DATACONNECT_CONSOLE_URL: {error}"))?;
@@ -490,12 +511,91 @@ fn configured_console_url() -> Result<String, String> {
     Ok(url.to_string().trim_end_matches('/').to_string())
 }
 
+/// Which server the tray speaks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TrayScope {
+    Local,
+    Attached {
+        host: String,
+    },
+    /// `DATACONNECT_RI_URL` / `DATACONNECT_CONSOLE_URL`: not changed here.
+    Environment {
+        host: String,
+    },
+}
+
+fn tray_scope_for(target: &crate::attach::AttachTarget, console_url: Option<String>) -> TrayScope {
+    use crate::attach::AttachTarget;
+    match target {
+        AttachTarget::Local => TrayScope::Local,
+        AttachTarget::Saved(attachment) => TrayScope::Attached {
+            host: attachment.host(),
+        },
+        AttachTarget::Environment => TrayScope::Environment {
+            host: console_url
+                .and_then(|url| url.parse::<tauri::Url>().ok())
+                .and_then(|url| {
+                    let host = url.host_str()?.to_string();
+                    Some(match url.port() {
+                        Some(port) => format!("{host}:{port}"),
+                        None => host,
+                    })
+                })
+                .unwrap_or_else(|| "a server".to_string()),
+        },
+    }
+}
+
+fn tray_scope() -> TrayScope {
+    let target = crate::attach::current_target();
+    let console_url = match target {
+        crate::attach::AttachTarget::Environment => configured_console_url().ok(),
+        _ => None,
+    };
+    tray_scope_for(&target, console_url)
+}
+
 fn build_tray_menu<M, R>(manager: &M, status: UnifiedStatus) -> tauri::Result<Menu<R>>
 where
     M: Manager<R>,
     R: Runtime,
 {
+    build_tray_menu_for(manager, status, &tray_scope())
+}
+
+fn build_tray_menu_for<M, R>(
+    manager: &M,
+    status: UnifiedStatus,
+    scope: &TrayScope,
+) -> tauri::Result<Menu<R>>
+where
+    M: Manager<R>,
+    R: Runtime,
+{
     let quitting = status == UnifiedStatus::Quitting;
+    let scope_label = match scope {
+        TrayScope::Local => "This computer".to_string(),
+        TrayScope::Attached { host } => format!("Attached to {host}"),
+        TrayScope::Environment { host } => format!("Attached to {host} (set by environment)"),
+    };
+    let scope_item = MenuItem::with_id(manager, "server-scope", scope_label, false, None::<&str>)?;
+    let server_item = match scope {
+        TrayScope::Local => Some(MenuItem::with_id(
+            manager,
+            "attach-server",
+            "Attach to a server...",
+            !quitting,
+            None::<&str>,
+        )?),
+        TrayScope::Attached { host } => Some(MenuItem::with_id(
+            manager,
+            "detach-server",
+            format!("Detach from {host}"),
+            !quitting,
+            None::<&str>,
+        )?),
+        TrayScope::Environment { .. } => None,
+    };
     let status_item = MenuItem::with_id(manager, "status", status.label(), false, None::<&str>)?;
     let open_console = MenuItem::with_id(
         manager,
@@ -520,20 +620,22 @@ where
     // A second click while disabled is a no-op, not a second concurrent
     // shutdown, because request_shutdown (lib.rs/unified.rs) is idempotent.
     let quit = MenuItem::with_id(manager, "quit", "Quit", !quitting, None::<&str>)?;
-    Menu::with_items(
-        manager,
-        &[
-            &status_item,
-            &open_console,
-            &open_browser,
-            &show_logs,
-            &quit,
-        ],
-    )
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<R>> =
+        vec![&scope_item, &status_item, &open_console, &open_browser];
+    if let Some(server_item) = &server_item {
+        items.push(server_item);
+    }
+    items.push(&show_logs);
+    items.push(&quit);
+    Menu::with_items(manager, &items)
 }
 
 pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(UnifiedRuntimeState::default());
+    app.manage(crate::attach_window::AttachWindowState::default());
+    // Before the tray and the bootstrap read it: which server this process
+    // uses is fixed for its lifetime.
+    crate::attach::init_saved_attachment(&app.path().app_data_dir()?);
     let menu = build_tray_menu(app, UnifiedStatus::Starting)?;
     let mut tray_builder = TrayIconBuilder::with_id(TRAY_ICON_ID)
         .menu(&menu)
@@ -589,21 +691,60 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Unified mode does not build the legacy window, which is the only consumer
-/// of `vana://` links. Record each one received so a dropped link shows in
-/// the log instead of vanishing. Whether unified mode should serve these
-/// links is an open product decision; this boundary only reports.
+/// of most `vana://` links. `vana://attach` opens the attach window,
+/// prefilled and never submitted. Every other link is recorded so a dropped
+/// link shows in the log instead of vanishing. Whether unified mode should
+/// serve those links is an open product decision; this boundary only
+/// reports.
 fn report_unhandled_deep_links(app: &tauri::App) {
     use tauri_plugin_deep_link::DeepLinkExt;
+    let handle = app.handle().clone();
     if let Ok(Some(urls)) = app.deep_link().get_current() {
         for url in &urls {
-            log::warn!("{}", unhandled_deep_link_notice(url));
+            handle_deep_link(&handle, url);
         }
     }
-    app.deep_link().on_open_url(|event| {
+    app.deep_link().on_open_url(move |event| {
         for url in &event.urls() {
-            log::warn!("{}", unhandled_deep_link_notice(url));
+            handle_deep_link(&handle, url);
         }
     });
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeepLinkRoute {
+    Attach(crate::attach_window::AttachPrefill),
+    Unhandled,
+}
+
+fn route_deep_link(url: &tauri::Url) -> DeepLinkRoute {
+    use crate::attach_window::AttachPrefill;
+    if !url.scheme().eq_ignore_ascii_case("vana") || url.host_str() != Some("attach") {
+        return DeepLinkRoute::Unhandled;
+    }
+    DeepLinkRoute::Attach(match crate::attach::parse_attach_input(url.as_str()) {
+        Ok(input) => AttachPrefill {
+            input: Some(input.origin),
+            code: input.code,
+            notice: None,
+        },
+        Err(error) => AttachPrefill {
+            input: None,
+            code: None,
+            notice: Some(error),
+        },
+    })
+}
+
+fn handle_deep_link(app: &AppHandle, url: &tauri::Url) {
+    match route_deep_link(url) {
+        DeepLinkRoute::Attach(prefill) => {
+            // Never log the link: it carries the pairing code.
+            log::info!("Opening the attach window from a pairing link");
+            crate::attach_window::open_attach_window(app, prefill);
+        }
+        DeepLinkRoute::Unhandled => log::warn!("{}", unhandled_deep_link_notice(url)),
+    }
 }
 
 /// Log line for an unhandled deep link. Grant links carry a session secret
@@ -675,6 +816,19 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 set_status(app, UnifiedStatus::Error);
             }
         }
+        TrayAction::AttachServer => crate::attach_window::open_attach_window(
+            app,
+            crate::attach_window::AttachPrefill::default(),
+        ),
+        TrayAction::DetachServer => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::attach_window::detach_and_restart(&app).await {
+                    log::error!("Detach failed: {error}");
+                    set_status(&app, UnifiedStatus::Error);
+                }
+            });
+        }
         TrayAction::Quit => {
             log::info!("Unified tray quit requested; deferring shutdown to exit handler");
             app.exit(0);
@@ -683,14 +837,9 @@ fn handle_tray_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
+/// No local stack: an environment override or a saved server attachment.
 pub(crate) fn attach_mode() -> bool {
-    ["DATACONNECT_RI_URL", "DATACONNECT_CONSOLE_URL"]
-        .into_iter()
-        .any(|name| {
-            std::env::var(name)
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty())
-        })
+    crate::attach::current_target() != crate::attach::AttachTarget::Local
 }
 
 fn unified_profile() -> String {
@@ -2728,6 +2877,112 @@ impl From<String> for BootstrapFailure {
     }
 }
 
+/// What a launch attached to a saved server does, from the session check.
+#[derive(Debug, PartialEq, Eq)]
+enum AttachedStartup {
+    OpenConsole {
+        session: String,
+    },
+    /// Open the attach window to pair again. Never retried on its own.
+    /// `forget_session` only when a stored session was read and the server
+    /// refused it: a locked keychain must not lose the pairing.
+    PairAgain {
+        prefill: crate::attach_window::AttachPrefill,
+        forget_session: bool,
+    },
+    /// Keep the pairing; show the error and Detach.
+    Unreachable {
+        prefill: crate::attach_window::AttachPrefill,
+        error: String,
+    },
+}
+
+fn attached_startup(
+    origin: &str,
+    launch: crate::attach::AttachedLaunch,
+    had_session: bool,
+) -> AttachedStartup {
+    use crate::attach::AttachedLaunch;
+    use crate::attach_window::AttachPrefill;
+    let prefill = |notice: String| AttachPrefill {
+        input: Some(origin.to_string()),
+        code: None,
+        notice: Some(notice),
+    };
+    match launch {
+        AttachedLaunch::OpenConsole { session } => AttachedStartup::OpenConsole { session },
+        AttachedLaunch::PairAgain { notice } => AttachedStartup::PairAgain {
+            prefill: prefill(notice),
+            forget_session: had_session,
+        },
+        AttachedLaunch::Unreachable { message } => AttachedStartup::Unreachable {
+            prefill: prefill(message.clone()),
+            error: message,
+        },
+    }
+}
+
+/// Launch attached to a saved server: no local sidecars and no local owner
+/// password. The stored session becomes the console cookie.
+async fn open_saved_attachment(
+    app: &AppHandle,
+    attachment: crate::attach::Attachment,
+    should_show: bool,
+    preserved_path: Option<String>,
+) -> Result<(), String> {
+    use crate::attach::{KeychainSessionStore, SessionLookup, SessionStore};
+    let origin = attachment.origin;
+    let memory = crate::attach::process_memory_store();
+    if let Some(session) = crate::attach::take_handed_off_session() {
+        let _ = memory.save(&origin, &session);
+    }
+    let lookup = crate::attach::load_session(&KeychainSessionStore, memory, &origin);
+    let had_session = matches!(lookup, SessionLookup::Found(_));
+    let launch = crate::attach::decide_attached_launch(&origin, lookup).await;
+    match attached_startup(&origin, launch, had_session) {
+        AttachedStartup::OpenConsole { session } => {
+            finish_bootstrap(
+                app,
+                OwnerSignIn::Session(session),
+                origin.clone(),
+                origin,
+                false,
+                should_show,
+                "",
+                preserved_path,
+                None,
+            )
+            .await
+        }
+        AttachedStartup::PairAgain {
+            prefill,
+            forget_session,
+        } => {
+            log::warn!("The pairing with {origin} ended; asking the owner to pair again");
+            if forget_session {
+                if let Err(error) =
+                    crate::attach::forget_session(&KeychainSessionStore, memory, &origin)
+                {
+                    log::warn!("Could not delete the ended attach session: {error}");
+                }
+                crate::attach_window::forget_console_session_cookie(app, &origin).await;
+            }
+            set_status(app, UnifiedStatus::NeedsPairing);
+            crate::attach_window::open_attach_window(app, prefill);
+            Ok(())
+        }
+        AttachedStartup::Unreachable { prefill, error } => {
+            crate::attach_window::show_notification(
+                app,
+                "DataConnect cannot reach the server",
+                &error,
+            );
+            crate::attach_window::open_attach_window(app, prefill);
+            Err(error)
+        }
+    }
+}
+
 async fn bootstrap_and_open_console(
     app: AppHandle,
     should_show: bool,
@@ -2760,6 +3015,12 @@ async fn bootstrap_and_open_console_with_stack_guard(
     owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
+
+    if let crate::attach::AttachTarget::Saved(attachment) = crate::attach::current_target() {
+        return open_saved_attachment(&app, attachment, should_show, preserved_path)
+            .await
+            .map_err(BootstrapFailure::from);
+    }
 
     let attach = attach_mode();
     // Attach mode starts no stack, so it can carry out no restart request.
@@ -2824,7 +3085,7 @@ async fn bootstrap_and_open_console_with_stack_guard(
 
     finish_bootstrap(
         &app,
-        &password,
+        OwnerSignIn::Password(&password),
         ri_origin,
         console_url,
         managed,
@@ -2835,6 +3096,13 @@ async fn bootstrap_and_open_console_with_stack_guard(
     )
     .await
     .map_err(BootstrapFailure::from)
+}
+
+/// How `finish_bootstrap` gets the owner session: sign in to the local RI
+/// with the owner password, or use a session a saved pairing holds.
+enum OwnerSignIn<'a> {
+    Password(&'a str),
+    Session(String),
 }
 
 /// The shared tail of bootstrap once an RI origin and console URL exist,
@@ -2860,7 +3128,7 @@ async fn bootstrap_and_open_console_with_stack_guard(
 /// `StopReason`'s doc comment for the live incident this fixes.
 async fn finish_bootstrap(
     app: &AppHandle,
-    password: &str,
+    sign_in: OwnerSignIn<'_>,
     ri_origin: String,
     console_url: String,
     managed: bool,
@@ -2871,19 +3139,22 @@ async fn finish_bootstrap(
 ) -> Result<(), String> {
     let host_header = ri_readiness_host_header(trusted_hosts);
     let ri_origin_for_state = ri_origin.clone();
-    let login = match login_reference_server_with_password_and_host(
-        ri_origin,
-        password,
-        host_header.as_deref(),
-        Some(DESKTOP_OWNER_SESSION_LABEL),
-    )
-    .await
-    {
-        Ok(login) => login,
-        Err(error) => {
-            teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
-            return Err(error);
-        }
+    let session_cookie = match sign_in {
+        OwnerSignIn::Password(password) => match login_reference_server_with_password_and_host(
+            ri_origin,
+            password,
+            host_header.as_deref(),
+            Some(DESKTOP_OWNER_SESSION_LABEL),
+        )
+        .await
+        {
+            Ok(login) => login.session_cookie,
+            Err(error) => {
+                teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
+                return Err(error);
+            }
+        },
+        OwnerSignIn::Session(session) => session,
     };
 
     // A slow console is not a broken console. This retries with backoff for
@@ -2912,7 +3183,7 @@ async fn finish_bootstrap(
             return Err(error);
         }
     };
-    let owner_cookie = match owner_session_cookie(&console_origin, &login.session_cookie) {
+    let owner_cookie = match owner_session_cookie(&console_origin, &session_cookie) {
         Ok(cookie) => cookie,
         Err(error) => {
             teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
@@ -2944,8 +3215,7 @@ async fn finish_bootstrap(
         *state
             .session_cookie
             .lock()
-            .map_err(|_| "Unified runtime state is poisoned".to_string())? =
-            Some(login.session_cookie);
+            .map_err(|_| "Unified runtime state is poisoned".to_string())? = Some(session_cookie);
         Ok(())
     })();
     if let Err(error) = state_update {
@@ -3288,7 +3558,7 @@ async fn import_database_encryption_recovery_code_with_stack_guard(
 
     finish_bootstrap(
         &app,
-        &password,
+        OwnerSignIn::Password(&password),
         ri_origin,
         console_url,
         true,
@@ -8973,6 +9243,242 @@ setInterval(() => {}, 1000);
                 !question.contains(leaked),
                 "question leaked {leaked}: {question}"
             );
+        }
+    }
+
+    fn menu_text(menu: &Menu<tauri::test::MockRuntime>, id: &str) -> Option<(String, bool)> {
+        let item = menu.get(id)?.as_menuitem().cloned()?;
+        Some((
+            item.text().expect("item text"),
+            item.is_enabled().expect("enabled state"),
+        ))
+    }
+
+    #[test]
+    fn the_tray_names_this_computer_and_offers_attach_when_local() {
+        let app = tauri::test::mock_app();
+        let menu =
+            build_tray_menu_for(&app, UnifiedStatus::Ready, &TrayScope::Local).expect("menu");
+        assert_eq!(
+            menu_text(&menu, "server-scope"),
+            Some(("This computer".to_string(), false))
+        );
+        assert_eq!(
+            menu_text(&menu, "attach-server"),
+            Some(("Attach to a server...".to_string(), true))
+        );
+        assert_eq!(menu_text(&menu, "detach-server"), None);
+    }
+
+    #[test]
+    fn the_tray_names_the_attached_host_and_offers_detach() {
+        let app = tauri::test::mock_app();
+        let scope = TrayScope::Attached {
+            host: "dc.example.com".to_string(),
+        };
+        let menu = build_tray_menu_for(&app, UnifiedStatus::Ready, &scope).expect("menu");
+        assert_eq!(
+            menu_text(&menu, "server-scope"),
+            Some(("Attached to dc.example.com".to_string(), false))
+        );
+        assert_eq!(
+            menu_text(&menu, "detach-server"),
+            Some(("Detach from dc.example.com".to_string(), true))
+        );
+        assert_eq!(menu_text(&menu, "attach-server"), None);
+        let quitting = build_tray_menu_for(&app, UnifiedStatus::Quitting, &scope).expect("menu");
+        assert_eq!(
+            menu_text(&quitting, "detach-server").map(|(_, enabled)| enabled),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn the_tray_offers_neither_attach_nor_detach_under_an_environment_override() {
+        let app = tauri::test::mock_app();
+        let scope = TrayScope::Environment {
+            host: "127.0.0.1".to_string(),
+        };
+        let menu = build_tray_menu_for(&app, UnifiedStatus::Ready, &scope).expect("menu");
+        assert_eq!(
+            menu_text(&menu, "server-scope"),
+            Some((
+                "Attached to 127.0.0.1 (set by environment)".to_string(),
+                false
+            ))
+        );
+        assert_eq!(menu_text(&menu, "attach-server"), None);
+        assert_eq!(menu_text(&menu, "detach-server"), None);
+    }
+
+    #[test]
+    fn the_attach_and_detach_tray_items_dispatch() {
+        assert_eq!(
+            tray_action_for_menu_id("attach-server"),
+            TrayAction::AttachServer
+        );
+        assert_eq!(
+            tray_action_for_menu_id("detach-server"),
+            TrayAction::DetachServer
+        );
+        assert_eq!(tray_action_for_menu_id("server-scope"), TrayAction::Unknown);
+    }
+
+    #[test]
+    fn the_tray_scope_follows_the_attach_target() {
+        use crate::attach::{AttachTarget, Attachment};
+        assert_eq!(tray_scope_for(&AttachTarget::Local, None), TrayScope::Local);
+        assert_eq!(
+            tray_scope_for(
+                &AttachTarget::Saved(Attachment {
+                    origin: "https://dc.example.com".to_string(),
+                    label: "l".to_string(),
+                    paired_at: "t".to_string(),
+                }),
+                None
+            ),
+            TrayScope::Attached {
+                host: "dc.example.com".to_string()
+            }
+        );
+        assert_eq!(
+            tray_scope_for(
+                &AttachTarget::Environment,
+                Some("http://127.0.0.1:4310".to_string())
+            ),
+            TrayScope::Environment {
+                host: "127.0.0.1:4310".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn the_console_url_prefers_the_environment_then_the_saved_server() {
+        use crate::attach::{AttachTarget, Attachment};
+        let saved = AttachTarget::Saved(Attachment {
+            origin: "https://dc.example.com".to_string(),
+            label: "l".to_string(),
+            paired_at: "t".to_string(),
+        });
+        assert_eq!(
+            console_url_source(Some("http://127.0.0.1:9/x?y".to_string()), &saved),
+            "http://127.0.0.1:9/x?y"
+        );
+        assert_eq!(console_url_source(None, &saved), "https://dc.example.com");
+        assert_eq!(
+            console_url_source(None, &AttachTarget::Environment),
+            DEFAULT_CONSOLE_URL
+        );
+        assert_eq!(
+            console_url_source(None, &AttachTarget::Local),
+            DEFAULT_CONSOLE_URL
+        );
+    }
+
+    #[test]
+    fn an_attach_link_opens_the_prefilled_window_and_other_links_stay_unhandled() {
+        use crate::attach_window::AttachPrefill;
+        let link: tauri::Url =
+            "vana://attach?server=https%3A%2F%2Fdc.example.com&code=abcd-efgh-jkmn"
+                .parse()
+                .expect("link");
+        assert_eq!(
+            route_deep_link(&link),
+            DeepLinkRoute::Attach(AttachPrefill {
+                input: Some("https://dc.example.com".to_string()),
+                code: Some("ABCDEFGHJKMN".to_string()),
+                notice: None,
+            })
+        );
+        let no_code: tauri::Url = "vana://attach?server=http%3A%2F%2Fnas%3A4310"
+            .parse()
+            .expect("link");
+        assert_eq!(
+            route_deep_link(&no_code),
+            DeepLinkRoute::Attach(AttachPrefill {
+                input: Some("http://nas:4310".to_string()),
+                code: None,
+                notice: None,
+            })
+        );
+        let broken: tauri::Url = "vana://attach?code=ABCD".parse().expect("link");
+        match route_deep_link(&broken) {
+            DeepLinkRoute::Attach(prefill) => {
+                assert_eq!(prefill.input, None);
+                assert_eq!(prefill.code, None, "a code without a server is not kept");
+                assert!(prefill.notice.is_some());
+            }
+            other => panic!("expected the attach window, got {other:?}"),
+        }
+        for other in [
+            "vana://connect?sessionId=s&secret=x",
+            "vana://attachments",
+            "https://attach.example.com/",
+        ] {
+            let url: tauri::Url = other.parse().expect("url");
+            assert_eq!(route_deep_link(&url), DeepLinkRoute::Unhandled, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_valid_session_opens_the_console() {
+        let startup = attached_startup(
+            "https://dc.example.com",
+            crate::attach::AttachedLaunch::OpenConsole {
+                session: "sess".to_string(),
+            },
+            true,
+        );
+        assert_eq!(
+            startup,
+            AttachedStartup::OpenConsole {
+                session: "sess".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_ended_pairing_forgets_the_session_and_asks_to_pair_again() {
+        use crate::attach_window::AttachPrefill;
+        let launch = crate::attach::AttachedLaunch::PairAgain {
+            notice: crate::attach::PAIRING_ENDED_NOTICE.to_string(),
+        };
+        assert_eq!(
+            attached_startup("https://dc.example.com", launch.clone(), true),
+            AttachedStartup::PairAgain {
+                prefill: AttachPrefill {
+                    input: Some("https://dc.example.com".to_string()),
+                    code: None,
+                    notice: Some(crate::attach::PAIRING_ENDED_NOTICE.to_string()),
+                },
+                forget_session: true,
+            }
+        );
+        // No session was read (missing, or the keychain is locked): keep
+        // whatever the keychain holds.
+        match attached_startup("https://dc.example.com", launch, false) {
+            AttachedStartup::PairAgain { forget_session, .. } => assert!(!forget_session),
+            other => panic!("expected pair again, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unreachable_server_keeps_the_pairing_and_names_the_origin() {
+        let message = crate::attach::AttachError::Unreachable.message("https://dc.example.com");
+        let startup = attached_startup(
+            "https://dc.example.com",
+            crate::attach::AttachedLaunch::Unreachable {
+                message: message.clone(),
+            },
+            true,
+        );
+        match startup {
+            AttachedStartup::Unreachable { prefill, error } => {
+                assert!(error.contains("https://dc.example.com"), "{error}");
+                assert_eq!(prefill.input.as_deref(), Some("https://dc.example.com"));
+                assert_eq!(prefill.notice.as_deref(), Some(message.as_str()));
+            }
+            other => panic!("expected unreachable, got {other:?}"),
         }
     }
 }

@@ -434,3 +434,51 @@ fn a_restart_drops_deep_links_from_the_arguments() {
         ]
     );
 }
+
+/// Attaching elsewhere ends the old pairing: the old server is asked to
+/// end its session, and the local copy is deleted.
+#[test]
+fn switching_servers_signs_out_of_the_previous_one() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let (previous, previous_server) =
+        serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
+    saved(data_root.path(), &previous);
+    attach::process_memory_store()
+        .save(&previous, "sess-old")
+        .expect("seed");
+    let (origin, server) = serve(vec![
+        pdpp_metadata(),
+        response(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            r#"{"object":"desktop_pairing_session","session":"sess-new","expires_at":"2026-12-17T00:00:00.000Z","expires_in_seconds":2592000,"label":"x"}"#,
+        ),
+    ]);
+    invoke_from(
+        &attach_window,
+        "attach_with_pairing_code",
+        json!({"input": origin, "code": "ABCDEFGHJKMN", "trustPlainHttp": false}),
+    )
+    .expect("attached");
+    server.join().expect("server");
+    let (joined, waited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = joined.send(previous_server.join());
+    });
+    let previous_requests = waited
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the previous server was never asked to end the session")
+        .expect("previous server");
+    assert!(previous_requests[1].starts_with("post /owner/logout "));
+    assert!(previous_requests[1].contains("cookie: pdpp_owner_session=sess-old"));
+    assert_eq!(attach::process_memory_store().load(&previous), Ok(None));
+    assert_eq!(
+        attach::load_attachment(&data_dir(data_root.path()))
+            .expect("read")
+            .expect("saved")
+            .origin,
+        origin
+    );
+}

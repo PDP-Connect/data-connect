@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<!--
+  Copyright The PDP-Connect Contributors
+  SPDX-License-Identifier: Apache-2.0
+
+  Attach window for the desktop app: pair this computer with a DataConnect
+  server elsewhere, or detach from it. Rust opens it from the tray or a
+  vana://attach link (src-tauri/src/attach_window.rs). Every command it
+  calls is refused unless the caller is this window. Nothing is submitted
+  until the owner presses a button.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DataConnect - Attach to a server</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 2rem;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.15rem;
+      }
+      p {
+        margin: 0.4rem 0;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        opacity: 0.85;
+      }
+      form {
+        display: grid;
+        gap: 0.8rem;
+        margin-top: 1.2rem;
+      }
+      label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.9rem;
+      }
+      label.check {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      input[type="text"],
+      input[type="password"] {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        border-radius: 6px;
+        padding: 0.6rem;
+        background: Canvas;
+        color: CanvasText;
+        font-size: 0.95rem;
+      }
+      button {
+        justify-self: start;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+        border-radius: 6px;
+        padding: 0.5rem 1rem;
+        background: CanvasText;
+        color: Canvas;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: Canvas;
+        color: CanvasText;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      details {
+        font-size: 0.9rem;
+      }
+      details > div {
+        display: grid;
+        gap: 0.6rem;
+        margin-top: 0.6rem;
+      }
+      summary {
+        cursor: pointer;
+      }
+      .box {
+        display: none;
+        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+        font-size: 0.85rem;
+        line-height: 1.45;
+      }
+      .box.visible {
+        display: block;
+      }
+      #error {
+        border: 1px solid #d33;
+        color: #d33;
+      }
+      #notice,
+      #attached,
+      #environment {
+        margin-top: 0.8rem;
+        border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+      }
+      #attached button {
+        margin-top: 0.5rem;
+      }
+      #http-warning {
+        border: 1px solid #c80;
+      }
+      #http-warning p {
+        margin: 0 0 0.4rem;
+      }
+      .hint {
+        font-size: 0.82rem;
+        opacity: 0.72;
+      }
+      #target {
+        font-size: 0.85rem;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Attach to a server</h1>
+    <p>
+      Use this app with a DataConnect server on another computer. In that server's console, open
+      Settings, then "Attach a desktop app", and create a pairing code.
+    </p>
+    <div id="notice" class="box" role="status"></div>
+    <div id="environment" class="box" role="status"></div>
+    <div id="attached" class="box">
+      <div id="attached-text"></div>
+      <button id="detach-button" class="secondary" type="button">Detach</button>
+    </div>
+    <form id="attach-form">
+      <label>
+        Server address or pairing link
+        <input
+          id="server-input"
+          autocomplete="off"
+          placeholder="https://dataconnect.example.com"
+          spellcheck="false"
+          type="text"
+        />
+      </label>
+      <p id="target">Target: none yet</p>
+      <div id="http-warning" class="box">
+        <p id="http-warning-text"></p>
+        <label class="check">
+          <input id="trust-input" type="checkbox" />
+          I trust this network
+        </label>
+      </div>
+      <label>
+        Pairing code
+        <input
+          id="code-input"
+          autocapitalize="characters"
+          autocomplete="off"
+          placeholder="ABCD-EFGH-JKMN"
+          spellcheck="false"
+          type="text"
+        />
+      </label>
+      <button id="attach-button" type="submit">Attach</button>
+      <details id="password-section">
+        <summary>Use the owner password instead</summary>
+        <div>
+          <p class="hint">
+            For a server without pairing codes. DataConnect uses the password once to sign in
+            and does not keep it.
+          </p>
+          <label>
+            Server owner password
+            <input id="password-input" autocomplete="off" type="password" />
+          </label>
+          <button id="password-button" class="secondary" type="button">
+            Attach with password
+          </button>
+        </div>
+      </details>
+      <div id="error" class="box" role="alert"></div>
+    </form>
+    <script>
+      const serverInput = document.getElementById("server-input");
+      const codeInput = document.getElementById("code-input");
+      const trustInput = document.getElementById("trust-input");
+      const passwordInput = document.getElementById("password-input");
+      const attachButton = document.getElementById("attach-button");
+      const passwordButton = document.getElementById("password-button");
+      const detachButton = document.getElementById("detach-button");
+      const target = document.getElementById("target");
+      const warning = document.getElementById("http-warning");
+      const warningText = document.getElementById("http-warning-text");
+      const errorBox = document.getElementById("error");
+      const noticeBox = document.getElementById("notice");
+      const environmentBox = document.getElementById("environment");
+      const attachedBox = document.getElementById("attached");
+      const attachedText = document.getElementById("attached-text");
+      const controls = [
+        serverInput,
+        codeInput,
+        trustInput,
+        passwordInput,
+        attachButton,
+        passwordButton,
+      ];
+      let busy = false;
+      let disabledByEnvironment = false;
+
+      const invoke =
+        window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+
+      function show(box, message) {
+        box.textContent = message || "";
+        box.classList.toggle("visible", Boolean(message));
+      }
+
+      function setBusy(value) {
+        busy = value;
+        for (const control of controls) {
+          control.disabled = value || disabledByEnvironment;
+        }
+        detachButton.disabled = value;
+      }
+
+      function message(error, fallback) {
+        return typeof error === "string" ? error : fallback;
+      }
+
+      let previewRun = 0;
+      async function updatePreview() {
+        const run = ++previewRun;
+        const preview = await invoke("preview_attach_target", {
+          input: serverInput.value,
+          trustPlainHttp: trustInput.checked,
+        }).catch(() => null);
+        if (run !== previewRun || !preview) {
+          return;
+        }
+        if (preview.origin) {
+          target.textContent = "Target: " + preview.origin;
+        } else if (preview.error) {
+          target.textContent = "Target: " + preview.error;
+        } else {
+          target.textContent = "Target: none yet";
+        }
+        warning.classList.toggle("visible", preview.plainHttp);
+        warningText.textContent = preview.warning || "";
+        if (preview.code && !codeInput.value) {
+          codeInput.value = preview.code;
+        }
+      }
+
+      async function attach(command, args) {
+        if (busy) {
+          return;
+        }
+        show(errorBox, "");
+        setBusy(true);
+        try {
+          const outcome = await invoke(command, {
+            input: serverInput.value,
+            trustPlainHttp: trustInput.checked,
+            ...args,
+          });
+          const restarting = "Attached to " + outcome.origin + ". DataConnect is restarting.";
+          show(noticeBox, outcome.notice ? restarting + " " + outcome.notice : restarting);
+        } catch (error) {
+          show(errorBox, message(error, "DataConnect could not attach to this server."));
+          setBusy(false);
+        } finally {
+          passwordInput.value = "";
+        }
+      }
+
+      async function detach() {
+        if (busy) {
+          return;
+        }
+        show(errorBox, "");
+        setBusy(true);
+        try {
+          const notice = await invoke("detach_from_server");
+          show(noticeBox, notice + " DataConnect is restarting on this computer.");
+        } catch (error) {
+          show(errorBox, message(error, "DataConnect could not detach."));
+          setBusy(false);
+        }
+      }
+
+      async function load() {
+        if (typeof invoke !== "function") {
+          show(errorBox, "This window cannot reach DataConnect. Restart the app and try again.");
+          setBusy(true);
+          return;
+        }
+        let view;
+        try {
+          view = await invoke("attach_window_view");
+        } catch (error) {
+          show(errorBox, message(error, "DataConnect could not load this window."));
+          return;
+        }
+        serverInput.value = view.input || "";
+        codeInput.value = view.code || "";
+        show(noticeBox, view.notice);
+        if (view.attached) {
+          attachedText.textContent = "This app is attached to " + view.attached.host + ".";
+          detachButton.textContent = "Detach from " + view.attached.host;
+          attachedBox.classList.add("visible");
+        }
+        if (view.environmentOverride) {
+          disabledByEnvironment = true;
+          show(environmentBox, view.environmentMessage);
+        }
+        setBusy(false);
+        await updatePreview();
+      }
+
+      serverInput.addEventListener("input", () => void updatePreview());
+      trustInput.addEventListener("change", () => void updatePreview());
+      document.getElementById("attach-form").addEventListener("submit", event => {
+        event.preventDefault();
+        void attach("attach_with_pairing_code", { code: codeInput.value });
+      });
+      passwordButton.addEventListener("click", () => {
+        void attach("attach_with_owner_password", { password: passwordInput.value });
+      });
+      passwordInput.addEventListener("keydown", event => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          passwordButton.click();
+        }
+      });
+      detachButton.addEventListener("click", () => void detach());
+      void load();
+    </script>
+  </body>
+</html>
