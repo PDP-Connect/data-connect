@@ -50,7 +50,7 @@ export function generatePassphrase(getRandomValues = globalThis.crypto.getRandom
  */
 export function ownPasswordProblem(password) {
   if (Array.from(password).length < MIN_PASSWORD_LENGTH) {
-    return "Use at least 15 characters.";
+    return "At least 15 characters.";
   }
   return null;
 }

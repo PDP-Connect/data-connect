@@ -44,7 +44,7 @@ describe("generatePassphrase", () => {
 
 describe("ownPasswordProblem", () => {
   it("enforces the 15-character floor only", () => {
-    expect(ownPasswordProblem("short")).toMatch(/at least 15/u);
+    expect(ownPasswordProblem("short")).toMatch(/^At least 15 characters\.$/u);
     expect(ownPasswordProblem("a".repeat(14))).not.toBeNull();
     expect(ownPasswordProblem("a".repeat(15))).toBeNull();
     expect(ownPasswordProblem("a".repeat(200))).toBeNull();
