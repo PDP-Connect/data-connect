@@ -228,6 +228,56 @@ test("the state that showed two cards for one service renders one", async () => 
   }
 })
 
+test("a cancelled setup with everything released renders no card; one that retains something keeps Undo setup", async () => {
+  const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+  const container = dom.window.document.querySelector("#root")!
+  const root = createRoot(container)
+  const { RemoteAccessSetting } = await import("./remote-access-setting.tsx")
+  // Setup view shape as the host serves it: resources carry a removal state (provider-setup.tsx holdsResources).
+  const view = (operationId: string, state: string, removal: string | null) => ({
+    operationId,
+    revision: 3,
+    state,
+    resources: removal ? [{ handle: "res-1", label: "Sign-in", ownership: "created", removal }] : [],
+    evidence: { known: false },
+    scope: { draftId: null, configurationRevision: "config" },
+    nextAction: null,
+  })
+  const request: typeof requestReachability = async url => {
+    if (url.startsWith("/setup-operations/op-cancelled"))
+      return { ok: true, data: view("op-cancelled", "cancelled", "confirmed") }
+    if (url.startsWith("/setup-operations/op-retained"))
+      return { ok: true, data: view("op-retained", "cancelled", "required") }
+    const observations: Record<string, unknown> = {
+      "/catalog": { providers: [] },
+      "/state": {
+        routes: [],
+        reasons: {},
+        starting: false,
+        services: [
+          { ...entry("cancelled-svc", "op-cancelled"), draftId: null },
+          { ...entry("retained-svc", "op-retained"), draftId: null },
+        ],
+      },
+      "/host-settings": { known: false, reason: "unavailable" },
+      "/host-capabilities": {},
+    }
+    assert.ok(Object.hasOwn(observations, url), url)
+    return { ok: true, data: observations[url] }
+  }
+  try {
+    await act(async () => root.render(createElement(RemoteAccessSetting, { request })))
+    const buttons = [...container.querySelectorAll("button")].map(node => node.textContent)
+    assert.equal(buttons.filter(label => label === "Undo setup").length, 1)
+    assert.equal(container.querySelectorAll('[aria-label^="Setup for"]').length, 0)
+    assert.doesNotMatch(container.textContent ?? "", /Setup cancelled/)
+  } finally {
+    await act(async () => root.unmount())
+    dom.window.close()
+  }
+})
+
 const draftPointer = JSON.stringify({ providerId: "svc", draftId: "draft-1", usage: "durable" })
 
 test("migration sends the saved draft to the host and keeps it until the host answers", async () => {

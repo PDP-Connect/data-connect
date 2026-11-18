@@ -638,8 +638,12 @@ export function ProviderSetup({
       {reservation.cleanup || !isCurrentWay() || view.state === "complete" ? "Undo setup" : "Cancel setup"}
     </button>
   ) : null
-  if (view && (reservation.cleanup || (!isCurrentWay() && isSignInChain(view)) || (view.state === "complete" && !action))) {
-    if (!holdsResources || (isCurrentWay() && !reservation.cleanup)) return null
+  // A setup that ended (cancelled, completed, denied or expired) and holds nothing is not shown, so a
+  // cancelled or replaced one leaves no card. Only one that still retains something gets a card, so the
+  // owner can undo it. A setup that is waiting on the owner is not ended and stays.
+  if (view && !holdsResources && (view.state === "cancelled" || (!isCurrentWay() && ["complete", "denied", "expired"].includes(view.state)))) return null
+  if (view && (reservation.cleanup || view.state === "cancelled" || (!isCurrentWay() && isSignInChain(view)) || (view.state === "complete" && !action))) {
+    if (!holdsResources || (isCurrentWay() && !reservation.cleanup && view.state !== "cancelled")) return null
     return (
       <section aria-label={`Setup cleanup for ${plain(reservation.providerLabel)}`} className="grid gap-3">
         <p>{plain(reservation.providerLabel)} setup is still retained.</p>
