@@ -2922,6 +2922,35 @@ fn attached_startup(
     }
 }
 
+/// The session side of an attached launch, without a window: keep a session
+/// the previous process handed over, check the stored session, and delete
+/// it when the server ended it.
+async fn resolve_attached_startup(
+    origin: &str,
+    keychain: &dyn crate::attach::SessionStore,
+    memory: &dyn crate::attach::SessionStore,
+    handed_off: Option<String>,
+) -> AttachedStartup {
+    use crate::attach::SessionLookup;
+    if let Some(session) = handed_off {
+        let _ = memory.save(origin, &session);
+    }
+    let lookup = crate::attach::load_session(keychain, memory, origin);
+    let had_session = matches!(lookup, SessionLookup::Found(_));
+    let launch = crate::attach::decide_attached_launch(origin, lookup).await;
+    let startup = attached_startup(origin, launch, had_session);
+    if let AttachedStartup::PairAgain {
+        forget_session: true,
+        ..
+    } = &startup
+    {
+        if let Err(error) = crate::attach::forget_session(keychain, memory, origin) {
+            log::warn!("Could not delete the ended attach session: {error}");
+        }
+    }
+    startup
+}
+
 /// Launch attached to a saved server: no local sidecars and no local owner
 /// password. The stored session becomes the console cookie.
 async fn open_saved_attachment(
@@ -2930,16 +2959,15 @@ async fn open_saved_attachment(
     should_show: bool,
     preserved_path: Option<String>,
 ) -> Result<(), String> {
-    use crate::attach::{KeychainSessionStore, SessionLookup, SessionStore};
     let origin = attachment.origin;
-    let memory = crate::attach::process_memory_store();
-    if let Some(session) = crate::attach::take_handed_off_session() {
-        let _ = memory.save(&origin, &session);
-    }
-    let lookup = crate::attach::load_session(&KeychainSessionStore, memory, &origin);
-    let had_session = matches!(lookup, SessionLookup::Found(_));
-    let launch = crate::attach::decide_attached_launch(&origin, lookup).await;
-    match attached_startup(&origin, launch, had_session) {
+    let startup = resolve_attached_startup(
+        &origin,
+        &crate::attach::KeychainSessionStore,
+        crate::attach::process_memory_store(),
+        crate::attach::take_handed_off_session(),
+    )
+    .await;
+    match startup {
         AttachedStartup::OpenConsole { session } => {
             finish_bootstrap(
                 app,
@@ -2960,11 +2988,6 @@ async fn open_saved_attachment(
         } => {
             log::warn!("The pairing with {origin} ended; asking the owner to pair again");
             if forget_session {
-                if let Err(error) =
-                    crate::attach::forget_session(&KeychainSessionStore, memory, &origin)
-                {
-                    log::warn!("Could not delete the ended attach session: {error}");
-                }
                 crate::attach_window::forget_console_session_cookie(app, &origin).await;
             }
             set_status(app, UnifiedStatus::NeedsPairing);
@@ -9493,5 +9516,120 @@ setInterval(() => {}, 1000);
             }
             other => panic!("expected unreachable, got {other:?}"),
         }
+    }
+
+    /// A stored session the startup reads, as a keychain that works.
+    fn keychain_with(origin: &str, session: &str) -> crate::attach::MemorySessionStore {
+        use crate::attach::SessionStore;
+        let keychain = crate::attach::MemorySessionStore::default();
+        keychain.save(origin, session).expect("store");
+        keychain
+    }
+
+    #[tokio::test]
+    async fn an_attached_start_forgets_a_session_the_server_ended() {
+        use crate::attach::tests::{pdpp_metadata, response, serve};
+        use crate::attach::SessionStore;
+        let (origin, server) = serve(vec![pdpp_metadata(), response("401 Unauthorized", "", "")]);
+        let keychain = keychain_with(&origin, "sess-ended");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup = resolve_attached_startup(&origin, &keychain, &memory, None).await;
+        server.join().expect("server");
+        assert!(
+            matches!(
+                startup,
+                AttachedStartup::PairAgain {
+                    forget_session: true,
+                    ..
+                }
+            ),
+            "{startup:?}"
+        );
+        assert_eq!(keychain.load(&origin), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn an_attached_start_keeps_the_session_when_the_server_is_unreachable() {
+        use crate::attach::tests::{closed_origin, pdpp_metadata, response, serve};
+        use crate::attach::SessionStore;
+        let (origin, server) = serve(vec![
+            pdpp_metadata(),
+            response("500 Internal Server Error", "", ""),
+        ]);
+        let closed = closed_origin();
+        for origin in [origin, closed] {
+            let keychain = keychain_with(&origin, "sess-kept");
+            let memory = crate::attach::MemorySessionStore::default();
+            let startup = resolve_attached_startup(&origin, &keychain, &memory, None).await;
+            assert!(
+                matches!(startup, AttachedStartup::Unreachable { .. }),
+                "{origin}: {startup:?}"
+            );
+            assert_eq!(keychain.load(&origin), Ok(Some("sess-kept".to_string())));
+        }
+        server.join().expect("server");
+    }
+
+    /// A locked keychain is not an ended pairing: nothing is deleted.
+    #[tokio::test]
+    async fn an_attached_start_with_a_locked_keychain_deletes_nothing() {
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup = resolve_attached_startup(
+            "https://dc.example.com",
+            &crate::attach::tests::BrokenKeychain,
+            &memory,
+            None,
+        )
+        .await;
+        match startup {
+            AttachedStartup::PairAgain {
+                prefill,
+                forget_session,
+            } => {
+                assert!(!forget_session);
+                assert_eq!(
+                    prefill.notice.as_deref(),
+                    Some(crate::attach::KEYCHAIN_LOST_NOTICE)
+                );
+            }
+            other => panic!("expected pair again, got {other:?}"),
+        }
+    }
+
+    /// The receiving side of a restart after a memory-only pairing: the
+    /// session leaves the environment once and opens the console.
+    #[tokio::test]
+    async fn a_handed_off_session_leaves_the_environment_and_opens_the_console() {
+        use crate::attach::tests::{pdpp_metadata, response, serve, BrokenKeychain};
+        use crate::attach::SESSION_HANDOFF_ENV;
+        let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
+        std::env::set_var(SESSION_HANDOFF_ENV, "sess-handed-off");
+        crate::attach::take_session_handoff_from_env();
+        assert_eq!(std::env::var_os(SESSION_HANDOFF_ENV), None);
+        let handed_off = crate::attach::take_handed_off_session();
+        assert_eq!(crate::attach::take_handed_off_session(), None, "taken once");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup = resolve_attached_startup(&origin, &BrokenKeychain, &memory, handed_off).await;
+        let requests = server.join().expect("server");
+        assert_eq!(
+            startup,
+            AttachedStartup::OpenConsole {
+                session: "sess-handed-off".to_string()
+            }
+        );
+        assert!(
+            requests[1].contains("cookie: pdpp_owner_session=sess-handed-off"),
+            "{}",
+            requests[1]
+        );
+
+        std::env::set_var(SESSION_HANDOFF_ENV, "");
+        crate::attach::take_session_handoff_from_env();
+        assert_eq!(std::env::var_os(SESSION_HANDOFF_ENV), None);
+        assert_eq!(
+            crate::attach::take_handed_off_session(),
+            None,
+            "empty is ignored"
+        );
     }
 }

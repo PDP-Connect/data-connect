@@ -427,6 +427,11 @@ static HANDED_OFF_SESSION: Mutex<Option<String>> = Mutex::new(None);
 /// Move a memory-only session handed over by the previous process out of
 /// the environment. Call before any thread starts: removing a variable while
 /// another thread reads the environment is not safe on every libc.
+///
+/// Known limitation: on Linux the value stays readable in
+/// `/proc/<pid>/environ` for the life of the process, because removing the
+/// variable does not clear the initial environment block. Only the same user
+/// can read that file, and that user can already read the keychain.
 pub(crate) fn take_session_handoff_from_env() {
     let Some(session) = std::env::var_os(SESSION_HANDOFF_ENV) else {
         return;
@@ -736,7 +741,7 @@ pub(crate) async fn revoke_session(origin: &str, session: &str) -> bool {
 }
 
 pub(crate) const PAIRING_ENDED_NOTICE: &str = "This pairing ended. Pair again.";
-const KEYCHAIN_LOST_NOTICE: &str =
+pub(crate) const KEYCHAIN_LOST_NOTICE: &str =
     "DataConnect could not read the pairing from this computer's keychain. Pair again.";
 
 /// What a launch in the attached state does.
