@@ -95,3 +95,54 @@ test("a valid review is accepted, and the precheck changes nothing", async () =>
   assert.equal(result.started(), 1);
   assert.ok(result.service.reviews.has("rev-1"), "the review is still there for apply");
 });
+
+for (const kind of ["session", "durable"] as const) {
+  test(`concurrent apply consumes one review once for ${kind}`, { timeout: 5000 }, async () => {
+    let release!: (target: string) => void;
+    const target = new Promise<string>((resolve) => { release = resolve; });
+    let targetReads = 0, acknowledgements = 0;
+    const effects: { method: string; operationId: string }[] = [];
+    const create = (method: string) => async (input: { operationId: string }) => {
+      effects.push({ method, operationId: input.operationId });
+      return {
+        handle: { id: "route-" + input.operationId, generation: 1, kind },
+        cleanup: { state: "none" },
+        verification: { status: "verified" },
+        published: "https://fixture.invalid",
+      };
+    };
+    const service = new ReachabilityService({
+      expose: create("expose"),
+      ensureRoute: create("ensureRoute"),
+      watchRoutes: async function* () {},
+    } as never, {
+      acknowledgeDisconnect: async () => { acknowledgements++; },
+      currentTarget: () => { targetReads++; return target; },
+      identity: { bootId: "b", instanceId: "i" },
+      query: {},
+    } as never);
+    const inner = service as unknown as { reviews: Map<string, unknown>; lifecycle: unknown };
+    const review = reviewFor("2999-01-01T00:00:00.000Z");
+    inner.reviews.set("rev-1", { ...review, query: { ...review.query,
+      usage: kind === "session" ? review.query.usage : { kind: "durable" } } });
+    inner.lifecycle = { ...initialLifecycle(), phase: "review", approvalIdentity: "rev-1" };
+    const input = { kind: "route", consentFactsDigest: DIGEST, acknowledgeDisconnect: true };
+    const first = service.apply("op-A", "rev-1", input);
+    const second = service.apply("op-B", "rev-1", input);
+    // Install rejection handlers before releasing either currentTarget read.
+    const settled = Promise.allSettled([first, second]);
+    assert.equal(targetReads, 2, "both calls reached the asynchronous target check");
+    assert.equal(effects.length, 0);
+    assert.equal(acknowledgements, 0);
+    release(review.query.target);
+    const results = await settled;
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    const rejected = results.filter((result) => result.status === "rejected");
+    assert.equal(rejected.length, 1);
+    assert.equal((rejected[0] as PromiseRejectedResult).reason.code, "review_not_found");
+    assert.equal(acknowledgements, 1, "the losing call performs no host effect");
+    assert.equal(effects.length, 1);
+    assert.equal(effects[0]!.method, kind === "durable" ? "ensureRoute" : "expose");
+    assert.equal(inner.reviews.has("rev-1"), false);
+  });
+}

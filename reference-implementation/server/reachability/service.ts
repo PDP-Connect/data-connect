@@ -587,11 +587,11 @@ export class ReachabilityService {
   // its own: nothing is written, started or deleted. The approve route runs it
   // before it answers 202, so a review that expired or changed since the owner
   // saw it is refused at once and the console can fetch a new one.
-  private async checkApply(
+  private checkApplyNow(
     operationId: string,
     reviewId: string,
     input: { kind: unknown; consentFactsDigest: string }
-  ): Promise<{ review: Review; approval: ReturnType<typeof requireRouteApproval>; event: ReturnType<typeof reduceLifecycle> }> {
+  ): { review: Review; approval: ReturnType<typeof requireRouteApproval>; event: ReturnType<typeof reduceLifecycle> } {
     if (input.kind !== "route") {
       throw new ReachabilityError("consent_kind_mismatch");
     }
@@ -608,9 +608,6 @@ export class ReachabilityService {
     if (this.starting || [...this.routes.values()].some((route) => route.cleanup.state !== "confirmed")) {
       throw new ReachabilityError("configuration_in_use");
     }
-    if (this.host.currentTarget && (await this.host.currentTarget()) !== review.query.target) {
-      throw new ReachabilityError("candidate_stale");
-    }
     const expiry = review.candidate.expiresAt ? Date.parse(review.candidate.expiresAt) : Number.NaN;
     const event = reduceLifecycle(this.lifecycle, {
       approvalExpiresAt: expiry,
@@ -624,6 +621,19 @@ export class ReachabilityService {
     }
     return { approval, event, review };
   }
+  private async checkApply(
+    operationId: string,
+    reviewId: string,
+    input: { kind: unknown; consentFactsDigest: string }
+  ): Promise<ReturnType<ReachabilityService["checkApplyNow"]>> {
+    const checked = this.checkApplyNow(operationId, reviewId, input);
+    if (this.host.currentTarget && (await this.host.currentTarget()) !== checked.review.query.target) {
+      throw new ReachabilityError("candidate_stale");
+    }
+    // A slow target read must not make the read-only precheck accept an
+    // expired review or lifecycle state that changed while it was pending.
+    return this.checkApplyNow(operationId, reviewId, input);
+  }
   /** Refuses a stale or changed review before the approval is accepted. Changes nothing. */
   async precheckApply(reviewId: string, input: { kind: unknown; consentFactsDigest: string }): Promise<void> {
     await this.checkApply("precheck", reviewId, input);
@@ -635,7 +645,10 @@ export class ReachabilityService {
   ): Promise<Route> {
     let checked: Awaited<ReturnType<ReachabilityService["checkApply"]>>;
     try {
-      checked = await this.checkApply(operationId, reviewId, input);
+      await this.checkApply(operationId, reviewId, input);
+      // Revalidate after the last asynchronous read. No await may separate this
+      // check from installing the lifecycle and consuming the review below.
+      checked = this.checkApplyNow(operationId, reviewId, input);
     } catch (error) {
       // A review the host can no longer approve is dropped, so it is not offered again.
       const code = error instanceof ReachabilityError ? error.code : null;
