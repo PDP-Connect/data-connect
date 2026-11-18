@@ -118,6 +118,20 @@ pub(crate) fn check_inside(label: &str, path: &Path, root: &Path) -> Result<(), 
     }
 }
 
+/// A profile build must carry its own Tauri identifier (`<id>.<profile>`):
+/// the identifier names the single-instance lock, the window-state file and
+/// the data directory, so the owner's installed app must never share it.
+pub(crate) fn check_identifier(profile: &str, identifier: &str) -> Result<(), String> {
+    if identifier.ends_with(&format!(".{profile}")) {
+        Ok(())
+    } else {
+        Err(format!(
+            "profile self-check failed: app identifier is {identifier}, which does not end in .{profile}; \
+             build the profile with TAURI_CONFIG setting identifier to dev.dataconnect.{profile}"
+        ))
+    }
+}
+
 /// The path set the self-check covers, as seen through `dirs`.
 fn resolved_paths() -> Vec<(&'static str, Option<PathBuf>)> {
     vec![
@@ -126,6 +140,15 @@ fn resolved_paths() -> Vec<(&'static str, Option<PathBuf>)> {
         ("config directory", dirs::config_dir()),
         ("cache directory", dirs::cache_dir()),
     ]
+}
+
+/// Exit when a profile build runs under an identifier without the profile suffix.
+pub(crate) fn require_identifier(identifier: &str) {
+    let Some(profile) = current() else { return };
+    if let Err(message) = check_identifier(profile, identifier) {
+        eprintln!("{message}");
+        std::process::exit(1);
+    }
 }
 
 /// Exit with the offending path when `path` is outside the profile root.
@@ -196,6 +219,13 @@ fn enter_profile(profile: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_profile_build_needs_its_own_identifier() {
+        assert!(check_identifier("attach-test", "dev.dataconnect.attach-test").is_ok());
+        assert!(check_identifier("attach-test", "dev.dataconnect").is_err());
+        assert!(check_identifier("attach-test", "dev.dataconnect.other").is_err());
+    }
+
     use super::*;
 
     #[test]

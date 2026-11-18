@@ -193,6 +193,7 @@ pub fn run() {
             // must find the Tauri paths inside its root or not start.
             #[cfg(desktop)]
             if profile::current().is_some() {
+                profile::require_identifier(&app.config().identifier);
                 profile::require_inside_root(
                     "Tauri app data directory",
                     &app.path().app_data_dir()?,
