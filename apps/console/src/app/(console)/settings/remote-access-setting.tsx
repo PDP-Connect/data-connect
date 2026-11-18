@@ -805,9 +805,14 @@ export function RemoteAccessSetting({
     }, "change");
   }
   // A route turned off and replaced is history: the newest one is the card.
+  // So is one the owner turned off and the host confirmed: this page shows its
+  // Off card once, right after the stop, and a reload shows the start card.
+  // A route that ended with no owner stop stays, as Needs your action.
   const settledOff = (route: Route) => route.state === "released" && route.cleanup.state === "confirmed";
   const visibleRoutes = state.routes.filter(
-    (route) => !(settledOff(route) && state.routes.some((other) => other !== route && !settledOff(other)))
+    (route) =>
+      !(settledOff(route) && state.routes.some((other) => other !== route && !settledOff(other))) &&
+      !(settledOff(route) && route.stopRequested === true && !acknowledged.has(route.handle.id))
   );
   // What the buttons on an error do. None of them reload the page.
   const refresh = () => {
@@ -882,7 +887,7 @@ export function RemoteAccessSetting({
       {inventory ? null : (
         <p role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
-      {idle && state.routes.length === 0 && !operation ? (
+      {idle && visibleRoutes.length === 0 && !operation ? (
         <p role="status">Off · Only this computer can open DataConnect.</p>
       ) : null}
       {idle && !passwordMissing ? (

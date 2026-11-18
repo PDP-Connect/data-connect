@@ -431,6 +431,14 @@ test("a route the owner stopped, with the stop confirmed, is Off", async (t) => 
   }, t);
 });
 
+test("after a reload, a route whose owner stop was confirmed has no card, only Off and the start card", async (t) => {
+  await withScreen(host({ "/state": () => diedState(true) }), async ({ text, container }) => {
+    assert.doesNotMatch(text(), /Your address no longer works|Not confirmed yet|one\.example\.invalid/);
+    assert.match(text(), /Off · Only this computer can open DataConnect\./);
+    assert.equal(container.querySelectorAll('section[aria-label="Your address"] > *').length, 0, "no route card");
+  }, t);
+});
+
 test("a route the host lost is Needs your action within one poll, with Turn on again", async (t) => {
   let lost = false;
   const handler = host({
