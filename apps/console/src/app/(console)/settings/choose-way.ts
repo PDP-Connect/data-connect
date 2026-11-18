@@ -143,20 +143,43 @@ export function wayUnusable(provider: Provider, capabilities: Capabilities, bloc
 }
 
 /**
- * The way to recommend: the best one this computer can finish now. Tailscale
- * public address when Tailscale is ready and nothing is missing; otherwise the
- * temporary address. Falls back to the first way this computer can run.
+ * Whether the host has positively seen this way's prerequisites met. Tailscale's
+ * catalog entry reads `present` once the command-line tool is found, with the
+ * version "not-observed" (gozar embedding-state.mjs prerequisitesFor). That is the
+ * same whether the daemon is stopped, signed out or signed in, so it proves
+ * nothing about sign-in. Only a way the owner already set up (`setUp`) or a
+ * prerequisite the host observed with a version counts.
  */
-export function recommendedWay(inventory: Inventory, capabilities: Capabilities, blocks: Blocks = {}): Provider | undefined {
+function confirmedReady(provider: Provider, setUp: ReadonlySet<string>): boolean {
+  if (!isTailscale(provider)) return true;
+  if (setUp.has(provider.providerId)) return true;
+  const local = provider.prerequisites.find((item) => item.id === "local-setup");
+  return local?.state === "present" && local.version.known === true;
+}
+
+/**
+ * The way to recommend: the best one this computer can finish now with its
+ * prerequisites known to be met. A way that needs a sign-in is not recommended
+ * over one that needs none. Tailscale public address when it is set up; otherwise
+ * the temporary address. Falls back to the first way this computer can run.
+ */
+export function recommendedWay(
+  inventory: Inventory,
+  capabilities: Capabilities,
+  blocks: Blocks = {},
+  setUp: ReadonlySet<string> = new Set()
+): Provider | undefined {
   const visible = inventory.providers.filter((item) => !isDevelopmentOnly(item));
   const runnable = (item: Provider) => missingFor(item, capabilities, blocks) === null;
+  const ready = (item: Provider) => runnable(item) && confirmedReady(item, setUp);
   const funnel = visible.find((item) => item.providerId === "tailscale-funnel");
-  if (funnel && runnable(funnel)) return funnel;
+  if (funnel && ready(funnel)) return funnel;
   const temporary = visible.find((item) => item.providerId === "localhost-run");
-  if (temporary && runnable(temporary)) return temporary;
+  if (temporary && ready(temporary)) return temporary;
   return (
-    visible.find((item) => runnable(item) && item.reach !== "lan" && pickUsage(item, capabilities) === "session") ??
-    visible.find((item) => runnable(item) && item.reach !== "lan") ??
+    visible.find((item) => ready(item) && item.reach !== "lan" && pickUsage(item, capabilities) === "session") ??
+    visible.find((item) => ready(item) && item.reach !== "lan") ??
+    visible.find(ready) ??
     visible.find(runnable)
   );
 }

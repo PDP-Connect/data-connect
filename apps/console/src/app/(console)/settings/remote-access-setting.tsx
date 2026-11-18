@@ -309,7 +309,9 @@ export function RemoteAccessSetting({
     return () => { active = false; };
   }, [operation, request]);
 
-  const recommended = inventory ? recommendedWay(inventory, capabilities, blocks) : undefined;
+  // A way the owner already set up and committed is one the host has seen working.
+  const setUp = new Set((state.services ?? []).filter((entry) => entry.committed).map((entry) => entry.providerId));
+  const recommended = inventory ? recommendedWay(inventory, capabilities, blocks, setUp) : undefined;
   const pinnedWay = inventory && pinned ? inventory.providers.find((item) => item.providerId === pinned) : undefined;
   // The pinned way stays until it truly cannot be used: a way whose prerequisite
   // is only unreadable for a moment is not one.

@@ -44,7 +44,8 @@ function deferred<T>() {
 }
 
 const available = { reason: "admitted", state: "available" };
-const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt: "x", remedy: null, state, version: { known: false, reason: "n" } });
+// "present" here is a prerequisite the host observed with a version: positive evidence. The real catalog shape is in real-gozar-shapes.fixture.ts.
+const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt: "x", remedy: null, state, version: state === "present" ? { known: true, value: "1.80.0" } : { known: false, reason: "n" } });
 const way = (providerId: string, over: Record<string, unknown> = {}) => ({
   providerId,
   label: `Label ${providerId}`,

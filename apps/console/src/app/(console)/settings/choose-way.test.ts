@@ -8,6 +8,7 @@ import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { otherWays, recommendedWay } from "./choose-way.ts";
+import { tailscaleFacts } from "./real-gozar-shapes.fixture.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
 
@@ -32,7 +33,8 @@ const bannedPatterns = [/reachability/i, /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/i, /
 const bannedIn = (text: string) => bannedPatterns.filter((pattern) => pattern.test(text)).map(String);
 
 const available = { reason: "admitted", state: "available" };
-const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt: "x", remedy: null, state, version: { known: false, reason: "n" } });
+// "present" here is a prerequisite the host observed with a version: positive evidence. The real catalog shape is in real-gozar-shapes.fixture.ts.
+const prerequisite = (id: string, state: string) => ({ id, label: id, observedAt: "x", remedy: null, state, version: state === "present" ? { known: true, value: "1.80.0" } : { known: false, reason: "n" } });
 const way = (providerId: string, over: Record<string, unknown> = {}) => ({
   providerId,
   label: `Label ${providerId}`,
@@ -81,6 +83,27 @@ test("without Tailscale the temporary address is recommended", () => {
 
 test("Tailscale installed, signed in and not blocked is recommended", () => {
   assert.equal(recommendedWay(inv(tailscaleReady), caps)?.providerId, "tailscale-funnel");
+});
+
+// The real catalog cannot tell a signed-out daemon from a signed-in one, so only a way the owner already set up is recommended.
+function withTailscaleFacts(prerequisites: unknown[]) {
+  const providers = ids.map((id) => (id.startsWith("tailscale-") ? way(id, { prerequisites }) : way(id)));
+  return inv({ catalogRevision: "c1", observedAt: "x", schemaVersion: 1, providers });
+}
+test("with real Tailscale facts, a way that needs a sign-in is not recommended over one that needs none", () => {
+  for (const [name, facts] of [
+    ["not running", tailscaleFacts.notRunning],
+    ["not installed", tailscaleFacts.notInstalled],
+    ["running, signed out", tailscaleFacts.signedOut],
+  ] as const) {
+    assert.equal(recommendedWay(withTailscaleFacts([...facts]), caps)?.providerId, "localhost-run", name);
+  }
+});
+
+test("with real Tailscale facts, a Tailscale the owner already set up is recommended", () => {
+  const signedIn = withTailscaleFacts([...tailscaleFacts.signedIn]);
+  assert.equal(recommendedWay(signedIn, caps, {}, new Set(["tailscale-funnel"]))?.providerId, "tailscale-funnel");
+  assert.equal(recommendedWay(signedIn, caps, {}, new Set())?.providerId, "localhost-run");
 });
 
 test("Tailscale with Funnel blocked is not recommended and its row shows the missing step", () => {

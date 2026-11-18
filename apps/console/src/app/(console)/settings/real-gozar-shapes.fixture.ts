@@ -84,3 +84,27 @@ export const unsafeStateFolderError = Object.assign(new Error("The state folder 
     disclosure: { revision: "gozar-local-1", text: "Gozar changes nothing; you fix the directory yourself.", links: [] },
   },
 });
+
+/**
+ * Tailscale's catalog prerequisites as the host reports them.
+ * Source: @tnunamak/gozar packages/gozar-node/embedding-state.mjs:16-27 (`prerequisitesFor`): `present` when
+ * the tool is detected, `missing` when it is not, `unknown` when the probe could not tell. The version is
+ * always `{ known: false, reason: "not-observed" }`, so a signed-out and a signed-in daemon look the same.
+ */
+const tailscalePrerequisite = (state: "present" | "missing" | "unknown") => ({
+  id: "local-setup",
+  label: "Local prerequisites",
+  state,
+  observedAt: "2026-01-01T00:00:00.000Z",
+  version: { known: false, reason: "not-observed" },
+  remedy: null,
+});
+export const tailscaleFacts = {
+  /** No Tailscale tool, or the daemon cannot be asked. */
+  notRunning: [tailscalePrerequisite("unknown")],
+  notInstalled: [tailscalePrerequisite("missing")],
+  /** The tool is there and the daemon answers; whether anyone is signed in is not in the catalog. */
+  signedOut: [tailscalePrerequisite("present")],
+  /** Signed in looks the same in the catalog; the host's services list shows the setup was committed. */
+  signedIn: [tailscalePrerequisite("present")],
+};
