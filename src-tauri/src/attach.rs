@@ -660,7 +660,9 @@ pub(crate) enum SessionCheck {
 }
 
 /// Identity check first, then `GET /owner/session` with the session cookie:
-/// 204 signed in, 401 (or a redirect to sign-in) ended.
+/// 204 signed in, 401 ended (the server answers 401 to JSON callers). Any
+/// other answer, 403 and redirects included, keeps the pairing: it may come
+/// from a proxy or a fault, and ending the pairing deletes the session.
 pub(crate) async fn check_session(origin: &str, session: &str) -> SessionCheck {
     if let Err(error) = verify_pdpp_server(origin).await {
         return SessionCheck::Unreachable(error);
@@ -684,7 +686,7 @@ pub(crate) async fn check_session(origin: &str, session: &str) -> SessionCheck {
     let status = response.status();
     if status.is_success() {
         SessionCheck::Valid
-    } else if matches!(status.as_u16(), 401 | 403) || status.is_redirection() {
+    } else if status == reqwest::StatusCode::UNAUTHORIZED {
         SessionCheck::Expired
     } else if is_gateway_failure(status) {
         SessionCheck::Unreachable(AttachError::Unreachable)

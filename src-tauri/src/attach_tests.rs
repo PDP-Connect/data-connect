@@ -510,16 +510,33 @@ async fn a_signed_in_session_is_valid() {
     );
 }
 
+/// The server answers 401 to a JSON caller whose session ended. Only that
+/// answer ends the pairing.
 #[tokio::test]
 async fn a_rejected_session_has_ended() {
-    for answer in [
-        response("401 Unauthorized", "", ""),
-        response("302 Found", "Location: /owner/login\r\n", ""),
+    let (origin, server) = serve(vec![pdpp_metadata(), response("401 Unauthorized", "", "")]);
+    assert_eq!(
+        check_session(&origin, "sess-abc").await,
+        SessionCheck::Expired
+    );
+    server.join().expect("server");
+}
+
+/// Any other refusal may come from a proxy or a fault, not from the end of
+/// the session: keep the pairing and show the error.
+#[tokio::test]
+async fn other_refusals_keep_the_pairing() {
+    for (answer, status) in [
+        (response("403 Forbidden", "", ""), 403),
+        (response("302 Found", "Location: /owner/login\r\n", ""), 302),
+        (response("500 Internal Server Error", "", ""), 500),
+        (response("418 I'm a teapot", "", ""), 418),
     ] {
         let (origin, server) = serve(vec![pdpp_metadata(), answer]);
         assert_eq!(
             check_session(&origin, "sess-abc").await,
-            SessionCheck::Expired
+            SessionCheck::Unreachable(AttachError::Server { status }),
+            "HTTP {status}"
         );
         server.join().expect("server");
     }
