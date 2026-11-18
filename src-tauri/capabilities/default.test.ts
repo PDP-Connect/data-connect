@@ -1,12 +1,13 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync, statSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 
 type CapabilityPermission = string | { identifier: string; allow?: unknown[]; deny?: unknown[] }
 
 interface CapabilityDocument {
+  identifier?: string
   platforms?: string[]
   windows?: string[]
   permissions: CapabilityPermission[]
@@ -200,11 +201,22 @@ describe("capability scoping of app commands", () => {
   // exact permission entries it may grant: a string, or an object written out
   // in full with its `allow`/`deny` scope. A scope is part of the grant, so
   // widening one, or rewriting a string into object form, fails here too. A new
-  // file, a new window or a new grant fails until someone adds it on purpose. The attach window ("attach") is deliberately in no file: its
-  // commands check the window label themselves, and any capability that lists
+  // file, a new window or a new grant fails until someone adds it on purpose.
+  // Every other top-level field is pinned too (identifier, platforms, and any
+  // field added later, such as `remote`, `webviews` or `local`); only `$schema`
+  // and `description` are free text. The attach window ("attach") is
+  // deliberately in no file: its commands check the window label themselves, and any capability that lists
   // it would widen who can reach them.
-  const ALLOWED_CAPABILITIES: Record<string, { windows: string[]; permissions: CapabilityPermission[] }> = {
+  interface AllowedCapability {
+    identifier: string
+    windows: string[]
+    platforms?: string[]
+    permissions: CapabilityPermission[]
+  }
+
+  const ALLOWED_CAPABILITIES: Record<string, AllowedCapability> = {
     "default.json": {
+      identifier: "default",
       windows: ["main", "connector-*"],
       permissions: [
         "core:default",
@@ -242,6 +254,7 @@ describe("capability scoping of app commands", () => {
       ],
     },
     "console.json": {
+      identifier: "console",
       windows: ["console"],
       permissions: [
         "core:default",
@@ -252,7 +265,9 @@ describe("capability scoping of app commands", () => {
       ],
     },
     "mcp-bridge.json": {
+      identifier: "mcp-bridge",
       windows: ["main", "connector-*"],
+      platforms: ["linux", "macOS"],
       permissions: [
         "mcp-bridge:default",
       ],
@@ -275,17 +290,46 @@ describe("capability scoping of app commands", () => {
       .toEqual(Object.keys(ALLOWED_CAPABILITIES).sort())
   })
 
-  it("every capability file grants exactly the listed windows and permissions", () => {
+  it("every capability file holds exactly the listed fields, windows and permissions", () => {
     const directory = resolve(process.cwd(), "src-tauri/capabilities")
-    const actual: Record<string, { windows: string[]; permissions: CapabilityPermission[] }> = {}
+    const actual: Record<string, unknown> = {}
     for (const name of Object.keys(ALLOWED_CAPABILITIES).sort()) {
-      const document = JSON.parse(readFileSync(resolve(directory, name), "utf-8")) as CapabilityDocument
-      actual[name] = {
-        windows: document.windows ?? [],
-        permissions: document.permissions,
-      }
+      const { $schema: _schema, description: _description, ...rest } = JSON.parse(
+        readFileSync(resolve(directory, name), "utf-8")
+      ) as Record<string, unknown>
+      actual[name] = rest
     }
     expect(actual).toEqual(ALLOWED_CAPABILITIES)
+  })
+
+  // "connector-*" is a prefix match, so any window whose label starts with
+  // "connector-" gets the shared capability. No code creates such a window
+  // today: connector runs use no window of their own, and the only
+  // "connector-" label in the Rust sources is the lookup that closes one. A
+  // window created under that prefix would gain core:default and the other
+  // shared grants with no change to this file, so creating one has to be a
+  // decision made here.
+  it("no code creates a window labelled connector-*", () => {
+    const files: string[] = []
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = resolve(dir, name)
+        if (statSync(path).isDirectory()) walk(path)
+        else if (/\.(rs|ts|tsx)$/.test(name)) files.push(path)
+      }
+    }
+    walk(resolve(process.cwd(), "src-tauri/src"))
+    walk(resolve(process.cwd(), "src"))
+    // A label built with a connector- prefix, or a window builder given one.
+    const labelBuilt = /format!\(\s*"connector-|WebviewWindowBuilder::new\([^,]+,\s*"connector-|new WebviewWindow\(\s*[`"']connector-/
+    const hits = files
+      .filter(path => labelBuilt.test(readFileSync(path, "utf-8")))
+      .map(path => path.replace(`${process.cwd()}/`, ""))
+    // The one known use only looks a window up in order to close it.
+    expect(hits).toEqual(["src-tauri/src/lib.rs"])
+    const lib = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf-8")
+    expect(lib.match(/connector-\{\}/g)).toHaveLength(1)
+    expect(lib).toContain('app_handle.get_webview_window(&window_label)')
   })
 
   // Tauri refuses an app command from a page that is not the app's own unless
