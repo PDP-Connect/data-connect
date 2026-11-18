@@ -72,12 +72,12 @@ test("active setup takes precedence and cleanup operation ids are unique", () =>
   assert.deepEqual(cards, [
     {
       providerId: "svc", draftId: "draft-1", usage: "durable",
-      operationId: "A", providerLabel: "Tunnel service",
+      operationId: "A", providerLabel: "Tunnel service", cleanup: true,
       actionId: "sign-in", expectedConfigurationRevision: "config",
     },
     {
       providerId: "svc", draftId: "draft-1", usage: "durable",
-      operationId: "B", providerLabel: "Tunnel service (left over)",
+      operationId: "B", providerLabel: "Tunnel service (left over)", cleanup: true,
       actionId: "", expectedConfigurationRevision: "",
     },
   ])

@@ -440,3 +440,41 @@ test("recommendation, rows and pinned usability agree on every provider prerequi
     }
   }
 });
+
+for (const initialFailure of [false, true]) test(`setup polling survives ${initialFailure ? "an initial dashboard rejection" : "a hung dashboard refresh"}`, async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let capabilityReads = 0, setupReads = 0, finished = false;
+  const never = deferred<Result>();
+  const browser = action({ id: "tailscale-browser", kind: "open-url",
+    step: { browser: { expiresAt: "2999-01-01T00:00:00.000Z", pollAfterMs: 2000 } } });
+  const setupView = () => ({
+    operationId: "setup-poll", revision: finished ? 9 : 1, state: finished ? "complete" : "pending",
+    resources: [], evidence: { known: false }, nextAction: finished ? null : browser,
+    scope: { providerId: "tailscale-funnel", draftId: null, configurationRevision: "r2" },
+  });
+  const handler = host(() => tailscaleReady, {
+    "/host-capabilities": () => {
+      capabilityReads++;
+      if (initialFailure && capabilityReads === 1) return Promise.reject(new Error("offline"));
+      if (!initialFailure && capabilityReads > 1) return never.promise;
+      return ok({});
+    },
+    "/state": () => ok({ ...idleState, services: [{
+      providerId: "tailscale-funnel", providerLabel: "Tailscale", draftId: null, usage: "session", committed: true,
+      setup: { operationId: "setup-poll", actionId: "tailscale-browser", expectedConfigurationRevision: "r2" },
+    }] }),
+    "/setup-operations/setup-poll": () => { setupReads++; return ok(setupView()); },
+  });
+  await withScreen(handler, async ({ container, settle }) => {
+    if (initialFailure) { await act(async () => t.mock.timers.tick(3000)); await settle(); }
+    // The card reads its setup once; the way's preparation reads it too.
+    assert.ok(setupReads >= 1);
+    assert.match(container.textContent ?? "", /Sign in to Tailscale to finish/);
+    const before = setupReads;
+    finished = true;
+    await act(async () => t.mock.timers.tick(3000));
+    await settle();
+    assert.ok(setupReads > before, "the setup tick still reads the setup");
+    assert.equal(container.querySelector('[aria-label="Sign in to Tailscale"]'), null);
+  });
+});

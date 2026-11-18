@@ -201,7 +201,6 @@ export function RemoteAccessSetting({
         return;
       }
       appliedSeq.current = seq;
-      setSetupTick((n) => n + 1);
       // The first read that failed names the problem; a later one that succeeds clears it.
       const failedRead = !catalogResult.ok ? catalogResult : !stateResult.ok ? stateResult : null;
       if (catalogResult.ok) {
@@ -247,12 +246,20 @@ export function RemoteAccessSetting({
         if (!active) {
           return;
         }
-        await load();
-        if (active) {
-          timer = setInterval(() => {
-            void load();
-          }, 3000);
-        }
+        const refresh = () => {
+          void load().catch((failure) => {
+            if (active) {
+              setStale(true);
+              setError((current) => current?.source === "action" ? current : toDisplayError(failure, "load"));
+            }
+          });
+        };
+        // Setup observations must not wait on unrelated dashboard requests.
+        timer = setInterval(() => {
+          setSetupTick((n) => n + 1);
+          refresh();
+        }, 3000);
+        refresh();
       });
     return () => {
       active = false;

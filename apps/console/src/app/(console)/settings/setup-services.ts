@@ -38,6 +38,7 @@ export function setupCards(services: ServiceEntry[] | undefined): SetupReservati
       cards.push({
         ...base,
         operationId: entry.setup.operationId,
+        ...(entry.cleanup?.includes(entry.setup.operationId) ? { cleanup: true } : {}),
         providerLabel: entry.providerLabel,
         actionId: entry.setup.actionId,
         expectedConfigurationRevision: entry.setup.expectedConfigurationRevision,
@@ -50,6 +51,7 @@ export function setupCards(services: ServiceEntry[] | undefined): SetupReservati
         ...base,
         operationId,
         providerLabel: `${entry.providerLabel} (left over)`,
+        cleanup: true,
         actionId: "",
         expectedConfigurationRevision: "",
       })

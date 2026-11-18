@@ -46,6 +46,8 @@ export type SetupReservation = {
   actionId: string
   expectedConfigurationRevision: string
   usage: string | null
+  /** The host retained this operation solely for cleanup. */
+  cleanup?: boolean
 }
 
 export function reserveSetupOperation(
@@ -303,7 +305,7 @@ export function ProviderSetup({
   acknowledgeDisconnect: boolean
   /** Bumped by the card's own 3-second poll. A waiting sign-in reads its setup on each bump. */
   pollTick?: number
-  /** True while this service's way is the one on screen. A way the owner left shows and opens nothing. */
+  /** True while this service's way is the one on screen. A way the owner left may show cleanup, but cannot open sign-in. */
   isCurrentWay?: () => boolean
 }) {
   const [view, setView] = useState<SetupView | null>(null)
@@ -319,51 +321,72 @@ export function ProviderSetup({
   }, [draftId, onReadiness, revision])
 
   const readEpoch = useRef(0)
+  const mounted = useRef(false)
+  const installedRevision = useRef(-1)
+  const inFlight = useRef<object | null>(null)
+  const trailingRead = useRef(false)
+  function installView(next: SetupView) {
+    installedRevision.current = Math.max(installedRevision.current, next.revision)
+    setView(next)
+  }
   const acceptObservation = useEffectEvent(async (next: SetupView, current: () => boolean) => {
-    if (!current()) return
+    const valid = () => current() && next.revision >= installedRevision.current
+    if (!valid()) return
     try {
       await onChange(next, false)
-      if (current()) {
-        setView(next)
+      if (valid()) {
+        installView(next)
+        setMissing(false)
         setError(null)
       }
     } catch {
-      if (current()) {
-        setView(null)
-        setError(
-          toDisplayError(
-            new ReachabilityFailure(publicError("configuration_stale")),
-            "load",
-            reservation.providerLabel
-          )
-        )
+      if (valid()) {
+        setError(toDisplayError(
+          new ReachabilityFailure(publicError("configuration_stale")),
+          "load", reservation.providerLabel
+        ))
       }
     }
   })
-
-  useEffect(() => {
-    let active = true
-    async function load() {
-      const epoch = readEpoch.current
-      const current = () => active && readEpoch.current === epoch
+  const readSetup = useEffectEvent(async (): Promise<void> => {
+    if (!mounted.current || busy) return
+    if (inFlight.current) {
+      trailingRead.current = true
+      return
+    }
+    const flight = {}
+    inFlight.current = flight
+    const epoch = ++readEpoch.current
+    const current = () => mounted.current && readEpoch.current === epoch
+    try {
       const result = await request(readPath)
       if (!current()) return
       if (result.ok) {
         await acceptObservation(result.data as SetupView, current)
       } else {
         setMissing(result.code === "route_not_found")
-        setError(
-          toDisplayError(
-            new ReachabilityFailure(result),
-            "load",
-            reservation.providerLabel
-          )
-        )
+        setError(toDisplayError(new ReachabilityFailure(result), "load", reservation.providerLabel))
+      }
+    } catch (failure) {
+      if (current()) setError(toDisplayError(failure, "load", reservation.providerLabel))
+    } finally {
+      if (inFlight.current === flight) {
+        inFlight.current = null
+        const again = trailingRead.current
+        trailingRead.current = false
+        if (again && current()) void readSetup()
       }
     }
-    void load()
+  })
+  useEffect(() => {
+    mounted.current = true
+    installedRevision.current = -1
+    void readSetup()
     return () => {
-      active = false
+      mounted.current = false
+      ++readEpoch.current
+      inFlight.current = null
+      trailingRead.current = false
     }
   }, [request, readPath])
 
@@ -383,7 +406,7 @@ export function ProviderSetup({
     try {
       const next = await run()
       await onChange(next, mutation)
-      setView(next)
+      installView(next)
       setMissing(false)
     } catch (failure) {
       setView(null)
@@ -396,12 +419,9 @@ export function ProviderSetup({
   // A sign-in the owner is finishing in the browser. The card's own poll
   // (`pollTick`) and a return to this window read the setup; no timer is added.
   const waitingForOwner = view !== null && signInStage(view) === "sign-in"
-  const readNow = useEffectEvent(async () => {
-    if (busy || !isCurrentWay()) return
-    const epoch = readEpoch.current
-    const current = () => readEpoch.current === epoch && isCurrentWay()
-    const result = await request(readPath)
-    if (current() && result.ok) await acceptObservation(result.data as SetupView, current)
+  const readNow = useEffectEvent(() => {
+    if (busy || !waitingForOwner || !isCurrentWay()) return
+    void readSetup()
   })
   useEffect(() => {
     if (pollTick > 0 && waitingForOwner) void readNow()
@@ -412,6 +432,8 @@ export function ProviderSetup({
     window.addEventListener("focus", onReturn)
     window.addEventListener("pageshow", onReturn)
     return () => {
+      ++readEpoch.current
+      trailingRead.current = false
       window.removeEventListener("focus", onReturn)
       window.removeEventListener("pageshow", onReturn)
     }
@@ -481,7 +503,7 @@ export function ProviderSetup({
           : await send<SetupView>(readPath)
       if (!isCurrentWay()) return
       await onChange(next, true)
-      setView(next)
+      installView(next)
     })
 
   // The facts the card has shown. A step after the first runs from the same
@@ -557,7 +579,7 @@ export function ProviderSetup({
         at = await send<SetupView>(path, { ...input, ...command(at, next, approval) })
         if (!isCurrentWay()) return
         await onChange(at, true)
-        setView(at)
+        installView(at)
       }
     })
   // After the browser sign-in the host asks to confirm the one computer it
@@ -583,8 +605,23 @@ export function ProviderSetup({
     })
 
   const action = view?.nextAction
-  // A finished setup has nothing left to show: the flow goes on to Turning on.
-  if (view?.state === "complete" && !action) return null
+  const holdsResources = view?.resources.some(resource => resource.removal !== "confirmed") ?? false
+  const cancelButton = view && (view.state !== "cancelled" || holdsResources) ? (
+    <button type="button" disabled={busy || disabled}
+      onClick={() => void change(() => send<SetupView>(`${path}/cancel`, { providerId }), false, "turn-off")}>
+      {reservation.cleanup || !isCurrentWay() || view.state === "complete" ? "Undo setup" : "Cancel setup"}
+    </button>
+  ) : null
+  if (view && (reservation.cleanup || (!isCurrentWay() && isSignInChain(view)) || (view.state === "complete" && !action))) {
+    if (!holdsResources || (isCurrentWay() && !reservation.cleanup)) return null
+    return (
+      <section aria-label={`Setup cleanup for ${plain(reservation.providerLabel)}`} className="grid gap-3">
+        <p>{plain(reservation.providerLabel)} setup is still retained.</p>
+        {error ? <ErrorNotice error={error} /> : null}
+        {cancelButton}
+      </section>
+    )
+  }
   if (view && isSignInChain(view) && action) {
     if (!isCurrentWay()) return null
     const service = plain(reservation.providerLabel)
@@ -594,6 +631,8 @@ export function ProviderSetup({
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{`Sign in to ${service} to finish.`}</p>
         {notice ? <p role="status">{notice}</p> : null}
+        {error ? <ErrorNotice error={error} /> : null}
+        {cancelButton}
         {chainAsksFields(action) ? (
           <>
             <label className="grid gap-2">
@@ -630,6 +669,8 @@ export function ProviderSetup({
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{adminCopy.line}</p>
         {notice ? <p role="status">{notice}</p> : null}
+        {error ? <ErrorNotice error={error} /> : null}
+        {cancelButton}
         <div className="flex flex-wrap gap-3">
           <button type="button" disabled={busy} onClick={() => void openAdmin(adminCopy.href)}>
             Open Tailscale admin
@@ -665,6 +706,8 @@ export function ProviderSetup({
         <h3 className="pdpp-label">Needs your action</h3>
         <p role="status">{copy.line}</p>
         {notice ? <p role="status">{notice}</p> : null}
+        {error ? <ErrorNotice error={error} /> : null}
+        {cancelButton}
         {stage === "sign-in" ? <WhatThisDoes consents={shown} /> : null}
         <div className="flex flex-wrap gap-3">
           {copy.button ? (

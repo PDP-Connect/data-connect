@@ -283,3 +283,100 @@ test("leaving the way stops polling its setup and never opens its link", async (
     dom.window.close()
   }
 })
+
+
+test("retained non-current setup can be undone once; empty completed cleanup stays hidden", async () => {
+  const { dom, container, root, button } = setup()
+  const calls: Call[] = []
+  let current = { ...view("pending", browserAction), resources: [{ handle: "resource-1", label: "Sign-in", removal: "retained" }] }
+  const request = transport(() => current, calls)
+  try {
+    await render(root, request, { isCurrentWay: () => false, reservation: { ...reservation, cleanup: true } })
+    assert.ok(button("Undo setup"))
+    assert.equal(button("Sign in to Tailscale"), undefined)
+    current = { ...view("cancelled", null, 4), resources: [] }
+    await act(async () => button("Undo setup")!.click())
+    assert.deepEqual(calls.filter(call => call.body), [{ url: path + "/cancel", body: { providerId: reservation.providerId } }])
+    assert.equal(container.textContent, "")
+    await render(root, transport(() => view("complete", null, 5), []), { reservation: { ...reservation, cleanup: true } })
+    assert.equal(container.textContent, "")
+  } finally { await act(async () => root.unmount()); dom.window.close() }
+})
+
+for (const state of ["pending", "denied", "expired"]) {
+  test(state + " sign-in exposes secondary cancellation", async () => {
+    const { dom, root, button } = setup()
+    const calls: Call[] = []
+    try {
+      await render(root, transport(() => view(state, browserAction), calls))
+      assert.ok(button("Cancel setup"))
+      await act(async () => button("Cancel setup")!.click())
+      assert.equal(calls.filter(call => call.url === path + "/cancel").length, 1)
+    } finally { await act(async () => root.unmount()); dom.window.close() }
+  })
+}
+
+test("poll and focus coalesce, and older revisions cannot replace the installed step", async () => {
+  const { dom, root, container } = setup()
+  let reads = 0
+  const releases: Array<(result: Awaited<ReturnType<typeof requestReachability>>) => void> = []
+  const seen: number[] = []
+  const request: typeof requestReachability = async () => {
+    if (++reads === 1) return { ok: true, data: view("pending", browserAction, 3) }
+    return new Promise(resolve => releases.push(resolve))
+  }
+  const extra = { onChange: async (next: { revision: number }) => { seen.push(next.revision) } }
+  try {
+    await render(root, request, extra)
+    await render(root, request, { ...extra, pollTick: 1 })
+    await act(async () => { dom.window.dispatchEvent(new dom.window.Event("focus")); dom.window.dispatchEvent(new dom.window.Event("pageshow")) })
+    assert.equal(reads, 2, "only one physical read is in flight")
+    await act(async () => releases.shift()!({ ok: true, data: view("pending", browserAction, 5) }))
+    assert.equal(reads, 3, "one trailing read coalesces both events")
+    await act(async () => releases.shift()!({ ok: true, data: view("pending", browserAction, 4) }))
+    assert.deepEqual(seen, [3, 5], "older revision is rejected before onChange")
+    await render(root, request, { ...extra, pollTick: 2 })
+    await act(async () => releases.shift()!({ ok: true, data: view("complete", null, 6) }))
+    assert.equal(container.textContent, "")
+    await render(root, request, { ...extra, pollTick: 3 })
+    assert.equal(reads, 4, "waiting ended")
+  } finally { await act(async () => root.unmount()); dom.window.close() }
+})
+
+test("unmount invalidates an unresolved setup observation", async () => {
+  const { dom, root } = setup()
+  let release!: (result: Awaited<ReturnType<typeof requestReachability>>) => void
+  let observed = 0
+  const request: typeof requestReachability = () => new Promise(resolve => { release = resolve })
+  await render(root, request, { onChange: async () => { observed++ } })
+  await act(async () => root.unmount())
+  await act(async () => release({ ok: true, data: view("complete", null, 10) }))
+  assert.equal(observed, 0)
+  dom.window.close()
+})
+
+test("new read completes before an invalidated old read without resurrecting pending", async () => {
+  const { dom, root, container } = setup()
+  let release!: (result: Awaited<ReturnType<typeof requestReachability>>) => void
+  const seen: number[] = []
+  const oldRequest: typeof requestReachability = () => new Promise(resolve => { release = resolve })
+  const extra = { onChange: async (next: { revision: number }) => { seen.push(next.revision) } }
+  try {
+    await render(root, oldRequest, extra)
+    await render(root, transport(() => view("complete", null, 8), []), extra)
+    assert.deepEqual(seen, [8])
+    await act(async () => release({ ok: true, data: view("pending", browserAction, 7) }))
+    assert.deepEqual(seen, [8])
+    assert.equal(container.textContent, "")
+  } finally { await act(async () => root.unmount()); dom.window.close() }
+})
+
+test("a completed cleanup card with retained resources still offers Undo setup", async () => {
+  const { dom, root, button } = setup()
+  try {
+    await render(root, transport(() => ({
+      ...view("complete", null), resources: [{ handle: "r", label: "Service", removal: "required" }],
+    }), []), { reservation: { ...reservation, cleanup: true } })
+    assert.ok(button("Undo setup"))
+  } finally { await act(async () => root.unmount()); dom.window.close() }
+})
