@@ -16,6 +16,7 @@ import {
   projectSetupOperation,
 } from "../reachability/projection.ts";
 import type { ReachabilityService } from "../reachability/service.ts";
+import { type StatePathReport, unsafeStatePathCause } from "../reachability/state-paths.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
 interface Request {
@@ -41,6 +42,8 @@ export type OwnerReachabilityContext = {
   requireOwner: MiddlewareHandler;
   requireCsrf: MiddlewareHandler;
   usage: (kind: string) => Usage;
+  /** The folders Gozar's safety check refuses, and the one repair for those inside the data directory. */
+  statePaths?: { inspect: () => Promise<StatePathReport>; fix: () => Promise<StatePathReport> };
   /** Whether the owner has chosen a password. Absent where remote access is not hosted. */
   passwordSet?: () => Promise<boolean>;
 };
@@ -95,9 +98,11 @@ const safeCodes = new Set([
   "unsupported",
   "cleanup_debt",
   "operation_superseded",
+  "unsafe_state_path",
 ]);
 export function publicReachabilityError(error: unknown): { code: string; message: string } {
-  const candidate = error && typeof error === "object" && "code" in error ? error.code : null;
+  const candidate =
+    unsafeStatePathCause(error) ? "unsafe_state_path" : error && typeof error === "object" && "code" in error ? error.code : null;
   const code = typeof candidate === "string" && safeCodes.has(candidate) ? candidate : "reachability_unavailable";
   // Never echo raw messages, causes or arbitrary error properties.
   return {
@@ -330,6 +335,14 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     return service().setupHandoff(setupReference(request, input.providerId), setupCommand(input));
   });
   get("/host-capabilities", async () => service().capabilities());
+  get("/state-paths", async () => {
+    if (!ctx.statePaths) throw new ReachabilityError("host_runtime_unavailable");
+    return ctx.statePaths.inspect();
+  });
+  post("/state-paths/fix", async () => {
+    if (!ctx.statePaths) throw new ReachabilityError("host_runtime_unavailable");
+    return ctx.statePaths.fix();
+  });
   get("/host-settings", async () => {
     const observation = await service().hostSettings();
     return observation.known

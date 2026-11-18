@@ -20,11 +20,13 @@ import {
   Diagnostics,
   DiagnosticsContext,
   ErrorNotice,
+  type Recover,
+  RecoveryContext,
   ReachabilityFailure,
   toDisplayError,
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
-import { type ActionKind, ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
+import { type ActionKind, CLEANUP_UNCONFIRMED, ERROR_MESSAGES, publicError } from "./reachability-errors.ts";
 import { ConsentFacts, RuntimeRouteConsentCard, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import {
   type Action,
@@ -155,6 +157,8 @@ export function RemoteAccessSetting({
   // second refresh for it.
   const refreshing = useRef<string | null>(null);
   const mounted = useRef(true);
+  // The poll, so a repair can read the host again at once.
+  const loadRef = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -199,15 +203,19 @@ export function RemoteAccessSetting({
       }
       appliedSeq.current = seq;
       setSetupTick((n) => n + 1);
+      // The first read that failed names the problem; a later one that succeeds clears it.
+      const failedRead = !catalogResult.ok ? catalogResult : !stateResult.ok ? stateResult : null;
       if (catalogResult.ok) {
         setInventory(catalogResult.data as Inventory);
         setStale(false);
       } else {
         setStale(true);
+      }
+      if (failedRead) {
         setError((current) =>
-          current?.source === "action" || (current?.source === "load" && current.code === catalogResult.code)
+          current?.source === "action" || (current?.source === "load" && current.code === failedRead.code)
             ? current
-            : toDisplayError(new ReachabilityFailure(catalogResult), "load")
+            : toDisplayError(new ReachabilityFailure(failedRead), "load")
         );
       }
       if (hostResult.ok) {
@@ -231,6 +239,7 @@ export function RemoteAccessSetting({
         setError((current) => (current?.source === "load" ? null : current));
       }
     };
+    loadRef.current = load;
     // Setups an older console kept in the browser move to the host first, and
     // polling starts only after that finishes.
     void migrateLegacySetupReservations(request)
@@ -725,6 +734,23 @@ export function RemoteAccessSetting({
   const visibleRoutes = state.routes.filter(
     (route) => !(settledOff(route) && state.routes.some((other) => other !== route && !settledOff(other)))
   );
+  // What the buttons on an error do. None of them reload the page.
+  const refresh = () => {
+    setError(null);
+    setPrepError(null);
+    void loadRef.current?.();
+    setPrepRun((n) => n + 1);
+  };
+  const recover: Recover = {
+    request,
+    onTryAgain: refresh,
+    onRefresh: refresh,
+    onTryAnotherWay: () => {
+      setError(null);
+      setPrepError(null);
+      chooseAnotherWay();
+    },
+  };
   const hostReasonShown = !host.known && host.reason !== "loading";
   const serviceLabel = wayLabel ?? "the service";
   const done = prep.status === "done" ? prep.result : null;
@@ -748,19 +774,14 @@ export function RemoteAccessSetting({
       ) : returnedFromPassword ? (
         <p role="status">Password saved ✓ Step 2: turn on.</p>
       ) : null}
-      {error ? <ErrorNotice error={error} /> : null}
-      {prepError ? (
-        <>
-          <ErrorNotice error={prepError} />
-          <button disabled={busy} onClick={() => setPrepRun((n) => n + 1)} type="button">
-            Try again
-          </button>
-        </>
-      ) : null}
+      <RecoveryContext.Provider value={recover}>
+        {error ? <ErrorNotice error={error} /> : null}
+        {prepError ? <ErrorNotice error={prepError} /> : null}
+      </RecoveryContext.Provider>
       {stale ? <p role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
-      {hostReasonShown ? <p role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
+      {hostReasonShown && !error ? <p role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
       {state.lifecycle?.cleanup === "unconfirmed" ? (
-        <p role="status">We couldn't confirm your address is closed. It may still work.</p>
+        <p role="status">{CLEANUP_UNCONFIRMED}</p>
       ) : null}
       {inventory ? null : (
         <p role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
@@ -874,7 +895,7 @@ export function RemoteAccessSetting({
             onClick={() => void stopOperation(operation)}
             type="button"
           >
-            Check and turn off
+            {operation.stage === "unknown-possibly-live" && cancel === null ? "Turn off" : "Check and turn off"}
           </button>
           {cancel === null && operation.recovery?.available ? (
             <button disabled={busy} onClick={() => void retryOperation(operation)} type="button">
@@ -997,7 +1018,7 @@ export function RemoteAccessSetting({
             {route.cleanup.state !== "confirmed" || attention ? <div className="flex flex-wrap gap-3">
               {headline === "Needs your action" && route.cleanup.state !== "unconfirmed" ? (
                 <button disabled={busy} onClick={() => void turnOnAgain(route)} type="button">
-                  Turn on again
+                  {unsupportedRefresh ? "Turn off and on" : "Turn on again"}
                 </button>
               ) : null}
               {state.lifecycle?.phase === "review" && !unsupportedRefresh && !attention ? (
@@ -1031,7 +1052,7 @@ export function RemoteAccessSetting({
                 </button>
               ) : null}
               <button disabled={busy} onClick={() => void turnOffRoute(route)}>
-                {route.cleanup.state === "unconfirmed" ? "Try turning off again" : "Turn off"}
+                {route.cleanup.state === "unconfirmed" ? "Try again" : "Turn off"}
               </button>
             </div> : null}
             {details}

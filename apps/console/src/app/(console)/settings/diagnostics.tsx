@@ -4,11 +4,23 @@
 // Plain-words errors with the raw code one click away, and the collapsed
 // Details block that holds host internals. Everything inside `Diagnostics`
 // may show codes and flags; nothing outside it may.
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { formatLocalTime } from "./plain-text.ts";
+import { type ButtonKind, recoveryFor } from "./failure-recovery.ts";
+import type { requestReachability } from "./reachability-actions.ts";
 import { type ActionKind, GENERIC_ERROR, genericErrorFor, type PublicError, publicError } from "./reachability-errors.ts";
 
 export const DiagnosticsContext = createContext<{ appVersion?: string }>({});
+
+// What an error's button may do on this card. A button with no handler is not shown.
+export type Recover = {
+  request: typeof requestReachability;
+  onTryAgain: () => void;
+  onTryAnotherWay: () => void;
+  // Reads the host again and prepares again, with no page reload.
+  onRefresh: () => void;
+};
+export const RecoveryContext = createContext<Recover | null>(null);
 
 export type DisplayError = PublicError & {
   at: number;
@@ -64,23 +76,109 @@ export function Diagnostics({ children, label = "Details" }: { children: ReactNo
   );
 }
 
-export function ErrorNotice({ error }: { error: DisplayError }) {
-  const { appVersion } = useContext(DiagnosticsContext);
+function CopyButton({ label, text }: { label: string; text: string }) {
   const [copied, setCopied] = useState(false);
-  const text = diagnosticsText(error, appVersion);
   return (
-    <div className="grid gap-1" role="alert">
+    <button
+      onClick={() => {
+        void navigator.clipboard?.writeText(text).then(() => setCopied(true));
+      }}
+      type="button"
+    >
+      {copied ? "Copied" : label}
+    </button>
+  );
+}
+
+type PathReport = { paths: { path: string; fixable: boolean }[]; command: string | null };
+
+// A folder Gozar refuses because others can write to it. The host repairs the
+// ones inside DataConnect's own directory; for any other it shows the command.
+function StatePathsFix({ recover }: { recover: Recover }) {
+  const [report, setReport] = useState<PathReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const { request } = recover;
+  useEffect(() => {
+    let active = true;
+    void request("/state-paths").then((result) => {
+      if (active && result.ok) setReport(result.data as PathReport);
+    });
+    return () => {
+      active = false;
+    };
+  }, [request]);
+  const fixable = report?.paths.some((item) => item.fixable) ?? false;
+  async function fix() {
+    setBusy(true);
+    setFailed(null);
+    try {
+      const result = await request("/state-paths/fix", {});
+      if (!result.ok) {
+        setFailed("Couldn't change the permissions. Try the command below, or copy the details for support.");
+        return;
+      }
+      const after = result.data as PathReport;
+      if (after.paths.length === 0) recover.onRefresh();
+      else setReport(after);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="grid gap-2">
+      {fixable ? (
+        <button disabled={busy} onClick={() => void fix()} type="button">
+          Fix permissions
+        </button>
+      ) : null}
+      {report?.command ? (
+        <>
+          <p className="pdpp-caption">{fixable ? "Others need a command from you. Run it, then try again:" : "Run this command, then try again:"}</p>
+          <code className="break-all">{report.command}</code>
+          <div className="flex flex-wrap gap-3">
+            <CopyButton label="Copy command" text={report.command} />
+            {fixable ? null : (
+              <button onClick={recover.onRefresh} type="button">
+                Try again
+              </button>
+            )}
+          </div>
+        </>
+      ) : null}
+      {failed ? <p className="pdpp-caption">{failed}</p> : null}
+    </div>
+  );
+}
+
+const handlerFor = (kind: ButtonKind, recover: Recover): (() => void) | null =>
+  kind === "try-again" ? recover.onTryAgain : kind === "try-another-way" ? recover.onTryAnotherWay : kind === "review" ? recover.onRefresh : null;
+
+export function ErrorNotice({ error, action = "turn-on" }: { error: DisplayError; action?: ActionKind }) {
+  const { appVersion } = useContext(DiagnosticsContext);
+  const recover = useContext(RecoveryContext);
+  const text = diagnosticsText(error, appVersion);
+  const recovery = recoveryFor(error.code, action);
+  const copyOutside = recovery.buttons.some((button) => button.kind === "copy-diagnostics");
+  return (
+    <div className="grid gap-2" data-status={recovery.status} role="alert">
+      {recovery.status === "needs-action" ? <p className="pdpp-label">Needs your action</p> : null}
       <p className="pdpp-caption text-destructive">{error.message}</p>
+      {recover && recovery.buttons.some((button) => button.kind === "fix-permissions") ? <StatePathsFix recover={recover} /> : null}
+      <div className="flex flex-wrap gap-3">
+        {recovery.buttons.map((button) => {
+          if (button.kind === "copy-diagnostics") return <CopyButton key={button.kind} label={button.label} text={text} />;
+          const run = recover ? handlerFor(button.kind, recover) : null;
+          return run ? (
+            <button key={button.kind} onClick={run} type="button">
+              {button.label}
+            </button>
+          ) : null;
+        })}
+      </div>
       <Diagnostics>
         <pre className="whitespace-pre-wrap break-words">{text}</pre>
-        <button
-          onClick={() => {
-            void navigator.clipboard?.writeText(text).then(() => setCopied(true));
-          }}
-          type="button"
-        >
-          {copied ? "Copied" : "Copy diagnostics"}
-        </button>
+        {copyOutside ? null : <CopyButton label="Copy diagnostics" text={text} />}
       </Diagnostics>
     </div>
   );

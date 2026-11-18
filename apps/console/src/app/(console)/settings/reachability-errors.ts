@@ -18,8 +18,9 @@ const GENERIC_BY_ACTION: Readonly<Record<ActionKind, string>> = {
 };
 export const genericErrorFor = (action: ActionKind): string => GENERIC_BY_ACTION[action];
 
+export const CLEANUP_UNCONFIRMED = "Couldn't confirm the service closed your address.";
 const TRY_AGAIN = "Something changed while we were connecting. Try again.";
-const SERVICE_DOWN = "DataConnect's background service isn't running. Restart DataConnect, then try again.";
+const SERVICE_DOWN = "DataConnect's background service isn't running. Quit and reopen DataConnect.";
 const SERVICE_DETAILS = "We couldn't load this service's details. Try again.";
 const ALREADY_WORKING = "Remote access is already changing. Wait a moment, then try again.";
 const STEP_GONE = "That step is no longer available. Reload this page and try again.";
@@ -51,6 +52,9 @@ export const ERROR_MESSAGES: Readonly<Record<string, string>> = {
   operation_recovery_unauthorized: TRY_AGAIN,
   draft_read_required: TRY_AGAIN,
   draft_read_unavailable: TRY_AGAIN,
+  unsafe_state_path:
+    "A DataConnect folder can be changed by other accounts on this computer. Fix its permissions to continue.",
+  cleanup_unconfirmed: CLEANUP_UNCONFIRMED,
   setup_required: "A step is needed before remote access can turn on. Finish setup, then try again.",
   host_path_too_long: "DataConnect's data folder path is too long for remote access.",
   host_supervisor_unavailable: SERVICE_DOWN,

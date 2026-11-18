@@ -13,6 +13,7 @@ import { ReachabilityError } from "./approvals.ts";
 import { consoleChallengeHeader, consoleProof, consoleProofHeader, consoleProofPath } from "./console-proof.ts";
 import { createReachabilityService } from "./factory.ts";
 import type { HostSettingsBridge } from "./host-settings.ts";
+import { fixStatePaths, inspectStatePaths } from "./state-paths.ts";
 import { createHostSecretBackend, createSealedSecretBackend } from "./secret-backend.ts";
 
 function known<T>(value: T) {
@@ -77,7 +78,7 @@ export async function startDesktopReachability(input: {
   bindHost: string;
   owner: string;
   passwordConfigured: boolean;
-}): Promise<Pick<OwnerReachabilityContext, "passwordSet" | "service" | "usage"> | undefined> {
+}): Promise<Pick<OwnerReachabilityContext, "passwordSet" | "service" | "statePaths" | "usage"> | undefined> {
   const proofKey = process.env.PDPP_OWNER_CREDENTIAL_REVEAL_PROOF;
   if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1" || input.bindHost !== "127.0.0.1" || !proofKey) return;
   const dataDir = await realpath(input.dataDir);
@@ -150,6 +151,7 @@ export async function startDesktopReachability(input: {
   });
   return {
     service,
+    statePaths: { inspect: () => inspectStatePaths(home, dataDir), fix: () => fixStatePaths(home, dataDir) },
     passwordSet: passwordReady,
     usage(kind) {
       if (kind === "attached") return { kind };

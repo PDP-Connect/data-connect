@@ -695,10 +695,10 @@ test("polls that finish out of order apply the newest answer only", async (t) =>
     await run(async () => t.mock.timers.tick(3000)); // poll 2 starts and waits
     await run(async () => t.mock.timers.tick(3000)); // poll 3 finishes first
     await settle();
-    assert.match(visibleText(container), /couldn.t confirm your address is closed/);
+    assert.match(visibleText(container), /couldn.t confirm the service closed your address/i);
     await run(async () => releases[0]!(ok({ routes: [], reasons: {}, starting: false }))); // the older answer lands last
     await settle();
-    assert.match(visibleText(container), /couldn.t confirm your address is closed/, "an older poll overwrote a newer one");
+    assert.match(visibleText(container), /couldn.t confirm the service closed your address/i, "an older poll overwrote a newer one");
   });
 });
 
@@ -721,13 +721,14 @@ test("a failed turn off says so on screen", async () => {
     url.endsWith("/stop") ? stop : world()(url, body);
   await withScreen(handler, async ({ container, act: run, settle }) => {
     const press = async (label: RegExp) => {
-      const button = [...container.querySelectorAll("button")].find((node) => label.test(node.textContent ?? ""));
+      const button = [...container.querySelectorAll("button")].findLast((node) => label.test(node.textContent ?? ""));
       assert.ok(button, `no button matching ${label}`);
       await run(async () => button.click());
       await settle();
     };
     const ack = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
     if (ack) await run(async () => ack.click());
+    // The last Turn off is the route's; the first belongs to the address that may still be on.
     await press(/^Turn off$/);
     assert.match(alertText(container), /couldn.t turn off\. It may still be on/);
   });

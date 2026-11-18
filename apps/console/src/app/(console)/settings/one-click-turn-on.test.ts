@@ -507,7 +507,8 @@ test("a failure after an effect, or an uncertain one, is Needs your action and n
     await withScreen(host({ "/state": ok({ ...idleState, operations: [operation] }) }), async ({ text }) => {
       assert.match(text(), /Needs your action/);
       assert.doesNotMatch(text(), /did not turn on|Off · Only this computer/);
-      assert.match(text(), /Check and turn off/);
+      // An address that may still be on offers Turn off; a failure after an effect keeps Check and turn off.
+      assert.match(text(), operation === uncertain ? /Turn off/ : /Check and turn off/);
     });
   }
 });

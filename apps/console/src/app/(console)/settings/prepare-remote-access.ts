@@ -103,6 +103,7 @@ export const staleReviewCodes = new Set([
   "consent_changed",
   "consent_mismatch",
   "candidate_stale",
+  "configuration_stale",
   "review_not_found",
 ]);
 const restartCodes = new Set(["draft_not_found", "configuration_stale", "draft_scope_mismatch", "candidate_stale"]);
