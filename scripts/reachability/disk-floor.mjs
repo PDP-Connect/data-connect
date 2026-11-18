@@ -15,10 +15,12 @@ const HARD_MINIMUM_BYTES = 15_000_000_000;
 // Release and CI runs must never use the waiver, even when the variables leak in.
 const CI_MARKERS = ["CI", "GITHUB_ACTIONS", "RELEASE", "SEMANTIC_RELEASE"];
 
-export function resolveDiskFloor(env = process.env) {
+export function resolveDiskFloor(env = process.env, defaultFloor = RELEASE_DISK_FLOOR_BYTES) {
+	if (!Number.isSafeInteger(defaultFloor) || defaultFloor < RELEASE_DISK_FLOOR_BYTES)
+		throw new Error("default disk floor must not lower the release floor");
 	const raw = env[LOCAL_DISK_FLOOR_ENV];
 	if (raw === undefined || raw === "")
-		return { floor: RELEASE_DISK_FLOOR_BYTES, waived: false };
+		return { floor: defaultFloor, waived: false };
 	const floor = Number(raw);
 	const reason = env[LOCAL_DISK_REASON_ENV]?.trim();
 	const ci = CI_MARKERS.find((name) => env[name] && env[name] !== "false" && env[name] !== "0");
@@ -33,8 +35,8 @@ export function resolveDiskFloor(env = process.env) {
 	return { floor, waived: true, reason };
 }
 
-export async function requireDiskFloor(env = process.env, cwd = process.cwd()) {
-	const { floor, waived, reason } = resolveDiskFloor(env);
+export async function requireDiskFloor(env = process.env, cwd = process.cwd(), defaultFloor = RELEASE_DISK_FLOOR_BYTES) {
+	const { floor, waived, reason } = resolveDiskFloor(env, defaultFloor);
 	const disk = await statfs(cwd);
 	const available = disk.bavail * disk.bsize;
 	if (waived) {
@@ -43,7 +45,7 @@ export async function requireDiskFloor(env = process.env, cwd = process.cwd()) {
 			status: "DISK_PREFLIGHT_WAIVED",
 			availableBytes: available,
 			waivedFloorBytes: floor,
-			releaseFloorBytes: RELEASE_DISK_FLOOR_BYTES,
+			releaseFloorBytes: defaultFloor,
 			reason,
 			...(env[LOCAL_DISK_FOOTPRINT_ENV]
 				? { measuredFootprintBytes: Number(env[LOCAL_DISK_FOOTPRINT_ENV]) }
@@ -55,7 +57,7 @@ export async function requireDiskFloor(env = process.env, cwd = process.cwd()) {
 	if (available < floor)
 		throw Object.assign(
 			new Error(`NOT RUN (disk): need ${Math.round(floor / 1e9)} GB free`),
-			{ code: "disk_floor" },
+			{ code: "disk_floor", requiredFreeBytes: floor, availableBytes: available },
 		);
 	return { available, floor, waived };
 }

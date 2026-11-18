@@ -1,19 +1,23 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { spawn } from "node:child_process";
-import { statfs, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
+import { requireDiskFloor } from "./disk-floor.mjs";
 const output = process.env.GOZAR_COVERAGE_MATRIX;
 if (!output)
 	throw new Error("GOZAR_COVERAGE_MATRIX must name an external evidence file");
 const results = [];
 async function run(name, args, reserve = 5_000_000_000, extraEnv = {}) {
-	const disk = await statfs(process.cwd());
-	if (disk.bavail * disk.bsize < 100_000_000_000 + reserve) {
+	try {
+		await requireDiskFloor(process.env, process.cwd(), 100_000_000_000 + reserve);
+	} catch (error) {
+		if (error.code !== "disk_floor") throw error;
 		results.push({
 			name,
 			result: "NOT RUN (disk)",
-			requiredFreeBytes: 100_000_000_000 + reserve,
+			requiredFreeBytes: error.requiredFreeBytes,
+			availableBytes: error.availableBytes,
 		});
 		return;
 	}
