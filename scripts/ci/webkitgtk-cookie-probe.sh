@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+
 # Run the already-compiled WebKitGTK cookie test binary directly, with its
 # output in a file (no pipe for a child to hold open), and report what keeps the
 # process alive if it does not exit after the test prints its RAN marker.
