@@ -1,3 +1,6 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 // Run-scoped blob upload credentials.
 //
 // A connector child needs exactly one authenticated call: `POST /v1/blobs`.
