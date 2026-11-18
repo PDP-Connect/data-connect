@@ -20,5 +20,14 @@ export async function readConfigurationDraft(
   if (!api.readConfigurationDraft) {
     throw new ReachabilityError("draft_read_unavailable");
   }
-  return api.readConfigurationDraft(request);
+  try {
+    return await api.readConfigurationDraft(request);
+  } catch (error) {
+    // The read names no revision, so the library can only call a draft stale when it
+    // does not hold it: a commit consumed it, a discard removed it, or it never existed.
+    if (error && typeof error === "object" && "code" in error && error.code === "configuration_stale") {
+      throw new ReachabilityError("draft_not_found");
+    }
+    throw error;
+  }
 }
