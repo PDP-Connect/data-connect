@@ -42,6 +42,7 @@ import { registerConnector } from "../server/auth.ts";
 import {
   type AutoEnrollListConnectors,
   autoEnrollEligibleSchedules,
+  listServerRunnableConnectorInstanceIds,
 } from "../server/auto-enroll-eligible-schedules.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { closeDb, initDb } from "../server/db.ts";
@@ -155,6 +156,71 @@ test(
       rowsForConnector[0]?.connector_instance_id,
       connectorInstanceId,
       `schedule row is keyed by '${rowsForConnector[0]?.connector_instance_id}', which matches no connector_instances row; the owner's connection '${connectorInstanceId}' therefore never runs`
+    );
+  })
+);
+
+test(
+  "startup auto-enrollment omits local-device connections and schedules an ordinary server connection",
+  withTmpDb(async () => {
+    const manifest = testManifest();
+    const registryId = manifest.connector_id as string;
+    await registerConnector(manifest);
+    const canonicalId = canonicalConnectorKey(registryId) ?? registryId;
+    const instanceStore = createSqliteConnectorInstanceStore();
+    const now = new Date().toISOString();
+
+    await Promise.resolve(
+      instanceStore.upsert({
+        connectorId: canonicalId,
+        connectorInstanceId: "cin_autoenrolllocaldevice",
+        createdAt: now,
+        displayName: "Paired-device connection",
+        ownerSubjectId: OWNER_SUBJECT_ID,
+        sourceBinding: { kind: "test_local_device" },
+        sourceBindingKey: "test-local-device-binding",
+        sourceKind: "local_device",
+        status: "active",
+        updatedAt: now,
+      })
+    );
+    await Promise.resolve(
+      instanceStore.upsert({
+        connectorId: canonicalId,
+        connectorInstanceId: "cin_autoenrollserver",
+        createdAt: now,
+        displayName: "Server connection",
+        ownerSubjectId: OWNER_SUBJECT_ID,
+        sourceBinding: { kind: "test_account" },
+        sourceBindingKey: "test-server-binding",
+        sourceKind: "account",
+        status: "active",
+        updatedAt: now,
+      })
+    );
+
+    const controller = createController({});
+    const summary = await autoEnrollEligibleSchedules({
+      controller,
+      env: { [TEST_ENV_KEY]: "integration-token" },
+      listActiveConnectorInstanceIds: async (id) => {
+        const instances = await Promise.resolve(
+          instanceStore.listActiveByConnector(OWNER_SUBJECT_ID, canonicalConnectorKey(id) ?? id)
+        );
+        return listServerRunnableConnectorInstanceIds(instances);
+      },
+      listConnectors: buildListConnectors(manifest),
+    });
+    assert.equal(summary.enrolled, 1, JSON.stringify(summary));
+    assert.equal(summary.errors, 0, JSON.stringify(summary));
+
+    const rows = (await Promise.resolve(getDefaultSchedulerStore().listSchedules())).filter(
+      (row) => row.connector_id === canonicalId
+    );
+    assert.deepEqual(
+      rows.map((row) => row.connector_instance_id),
+      ["cin_autoenrollserver"],
+      "startup enrollment creates no server schedule for the paired-device connection"
     );
   })
 );

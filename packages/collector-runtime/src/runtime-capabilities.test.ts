@@ -172,6 +172,20 @@ test("a declared OBSERVATION capability is a named missing capability, not a mal
   assert.equal(evaluatePlacement(observationConnector, observingRuntime).kind, "ok");
 });
 
+// RUN_COVERAGE_V1 is an elective extension. The collector advertises it and
+// may request evidence; a runtime that does not advertise it still starts the
+// connector without evidence.
+test("a declared RUN_COVERAGE_V1 places on runtimes with or without the extension", () => {
+  const evidenceConnector = {
+    connector_id: "evidence-connector",
+    protocol_capabilities: ["RUN_COVERAGE_V1" as const],
+  };
+  assert.equal(COLLECTOR_RUNTIME_CAPABILITIES.protocolCapabilities.has("RUN_COVERAGE_V1"), true);
+  assert.equal(PROVIDER_RUNTIME_CAPABILITIES.protocolCapabilities.has("RUN_COVERAGE_V1"), false);
+  assert.deepEqual(evaluatePlacement(evidenceConnector, COLLECTOR_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
+  assert.deepEqual(evaluatePlacement(evidenceConnector, PROVIDER_RUNTIME_CAPABILITIES), { kind: "ok", satisfied: [] });
+});
+
 test("boundary_claim remains optional and does not require a protocol capability", () => {
   const skipResult = {
     boundary_claim: "provider_history_boundary",

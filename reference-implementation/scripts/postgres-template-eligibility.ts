@@ -103,6 +103,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/lexical-index-skip-unchanged-postgres.test.ts",
   "test/live-shadow-comparison.test.ts",
   "test/local-coverage-state-parser-postgres.test.ts",
+  // Postgres is a fixture for the collection-revision fence read, not the schema bootstrap under test.
+  "test/local-device-coverage-state-commit-postgres.test.ts",
   "test/manual-upload-artifact-store-postgres.test.ts",
   "test/oauth-code-delivery-atomicity.test.ts",
   "test/owner-connection-delete-orphans.test.ts",
@@ -218,6 +220,8 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/device-ingest-reservation-migration.test.ts",
   // Fences issuance writers while the cutover migration snapshots source tables.
   "test/issuance-cutover.test.ts",
+  // Drops the collection-revision columns and re-runs the bootstrap migration.
+  "test/local-device-coverage-revision-atomicity.test.ts",
   // Reopens old identity schemas and exercises migration rollback and recovery.
   "test/pairwise-grant-generation.test.ts",
   // Builds a prototype-shaped identity ledger before the real schema bootstrap.
@@ -239,6 +243,9 @@ export const POSTGRES_TEMPLATE_COLD_REQUIRED_FILES: readonly string[] = [
   "test/records-instance-stream-id-keyset-index.test.ts",
   "test/rs-opaque-cursors.test.ts",
   "test/run-history-completed-at-fleet-migration.test.ts",
+  "test/run-history-device-run-provenance-migration.test.ts",
+  // Exercises bounded boot retries and cursor recovery after run_history lock timeouts.
+  "test/run-history-device-run-provenance-migration-deadlines.test.ts",
   "test/run-history-duplicate-run-id-identity.test.ts",
   "test/run-history-interrupted-migration-reconciliation.test.ts",
   "test/run-history-writer-authority.test.ts",

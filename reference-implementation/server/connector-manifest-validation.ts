@@ -186,14 +186,20 @@ export function invalidConnectorManifest(message: string, code = "invalid_reques
 /**
  * Collection Profile declaration gate (profile Sections 3.1 and 3.4):
  * `protocol_version` names a supported profile version, every
- * `protocol_capabilities` name is known, and a capability added in 0.2.0
- * comes with `protocol_version` 0.2.0. This server has always admitted a
- * manifest without `protocol_version`; it is checked as a 0.1.0 manifest.
+ * `protocol_capabilities` name is known, a capability added in 0.2.0 comes
+ * with `protocol_version` 0.2.0, and any stream with `coverage_stores` also
+ * declares the elective RUN_COVERAGE_V1 extension. This server has always
+ * admitted a manifest without `protocol_version`; it is checked as 0.1.0.
  */
 function validateCollectionProfileDeclaration(manifest: Record<string, unknown>, code: string): void {
+  const streams = Array.isArray(manifest.streams) ? manifest.streams : [];
+  const coverageStoresDeclared = streams.some(
+    (stream) => stream !== null && typeof stream === "object" && !Array.isArray(stream) && Object.hasOwn(stream, "coverage_stores")
+  );
   const error = collectionProfileDeclarationError(
     manifest.protocol_version === undefined ? "0.1.0" : manifest.protocol_version,
-    manifest.protocol_capabilities
+    manifest.protocol_capabilities,
+    coverageStoresDeclared
   );
   if (error !== null) {
     throw invalidConnectorManifest(error, code);

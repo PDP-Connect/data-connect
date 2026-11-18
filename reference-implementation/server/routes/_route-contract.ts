@@ -21,6 +21,8 @@
 // keeps a single source of truth without widening any adapter's documented
 // request/response surface.
 
+import { assertRemoteControlSupported as assertPlacementSupported } from "../connector-instance-placement.ts";
+
 // A middleware passed alongside the final route handler (e.g.
 // `requireOwnerSession`, `requireCsrf`). The transport forwards these
 // positionally, so the structural shape is intentionally permissive.
@@ -55,13 +57,7 @@ export interface ConnectorNamespace {
 }
 
 export function assertRemoteControlSupported(namespace: ConnectorNamespace): void {
-  if (namespace.sourceKind === "local_device") {
-    const error = new Error("Local-device connections are collected by their paired device.") as Error & {
-      code: string;
-    };
-    error.code = "local_device_control_unsupported";
-    throw error;
-  }
+  assertPlacementSupported(namespace);
 }
 
 export interface ActiveBinding {
