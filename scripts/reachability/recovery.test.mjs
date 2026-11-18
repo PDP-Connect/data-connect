@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, rm, statfs } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { requireDiskFloor } from "./disk-floor.mjs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -17,9 +18,7 @@ for (const usage of ["attached", "session", "durable"]) {
 	test(`${usage}: crash after reservation/allocation before host handle persistence recovers through public enumeration`, {
 		timeout: 60000,
 	}, async () => {
-		const disk = await statfs(process.cwd());
-		if (disk.bavail * disk.bsize < 105_000_000_000)
-			throw new Error("NOT RUN (disk): need 105 GB free");
+		await requireDiskFloor();
 		const parent = join(homedir(), ".tmp", "ra");
 		await mkdir(parent, { recursive: true, mode: 0o700 });
 		const root = await mkdtemp(join(parent, "crash-"));

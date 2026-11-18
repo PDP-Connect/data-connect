@@ -9,13 +9,13 @@ import {
 	readdir,
 	readFile,
 	rm,
-	statfs,
 } from "node:fs/promises";
 import http from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createGozar, createServiceVerifier } from "@tnunamak/gozar";
 import { FixtureSecretBackend } from "../../reference-implementation/test/fixtures/reachability/secret-backend.ts";
+import { requireDiskFloor } from "./disk-floor.mjs";
 import { prepareDraft } from "./journey-support.mjs";
 import { createOwnerHttpFixture } from "./owner-http-fixture.mjs";
 import { createUnknownRegistry } from "./unknown-registry.mjs";
@@ -23,9 +23,7 @@ import { createEffectFixtures } from "./effect-fixtures.ts";
 import { createEffectFixtureHost } from "./testing-effects.mjs";
 
 export async function createPreparedFixture(root, options = {}) {
-	const disk = await statfs(process.cwd());
-	if (disk.bavail * disk.bsize < 105_000_000_000)
-		throw new Error("NOT RUN (disk): need 105 GB free");
+	await requireDiskFloor();
 	if (!root) {
 		const parent = join(homedir(), ".tmp", "ra");
 		await mkdir(parent, { recursive: true, mode: 0o700 });

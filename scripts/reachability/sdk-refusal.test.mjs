@@ -3,7 +3,8 @@
 import assert from "node:assert/strict"
 import { randomBytes, randomUUID } from "node:crypto"
 import { once } from "node:events"
-import { mkdir, mkdtemp, readdir, readFile, rm, statfs } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { requireDiskFloor } from "./disk-floor.mjs"
 import http from "node:http"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -54,11 +55,7 @@ test(
   "SDK safe refusal stays unpublished and retains unknown allocation cleanup debt",
   { timeout: 30000 },
   async () => {
-    const disk = await statfs(process.cwd())
-    assert.ok(
-      disk.bavail * disk.bsize >= 105_000_000_000,
-      "NOT RUN (disk): need 105 GB free"
-    )
+    await requireDiskFloor()
     const parent = join(homedir(), ".tmp", "ra")
     await mkdir(parent, { recursive: true, mode: 0o700 })
     const root = await mkdtemp(join(parent, "sdk-refusal-"))
