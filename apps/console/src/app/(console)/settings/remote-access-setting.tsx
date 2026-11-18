@@ -55,7 +55,7 @@ import {
 import { AllowCard, TurnOnCard, TurningOnChecklist, checklistStep } from "./turn-on.tsx";
 
 type Inventory = ReturnType<typeof projectInventory>;
-type Route = ReturnType<typeof projectRoute>;
+type Route = ReturnType<typeof projectRoute> & { stopRequested?: boolean };
 type Operation = {
   failureCode?: string | null;
   handle?: unknown;

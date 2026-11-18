@@ -12,6 +12,7 @@ import {
   routeSentence,
   type RouteDisplayInput,
 } from "./route-display.ts";
+import { diedRoute } from "./real-gozar-shapes.fixture.ts";
 
 // Values copied from the secret-free /v1/owner/reachability/state snapshots of
 // the packaged native walk (plan050 evidence state-snapshots-run2.jsonl, same
@@ -109,4 +110,26 @@ test("released without confirmed cleanup keeps the lifecycle meaning; nothing is
   assert.equal(routeHeadline(staleRoute, null, false), "On");
   assert.equal(routeHeadline(staleRoute, "stale", true), "Needs your action");
   assert.equal(routeHeadline(staleRoute, "no-such-phase", false), "Needs your action");
+});
+
+// Real shape: after the tunnel process was killed the host reported the route released and inactive
+// with cleanup confirmed, and no stop the owner asked for.
+test("a route whose tunnel died shows Needs your action with Turn on again, never Off", () => {
+  const attention = routeAttention(diedRoute, { ...base, lifecyclePhase: "inactive" });
+  assert.equal(attention, "lost");
+  assert.equal(routeHeadline(diedRoute, "inactive", false, attention), "Needs your action");
+  assert.match(attentionSentence("lost", diedRoute, "Temporary address"), /stopped working/);
+});
+
+test("an owner's confirmed stop is Off, and a route with no stop information is not guessed at", () => {
+  const stopped = { ...diedRoute, stopRequested: true };
+  assert.equal(routeAttention(stopped, { ...base, lifecyclePhase: "stopped" }), null);
+  assert.equal(routeHeadline(stopped, "stopped", false, null), "Off");
+  const { stopRequested: _unknown, ...unknown } = diedRoute;
+  assert.equal(routeAttention(unknown, { ...base, lifecyclePhase: "inactive" }), null);
+});
+
+test("a session that ran out with no owner stop says when it turned off", () => {
+  const ranOut = { ...diedRoute, expiresAt: { known: true as const, value: "2026-11-18T07:00:00Z" } };
+  assert.equal(routeAttention(ranOut, { ...base, lifecyclePhase: "inactive" }), "expired");
 });

@@ -335,6 +335,31 @@ test("a re-check that returns an unverified route is a failure too", async (t) =
   }, t);
 });
 
+// Real shape seen after a tunnel process was killed: route released and inactive, cleanup confirmed,
+// lifecycle inactive, and no stop the owner asked for (the host's /state adds stopRequested: false).
+const diedState = (stopRequested: boolean) =>
+  ok({
+    routes: [{ ...routeAt({ state: "released" }), routeState: "inactive", cleanup: { state: "confirmed", nextAction: null }, stopRequested }],
+    reasons: {},
+    starting: false,
+    services: [],
+    lifecycle: lifecycle("inactive"),
+    operations: [],
+  });
+
+test("a tunnel that died with no owner stop shows Needs your action with Turn on again, not Off", async (t) => {
+  await withScreen(host({ "/state": () => diedState(false) }), async ({ text, container }) => {
+    assert.match(text(), /Needs your action/);
+    assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Turn on again"));
+  }, t);
+});
+
+test("a route the owner stopped, with the stop confirmed, is Off", async (t) => {
+  await withScreen(host({ "/state": () => diedState(true) }), async ({ text }) => {
+    assert.doesNotMatch(text(), /Needs your action/);
+  }, t);
+});
+
 test("a route the host lost is Needs your action within one poll, with Turn on again", async (t) => {
   let lost = false;
   const handler = host({

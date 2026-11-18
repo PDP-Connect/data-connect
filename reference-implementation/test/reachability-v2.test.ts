@@ -254,3 +254,30 @@ test("state and event projections bind provider identity to the exact journaled 
     await rm(root, { force: true, recursive: true });
   }
 });
+
+test("state marks a route as owner-stopped only when a settled stop names its exact handle", async () => {
+  const { mountOwnerReachability } = await import("../server/routes/owner-reachability.ts");
+  type Context = Parameters<typeof mountOwnerReachability>[1];
+  const seed = fakeRouteScenarios()[0]!;
+  const stopped = { ...seed, handle: { ...seed.handle, id: "stopped-handle" }, operationId: null };
+  const died = { ...seed, handle: { ...seed.handle, id: "died-handle" }, operationId: null };
+  // Journal shape of a stop (operations.ts record: kind stop, stage settled, failureCode null, handle).
+  const stopRecord = {
+    operationId: "11111111-1111-1111-1111-111111111111", kind: "stop", stage: "settled", failureCode: null,
+    recovery: null, handle: { kind: seed.handle.kind, id: "stopped-handle", generation: seed.handle.generation },
+  };
+  const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
+  const app = { get(path: string, ...args: any[]) { handlers.set(path, args.at(-1)); }, post() {} };
+  const noop = () => undefined;
+  mountOwnerReachability(app as Parameters<typeof mountOwnerReachability>[0], {
+    operations: { list: async () => [stopRecord], read: async () => null } as unknown as Context["operations"],
+    service: { state: () => ({ routes: [stopped, died], reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
+    setups: { list: async () => [] } as unknown as Context["setups"],
+    requireToken: noop, requireOwner: noop, requireCsrf: noop,
+    usage: () => ({ kind: "session", lifetimeMs: 3_600_000 }),
+  });
+  let response: any;
+  const res = { setHeader() {}, status() { return res; }, json(body: unknown) { response = body; } };
+  await handlers.get("/v1/owner/reachability/state")!({ params: {} }, res);
+  assert.deepEqual(response.data.routes.map((route: { stopRequested: boolean }) => route.stopRequested), [true, false]);
+});

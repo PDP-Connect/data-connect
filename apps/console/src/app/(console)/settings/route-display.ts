@@ -16,6 +16,8 @@ export type RouteDisplayInput = {
   /** The server's own end time for this route, when it reports one. */
   expiresAt?: Known<string>;
   handle?: { kind?: string };
+  /** True when the owner asked for a stop that settled. False when the host holds no such stop. Absent when it was not asked. */
+  stopRequested?: boolean;
 };
 
 /** Why a route needs the owner, when the server's state alone would show On or Off. */
@@ -144,7 +146,15 @@ export function routeAttention(
 ): Attention | null {
   if (context.acknowledged) return null;
   if (route.state === "lost" || context.lifecycleReason === "agent-exited") return "lost";
-  if (route.cleanup.state === "confirmed") return null;
+  if (route.cleanup.state === "confirmed") {
+    // Off is only for a stop the owner asked for. A route that ended with no such stop (the tunnel
+    // process died, or the session ran out) is the owner's to turn on again.
+    if (route.state === "released" && route.stopRequested === false) {
+      const ended = expiryTime(route);
+      return ended !== null && ended <= context.now ? "expired" : "lost";
+    }
+    return null;
+  }
   // The server stops calling the proof verified at the end time, so a browser
   // clock that runs ahead cannot flip a working address to Needs your action.
   const end = expiryTime(route);

@@ -108,3 +108,17 @@ export const tailscaleFacts = {
   /** Signed in looks the same in the catalog; the host's services list shows the setup was committed. */
   signedIn: [tailscalePrerequisite("present")],
 };
+
+/**
+ * A route after its tunnel process was killed with no stop from the owner: the host reports it released,
+ * the route inactive and the cleanup confirmed. The host's /state adds `stopRequested: false` because no
+ * settled stop operation names its handle (reference-implementation owner-reachability.ts `ownerStopped`).
+ */
+export const diedRoute = {
+  state: "released",
+  routeState: "inactive",
+  cleanup: { state: "confirmed" },
+  verification: { status: "unverified", vantage: "public", observedAt: "2026-01-01T00:00:00.000Z" },
+  handle: { kind: "session" },
+  stopRequested: false,
+};

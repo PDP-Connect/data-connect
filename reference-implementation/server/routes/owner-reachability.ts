@@ -147,7 +147,20 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   // Attribution is bound to the journaled creation, never the current selection.
   type Route = Parameters<typeof projectRoute>[0];
   type Records = Map<string, Promise<OperationRecord | null>>;
-  async function projectOwnedRoute(route: Route, records: Records = new Map()) {
+  // True when a settled stop the owner asked for names this route's handle. Unknown (undefined) when
+  // the operation records were not read, so a caller never reads "no stop" from a missing list.
+  const ownerStopped = (route: Route, known: OperationRecord[] | undefined) =>
+    known === undefined
+      ? undefined
+      : known.some(
+          (record) =>
+            record.kind === "stop" &&
+            record.stage === "settled" &&
+            record.failureCode === null &&
+            record.handle?.id === route.handle.id &&
+            record.handle.generation === route.handle.generation
+        );
+  async function projectOwnedRoute(route: Route, records: Records = new Map(), stopped?: boolean) {
     let creator: { providerId: string } | null = null;
     if (route.operationId) {
       let pending = records.get(route.operationId);
@@ -163,11 +176,11 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         creator = { providerId: record.intent.providerId };
       }
     }
-    return projectRoute(route, creator);
+    return { ...projectRoute(route, creator), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
   }
-  function projectRoutes(routes: Route[], known: OperationRecord[] = []) {
-    const records: Records = new Map(known.map((record) => [record.operationId, Promise.resolve(record)]));
-    return Promise.all(routes.map((route) => projectOwnedRoute(route, records)));
+  function projectRoutes(routes: Route[], known?: OperationRecord[]) {
+    const records: Records = new Map((known ?? []).map((record) => [record.operationId, Promise.resolve(record)]));
+    return Promise.all(routes.map((route) => projectOwnedRoute(route, records, ownerStopped(route, known))));
   }
   const guarded = [ctx.requireToken, ctx.requireOwner];
   function get(path: string, run: (request: Request) => Promise<unknown>) {
