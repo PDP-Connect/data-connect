@@ -12,7 +12,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   renameSync,
@@ -80,6 +82,26 @@ test("the spool directory is private, and dispose removes it and its files, twic
   spool.dispose();
   assert.equal(existsSync(spool.dir), false);
   spool.dispose();
+});
+
+test("dispose retries after a transient removal failure", (t) => {
+  const spool = createHostBlobSpool();
+  // A read-only subdirectory makes the first removal fail for real: its file cannot be unlinked.
+  const locked = join(spool.dir, "locked");
+  mkdirSync(locked);
+  writeFileSync(join(locked, "left-behind.json"), "{}");
+  chmodSync(locked, 0o500);
+  t.after(() => {
+    if (existsSync(locked)) {
+      chmodSync(locked, 0o700);
+    }
+    rmSync(spool.dir, { force: true, recursive: true });
+  });
+  spool.dispose();
+  assert.equal(existsSync(spool.dir), true, "precondition: the first removal failed");
+  chmodSync(locked, 0o700);
+  spool.dispose();
+  assert.equal(existsSync(spool.dir), false);
 });
 
 test("a good file returns its bytes and is deleted so a second BLOB cannot name it again", (t) => {

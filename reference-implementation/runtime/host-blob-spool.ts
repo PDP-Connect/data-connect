@@ -80,12 +80,13 @@ export function createHostBlobSpool(): HostBlobSpool {
       if (disposed) {
         return;
       }
-      disposed = true;
       try {
         rmSync(dir, { force: true, recursive: true });
+        disposed = true;
       } catch {
-        // A failed cleanup must not change the run outcome. The directory is
-        // private to this process and sits under the OS temp root.
+        // A failed cleanup must not change the run outcome, and must stay
+        // retryable: `disposed` is set only once the directory is gone. The
+        // directory is private to this process and sits under the OS temp root.
       }
     },
   };
