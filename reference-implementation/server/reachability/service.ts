@@ -639,7 +639,7 @@ export class ReachabilityService {
       this.watch(route.handle);
       return route;
     } catch (error) {
-      const partial = (error as import("@tnunamak/gozar").GozarThrownError).route;
+      const partial = (error as import("@tnunamak/gozar").GozarThrownError | null | undefined)?.route;
       if (partial) {
         this.routes.set(partial.handle.id, partial);
         const allocated = reduceLifecycle(this.lifecycle, { handle: partial.handle, type: "allocated" });

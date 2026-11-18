@@ -47,3 +47,71 @@ test("a masked apply failure is logged with its original class and message", asy
   assert.equal(record.failureCode, "reachability_unavailable");
   assert.equal(lines.some(line => line.includes(operationId) && line.includes("code=internal_error") && line.includes("listen EINVAL")), true);
 });
+
+async function waitSettled(operations: ReachabilityOperations, operationId: string) {
+  for (let i = 0; i < 100 && (await operations.read(operationId)).stage === "applying"; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  return operations.read(operationId);
+}
+
+test("a failed settlement write keeps the handle the effect returned", async (t) => {
+  const parent = process.env.TEST_TMPDIR ?? join(homedir(), ".tmp");
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const root = await mkdtemp(join(parent, "rso-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = original; });
+  const operations = new ReachabilityOperations(root);
+  // Only the settled record fails; the intent and fallback records succeed.
+  const journal = operations as unknown as { write(record: { stage: string }): Promise<void> };
+  const realWrite = journal.write.bind(operations);
+  journal.write = async (record) => {
+    if (record.stage === "settled") throw Object.assign(new Error("EIO"), { code: "EIO" });
+    return realWrite(record);
+  };
+  const handle = { id: "h-exact" } as never;
+  const { operationId } = await operations.start("start", null, async () => ({ handle } as never));
+  const record = await waitSettled(operations, operationId);
+  assert.deepEqual(record.handle, handle);
+  assert.equal(record.stage, "unknown-possibly-live");
+  assert.equal(record.failureCode, "reachability_unavailable");
+});
+
+test("a thrown partial route handle is journaled", async (t) => {
+  const parent = process.env.TEST_TMPDIR ?? join(homedir(), ".tmp");
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const root = await mkdtemp(join(parent, "rso-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = original; });
+  const operations = new ReachabilityOperations(root);
+  const handle = { id: "h-partial" } as never;
+  const { operationId } = await operations.start("start", null, async () => {
+    throw Object.assign(new Error("verify failed"), { code: "verification_failed", route: { handle } });
+  });
+  const record = await waitSettled(operations, operationId);
+  assert.deepEqual(record.handle, handle);
+  assert.equal(record.failureCode, "verification_failed");
+  assert.equal(record.stage, "unknown-possibly-live");
+});
+
+test("a nullish thrown value still journals an uncertain failure", async (t) => {
+  const parent = process.env.TEST_TMPDIR ?? join(homedir(), ".tmp");
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const root = await mkdtemp(join(parent, "rso-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const original = console.error;
+  console.error = () => {};
+  t.after(() => { console.error = original; });
+  const operations = new ReachabilityOperations(root);
+  const { operationId } = await operations.start("start", null, async () => {
+    // biome-ignore lint/style/useThrowOnlyError: nullish throw is the case under test
+    throw undefined;
+  });
+  const record = await waitSettled(operations, operationId);
+  assert.equal(record.stage, "unknown-possibly-live");
+  assert.equal(record.failureCode, "reachability_unavailable");
+});

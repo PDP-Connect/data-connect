@@ -157,10 +157,17 @@ export class ReachabilityOperations {
     await this.write(pending);
     this.running.add(operationId);
     void (async () => {
+      // Set once the effect has returned: a later settlement-write failure must
+      // not drop the handle the effect already allocated.
+      let allocated: Handle | null = null;
       try {
         const route = await effect(operationId);
+        allocated = route.handle;
         await this.write({ ...pending, handle: route.handle, route: null, stage: "settled" });
       } catch (error) {
+        const partial = error && typeof error === "object" && "route" in error
+          ? (error as { route?: { handle?: Handle } | null }).route
+          : null;
         const known = new Set([
           "host_policy_denied",
           "artifact_integrity_failed",
@@ -189,6 +196,7 @@ export class ReachabilityOperations {
         );
         await this.write({
           ...pending,
+          handle: allocated ?? partial?.handle ?? pending.handle,
           failureCode,
           recovery: {
             available: this.recoveryAvailable,
