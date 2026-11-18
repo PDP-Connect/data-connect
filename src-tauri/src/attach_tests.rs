@@ -7,33 +7,102 @@ fn input(origin: &str, code: Option<&str>) -> AttachInput {
     AttachInput {
         origin: origin.to_string(),
         code: code.map(ToOwned::to_owned),
+        key: None,
+    }
+}
+
+const VECTOR_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+
+/// The string the desktop signs over and verifies against is the origin of
+/// the typed address in `url.origin` form, the form the server signs. Each
+/// expected value below was produced with Node's `new URL(typed).origin`
+/// (scheme defaulted as the desktop does for a bare host).
+#[test]
+fn typed_variants_reach_the_canonical_origin_the_server_signs() {
+    for (typed, canonical) in [
+        ("HOST.example:443", "https://host.example"),
+        ("https://HOST.example:443/", "https://host.example"),
+        ("https://host.example:443", "https://host.example"),
+        ("https://host.example/", "https://host.example"),
+        ("HTTPS://Host.Example", "https://host.example"),
+        ("host.example", "https://host.example"),
+        (
+            "https://host.example:8443/settings?x=1",
+            "https://host.example:8443",
+        ),
+        ("http://localhost:3000/", "http://localhost:3000"),
+        ("http://LOCALHOST:80/x", "http://localhost"),
+        ("localhost:3000", "http://localhost:3000"),
+        ("http://[::1]:3000", "http://[::1]:3000"),
+        ("http://127.0.0.1:4310", "http://127.0.0.1:4310"),
+        ("https://bücher.example/", "https://xn--bcher-kva.example"),
+    ] {
+        assert_eq!(
+            parse_attach_input(typed).map(|parsed| parsed.origin),
+            Ok(canonical.to_string()),
+            "{typed}"
+        );
     }
 }
 
 #[test]
-fn parses_a_pairing_link_with_an_encoded_server_and_code() {
+fn parses_pairing_links_addresses_and_fragments() {
+    let link = format!("https://dc.example.com/settings#code=abcd-efgh-jkmn&key={VECTOR_KEY}");
     assert_eq!(
-        parse_attach_input(
-            "vana://attach?server=https%3A%2F%2Fdc.example.com%2F&code=abcd-efgh-jkmn"
-        ),
-        Ok(input("https://dc.example.com", Some("ABCDEFGHJKMN")))
+        parse_attach_input(&link),
+        Ok(AttachInput {
+            origin: "https://dc.example.com".to_string(),
+            code: Some("ABCDEFGHJKMN".to_string()),
+            key: Some(VECTOR_KEY.to_string()),
+        })
     );
+    // Path and query are ignored; only the fragment's code and key count.
     assert_eq!(
-        parse_attach_input("  VANA://attach/?code=ABCDEFGHJKMN&server=http://localhost:3000  "),
+        parse_attach_input(&format!(
+            "  http://localhost:3000/other/path?code=ZZZZ-ZZZZ-ZZZZ&key=x#key={VECTOR_KEY}  "
+        )),
+        Ok(AttachInput {
+            origin: "http://localhost:3000".to_string(),
+            code: None,
+            key: Some(VECTOR_KEY.to_string()),
+        })
+    );
+    // A bare host with a fragment keeps the scheme rules.
+    assert_eq!(
+        parse_attach_input("localhost:3000/settings#code=ABCDEFGHJKMN"),
         Ok(input("http://localhost:3000", Some("ABCDEFGHJKMN")))
     );
     assert_eq!(
-        parse_attach_input("vana://attach?server=http%3A%2F%2Fnas%3A8080"),
-        Ok(input("http://nas:8080", None))
+        parse_attach_input("dc.example.com/settings#code=ABCDEFGHJKMN"),
+        Ok(input("https://dc.example.com", Some("ABCDEFGHJKMN")))
+    );
+    // Unknown fragment names are ignored.
+    assert_eq!(
+        parse_attach_input("https://dc.example.com/#tab=2"),
+        Ok(input("https://dc.example.com", None))
     );
 }
 
 #[test]
-fn rejects_links_that_are_not_attach_links() {
-    assert!(parse_attach_input("vana://connect?sessionId=x&secret=y").is_err());
-    assert!(parse_attach_input("vana://attach?code=ABCDEFGHJKMN").is_err());
-    assert!(parse_attach_input("vana://attach?server=ftp://x&code=ABCDEFGHJKMN").is_err());
-    assert!(parse_attach_input("vana://attach?server=https://x&code=nope").is_err());
+fn a_bad_code_or_key_in_a_link_is_refused() {
+    assert!(parse_attach_input("https://dc.example.com/settings#code=nope").is_err());
+    assert!(parse_attach_input("https://dc.example.com/settings#key=AAAA").is_err());
+    assert!(parse_attach_input(&format!(
+        "https://dc.example.com/settings#key={VECTOR_KEY}="
+    ))
+    .is_err());
+}
+
+#[test]
+fn the_vana_scheme_is_not_an_attach_address() {
+    for raw in [
+        "vana://attach?server=https%3A%2F%2Fdc.example.com&code=ABCDEFGHJKMN",
+        "VANA://attach",
+        "vana:attach",
+        "vana://connect?sessionId=x&secret=y",
+    ] {
+        assert!(parse_attach_input(raw).is_err(), "{raw}");
+    }
 }
 
 #[test]
@@ -132,6 +201,7 @@ fn attachment(origin: &str) -> Attachment {
         origin: origin.to_string(),
         label: "DataConnect desktop (test)".to_string(),
         paired_at: "2026-11-17T00:00:00+00:00".to_string(),
+        server_key: None,
     }
 }
 
@@ -153,6 +223,54 @@ fn attachment_round_trips_without_secrets() {
     remove_attachment(dir.path()).expect("remove");
     assert_eq!(load_attachment(dir.path()), Ok(None));
     remove_attachment(dir.path()).expect("removing twice is fine");
+}
+
+#[test]
+fn a_pinned_attachment_round_trips_and_an_old_file_still_loads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pinned = Attachment {
+        server_key: Some(VECTOR_KEY.to_string()),
+        ..attachment("https://dc.example.com")
+    };
+    save_attachment(dir.path(), &pinned).expect("save");
+    assert_eq!(load_attachment(dir.path()), Ok(Some(pinned.clone())));
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(ATTACH_FILE)).expect("read"))
+            .expect("json");
+    assert_eq!(raw["server_key"], serde_json::json!(VECTOR_KEY));
+    assert_eq!(pinned.server_id().as_deref(), Some("MMG4-2KLG-YQZW-NEIS"));
+
+    // A file written before pinning has no server_key: unpinned.
+    std::fs::write(
+        dir.path().join(ATTACH_FILE),
+        r#"{"origin":"https://dc.example.com","label":"x","paired_at":"y"}"#,
+    )
+    .expect("write");
+    let loaded = load_attachment(dir.path())
+        .expect("loads")
+        .expect("present");
+    assert_eq!(loaded.server_key, None);
+    assert_eq!(loaded.server_id(), None);
+
+    // A key that is not 32 base64url bytes is refused, not trusted.
+    std::fs::write(
+        dir.path().join(ATTACH_FILE),
+        r#"{"origin":"https://dc.example.com","label":"x","paired_at":"y","server_key":"AAAA"}"#,
+    )
+    .expect("write");
+    assert!(load_attachment(dir.path()).is_err());
+}
+
+#[test]
+fn the_keychain_service_follows_the_app_identifier() {
+    assert_eq!(
+        keyring_service_for("dev.dataconnect"),
+        "dev.dataconnect.attach"
+    );
+    assert_eq!(
+        keyring_service_for("dev.other.build"),
+        "dev.other.build.attach"
+    );
 }
 
 #[test]
@@ -287,6 +405,7 @@ fn an_unavailable_keychain_degrades_to_memory_never_a_file() {
             &BrokenKeychain,
             &memory,
             origin,
+            None,
             session,
             "2026-11-17T00:00:00Z".to_string(),
         ),
@@ -332,15 +451,28 @@ fn the_session_label_names_this_computer() {
     assert!(label.ends_with(')'), "{label}");
 }
 
-/// Serves one canned response per connection and returns the raw requests
-/// (lowercased) once every response was sent.
-pub(crate) fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+/// One request a fake server received.
+pub(crate) struct Request {
+    pub method: String,
+    pub path: String,
+    /// The raw request, original case.
+    pub raw: String,
+    pub body: String,
+}
+
+/// Serves `count` connections, answering each with `handler(origin, request)`.
+/// Returns the raw requests (lowercased) once all were answered.
+pub(crate) fn serve_with(
+    count: usize,
+    mut handler: impl FnMut(&str, &Request) -> String + Send + 'static,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
     let origin = format!("http://{}", listener.local_addr().expect("addr"));
+    let served_origin = origin.clone();
     let handle = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        for response in responses {
+        for _ in 0..count {
             let (mut stream, _) = listener.accept().expect("accept");
             let mut request = Vec::new();
             let mut buffer = [0_u8; 4096];
@@ -365,12 +497,102 @@ pub(crate) fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<
                     break;
                 }
             }
-            stream.write_all(response.as_bytes()).expect("answer");
-            requests.push(String::from_utf8_lossy(&request).to_ascii_lowercase());
+            let raw = String::from_utf8_lossy(&request).to_string();
+            let mut first_line = raw.lines().next().unwrap_or_default().split_whitespace();
+            let parsed = Request {
+                method: first_line.next().unwrap_or_default().to_string(),
+                path: first_line.next().unwrap_or_default().to_string(),
+                body: raw
+                    .split_once("\r\n\r\n")
+                    .map(|(_, body)| body.to_string())
+                    .unwrap_or_default(),
+                raw,
+            };
+            let answer = handler(&served_origin, &parsed);
+            stream.write_all(answer.as_bytes()).expect("answer");
+            requests.push(parsed.raw.to_ascii_lowercase());
         }
         requests
     });
     (origin, handle)
+}
+
+/// Serves one canned response per connection and returns the raw requests
+/// (lowercased) once every response was sent.
+pub(crate) fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let count = responses.len();
+    let mut responses = responses.into_iter();
+    serve_with(count, move |_, _| responses.next().expect("a response"))
+}
+
+/// A server's Ed25519 key, from a one-byte seed.
+pub(crate) fn test_key(seed: u8) -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+}
+
+pub(crate) fn key_text(key: &ed25519_dalek::SigningKey) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    URL_SAFE_NO_PAD.encode(key.verifying_key().to_bytes())
+}
+
+pub(crate) fn server_id(key: &ed25519_dalek::SigningKey) -> String {
+    crate::attach_identity::fingerprint(&key.verifying_key().to_bytes())
+}
+
+/// The identity answer a server gives for the nonce in `request`, signing
+/// the proof text for `signed_origin`.
+pub(crate) fn identity_answer(
+    key: &ed25519_dalek::SigningKey,
+    signed_origin: &str,
+    request: &Request,
+) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::Signer;
+    let body: serde_json::Value = serde_json::from_str(&request.body).expect("nonce body");
+    let nonce = body["nonce"].as_str().expect("nonce");
+    let signature =
+        key.sign(crate::attach_identity::proof_message(signed_origin, nonce).as_bytes());
+    response(
+        "200 OK",
+        "Content-Type: application/json\r\nCache-Control: no-store\r\n",
+        &serde_json::json!({
+            "public_key": key_text(key),
+            "fingerprint": server_id(key),
+            "signature": URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        })
+        .to_string(),
+    )
+}
+
+/// A server that knows its key (`None`: an older server, 404 on the
+/// identity route). Answers the routes attach uses; the redeem answer names
+/// the key.
+pub(crate) fn pdpp_route(
+    origin: &str,
+    request: &Request,
+    key: Option<&ed25519_dalek::SigningKey>,
+) -> String {
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/.well-known/oauth-protected-resource") => pdpp_metadata(),
+        ("POST", "/owner/desktop-pairings/identity") => match key {
+            Some(key) => identity_answer(key, origin, request),
+            None => response("404 Not Found", "", ""),
+        },
+        ("POST", "/owner/desktop-pairings/redeem") => response(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            &serde_json::json!({
+                "object": "desktop_pairing_session",
+                "session": "sess-paired",
+                "expires_at": "2026-12-17T00:00:00.000Z",
+                "server_public_key": key.map(key_text),
+            })
+            .to_string(),
+        ),
+        ("GET", "/owner/session") => response("204 No Content", "", ""),
+        ("POST", "/owner/logout") => response("204 No Content", "", ""),
+        other => panic!("unexpected request {other:?}"),
+    }
 }
 
 pub(crate) fn response(status: &str, headers: &str, body: &str) -> String {
@@ -462,6 +684,7 @@ async fn redeems_a_pairing_code_for_a_session() {
         RedeemedSession {
             session: "sess-abc".to_string(),
             expires_at: Some("2026-12-17T00:00:00.000Z".to_string()),
+            server_public_key: None,
         }
     );
     let request = &server.join().expect("server")[0];
@@ -604,7 +827,7 @@ async fn a_server_that_is_down_or_not_pdpp_gets_no_session() {
 #[tokio::test]
 async fn revoking_signs_the_session_out_as_a_json_client() {
     let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
-    assert!(revoke_session(&origin, "sess-abc").await);
+    assert!(revoke_session(&origin, None, "sess-abc").await);
     let requests = server.join().expect("server");
     assert!(requests[1].starts_with("post /owner/logout "));
     assert!(requests[1].contains("\r\ncookie: pdpp_owner_session=sess-abc\r\n"));
@@ -614,9 +837,9 @@ async fn revoking_signs_the_session_out_as_a_json_client() {
         pdpp_metadata(),
         response("500 Internal Server Error", "", ""),
     ]);
-    assert!(!revoke_session(&origin, "sess-abc").await);
+    assert!(!revoke_session(&origin, None, "sess-abc").await);
     server.join().expect("server");
-    assert!(!revoke_session(&closed_origin(), "sess-abc").await);
+    assert!(!revoke_session(&closed_origin(), None, "sess-abc").await);
 }
 
 #[tokio::test]
@@ -667,7 +890,7 @@ async fn password_login_errors_follow_the_login_function() {
 async fn an_attached_launch_opens_the_console_with_a_valid_session() {
     let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
     assert_eq!(
-        decide_attached_launch(&origin, SessionLookup::Found("sess-abc".to_string())).await,
+        decide_attached_launch(&origin, None, SessionLookup::Found("sess-abc".to_string())).await,
         AttachedLaunch::OpenConsole {
             session: "sess-abc".to_string()
         }
@@ -679,21 +902,26 @@ async fn an_attached_launch_opens_the_console_with_a_valid_session() {
 async fn an_attached_launch_with_an_ended_session_asks_to_pair_again() {
     let (origin, server) = serve(vec![pdpp_metadata(), response("401 Unauthorized", "", "")]);
     assert_eq!(
-        decide_attached_launch(&origin, SessionLookup::Found("sess-abc".to_string())).await,
+        decide_attached_launch(&origin, None, SessionLookup::Found("sess-abc".to_string())).await,
         AttachedLaunch::PairAgain {
             notice: PAIRING_ENDED_NOTICE.to_string()
         }
     );
     server.join().expect("server");
     assert_eq!(
-        decide_attached_launch("https://dc.example.com", SessionLookup::Missing).await,
+        decide_attached_launch("https://dc.example.com", None, SessionLookup::Missing).await,
         AttachedLaunch::PairAgain {
             notice: PAIRING_ENDED_NOTICE.to_string()
         },
         "no request is made without a session"
     );
     assert!(matches!(
-        decide_attached_launch("https://dc.example.com", SessionLookup::KeychainUnavailable).await,
+        decide_attached_launch(
+            "https://dc.example.com",
+            None,
+            SessionLookup::KeychainUnavailable
+        )
+        .await,
         AttachedLaunch::PairAgain { .. }
     ));
 }
@@ -702,12 +930,12 @@ async fn an_attached_launch_with_an_ended_session_asks_to_pair_again() {
 async fn an_unreachable_server_keeps_the_pairing_and_names_the_origin() {
     let origin = closed_origin();
     let AttachedLaunch::Unreachable { message } =
-        decide_attached_launch(&origin, SessionLookup::Found("sess-abc".to_string())).await
+        decide_attached_launch(&origin, None, SessionLookup::Found("sess-abc".to_string())).await
     else {
         panic!("expected Unreachable");
     };
     assert!(message.contains(&origin), "{message}");
-    assert!(message.contains("detach"), "{message}");
+    assert!(message.contains("disconnect"), "{message}");
 }
 
 /// Drive every request that carries a secret against servers that echo the

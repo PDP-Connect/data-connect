@@ -12,6 +12,7 @@ use crate::attach::{
     self, AttachError, Attachment, HttpsPolicy, KeychainSessionStore, SessionLookup, SessionStore,
     StoredIn,
 };
+use crate::attach_identity::{self, ServerIdentity};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,40 +26,32 @@ const ENVIRONMENT_OVERRIDE_MESSAGE: &str = "Set by environment: DATACONNECT_RI_U
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct AttachPrefill {
     pub input: Option<String>,
-    pub code: Option<String>,
     pub notice: Option<String>,
+    /// Set when a start found something other than the pinned server.
+    pub identity_changed: Option<IdentityChanged>,
+}
+
+/// The Server IDs the "identity changed" state shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IdentityChanged {
+    pub pinned_id: Option<String>,
+    /// Shown only when the answering server proved a key of its own.
+    pub answering_id: Option<String>,
 }
 
 #[derive(Default)]
 pub(crate) struct AttachWindowState {
     /// What the next page load shows; `attach_window_view` takes it.
     prefill: Mutex<AttachPrefill>,
-    /// What the open window was last given, kept after the page took it.
-    shown: Mutex<AttachPrefill>,
     busy: AtomicBool,
-}
-
-/// Whether `incoming` may replace what the open window shows. A pairing
-/// link's code is never replaced by a request without one: a second
-/// instance started by the link also re-runs the saved-attachment start,
-/// which asks for this window without a code.
-fn replaces_shown_prefill(shown: &AttachPrefill, incoming: &AttachPrefill) -> bool {
-    shown.code.is_none() || incoming.code.is_some()
 }
 
 /// Open (or reload) the attach window with `prefill`. Never submits.
 pub(crate) fn open_attach_window<R: Runtime>(app: &AppHandle<R>, prefill: AttachPrefill) {
     let open_window = app.get_webview_window(ATTACH_WINDOW_LABEL);
     if let Some(state) = app.try_state::<AttachWindowState>() {
-        if let (Ok(mut slot), Ok(mut shown)) = (state.prefill.lock(), state.shown.lock()) {
-            if open_window.is_some() && !replaces_shown_prefill(&shown, &prefill) {
-                if let Some(window) = open_window {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-                return;
-            }
-            *shown = prefill.clone();
+        if let Ok(mut slot) = state.prefill.lock() {
             *slot = prefill;
         }
     }
@@ -74,8 +67,8 @@ pub(crate) fn open_attach_window<R: Runtime>(app: &AppHandle<R>, prefill: Attach
         ATTACH_WINDOW_LABEL,
         WebviewUrl::App("attach.html".into()),
     )
-    .title("DataConnect - Attach to a server")
-    .inner_size(560.0, 680.0)
+    .title("Connect to a server")
+    .inner_size(560.0, 720.0)
     .min_inner_size(480.0, 520.0)
     .center()
     .resizable(true)
@@ -102,6 +95,8 @@ fn require_attach_window(label: &str) -> Result<(), String> {
 pub(crate) struct AttachedView {
     origin: String,
     host: String,
+    /// The pinned Server ID; absent for a server that cannot prove its identity.
+    server_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,8 +106,8 @@ pub(crate) struct AttachWindowView {
     environment_message: Option<String>,
     attached: Option<AttachedView>,
     input: Option<String>,
-    code: Option<String>,
     notice: Option<String>,
+    identity_changed: Option<IdentityChanged>,
 }
 
 fn app_data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
@@ -153,6 +148,7 @@ pub(crate) fn attach_window_view<R: Runtime>(
         .unwrap_or(None)
         .map(|attachment| AttachedView {
             host: attachment.host(),
+            server_id: attachment.server_id(),
             origin: attachment.origin,
         });
     Ok(AttachWindowView {
@@ -160,8 +156,8 @@ pub(crate) fn attach_window_view<R: Runtime>(
         environment_message: environment_override.then(|| ENVIRONMENT_OVERRIDE_MESSAGE.to_string()),
         attached,
         input: prefill.input,
-        code: prefill.code,
         notice: prefill.notice,
+        identity_changed: prefill.identity_changed,
     })
 }
 
@@ -226,6 +222,91 @@ fn checked_origin(input: &str, trust_plain_http: bool) -> Result<attach::AttachI
     }
 }
 
+/// First contact with a server, before any code or password is sent: it is a
+/// DataConnect server, and it proves the identity it names (or cannot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Contact {
+    Proven(ServerIdentity),
+    /// 404 on the identity route: only the owner password can connect.
+    Unproven,
+}
+
+async fn contact_server(origin: &str, link_key: Option<&str>) -> Result<Contact, AttachError> {
+    attach::verify_pdpp_server(origin).await?;
+    match attach_identity::probe_identity(origin).await {
+        Ok(identity) if link_key.is_some_and(|key| key != identity.public_key) => {
+            Err(AttachError::KeyDiffersFromLink)
+        }
+        Ok(identity) => Ok(Contact::Proven(identity)),
+        // A link names a key, so a server that cannot prove one is not it.
+        Err(AttachError::IdentityUnsupported) if link_key.is_some() => {
+            Err(AttachError::KeyDiffersFromLink)
+        }
+        Err(AttachError::IdentityUnsupported) => Ok(Contact::Unproven),
+        Err(error) => Err(error),
+    }
+}
+
+/// What the confirm step shows.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ServerInspection {
+    origin: String,
+    host: String,
+    /// Absent when the server cannot prove its identity.
+    server_id: Option<String>,
+    /// Passed back with Connect so the connection is made to this key.
+    server_key: Option<String>,
+    /// The pasted link carried a key and it equals the server's.
+    matches_link: bool,
+    code: Option<String>,
+    /// A server saved before at this address now answers with another ID.
+    previously_connected_id: Option<String>,
+    plain_http: bool,
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_server<R: Runtime>(
+    app: AppHandle<R>,
+    webview: tauri::WebviewWindow<R>,
+    input: String,
+    trust_plain_http: bool,
+) -> Result<ServerInspection, String> {
+    require_attach_window(webview.label())?;
+    if environment_override_for(&app) {
+        return Err(ENVIRONMENT_OVERRIDE_MESSAGE.to_string());
+    }
+    let parsed = checked_origin(&input, trust_plain_http)?;
+    let origin = parsed.origin.clone();
+    let state = app
+        .try_state::<AttachWindowState>()
+        .ok_or_else(|| "The attach window state is unavailable.".to_string())?;
+    let _busy = BusyGuard::take(&state.busy)?;
+    let contact = contact_server(&origin, parsed.key.as_deref())
+        .await
+        .map_err(|error| error.message(&origin))?;
+    let identity = match &contact {
+        Contact::Proven(identity) => Some(identity),
+        Contact::Unproven => None,
+    };
+    let previously_connected_id = attach::load_attachment(&app_data_dir(&app)?)
+        .ok()
+        .flatten()
+        .filter(|previous| previous.origin == origin)
+        .and_then(|previous| previous.server_id())
+        .filter(|previous_id| identity.is_none_or(|identity| *previous_id != identity.fingerprint));
+    Ok(ServerInspection {
+        host: Attachment::host_of(&origin),
+        origin,
+        server_id: identity.map(|identity| identity.fingerprint.clone()),
+        server_key: identity.map(|identity| identity.public_key.clone()),
+        matches_link: parsed.key.is_some() && identity.is_some(),
+        code: parsed.code,
+        previously_connected_id,
+        plain_http: attach::https_policy(&parsed.origin, true) == HttpsPolicy::Warn,
+    })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AttachOutcome {
@@ -241,6 +322,7 @@ pub(crate) fn save_pairing(
     keychain: &dyn SessionStore,
     memory: &dyn SessionStore,
     origin: &str,
+    server_key: Option<&str>,
     session: &str,
     paired_at: String,
 ) -> Result<StoredIn, String> {
@@ -256,6 +338,7 @@ pub(crate) fn save_pairing(
         origin: origin.to_string(),
         label: attach::desktop_session_label(),
         paired_at,
+        server_key: server_key.map(ToOwned::to_owned),
     };
     if let Err(error) = attach::save_attachment(data_dir, &attachment) {
         let _ = attach::forget_session(keychain, memory, origin);
@@ -271,7 +354,7 @@ impl<'a> BusyGuard<'a> {
     fn take(flag: &'a AtomicBool) -> Result<Self, String> {
         flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .map(|_| Self(flag))
-            .map_err(|_| "DataConnect is already attaching. Wait for it to finish.".to_string())
+            .map_err(|_| "DataConnect is already connecting. Wait for it to finish.".to_string())
     }
 }
 
@@ -286,23 +369,62 @@ enum Credential {
     OwnerPassword(String),
 }
 
+/// What the owner confirmed in the window before pressing Connect.
+struct Confirmation {
+    /// The Server ID's key shown in the confirm step.
+    server_key: Option<String>,
+    /// The tick-box for a server that cannot prove its identity.
+    accept_unverified: bool,
+}
+
 async fn attach_with<R: Runtime>(
     app: AppHandle<R>,
     input: String,
     credential: Credential,
     trust_plain_http: bool,
+    confirmation: Confirmation,
 ) -> Result<AttachOutcome, String> {
     if environment_override_for(&app) {
         return Err(ENVIRONMENT_OVERRIDE_MESSAGE.to_string());
     }
     let parsed = checked_origin(&input, trust_plain_http)?;
-    let origin = parsed.origin;
+    let origin = parsed.origin.clone();
     let state = app
         .try_state::<AttachWindowState>()
         .ok_or_else(|| "The attach window state is unavailable.".to_string())?;
     let _busy = BusyGuard::take(&state.busy)?;
     let message = |error: AttachError| error.message(&origin);
-    attach::verify_pdpp_server(&origin).await.map_err(message)?;
+    // Identity first: no code or password goes to a server that has not
+    // proven the identity the owner confirmed.
+    let contact = contact_server(&origin, parsed.key.as_deref())
+        .await
+        .map_err(message)?;
+    let pinned_key = match &contact {
+        Contact::Proven(identity) => {
+            if confirmation.server_key.as_deref() != Some(identity.public_key.as_str()) {
+                return Err(
+                    "This server's ID is not the one you confirmed. Check the Server ID and try again."
+                        .to_string(),
+                );
+            }
+            Some(identity.public_key.clone())
+        }
+        Contact::Unproven => {
+            if matches!(credential, Credential::PairingCode(_)) {
+                return Err(format!(
+                    "{} Use the owner password instead.",
+                    AttachError::IdentityUnsupported.message(&origin)
+                ));
+            }
+            if !confirmation.accept_unverified {
+                return Err(
+                    "This server cannot prove its identity. Tick the box to connect with the owner password anyway."
+                        .to_string(),
+                );
+            }
+            None
+        }
+    };
     let session = match credential {
         Credential::PairingCode(code) => {
             let code = if code.trim().is_empty() {
@@ -312,10 +434,13 @@ async fn attach_with<R: Runtime>(
             } else {
                 attach::normalize_pairing_code(&code)?
             };
-            attach::redeem_pairing(&origin, &code, &attach::desktop_session_label())
+            let redeemed = attach::redeem_pairing(&origin, &code, &attach::desktop_session_label())
                 .await
-                .map_err(message)?
-                .session
+                .map_err(message)?;
+            if redeemed.server_public_key != pinned_key {
+                return Err(message(AttachError::KeyChangedWhileConnecting));
+            }
+            redeemed.session
         }
         Credential::OwnerPassword(password) => {
             if password.is_empty() {
@@ -328,8 +453,9 @@ async fn attach_with<R: Runtime>(
     };
     let data_dir = app_data_dir(&app)?;
     let memory = attach::process_memory_store();
-    // A switch ends the old pairing at its server (best effort) before
-    // `save_pairing` deletes the local copy.
+    // A switch ends the old pairing at its server (best effort, and only when
+    // that server proves its pinned identity) before `save_pairing` deletes
+    // the local copy.
     let previous = attach::load_attachment(&data_dir)
         .ok()
         .flatten()
@@ -338,7 +464,9 @@ async fn attach_with<R: Runtime>(
         if let SessionLookup::Found(old) =
             attach::load_session(&KeychainSessionStore, memory, &previous.origin)
         {
-            let confirmed = attach::revoke_session(&previous.origin, &old).await;
+            let confirmed =
+                attach::revoke_session(&previous.origin, previous.server_key.as_deref(), &old)
+                    .await;
             log::info!(
                 "Switching servers; {} confirmed the old session ended: {confirmed}",
                 previous.origin
@@ -350,13 +478,14 @@ async fn attach_with<R: Runtime>(
         &KeychainSessionStore,
         memory,
         &origin,
+        pinned_key.as_deref(),
         &session,
         chrono::Utc::now().to_rfc3339(),
     )?;
     if let Some(previous) = &previous {
         forget_console_session_cookie(&app, &previous.origin).await;
     }
-    log::info!("Attached to {origin}; restarting into the attached state");
+    log::info!("Connected to {origin}; restarting into the connected state");
     let (notice, handoff) = match stored {
         StoredIn::Keychain => (None, None),
         StoredIn::MemoryOnly => (Some(attach::MEMORY_ONLY_NOTICE.to_string()), Some(session)),
@@ -372,9 +501,20 @@ pub(crate) async fn attach_with_pairing_code<R: Runtime>(
     input: String,
     code: String,
     trust_plain_http: bool,
+    confirmed_key: Option<String>,
 ) -> Result<AttachOutcome, String> {
     require_attach_window(webview.label())?;
-    attach_with(app, input, Credential::PairingCode(code), trust_plain_http).await
+    attach_with(
+        app,
+        input,
+        Credential::PairingCode(code),
+        trust_plain_http,
+        Confirmation {
+            server_key: confirmed_key,
+            accept_unverified: false,
+        },
+    )
+    .await
 }
 
 /// Fallback for servers without pairing. The password is used once for
@@ -386,6 +526,8 @@ pub(crate) async fn attach_with_owner_password<R: Runtime>(
     input: String,
     password: String,
     trust_plain_http: bool,
+    confirmed_key: Option<String>,
+    accept_unverified: Option<bool>,
 ) -> Result<AttachOutcome, String> {
     require_attach_window(webview.label())?;
     attach_with(
@@ -393,6 +535,10 @@ pub(crate) async fn attach_with_owner_password<R: Runtime>(
         input,
         Credential::OwnerPassword(password),
         trust_plain_http,
+        Confirmation {
+            server_key: confirmed_key,
+            accept_unverified: accept_unverified.unwrap_or(false),
+        },
     )
     .await
 }
@@ -423,10 +569,10 @@ impl DetachReport {
     pub(crate) fn notice(&self) -> String {
         let host = self.attachment.host();
         let mut notice = if self.server_confirmed {
-            format!("Detached from {host}. The server ended this computer's session.")
+            format!("Disconnected from {host}. The server ended this computer's session.")
         } else {
             format!(
-                "Detached from {host}. The server did not confirm that the session ended; you can revoke it in the server's Settings."
+                "Disconnected from {host}. The server did not confirm that the session ended; you can revoke it in the server's Settings."
             )
         };
         if self.keychain_error.is_some() {
@@ -448,7 +594,14 @@ pub(crate) async fn detach_saved_attachment(
     let attachment = attach::load_attachment(data_dir)?
         .ok_or_else(|| "DataConnect is not attached to a server.".to_string())?;
     let server_confirmed = match attach::load_session(keychain, memory, &attachment.origin) {
-        SessionLookup::Found(session) => attach::revoke_session(&attachment.origin, &session).await,
+        SessionLookup::Found(session) => {
+            attach::revoke_session(
+                &attachment.origin,
+                attachment.server_key.as_deref(),
+                &session,
+            )
+            .await
+        }
         SessionLookup::Missing | SessionLookup::KeychainUnavailable => false,
     };
     let keychain_error = attach::forget_session(keychain, memory, &attachment.origin).err();
@@ -460,7 +613,7 @@ pub(crate) async fn detach_saved_attachment(
     })
 }
 
-/// Detach, drop the remote session cookie from the console webview, tell
+/// Disconnect, drop the remote session cookie from the console webview, tell
 /// the owner whether the server confirmed, and restart on this computer.
 pub(crate) async fn detach_and_restart<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     let report = detach_saved_attachment(
@@ -472,7 +625,7 @@ pub(crate) async fn detach_and_restart<R: Runtime>(app: &AppHandle<R>) -> Result
     forget_console_session_cookie(app, &report.attachment.origin).await;
     let notice = report.notice();
     log::info!("{notice}");
-    show_notification(app, "DataConnect detached", &notice);
+    show_notification(app, "DataConnect disconnected", &notice);
     request_relaunch(app, None);
     Ok(notice)
 }
@@ -521,9 +674,8 @@ struct Relaunch {
 static RELAUNCH: Mutex<Option<Relaunch>> = Mutex::new(None);
 
 /// Restart into the new attach state through the normal exit path. Unlike
-/// `AppHandle::restart`, the new process does not get `vana://` arguments
-/// (a used pairing link would reopen the window) and can receive a
-/// memory-only session in its environment, never on disk or argv.
+/// `AppHandle::restart`, the new process can receive a memory-only session
+/// in its environment, never on disk or argv.
 pub(crate) fn request_relaunch<R: Runtime>(app: &AppHandle<R>, session_handoff: Option<String>) {
     #[cfg(test)]
     if let Some(recorder) = app.try_state::<RelaunchRecorderForTest>() {
@@ -552,24 +704,13 @@ pub(crate) fn relaunch_if_requested() {
         return;
     };
     let mut command = std::process::Command::new(&relaunch.binary);
-    command.args(relaunch_args(std::env::args_os().skip(1)));
+    command.args(std::env::args_os().skip(1));
     if let Some(session) = relaunch.session_handoff {
         command.env(attach::SESSION_HANDOFF_ENV, session);
     }
     if let Err(error) = command.spawn() {
         log::error!("Failed to restart DataConnect: {error}");
     }
-}
-
-/// The current arguments without deep links.
-pub(crate) fn relaunch_args(
-    args: impl Iterator<Item = std::ffi::OsString>,
-) -> Vec<std::ffi::OsString> {
-    args.filter(|arg| {
-        !arg.to_str()
-            .is_some_and(|arg| arg.len() >= 5 && arg[..5].eq_ignore_ascii_case("vana:"))
-    })
-    .collect()
 }
 
 #[cfg(test)]

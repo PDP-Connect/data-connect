@@ -135,7 +135,7 @@ enum UnifiedStatus {
     // than reuse the generic "something went wrong, nothing to do" label.
     NeedsRecovery,
     // Attached, and the server ended this computer's session: the attach
-    // window is open with "Pair again". Never retried on its own.
+    // window is open with "Connect again". Never retried on its own.
     NeedsPairing,
 }
 
@@ -149,7 +149,7 @@ impl UnifiedStatus {
             Self::Stopped => "Status: Stopped",
             Self::Error => "Status: Error",
             Self::NeedsRecovery => "Status: Needs recovery code",
-            Self::NeedsPairing => "Status: Pair again",
+            Self::NeedsPairing => "Status: Connect again",
         }
     }
 }
@@ -575,22 +575,22 @@ where
     let quitting = status == UnifiedStatus::Quitting;
     let scope_label = match scope {
         TrayScope::Local => "This computer".to_string(),
-        TrayScope::Attached { host } => format!("Attached to {host}"),
-        TrayScope::Environment { host } => format!("Attached to {host} (set by environment)"),
+        TrayScope::Attached { host } => format!("Connected to {host}"),
+        TrayScope::Environment { host } => format!("Connected to {host} (set by environment)"),
     };
     let scope_item = MenuItem::with_id(manager, "server-scope", scope_label, false, None::<&str>)?;
     let server_item = match scope {
         TrayScope::Local => Some(MenuItem::with_id(
             manager,
             "attach-server",
-            "Attach to a server...",
+            "Connect to a server...",
             !quitting,
             None::<&str>,
         )?),
         TrayScope::Attached { host } => Some(MenuItem::with_id(
             manager,
             "detach-server",
-            format!("Detach from {host}"),
+            format!("Disconnect from {host}"),
             !quitting,
             None::<&str>,
         )?),
@@ -635,6 +635,7 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     app.manage(crate::attach_window::AttachWindowState::default());
     // Before the tray and the bootstrap read it: which server this process
     // uses is fixed for its lifetime.
+    crate::attach::init_keyring_service(&app.config().identifier);
     crate::attach::init_saved_attachment(&app.path().app_data_dir()?);
     let menu = build_tray_menu(app, UnifiedStatus::Starting)?;
     let mut tray_builder = TrayIconBuilder::with_id(TRAY_ICON_ID)
@@ -691,60 +692,21 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Unified mode does not build the legacy window, which is the only consumer
-/// of most `vana://` links. `vana://attach` opens the attach window,
-/// prefilled and never submitted. Every other link is recorded so a dropped
-/// link shows in the log instead of vanishing. Whether unified mode should
-/// serve those links is an open product decision; this boundary only
-/// reports.
+/// of `vana://` links. Every link is recorded so a dropped link shows in the
+/// log instead of vanishing. Whether unified mode should serve those links
+/// is an open product decision; this boundary only reports.
 fn report_unhandled_deep_links(app: &tauri::App) {
     use tauri_plugin_deep_link::DeepLinkExt;
-    let handle = app.handle().clone();
     if let Ok(Some(urls)) = app.deep_link().get_current() {
         for url in &urls {
-            handle_deep_link(&handle, url);
+            log::warn!("{}", unhandled_deep_link_notice(url));
         }
     }
     app.deep_link().on_open_url(move |event| {
         for url in &event.urls() {
-            handle_deep_link(&handle, url);
+            log::warn!("{}", unhandled_deep_link_notice(url));
         }
     });
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum DeepLinkRoute {
-    Attach(crate::attach_window::AttachPrefill),
-    Unhandled,
-}
-
-fn route_deep_link(url: &tauri::Url) -> DeepLinkRoute {
-    use crate::attach_window::AttachPrefill;
-    if !url.scheme().eq_ignore_ascii_case("vana") || url.host_str() != Some("attach") {
-        return DeepLinkRoute::Unhandled;
-    }
-    DeepLinkRoute::Attach(match crate::attach::parse_attach_input(url.as_str()) {
-        Ok(input) => AttachPrefill {
-            input: Some(input.origin),
-            code: input.code,
-            notice: None,
-        },
-        Err(error) => AttachPrefill {
-            input: None,
-            code: None,
-            notice: Some(error),
-        },
-    })
-}
-
-fn handle_deep_link(app: &AppHandle, url: &tauri::Url) {
-    match route_deep_link(url) {
-        DeepLinkRoute::Attach(prefill) => {
-            // Never log the link: it carries the pairing code.
-            log::info!("Opening the attach window from a pairing link");
-            crate::attach_window::open_attach_window(app, prefill);
-        }
-        DeepLinkRoute::Unhandled => log::warn!("{}", unhandled_deep_link_notice(url)),
-    }
 }
 
 /// Log line for an unhandled deep link. Grant links carry a session secret
@@ -2890,15 +2852,21 @@ enum AttachedStartup {
         prefill: crate::attach_window::AttachPrefill,
         forget_session: bool,
     },
-    /// Keep the pairing; show the error and Detach.
+    /// Keep the pairing; show the error and Disconnect.
     Unreachable {
         prefill: crate::attach_window::AttachPrefill,
         error: String,
+    },
+    /// Something other than the pinned server answered and nothing was sent.
+    /// Keeps the pairing record and the stored session.
+    IdentityChanged {
+        prefill: crate::attach_window::AttachPrefill,
     },
 }
 
 fn attached_startup(
     origin: &str,
+    pinned_id: Option<String>,
     launch: crate::attach::AttachedLaunch,
     had_session: bool,
 ) -> AttachedStartup {
@@ -2906,8 +2874,8 @@ fn attached_startup(
     use crate::attach_window::AttachPrefill;
     let prefill = |notice: String| AttachPrefill {
         input: Some(origin.to_string()),
-        code: None,
         notice: Some(notice),
+        identity_changed: None,
     };
     match launch {
         AttachedLaunch::OpenConsole { session } => AttachedStartup::OpenConsole { session },
@@ -2919,6 +2887,16 @@ fn attached_startup(
             prefill: prefill(message.clone()),
             error: message,
         },
+        AttachedLaunch::IdentityChanged { answering } => AttachedStartup::IdentityChanged {
+            prefill: AttachPrefill {
+                input: Some(origin.to_string()),
+                notice: None,
+                identity_changed: Some(crate::attach_window::IdentityChanged {
+                    pinned_id,
+                    answering_id: answering,
+                }),
+            },
+        },
     }
 }
 
@@ -2926,19 +2904,22 @@ fn attached_startup(
 /// the previous process handed over, check the stored session, and delete
 /// it when the server ended it.
 async fn resolve_attached_startup(
-    origin: &str,
+    attachment: &crate::attach::Attachment,
     keychain: &dyn crate::attach::SessionStore,
     memory: &dyn crate::attach::SessionStore,
     handed_off: Option<String>,
 ) -> AttachedStartup {
     use crate::attach::SessionLookup;
+    let origin = attachment.origin.as_str();
     if let Some(session) = handed_off {
         let _ = memory.save(origin, &session);
     }
     let lookup = crate::attach::load_session(keychain, memory, origin);
     let had_session = matches!(lookup, SessionLookup::Found(_));
-    let launch = crate::attach::decide_attached_launch(origin, lookup).await;
-    let startup = attached_startup(origin, launch, had_session);
+    let launch =
+        crate::attach::decide_attached_launch(origin, attachment.server_key.as_deref(), lookup)
+            .await;
+    let startup = attached_startup(origin, attachment.server_id(), launch, had_session);
     if let AttachedStartup::PairAgain {
         forget_session: true,
         ..
@@ -2959,14 +2940,14 @@ async fn open_saved_attachment(
     should_show: bool,
     preserved_path: Option<String>,
 ) -> Result<(), String> {
-    let origin = attachment.origin;
     let startup = resolve_attached_startup(
-        &origin,
+        &attachment,
         &crate::attach::KeychainSessionStore,
         crate::attach::process_memory_store(),
         crate::attach::take_handed_off_session(),
     )
     .await;
+    let origin = attachment.origin;
     match startup {
         AttachedStartup::OpenConsole { session } => {
             finish_bootstrap(
@@ -2990,6 +2971,14 @@ async fn open_saved_attachment(
             if forget_session {
                 crate::attach_window::forget_console_session_cookie(app, &origin).await;
             }
+            set_status(app, UnifiedStatus::NeedsPairing);
+            crate::attach_window::open_attach_window(app, prefill);
+            Ok(())
+        }
+        AttachedStartup::IdentityChanged { prefill } => {
+            log::error!("The server at {origin} did not prove its pinned identity; sent nothing");
+            // The console cookie of this server is not trusted either.
+            crate::attach_window::forget_console_session_cookie(app, &origin).await;
             set_status(app, UnifiedStatus::NeedsPairing);
             crate::attach_window::open_attach_window(app, prefill);
             Ok(())
@@ -9301,7 +9290,7 @@ setInterval(() => {}, 1000);
         );
         assert_eq!(
             menu_text(&menu, "attach-server"),
-            Some(("Attach to a server...".to_string(), true))
+            Some(("Connect to a server...".to_string(), true))
         );
         assert_eq!(menu_text(&menu, "detach-server"), None);
     }
@@ -9315,11 +9304,11 @@ setInterval(() => {}, 1000);
         let menu = build_tray_menu_for(&app, UnifiedStatus::Ready, &scope).expect("menu");
         assert_eq!(
             menu_text(&menu, "server-scope"),
-            Some(("Attached to dc.example.com".to_string(), false))
+            Some(("Connected to dc.example.com".to_string(), false))
         );
         assert_eq!(
             menu_text(&menu, "detach-server"),
-            Some(("Detach from dc.example.com".to_string(), true))
+            Some(("Disconnect from dc.example.com".to_string(), true))
         );
         assert_eq!(menu_text(&menu, "attach-server"), None);
         let quitting = build_tray_menu_for(&app, UnifiedStatus::Quitting, &scope).expect("menu");
@@ -9339,7 +9328,7 @@ setInterval(() => {}, 1000);
         assert_eq!(
             menu_text(&menu, "server-scope"),
             Some((
-                "Attached to 127.0.0.1 (set by environment)".to_string(),
+                "Connected to 127.0.0.1 (set by environment)".to_string(),
                 false
             ))
         );
@@ -9370,6 +9359,7 @@ setInterval(() => {}, 1000);
                     origin: "https://dc.example.com".to_string(),
                     label: "l".to_string(),
                     paired_at: "t".to_string(),
+                    server_key: None,
                 }),
                 None
             ),
@@ -9395,6 +9385,7 @@ setInterval(() => {}, 1000);
             origin: "https://dc.example.com".to_string(),
             label: "l".to_string(),
             paired_at: "t".to_string(),
+            server_key: None,
         });
         assert_eq!(
             console_url_source(Some("http://127.0.0.1:9/x?y".to_string()), &saved),
@@ -9412,54 +9403,10 @@ setInterval(() => {}, 1000);
     }
 
     #[test]
-    fn an_attach_link_opens_the_prefilled_window_and_other_links_stay_unhandled() {
-        use crate::attach_window::AttachPrefill;
-        let link: tauri::Url =
-            "vana://attach?server=https%3A%2F%2Fdc.example.com&code=abcd-efgh-jkmn"
-                .parse()
-                .expect("link");
-        assert_eq!(
-            route_deep_link(&link),
-            DeepLinkRoute::Attach(AttachPrefill {
-                input: Some("https://dc.example.com".to_string()),
-                code: Some("ABCDEFGHJKMN".to_string()),
-                notice: None,
-            })
-        );
-        let no_code: tauri::Url = "vana://attach?server=http%3A%2F%2Fnas%3A4310"
-            .parse()
-            .expect("link");
-        assert_eq!(
-            route_deep_link(&no_code),
-            DeepLinkRoute::Attach(AttachPrefill {
-                input: Some("http://nas:4310".to_string()),
-                code: None,
-                notice: None,
-            })
-        );
-        let broken: tauri::Url = "vana://attach?code=ABCD".parse().expect("link");
-        match route_deep_link(&broken) {
-            DeepLinkRoute::Attach(prefill) => {
-                assert_eq!(prefill.input, None);
-                assert_eq!(prefill.code, None, "a code without a server is not kept");
-                assert!(prefill.notice.is_some());
-            }
-            other => panic!("expected the attach window, got {other:?}"),
-        }
-        for other in [
-            "vana://connect?sessionId=s&secret=x",
-            "vana://attachments",
-            "https://attach.example.com/",
-        ] {
-            let url: tauri::Url = other.parse().expect("url");
-            assert_eq!(route_deep_link(&url), DeepLinkRoute::Unhandled, "{other}");
-        }
-    }
-
-    #[test]
     fn a_valid_session_opens_the_console() {
         let startup = attached_startup(
             "https://dc.example.com",
+            None,
             crate::attach::AttachedLaunch::OpenConsole {
                 session: "sess".to_string(),
             },
@@ -9480,19 +9427,19 @@ setInterval(() => {}, 1000);
             notice: crate::attach::PAIRING_ENDED_NOTICE.to_string(),
         };
         assert_eq!(
-            attached_startup("https://dc.example.com", launch.clone(), true),
+            attached_startup("https://dc.example.com", None, launch.clone(), true),
             AttachedStartup::PairAgain {
                 prefill: AttachPrefill {
                     input: Some("https://dc.example.com".to_string()),
-                    code: None,
                     notice: Some(crate::attach::PAIRING_ENDED_NOTICE.to_string()),
+                    identity_changed: None,
                 },
                 forget_session: true,
             }
         );
         // No session was read (missing, or the keychain is locked): keep
         // whatever the keychain holds.
-        match attached_startup("https://dc.example.com", launch, false) {
+        match attached_startup("https://dc.example.com", None, launch, false) {
             AttachedStartup::PairAgain { forget_session, .. } => assert!(!forget_session),
             other => panic!("expected pair again, got {other:?}"),
         }
@@ -9503,6 +9450,7 @@ setInterval(() => {}, 1000);
         let message = crate::attach::AttachError::Unreachable.message("https://dc.example.com");
         let startup = attached_startup(
             "https://dc.example.com",
+            None,
             crate::attach::AttachedLaunch::Unreachable {
                 message: message.clone(),
             },
@@ -9516,6 +9464,124 @@ setInterval(() => {}, 1000);
             }
             other => panic!("expected unreachable, got {other:?}"),
         }
+    }
+
+    fn unpinned(origin: &str) -> crate::attach::Attachment {
+        crate::attach::Attachment {
+            origin: origin.to_string(),
+            label: "DataConnect desktop (test)".to_string(),
+            paired_at: "2026-11-17T00:00:00Z".to_string(),
+            server_key: None,
+        }
+    }
+
+    fn pinned(origin: &str, key: &ed25519_dalek::SigningKey) -> crate::attach::Attachment {
+        crate::attach::Attachment {
+            server_key: Some(crate::attach::tests::key_text(key)),
+            ..unpinned(origin)
+        }
+    }
+
+    /// A pinned start proves the server first: the stored session is sent
+    /// only after a valid signature, and never to a server that fails it.
+    #[tokio::test]
+    async fn a_pinned_start_verifies_the_server_before_sending_the_session() {
+        use crate::attach::tests::{pdpp_route, serve_with, test_key};
+        let key = test_key(31);
+        let signer = key.clone();
+        let (origin, server) = serve_with(2, move |origin, request| {
+            pdpp_route(origin, request, Some(&signer))
+        });
+        let keychain = keychain_with(&origin, "sess-pinned");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup =
+            resolve_attached_startup(&pinned(&origin, &key), &keychain, &memory, None).await;
+        let requests = server.join().expect("server");
+        assert_eq!(
+            startup,
+            AttachedStartup::OpenConsole {
+                session: "sess-pinned".to_string()
+            }
+        );
+        let identity_at = requests
+            .iter()
+            .position(|request| request.starts_with("post /owner/desktop-pairings/identity "))
+            .expect("identity probe");
+        let first_session_at = requests
+            .iter()
+            .position(|request| request.contains("pdpp_owner_session=sess-pinned"))
+            .expect("session check");
+        assert!(identity_at < first_session_at, "{requests:?}");
+    }
+
+    #[tokio::test]
+    async fn a_changed_identity_sends_nothing_and_keeps_the_pairing() {
+        use crate::attach::tests::{pdpp_route, response, serve_with, server_id, test_key};
+        use crate::attach::SessionStore;
+        let pinned_key = test_key(32);
+        let other = test_key(33);
+        // Another key answers; a missing route; a broken proof.
+        type Handler = Box<dyn Fn(&str, &crate::attach::tests::Request) -> String + Send>;
+        let signer = other.clone();
+        let cases: Vec<(Handler, Option<String>)> = vec![
+            (
+                Box::new(move |origin, request| pdpp_route(origin, request, Some(&signer))),
+                Some(server_id(&other)),
+            ),
+            (
+                Box::new(|origin, request| pdpp_route(origin, request, None)),
+                None,
+            ),
+            (
+                Box::new(|_, _| response("200 OK", "Content-Type: application/json\r\n", "{}")),
+                None,
+            ),
+        ];
+        for (handler, answering) in cases {
+            let (origin, server) = serve_with(1, handler);
+            let keychain = keychain_with(&origin, "sess-kept");
+            let memory = crate::attach::MemorySessionStore::default();
+            let startup =
+                resolve_attached_startup(&pinned(&origin, &pinned_key), &keychain, &memory, None)
+                    .await;
+            let requests = server.join().expect("server");
+            assert_eq!(requests.len(), 1, "only the identity probe: {requests:?}");
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !request.contains("pdpp_owner_session")),
+                "{requests:?}"
+            );
+            match startup {
+                AttachedStartup::IdentityChanged { prefill } => {
+                    let changed = prefill.identity_changed.expect("identity state");
+                    assert_eq!(changed.answering_id, answering);
+                    assert_eq!(prefill.input.as_deref(), Some(origin.as_str()));
+                }
+                other => panic!("expected IdentityChanged, got {other:?}"),
+            }
+            assert_eq!(
+                keychain.load(&origin),
+                Ok(Some("sess-kept".to_string())),
+                "the pairing record and session stay"
+            );
+        }
+    }
+
+    /// A pinned server that cannot be reached keeps the pairing and sends nothing.
+    #[tokio::test]
+    async fn a_pinned_start_with_an_unreachable_server_keeps_the_pairing() {
+        use crate::attach::tests::{closed_origin, test_key};
+        let origin = closed_origin();
+        let keychain = keychain_with(&origin, "sess-kept");
+        let memory = crate::attach::MemorySessionStore::default();
+        let startup =
+            resolve_attached_startup(&pinned(&origin, &test_key(34)), &keychain, &memory, None)
+                .await;
+        assert!(
+            matches!(startup, AttachedStartup::Unreachable { .. }),
+            "{startup:?}"
+        );
     }
 
     /// A stored session the startup reads, as a keychain that works.
@@ -9533,7 +9599,7 @@ setInterval(() => {}, 1000);
         let (origin, server) = serve(vec![pdpp_metadata(), response("401 Unauthorized", "", "")]);
         let keychain = keychain_with(&origin, "sess-ended");
         let memory = crate::attach::MemorySessionStore::default();
-        let startup = resolve_attached_startup(&origin, &keychain, &memory, None).await;
+        let startup = resolve_attached_startup(&unpinned(&origin), &keychain, &memory, None).await;
         server.join().expect("server");
         assert!(
             matches!(
@@ -9560,7 +9626,8 @@ setInterval(() => {}, 1000);
         for origin in [origin, closed] {
             let keychain = keychain_with(&origin, "sess-kept");
             let memory = crate::attach::MemorySessionStore::default();
-            let startup = resolve_attached_startup(&origin, &keychain, &memory, None).await;
+            let startup =
+                resolve_attached_startup(&unpinned(&origin), &keychain, &memory, None).await;
             assert!(
                 matches!(startup, AttachedStartup::Unreachable { .. }),
                 "{origin}: {startup:?}"
@@ -9575,7 +9642,7 @@ setInterval(() => {}, 1000);
     async fn an_attached_start_with_a_locked_keychain_deletes_nothing() {
         let memory = crate::attach::MemorySessionStore::default();
         let startup = resolve_attached_startup(
-            "https://dc.example.com",
+            &unpinned("https://dc.example.com"),
             &crate::attach::tests::BrokenKeychain,
             &memory,
             None,
@@ -9609,7 +9676,9 @@ setInterval(() => {}, 1000);
         let handed_off = crate::attach::take_handed_off_session();
         assert_eq!(crate::attach::take_handed_off_session(), None, "taken once");
         let memory = crate::attach::MemorySessionStore::default();
-        let startup = resolve_attached_startup(&origin, &BrokenKeychain, &memory, handed_off).await;
+        let startup =
+            resolve_attached_startup(&unpinned(&origin), &BrokenKeychain, &memory, handed_off)
+                .await;
         let requests = server.join().expect("server");
         assert_eq!(
             startup,

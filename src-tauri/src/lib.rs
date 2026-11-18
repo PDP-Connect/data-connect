@@ -6,6 +6,7 @@ mod webview_cookies;
 mod atomic_write;
 #[cfg(desktop)]
 mod attach;
+mod attach_identity;
 #[cfg(desktop)]
 mod attach_window;
 #[cfg(desktop)]
@@ -371,6 +372,7 @@ const RUNTIME_GENERIC_COMMANDS: &[&str] = &[
     "set_desktop_owner_password",
     "attach_window_view",
     "preview_attach_target",
+    "inspect_server",
     "attach_with_pairing_code",
     "attach_with_owner_password",
     "detach_from_server",
@@ -387,6 +389,8 @@ pub(crate) fn runtime_generic_invoke_handler<R: Runtime>(
         attach_window::attach_window_view,
         #[cfg(desktop)]
         attach_window::preview_attach_target,
+        #[cfg(desktop)]
+        attach_window::inspect_server,
         #[cfg(desktop)]
         attach_window::attach_with_pairing_code,
         #[cfg(desktop)]

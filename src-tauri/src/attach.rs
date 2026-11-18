@@ -16,9 +16,11 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 pub(crate) const ATTACH_FILE: &str = "attach.json";
-/// Keychain service for attach sessions. Distinct from the managed stack's
-/// `com.vana.dataconnect` entries, so detaching never touches them.
-pub(crate) const SESSION_KEYRING_SERVICE: &str = "com.vana.dataconnect.attach";
+/// Keychain service suffix for attach sessions: `<app identifier>.attach`,
+/// so a build with another identifier uses another keychain namespace.
+/// Distinct from the managed stack's entries, so detaching never touches them.
+const SESSION_KEYRING_SUFFIX: &str = "attach";
+const DEFAULT_APP_IDENTIFIER: &str = "dev.dataconnect";
 pub(crate) const OWNER_SESSION_COOKIE: &str = "pdpp_owner_session";
 /// Carries a memory-only session across the attach restart. Read and
 /// removed once by `take_session_handoff_from_env` before any thread starts.
@@ -39,23 +41,24 @@ const PASSWORD_LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
 const PASSWORD_LOGIN_TIMEOUT: Duration = Duration::from_secs(1);
 const PASSWORD_LOGIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// What the owner pasted, reduced to a server origin and an optional code.
+/// What the owner pasted, reduced to a server origin, an optional pairing
+/// code and an optional server key (from a pairing link's fragment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttachInput {
     pub origin: String,
     pub code: Option<String>,
+    /// The 32-byte Ed25519 public key, base64url without padding.
+    pub key: Option<String>,
 }
 
-/// Accepts `vana://attach?server=<origin>&code=<code>`, an `http(s)` URL,
-/// or a bare `host[:port]`. A bare loopback host gets `http://`, any other
-/// bare host `https://`. Path, query and fragment are dropped.
+/// Accepts a bare `host[:port]`, an `http(s)` URL, or a pairing link
+/// (`<origin>/settings#code=<code>&key=<key>`). A bare loopback host gets
+/// `http://`, any other bare host `https://`. Path and query are ignored;
+/// only the fragment's `code` and `key` are read.
 pub(crate) fn parse_attach_input(input: &str) -> Result<AttachInput, String> {
     let input = input.trim();
     if input.is_empty() {
         return Err("Enter the server address or paste the pairing link.".to_string());
-    }
-    if input.len() > 5 && input[..5].eq_ignore_ascii_case("vana:") {
-        return parse_attach_link(input);
     }
     let candidate = if input.contains("://") {
         input.to_string()
@@ -68,38 +71,27 @@ pub(crate) fn parse_attach_input(input: &str) -> Result<AttachInput, String> {
             _ => https,
         }
     };
-    Ok(AttachInput {
-        origin: normalize_origin(&candidate)?,
-        code: None,
-    })
-}
-
-fn parse_attach_link(input: &str) -> Result<AttachInput, String> {
-    let url = url::Url::parse(input).map_err(|_| "This pairing link is not valid.".to_string())?;
-    if !url.scheme().eq_ignore_ascii_case("vana")
-        || url.host_str() != Some("attach")
-        || !matches!(url.path(), "" | "/")
+    let origin = normalize_origin(&candidate)?;
+    let (mut code, mut key) = (None, None);
+    if let Some(fragment) = url::Url::parse(&candidate)
+        .ok()
+        .and_then(|url| url.fragment().map(ToOwned::to_owned))
     {
-        return Err("This is not a DataConnect pairing link.".to_string());
-    }
-    let mut server = None;
-    let mut code = None;
-    for (name, value) in url.query_pairs() {
-        match name.as_ref() {
-            "server" => server = Some(value.into_owned()),
-            "code" => code = Some(value.into_owned()),
-            _ => {}
+        for (name, value) in url::form_urlencoded::parse(fragment.as_bytes()) {
+            match name.as_ref() {
+                "code" if !value.trim().is_empty() => {
+                    code = Some(normalize_pairing_code(&value)?);
+                }
+                "key" if !value.trim().is_empty() => {
+                    key = Some(crate::attach_identity::identity_of(&value)
+                        .map_err(|_| "The pairing link has an invalid server key. Copy it again from the server's Settings.".to_string())?
+                        .public_key);
+                }
+                _ => {}
+            }
         }
     }
-    let server = server
-        .filter(|server| !server.trim().is_empty())
-        .ok_or_else(|| "The pairing link names no server.".to_string())?;
-    let origin = normalize_origin(server.trim())?;
-    let code = match code.filter(|code| !code.trim().is_empty()) {
-        Some(code) => Some(normalize_pairing_code(&code)?),
-        None => None,
-    };
-    Ok(AttachInput { origin, code })
+    Ok(AttachInput { origin, code, key })
 }
 
 /// `scheme://host[:port]` of an `http(s)` URL, without a default port.
@@ -178,11 +170,19 @@ pub(crate) struct Attachment {
     pub origin: String,
     pub label: String,
     pub paired_at: String,
+    /// The server's pinned public key (base64url). Absent for a server that
+    /// cannot prove its identity (connected with the owner password).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_key: Option<String>,
 }
 
 impl Attachment {
     pub(crate) fn host(&self) -> String {
-        url::Url::parse(&self.origin)
+        Self::host_of(&self.origin)
+    }
+
+    pub(crate) fn host_of(origin: &str) -> String {
+        url::Url::parse(origin)
             .ok()
             .and_then(|url| {
                 url.host_str().map(|host| match url.port() {
@@ -190,7 +190,15 @@ impl Attachment {
                     None => host.to_string(),
                 })
             })
-            .unwrap_or_else(|| self.origin.clone())
+            .unwrap_or_else(|| origin.to_string())
+    }
+
+    /// The pinned Server ID, when the attachment is pinned.
+    pub(crate) fn server_id(&self) -> Option<String> {
+        self.server_key
+            .as_deref()
+            .and_then(|key| crate::attach_identity::identity_of(key).ok())
+            .map(|identity| identity.fingerprint)
     }
 }
 
@@ -209,6 +217,13 @@ pub(crate) fn load_attachment(app_data_dir: &Path) -> Result<Option<Attachment>,
         .map_err(|error| format!("{ATTACH_FILE} is not valid: {error}"))?;
     if normalize_origin(&attachment.origin).as_deref() != Ok(attachment.origin.as_str()) {
         return Err(format!("{ATTACH_FILE} names an invalid server origin"));
+    }
+    if let Some(key) = &attachment.server_key {
+        if crate::attach_identity::identity_of(key).map(|identity| identity.public_key)
+            != Ok(key.clone())
+        {
+            return Err(format!("{ATTACH_FILE} names an invalid server key"));
+        }
     }
     Ok(Some(attachment))
 }
@@ -285,7 +300,25 @@ pub(crate) trait SessionStore: Send + Sync {
     fn delete(&self, origin: &str) -> Result<(), String>;
 }
 
-/// OS keychain, one entry per origin under `SESSION_KEYRING_SERVICE`.
+static KEYRING_SERVICE: OnceLock<String> = OnceLock::new();
+
+/// Name the keychain namespace after the app identifier. Call once at setup.
+pub(crate) fn init_keyring_service(app_identifier: &str) {
+    let _ = KEYRING_SERVICE.set(keyring_service_for(app_identifier));
+}
+
+pub(crate) fn keyring_service_for(app_identifier: &str) -> String {
+    format!("{app_identifier}.{SESSION_KEYRING_SUFFIX}")
+}
+
+fn keyring_service() -> String {
+    KEYRING_SERVICE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| keyring_service_for(DEFAULT_APP_IDENTIFIER))
+}
+
+/// OS keychain, one entry per origin under `<app identifier>.attach`.
 pub(crate) struct KeychainSessionStore;
 
 impl KeychainSessionStore {
@@ -294,7 +327,7 @@ impl KeychainSessionStore {
         if cfg!(test) {
             return Err("the OS keychain is not used under cargo test".to_string());
         }
-        keyring::Entry::new(SESSION_KEYRING_SERVICE, origin)
+        keyring::Entry::new(&keyring_service(), origin)
             .map_err(|error| format!("could not initialize OS keychain: {error}"))
     }
 }
@@ -491,10 +524,22 @@ pub(crate) enum AttachError {
     Unreachable,
     NotPdppServer,
     InvalidCode,
-    RateLimited { retry_after_seconds: Option<u64> },
+    RateLimited {
+        retry_after_seconds: Option<u64>,
+    },
     PairingUnsupported,
     WrongPassword,
-    Server { status: u16 },
+    Server {
+        status: u16,
+    },
+    /// 404 on the identity route: a server that predates identity proofs.
+    IdentityUnsupported,
+    /// The server answered the identity route but its proof does not check out.
+    IdentityProofInvalid,
+    /// The pasted link carries a key the server does not have.
+    KeyDiffersFromLink,
+    /// The code was redeemed by a server whose key is not the one shown.
+    KeyChangedWhileConnecting,
 }
 
 impl AttachError {
@@ -512,11 +557,15 @@ impl AttachError {
             Self::PairingUnsupported => "This server is older and cannot pair with a code. Use the owner password instead.".to_string(),
             Self::WrongPassword => "The server did not accept this owner password.".to_string(),
             Self::Server { status } => format!("{origin} answered with an error (HTTP {status}). Try again later."),
+            Self::IdentityUnsupported => "This server cannot prove its identity.".to_string(),
+            Self::IdentityProofInvalid => format!("{origin} could not prove its identity. Check that this is the server's public address. Nothing was sent."),
+            Self::KeyDiffersFromLink => "This server does not match the link. Nothing was sent. Copy the link again from your server's Settings, or check the address.".to_string(),
+            Self::KeyChangedWhileConnecting => "The server's ID changed while connecting. Nothing was saved. Start again.".to_string(),
         }
     }
 }
 
-fn http_client() -> Result<reqwest::Client, AttachError> {
+pub(crate) fn http_client() -> Result<reqwest::Client, AttachError> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(HTTP_TIMEOUT)
@@ -525,11 +574,11 @@ fn http_client() -> Result<reqwest::Client, AttachError> {
         .map_err(|_| AttachError::Unreachable)
 }
 
-fn endpoint(origin: &str, path: &str) -> String {
+pub(crate) fn endpoint(origin: &str, path: &str) -> String {
     format!("{}{path}", origin.trim_end_matches('/'))
 }
 
-fn is_gateway_failure(status: reqwest::StatusCode) -> bool {
+pub(crate) fn is_gateway_failure(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 502..=504)
 }
 
@@ -564,6 +613,9 @@ pub(crate) async fn verify_pdpp_server(origin: &str) -> Result<(), AttachError> 
 pub(crate) struct RedeemedSession {
     pub session: String,
     pub expires_at: Option<String>,
+    /// The key the redeeming server names (absent on a server without
+    /// identity proofs). The caller compares it with the probed key.
+    pub server_public_key: Option<String>,
 }
 
 fn retry_after_seconds(response: &reqwest::Response) -> Option<u64> {
@@ -620,6 +672,11 @@ pub(crate) async fn redeem_pairing(
             .get("expires_at")
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned),
+        server_public_key: body
+            .get("server_public_key")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|key| crate::attach_identity::identity_of(key).ok())
+            .map(|identity| identity.public_key),
     })
 }
 
@@ -686,6 +743,12 @@ pub(crate) async fn check_session(origin: &str, session: &str) -> SessionCheck {
     if let Err(error) = verify_pdpp_server(origin).await {
         return SessionCheck::Unreachable(error);
     }
+    check_session_of_verified_server(origin, session).await
+}
+
+/// `GET /owner/session` for a server whose identity the caller already
+/// established (a verified pin, or the unpinned protected-resource check).
+async fn check_session_of_verified_server(origin: &str, session: &str) -> SessionCheck {
     let client = match http_client() {
         Ok(client) => client,
         Err(error) => return SessionCheck::Unreachable(error),
@@ -716,13 +779,26 @@ pub(crate) async fn check_session(origin: &str, session: &str) -> SessionCheck {
     }
 }
 
-/// End the session on the server: `POST /owner/logout` as a JSON client
+/// End the session on the server (after the pin check, when pinned): `POST /owner/logout` as a JSON client
 /// (JSON is exempt from the owner CSRF check; `owner-auth.ts`
 /// `handleOwnerLogout`). Returns whether the server confirmed. Best effort:
 /// the caller deletes the local copy either way.
-pub(crate) async fn revoke_session(origin: &str, session: &str) -> bool {
-    if verify_pdpp_server(origin).await.is_err() {
-        return false;
+pub(crate) async fn revoke_session(origin: &str, server_key: Option<&str>, session: &str) -> bool {
+    // A pinned server must prove itself first: the session is never sent to
+    // whatever now answers at the address.
+    match server_key {
+        Some(key) => {
+            if crate::attach_identity::verify_pinned(origin, key).await
+                != crate::attach_identity::PinnedCheck::Verified
+            {
+                return false;
+            }
+        }
+        None => {
+            if verify_pdpp_server(origin).await.is_err() {
+                return false;
+            }
+        }
     }
     let Ok(client) = http_client() else {
         return false;
@@ -740,9 +816,9 @@ pub(crate) async fn revoke_session(origin: &str, session: &str) -> bool {
         .is_ok_and(|response| response.status().is_success())
 }
 
-pub(crate) const PAIRING_ENDED_NOTICE: &str = "This pairing ended. Pair again.";
+pub(crate) const PAIRING_ENDED_NOTICE: &str = "This pairing ended. Connect again.";
 pub(crate) const KEYCHAIN_LOST_NOTICE: &str =
-    "DataConnect could not read the pairing from this computer's keychain. Pair again.";
+    "DataConnect could not read the pairing from this computer's keychain. Connect again.";
 
 /// What a launch in the attached state does.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -758,9 +834,20 @@ pub(crate) enum AttachedLaunch {
     Unreachable {
         message: String,
     },
+    /// Something other than the pinned server answered. Nothing was sent.
+    /// The pairing record stays so the owner can Disconnect or connect again.
+    IdentityChanged {
+        answering: Option<String>,
+    },
 }
 
-pub(crate) async fn decide_attached_launch(origin: &str, lookup: SessionLookup) -> AttachedLaunch {
+/// `server_key` is the pinned key. A pinned launch verifies a fresh proof
+/// before it sends the stored session anywhere.
+pub(crate) async fn decide_attached_launch(
+    origin: &str,
+    server_key: Option<&str>,
+    lookup: SessionLookup,
+) -> AttachedLaunch {
     let session = match lookup {
         SessionLookup::Found(session) => session,
         SessionLookup::Missing => {
@@ -774,14 +861,28 @@ pub(crate) async fn decide_attached_launch(origin: &str, lookup: SessionLookup) 
             }
         }
     };
-    match check_session(origin, &session).await {
+    let check = match server_key {
+        Some(key) => match crate::attach_identity::verify_pinned(origin, key).await {
+            crate::attach_identity::PinnedCheck::Verified => {
+                check_session_of_verified_server(origin, &session).await
+            }
+            crate::attach_identity::PinnedCheck::Unreachable(error) => {
+                SessionCheck::Unreachable(error)
+            }
+            crate::attach_identity::PinnedCheck::Changed { answering } => {
+                return AttachedLaunch::IdentityChanged { answering }
+            }
+        },
+        None => check_session(origin, &session).await,
+    };
+    match check {
         SessionCheck::Valid => AttachedLaunch::OpenConsole { session },
         SessionCheck::Expired => AttachedLaunch::PairAgain {
             notice: PAIRING_ENDED_NOTICE.to_string(),
         },
         SessionCheck::Unreachable(error) => AttachedLaunch::Unreachable {
             message: format!(
-                "{} The pairing is kept. Choose Open DataConnect in the tray to try again, or detach.",
+                "{} The pairing is kept. Choose Open DataConnect in the tray to try again, or disconnect.",
                 error.message(origin)
             ),
         },

@@ -2,15 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::attach::tests::{closed_origin, pdpp_metadata, response, serve, BrokenKeychain};
+use crate::attach::tests::{
+    closed_origin, key_text, pdpp_metadata, pdpp_route, response, serve, serve_with, server_id,
+    test_key, BrokenKeychain,
+};
 use crate::attach::MemorySessionStore;
 use crate::{invoke_from, mock_app_with_data_dir};
 use serde_json::{json, Value};
 use tauri::test::MockRuntime;
 
-const COMMANDS: [&str; 5] = [
+const COMMANDS: [&str; 6] = [
     "attach_window_view",
     "preview_attach_target",
+    "inspect_server",
     "attach_with_pairing_code",
     "attach_with_owner_password",
     "detach_from_server",
@@ -50,12 +54,17 @@ fn body(response: tauri::ipc::InvokeResponseBody) -> Value {
 }
 
 fn saved(data_root: &Path, origin: &str) {
+    saved_with_key(data_root, origin, None);
+}
+
+fn saved_with_key(data_root: &Path, origin: &str, server_key: Option<String>) {
     attach::save_attachment(
         &data_dir(data_root),
         &Attachment {
             origin: origin.to_string(),
             label: "DataConnect desktop (box)".to_string(),
             paired_at: "2026-11-17T00:00:00Z".to_string(),
+            server_key,
         },
     )
     .expect("save attachment");
@@ -100,8 +109,11 @@ fn the_window_view_reports_prefill_once_and_the_saved_attachment() {
         let state = app.state::<AttachWindowState>();
         *state.prefill.lock().unwrap() = AttachPrefill {
             input: Some("https://dc.example.com".to_string()),
-            code: Some("ABCDEFGHJKMN".to_string()),
             notice: Some(attach::PAIRING_ENDED_NOTICE.to_string()),
+            identity_changed: Some(IdentityChanged {
+                pinned_id: Some("AAAA-BBBB-CCCC-DDDD".to_string()),
+                answering_id: None,
+            }),
         };
     }
     saved(data_root.path(), "https://dc.example.com");
@@ -109,58 +121,18 @@ fn the_window_view_reports_prefill_once_and_the_saved_attachment() {
     assert_eq!(view["environmentOverride"], json!(false));
     assert_eq!(view["environmentMessage"], Value::Null);
     assert_eq!(view["input"], json!("https://dc.example.com"));
-    assert_eq!(view["code"], json!("ABCDEFGHJKMN"));
     assert_eq!(view["notice"], json!(attach::PAIRING_ENDED_NOTICE));
     assert_eq!(
+        view["identityChanged"],
+        json!({"pinnedId": "AAAA-BBBB-CCCC-DDDD", "answeringId": null})
+    );
+    assert_eq!(
         view["attached"],
-        json!({"origin": "https://dc.example.com", "host": "dc.example.com"})
+        json!({"origin": "https://dc.example.com", "host": "dc.example.com", "serverId": null})
     );
     let again = body(invoke_from(&attach_window, "attach_window_view", json!({})).expect("view"));
-    assert_eq!(
-        again["code"],
-        Value::Null,
-        "a reload must not refill the code"
-    );
-    assert_eq!(again["notice"], Value::Null);
-}
-
-/// A second instance started by a pairing link both routes the link and
-/// re-runs the saved-attachment start, which asks for the window again
-/// without a code. That second request must only focus the window.
-#[test]
-fn a_pairing_link_code_survives_a_later_request_without_a_code() {
-    let data_root = tempfile::tempdir().expect("tempdir");
-    let app = app(data_root.path(), false);
-    let link = |code: &str| AttachPrefill {
-        input: Some("https://dc.example.com".to_string()),
-        code: Some(code.to_string()),
-        notice: None,
-    };
-    let pair_again = AttachPrefill {
-        input: Some("https://dc.example.com".to_string()),
-        code: None,
-        notice: Some(attach::PAIRING_ENDED_NOTICE.to_string()),
-    };
-    let view = |app: &tauri::App<MockRuntime>| {
-        let attach_window = app
-            .get_webview_window(ATTACH_WINDOW_LABEL)
-            .expect("attach window open");
-        body(invoke_from(&attach_window, "attach_window_view", json!({})).expect("view"))
-    };
-
-    open_attach_window(app.handle(), link("ABCDEFGHJKMN"));
-    open_attach_window(app.handle(), pair_again.clone());
-    assert_eq!(view(&app)["code"], json!("ABCDEFGHJKMN"));
-
-    // A newer link still replaces the code it shows.
-    open_attach_window(app.handle(), link("NMKJHGFEDCBA"));
-    assert_eq!(view(&app)["code"], json!("NMKJHGFEDCBA"));
-
-    // After the page loaded the code, a request without one changes nothing.
-    open_attach_window(app.handle(), pair_again);
-    let after = view(&app);
-    assert_eq!(after["code"], Value::Null);
-    assert_eq!(after["notice"], Value::Null, "the window was not reloaded");
+    assert_eq!(again["notice"], Value::Null, "a reload must not refill");
+    assert_eq!(again["identityChanged"], Value::Null);
 }
 
 #[test]
@@ -211,7 +183,7 @@ fn the_preview_names_the_target_and_the_plain_http_warning() {
     assert_eq!(https.warning, None);
 
     let link = preview(
-        "vana://attach?server=https%3A%2F%2Fdc.example.com&code=ABCD-EFGH-JKMN",
+        "https://dc.example.com/settings#code=ABCD-EFGH-JKMN&key=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
         false,
     );
     assert_eq!(link.origin.as_deref(), Some("https://dc.example.com"));
@@ -262,33 +234,49 @@ fn plain_http_to_another_machine_needs_the_trust_box_before_any_request() {
     );
 }
 
+fn connect_args(origin: &str, key: &ed25519_dalek::SigningKey) -> Value {
+    json!({
+        "input": origin,
+        "code": "abcd-efgh-jkmn",
+        "trustPlainHttp": false,
+        "confirmedKey": key_text(key),
+    })
+}
+
+fn session_sent(requests: &[String]) -> bool {
+    requests
+        .iter()
+        .any(|request| request.contains("pdpp_owner_session="))
+}
+
+/// Contact order: the server is identified and proves its key, then the
+/// code is redeemed. The key is pinned in attach.json; the session is not.
 #[test]
-fn pairing_saves_the_attachment_and_restarts() {
+fn pairing_pins_the_proven_key_and_restarts() {
     let data_root = tempfile::tempdir().expect("tempdir");
     let app = app(data_root.path(), false);
     let attach_window = window(&app, ATTACH_WINDOW_LABEL);
-    let (origin, server) = serve(vec![
-        pdpp_metadata(),
-        response(
-            "200 OK",
-            "Content-Type: application/json\r\n",
-            r#"{"object":"desktop_pairing_session","session":"sess-paired","expires_at":"2026-12-17T00:00:00.000Z","expires_in_seconds":2592000,"label":"x"}"#,
-        ),
-    ]);
+    let key = test_key(11);
+    let signer = key.clone();
+    let (origin, server) = serve_with(3, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
     let outcome = body(
         invoke_from(
             &attach_window,
             "attach_with_pairing_code",
-            json!({"input": origin, "code": "abcd-efgh-jkmn", "trustPlainHttp": false}),
+            connect_args(&origin, &key),
         )
-        .expect("attached"),
+        .expect("connected"),
     );
     let requests = server.join().expect("server");
-    assert!(requests[1].starts_with("post /owner/desktop-pairings/redeem "));
+    assert!(requests[0].starts_with("get /.well-known/oauth-protected-resource "));
+    assert!(requests[1].starts_with("post /owner/desktop-pairings/identity "));
+    assert!(requests[2].starts_with("post /owner/desktop-pairings/redeem "));
     assert!(
-        requests[1].contains(r#""code":"abcdefghjkmn""#),
+        requests[2].contains(r#""code":"abcdefghjkmn""#),
         "{}",
-        requests[1]
+        requests[2]
     );
     assert_eq!(outcome["origin"], json!(origin));
     // Under test the keychain is refused, so the session is memory-only,
@@ -299,6 +287,7 @@ fn pairing_saves_the_attachment_and_restarts() {
         .expect("read")
         .expect("saved");
     assert_eq!(attachment.origin, origin);
+    assert_eq!(attachment.server_key, Some(key_text(&key)));
     let file = std::fs::read_to_string(attach::attachment_path(&data_dir(data_root.path())))
         .expect("attach.json");
     assert!(
@@ -307,27 +296,259 @@ fn pairing_saves_the_attachment_and_restarts() {
     );
 }
 
-/// A server that answers the identity check, then accepts the next request
-/// and never answers it. It hangs up after `stall` or when the client does.
+#[test]
+fn inspecting_a_server_shows_its_id_and_sends_no_code() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let key = test_key(12);
+    let signer = key.clone();
+    let (origin, server) = serve_with(2, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    let link = format!(
+        "{origin}/settings#code=ABCD-EFGH-JKMN&key={}",
+        key_text(&key)
+    );
+    let inspection = body(
+        invoke_from(
+            &attach_window,
+            "inspect_server",
+            json!({"input": link, "trustPlainHttp": false}),
+        )
+        .expect("inspected"),
+    );
+    let requests = server.join().expect("server");
+    assert_eq!(requests.len(), 2, "no redeem request");
+    assert!(requests
+        .iter()
+        .all(|request| !request.contains("abcdefghjkmn")));
+    assert_eq!(inspection["origin"], json!(origin));
+    assert_eq!(inspection["serverId"], json!(server_id(&key)));
+    assert_eq!(inspection["serverKey"], json!(key_text(&key)));
+    assert_eq!(inspection["matchesLink"], json!(true));
+    assert_eq!(inspection["code"], json!("ABCDEFGHJKMN"));
+    assert!(relaunches(&app).is_empty());
+    assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+}
+
+#[test]
+fn an_address_without_a_link_shows_the_id_but_does_not_claim_a_match() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let key = test_key(12);
+    let signer = key.clone();
+    let (origin, server) = serve_with(2, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    let inspection = body(
+        invoke_from(
+            &attach_window,
+            "inspect_server",
+            json!({"input": origin, "trustPlainHttp": false}),
+        )
+        .expect("inspected"),
+    );
+    server.join().expect("server");
+    assert_eq!(inspection["matchesLink"], json!(false));
+    assert_eq!(inspection["serverId"], json!(server_id(&key)));
+    assert_eq!(inspection["code"], Value::Null);
+}
+
+/// A link names the server's key. A server with another key gets nothing:
+/// not the code, not even a connect.
+#[test]
+fn a_link_key_that_differs_from_the_probed_key_sends_nothing() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let real = test_key(13);
+    let linked = test_key(14);
+    let signer = real.clone();
+    let (origin, server) = serve_with(2, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    let link = format!(
+        "{origin}/settings#code=ABCD-EFGH-JKMN&key={}",
+        key_text(&linked)
+    );
+    let error = invoke_from(
+        &attach_window,
+        "inspect_server",
+        json!({"input": link, "trustPlainHttp": false}),
+    )
+    .expect_err("refused");
+    assert_eq!(
+        error,
+        json!(AttachError::KeyDiffersFromLink.message(&origin))
+    );
+    let requests = server.join().expect("server");
+    assert!(requests
+        .iter()
+        .all(|request| !request.contains("/redeem") && !request.contains("abcdefghjkmn")));
+    assert!(relaunches(&app).is_empty());
+    assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+}
+
+#[test]
+fn connecting_a_key_the_owner_did_not_confirm_sends_no_code() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let key = test_key(15);
+    let signer = key.clone();
+    let (origin, server) = serve_with(2, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    let error = invoke_from(
+        &attach_window,
+        "attach_with_pairing_code",
+        connect_args(&origin, &test_key(16)),
+    )
+    .expect_err("refused");
+    let requests = server.join().expect("server");
+    assert!(error
+        .as_str()
+        .expect("text")
+        .contains("not the one you confirmed"));
+    assert!(requests.iter().all(|request| !request.contains("/redeem")));
+    assert!(relaunches(&app).is_empty());
+}
+
+/// The server redeems with another key than it proved: nothing is saved.
+#[test]
+fn a_redeem_that_names_another_key_saves_nothing() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+    let key = test_key(17);
+    let signer = key.clone();
+    let (origin, server) = serve_with(3, move |origin, request| {
+        let answer = pdpp_route(origin, request, Some(&signer));
+        if request.path.ends_with("/redeem") {
+            answer.replace(&key_text(&signer), &key_text(&test_key(18)))
+        } else {
+            answer
+        }
+    });
+    let error = invoke_from(
+        &attach_window,
+        "attach_with_pairing_code",
+        connect_args(&origin, &key),
+    )
+    .expect_err("refused");
+    server.join().expect("server");
+    assert_eq!(
+        error,
+        json!(AttachError::KeyChangedWhileConnecting.message(&origin))
+    );
+    assert!(relaunches(&app).is_empty());
+    assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+}
+
+/// An older server (404 on the identity route) connects only through the
+/// owner password with the tick-box, and is stored unpinned.
+#[test]
+fn an_older_server_connects_only_by_password_with_the_tick_box_and_stays_unpinned() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let app = app(data_root.path(), false);
+    let attach_window = window(&app, ATTACH_WINDOW_LABEL);
+
+    let (origin, server) = serve_with(2, |origin, request| pdpp_route(origin, request, None));
+    let inspection = body(
+        invoke_from(
+            &attach_window,
+            "inspect_server",
+            json!({"input": origin, "trustPlainHttp": false}),
+        )
+        .expect("inspected"),
+    );
+    server.join().expect("server");
+    assert_eq!(inspection["serverId"], Value::Null);
+    assert_eq!(inspection["serverKey"], Value::Null);
+
+    // A code is refused before it is sent.
+    let (origin, server) = serve_with(2, |origin, request| pdpp_route(origin, request, None));
+    let error = invoke_from(
+        &attach_window,
+        "attach_with_pairing_code",
+        json!({"input": origin, "code": "ABCDEFGHJKMN", "trustPlainHttp": false}),
+    )
+    .expect_err("refused");
+    let requests = server.join().expect("server");
+    assert!(error
+        .as_str()
+        .expect("text")
+        .contains("cannot prove its identity"));
+    assert!(requests.iter().all(|request| !request.contains("/redeem")));
+
+    // The password without the tick-box is refused before it is sent.
+    let (origin, server) = serve_with(2, |origin, request| pdpp_route(origin, request, None));
+    let error = invoke_from(
+        &attach_window,
+        "attach_with_owner_password",
+        json!({"input": origin, "password": "pw", "trustPlainHttp": false, "acceptUnverified": false}),
+    )
+    .expect_err("refused");
+    let requests = server.join().expect("server");
+    assert!(error.as_str().expect("text").contains("Tick the box"));
+    assert!(requests
+        .iter()
+        .all(|request| !request.contains("/owner/login")));
+    assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
+
+    // With the tick-box the login runs and the attachment has no key.
+    let (origin, server) = serve_with(3, |origin, request| {
+        if request.path == "/owner/login" {
+            response(
+                "200 OK",
+                "Set-Cookie: pdpp_owner_session=sess-pw; Path=/; HttpOnly\r\n",
+                "{}",
+            )
+        } else {
+            pdpp_route(origin, request, None)
+        }
+    });
+    invoke_from(
+        &attach_window,
+        "attach_with_owner_password",
+        json!({"input": origin, "password": "pw", "trustPlainHttp": false, "acceptUnverified": true}),
+    )
+    .expect("connected");
+    server.join().expect("server");
+    let attachment = attach::load_attachment(&data_dir(data_root.path()))
+        .expect("read")
+        .expect("saved");
+    assert_eq!(attachment.origin, origin);
+    assert_eq!(attachment.server_key, None);
+    assert_eq!(relaunches(&app), vec![Some("sess-pw".to_string())]);
+}
+
+/// A server that answers the identity checks (protected-resource metadata,
+/// then 404 on the identity route), then accepts the next request and never
+/// answers it. It hangs up after `stall` or when the client does.
 fn serve_then_stall(stall: std::time::Duration) -> (String, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
     let origin = format!("http://{}", listener.local_addr().expect("addr"));
     let handle = std::thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept");
         let mut buffer = [0_u8; 4096];
-        let mut request = Vec::new();
-        while !String::from_utf8_lossy(&request).contains("\r\n\r\n") {
-            let read = stream.read(&mut buffer).expect("read request");
-            if read == 0 {
-                return;
+        for answer in [pdpp_metadata(), response("404 Not Found", "", "")] {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request = Vec::new();
+            while !String::from_utf8_lossy(&request).contains("\r\n\r\n") {
+                let read = stream.read(&mut buffer).expect("read request");
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..read]);
             }
-            request.extend_from_slice(&buffer[..read]);
+            // Request bodies are small; the JSON body arrives with the head.
+            stream
+                .write_all(answer.as_bytes())
+                .expect("answer the check");
         }
-        stream
-            .write_all(pdpp_metadata().as_bytes())
-            .expect("answer the identity check");
-        drop(stream);
         let (mut stalled, _) = listener.accept().expect("accept the login");
         stalled.set_read_timeout(Some(stall)).expect("read timeout");
         // Returns when the client hangs up or `stall` passes.
@@ -348,7 +569,7 @@ fn a_stalled_password_login_times_out_and_frees_the_window() {
     let error = invoke_from(
         &attach_window,
         "attach_with_owner_password",
-        json!({"input": origin, "password": "pw", "trustPlainHttp": false}),
+        json!({"input": origin, "password": "pw", "trustPlainHttp": false, "acceptUnverified": true}),
     )
     .expect_err("the login timed out");
     assert!(
@@ -364,11 +585,11 @@ fn a_stalled_password_login_times_out_and_frees_the_window() {
     let next = invoke_from(
         &attach_window,
         "attach_with_owner_password",
-        json!({"input": closed_origin(), "password": "pw", "trustPlainHttp": false}),
+        json!({"input": closed_origin(), "password": "pw", "trustPlainHttp": false, "acceptUnverified": true}),
     )
     .expect_err("nothing listens");
     assert!(
-        !next.as_str().expect("text").contains("already attaching"),
+        !next.as_str().expect("text").contains("already connecting"),
         "{next}"
     );
     server.join().expect("server");
@@ -381,18 +602,23 @@ fn a_rejected_code_saves_nothing_and_does_not_restart() {
     let data_root = tempfile::tempdir().expect("tempdir");
     let app = app(data_root.path(), false);
     let attach_window = window(&app, ATTACH_WINDOW_LABEL);
-    let (origin, server) = serve(vec![
-        pdpp_metadata(),
-        response(
-            "401 Unauthorized",
-            "Content-Type: application/json\r\n",
-            r#"{"error":"invalid_pairing_code"}"#,
-        ),
-    ]);
+    let key = test_key(19);
+    let signer = key.clone();
+    let (origin, server) = serve_with(3, move |origin, request| {
+        if request.path.ends_with("/redeem") {
+            response(
+                "401 Unauthorized",
+                "Content-Type: application/json\r\n",
+                r#"{"error":"invalid_pairing_code"}"#,
+            )
+        } else {
+            pdpp_route(origin, request, Some(&signer))
+        }
+    });
     let error = invoke_from(
         &attach_window,
         "attach_with_pairing_code",
-        json!({"input": origin, "code": "ABCDEFGHJKMN", "trustPlainHttp": false}),
+        connect_args(&origin, &key),
     )
     .expect_err("rejected");
     server.join().expect("server");
@@ -413,6 +639,7 @@ fn a_saved_pairing_keeps_the_session_out_of_attach_json_and_forgets_the_previous
             &keychain,
             &memory,
             "https://a.example",
+            None,
             "sess-a",
             "t1".into()
         ),
@@ -428,6 +655,7 @@ fn a_saved_pairing_keeps_the_session_out_of_attach_json_and_forgets_the_previous
             &keychain,
             &memory,
             "https://b.example",
+            None,
             "sess-b",
             "t2".into()
         ),
@@ -454,6 +682,7 @@ fn a_saved_pairing_keeps_the_session_out_of_attach_json_and_forgets_the_previous
             &BrokenKeychain,
             &memory,
             "https://c.example",
+            None,
             "sess-c",
             "t3".into()
         ),
@@ -472,7 +701,16 @@ async fn detach_revokes_then_deletes_everything_local() {
     let keychain = MemorySessionStore::default();
     let memory = MemorySessionStore::default();
     let (origin, server) = serve(vec![pdpp_metadata(), response("204 No Content", "", "")]);
-    save_pairing(&data_dir, &keychain, &memory, &origin, "sess-d", "t".into()).expect("save");
+    save_pairing(
+        &data_dir,
+        &keychain,
+        &memory,
+        &origin,
+        None,
+        "sess-d",
+        "t".into(),
+    )
+    .expect("save");
     let report = detach_saved_attachment(&data_dir, &keychain, &memory)
         .await
         .expect("detached");
@@ -495,7 +733,16 @@ async fn detach_finishes_locally_when_the_server_does_not_answer() {
     let keychain = MemorySessionStore::default();
     let memory = MemorySessionStore::default();
     let origin = closed_origin();
-    save_pairing(&data_dir, &keychain, &memory, &origin, "sess-e", "t".into()).expect("save");
+    save_pairing(
+        &data_dir,
+        &keychain,
+        &memory,
+        &origin,
+        None,
+        "sess-e",
+        "t".into(),
+    )
+    .expect("save");
     let report = detach_saved_attachment(&data_dir, &keychain, &memory)
         .await
         .expect("detached");
@@ -523,28 +770,9 @@ fn detach_from_the_window_restarts_without_a_session() {
     assert!(notice
         .as_str()
         .expect("text")
-        .starts_with("Detached from 127.0.0.1:"));
+        .starts_with("Disconnected from 127.0.0.1:"));
     assert_eq!(relaunches(&app), vec![None]);
     assert!(!attach::attachment_path(&data_dir(data_root.path())).exists());
-}
-
-#[test]
-fn a_restart_drops_deep_links_from_the_arguments() {
-    let args = [
-        "--minimized",
-        "vana://attach?server=x&code=ABCD",
-        "VANA://connect?x",
-        "other",
-    ]
-    .into_iter()
-    .map(std::ffi::OsString::from);
-    assert_eq!(
-        relaunch_args(args),
-        vec![
-            std::ffi::OsString::from("--minimized"),
-            std::ffi::OsString::from("other")
-        ]
-    );
 }
 
 /// Attaching elsewhere ends the old pairing: the old server is asked to
@@ -560,18 +788,15 @@ fn switching_servers_signs_out_of_the_previous_one() {
     attach::process_memory_store()
         .save(&previous, "sess-old")
         .expect("seed");
-    let (origin, server) = serve(vec![
-        pdpp_metadata(),
-        response(
-            "200 OK",
-            "Content-Type: application/json\r\n",
-            r#"{"object":"desktop_pairing_session","session":"sess-new","expires_at":"2026-12-17T00:00:00.000Z","expires_in_seconds":2592000,"label":"x"}"#,
-        ),
-    ]);
+    let key = test_key(21);
+    let signer = key.clone();
+    let (origin, server) = serve_with(3, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
     invoke_from(
         &attach_window,
         "attach_with_pairing_code",
-        json!({"input": origin, "code": "ABCDEFGHJKMN", "trustPlainHttp": false}),
+        connect_args(&origin, &key),
     )
     .expect("attached");
     server.join().expect("server");
@@ -593,4 +818,70 @@ fn switching_servers_signs_out_of_the_previous_one() {
             .origin,
         origin
     );
+}
+
+/// A pinned server proves itself before the logout carries the session; a
+/// server that does not gets nothing, and the local copy is still deleted.
+#[tokio::test]
+async fn disconnecting_a_pinned_server_sends_the_session_only_after_it_proves_itself() {
+    let data_root = tempfile::tempdir().expect("tempdir");
+    let data_dir = data_dir(data_root.path());
+    let key = test_key(22);
+
+    let keychain = MemorySessionStore::default();
+    let memory = MemorySessionStore::default();
+    let signer = key.clone();
+    let (origin, server) = serve_with(2, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    let pinned = key_text(&key);
+    save_pairing(
+        &data_dir,
+        &keychain,
+        &memory,
+        &origin,
+        Some(&pinned),
+        "sess-p",
+        "t".into(),
+    )
+    .expect("save");
+    let report = detach_saved_attachment(&data_dir, &keychain, &memory)
+        .await
+        .expect("disconnected");
+    let requests = server.join().expect("server");
+    assert!(report.server_confirmed);
+    let identity_at = requests
+        .iter()
+        .position(|request| request.starts_with("post /owner/desktop-pairings/identity "))
+        .expect("identity probe");
+    let session_at = requests
+        .iter()
+        .position(|request| request.contains("pdpp_owner_session=sess-p"))
+        .expect("logout");
+    assert!(identity_at < session_at, "{requests:?}");
+
+    // Another server answers at the pinned address.
+    let other = test_key(23);
+    let signer = other.clone();
+    let (origin, server) = serve_with(1, move |origin, request| {
+        pdpp_route(origin, request, Some(&signer))
+    });
+    save_pairing(
+        &data_dir,
+        &keychain,
+        &memory,
+        &origin,
+        Some(&pinned),
+        "sess-q",
+        "t".into(),
+    )
+    .expect("save");
+    let report = detach_saved_attachment(&data_dir, &keychain, &memory)
+        .await
+        .expect("disconnected");
+    let requests = server.join().expect("server");
+    assert!(!report.server_confirmed);
+    assert!(!session_sent(&requests), "{requests:?}");
+    assert_eq!(keychain.load(&origin), Ok(None));
+    assert!(attach::load_attachment(&data_dir).expect("read").is_none());
 }
