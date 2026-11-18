@@ -183,6 +183,16 @@ describe("windowIsGranted window-pattern matching", () => {
 // that is no longer true.
 
 describe("capability scoping of app commands", () => {
+  // The windows that may call app commands under the shared capability. The
+  // attach window ("attach") is not among them: its commands check the window
+  // label themselves, and a label added here would widen who can reach them.
+  it("grants the shared capability to exactly the intended windows", () => {
+    const document = JSON.parse(
+      readFileSync(resolve(process.cwd(), "src-tauri/capabilities/default.json"), "utf-8")
+    ) as { windows?: string[] }
+    expect(document.windows).toEqual(["main", "connector-*"])
+  })
+
   // Tauri refuses an app command from a page that is not the app's own unless
   // a capability lists that page under `remote`. The attach window's commands
   // rely on that refusal (attach_window_tests.rs), so no capability may add it.

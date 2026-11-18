@@ -268,13 +268,22 @@ describe("attach window pairing code", () => {
       page.policy.refuse = REFUSED_PAGE
       await page.connect()
 
+      expect(page.attachCalls()).toHaveLength(1)
       expect(page.text("error")).toBe(REFUSED_PAGE)
       expect(page.visible("notice")).toBe(false)
       expect(page.text("notice")).not.toContain("Connected")
       expect(page.disabled("attach-button")).toBe(false)
-      // Each attempt is refused again; none is reported as a success.
+
+      // A retry is a new attempt with a new answer: the window must show that
+      // answer, not keep the first one or stay silent.
+      const second = `${REFUSED_PAGE} (second attempt)`
+      page.policy.refuse = second
       await page.connect()
+
+      expect(page.attachCalls()).toHaveLength(2)
+      expect(page.text("error")).toBe(second)
       expect(page.visible("notice")).toBe(false)
+      expect(page.disabled("attach-button")).toBe(false)
     })
   })
 })
