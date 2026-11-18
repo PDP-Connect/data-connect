@@ -12,7 +12,16 @@ type Setting = typeof import("./desktop-pairing-setting.tsx")
 
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 const CODE = "ABCD-EFGH-JKLM"
-const LINK = `vana://attach?server=https%3A%2F%2Fx.example&code=${CODE}`
+const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+const FINGERPRINT = "MMG4-2KLG-YQZW-NEIS"
+const ORIGIN = "https://x.example"
+const LINK = `${ORIGIN}/settings#code=${CODE}&key=${KEY}`
+const LIVE = {
+  code: CODE,
+  link: LINK,
+  serverFingerprint: FINGERPRINT,
+  serverOrigin: ORIGIN,
+}
 
 let loaded: Promise<Setting> | null = null
 
@@ -45,36 +54,37 @@ test("before a code exists the section offers only the button and the one-line r
   assert.doesNotMatch(html, /vana:\/\//)
 })
 
-test("a live code shows the code, the link, a copy button, the countdown and the steps", async () => {
+test("a live code shows the address, code, Server ID and link, three copy buttons, the countdown and the instruction", async () => {
   const { DesktopPairingDisplay } = await loadSetting()
   const html = renderToStaticMarkup(
-    createElement(DesktopPairingDisplay, {
-      code: CODE,
-      link: LINK,
-      remainingSeconds: 582,
-    })
+    createElement(DesktopPairingDisplay, { ...LIVE, remainingSeconds: 582 })
   )
   assert.match(html, new RegExp(CODE))
+  assert.ok(html.includes(`value="${ORIGIN}"`))
+  assert.ok(html.includes(FINGERPRINT))
+  assert.match(html, /Server ID/)
   assert.match(html, /Expires in 9:42/)
   assert.match(html, /readOnly|readonly/)
   assert.ok(html.includes(`value="${LINK.replaceAll("&", "&amp;")}"`))
-  assert.match(html, />Copy</)
-  assert.match(html, /1\. Open DataConnect on your computer\./)
-  assert.match(html, /2\. From the tray menu choose Attach to a server\./)
-  assert.match(html, /3\. Paste this link, or enter this server/)
+  assert.equal(html.match(/>Copy</g)?.length, 3)
+  for (const label of ["server address", "pairing code", "pairing link"]) {
+    assert.match(html, new RegExp(`aria-label="Copy ${label}"`))
+  }
+  assert.match(
+    html,
+    /In the DataConnect desktop app choose Connect to a server, then\s+paste the link \(or the address and the code\)\./
+  )
+  assert.doesNotMatch(html, /vana:\/\//)
 })
 
 test("at zero the code and link are gone and the panel says to make a new one", async () => {
   const { DesktopPairingDisplay } = await loadSetting()
   const html = renderToStaticMarkup(
-    createElement(DesktopPairingDisplay, {
-      code: CODE,
-      link: LINK,
-      remainingSeconds: 0,
-    })
+    createElement(DesktopPairingDisplay, { ...LIVE, remainingSeconds: 0 })
   )
   assert.match(html, /Expired\. Create a new code\./)
   assert.doesNotMatch(html, new RegExp(CODE))
+  assert.doesNotMatch(html, new RegExp(FINGERPRINT))
   assert.doesNotMatch(html, /vana:\/\//)
   assert.doesNotMatch(html, />Copy</)
 })

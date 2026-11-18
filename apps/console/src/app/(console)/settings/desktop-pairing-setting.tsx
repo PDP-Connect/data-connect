@@ -10,6 +10,8 @@ import { countdownLabel, secondsRemaining } from "./desktop-pairing.ts"
 interface IssuedPairing {
   code: string
   link: string
+  serverOrigin: string
+  serverFingerprint: string
   /** Browser-clock deadline, from the server's lifetime at receipt. */
   deadlineMs: number
 }
@@ -22,20 +24,26 @@ export function DesktopPairingDisplay({
   code,
   link,
   remainingSeconds,
+  serverFingerprint,
+  serverOrigin,
 }: {
   code: string
   link: string
   remainingSeconds: number
+  serverFingerprint: string
+  serverOrigin: string
 }) {
   const [copyMessage, setCopyMessage] = useState<string | null>(null)
   const expired = remainingSeconds <= 0
 
-  async function copyLink() {
+  async function copy(value: string, what: string) {
     try {
-      await navigator.clipboard.writeText(link)
-      setCopyMessage("Link copied.")
+      await navigator.clipboard.writeText(value)
+      setCopyMessage(`${what} copied.`)
     } catch {
-      setCopyMessage("Could not copy. Select the link and copy it by hand.")
+      setCopyMessage(
+        `Could not copy. Select the ${what.toLowerCase()} and copy it by hand.`
+      )
     }
   }
 
@@ -53,8 +61,42 @@ export function DesktopPairingDisplay({
       </p>
       {expired ? null : (
         <>
-          <p className="w-fit rounded-md border border-border/70 bg-muted px-3 py-2 font-mono text-lg tracking-widest text-foreground">
-            {code}
+          <div className="flex max-w-xl flex-wrap items-center gap-2">
+            <input
+              aria-label="Server address"
+              className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm"
+              onFocus={event => event.currentTarget.select()}
+              readOnly
+              value={serverOrigin}
+            />
+            <button
+              aria-label="Copy server address"
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              onClick={() => void copy(serverOrigin, "Address")}
+              type="button"
+            >
+              Copy
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="w-fit rounded-md border border-border/70 bg-muted px-3 py-2 font-mono text-lg tracking-widest text-foreground">
+              {code}
+            </p>
+            <button
+              aria-label="Copy pairing code"
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+              onClick={() => void copy(code, "Code")}
+              type="button"
+            >
+              Copy
+            </button>
+          </div>
+          <p className="pdpp-caption text-muted-foreground">
+            Server ID{" "}
+            <span className="font-mono text-foreground">
+              {serverFingerprint}
+            </span>
+            . The desktop app shows the same ID when it connects.
           </p>
           <div className="flex max-w-xl flex-wrap items-center gap-2">
             <input
@@ -65,8 +107,9 @@ export function DesktopPairingDisplay({
               value={link}
             />
             <button
+              aria-label="Copy pairing link"
               className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
-              onClick={() => void copyLink()}
+              onClick={() => void copy(link, "Link")}
               type="button"
             >
               Copy
@@ -77,14 +120,10 @@ export function DesktopPairingDisplay({
               {copyMessage}
             </p>
           ) : null}
-          <ol className="grid list-none gap-1 text-sm text-foreground">
-            <li>1. Open DataConnect on your computer.</li>
-            <li>2. From the tray menu choose Attach to a server.</li>
-            <li>
-              3. Paste this link, or enter this server&apos;s address and the
-              code.
-            </li>
-          </ol>
+          <p className="text-sm text-foreground">
+            In the DataConnect desktop app choose Connect to a server, then
+            paste the link (or the address and the code).
+          </p>
         </>
       )}
     </div>
@@ -135,6 +174,8 @@ export function DesktopPairingSetting() {
         code: result.code,
         deadlineMs: receivedAt + result.expiresInSeconds * 1000,
         link: result.link,
+        serverFingerprint: result.serverFingerprint,
+        serverOrigin: result.serverOrigin,
       })
     } catch (reason) {
       setError(
@@ -172,6 +213,8 @@ export function DesktopPairingSetting() {
           code={pairing.code}
           link={pairing.link}
           remainingSeconds={remaining}
+          serverFingerprint={pairing.serverFingerprint}
+          serverOrigin={pairing.serverOrigin}
         />
       ) : null}
       <p className="pdpp-caption text-muted-foreground">

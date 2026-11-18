@@ -8,7 +8,10 @@
  */
 
 export const PAIRING_CODE_PATTERN = /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/u
-export const PAIRING_LINK_PREFIX = "vana://attach?"
+/** Ed25519 public key, 32 raw bytes as unpadded base64url. */
+export const SERVER_PUBLIC_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/u
+/** Server ID: 16 base32 characters in groups of four. */
+export const SERVER_FINGERPRINT_PATTERN = /^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$/u
 
 export interface DesktopPairing {
   code: string
@@ -18,6 +21,10 @@ export interface DesktopPairing {
   /** Lifetime from the moment the server answered. Immune to clock skew. */
   expiresInSeconds: number
   serverOrigin: string
+  /** The server's Ed25519 public key, base64url. */
+  serverPublicKey: string
+  /** The Server ID shown in settings and on the desktop: `XXXX-XXXX-XXXX-XXXX`. */
+  serverFingerprint: string
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -33,9 +40,21 @@ function isHttpOrigin(value: string): boolean {
   }
 }
 
-function linkCarriesCode(link: string, code: string): boolean {
+/**
+ * The link is `<origin>/settings#code=<code>&key=<key>`. It must point at the
+ * server that answered and carry exactly the code and key in the response.
+ */
+function linkMatches(
+  link: string,
+  origin: string,
+  code: string,
+  key: string
+): boolean {
   try {
-    return new URL(link).searchParams.get("code") === code
+    const url = new URL(link)
+    if (url.origin !== new URL(origin).origin) return false
+    const fragment = new URLSearchParams(url.hash.slice(1))
+    return fragment.get("code") === code && fragment.get("key") === key
   } catch {
     return false
   }
@@ -46,12 +65,37 @@ export function parseDesktopPairingResponse(
   body: unknown
 ): DesktopPairing | null {
   if (!isRecord(body) || body.object !== "desktop_pairing") return null
-  const { code, link, expires_at, expires_in_seconds, server_origin } = body
+  const {
+    code,
+    link,
+    expires_at,
+    expires_in_seconds,
+    server_origin,
+    server_public_key,
+    server_fingerprint,
+  } = body
   if (typeof code !== "string" || !PAIRING_CODE_PATTERN.test(code)) return null
-  if (typeof link !== "string" || !link.startsWith(PAIRING_LINK_PREFIX)) {
+  if (typeof server_origin !== "string" || !isHttpOrigin(server_origin)) {
     return null
   }
-  if (!linkCarriesCode(link, code)) return null
+  if (
+    typeof server_public_key !== "string" ||
+    !SERVER_PUBLIC_KEY_PATTERN.test(server_public_key)
+  ) {
+    return null
+  }
+  if (
+    typeof server_fingerprint !== "string" ||
+    !SERVER_FINGERPRINT_PATTERN.test(server_fingerprint)
+  ) {
+    return null
+  }
+  if (
+    typeof link !== "string" ||
+    !linkMatches(link, server_origin, code, server_public_key)
+  ) {
+    return null
+  }
   if (typeof expires_at !== "string" || !Number.isFinite(Date.parse(expires_at))) {
     return null
   }
@@ -62,15 +106,14 @@ export function parseDesktopPairingResponse(
   ) {
     return null
   }
-  if (typeof server_origin !== "string" || !isHttpOrigin(server_origin)) {
-    return null
-  }
   return {
     code,
     expiresAt: expires_at,
     expiresInSeconds: expires_in_seconds,
     link,
+    serverFingerprint: server_fingerprint,
     serverOrigin: server_origin,
+    serverPublicKey: server_public_key,
   }
 }
 

@@ -10,14 +10,20 @@ import {
   secondsRemaining,
 } from "./desktop-pairing.ts"
 
+const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+const FINGERPRINT = "MMG4-2KLG-YQZW-NEIS"
+const LINK = `https://x.example/settings#code=ABCD-EFGH-JKLM&key=${KEY}`
+
 function body(overrides: Record<string, unknown> = {}) {
   return {
     code: "ABCD-EFGH-JKLM",
     expires_at: "2026-11-17T12:10:00.000Z",
     expires_in_seconds: 600,
-    link: "vana://attach?server=https%3A%2F%2Fx.example&code=ABCD-EFGH-JKLM",
+    link: LINK,
     object: "desktop_pairing",
+    server_fingerprint: FINGERPRINT,
     server_origin: "https://x.example",
+    server_public_key: KEY,
     ...overrides,
   }
 }
@@ -27,9 +33,16 @@ test("a well-formed pairing response parses", () => {
     code: "ABCD-EFGH-JKLM",
     expiresAt: "2026-11-17T12:10:00.000Z",
     expiresInSeconds: 600,
-    link: "vana://attach?server=https%3A%2F%2Fx.example&code=ABCD-EFGH-JKLM",
+    link: LINK,
+    serverFingerprint: FINGERPRINT,
     serverOrigin: "https://x.example",
+    serverPublicKey: KEY,
   })
+})
+
+test("a link on a path other than /settings still parses when origin, code and key match", () => {
+  const link = `https://x.example/anything?x=1#code=ABCD-EFGH-JKLM&key=${KEY}`
+  assert.equal(parseDesktopPairingResponse(body({ link }))?.link, link)
 })
 
 test("malformed pairing responses are rejected", () => {
@@ -42,9 +55,22 @@ test("malformed pairing responses are rejected", () => {
     body({ code: "ABCD-EFGH-JKL0" }), // 0 and 1 are not in the alphabet
     body({ code: "ABCDEFGHJKLM" }),
     body({ code: 7 }),
-    body({ link: "https://evil.example/attach?code=ABCD-EFGH-JKLM" }),
-    body({ link: "vana://other?code=ABCD-EFGH-JKLM" }),
-    body({ link: "vana://attach?server=https%3A%2F%2Fx.example&code=WXYZ-WXYZ-WXYZ" }),
+    // A link on another origin, in another scheme, or carrying another code or key.
+    body({ link: `https://evil.example/settings#code=ABCD-EFGH-JKLM&key=${KEY}` }),
+    body({ link: `http://x.example/settings#code=ABCD-EFGH-JKLM&key=${KEY}` }),
+    body({ link: `other://x.example/settings#code=ABCD-EFGH-JKLM&key=${KEY}` }),
+    body({ link: `https://x.example/settings#code=WXYZ-WXYZ-WXYZ&key=${KEY}` }),
+    body({ link: `https://x.example/settings#code=ABCD-EFGH-JKLM&key=${KEY.replace("A", "B")}` }),
+    body({ link: "https://x.example/settings#code=ABCD-EFGH-JKLM" }),
+    // The code and key must be in the fragment, not the query.
+    body({ link: `https://x.example/settings?code=ABCD-EFGH-JKLM&key=${KEY}` }),
+    body({ server_public_key: undefined }),
+    body({ server_public_key: "short" }),
+    body({ server_public_key: `${KEY}=` }),
+    body({ server_fingerprint: undefined }),
+    body({ server_fingerprint: "MMG4-2KLG-YQZW" }),
+    body({ server_fingerprint: "mmg4-2klg-yqzw-neis" }),
+    body({ server_fingerprint: "MMG4-2KLG-YQZW-NEI1" }),
     body({ expires_at: "not a date" }),
     body({ expires_at: undefined }),
     body({ expires_in_seconds: 0 }),

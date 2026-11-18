@@ -16,6 +16,8 @@ export type CreateDesktopPairingResult =
       expiresAt: string
       expiresInSeconds: number
       serverOrigin: string
+      serverPublicKey: string
+      serverFingerprint: string
     }
   | { ok: false; message: string }
 

@@ -7,7 +7,9 @@ import { afterEach, mock, test } from "node:test"
 type Actions = typeof import("./desktop-pairing-actions.ts")
 
 const CODE = "ABCD-EFGH-JKLM"
-const LINK = `vana://attach?server=https%3A%2F%2Fx.example&code=${CODE}`
+const KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+const FINGERPRINT = "MMG4-2KLG-YQZW-NEIS"
+const LINK = `https://x.example/settings#code=${CODE}&key=${KEY}`
 
 let loginRedirects: string[] = []
 let accessChecks: string[] = []
@@ -70,7 +72,9 @@ function created(overrides: Record<string, unknown> = {}) {
     expires_in_seconds: 600,
     link: LINK,
     object: "desktop_pairing",
+    server_fingerprint: FINGERPRINT,
     server_origin: "https://x.example",
+    server_public_key: KEY,
     ...overrides,
   })
 }
@@ -92,7 +96,9 @@ test("a 201 response becomes a pairing the console can show", async () => {
     expiresInSeconds: 600,
     link: LINK,
     ok: true,
+    serverFingerprint: FINGERPRINT,
     serverOrigin: "https://x.example",
+    serverPublicKey: KEY,
   })
   assert.deepEqual(accessChecks, ["/settings"])
   assert.equal(requests.length, 1)
@@ -120,7 +126,9 @@ test("a malformed 201 is rejected rather than shown", async () => {
   fakeFetch()
   for (const response of [
     () => created({ code: "not-a-code" }),
-    () => created({ link: `https://evil.example/?code=${CODE}` }),
+    () => created({ link: `https://evil.example/settings#code=${CODE}&key=${KEY}` }),
+    () => created({ server_public_key: undefined }),
+    () => created({ server_fingerprint: "nope" }),
     () => created({ expires_in_seconds: undefined }),
     () => new Response("<html>proxy page</html>", { status: 201 }),
   ]) {
