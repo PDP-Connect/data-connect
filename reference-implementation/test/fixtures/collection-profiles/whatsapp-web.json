@@ -1,0 +1,457 @@
+{
+	"protocol_version": "0.1.0",
+	"connector_id": "https://registry.pdpp.dev/connectors/whatsapp-web",
+	"source": {
+		"id": "https://registry.pdpp.dev/sources/whatsapp_web",
+		"display": {
+			"name": "WhatsApp (web)",
+			"description": "WhatsApp chats, messages, contacts and groups, read from the signed-in WhatsApp Web page's own local stores."
+		}
+	},
+	"connector_key": "whatsapp-web",
+	"manifest_uri": "https://registry.pdpp.dev/connectors/whatsapp-web",
+	"version": "0.1.10",
+	"display_name": "WhatsApp (web)",
+	"brand": {
+		"icon": "icon.svg",
+		"background_color": "#25D366"
+	},
+	"runtime_requirements": {
+		"bindings": {
+			"network": {
+				"required": true,
+				"features": ["same_origin_page_fetch"]
+			},
+			"browser": {
+				"required": true,
+				"features": [
+					"page_navigation",
+					"page_script_evaluation",
+					"page_condition_wait"
+				]
+			}
+		}
+	},
+	"capabilities": {
+		"human_interaction": ["manual_action"],
+		"refresh_policy": {
+			"recommended_mode": "manual",
+			"minimum_interval_seconds": 3600,
+			"interaction_posture": "manual_action_likely",
+			"rate_limit_sensitivity": "medium",
+			"bot_detection_sensitivity": "medium",
+			"background_safe": false,
+			"rationale": "Collection reads the page's own local stores inside the owner's signed-in tab. It sends no request of its own except one on-demand history request per chat that says more messages remain on the phone; the owner starts every run and no run happens in the background. A live session refreshes without a prompt; the first run and an expired session need the owner to sign in through the browser handoff."
+		},
+		"public_listing": {
+			"tier": "development",
+			"rationale": "First version: chats, messages, contacts and groups read from the WhatsApp Web client's own in-page stores. Never reads or emits media keys, encrypted blobs, or anything from the signal-storage / wawc_db_enc databases."
+		}
+	},
+	"streams": [
+		{
+			"name": "chats",
+			"required": true,
+			"description": "Every chat the signed-in account has, from the page's own chat collection.",
+			"display": {
+				"label": "Your WhatsApp chats",
+				"detail": "Chat kind (user, group or other), title, last activity, archive, pin, mute, unread and read-only state, and whether more messages remain on the phone."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The chat's WhatsApp id (wid), serialized."
+					},
+					"kind": {
+						"type": "string",
+						"enum": ["user", "group", "other"],
+						"description": "What the chat is, from the id's server part."
+					},
+					"title": {
+						"type": ["string", "null"],
+						"description": "The chat's formatted title.",
+						"x_pdpp_role": "primary-title"
+					},
+					"last_activity_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The time of the chat's last message.",
+						"x_pdpp_role": "event-time"
+					},
+					"archived": {
+						"type": "boolean",
+						"description": "True when the chat is archived."
+					},
+					"pinned": {
+						"type": ["boolean", "null"],
+						"description": "True when the chat is pinned."
+					},
+					"muted": {
+						"type": "boolean",
+						"description": "True when the source holds a mute for the chat: muted with no end, or muted until muted_until. It is not compared with the run's clock; whether a timed mute is still in force is muted_until against the reader's clock."
+					},
+					"muted_until": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The time the chat's mute ends, as the source holds it (it can be in the past); null when no mute is set or the mute has no end."
+					},
+					"unread_count": {
+						"type": "integer",
+						"description": "How many unread messages the chat has."
+					},
+					"read_only": {
+						"type": "boolean",
+						"description": "True when the chat cannot accept new messages (e.g. a closed group)."
+					},
+					"history_state": {
+						"type": ["string", "null"],
+						"description": "The chat's end-of-history-transfer state, named as the app's own module names it."
+					}
+				},
+				"required": [
+					"id",
+					"kind",
+					"title",
+					"last_activity_at",
+					"archived",
+					"pinned",
+					"muted",
+					"muted_until",
+					"unread_count",
+					"read_only",
+					"history_state"
+				]
+			},
+			"query": {
+				"search": {
+					"lexical_fields": ["title"],
+					"semantic_fields": ["title"]
+				},
+				"range_filters": {
+					"last_activity_at": ["gte", "gt", "lte", "lt"],
+					"muted_until": ["gte", "gt", "lte", "lt"],
+					"unread_count": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["last_activity_at"],
+					"group_by": ["kind", "archived"]
+				}
+			},
+			"primary_key": ["id"],
+			"cursor_field": "last_activity_at",
+			"consent_time_field": "last_activity_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "messages",
+			"required": true,
+			"description": "Every message of every chat, read from the page's local message store with one on-demand history request per chat that says more messages remain on the phone.",
+			"display": {
+				"label": "Your WhatsApp messages",
+				"detail": "Message text or caption, who sent it, when, whether it was forwarded or starred, media metadata, calls, polls and locations."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The message's own key id."
+					},
+					"chat_id": {
+						"type": "string",
+						"description": "The chat the message belongs to."
+					},
+					"from_me": {
+						"type": "boolean",
+						"description": "True when the signed-in account wrote the message."
+					},
+					"author": {
+						"type": ["string", "null"],
+						"description": "The id of who wrote the message: in a group, the participant (the owner's own id for the owner's messages); in a one-to-one chat, the owner's own id when from_me, else the chat peer's id. Null only when the page does not say."
+					},
+					"type": {
+						"type": ["string", "null"],
+						"description": "The message's own type, e.g. chat, image, video, call_log, poll."
+					},
+					"subtype": {
+						"type": ["string", "null"],
+						"description": "The message's own subtype when it has one."
+					},
+					"text": {
+						"type": ["string", "null"],
+						"description": "The message's body for a chat message, or its caption for media."
+					},
+					"sent_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The message's timestamp.",
+						"x_pdpp_role": "event-time"
+					},
+					"quoted_id": {
+						"type": ["string", "null"],
+						"description": "The id of the message this one quotes, null when it quotes nothing."
+					},
+					"is_forwarded": {
+						"type": "boolean",
+						"description": "True when the message was forwarded."
+					},
+					"starred": {
+						"type": "boolean",
+						"description": "True when the message is starred."
+					},
+					"media_mimetype": {
+						"type": ["string", "null"],
+						"description": "The media's mimetype, null for a non-media message."
+					},
+					"media_size": {
+						"type": ["integer", "null"],
+						"description": "The media's size in bytes."
+					},
+					"media_filename": {
+						"type": ["string", "null"],
+						"description": "The media's filename."
+					},
+					"media_duration": {
+						"type": ["integer", "null"],
+						"description": "For audio, voice-note and video messages, the media's duration in seconds; null for other types, whose duration value has no known unit."
+					},
+					"call_log": {
+						"type": ["string", "null"],
+						"description": "For a call message, the call's outcome."
+					},
+					"call_duration": {
+						"type": ["integer", "null"],
+						"description": "For a call message, how long the call lasted in seconds."
+					},
+					"poll_name": {
+						"type": ["string", "null"],
+						"description": "For a poll message, the poll's name."
+					},
+					"location_lat": {
+						"type": ["number", "null"],
+						"description": "For a location message, the latitude."
+					},
+					"location_lng": {
+						"type": ["number", "null"],
+						"description": "For a location message, the longitude."
+					}
+				},
+				"required": [
+					"id",
+					"chat_id",
+					"from_me",
+					"author",
+					"type",
+					"subtype",
+					"text",
+					"sent_at",
+					"quoted_id",
+					"is_forwarded",
+					"starred",
+					"media_mimetype",
+					"media_size",
+					"media_filename",
+					"media_duration",
+					"call_log",
+					"call_duration",
+					"poll_name",
+					"location_lat",
+					"location_lng"
+				]
+			},
+			"query": {
+				"search": {
+					"lexical_fields": ["text", "author", "poll_name", "media_filename"],
+					"semantic_fields": ["text"]
+				},
+				"range_filters": {
+					"sent_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["sent_at"],
+					"group_by": ["type", "from_me"]
+				}
+			},
+			"primary_key": ["id"],
+			"cursor_field": "sent_at",
+			"consent_time_field": "sent_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "parent_detail_accounting",
+			"parent_streams": ["chats"],
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "contacts",
+			"required": false,
+			"description": "Only contacts that appear in the user's chats or groups.",
+			"display": {
+				"label": "Your WhatsApp contacts",
+				"detail": "Contact name, short name, push name, and business identity when one is known."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The contact's WhatsApp id (wid), serialized."
+					},
+					"name": {
+						"type": ["string", "null"],
+						"description": "The contact's full name, as the address book or the app has it.",
+						"x_pdpp_role": "primary-title"
+					},
+					"short_name": {
+						"type": ["string", "null"],
+						"description": "The contact's short name."
+					},
+					"push_name": {
+						"type": ["string", "null"],
+						"description": "The name the contact set for themselves."
+					},
+					"is_business": {
+						"type": ["boolean", "null"],
+						"description": "True when the contact is a business account."
+					},
+					"verified_name": {
+						"type": ["string", "null"],
+						"description": "The contact's verified business name."
+					}
+				},
+				"required": [
+					"id",
+					"name",
+					"short_name",
+					"push_name",
+					"is_business",
+					"verified_name"
+				]
+			},
+			"query": {
+				"search": {
+					"lexical_fields": ["name", "short_name", "push_name", "verified_name"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by": ["is_business"]
+				}
+			},
+			"primary_key": ["id"],
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		},
+		{
+			"name": "groups",
+			"required": false,
+			"description": "The group metadata of every group chat: subject, when it was created, its owner and the participants with their admin status.",
+			"display": {
+				"label": "Your WhatsApp groups",
+				"detail": "Group subject, creation time, owner, and the participants with their admin and super-admin status."
+			},
+			"semantics": "mutable_state",
+			"schema": {
+				"type": "object",
+				"properties": {
+					"id": {
+						"type": "string",
+						"description": "The group's WhatsApp id (wid), serialized."
+					},
+					"subject": {
+						"type": ["string", "null"],
+						"description": "The group's subject.",
+						"x_pdpp_role": "primary-title"
+					},
+					"created_at": {
+						"type": ["string", "null"],
+						"format": "date-time",
+						"description": "The time the group was created.",
+						"x_pdpp_role": "event-time"
+					},
+					"owner": {
+						"type": ["string", "null"],
+						"description": "The group owner's id."
+					},
+					"participants": {
+						"type": "array",
+						"description": "The group's participants, with their admin and super-admin status.",
+						"items": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string",
+									"description": "The participant's WhatsApp id (wid), serialized."
+								},
+								"is_admin": {
+									"type": "boolean",
+									"description": "True when the participant is a group admin."
+								},
+								"is_super_admin": {
+									"type": "boolean",
+									"description": "True when the participant is the group's super admin."
+								}
+							},
+							"required": ["id", "is_admin", "is_super_admin"]
+						}
+					}
+				},
+				"required": ["id", "subject", "created_at", "owner", "participants"]
+			},
+			"query": {
+				"search": {
+					"lexical_fields": ["subject"],
+					"semantic_fields": ["subject"]
+				},
+				"range_filters": {
+					"created_at": ["gte", "gt", "lte", "lt"]
+				},
+				"aggregations": {
+					"count": true,
+					"group_by_time": ["created_at"]
+				}
+			},
+			"primary_key": ["id"],
+			"cursor_field": "created_at",
+			"selection": {
+				"fields": true,
+				"resources": true
+			},
+			"incremental": false,
+			"coverage_strategy": "full_inventory",
+			"freshness_strategy": "scheduled_window"
+		}
+	],
+	"reason_display_messages": {
+		"scope_not_supported": "WhatsApp messages can only be imported together with their chats. Select both to import your messages."
+	},
+	"mobile": {
+		"pageshim": {
+			"scope_prefix": "whatsapp_web",
+			"login_url": "https://web.whatsapp.com/",
+			"login_message": "Sign in to WhatsApp Web, then return here.",
+			"collect_export": "collect",
+			"probe_export": "probeWhatsAppSessionOnPage",
+			"summary": { "singular": "record", "plural": "records" }
+		}
+	}
+}

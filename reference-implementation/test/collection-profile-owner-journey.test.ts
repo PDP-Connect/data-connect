@@ -61,7 +61,14 @@ test("owner can discover profile support and read diagnostics through the real s
       {
         bindings: {
           constraint_kinds: [],
-          features: [],
+          features: [
+            "host_http_request",
+            "page_condition_wait",
+            "page_content_read",
+            "page_navigation",
+            "page_script_evaluation",
+            "same_origin_page_fetch",
+          ],
           interface_versions: { browser: [1], filesystem: [1], network: [1] },
           kinds: ["browser", "filesystem", "network"],
         },

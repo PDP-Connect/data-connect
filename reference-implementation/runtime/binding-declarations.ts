@@ -313,9 +313,29 @@ export function normalizeBindingDeclarations(bindings: unknown): readonly Bindin
 // ---------------------------------------------------------------------------
 
 /**
- * What this runtime supplies. It publishes no feature and enforces no
- * constraint, so any declared feature or constraint is an unmet contract.
- * `kinds` matches the static START.bindings advertisement in runtime/index.ts.
+ * What this runtime supplies. It enforces no constraint, so any declared
+ * constraint is an unmet contract. `kinds` matches the static START.bindings
+ * advertisement in runtime/index.ts.
+ *
+ * `features` names only what a run on this runtime can actually do, section
+ * 3.3.8: a required binding that declares an unlisted feature is refused before
+ * spawn, which is cheaper and clearer than the connector failing mid-run. Add a
+ * name here only with a test that exercises it against a real browser (see
+ * test/collection-profile-binding-features-browser.test.ts).
+ *
+ * What supplies each one. The connector child drives a Chromium that this
+ * runtime provides, either a managed surface whose CDP endpoint the runtime
+ * passes in `PDPP_BROWSER_SURFACE_*`, or the deployment's own Chromium. That
+ * browser handle carries navigation, in-page script evaluation, in-page waits
+ * and rendered-content reads, and a script in the page can `fetch` same-origin.
+ * The child also runs with the host's own outbound network, which is what a
+ * host-side HTTP request uses. Not listed, and why:
+ *   - `host_download_capture`, `host_archive_extraction` and
+ *     `host_archive_entry_chunk_read`: the runtime has no download or archive
+ *     seam. The connector's own library would do that work in-process, and a
+ *     download from a remote managed surface is not exercised here.
+ *   - `page_input`, `cookie_read`, `page_response_observation` and
+ *     `host_cookie_jar_request`: nothing here exercises them yet.
  */
 export interface BindingSupport {
   readonly constraintKinds: ReadonlySet<string>;
@@ -326,7 +346,14 @@ export interface BindingSupport {
 
 export const RUNTIME_BINDING_SUPPORT: BindingSupport = {
   constraintKinds: new Set(),
-  features: new Set(),
+  features: new Set([
+    "host_http_request",
+    "page_condition_wait",
+    "page_content_read",
+    "page_navigation",
+    "page_script_evaluation",
+    "same_origin_page_fetch",
+  ]),
   interfaceVersions: new Map([
     ["browser", new Set([1])],
     ["filesystem", new Set([1])],
@@ -334,6 +361,9 @@ export const RUNTIME_BINDING_SUPPORT: BindingSupport = {
   ]),
   kinds: new Set(["browser", "filesystem", "network"]),
 };
+
+/** Features that run in the page a placed browser holds, so they need that browser. */
+const PAGE_CONTEXT_FEATURES: ReadonlySet<string> = new Set(["same_origin_page_fetch"]);
 
 /** Why an instance cannot be supplied, or `null` when the runtime supplies its contract. */
 export function unsupportedReason(instance: BindingInstance, support: BindingSupport): string | null {
@@ -365,6 +395,12 @@ export function unsupportedReason(instance: BindingInstance, support: BindingSup
   return null;
 }
 
+function pageContextReason(instance: BindingInstance): string | null {
+  const { features } = instance.declaration;
+  const needsPage = Array.isArray(features) && features.some((feature) => PAGE_CONTEXT_FEATURES.has(String(feature)));
+  return needsPage ? "page-context features need a browser binding placed with it" : null;
+}
+
 export interface BindingPlacement {
   /** Optional instances this runtime omits, with the reason. */
   readonly omitted: readonly { instance: BindingInstance; reason: string }[];
@@ -384,8 +420,11 @@ export function planBindingPlacement(
   const placed: BindingInstance[] = [];
   const omitted: { instance: BindingInstance; reason: string }[] = [];
   const failures: { key: string; reason: string }[] = [];
-  for (const instance of instances) {
-    const reason = unsupportedReason(instance, support);
+  const reasons = instances.map((instance) => unsupportedReason(instance, support));
+  // A page-context feature has no page unless a browser instance is placed.
+  const browserPlaced = instances.some((instance, index) => instance.kind === "browser" && reasons[index] === null);
+  for (const [index, instance] of instances.entries()) {
+    const reason = reasons[index] ?? (browserPlaced ? null : pageContextReason(instance));
     if (reason === null) {
       placed.push(instance);
     } else if (instance.required) {
