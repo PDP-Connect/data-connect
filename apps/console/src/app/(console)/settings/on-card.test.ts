@@ -718,3 +718,30 @@ test("distinct one-second proof windows stay rate bounded over thirty seconds", 
     assert.ok(checks(calls).length >= 5, "renewal actually continues across distinct windows");
   }, t);
 });
+
+// Live routes do not carry provider identity in projectRoute. Never borrow it
+// from the catalog selection, even when that selection has a known-false line.
+for (const providerId of ["localhost-run", "cloudflare-named"]) {
+  test(`live-route facts remain unfiltered when the catalog selects ${providerId}`, async (t) => {
+    const line = "the plan limits a session to 15 minutes";
+    const live = routeAt({
+      facts: [{ ...fact("address conditions", line), group: "address", affectsConsent: false }],
+    });
+    const selectedCatalog = {
+      ...catalog,
+      providers: [{ ...provider, providerId }],
+    };
+    await withScreen(host({
+      "/catalog": ok(selectedCatalog),
+      "/state": onState(live),
+    }), async ({ container, calls }) => {
+      assert.ok(calls.some((call) => call.url === "/catalog"));
+      const address = container.querySelector("[aria-label='Your address']");
+      assert.ok(address, "the live route is mounted");
+      assert.ok(
+        [...address.querySelectorAll("dd")].some((node) => node.textContent === line),
+        "an unidentified route keeps its own condition, regardless of the selected way"
+      );
+    }, t);
+  });
+}
