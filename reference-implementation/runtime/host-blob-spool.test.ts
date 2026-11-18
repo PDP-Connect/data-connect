@@ -185,7 +185,10 @@ test("each way a spool file can disagree with its descriptor is refused", (t) =>
     ],
     [
       "a directory",
-      () => messageFor(".", text),
+      () => {
+        mkdirSync(join(spool.dir, "sub"));
+        return messageFor("sub", text);
+      },
       /cannot be read|does not match its spool file size/,
     ],
     ["missing file", () => messageFor("missing.json", text), /cannot be read/],
@@ -245,4 +248,30 @@ test("a spool directory swapped for a symlink is refused and the outside file su
   symlinkSync(outside, spool.dir);
   assert.throws(() => readVerifiedSpoolBlob(spool, messageFor("a.json", text), DECLARATION), /spool directory replaced/);
   assert.equal(readFileSync(join(outside, "a.json"), "utf-8"), text, "the outside file is untouched");
+});
+
+test("traversal spool descriptor preserves an outside sentinel", (t) => {
+  const spool = createHostBlobSpool();
+  const sibling = `${spool.dir}-sentinel.json`;
+  const outsideDir = mkdtempSync(join(tmpdir(), "pdpp-blob-outside-"));
+  t.after(() => {
+    rmSync(sibling, { force: true });
+    rmSync(outsideDir, { force: true, recursive: true });
+    spool.dispose();
+  });
+  writeFileSync(sibling, "{}");
+  const parentName = spool.dir.slice(0, spool.dir.lastIndexOf("/") + 1);
+  const relative = `../${sibling.slice(parentName.length)}`;
+  assert.throws(() => readVerifiedSpoolBlob(spool, messageFor(relative, "{}"), DECLARATION), /spool file name/);
+  assert.equal(readFileSync(sibling, "utf-8"), "{}", "the outside sentinel is unchanged");
+
+  // The same escape through a symlinked directory inside the spool.
+  writeFileSync(join(outsideDir, "s.json"), "{}");
+  symlinkSync(outsideDir, join(spool.dir, "link"));
+  assert.throws(() => readVerifiedSpoolBlob(spool, messageFor("link/s.json", "{}"), DECLARATION), /spool file name/);
+  assert.equal(readFileSync(join(outsideDir, "s.json"), "utf-8"), "{}", "the file behind the symlinked directory is unchanged");
+
+  for (const bad of ["", ".", "..", "a\\b", "a/b", "/etc/passwd"]) {
+    assert.throws(() => readVerifiedSpoolBlob(spool, messageFor(bad, "{}"), DECLARATION), /spool file name/, bad);
+  }
 });

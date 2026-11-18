@@ -121,11 +121,23 @@ function assertSpoolDirectoryUnchanged(spool: HostBlobSpool, stream: string): vo
   }
 }
 
+function isSpoolBasename(file: unknown): file is string {
+  return (
+    typeof file === "string" &&
+    file !== "" &&
+    file !== "." &&
+    file !== ".." &&
+    !file.includes("/") &&
+    !file.includes("\\") &&
+    !file.includes("\0")
+  );
+}
+
 /**
  * Read the spool file a BLOB descriptor names and return its bytes after they
- * pass every check, or throw. Checks, in order: the path stays inside the
- * spool; the entry is a regular file reached without following a symlink; its
- * size equals `size_bytes` and is within the declared cap; the bytes read equal
+ * pass every check, or throw. Checks, in order: the name is a single basename,
+ * so the path stays inside the spool; the entry is a regular file reached
+ * without following a symlink; its size equals `size_bytes` and is within the declared cap; the bytes read equal
  * that size and hash to `sha256`; the bytes are valid UTF-8 JSON. The file is
  * deleted on success so a second BLOB cannot name it again.
  */
@@ -136,6 +148,12 @@ export function readVerifiedSpoolBlob(
 ): Buffer {
   if (message.size_bytes > declaration.maxBlobBytes) {
     throw new Error(`BLOB for stream '${message.stream}' exceeds the declared max_blob_bytes`);
+  }
+  // A descriptor names one file directly inside the spool. Refuse anything
+  // else before any open or unlink: "../x" and a path through a symlinked
+  // subdirectory both escape, and O_NOFOLLOW guards only the last component.
+  if (!isSpoolBasename(message.file)) {
+    throw new Error(`BLOB for stream '${message.stream}' has an invalid spool file name`);
   }
   const path = join(spool.dir, message.file);
   assertSpoolDirectoryUnchanged(spool, message.stream);
