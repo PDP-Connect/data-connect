@@ -202,10 +202,21 @@ export async function prepareTurnOn(
     }
     if (!committed && entry?.setup) {
       // Nothing is committed while the service's own setup is still open.
-      const setup = await send<{ state: string }>(
-        `/setup-operations/${encodeURIComponent(entry.setup.operationId)}?providerId=${encodeURIComponent(choice.providerId)}`
-      );
-      if (setup.state !== "complete" && setup.state !== "cancelled") return { kind: "setup-pending", draft };
+      const setupPath = `/setup-operations/${encodeURIComponent(entry.setup.operationId)}`;
+      const setup = await send<{ state: string }>(`${setupPath}?providerId=${encodeURIComponent(choice.providerId)}`);
+      if (setup.state === "blocked") {
+        // The library holds a setup it can no longer advance: the draft it was started on is gone
+        // (a commit or a discard in an earlier run used it up). It is released when it holds nothing
+        // to remove, and shown as pending when it still holds a resource.
+        proceed();
+        const ended = await send<{ state: string; resources?: { removal?: string }[] }>(`${setupPath}/cancel`, {
+          providerId: choice.providerId,
+        });
+        const holding = (ended.resources ?? []).some((item) => item.removal === "required" || item.removal === "unconfirmed");
+        if (ended.state !== "cancelled" || holding) return { kind: "setup-pending", draft };
+      } else if (setup.state !== "complete" && setup.state !== "cancelled") {
+        return { kind: "setup-pending", draft };
+      }
     }
     if (!committed) {
       for (const action of draft.configuration.actions) {

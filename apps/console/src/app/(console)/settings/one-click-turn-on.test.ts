@@ -161,6 +161,38 @@ test("the chain waits while the service's own setup is open", async () => {
   assert.ok(!urls().includes("/drafts/d-1/commit"));
 });
 
+test("a blocked setup that holds nothing is cancelled, and the chain goes on", async () => {
+  const services = [
+    { providerId: "p-tunnel", providerLabel: "T", draftId: "d-1", usage: "session", committed: false, setup: { operationId: "op", actionId: "a", expectedConfigurationRevision: "r" } },
+  ];
+  const { request, urls } = recorder({
+    ...baseTable,
+    "/state": ok({ routes: [], reasons: {}, starting: false, services }),
+    "/drafts/d-1": ok(draftWith()),
+    "/setup-operations/op": ok({ state: "blocked" }),
+    "/setup-operations/op/cancel": ok({ state: "cancelled", resources: [] }),
+  });
+  const result = await prepareTurnOn(request, choice);
+  assert.equal(result.kind, "ready");
+  assert.ok(urls().includes("/setup-operations/op/cancel"));
+});
+
+test("a blocked setup that still holds a resource is shown as pending, never dropped", async () => {
+  const services = [
+    { providerId: "p-tunnel", providerLabel: "T", draftId: "d-1", usage: "session", committed: false, setup: { operationId: "op", actionId: "a", expectedConfigurationRevision: "r" } },
+  ];
+  const { request, urls } = recorder({
+    ...baseTable,
+    "/state": ok({ routes: [], reasons: {}, starting: false, services }),
+    "/drafts/d-1": ok(draftWith()),
+    "/setup-operations/op": ok({ state: "blocked" }),
+    "/setup-operations/op/cancel": ok({ state: "cancelled", resources: [{ removal: "required" }] }),
+  });
+  const result = await prepareTurnOn(request, choice);
+  assert.equal(result.kind, "setup-pending");
+  assert.ok(!urls().includes("/drafts/d-1/commit"));
+});
+
 test("a setup action with effects waits for Allow; the chain runs nothing", async () => {
   for (const effectful of [
     action({ kind: "install-artifact", effects: { ...none, writes: ["/opt/x"] }, artifact: { url: "https://x.invalid/a", sha256: "s", platform: "linux", architecture: "x64" } }),
