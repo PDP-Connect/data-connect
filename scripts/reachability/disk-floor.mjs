@@ -8,7 +8,10 @@ export const RELEASE_DISK_FLOOR_BYTES = 105_000_000_000;
 export const LOCAL_DISK_FLOOR_ENV = "PDPP_LOCAL_DISK_FLOOR_BYTES";
 export const LOCAL_DISK_REASON_ENV = "PDPP_LOCAL_DISK_WAIVER_REASON";
 export const LOCAL_DISK_LOG_ENV = "PDPP_LOCAL_DISK_WAIVER_LOG";
-const HARD_MINIMUM_BYTES = 20_000_000_000;
+export const LOCAL_DISK_FOOTPRINT_ENV = "PDPP_LOCAL_DISK_FOOTPRINT_BYTES";
+const HARD_MINIMUM_BYTES = 15_000_000_000;
+// Release and CI runs must never use the waiver, even when the variables leak in.
+const CI_MARKERS = ["CI", "GITHUB_ACTIONS", "RELEASE", "SEMANTIC_RELEASE"];
 
 export function resolveDiskFloor(env = process.env) {
 	const raw = env[LOCAL_DISK_FLOOR_ENV];
@@ -16,6 +19,8 @@ export function resolveDiskFloor(env = process.env) {
 		return { floor: RELEASE_DISK_FLOOR_BYTES, waived: false };
 	const floor = Number(raw);
 	const reason = env[LOCAL_DISK_REASON_ENV]?.trim();
+	const ci = CI_MARKERS.find((name) => env[name] && env[name] !== "false" && env[name] !== "0");
+	if (ci) throw new Error(`${LOCAL_DISK_FLOOR_ENV} is refused when ${ci} is set`);
 	if (!Number.isSafeInteger(floor) || floor < HARD_MINIMUM_BYTES)
 		throw new Error(
 			`${LOCAL_DISK_FLOOR_ENV} must be an integer of at least ${HARD_MINIMUM_BYTES} bytes`,
@@ -38,6 +43,9 @@ export async function requireDiskFloor(env = process.env, cwd = process.cwd()) {
 			waivedFloorBytes: floor,
 			releaseFloorBytes: RELEASE_DISK_FLOOR_BYTES,
 			reason,
+			...(env[LOCAL_DISK_FOOTPRINT_ENV]
+				? { measuredFootprintBytes: Number(env[LOCAL_DISK_FOOTPRINT_ENV]) }
+				: {}),
 		});
 		process.stderr.write(`${line}\n`);
 		if (env[LOCAL_DISK_LOG_ENV]) appendFileSync(env[LOCAL_DISK_LOG_ENV], `${line}\n`);

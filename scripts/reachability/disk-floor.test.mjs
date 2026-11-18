@@ -17,6 +17,9 @@ test("default keeps the release floor", () => {
 test("a waived floor needs a reason, a sane value and stays below release", () => {
 	assert.throws(() => resolveDiskFloor({ [LOCAL_DISK_FLOOR_ENV]: "50000000000" }));
 	assert.throws(() =>
+		resolveDiskFloor({ [LOCAL_DISK_FLOOR_ENV]: "14999999999", [LOCAL_DISK_REASON_ENV]: "x" }),
+	);
+	assert.throws(() =>
 		resolveDiskFloor({ [LOCAL_DISK_FLOOR_ENV]: "1", [LOCAL_DISK_REASON_ENV]: "x" }),
 	);
 	assert.throws(() =>
@@ -44,4 +47,20 @@ test("a waived floor still refuses when real free bytes are below it", async () 
 	} finally {
 		process.stderr.write = quiet;
 	}
+});
+test("release and CI environments refuse the waiver", () => {
+	for (const marker of ["CI", "GITHUB_ACTIONS", "RELEASE", "SEMANTIC_RELEASE"])
+		assert.throws(
+			() =>
+				resolveDiskFloor({
+					[marker]: "true",
+					[LOCAL_DISK_FLOOR_ENV]: "15000000000",
+					[LOCAL_DISK_REASON_ENV]: "r",
+				}),
+			/refused/,
+		);
+	assert.equal(
+		resolveDiskFloor({ CI: "true" }).floor,
+		RELEASE_DISK_FLOOR_BYTES,
+	);
 });
