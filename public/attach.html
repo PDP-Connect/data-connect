@@ -296,6 +296,11 @@
       // The code this page copied out of a pairing link. It belongs to that
       // link, so it is dropped with the link; a code the owner typed is not.
       let autoFilledCode = null;
+      // Each inspection gets a number. Editing the link, or starting a new
+      // inspection, invalidates the one still running, so a slow answer for an
+      // earlier link cannot become what Connect sends.
+      let inspectRun = 0;
+      let inspecting = false;
 
       const invoke =
         window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
@@ -318,6 +323,11 @@
       }
 
       function leaveConfirm() {
+        inspectRun++;
+        if (inspecting) {
+          inspecting = false;
+          setBusy(false);
+        }
         inspected = null;
         if (autoFilledCode !== null && codeInput.value === autoFilledCode) {
           codeInput.value = "";
@@ -355,11 +365,16 @@
         show(errorBox, "");
         leaveConfirm();
         setBusy(true);
+        inspecting = true;
+        const run = ++inspectRun;
         try {
           const result = await invoke("inspect_server", {
             input: serverInput.value,
             trustPlainHttp: trustInput.checked,
           });
+          if (run !== inspectRun) {
+            return;
+          }
           inspected = result;
           confirmServer.textContent = result.origin;
           pairingSection.style.display = result.serverId ? "" : "none";
@@ -388,9 +403,14 @@
           confirmSection.classList.add("visible");
           passwordSection.open = !result.serverId;
         } catch (error) {
-          show(errorBox, message(error, "DataConnect could not reach this server."));
+          if (run === inspectRun) {
+            show(errorBox, message(error, "DataConnect could not reach this server."));
+          }
         } finally {
-          setBusy(false);
+          if (run === inspectRun) {
+            inspecting = false;
+            setBusy(false);
+          }
         }
       }
 
