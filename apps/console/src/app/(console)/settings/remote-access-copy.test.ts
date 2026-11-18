@@ -55,6 +55,7 @@ const dir = new URL(".", import.meta.url);
 const sourceFiles = [
   "remote-access-setting.tsx",
   "provider-setup.tsx",
+  "sign-in.ts",
   "reachability-consent.tsx",
   "route-display.ts",
   "on-card.tsx",

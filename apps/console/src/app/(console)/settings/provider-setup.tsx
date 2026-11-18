@@ -18,6 +18,7 @@ import {
 } from "./diagnostics.tsx"
 import { plain } from "./plain-text.ts"
 import { type ActionKind, publicError } from "./reachability-errors.ts"
+import { approvalFor, safeSignInUrl, signInCopy, signInStage } from "./sign-in.ts"
 
 type SetupView = ReturnType<typeof projectSetupOperation>
 type Request = typeof requestReachability
@@ -56,10 +57,10 @@ export function reserveSetupOperation(
 }
 
 const status: Record<SetupView["state"], (service: string) => string> = {
-  "authorization-required": service => `Sign in to ${service} to finish`,
+  "authorization-required": service => `Sign in to ${service} to finish.`,
   pending: () => "Waiting for you to finish signing in…",
   denied: service => `${service} sign-in was cancelled.`,
-  expired: service => `${service} sign-in took too long. Try again.`,
+  expired: service => `${service} sign-in took too long.`,
   blocked: () => "Needs your action",
   reconciling: () => "Turning off…",
   complete: () => "Ready to turn on",
@@ -168,6 +169,8 @@ export function ProviderSetup({
   onReadiness,
   onResume,
   acknowledgeDisconnect,
+  pollTick = 0,
+  isCurrentWay = () => true,
 }: {
   reservation: SetupReservation
   request: Request
@@ -176,6 +179,10 @@ export function ProviderSetup({
   onReadiness: (draftId: string, revision: string | null) => void
   onResume?: () => void
   acknowledgeDisconnect: boolean
+  /** Bumped by the card's own 3-second poll. A waiting sign-in reads its setup on each bump. */
+  pollTick?: number
+  /** True while this service's way is the one on screen. A way the owner left shows and opens nothing. */
+  isCurrentWay?: () => boolean
 }) {
   const [view, setView] = useState<SetupView | null>(null)
   const [busy, setBusy] = useState(false)
@@ -264,43 +271,139 @@ export function ProviderSetup({
     }
   }
 
-  const browser =
-    view?.state === "pending" ? view.nextAction?.step?.browser : undefined
-  const expiresAt = browser?.expiresAt
-  const pollAfterMs = browser?.pollAfterMs
+  // A sign-in the owner is finishing in the browser. The card's own poll
+  // (`pollTick`) and a return to this window read the setup; no timer is added.
+  const waitingForOwner = view !== null && signInStage(view) === "sign-in"
+  const readNow = useEffectEvent(async () => {
+    if (busy || !isCurrentWay()) return
+    const epoch = readEpoch.current
+    const current = () => readEpoch.current === epoch && isCurrentWay()
+    const result = await request(readPath)
+    if (current() && result.ok) await acceptObservation(result.data as SetupView, current)
+  })
   useEffect(() => {
-    if (!expiresAt || !pollAfterMs || busy) return
-    // Focus and a provider-suggested poll both read current evidence.
-    let active = true
-    let reading = false
-    let timer: ReturnType<typeof setTimeout>
-    const check = async () => {
-      if (reading) return
-      clearTimeout(timer)
-      reading = true
-      const epoch = readEpoch.current
-      const current = () => active && readEpoch.current === epoch
-      const result = await request(readPath)
-      if (current() && result.ok) await acceptObservation(result.data as SetupView, current)
-      reading = false
-      if (!current()) return
-      if (Date.now() < Date.parse(expiresAt)) {
-        timer = setTimeout(() => void check(), Math.max(1000, pollAfterMs))
-      }
-    }
-    const onReturn = () => void check()
-    timer = setTimeout(onReturn, Math.max(1000, pollAfterMs))
+    if (pollTick > 0 && waitingForOwner) void readNow()
+  }, [pollTick])
+  useEffect(() => {
+    if (!waitingForOwner) return
+    const onReturn = () => void readNow()
     window.addEventListener("focus", onReturn)
     window.addEventListener("pageshow", onReturn)
     return () => {
-      active = false
-      clearTimeout(timer)
       window.removeEventListener("focus", onReturn)
       window.removeEventListener("pageshow", onReturn)
     }
-  }, [busy, expiresAt, pollAfterMs, readPath, request])
+  }, [waitingForOwner])
+
+  // The sign-in card: words, one primary button, and a copy-link fallback.
+  const [opened, setOpened] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const stage = view ? signInStage(view) : null
+  useEffect(() => {
+    if (stage !== "sign-in") setOpened(false)
+  }, [stage])
+  function command(setup: SetupView, action: NonNullable<SetupView["nextAction"]>, approval: Approval) {
+    return {
+      approval,
+      providerId,
+      actionId: action.id,
+      ...(setup.scope.draftId === null ? {} : { draftId: setup.scope.draftId }),
+      expectedConfigurationRevision: setup.scope.configurationRevision,
+      expectedSetupRevision: setup.revision,
+      acknowledgeDisconnect,
+    }
+  }
+  // Asks the host for the sign-in link. Null when this way is no longer the one on screen.
+  async function signInLink(setup: SetupView): Promise<URL | null> {
+    const action = setup.nextAction
+    const approval = action ? approvalFor(action) : null
+    if (!action || !approval) throw new ReachabilityFailure(publicError("consent_required"))
+    const handoff = await send<{ href: string }>(`${path}/handoff`, command(setup, action, approval))
+    if (!isCurrentWay()) return null
+    const url = safeSignInUrl(handoff.href)
+    if (!url) throw new ReachabilityFailure(publicError("setup_action_unavailable"))
+    return url
+  }
+  async function guarded(run: () => Promise<void>) {
+    if (!isCurrentWay()) return
+    ++readEpoch.current
+    setBusy(true)
+    setNotice(null)
+    try {
+      await run()
+    } catch (failure) {
+      setNotice(toDisplayError(failure, "action", reservation.providerLabel).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const openSignIn = (setup: SetupView) =>
+    guarded(async () => {
+      const url = await signInLink(setup)
+      if (!url) return
+      if (!(await openResource(url.href, { kind: "external-url", newTab: false }))) {
+        setNotice("Your browser didn't open. Copy the sign-in link instead.")
+        return
+      }
+      setOpened(true)
+    })
+  const copySignIn = (setup: SetupView) =>
+    guarded(async () => {
+      const url = await signInLink(setup)
+      if (!url) return
+      try {
+        await window.navigator.clipboard.writeText(url.href)
+        setNotice("Sign-in link copied.")
+      } catch {
+        setNotice("Couldn't copy the link.")
+      }
+    })
+  const tryAgain = (setup: SetupView) =>
+    guarded(async () => {
+      const action = setup.nextAction
+      const approval = action ? approvalFor(action) : null
+      // The same setup runs its sign-in step again. A setup with no step to run is read once more.
+      const next =
+        action && approval
+          ? await send<SetupView>(path, command(setup, action, approval))
+          : await send<SetupView>(readPath)
+      if (!isCurrentWay()) return
+      await onChange(next, true)
+      setView(next)
+    })
 
   const action = view?.nextAction
+  // A finished setup has nothing left to show: the flow goes on to Turning on.
+  if (view?.state === "complete" && !action) return null
+  if (view && stage) {
+    // A way the owner has left shows nothing and opens nothing.
+    if (!isCurrentWay()) return null
+    const service = plain(reservation.providerLabel)
+    const copy = signInCopy(stage, service, opened)
+    return (
+      <section aria-label={`Sign in to ${service}`} className="grid gap-3">
+        <h3 className="pdpp-label">Needs your action</h3>
+        <p role="status">{copy.line}</p>
+        {notice ? <p role="status">{notice}</p> : null}
+        <div className="flex flex-wrap gap-3">
+          {copy.button ? (
+            <button
+              type="button"
+              disabled={busy || disabled}
+              onClick={() => void (stage === "sign-in" ? openSignIn(view) : tryAgain(view))}
+            >
+              {copy.button}
+            </button>
+          ) : null}
+          {stage === "sign-in" ? (
+            <button type="button" disabled={busy} onClick={() => void copySignIn(view)}>
+              Copy sign-in link
+            </button>
+          ) : null}
+        </div>
+      </section>
+    )
+  }
   return (
     <section
       aria-label={`Setup for ${plain(reservation.providerLabel)}`}
@@ -369,7 +472,7 @@ export function ProviderSetup({
                 ) {
                   throw new ReachabilityFailure({
                     code: "browser_not_opened",
-                    message: "Your browser didn't open. Try again.",
+                    message: "Your browser didn't open. Copy the sign-in link instead.",
                   })
                 }
                 return send<SetupView>(readPath)

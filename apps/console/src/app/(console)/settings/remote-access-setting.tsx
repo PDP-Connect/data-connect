@@ -168,6 +168,8 @@ export function RemoteAccessSetting({
   const loadSeq = useRef(0);
   const appliedSeq = useRef(0);
   const seenSetup = useRef<string | null>(null);
+  // Bumped by each poll above; a sign-in the owner is finishing reads its setup on each bump.
+  const [setupTick, setSetupTick] = useState(0);
 
   async function send<T>(path: string, input?: Record<string, unknown>): Promise<T> {
     const result = await request(path, input);
@@ -196,6 +198,7 @@ export function RemoteAccessSetting({
         return;
       }
       appliedSeq.current = seq;
+      setSetupTick((n) => n + 1);
       if (catalogResult.ok) {
         setInventory(catalogResult.data as Inventory);
         setStale(false);
@@ -294,6 +297,9 @@ export function RemoteAccessSetting({
   const wayUsage = way ? pickUsage(way, capabilities) : null;
   const wayId = way?.providerId ?? null;
   const wayLabel = way ? plain(way.label) : undefined;
+  // Read by a sign-in step already under way: it must not show or open for a way the owner has left.
+  const wayIdNow = useRef<string | null>(null);
+  wayIdNow.current = wayId;
 
   const mutationBlocked = busy || stale || state.starting;
   // The password is the only gate on an address reachable from the internet,
@@ -814,7 +820,9 @@ export function RemoteAccessSetting({
         <ProviderSetup
           acknowledgeDisconnect
           disabled={mutationBlocked || passwordMissing}
+          isCurrentWay={() => wayIdNow.current === reservation.providerId}
           key={reservation.operationId}
+          pollTick={setupTick}
           reservation={reservation}
           request={request}
           onReadiness={() => undefined}
