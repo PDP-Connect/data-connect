@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import { mkdtempSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { closeDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
+import { instanceFingerprint, instanceProofMessage } from "../server/instance-identity.ts";
 import {
   createDesktopPairingStore,
   DESKTOP_PAIRING_ALPHABET,
@@ -17,6 +21,11 @@ import {
 import { createOwnerSessionController, createMemoryOwnerSessionStore } from "../server/owner-session.ts";
 import { createOwnerPasswordVerifierStore, setOwnerPassword } from "../server/stores/owner-password-verifier-store.ts";
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+
+// The instance identity file lives under PDPP_DATA_DIR; keep it out of the working tree.
+const IDENTITY_DATA_DIR = mkdtempSync(join(tmpdir(), "pdpp-desktop-pairing-identity-"));
+process.env.PDPP_DATA_DIR = IDENTITY_DATA_DIR;
+after(() => rm(IDENTITY_DATA_DIR, { force: true, recursive: true }));
 
 const TEST_PASSWORD = "placeholder-test-password";
 const CODE_PATTERN = /^[ABCDEFGHJKMNPQRSTVWXYZ2-9]{4}-[ABCDEFGHJKMNPQRSTVWXYZ2-9]{4}-[ABCDEFGHJKMNPQRSTVWXYZ2-9]{4}$/u;
@@ -110,7 +119,9 @@ interface PairingBody {
   expires_in_seconds: number;
   link: string;
   object: string;
+  server_fingerprint: string;
   server_origin: string;
+  server_public_key: string;
 }
 
 async function createPairing(asUrl: string, cookie: string): Promise<{ body: PairingBody; status: number }> {
@@ -255,10 +266,7 @@ test("desktop pairing: create returns the contract body with the public origin a
       const expires = Date.parse(body.expires_at);
       assert.ok(expires >= before + 599_000 && expires <= Date.now() + 600_000);
       assert.equal(body.server_origin, "https://vault.example.com");
-      assert.equal(
-        body.link,
-        `vana://attach?server=${encodeURIComponent(body.server_origin)}&code=${body.code}`
-      );
+      assert.equal(body.link, `https://vault.example.com/settings#code=${body.code}&key=${body.server_public_key}`);
     }
   );
 });
@@ -405,7 +413,7 @@ test("desktop pairing: on a hosted server server_origin is PDPP_REFERENCE_ORIGIN
       const { body, status } = await createPairing(asUrl, cookie);
       assert.equal(status, 201);
       assert.equal(body.server_origin, "https://vault.example.com");
-      assert.ok(body.link.startsWith("vana://attach?server=https%3A%2F%2Fvault.example.com&code="));
+      assert.ok(body.link.startsWith("https://vault.example.com/settings#code="));
     }
   );
 });
@@ -457,4 +465,218 @@ test("desktop pairing: an owner password change revokes the paired session", asy
   } finally {
     await rm(directory, { force: true, recursive: true });
   }
+});
+
+// ── instance identity ────────────────────────────────────────────────────────
+
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+function verifyProof(
+  proof: { public_key: string; signature: string },
+  origin: string,
+  nonce: string
+): boolean {
+  const key = crypto.createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(proof.public_key, "base64url")]),
+    format: "der",
+    type: "spki",
+  });
+  return crypto.verify(
+    null,
+    Buffer.from(instanceProofMessage(origin, nonce)),
+    key,
+    Buffer.from(proof.signature, "base64url")
+  );
+}
+
+interface ProofBody {
+  fingerprint: string;
+  public_key: string;
+  signature: string;
+}
+
+const NONCE_16 = Buffer.alloc(16, 7).toString("base64url");
+
+/** node:http, because fetch will not let a test choose the Host header. */
+function postIdentity(
+  asUrl: string,
+  nonce: unknown,
+  headers: Record<string, string> = {}
+): Promise<{ body: Record<string, unknown>; cacheControl: string | undefined; status: number }> {
+  const target = new URL(`${asUrl}/owner/desktop-pairings/identity`);
+  const payload = JSON.stringify({ nonce });
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        headers: { "Content-Type": "application/json", Accept: "application/json", ...headers },
+        hostname: target.hostname,
+        method: "POST",
+        path: target.pathname,
+        port: target.port,
+      },
+      (resp) => {
+        let text = "";
+        resp.on("data", (chunk) => {
+          text += chunk;
+        });
+        resp.on("end", () =>
+          resolve({
+            body: JSON.parse(text) as Record<string, unknown>,
+            cacheControl: resp.headers["cache-control"],
+            status: resp.statusCode ?? 0,
+          })
+        );
+      }
+    );
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
+
+test("desktop identity: signs the nonce with a key whose fingerprint create and redeem also return", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const { cookie } = await login(asUrl, TEST_PASSWORD);
+    assert.ok(cookie);
+    const { body: pairing } = await createPairing(asUrl, cookie);
+    const proof = await postIdentity(asUrl, NONCE_16);
+    assert.equal(proof.status, 200);
+    assert.equal(proof.cacheControl, "no-store");
+    const body = proof.body as unknown as ProofBody;
+    assert.equal(body.public_key, pairing.server_public_key);
+    assert.equal(body.fingerprint, pairing.server_fingerprint);
+    assert.equal(body.fingerprint, instanceFingerprint(Buffer.from(body.public_key, "base64url")));
+    assert.match(body.public_key, /^[A-Za-z0-9_-]{43}$/u);
+    assert.match(body.fingerprint, /^[A-Z2-7]{4}(-[A-Z2-7]{4}){3}$/u);
+    assert.equal(verifyProof(body, new URL(asUrl).origin, NONCE_16), true);
+
+    const redeemed = await redeem(asUrl, { code: pairing.code });
+    assert.equal(redeemed.status, 200);
+    assert.equal(redeemed.body.server_public_key, body.public_key);
+    assert.equal(redeemed.body.server_fingerprint, body.fingerprint);
+  });
+});
+
+test("desktop identity: the signed message binds the origin and the nonce", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const nonce = Buffer.alloc(32, 9).toString("base64url");
+    const body = (await postIdentity(asUrl, nonce)).body as unknown as ProofBody;
+    const origin = new URL(asUrl).origin;
+    assert.equal(verifyProof(body, origin, nonce), true);
+    assert.equal(verifyProof(body, "https://other.example.com", nonce), false);
+    assert.equal(verifyProof(body, origin, NONCE_16), false);
+    const again = (await postIdentity(asUrl, NONCE_16)).body as unknown as ProofBody;
+    assert.notEqual(again.signature, body.signature);
+    assert.equal(again.public_key, body.public_key, "the key is stable across requests");
+  });
+});
+
+test("desktop identity: rejects a missing, short, long or non-base64url nonce with 400 invalid_request", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const bad: unknown[] = [
+      undefined,
+      42,
+      "",
+      Buffer.alloc(15).toString("base64url"),
+      Buffer.alloc(65).toString("base64url"),
+      `${NONCE_16}=`,
+      "not base64url!!!!!!!!!!!!",
+      Buffer.alloc(16, 255).toString("base64"),
+    ];
+    for (const nonce of bad) {
+      const result = await postIdentity(asUrl, nonce);
+      assert.equal(result.status, 400, JSON.stringify(nonce));
+      assert.equal((result.body.error as { code: string }).code, "invalid_request");
+    }
+    for (const size of [16, 64]) {
+      const result = await postIdentity(asUrl, Buffer.alloc(size, 1).toString("base64url"));
+      assert.equal(result.status, 200, `${size} raw bytes is accepted`);
+    }
+  });
+});
+
+test("desktop identity: a created server keeps its identity across a restart on the same data directory", async () => {
+  let first = "";
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    first = ((await postIdentity(asUrl, NONCE_16)).body as unknown as ProofBody).public_key;
+  });
+  assert.match(first, /^[A-Za-z0-9_-]{43}$/u);
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    assert.equal(((await postIdentity(asUrl, NONCE_16)).body as unknown as ProofBody).public_key, first);
+  });
+});
+
+// The signed origin is the one the desktop dials. These pin what the resolver
+// yields for the Host header, a configured PDPP_REFERENCE_ORIGIN and the
+// Docker quickstart configuration (loopback reference origin, trusted hosts
+// localhost and 127.0.0.1).
+
+test("desktop identity: with no configured origin the signed origin is the Host the client dialed", async () => {
+  await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
+    const port = new URL(asUrl).port;
+    for (const host of [`localhost:${port}`, `127.0.0.1:${port}`]) {
+      const proof = await postIdentity(asUrl, NONCE_16, { Host: host });
+      assert.equal(proof.status, 200);
+      assert.equal(verifyProof(proof.body as unknown as ProofBody, `http://${host}`, NONCE_16), true, host);
+    }
+  });
+});
+
+test("desktop identity: on a hosted server the signed origin is PDPP_REFERENCE_ORIGIN and an untrusted Host is refused", async () => {
+  await withServer(
+    {
+      ownerAuthPassword: TEST_PASSWORD,
+      referenceOrigin: "https://vault.example.com",
+      trustedMetadataHosts: "localhost",
+    },
+    async ({ asUrl }) => {
+      const port = new URL(asUrl).port;
+      const trusted = await postIdentity(asUrl, NONCE_16, { Host: `localhost:${port}` });
+      assert.equal(trusted.status, 200);
+      assert.equal(verifyProof(trusted.body as unknown as ProofBody, "https://vault.example.com", NONCE_16), true);
+      const untrusted = await postIdentity(asUrl, NONCE_16, { Host: "attacker.example.net" });
+      assert.ok(untrusted.status >= 400, "a Host outside the trusted list gets no signature");
+      assert.equal(untrusted.body.signature, undefined);
+    }
+  );
+});
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = http.createServer();
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address() as { port: number };
+      probe.close(() => resolve(port));
+    });
+    probe.on("error", reject);
+  });
+}
+
+test("desktop identity: Docker quickstart configuration signs PDPP_REFERENCE_ORIGIN, whichever loopback name was dialed", async () => {
+  const port = await freePort();
+  await withServer(
+    {
+      asPort: port,
+      ownerAuthPassword: TEST_PASSWORD,
+      referenceOrigin: `http://localhost:${port}`,
+      trustedMetadataHosts: "localhost,127.0.0.1",
+    },
+    async ({ asUrl }) => {
+      const { cookie } = await login(asUrl, TEST_PASSWORD);
+      assert.ok(cookie);
+      const { body: pairing } = await createPairing(asUrl, cookie);
+      const observed: string[] = [];
+      for (const host of [`localhost:${port}`, `127.0.0.1:${port}`]) {
+        const proof = await postIdentity(asUrl, NONCE_16, { Host: host });
+        assert.equal(proof.status, 200, host);
+        const body = proof.body as unknown as ProofBody;
+        const signed = [`http://localhost:${port}`, `http://127.0.0.1:${port}`].find((origin) =>
+          verifyProof(body, origin, NONCE_16)
+        );
+        observed.push(`Host ${host} signs ${signed}`);
+        assert.equal(signed, `http://localhost:${port}`, `quickstart signs the configured origin for Host ${host}`);
+      }
+      assert.equal(pairing.server_origin, `http://localhost:${port}`);
+      console.log(`quickstart (PDPP_REFERENCE_ORIGIN=http://localhost:PORT, trusted localhost,127.0.0.1): ${observed.join("; ")}`);
+    }
+  );
 });

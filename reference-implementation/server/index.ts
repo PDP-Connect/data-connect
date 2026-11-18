@@ -101,6 +101,7 @@ import { appConfigPath, createAppConfigStore } from "./app-config-store.ts";
 import { autostartStatePath, createAutostartStore } from "./autostart-store.ts";
 import { type BrowserProfilePurger, createBrowserProfilePurger } from "./browser-profile-purge.ts";
 import { createLiveRevisions, type LiveRevisions, registerDefaultLiveTopics } from "./live-revisions.ts";
+import { createInstanceIdentityProvider } from "./instance-identity.ts";
 import { createRecoveryKeyStore } from "./recovery-key-store.ts";
 import { probeNonPressureRecoverableCount, probeSourcePressureGaps } from "./scheduler-manager-factory.ts";
 import { getOwnerSessionStore } from "./stores/owner-session-store.ts";
@@ -5097,6 +5098,8 @@ export function buildAsApp(opts: ServerOpts = {}) {
         req as unknown as Parameters<typeof resolvePublicUrl>[0],
         opts.asPublicUrl || (opts.ignoreAmbientPublicUrls ? null : process.env.AS_PUBLIC_URL)
       ),
+    // Created on first use under PDPP_DATA_DIR, so a server that never pairs a desktop writes nothing.
+    instanceIdentity: createInstanceIdentityProvider(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data")),
   });
   app.use((..._args: never[]) => {
     const [req, res, next] = _args as unknown as [ReqLike, ResLike, () => void];

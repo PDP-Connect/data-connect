@@ -30,6 +30,7 @@ import {
   renderResultState,
   renderSurface,
 } from "./hosted-ui.ts";
+import { instanceProofMessage, type InstanceIdentity } from "./instance-identity.ts";
 import {
   createDesktopPairingStore,
   DESKTOP_PAIRING_SESSION_TTL_SECONDS,
@@ -201,6 +202,11 @@ export interface OwnerAuthPlaceholderOptions {
    * supplies it.
    */
   resolvePublicOrigin?: (req: AuthRequest) => string;
+  /**
+   * This server's Ed25519 identity, loaded lazily. Required (with
+   * `resolvePublicOrigin`) for the desktop-pairing routes to mount.
+   */
+  instanceIdentity?: () => InstanceIdentity;
   sameSite?: OwnerSessionSameSite;
   sessionTtlSeconds?: number;
   subjectId?: string | null;
@@ -626,6 +632,7 @@ interface OwnerAuthRouteContext {
   readonly passwordMatches: (submitted: string) => Promise<OwnerPasswordMatch>;
   readonly credentialSource: () => OwnerCredentialSource;
   readonly desktopPairings: DesktopPairingStore;
+  readonly instanceIdentity: (() => InstanceIdentity) | undefined;
   readonly changeAppPassword: (
     password: string,
     subjectId: string,
@@ -1040,6 +1047,7 @@ async function handleDesktopPairingCreate(
   if (!(await requireSignedInSession(req, res, context))) return;
   const { code, expiresAtMs } = context.desktopPairings.create();
   const serverOrigin = new URL(resolvePublicOrigin(req)).origin;
+  const identity = requireInstanceIdentity(context);
   res
     .status(201)
     .setHeader("Cache-Control", "no-store")
@@ -1050,7 +1058,62 @@ async function handleDesktopPairingCreate(
       expires_at: new Date(expiresAtMs).toISOString(),
       expires_in_seconds: DESKTOP_PAIRING_TTL_SECONDS,
       server_origin: serverOrigin,
-      link: `vana://attach?server=${encodeURIComponent(serverOrigin)}&code=${code}`,
+      server_public_key: identity.publicKey,
+      server_fingerprint: identity.fingerprint,
+      // The fragment never reaches a server; /settings is the page that made the code.
+      link: `${serverOrigin}/settings#code=${code}&key=${identity.publicKey}`,
+    });
+}
+
+function requireInstanceIdentity(context: OwnerAuthRouteContext): InstanceIdentity {
+  if (!context.instanceIdentity) throw new Error("instance identity is not configured");
+  return context.instanceIdentity();
+}
+
+const IDENTITY_NONCE_RE = /^[A-Za-z0-9_-]+$/u;
+const IDENTITY_NONCE_MIN_BYTES = 16;
+const IDENTITY_NONCE_MAX_BYTES = 64;
+
+/**
+ * Public and unauthenticated: it changes nothing and reveals only the public
+ * key. The desktop sends a fresh nonce and checks the signature against the key
+ * it pinned before it sends a stored session.
+ */
+function handleDesktopPairingIdentity(
+  req: AuthRequest,
+  res: AuthResponse,
+  context: OwnerAuthRouteContext,
+  resolvePublicOrigin: (req: AuthRequest) => string
+): void {
+  const body: Record<string, unknown> | undefined =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body) ? req.body : undefined;
+  const nonce = body?.nonce;
+  const rawBytes = typeof nonce === "string" && IDENTITY_NONCE_RE.test(nonce) ? Buffer.from(nonce, "base64url") : null;
+  if (
+    typeof nonce !== "string" ||
+    rawBytes === null ||
+    rawBytes.toString("base64url") !== nonce ||
+    rawBytes.length < IDENTITY_NONCE_MIN_BYTES ||
+    rawBytes.length > IDENTITY_NONCE_MAX_BYTES
+  ) {
+    res.status(400).json({
+      error: {
+        code: "invalid_request",
+        message: "Send a JSON body with a base64url nonce of 16 to 64 bytes.",
+      },
+    });
+    return;
+  }
+  const identity = requireInstanceIdentity(context);
+  const serverOrigin = new URL(resolvePublicOrigin(req)).origin;
+  res
+    .status(200)
+    .setHeader("Cache-Control", "no-store")
+    .setHeader("Content-Type", "application/json")
+    .json({
+      public_key: identity.publicKey,
+      fingerprint: identity.fingerprint,
+      signature: identity.sign(instanceProofMessage(serverOrigin, nonce)),
     });
 }
 
@@ -1099,6 +1162,7 @@ async function handleDesktopPairingRedeem(
     return;
   }
   context.loginRateLimiter.recordSuccess(req);
+  const identity = requireInstanceIdentity(context);
   const sessionLabel = sanitizeDesktopPairingLabel(label);
   const minted = await context.session.issueToken(req, sessionLabel, DESKTOP_PAIRING_SESSION_TTL_SECONDS);
   if (!minted) {
@@ -1118,6 +1182,8 @@ async function handleDesktopPairingRedeem(
       expires_at: new Date(minted.expiresAtSeconds * 1000).toISOString(),
       expires_in_seconds: DESKTOP_PAIRING_SESSION_TTL_SECONDS,
       label: sessionLabel,
+      server_public_key: identity.publicKey,
+      server_fingerprint: identity.fingerprint,
     });
 }
 
@@ -1166,6 +1232,7 @@ export function createOwnerAuthPlaceholder({
   csrfSecret: csrfSecretOverride = null,
   loginRateLimit = {},
   resolvePublicOrigin,
+  instanceIdentity,
   sessionStore,
   passwordVerifierStore,
 }: OwnerAuthPlaceholderOptions = {}): OwnerAuthPlaceholder {
@@ -1364,6 +1431,7 @@ export function createOwnerAuthPlaceholder({
       credentialSource: () => credentialSource,
       changeAppPassword,
       desktopPairings,
+      instanceIdentity,
       enabled,
       ensureCsrfToken,
       loginRateLimiter,
@@ -1584,7 +1652,10 @@ export function createOwnerAuthPlaceholder({
       res.status(204).end();
     });
 
-    if (resolvePublicOrigin) {
+    if (resolvePublicOrigin && instanceIdentity) {
+      app.post("/owner/desktop-pairings/identity", (req, res) => {
+        handleDesktopPairingIdentity(req, res, context, resolvePublicOrigin);
+      });
       app.post("/owner/desktop-pairings", async (req, res) => {
         await handleDesktopPairingCreate(req, res, context, resolvePublicOrigin);
       });
