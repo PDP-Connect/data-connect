@@ -14,7 +14,7 @@ PLAYWRIGHT_EXECUTABLE_PATH=/path/to/existing/chromium \
 node scripts/reachability/run-release.mjs
 ```
 
-The installer checks integrity before installing into an isolated dependency prefix. It does not change dependency manifests or lockfiles. It requires headroom above the 100 GB disk floor. The runner checks disk before each step, keeps every registered provider/usage pair in the matrix and fails on missing coverage. Browser steps require 110 GB free. They use the existing cache and never download a browser.
+The installer checks integrity before installing into an isolated dependency prefix. It does not change dependency manifests or lockfiles. It requires headroom above the 100 GB disk floor. The runner checks disk before each step, keeps every registered provider/usage pair in the matrix and fails on missing coverage. Browser steps require 110 GB free. They use the existing cache and never download a browser. The browser steps also need the `e2e` dependencies: run `npm --prefix e2e ci` once, as CI does.
 
 `testing-effects.mjs` is the only effects-harness seam. `effect-fixtures.ts` imports the published request/result unions. Its handlers match exact kind/operation pairs. Fixture outputs live in neutral fixture assets; network proof requests reach the actual owned local gate. Long-running spawn fixtures create harmless children and retain their own resource ledger. Credentials are transient and excluded from arguments, environment, diagnostics and browser responses.
 
