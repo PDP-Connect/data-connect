@@ -8409,13 +8409,72 @@ setInterval(() => {}, 1000);
         use gtk::prelude::*;
         use std::io::{BufRead, BufReader, Write};
         use wry::WebViewBuilderExtUnix;
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+        use std::time::Instant;
+
+        // Diagnostic only: observe synchronous stalls without changing the GTK pump.
+        const PHASES: &[&str] = &[
+            "START", "GTK_BEGIN", "GTK_END", "WINDOW_BEGIN", "WINDOW_END",
+            "BUILD_BEGIN", "BUILD_END", "SHOW_BEGIN", "SHOW_END",
+            "COOKIE_0_BEGIN", "COOKIE_0_END", "COOKIE_1_BEGIN", "COOKIE_1_END",
+            "NAVIGATE_BEGIN", "NAVIGATE_END", "WAIT_ENTER", "DRAIN_BEGIN",
+            "ITER_BEGIN", "ITER_END", "DRAIN_END", "ASSERT_BEGIN", "ASSERT_END",
+            "DROP_WEBVIEW_BEGIN", "DROP_WEBVIEW_END", "DROP_WINDOW_BEGIN",
+            "DROP_WINDOW_END", "TEST_EXIT",
+        ];
+        fn log_phase(start: Instant, name: &str) {
+            let mut out = std::io::stderr().lock();
+            let _ = writeln!(out, "WEBKITGTK PHASE {} elapsed_ms={}", name, start.elapsed().as_millis());
+            let _ = out.flush();
+        }
+        struct Watchdog {
+            stop: std::sync::mpsc::Sender<()>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Watchdog {
+            fn drop(&mut self) {
+                let _ = self.stop.send(());
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        let started = Instant::now();
+        let phase = Arc::new(AtomicUsize::new(0));
+        let iterations = Arc::new(AtomicUsize::new(0));
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let watched_phase = phase.clone();
+        let watched_iterations = iterations.clone();
+        let watchdog = Watchdog {
+            stop,
+            thread: Some(std::thread::spawn(move || {
+                while matches!(stopped.recv_timeout(Duration::from_secs(1)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)) {
+                    let mut out = std::io::stderr().lock();
+                    let _ = writeln!(out, "WEBKITGTK PROGRESS elapsed_ms={} phase={} completed_iterations={}",
+                        started.elapsed().as_millis(), PHASES[watched_phase.load(Ordering::SeqCst)],
+                        watched_iterations.load(Ordering::SeqCst));
+                    let _ = out.flush();
+                }
+            })),
+        };
+        let mark = |id: usize| {
+            phase.store(id, Ordering::SeqCst);
+            log_phase(started, PHASES[id]);
+        };
+        mark(0);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("local addr").port();
         let (seen, requests) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
+            let mut logged = [false; 3];
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                if !logged[0] {
+                    log_phase(started, "SERVER_ACCEPT");
+                    logged[0] = true;
+                }
                 let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
                 let mut request_line = String::new();
                 let _ = reader.read_line(&mut request_line);
@@ -8435,7 +8494,15 @@ setInterval(() => {}, 1000);
                         }
                     }
                 }
+                if !logged[1] {
+                    log_phase(started, "SERVER_REQUEST_COMPLETE");
+                    logged[1] = true;
+                }
                 if request_line.starts_with("GET /settings ") {
+                    if !logged[2] {
+                        log_phase(started, "SERVER_SETTINGS_HEADER_OBSERVED");
+                        logged[2] = true;
+                    }
                     let _ = seen.send(cookie);
                 }
                 let body = "<html><body>console</body></html>";
@@ -8447,28 +8514,52 @@ setInterval(() => {}, 1000);
             }
         });
 
+        mark(1);
         gtk::init().expect("GTK needs a display: run under xvfb-run");
+        mark(2);
+        mark(3);
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        mark(4);
+        mark(5);
         let webview = wry::WebViewBuilder::new()
             .with_url("about:blank")
             .build_gtk(&window)
             .expect("build the webview");
+        mark(6);
+        mark(7);
         window.show_all();
+        mark(8);
         let url: tauri::Url = format!("http://127.0.0.1:{port}/").parse().expect("url");
-        for cookie in [
+        for (index, cookie) in [
             owner_session_cookie(&url, "session-value").expect("session cookie"),
             owner_credential_reveal_cookie(&url, "reveal-value").expect("reveal cookie"),
-        ] {
+        ].into_iter().enumerate() {
+            mark(9 + index * 2);
             webview.set_cookie(&cookie).expect("set cookie");
+            mark(10 + index * 2);
         }
+        mark(13);
         webview
             .load_url(&format!("http://127.0.0.1:{port}/settings"))
             .expect("load the console");
+        mark(14);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        mark(15);
+        let mut first_drain = true;
         let cookie = loop {
+            phase.store(16, Ordering::SeqCst);
+            if first_drain { log_phase(started, "DRAIN_BEGIN"); }
             while gtk::events_pending() {
+                phase.store(17, Ordering::SeqCst);
                 gtk::main_iteration_do(false);
+                iterations.fetch_add(1, Ordering::SeqCst);
+                phase.store(18, Ordering::SeqCst);
+            }
+            phase.store(19, Ordering::SeqCst);
+            if first_drain {
+                log_phase(started, "DRAIN_END");
+                first_drain = false;
             }
             if let Ok(cookie) = requests.try_recv() {
                 break cookie;
@@ -8479,7 +8570,7 @@ setInterval(() => {}, 1000);
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        println!("WEBKITGTK COOKIE HEADER: {cookie}");
+        mark(20);
         let pairs: Vec<&str> = cookie.split("; ").collect();
         assert!(
             pairs.contains(&"pdpp_owner_session=session-value"),
@@ -8489,7 +8580,17 @@ setInterval(() => {}, 1000);
             pairs.contains(&format!("{OWNER_CREDENTIAL_REVEAL_COOKIE}=reveal-value").as_str()),
             "the reveal cookie was not sent: {cookie:?}"
         );
+        mark(21);
+        mark(22);
+        drop(webview);
+        mark(23);
+        mark(24);
+        drop(window);
+        mark(25);
+        drop(watchdog);
+        mark(26);
         println!("WEBKITGTK COOKIE TEST RAN");
+        std::io::stdout().flush().expect("flush RAN marker");
     }
 
     #[test]

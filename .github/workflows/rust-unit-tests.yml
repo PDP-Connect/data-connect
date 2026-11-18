@@ -145,6 +145,7 @@ jobs:
         # wry. WebKitGTK drops a cookie it will not send without an error, so
         # this ignored test builds a real webview on its own X display and
         # session bus and checks the Cookie header a local server receives.
+        # Bound synchronous GTK calls and teardown, not just the inner wait loop.
         working-directory: src-tauri
         run: |
           set -euo pipefail
@@ -159,7 +160,7 @@ jobs:
             TMPDIR="$test_tmp" TMP="$test_tmp" TEMP="$test_tmp" \
             CARGO_BUILD_JOBS=4 \
             TAURI_CONFIG='{"bundle":{"resources":null,"externalBin":[]}}' \
-            xvfb-run -a dbus-run-session -- \
+            timeout --signal=TERM --kill-after=5s 90s xvfb-run -a dbus-run-session -- \
             cargo test --lib -- --ignored --exact \
             unified::tests::the_console_webview_sends_the_session_and_reveal_cookies \
             --nocapture 2>&1 | tee "$RUNNER_TEMP/webkitgtk-cookie-test.log"
