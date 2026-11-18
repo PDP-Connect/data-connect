@@ -5,6 +5,8 @@
 // Funnel setup blocked on an administrator demotes that way.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import test, { mock } from "node:test";
 import { JSDOM } from "jsdom";
 import * as React from "react";
@@ -341,7 +343,13 @@ test("an administrator link that is not https falls back to the Funnel help page
 
 // ---------- defect 5: the known-false 15-minute line ----------
 
-const gozarDir = new URL("../../../../../../reference-implementation/node_modules/@tnunamak/gozar/", import.meta.url);
+// Resolved the way Node does from reference-implementation, so it works whether npm hoists the package or not.
+const gozarDir = new URL(
+  ".",
+  pathToFileURL(
+    createRequire(new URL("../../../../../../reference-implementation/package.json", import.meta.url)).resolve("@tnunamak/gozar/package.json")
+  )
+);
 const falseLine = "the plan limits a session to 15 minutes";
 const addressFact = (id: string, value: string) => ({
   id, group: "address", label: "address conditions", known: true as const, value, affectsConsent: false, source: "provider", asOf: null,
