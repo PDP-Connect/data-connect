@@ -256,26 +256,59 @@ fn a_working_keychain_holds_the_session() {
     );
 }
 
+/// Every file under `root`, at any depth.
+fn files_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
 #[test]
 fn an_unavailable_keychain_degrades_to_memory_never_a_file() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().join("app");
     let memory = MemorySessionStore::default();
     let origin = "https://dc.example.com";
+    let session = "sess-never-on-disk-7f3a";
+    // The whole save a pairing does, with the keychain refusing.
     assert_eq!(
-        store_session(&BrokenKeychain, &memory, origin, "sess-1"),
+        crate::attach_window::save_pairing(
+            &data_dir,
+            &BrokenKeychain,
+            &memory,
+            origin,
+            session,
+            "2026-11-17T00:00:00Z".to_string(),
+        ),
         Ok(StoredIn::MemoryOnly)
     );
     assert_eq!(
         load_session(&BrokenKeychain, &memory, origin),
-        SessionLookup::Found("sess-1".to_string())
+        SessionLookup::Found(session.to_string())
     );
+    let files = files_under(dir.path());
     assert!(
-        std::fs::read_dir(dir.path())
-            .expect("read dir")
-            .next()
-            .is_none(),
-        "nothing may be written to disk"
+        files.contains(&attachment_path(&data_dir)),
+        "the pairing itself is saved: {files:?}"
     );
+    for file in files {
+        let bytes = std::fs::read(&file).expect("read file");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(session),
+            "{} holds the session",
+            file.display()
+        );
+    }
     assert!(forget_session(&BrokenKeychain, &memory, origin).is_err());
     assert_eq!(
         load_session(&BrokenKeychain, &memory, origin),
@@ -677,21 +710,66 @@ async fn an_unreachable_server_keeps_the_pairing_and_names_the_origin() {
     assert!(message.contains("detach"), "{message}");
 }
 
-#[test]
-fn error_messages_never_include_the_code_or_session() {
+/// Drive every request that carries a secret against servers that echo the
+/// secrets back, and check that no message shown to the owner repeats one.
+#[tokio::test]
+async fn error_messages_never_include_the_code_session_or_password() {
+    const CODE: &str = "QRSTVWXYZ234";
+    const SESSION: &str = "sess-secret-5d1c";
+    const PASSWORD: &str = "pw-secret-8e2b";
+    let echo = format!(r#"{{"error":"{CODE} {SESSION} {PASSWORD}"}}"#);
+    let echo_header = format!("Content-Type: application/json\r\nX-Echo: {CODE} {SESSION}\r\n");
+    let answers = [
+        "200 OK",
+        "302 Found",
+        "400 Bad Request",
+        "401 Unauthorized",
+        "403 Forbidden",
+        "404 Not Found",
+        "429 Too Many Requests",
+        "500 Internal Server Error",
+        "502 Bad Gateway",
+    ];
+    let mut messages = Vec::new();
+    for status in answers {
+        let answer = || response(status, &echo_header, &echo);
+
+        let (origin, server) = serve(vec![answer()]);
+        if let Err(error) = redeem_pairing(&origin, CODE, "label").await {
+            messages.push(error.message(&origin));
+        }
+        server.join().expect("server");
+
+        let (origin, server) = serve(vec![answer()]);
+        if let Err(error) = login_with_password(&origin, PASSWORD).await {
+            messages.push(error.message(&origin));
+        }
+        server.join().expect("server");
+
+        let (origin, server) = serve(vec![pdpp_metadata(), answer()]);
+        if let SessionCheck::Unreachable(error) = check_session(&origin, SESSION).await {
+            messages.push(error.message(&origin));
+        }
+        server.join().expect("server");
+    }
+    let origin = closed_origin();
     for error in [
-        AttachError::Unreachable,
-        AttachError::NotPdppServer,
-        AttachError::InvalidCode,
-        AttachError::RateLimited {
-            retry_after_seconds: Some(3),
-        },
-        AttachError::PairingUnsupported,
-        AttachError::WrongPassword,
-        AttachError::Server { status: 500 },
-    ] {
-        let message = error.message("https://dc.example.com");
+        redeem_pairing(&origin, CODE, "label").await.err(),
+        login_with_password(&origin, PASSWORD).await.err(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        messages.push(error.message(&origin));
+    }
+    assert!(
+        messages.len() >= answers.len() * 2,
+        "too few failures to check: {messages:?}"
+    );
+    for message in &messages {
         assert!(!message.is_empty());
-        assert!(!message.contains("ABCDEFGHJKMN"));
+        for secret in [CODE, SESSION, PASSWORD] {
+            assert!(!message.contains(secret), "{message}");
+        }
     }
 }
