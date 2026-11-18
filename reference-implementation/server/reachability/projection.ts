@@ -32,9 +32,12 @@ function consentValue(value: ConsentDisclosures): unknown {
       scope: value.address.scope,
       stability: value.address.stability,
     },
-    cost: { kind: value.cost.kind },
+    cost: value.cost.kind === "paid"
+      ? { kind: value.cost.kind, summary: value.cost.summary, amount: value.cost.amount, currency: value.cost.currency, period: value.cost.period }
+      : { kind: value.cost.kind, summary: value.cost.summary },
     disclosure: disclosure(value.disclosure),
     lifetimes: value.lifetimes,
+    ownership: value.ownership,
     protocols: {
       oauthDcr: value.protocols.oauthDcr,
       sse: value.protocols.sse,
@@ -242,6 +245,7 @@ export function projectCandidate(candidate: RouteCandidate) {
     eligible: candidate.eligible,
     expiresAt: candidate.expiresAt,
     facts: candidate.facts.map(projectFact),
+    ownership: candidate.ownership,
     providerId: candidate.providerId,
   };
 }
