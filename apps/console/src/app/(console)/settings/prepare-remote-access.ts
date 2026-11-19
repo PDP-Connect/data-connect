@@ -43,6 +43,15 @@ export function hasEffects(action: Action, hasInput = false): boolean {
   return effects.writes.length > 0 || effects.networkOrigins.length > 0 || effects.requiresPrivilege || effects.restartRequired;
 }
 
+type InputField = Draft["configuration"]["inputRequirements"][number];
+
+/** True when the draft already holds the value (or the secret) this input asks for. */
+function inputGiven(configuration: Draft["configuration"], field: InputField): boolean {
+  if (!field.secret) return field.id in configuration.values;
+  const held = configuration.credentials[field.id];
+  return held?.known === true && held.value === true;
+}
+
 /** The effects in the owner's words, from what the action declares. */
 export function effectLines(action: Action): string[] {
   const lines: string[] = [];
@@ -226,10 +235,14 @@ export async function prepareTurnOn(
     }
     if (!committed) {
       for (const action of draft.configuration.actions) {
-        const needsInput = draft.configuration.inputRequirements.some((field) => field.actionId === action.id);
+        const field = draft.configuration.inputRequirements.find((item) => item.actionId === action.id);
+        const needsInput = field !== undefined;
         // The caller posts the setup for a sign-in step, so it only gets one while this may still act.
         proceed();
         if (isRouteConsentStep(action)) continue;
+        // An input the owner already gave stays in the draft's action list, and so does the
+        // action that would forget it. Neither is a step of turning on; asking again would never end.
+        if (action.kind === "clear-input" || (field && inputGiven(draft.configuration, field))) continue;
         if (action.step) return { kind: "sign-in", draft, action };
         if (hasEffects(action, needsInput)) return { kind: "allow", draft, action };
         draft = await runAction(send, draft, action);
