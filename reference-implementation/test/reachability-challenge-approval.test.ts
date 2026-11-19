@@ -50,6 +50,7 @@ type Fixture = {
   home: string
   newService: (bootId: string) => Promise<ReachabilityService>
   proofFetches: () => number
+  acknowledgment: () => import("@tnunamak/gozar").OriginAcknowledgmentRequest | undefined
   use: (service: ReachabilityService) => void
 }
 
@@ -61,6 +62,7 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>) {
   const harnesses: { close(): Promise<unknown> }[] = []
   const services: ReachabilityService[] = []
   let current: ReachabilityService | undefined
+  let acknowledged: import("@tnunamak/gozar").OriginAcknowledgmentRequest | undefined
 
   type Handler = Parameters<Parameters<typeof mountServiceChallenge>[0]["get"]>[1]
   let handler: Handler | undefined
@@ -116,9 +118,15 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>) {
   // A new service over the same library home is what a restart leaves behind.
   const newService = async (bootId: string) => {
     const identity = { bootId, instanceId: "fixture-instance" }
-    const harness = await createTestingGozar({ effects: effects.effects, hostCapabilities, identity, secretBackend })
+    let service: ReachabilityService
+    const harness = await createTestingGozar({ acknowledgeOrigin: async (request) => {
+      assert.equal(service.approvesChallengeAuthority(new URL(request.origin).host), false, "allocation alone grants no Host permission")
+      const reply = await service.acknowledgeOrigin(request)
+      acknowledged = request
+      return reply
+    }, effects: effects.effects, hostCapabilities, identity, secretBackend })
     harnesses.push(harness)
-    const service = new ReachabilityService(harness.gozar, {
+    service = new ReachabilityService(harness.gozar, {
       acknowledgeDisconnect: async () => undefined,
       hostCapabilities,
       identity,
@@ -142,7 +150,7 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>) {
     return service
   }
   try {
-    await run({ ask, gate, home, newService, proofFetches: () => fetches, use: (service) => void (current = service) })
+    await run({ acknowledgment: () => acknowledged, ask, gate, home, newService, proofFetches: () => fetches, use: (service) => void (current = service) })
   } finally {
     release()
     for (const service of services) service.closeObservers()
@@ -207,8 +215,8 @@ test("while apply starts the route, the challenge answers for the approved origi
 
 // A provider that picks its own public address (a tunnel) has no origin to name
 // at review time: the library allocates it while the route starts. For the
-// length of that start the challenge answers any Host, and no longer.
-test("a provider-chosen address: the challenge answers any Host while the route starts, then only the route's origin", realLibrary, async () => {
+// start the challenge answers only the exact acknowledged origin.
+test("a provider-chosen address: the challenge refuses unacknowledged Hosts while the route starts", realLibrary, async () => {
   await withFixture(async (fixture) => {
     const service = await fixture.newService("boot-1")
     fixture.use(service)
@@ -218,13 +226,24 @@ test("a provider-chosen address: the challenge answers any Host while the route 
     assert.equal(await fixture.ask("fixture.invalid"), 404)
     const applying = service.apply("operation-1", shown.id, consent(shown))
     await fixture.gate.reached
-    assert.equal(await fixture.ask("anything.invalid"), 200)
+    assert.equal(await fixture.ask("anything.invalid"), 404)
+    assert.equal(await fixture.ask("fixture.invalid"), 200)
+    const acknowledged = fixture.acknowledgment()
+    assert.ok(acknowledged)
+    for (const request of [
+      { ...acknowledged, attemptId: "another-attempt" },
+      { ...acknowledged, handle: { ...acknowledged.handle, generation: acknowledged.handle.generation + 1 } },
+      { ...acknowledged, handle: { ...acknowledged.handle, id: "another-handle" } },
+    ]) await assert.rejects(service.acknowledgeOrigin(request), { code: "origin_acknowledgment_scope_mismatch" })
     fixture.gate.release()
     const started = await applying
     assert.equal(started.verification.status, "verified")
     assert.equal(started.published, ORIGIN)
     assert.equal(await fixture.ask("other.invalid"), 404)
-    assert.equal(await fixture.ask("fixture.invalid"), 200)
+    assert.equal(await fixture.ask("fixture.invalid"), 404)
+    await assert.rejects(service.acknowledgeOrigin(acknowledged), { code: "origin_acknowledgment_scope_mismatch" })
+    await service.stop(started.handle.id, started.handle.generation, true)
+    assert.equal(await fixture.ask("fixture.invalid"), 404)
   })
 })
 
@@ -253,4 +272,19 @@ test("a route whose cleanup is confirmed no longer approves its origin", realLib
     assert.equal(stopped.cleanup.state, "confirmed")
     assert.equal(await fixture.ask("fixture.invalid"), 404)
   })
+})
+
+test("a recovered unverified view grants no challenge authority", async () => {
+  const { fakeRouteScenarios } = await import("@tnunamak/gozar/testing")
+  const route = fakeRouteScenarios().find(route => route.handle.kind === "durable" && route.verification.status === "unverified")!
+  const service = new ReachabilityService({ routeStatus: async () => route } as never, {
+    identity: { instanceId: "fixture-instance", bootId: "fixture-boot" },
+    hostCapabilities: {},
+    query: { home: "/fixture", owner: "fixture-owner", schemaVersion: 1, target: "127.0.0.1:18765", requirements: {
+      reach: "internet", transport: "https", address: "any", payloadAccess: "allow-provider", setup: "allow", protocols: [],
+    } },
+    prepare: async () => {}, acknowledgeDisconnect: async () => {},
+  })
+  await service.reconcileKnownHandle(route.handle, false)
+  assert.equal(service.approvesChallengeAuthority(new URL(route.origin!).host), false)
 })

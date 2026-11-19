@@ -17,7 +17,12 @@ export async function createReachabilityService(
   if (!(options.identity && options.secretBackend && options.hostCapabilities)) {
     throw new ReachabilityError("host_configuration_required");
   }
-  const api = createGozar(options);
+  let service: ReachabilityService;
+  const api = createGozar({
+    ...options,
+    acknowledgeOrigin: async (request) => service.acknowledgeOrigin(request),
+    originAckTimeoutMs: 10_000,
+  });
   const methods: (keyof EmbeddingApi)[] = [
     "listRoutes",
     "listProviders",
@@ -43,9 +48,10 @@ export async function createReachabilityService(
   if (methods.some((method) => typeof api[method] !== "function")) {
     throw new ReachabilityError("embedding_contract_unavailable");
   }
-  return new ReachabilityService(api, {
+  service = new ReachabilityService(api, {
     ...host,
     hostCapabilities: options.hostCapabilities,
     identity: options.identity,
   });
+  return service;
 }

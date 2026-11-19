@@ -6,6 +6,8 @@ import type {
   ConfigurationDraft as Draft,
   Handle,
   InputRequirement,
+  OriginAcknowledgmentRequest,
+  OriginAcknowledgmentReply,
   Configuration as ProviderConfiguration,
   ProviderInventory,
   Query,
@@ -121,12 +123,11 @@ export class ReachabilityService {
   }
   private starting = false;
   private startSettled: Promise<void> | null = null;
-  // The route `apply` is starting. The review is gone by then and the route is not
-  // yet held, yet the library probes the origin while it starts. `origin` is null
-  // when the provider picks the address itself (a tunnel): nothing is known to
-  // approve until the library allocates it, so the challenge answers any Host for
-  // the length of the start and no longer.
-  private applying: { origin: string | null } | null = null;
+  // Provider-chosen origins are allowed only within an active proof call. The
+  // first acknowledgment binds that call to one exact handle and attempt.
+  private applying: { origin: string | null; operationId: string; providerId: string; target: string; acknowledgment?: OriginAcknowledgmentRequest } | null = null;
+  private readonly proofCalls = new Map<string, { handle: Handle; acknowledgment?: OriginAcknowledgmentRequest }>();
+  private readonly ownerOrigins = new Map<string, string>();
   private epoch = 0;
   private shutdownRun: Promise<ShutdownOutcome> | null = null;
   private restartRun: Promise<RestartOutcome> | null = null;
@@ -555,17 +556,30 @@ export class ReachabilityService {
     this.transition({ approvalIdentity: review.id, type: "review" });
     return review;
   }
-  // The one question the ownership challenge asks: is this public authority the
-  // origin the owner approved, now or earlier? Approval lives in a review being
-  // shown, the route being started, or a route this process holds. Any other
-  // name gets no answer. `authority` is the library verifier's own canonical
-  // Host, compared with the authority of each approved origin.
+  async acknowledgeOrigin(request: OriginAcknowledgmentRequest): Promise<OriginAcknowledgmentReply> {
+    const applying = this.applying;
+    const proof = this.proofCalls.get(handleKey(request.handle));
+    const scope = applying && applying.origin === null &&
+      request.operationId === applying.operationId && request.providerId === applying.providerId &&
+      request.target === applying.target ? applying : proof;
+    if (!scope || request.home !== this.host.query.home || request.owner !== this.host.query.owner ||
+        !request.attemptId || !URL.canParse(request.origin)) {
+      throw new ReachabilityError("origin_acknowledgment_scope_mismatch");
+    }
+    const prior = scope.acknowledgment;
+    if (prior && (!sameHandle(prior.handle, request.handle) || prior.attemptId !== request.attemptId || prior.origin !== request.origin)) {
+      throw new ReachabilityError("origin_acknowledgment_scope_mismatch");
+    }
+    scope.acknowledgment = request;
+    return { acknowledged: true, origin: request.origin, handle: { id: request.handle.id, generation: request.handle.generation }, attemptId: request.attemptId };
+  }
   approvesChallengeAuthority(authority: string): boolean {
-    if (this.applying && this.applying.origin === null) return true;
     const origins = [
       this.applying?.origin,
+      this.applying?.acknowledgment?.origin,
+      ...[...this.proofCalls.values()].map(call => call.acknowledgment?.origin),
       ...[...this.reviews.values()].map(reviewedOrigin),
-      ...[...this.routes.values()].filter((route) => route.cleanup.state !== "confirmed").map((route) => route.origin),
+      ...this.ownerOrigins.values(),
     ];
     return origins.some((origin) => {
       if (!origin) return false;
@@ -600,6 +614,9 @@ export class ReachabilityService {
   // needs a provider cancellation or expiry, which the library does not offer; a restart does.
   private closeShared(handle: Handle): Promise<Route> {
     const key = handleKey(handle);
+    this.ownerOrigins.delete(key);
+    this.proofCalls.delete(key);
+    if (this.applying?.acknowledgment && sameHandle(this.applying.acknowledgment.handle, handle)) this.applying = null;
     const existing = this.closing.get(key);
     if (existing) return existing;
     // A reply that does not name this exact handle (or is not a route view) says nothing about
@@ -824,7 +841,7 @@ export class ReachabilityService {
     this.lifecycle = event.state;
     const epoch = ++this.epoch;
     this.starting = true;
-    this.applying = { origin: applyingOrigin };
+    this.applying = { origin: applyingOrigin, operationId, providerId: review.candidate.providerId, target: review.query.target };
     let settled!: () => void;
     this.startSettled = new Promise<void>((resolve) => {
       settled = resolve;
@@ -871,6 +888,7 @@ export class ReachabilityService {
       if (route.verification.status === "verified" && route.published) {
         this.transition({ epoch: this.lifecycle.epoch, type: "proof-passed" });
       }
+      if (applyingOrigin) this.ownerOrigins.set(handleKey(route.handle), applyingOrigin);
       this.watch(route.handle);
       return route;
     } catch (error) {
@@ -906,6 +924,7 @@ export class ReachabilityService {
             event.route.handle.generation === handle.generation
           ) {
             this.routes.set(handle.id, event.route);
+            if (event.route.cleanup.state === "confirmed") this.ownerOrigins.delete(handleKey(handle));
             if (event.route.state === "lost") {
               this.transition({ type: "agent-exit" });
               await this.stop(handle.id, handle.generation, true);
@@ -931,6 +950,8 @@ export class ReachabilityService {
     const route = this.route(id, generation);
     this.transition({ type: "check" });
     const epoch = this.lifecycle.epoch;
+    const proofCall = { handle: route.handle };
+    this.proofCalls.set(handleKey(route.handle), proofCall);
     try {
       const current = await this.api.routeStatus({ handle: route.handle, home: this.host.query.home });
       if (epoch !== this.lifecycle.epoch || this.lifecycle.stopTombstone) {
@@ -953,6 +974,8 @@ export class ReachabilityService {
         }
       }
       throw error;
+    } finally {
+      if (this.proofCalls.get(handleKey(route.handle)) === proofCall) this.proofCalls.delete(handleKey(route.handle));
     }
   }
   routeReference(id: string, generation: number): Handle {
