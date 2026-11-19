@@ -50,7 +50,7 @@ async function mount(nextAction: unknown) {
   const { createRoot } = await import("react-dom/client")
   const { ProviderSetup } = await import("./provider-setup.tsx")
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
-  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement })
   const container = dom.window.document.querySelector("#root")!
   const root = createRoot(container)
   const sent: Sent[] = []
@@ -239,7 +239,7 @@ test("the allow card and the turn-on card show every disclosure string and still
   const { createRoot } = await import("react-dom/client")
   const { AllowCard, TurnOnCard } = await import("./turn-on.tsx")
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
-  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement })
   const container = dom.window.document.querySelector("#root")!
   const root = createRoot(container)
   try {
@@ -293,9 +293,16 @@ test("the allow card and the turn-on card show every disclosure string and still
     await act(async () =>
       root.render(createElement(TurnOnCard, { review: review as never, busy: false, changed: null, onTurnOn: (given: unknown) => turned.push(given) }))
     )
-    const turnText = shownText(container)
+    const turnText = container.textContent ?? ""
+    // The leftover sentence sits in the card's Details, one click away.
     assert.ok(turnText.includes("Your address is listed in a public directory."))
-    assert.equal(turnText.includes(DIGEST), false)
+    // Codes stay inside Details: nothing outside the collapsed Details shows them.
+    const outsideDetails = (() => {
+      const copy = container.cloneNode(true) as Element
+      for (const details of copy.querySelectorAll("details")) details.remove()
+      return copy.textContent ?? ""
+    })()
+    assert.equal(outsideDetails.includes(DIGEST), false)
     assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
     await act(async () => [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!.click())
     const sentReview = turned[0] as typeof review
@@ -314,7 +321,7 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
   const { createRoot } = await import("react-dom/client")
   const { TurnOnCard } = await import("./turn-on.tsx")
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" })
-  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement })
   const container = dom.window.document.querySelector("#root")!
   const root = createRoot(container)
   const routeConsent = (disclosures: unknown) => ({
@@ -344,40 +351,41 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
       const details = container.querySelector("details")!
       const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!
       assert.equal(details.hasAttribute("open"), true, `${name}: Details starts open`)
-      assert.ok(details.compareDocumentPosition(button) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING, `${name}: Details comes before the button`)
+      // Details sits below the button, as in the approved mockups, and opens on its own.
+      assert.ok(button.compareDocumentPosition(details) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING, `${name}: Details comes after the button`)
       const text = shownText(container)
       assert.match(text, /Retention days/, `${name}: the raw key shows`)
       assert.match(text, /30/, `${name}: the raw value shows`)
       assert.match(text, /Recurring/, `${name}: the second raw key shows`)
     }
-    for (const { disclosures, values } of [
-      { disclosures: { ...readableRoute, cost: { kind: "free", amount: 12, currency: "USD", period: "month" } }, values: [/12/, /USD/, /month/] },
-      { disclosures: { ...readableRoute, address: { stability: "rotating" } }, values: [/Stability/, /rotating/] },
-      { disclosures: { ...readableRoute, cost: { kind: "paid", amount: 12, currency: "USD" } }, values: [/12/, /USD/, /price is in Details/] },
-      { disclosures: { ...readableRoute, traffic: { providerCanReadPayload: "yes" } }, values: [/yes/i] },
+    // Readable leftovers show as the short lines above the button; unreadable ones
+    // open Details below it. Either way the card shows them. A free cost that also
+    // carries price fields is a contradiction, so Details opens for it too.
+    for (const { disclosures, values, open } of [
+      { disclosures: { ...readableRoute, cost: { kind: "free", amount: 12, currency: "USD", period: "month" } }, values: [/12/, /USD/, /month/], open: true },
+      { disclosures: { ...readableRoute, address: { stability: "rotating" } }, values: [/Stability/, /rotating/], open: true },
+      { disclosures: { ...readableRoute, cost: { kind: "paid", amount: 12, currency: "USD" } }, values: [/12/, /USD/, /price is in Details/], open: true },
+      { disclosures: { ...readableRoute, traffic: { providerCanReadPayload: "yes" } }, values: [/yes/i], open: true },
     ]) {
       await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
-      const section = container.querySelector('section[aria-label="Turn on"]')!
-      const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Turn on remote access")!
-      // Readable leftovers show as plain text and unreadable ones open Details; either way they precede the button.
-      const range = dom.window.document.createRange()
-      range.setStart(section, 0)
-      range.setEndBefore(button)
-      const visibleBeforeButton = range.toString()
+      const details = container.querySelector("details")!
       const label = JSON.stringify(disclosures)
-      for (const value of values) assert.match(visibleBeforeButton, value, `${label}: the leftover value shows above the button`)
+      assert.equal(details.hasAttribute("open"), open, `${label}: Details opens exactly when something is unreadable`)
+      for (const value of values) assert.match(shownText(container), value, `${label}: the leftover value shows on the card`)
     }
     await act(async () => root.render(createElement(TurnOnCard, { review: review(readableRoute), busy: false, changed: null, onTurnOn: () => {} } as never)))
     assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
     const typedCases = [
       { name: "complete typed route", disclosures: typedRouteDisclosures, open: false,
-        words: [/over the internet/, /The address stays the same/, /secure connection ends at the service/, /These can read your traffic: route-service\./, /These can see when and how much you connect: route-service, connection-operator\./, /There is no charge/] },
+        words: [/over the internet/, /The address stays the same/, /secure connection ends at the service/, /These can read your traffic: route-service\./, /These can see when and how much you connect: route-service, connection-operator\./],
+        // The cost summary is a leftover sentence: it lives in Details, one click away.
+        cardWords: [/There is no charge/] },
       { name: "unencrypted transport", disclosures: { ...typedRouteDisclosures, transport: "http" }, open: false,
-        words: [/unencrypted HTTP/] },
+        words: [/unencrypted HTTP/], cardWords: [] as RegExp[] },
       { name: "unrecognized reach", disclosures: { ...readableRoute, reach: "regional" }, open: true,
-        words: [/regional/] },
+        words: [] as RegExp[], cardWords: [/regional/] },
     ]
-    for (const { name, disclosures, open, words } of typedCases) {
+    for (const { name, disclosures, open, words, cardWords } of typedCases) {
       await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
       const details = container.querySelector("details")!
       const button = container.querySelector("button")!
@@ -386,7 +394,9 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
       range.setStart(container.querySelector("section")!, 0)
       range.setEndBefore(button)
       const before = range.toString()
+      // The classified short lines stay above the button, where the approval is read.
       for (const word of words) assert.match(before, word, name)
+      for (const word of cardWords) assert.match(container.textContent ?? "", word, name)
       // Reader names are approved values and show above the button; the evidence reference is metadata.
       if (!open) assert.doesNotMatch(before, /route-evidence/, name)
     }

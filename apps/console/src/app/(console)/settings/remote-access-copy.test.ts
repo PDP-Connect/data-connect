@@ -451,6 +451,10 @@ async function withScreen<T>(
     IS_REACT_ACT_ENVIRONMENT: true,
     localStorage: dom.window.localStorage,
     sessionStorage: dom.window.sessionStorage,
+    // The shared Button reads these as globals when it mounts.
+    Element: dom.window.Element,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
   });
   const { RemoteAccessSetting } = await import("./remote-access-setting.tsx");
   const container = dom.window.document.querySelector("#root")!;
@@ -573,7 +577,7 @@ test("setup, approval and consent cards show no codes, flags or ISO times", () =
 
 test("setup status cards show no codes in any state", async () => {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
-  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, localStorage: dom.window.localStorage, sessionStorage: dom.window.sessionStorage });
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, localStorage: dom.window.localStorage, sessionStorage: dom.window.sessionStorage, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
   const container = dom.window.document.querySelector("#root")!;
   const reservation = {
     operationId: "o-1",

@@ -1,6 +1,7 @@
 "use client";
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+import { Badge } from "@/components/ui/badge.tsx";
 import { type Blocks, type WayRow, otherWays } from "./choose-way.ts";
 import type { Inventory } from "./prepare-remote-access.ts";
 
@@ -9,12 +10,12 @@ type Capabilities = Parameters<typeof otherWays>[1];
 function MissingStep({ row }: { row: WayRow }) {
   if (!row.missing) return null;
   return (
-    <span className="pdpp-caption">
+    <span className="text-[13px] text-amber-600 dark:text-amber-400">
       {row.missing.text}
       {row.missing.link ? (
         <>
           {" "}
-          <a href={row.missing.link.href} rel="noreferrer" target="_blank">
+          <a className="underline underline-offset-4" href={row.missing.link.href} rel="noreferrer" target="_blank">
             {row.missing.link.label} ↗
           </a>
         </>
@@ -23,21 +24,29 @@ function MissingStep({ row }: { row: WayRow }) {
   );
 }
 
+/** One way, as a selectable card: the picked one is outlined and tinted, a way that cannot run says why. */
 function WayChoice({ row, checked, onPick }: { row: WayRow; checked: boolean; onPick: (providerId: string) => void }) {
   return (
-    <label className={`grid gap-1 rounded-lg border p-3${row.usable ? "" : " text-muted-foreground"}`}>
-      <span>
+    <label
+      className={`grid cursor-pointer gap-1 rounded-xl border p-3.5 transition-colors has-[input:focus-visible]:border-ring ${
+        checked ? "border-primary bg-primary/5" : row.usable ? "hover:border-ring" : "opacity-60"
+      }`}
+    >
+      <span className="flex items-start gap-3">
         <input
           checked={checked}
+          className="mt-0.5 accent-primary"
           disabled={!row.usable}
           name="way"
           onChange={() => onPick(row.providerId)}
           type="radio"
           value={row.providerId}
-        />{" "}
-        {row.title}
+        />
+        <span className="grid gap-1">
+          <span className="text-sm font-medium">{row.title}</span>
+          {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
+        </span>
       </span>
-      {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
       <MissingStep row={row} />
     </label>
   );
@@ -56,20 +65,32 @@ export function RecommendedWay({
   onPick: (providerId: string) => void;
 }) {
   return (
-    <section aria-label="Recommended way" className="grid gap-1 rounded-lg border p-3">
-      <span>
-        <input
-          aria-label={row.title}
-          checked={checked}
-          disabled={disabled}
-          name="way"
-          onChange={() => onPick(row.providerId)}
-          type="radio"
-          value={row.providerId}
-        />{" "}
-        <strong>{row.title}</strong> · Recommended
-      </span>
-      {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
+    <section aria-label="Recommended way" className="grid gap-1">
+      <label
+        className={`grid cursor-pointer gap-1 rounded-xl border p-3.5 transition-colors has-[input:focus-visible]:border-ring ${
+          checked ? "border-primary bg-primary/5" : "hover:border-ring"
+        }`}
+      >
+        <span className="flex items-start gap-3">
+          <input
+            aria-label={row.title}
+            checked={checked}
+            className="mt-0.5 accent-primary"
+            disabled={disabled}
+            name="way"
+            onChange={() => onPick(row.providerId)}
+            type="radio"
+            value={row.providerId}
+          />
+          <span className="grid gap-1.5">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">{row.title}</span>
+              <Badge variant="secondary">Recommended</Badge>
+            </span>
+            {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
+          </span>
+        </span>
+      </label>
     </section>
   );
 }
@@ -102,15 +123,17 @@ export function OtherWays({
         ));
         if (group.rows.length === 0) return null;
         return group.id === "advanced" ? (
-          <details key={group.id}>
-            <summary>{group.title}</summary>
-            <div className="grid gap-3">{rows}</div>
+          <details className="grid gap-2" key={group.id}>
+            <summary className="cursor-pointer text-sm font-medium">{group.title}</summary>
+            <div className="grid gap-2.5">{rows}</div>
           </details>
         ) : (
           <section aria-label={group.title} className="grid gap-2" key={group.id}>
-            <h4 className="pdpp-label">{group.title}</h4>
-            <p className="pdpp-caption">{group.note}</p>
-            {rows}
+            <div className="grid gap-0.5">
+              <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">{group.title}</h4>
+              {group.note ? <p className="text-[13px] text-muted-foreground">{group.note}</p> : null}
+            </div>
+            <div className="grid gap-2.5">{rows}</div>
           </section>
         );
       })}

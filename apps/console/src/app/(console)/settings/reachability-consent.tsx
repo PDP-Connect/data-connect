@@ -7,6 +7,7 @@ import type {
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button.tsx";
 import { isKnownFalseCondition } from "./known-false-conditions.ts";
 import { formatLocalTime, humanizeKey, plain, verbatimValue } from "./plain-text.ts";
 
@@ -112,8 +113,10 @@ const machineShape = /^(?:[a-z][a-z0-9_.:-]*|[0-9a-f]{16,}|[a-z][a-z0-9+.-]*:\/\
  * Walks a disclosure for the text an owner reads. A string with spaces, or a one-word string under a
  * text key, is a sentence; ids, digests, revisions, links, enum words and timestamps are not. A number,
  * a boolean or a capitalised one-word string under another key has no known reading: `unreadable`.
+ * A descriptor condition the owner decided is false (`providerId`) is skipped, exactly as in the
+ * structured view above.
  */
-export function readDisclosure(value: unknown): { sentences: string[]; unreadable: boolean } {
+export function readDisclosure(value: unknown, providerId?: string | null): { sentences: string[]; unreadable: boolean } {
   const found: string[] = [];
   let unreadable = false;
   const walk = (node: unknown, key: string) => {
@@ -127,6 +130,7 @@ export function readDisclosure(value: unknown): { sentences: string[]; unreadabl
     } else if (typeof node === "string") {
       const text = node.trim();
       if (text === "") return;
+      if (isKnownFalseCondition(providerId, text)) return;
       if (/\s/.test(text) || textKey.test(key)) found.push(text);
       else if (!machineShape.test(text)) unreadable = true;
     } else {
@@ -147,10 +151,10 @@ const asSentence = (text: string) => {
  * The sentences a disclosure holds, in reading order, found by walking it (see readDisclosure), so the
  * text is shown wherever the host puts it. Sentences in `except` are already on screen and are left out.
  */
-export function disclosureSentences(value: unknown, except: readonly string[] = []): string[] {
+export function disclosureSentences(value: unknown, except: readonly string[] = [], providerId?: string | null): string[] {
   const seen = new Set(except.filter((line) => line.trim() !== "").map(asSentence));
   const sentences: string[] = [];
-  for (const text of readDisclosure(value).sentences) {
+  for (const text of readDisclosure(value, providerId).sentences) {
     if (plain(text).trim() === "") continue;
     const sentence = asSentence(text);
     if (!seen.has(sentence)) {
@@ -171,8 +175,8 @@ export function DisclosureDetails({ value, providerId, open }: { value: unknown;
   );
 }
 
-export function PlainDisclosure({ value, except }: { value: unknown; except?: readonly string[] }) {
-  const sentences = disclosureSentences(value, except);
+export function PlainDisclosure({ value, except, providerId }: { value: unknown; except?: readonly string[]; providerId?: string | null }) {
+  const sentences = disclosureSentences(value, except, providerId);
   if (sentences.length === 0) return null;
   return (
     <ul className="grid gap-2">
@@ -201,11 +205,11 @@ export function ApprovalDisclosure({
   shown?: readonly string[];
 }) {
   const bound = { disclosure: actionDisclosure, disclosures: consent.disclosures };
-  const readable = readDisclosure(bound);
+  const readable = readDisclosure(bound, consent.scope.providerId);
   const open = readable.unreadable || readable.sentences.length === 0;
   return (
     <>
-      <PlainDisclosure value={bound} except={shown} />
+      <PlainDisclosure value={bound} except={shown} providerId={consent.scope.providerId} />
       {consent.facts ? <ConsentFacts facts={consent.facts} providerId={consent.scope.providerId} /> : null}
       <DisclosureDetails open={open} value={consent.disclosures} providerId={consent.scope.providerId} />
     </>
@@ -261,7 +265,7 @@ export function SetupApprovalCard({
           We couldn't load this service's details. Try again.
         </p>
       )}
-      <button
+      <Button
         disabled={busy || !complete || !checked}
         onClick={() => {
           if (complete && checked) {
@@ -276,7 +280,7 @@ export function SetupApprovalCard({
         type="button"
       >
         {buttonLabel}
-      </button>
+      </Button>
     </section>
   );
 }
@@ -325,17 +329,17 @@ export function RuntimeRouteConsentCard({
       ) : (
         <p>These details have expired. Reload to see the new ones.</p>
       )}
-      <button
-        type="button"
+      <Button
         disabled={busy || !valid || approvedDigest !== review.consentFactsDigest}
         onClick={() =>
           valid &&
           approvedDigest === review.consentFactsDigest &&
           onApprove({ kind: "route", consentFactsDigest: review.consentFactsDigest })
         }
+        type="button"
       >
         Turn on again
-      </button>
+      </Button>
     </section>
   );
 }
