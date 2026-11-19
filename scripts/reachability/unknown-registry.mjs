@@ -79,7 +79,7 @@ export async function createUnknownRegistry(
 		...registry,
 		specification,
 		addedFact,
-		setRuntimeCost: async (costKind) =>
-			writeFile(observationFile, JSON.stringify({ costKind })),
+		setRuntimeCost: async (costKind, amount) =>
+			writeFile(observationFile, JSON.stringify({ costKind, amount })),
 	};
 }
