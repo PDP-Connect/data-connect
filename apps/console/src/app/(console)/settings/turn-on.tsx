@@ -4,7 +4,7 @@
 import { useState } from "react";
 import { Input } from "@/components/ui/input.tsx";
 import { ApprovalDisclosure, ConsentDisclosures, ConsentFacts, PlainDisclosure, readDisclosure, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
-import { type Action, type Draft, type ConsumedDisclosure, formatDisclosures, effectLines, type Review } from "./prepare-remote-access.ts";
+import { type Action, type Draft, formatDisclosures, effectLines, type Review } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
 
 /**
@@ -36,10 +36,9 @@ export function TurnOnCard({
     candidate.consentFactsDigest === consent.consentFactsDigest &&
     steps.every((step) => step.consent?.facts !== undefined && step.consent.disclosures != null);
   const { shown, unknown } = splitFacts(consent?.facts ?? []);
-  const { lines: routeLines, consumed, unread } = formatDisclosures(candidate);
-  const otherDisclosures = unworded(consent?.disclosures, consumed);
+  const { lines: routeLines, remaining, unread } = formatDisclosures(candidate);
   const lines = [...routeLines, ...steps.map((step) => step.disclosure.text), ...steps.map((step) => step.label)];
-  const bound = [otherDisclosures, ...steps.map((step) => step.consent?.disclosures)];
+  const bound = [remaining, ...steps.map((step) => step.consent?.disclosures)];
   // An unreadable shape opens Details: the owner is never asked to approve text that is hidden.
   const readable = readDisclosure(bound);
   const detailsOpen = readable.unreadable || unread;
@@ -91,23 +90,6 @@ export function TurnOnCard({
       {detailsOpen ? null : details}
     </section>
   );
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** Remove only values the formatter accounted for. */
-function unworded(disclosures: unknown, consumed: readonly ConsumedDisclosure[]): unknown {
-  if (!isRecord(disclosures)) return disclosures;
-  const rest: Record<string, unknown> = { ...disclosures };
-  for (const [key, field] of consumed) {
-    const value = rest[key];
-    if (!isRecord(value)) continue;
-    const left = Object.fromEntries(Object.entries(value).filter(([name]) => name !== field));
-    if (Object.keys(left).length === 0) delete rest[key];
-    else rest[key] = left;
-  }
-  return rest;
 }
 
 /** A setup action with effects. Nothing runs until Allow. */

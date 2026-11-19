@@ -329,86 +329,143 @@ export function disclosureLines(candidate: Candidate): string[] {
   return formatDisclosures(candidate).lines;
 }
 
-export type ConsumedDisclosure = readonly [section: string, field: string];
+const isDisclosureRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+const isText = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
+const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
+const oneOf = (...choices: string[]) => (value: unknown): value is string =>
+  typeof value === "string" && choices.includes(value);
+const listOf = (item: (value: unknown) => boolean) => (value: unknown): value is unknown[] =>
+  Array.isArray(value) && value.every(item);
 
 /**
- * The route disclosure in words. `consumed` lists the [section, field] pairs the words say in full.
- * `unread` is true when one of those fields holds a value the words do not know: the card then opens
- * Details so the raw value is read before approval.
+ * Classify the route schema once. Consume fields only after their shape is checked and they are worded
+ * or identified as metadata. The unclassified remainder is still available to the generic text walker.
+ * Invalid known values open Details even if they happen to look like machine words.
  */
-export function formatDisclosures(candidate: Candidate): { lines: string[]; consumed: ConsumedDisclosure[]; unread: boolean } {
+export function formatDisclosures(candidate: Candidate): { lines: string[]; remaining: unknown; unread: boolean } {
   const consent = candidate.consent;
-  const service = candidate.display.label;
-  const disclosures = consent?.disclosures as
-    | {
-        traffic?: { providerCanReadPayload: boolean | null };
-        cost?: { kind: string; summary?: string; amount?: number; currency?: string; period?: string };
-        address?: { stability: string };
-      }
-    | null
-    | undefined;
-  const usage = consent?.scope?.query.usage;
+  const original = consent?.disclosures;
+  const rest: Record<string, unknown> = isDisclosureRecord(original) ? { ...original } : {};
+  let unread = original != null && !isDisclosureRecord(original);
   const lines = ["People who open the address must sign in with your password. Apps also need your permission."];
-  const consumed: ConsumedDisclosure[] = [];
-  let unread = false;
-  const reads = disclosures?.traffic?.providerCanReadPayload;
-  lines.push(
-    reads === true
-      ? `${service} can see what passes through.`
-      : reads === false
-        ? `${service} can't read what passes through.`
-        : `We can't tell whether ${service} can read what passes through.`
-  );
-  if (typeof reads === "boolean") consumed.push(["traffic", "providerCanReadPayload"]);
-  else if (reads != null) unread = true;
-  const cost = disclosures?.cost;
-  const priced =
-    cost?.kind === "paid" &&
-    typeof cost.amount === "number" &&
-    Number.isFinite(cost.amount) &&
-    typeof cost.currency === "string" &&
-    cost.currency.trim() !== "" &&
-    typeof cost.period === "string" &&
-    cost.period.trim() !== "";
-  const price =
-    cost?.kind === "free"
-      ? "Free."
-      : priced
-        ? `Costs ${cost.amount} ${cost.currency} per ${cost.period}.`
-        : cost?.kind === "paid"
-          ? "This costs money. The price is in Details."
-          : "We can't tell what this costs.";
-  if (cost?.kind === "free" || cost?.kind === "paid") consumed.push(["cost", "kind"]);
-  else if (cost?.kind != null) unread = true;
-  if (cost?.kind === "paid") {
-    if (typeof cost.amount === "number" && Number.isFinite(cost.amount)) consumed.push(["cost", "amount"]);
-    else unread = true;
-    if (typeof cost.currency === "string" && cost.currency.trim()) consumed.push(["cost", "currency"]);
-    else unread = true;
-    if (typeof cost.period === "string" && cost.period.trim()) consumed.push(["cost", "period"]);
-    else unread = true;
+
+  function take<T>(parent: Record<string, unknown>, key: string, valid: (value: unknown) => value is T): T | undefined {
+    if (!Object.hasOwn(parent, key)) return;
+    const value = parent[key];
+    if (valid(value)) {
+      delete parent[key];
+      return value;
+    }
+    unread = true;
+    return undefined;
   }
-  // Stable is the expected default; only the exact value may stay implicit.
-  const stability = disclosures?.address?.stability;
-  const addressWords: Record<string, string> = {
-    stable: "",
-    ephemeral: " The address changes each time.",
-    unknown: " We can't tell whether the address stays the same.",
-  };
-  const address = typeof stability === "string" && Object.hasOwn(addressWords, stability) ? addressWords[stability] : null;
-  if (address !== null) consumed.push(["address", "stability"]);
-  else if (stability != null) unread = true;
-  lines.push(`${price}${address ?? ""}`);
+  function section(key: string, classify: (section: Record<string, unknown>) => void) {
+    if (!Object.hasOwn(rest, key)) return;
+    const value = rest[key];
+    if (!isDisclosureRecord(value)) {
+      unread = true;
+      return;
+    }
+    const fields = { ...value };
+    classify(fields);
+    if (Object.keys(fields).length === 0) delete rest[key];
+    else rest[key] = fields;
+  }
+  function wordEnum(parent: Record<string, unknown>, key: string, words: Record<string, string>) {
+    const value = take(parent, key, oneOf(...Object.keys(words)));
+    if (value !== undefined && words[value]) lines.push(words[value]);
+  }
+
+  wordEnum(rest, "reach", {
+    internet: "People can reach the sign-in page over the internet.",
+    tailnet: "Only people on your private network can reach the sign-in page.",
+    lan: "Only people on your local network can reach the sign-in page.",
+    "this-device": "Only this device can reach the sign-in page.",
+    unknown: "We can't tell who can reach the sign-in page.",
+  });
+  wordEnum(rest, "transport", {
+    http: "This connection uses unencrypted HTTP. Traffic may be readable in transit.",
+    tcp: "This connection uses TCP without transport encryption.",
+    // Encrypted transports are the expected default and need no words.
+    https: "",
+    tls: "",
+  });
+  const service = candidate.display.label;
+  let payloadReading = `We can't tell whether ${service} can read what passes through.`;
+  section("traffic", (traffic) => {
+    const reads = take(traffic, "providerCanReadPayload", (v): v is boolean | null => v === null || isBoolean(v));
+    if (reads === true) payloadReading = `${service} can see what passes through.`;
+    if (reads === false) payloadReading = `${service} can't read what passes through.`;
+    wordEnum(traffic, "tlsTermination", {
+      // Encryption that ends at your device is the expected default and needs no words.
+      endpoint: "",
+      provider: "The secure connection ends at the service, not at your device.",
+      unknown: "We can't tell where the secure connection ends.",
+    });
+    const readers = take(traffic, "readers", listOf(isText));
+    // Named here, above the button: Details sits below it unless something is unreadable.
+    if (readers?.length) lines.push(`These can read your traffic: ${readers.join(", ")}.`);
+    const metadata = take(traffic, "metadataVisibleTo", listOf(isText));
+    if (metadata?.length) lines.push(`These can see when and how much you connect: ${metadata.join(", ")}.`);
+    // Reference to supporting evidence, not a statement about the connection.
+    take(traffic, "evidenceRef", (v): v is string | null => v === null || typeof v === "string");
+  });
+  lines.push(payloadReading);
+
+  let price = "We can't tell what this costs.";
+  section("cost", (cost) => {
+    const kind = take(cost, "kind", oneOf("free", "paid", "unknown"));
+    if (kind === "free") price = "Free.";
+    if (kind === "paid") {
+      const amount = take(cost, "amount", isNumber);
+      const currency = take(cost, "currency", isText);
+      const period = take(cost, "period", isText);
+      if (amount !== undefined && currency !== undefined && period !== undefined) {
+        price = `Costs ${amount} ${currency} per ${period}.`;
+      } else {
+        price = "This costs money. The price is in Details.";
+        unread = true;
+      }
+    } else if (["amount", "currency", "period"].some((key) => Object.hasOwn(cost, key))) {
+      unread = true;
+    }
+    // Leave the cost summary to the walker: it can include terms not covered by the amount.
+  });
+  lines.push(price);
+  section("address", (address) => {
+    wordEnum(address, "stability", {
+      stable: "The address stays the same.",
+      ephemeral: "The address changes each time.",
+      unknown: "We can't tell whether the address stays the same.",
+    });
+    // Describes how the address is allocated; reach, stability and the actual address are shown separately.
+    take(address, "scope", (v): v is string => typeof v === "string");
+  });
+
+  const usage = consent?.scope?.query.usage?.kind;
   lines.push(
-    usage?.kind === "session"
-      ? "Turns off by itself. The time shows once it's on."
-      : usage?.kind === "durable"
-        ? "Stays on until you turn it off."
-        : usage?.kind === "attached"
-          ? "Stays on while DataConnect runs."
-          : "We can't tell how long this lasts."
+    usage === "session" ? "Turns off by itself. The time shows once it's on."
+      : usage === "durable" ? "Stays on until you turn it off."
+      : usage === "attached" ? "Stays on while DataConnect runs."
+      : "We can't tell how long this lasts."
   );
-  return { lines, consumed, unread };
+  // Supported modes are catalog metadata; the usage above is the one being approved.
+  take(rest, "lifetimes", listOf(oneOf("session", "attached", "durable")));
+  // Lifecycle implementation and ownership are not reach, privacy, or the approved usage.
+  take(rest, "supervision", oneOf("controller", "provider-persistent", "host-supervised"));
+  take(rest, "ownership", oneOf("gozar-owned", "external-owned"));
+  // Capability flags describe app compatibility, not which route or usage is being approved.
+  section("protocols", (protocols) => {
+    for (const flag of ["sse", "streamableHttp", "oauthDcr"]) take(protocols, flag, isBoolean);
+  });
+  // Keep the adapter's explanatory disclosure text with any unclassified fields; Details retains the full value.
+  section("disclosure", (disclosure) => {
+    if (Object.hasOwn(disclosure, "text") && typeof disclosure.text !== "string") unread = true;
+  });
+
+  return { lines, remaining: isDisclosureRecord(original) ? rest : original, unread };
 }
 
 /** The facts whose value differs between two reviews, by label. */

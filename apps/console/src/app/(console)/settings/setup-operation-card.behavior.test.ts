@@ -329,6 +329,7 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
     candidate: { providerId: "workshop", display: { label: "Workshop" }, consentFactsDigest: "consent-v1:route", consent: routeConsent(disclosures) },
   })
   const readableRoute = { traffic: { providerCanReadPayload: false }, cost: { kind: "free" }, address: { stability: "stable" } }
+  const { typedRouteDisclosures } = await import("./real-gozar-shapes.fixture.ts")
   const step = action("run-it") as never as Record<string, any>
   step.consent.disclosures = { retentionDays: 30, recurring: true }
   const cases = [
@@ -368,6 +369,27 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
     }
     await act(async () => root.render(createElement(TurnOnCard, { review: review(readableRoute), busy: false, changed: null, onTurnOn: () => {} } as never)))
     assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
+    const typedCases = [
+      { name: "complete typed route", disclosures: typedRouteDisclosures, open: false,
+        words: [/over the internet/, /The address stays the same/, /secure connection ends at the service/, /These can read your traffic: route-service\./, /These can see when and how much you connect: route-service, connection-operator\./, /There is no charge/] },
+      { name: "unencrypted transport", disclosures: { ...typedRouteDisclosures, transport: "http" }, open: false,
+        words: [/unencrypted HTTP/] },
+      { name: "unrecognized reach", disclosures: { ...readableRoute, reach: "regional" }, open: true,
+        words: [/regional/] },
+    ]
+    for (const { name, disclosures, open, words } of typedCases) {
+      await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
+      const details = container.querySelector("details")!
+      const button = container.querySelector("button")!
+      assert.equal(details.hasAttribute("open"), open, name)
+      const range = dom.window.document.createRange()
+      range.setStart(container.querySelector("section")!, 0)
+      range.setEndBefore(button)
+      const before = range.toString()
+      for (const word of words) assert.match(before, word, name)
+      // Reader names are approved values and show above the button; the evidence reference is metadata.
+      if (!open) assert.doesNotMatch(before, /route-evidence/, name)
+    }
     // Gozar reports "unknown" stability for routes it did not create; the card says so in words.
     await act(async () => root.render(createElement(TurnOnCard, { review: review({ ...readableRoute, address: { stability: "unknown" } }), busy: false, changed: null, onTurnOn: () => {} } as never)))
     assert.match(shownText(container), /We can't tell whether the address stays the same\./)

@@ -122,3 +122,23 @@ export const diedRoute = {
   handle: { kind: "session" },
   stopRequested: false,
 };
+
+/** Closed-schema route values, with example-only evidence and prose. */
+export const typedRouteDisclosures = {
+  ownership: "gozar-owned",
+  reach: "internet",
+  transport: "https",
+  traffic: {
+    providerCanReadPayload: true,
+    tlsTermination: "provider",
+    readers: ["route-service"],
+    metadataVisibleTo: ["route-service", "connection-operator"],
+    evidenceRef: "https://example.test/route-evidence",
+  },
+  address: { stability: "stable", scope: "a fixed public address" },
+  cost: { kind: "free", summary: "There is no charge." },
+  lifetimes: ["session", "attached"],
+  supervision: "host-supervised",
+  protocols: { sse: true, streamableHttp: true, oauthDcr: false },
+  disclosure: { text: "This route connects to this computer.", links: [], revision: "example-v1" },
+};
