@@ -529,6 +529,39 @@ test("a failed first load says what to do, keeps the code in Details, and clears
   );
 });
 
+// Saving the password restarts the service, so the polls around it get no answer.
+test("reads that get no answer while the service restarts show the paused line, never an error card", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let mode: "service_unreachable" | "reachability_unavailable" | "thrown" | "healthy" = "service_unreachable";
+  const handler = world();
+  await withScreen(
+    (url, body) => {
+      if (mode === "healthy") return handler(url, body);
+      if (mode === "thrown") throw new Error("fetch failed");
+      return fail(mode);
+    },
+    async ({ container, act: run }) => {
+      for (const next of ["reachability_unavailable", "thrown", "healthy"] as const) {
+        const text = visibleText(container);
+        assert.equal(container.querySelector("[role=alert]"), null, `${mode}: no error card`);
+        assert.match(text, /Can't reach DataConnect's background service\. Changes are paused\./, mode);
+        assert.doesNotMatch(text, /couldn't turn on|isn't running/, mode);
+        mode = next;
+        await run(async () => t.mock.timers.tick(3000));
+      }
+      assert.doesNotMatch(visibleText(container), /Can't reach DataConnect's background service/, "a good read clears it");
+    }
+  );
+});
+
+test("a read the service refuses with a fallback code says it couldn't check, not that it couldn't turn on", async () => {
+  await withScreen(world({ "/state": fail("internal_error") }), async ({ container }) => {
+    const alert = container.querySelector("[role=alert]")?.textContent ?? "";
+    assert.match(alert, /We couldn't check remote access\. Try again, or copy the details for support\./);
+    assert.doesNotMatch(visibleText(container), /couldn't turn on/);
+  });
+});
+
 test("an unknown error code shows the generic message, and an action error survives a later load", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const handler = readyWorld({ "/operations": fail("brand_new_server_code") });

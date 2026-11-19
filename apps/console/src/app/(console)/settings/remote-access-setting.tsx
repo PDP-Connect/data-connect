@@ -93,6 +93,11 @@ type Prep =
   | { status: "preparing" }
   | { status: "done"; providerId: string; result: Prepared };
 
+// Codes for a read that got no answer: the service is restarting (saving the
+// password restarts it) or is down. The card goes stale, its status line says
+// the service can't be reached, and the next poll retries. No error card.
+const gotNoAnswer = (code: string) => code === "service_unreachable" || code === "reachability_unavailable";
+
 /**
  * The Off status row: one inline text flow, so on a narrow screen the words
  * wrap under the dot instead of splitting into columns. As the start card's
@@ -234,11 +239,12 @@ export function RemoteAccessSetting({
       } else {
         setStale(true);
       }
-      if (failedRead) {
+      if (failedRead && !gotNoAnswer(failedRead.code)) {
         setError((current) =>
           current?.source === "action" || (current?.source === "load" && current.code === failedRead.code)
             ? current
-            : toDisplayError(new ReachabilityFailure(failedRead), "load")
+            : // A read failed, so the fallback sentence names a check, never a turn-on.
+              toDisplayError(new ReachabilityFailure(failedRead), "load", undefined, "check")
         );
       }
       if (hostResult.ok) {
@@ -272,10 +278,10 @@ export function RemoteAccessSetting({
           return;
         }
         const refresh = () => {
-          void load().catch((failure) => {
+          // A poll that threw got no answer either: the next one retries.
+          void load().catch(() => {
             if (active) {
               setStale(true);
-              setError((current) => current?.source === "action" ? current : toDisplayError(failure, "load"));
             }
           });
         };
