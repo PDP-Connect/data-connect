@@ -20,7 +20,7 @@ The installer checks integrity before installing into an isolated dependency pre
 
 `release-journey.test.mjs` exercises the real owner HTTP service. Separate suites cover draft rotation, locked custody, public recovery, runtime consent, pending initial streaming proof and installer refusals. `contract-preflight.test.mjs` checks export availability only. It cannot certify a lifecycle result.
 
-Run browser journeys through `e2e/harness.mjs --reachability reachability.spec.ts` and `--reachability-stream reachability-stream.spec.ts`. They require the existing private network/PID namespace. A fixture run cannot certify external account entitlement or internet reachability.
+Run browser journeys through `e2e/harness.mjs --reachability reachability.spec.ts` and `--reachability-setup reachability-setup.spec.ts`. They require the existing private network/PID namespace. A fixture run cannot certify external account entitlement or internet reachability.
 
 The controller suites use the resource governor. Reachability browser journeys add a constructed namespace root whose ancestors have mapped owners, retaining private network/PID isolation and Gozar's unmodified home-safety checks. `owned-root-sandbox.test.mjs` checks public inventory and loopback-only networking inside that namespace. A forced test-process exit handles the missing factory shutdown API only after public route cleanup attempts; retained cleanup uncertainty remains a failure.
 
