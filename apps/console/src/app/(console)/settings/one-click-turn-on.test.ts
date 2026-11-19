@@ -407,6 +407,15 @@ test("opening step 2 prepares a review without applying anything", async () => {
   });
 });
 
+test("the recommended way's radio has a name and every way's radio carries its provider id", async () => {
+  await withScreen(host(), async ({ container }) => {
+    const recommended = container.querySelector('[aria-label="Recommended way"] input[type="radio"]');
+    assert.ok(recommended);
+    assert.equal(recommended.getAttribute("aria-label"), "Tunnel service");
+    assert.equal((recommended as HTMLInputElement).value, "p-tunnel");
+  });
+});
+
 test("the Turn on click sends the review id and digest whose facts are on screen", async () => {
   await withScreen(host({ "/operations": ok({ operationId: "op-1" }) }), async ({ calls, press, text }) => {
     assert.match(text(), /Tunnel service can see what passes through\./);

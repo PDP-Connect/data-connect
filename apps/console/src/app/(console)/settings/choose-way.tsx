@@ -27,7 +27,14 @@ function WayChoice({ row, checked, onPick }: { row: WayRow; checked: boolean; on
   return (
     <label className={`grid gap-1 rounded-lg border p-3${row.usable ? "" : " text-muted-foreground"}`}>
       <span>
-        <input checked={checked} disabled={!row.usable} name="way" onChange={() => onPick(row.providerId)} type="radio" />{" "}
+        <input
+          checked={checked}
+          disabled={!row.usable}
+          name="way"
+          onChange={() => onPick(row.providerId)}
+          type="radio"
+          value={row.providerId}
+        />{" "}
         {row.title}
       </span>
       {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
@@ -51,7 +58,15 @@ export function RecommendedWay({
   return (
     <section aria-label="Recommended way" className="grid gap-1 rounded-lg border p-3">
       <span>
-        <input checked={checked} disabled={disabled} name="way" onChange={() => onPick(row.providerId)} type="radio" />{" "}
+        <input
+          aria-label={row.title}
+          checked={checked}
+          disabled={disabled}
+          name="way"
+          onChange={() => onPick(row.providerId)}
+          type="radio"
+          value={row.providerId}
+        />{" "}
         <strong>{row.title}</strong> · Recommended
       </span>
       {row.line ? <span className="pdpp-caption">{row.line}</span> : null}
