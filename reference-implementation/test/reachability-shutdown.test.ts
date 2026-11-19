@@ -213,16 +213,15 @@ const hangingJournal = {
   requestStop: () => new Promise<void>(() => {}),
 };
 
-test("a stalled journal does not hold shutdown past its budget, and the close was still dispatched", async () => {
+// Both hung-journal tests await shutdown directly: its own deadline plus the
+// capped journal grace bound the run, and the per-test timeout catches a true
+// hang without parking a real timer in test code.
+test("a stalled journal does not hold shutdown past its budget, and the close was still dispatched", { timeout: 2000 }, async () => {
   const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], () => new Promise<Route>(() => {}));
   try {
     const started = Date.now();
-    const outcome = await Promise.race([
-      f.service.shutdown(80, hangingJournal),
-      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2000)),
-    ]);
-    assert.notEqual(outcome, "hung", "shutdown returns within the deadline plus the journal grace");
-    assert.ok(Date.now() - started < 1000);
+    const outcome = await f.service.shutdown(80, hangingJournal);
+    assert.ok(Date.now() - started < 1000, "shutdown returns within the deadline plus the journal grace");
     assert.deepEqual(outcome, { confirmed: [], unconfirmed: ["route-0"] });
     assert.equal(f.calls.length, 1, "the provider close was dispatched");
     // The writes never landed: the record is still a restart candidate, not confirmed.
@@ -232,14 +231,10 @@ test("a stalled journal does not hold shutdown past its budget, and the close wa
   }
 });
 
-test("a hung tombstone write does not keep the provider close from starting", async () => {
+test("a hung tombstone write does not keep the provider close from starting", { timeout: 2000 }, async () => {
   const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], confirmed);
   try {
-    const outcome = await Promise.race([
-      f.service.shutdown(80, hangingJournal),
-      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2000)),
-    ]);
-    assert.notEqual(outcome, "hung");
+    const outcome = await f.service.shutdown(80, hangingJournal);
     assert.equal(f.calls.length, 1, "the close starts without waiting for the tombstone");
     assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
   } finally {
