@@ -89,6 +89,8 @@ export default async function SettingsPage() {
             <DesktopPairingSetting />
           </Section>
         ) : null}
+        {managedDesktopHost ? (
+          <>
         <Section
           description="Control how DataConnect starts on this computer."
           title="Desktop"
@@ -101,6 +103,8 @@ export default async function SettingsPage() {
         >
           <RecoveryKeySetting />
         </Section>
+          </>
+        ) : null}
         <AboutSection identity={identity} />
       </main>
     </RecordroomShellWithPalette>
