@@ -146,6 +146,7 @@ export class ReachabilityService {
   private recoveryTimedOut = false;
   private recoveryRun: Promise<{ closed: number; reproved: number; failed: number }> | null = null;
   private readonly unsettled = new Set<string>();
+  private readonly externalOrigins = new Set<string>();
   private readonly runtimeReviews = new Map<string, RuntimeConsentReview>();
   private readonly watchers = new Map<string, AbortController>();
   private readonly reasons = new Map<string, string>();
@@ -619,6 +620,7 @@ export class ReachabilityService {
     const origins = [
       this.applying?.origin,
       ...[...this.reviews.values()].map(reviewedOrigin),
+      ...this.externalOrigins,
       ...[...this.routes.values()].filter((route) => route.cleanup.state !== "confirmed").map((route) => route.origin),
     ];
     return origins.some((origin) => {
@@ -780,6 +782,10 @@ export class ReachabilityService {
         this.recoveryTimedOut = false;
         const cleared = reduceLifecycle(this.lifecycle, { type: "recovery-cleared" });
         if (cleared.accepted) this.lifecycle = cleared.state;
+      }
+      this.externalOrigins.clear();
+      for (const route of listed.routes) {
+        if (route.ownership === "external-owned" && route.origin && route.cleanup.state !== "confirmed") this.externalOrigins.add(route.origin);
       }
       const owned = listed.routes.filter((route: Route) => route.ownership === "gozar-owned");
       for (const route of owned) {
