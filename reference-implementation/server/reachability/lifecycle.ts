@@ -30,6 +30,7 @@ export const events = [
   "setup-complete",
   "setup-failed",
   "setup-timeout",
+  "discard",
   "review",
   "apply",
   "allocated",
@@ -137,6 +138,11 @@ allow(["draft", "setup", "review", "stale", "unknown", "failed", "stopped"], "re
   event.approvalIdentity
     ? accept(state, { approvalIdentity: event.approvalIdentity, phase: "review", reason: null })
     : reject(state, "approval-identity-missing")
+);
+// Discarding the last draft ends configuring. A phase that holds a route
+// (a failed proof, say) keeps it; one without a route has nothing left.
+allow(["draft", "setup", "review", "failed"], "discard", (state) =>
+  state.handle ? accept(state, {}) : accept(state, { approvalIdentity: null, phase: "inactive", reason: null })
 );
 allow(["review"], "apply", (state, event) => {
   if (

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Usage } from "@tnunamak/gozar";
-import { ReachabilityError } from "../reachability/approvals.ts";
+import { ReachabilityError, type UnsupportedReason } from "../reachability/approvals.ts";
 import { projectHostSettings, validateHostSettingsInput } from "../reachability/host-settings.ts";
 import { type OperationRecord, type ReachabilityOperations, sameHandle } from "../reachability/operations.ts";
 import type { ReachabilitySetups } from "../reachability/setups.ts";
@@ -61,6 +61,8 @@ const safeCodes = new Set([
   "internal_error",
   "ambiguous_selection",
   "operation_in_progress",
+  "recovery_in_progress",
+  "recovery_timed_out",
   "operation_conflict",
   "operation_recovery_unauthorized",
   "operation_not_found",
@@ -103,17 +105,24 @@ const safeCodes = new Set([
   "operation_superseded",
   "unsafe_state_path",
 ]);
+const unsupportedReasonText: Record<UnsupportedReason, string> = {
+  provider_properties_unsupported: "This provider reports a reach or connection type that this host does not support.",
+  reach_unknown:
+    "Where this route can be reached from is not known yet. Set its address, commit the setup, then review it again.",
+};
 export function publicReachabilityError(error: unknown): { code: string; message: string } {
-  const candidate =
-    unsafeStatePathCause(error) ? "unsafe_state_path" : error && typeof error === "object" && "code" in error ? error.code : null;
+  const candidate = unsafeStatePathCause(error) ? "unsafe_state_path" : error && typeof error === "object" && "code" in error ? error.code : null;
   const code = typeof candidate === "string" && safeCodes.has(candidate) ? candidate : "reachability_unavailable";
+  const reason = error instanceof ReachabilityError && code === "unsupported" ? error.reason : null;
   // Never echo raw messages, causes or arbitrary error properties.
   return {
     code,
     message:
       code === "proof_refresh_unsupported"
         ? "This route cannot safely refresh its proof. It remains unpublished. Stop it before starting a new route."
-        : "The reachability operation could not complete. Review its current state before retrying.",
+        : reason
+          ? unsupportedReasonText[reason]
+          : "The reachability operation could not complete. Review its current state before retrying.",
   };
 }
 function body(request: Request): Record<string, unknown> {

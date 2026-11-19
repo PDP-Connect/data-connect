@@ -529,6 +529,15 @@ export class ReachabilityService {
     // Promoted/live bindings remain under its authorization checks.
     this.drafts.delete(id);
     this.reviews.clear();
+    // The last draft is gone, so no setup or review remains. A route that
+    // is live or being stopped keeps its phase: the reducer ignores it.
+    if (this.drafts.size === 0) {
+      const next = reduceLifecycle(this.lifecycle, { type: "discard" });
+      if (next.accepted) {
+        this.lifecycle = next.state;
+      }
+    }
+
     return result;
   }
   async commit(id: string, expectedRevision: string): Promise<ProviderConfiguration> {
@@ -557,6 +566,7 @@ export class ReachabilityService {
       throw new ReachabilityError("ambiguous_selection");
     }
     const selected = variants[0];
+    if (selected.reach === "unknown") throw new ReachabilityError("unsupported", undefined, undefined, "reach_unknown");
     if (selected.availability[usage.kind]?.state !== "available") {
       throw new ReachabilityError("setup_required");
     }
@@ -566,7 +576,7 @@ export class ReachabilityService {
         ["http", "https", "tcp", "tls"].includes(selected.transport)
       )
     ) {
-      throw new ReachabilityError("unsupported");
+      throw new ReachabilityError("unsupported", undefined, undefined, "provider_properties_unsupported");
     }
     await this.host.prepare({ reach: selected.reach, transport: selected.transport, usage });
     let query: Query = {
