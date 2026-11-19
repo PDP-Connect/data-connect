@@ -281,10 +281,12 @@ export function projectInventory(list: ProviderList) {
 // created it and the digest of the facts the owner approved. Null when no verified record exists.
 export function projectRoute(
   route: Route,
-  journaled?: { providerId: string | null; approvedConsentFactsDigest: string | null } | null
+  journaled?: { providerId: string | null; approvedConsentFactsDigest: string | null } | null,
+  presentation?: ReturnType<typeof import("./presentation.ts").routePresentation>
 ) {
   const proof = route.verification;
   return {
+    presentation,
     actions: route.actions,
     binding: {
       authority: route.binding.authority,

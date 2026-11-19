@@ -192,7 +192,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       // attribution and stop intent stay unknown rather than await a journal
       // read a degraded /state must not depend on.
     }
-    return { ...projectRoute(route, journaled), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
+    return { ...projectRoute(route, journaled, service().presentation(route)), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
   }
   function projectRoutes(routes: Route[], known?: OperationRecord[], readMissing = true) {
     const records: Records = new Map((known ?? []).map((record) => [record.operationId, Promise.resolve(record)]));

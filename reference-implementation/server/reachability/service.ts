@@ -18,7 +18,7 @@ import type {
 import type { HostSettingsBridge } from "./host-settings.ts";
 import type { LifecycleEvent } from "./lifecycle.ts";
 import { initialLifecycle, reduceLifecycle } from "./lifecycle.ts";
-import { hostCapability } from "./presentation.ts";
+import { hostCapability, routePresentation } from "./presentation.ts";
 
 type EmbeddingApi = ReturnType<typeof import("@tnunamak/gozar").createGozar>;
 type RuntimeConsentReview = Awaited<ReturnType<typeof import("@tnunamak/gozar").reviewRouteConsent>>;
@@ -796,6 +796,18 @@ export class ReachabilityService {
     } finally {
       this.recoveryPending = false;
     }
+  }
+  presentation(route: Route) {
+    const current = route.origin
+      ? {
+          bootId: this.host.identity.bootId,
+          handleGeneration: route.handle.generation,
+          instanceId: this.host.identity.instanceId,
+          origin: route.origin,
+          target: this.host.query.target,
+        }
+      : null;
+    return routePresentation(route, current, Date.now(), this.reasons.get(route.handle.id));
   }
   observeHostConfinement(confinement: import("@tnunamak/gozar").Observation<boolean>): void {
     this.transition({ confinement, type: "host-confinement" });
