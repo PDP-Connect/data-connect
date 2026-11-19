@@ -295,3 +295,50 @@ test("state marks a route as owner-stopped only when a settled stop names its ex
   await handlers.get("/v1/owner/reachability/state")!({ params: {} }, res);
   assert.deepEqual(response.data.routes.map((route: { stopRequested: boolean }) => route.stopRequested), [true, false, false]);
 });
+
+// The shape an owner-managed durable route reports: it has no expiry to observe.
+function presentedRoute(now: number): { route: Route; current: Parameters<typeof routePresentation>[1] } {
+  const target = "127.0.0.1:37807";
+  const base = fakeRouteScenarios({ target }).find((item) => item.handle.kind === "durable" && item.routeState === "verified");
+  assert.ok(base);
+  const subject = base.verification.subject;
+  assert.ok(subject);
+  const route: Route = {
+    ...base,
+    expiresAt: { known: false as const, reason: "not-observed" },
+    verification: {
+      ...base.verification,
+      checkedAt: new Date(now - 1000).toISOString(),
+      observedAt: new Date(now - 1000).toISOString(),
+      validUntil: { known: true as const, value: new Date(now + 14_000).toISOString() },
+    },
+  };
+  return { current: subject, route };
+}
+
+test("a route with no observable expiry presents as Verified while its proof is fresh", () => {
+  const now = Date.now();
+  const { route, current } = presentedRoute(now);
+  // Control: the same route with an expiry that has not passed is Verified, so the missing expiry is the only difference.
+  const bounded = { ...route, expiresAt: { known: true as const, value: new Date(now + 60_000).toISOString() } };
+  assert.equal(routePresentation(bounded, current, now).label, "Verified");
+  assert.equal(routePresentation(route, current, now).label, "Verified");
+});
+
+test("an unknown route expiry never outlives the proof, and a known past expiry still blocks", () => {
+  const now = Date.now();
+  const { route, current } = presentedRoute(now);
+  const lapsed = {
+    ...route,
+    verification: { ...route.verification, validUntil: { known: true as const, value: new Date(now - 1).toISOString() } },
+  };
+  assert.equal(routePresentation(lapsed, current, now).label, "Unpublished");
+  const unboundedProof = {
+    ...route,
+    verification: { ...route.verification, validUntil: { known: false as const, reason: "not-observed" } },
+  } as Route;
+  assert.equal(routePresentation(unboundedProof, current, now).label, "Unpublished");
+  const expired = { ...route, expiresAt: { known: true as const, value: new Date(now - 1).toISOString() } };
+  assert.equal(routePresentation(expired, current, now).label, "Unpublished");
+  assert.equal(routePresentation(route, { ...current, bootId: "new-boot" } as typeof current, now).label, "Unpublished");
+});
