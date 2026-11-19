@@ -568,7 +568,12 @@ export class ReachabilityService {
     const key = handleKey(handle);
     const existing = this.closing.get(key);
     if (existing) return existing;
-    const closing = this.api.closeRoute({ handle, home: this.host.query.home, mode: "remove" });
+    // A reply that does not name this exact handle (or is not a route view) says nothing about
+    // it: the outcome is unknown, exactly as for a close that throws. No caller installs it.
+    const closing = this.api.closeRoute({ handle, home: this.host.query.home, mode: "remove" }).then((reply) => {
+      if (!closeReplyNames(reply, handle)) throw new ReachabilityError("close_reply_mismatch");
+      return reply;
+    });
     this.closing.set(key, closing);
     const release = () => {
       if (this.closing.get(key) === closing) this.closing.delete(key);
@@ -812,9 +817,10 @@ export class ReachabilityService {
         // carries it, so the start's journal record keeps the exact handle for the next restart.
         // A confirmed close owes nothing, and the journal's merge never lets this record replace
         // confirmed evidence.
-        let closed: Route;
+        let owed: Route | undefined;
         try {
-          closed = await this.stop(route.handle.id, route.handle.generation, true);
+          const closed = await this.stop(route.handle.id, route.handle.generation, true);
+          if (closed.cleanup.state !== "confirmed") owed = owedRoute(route, [closed]);
         } catch (closeError) {
           // The close outcome is unknown. Wrap the cause; never mutate it.
           throw new ReachabilityError(
@@ -823,10 +829,7 @@ export class ReachabilityService {
             closeError
           );
         }
-        throw new ReachabilityError(
-          "operation_superseded",
-          closed.cleanup.state === "confirmed" ? undefined : owedRoute(route, [closed]),
-        );
+        throw new ReachabilityError("operation_superseded", owed);
       }
       this.transition({ handle: route.handle, type: "allocated" });
       if (route.verification.status === "verified" && route.published) {
@@ -1277,27 +1280,52 @@ function hostStartedKind(handle: Handle): boolean {
 }
 
 
+/** True when a close reply is a route view naming exactly `handle`. Reads nothing it cannot bound. */
+function closeReplyNames(reply: unknown, handle: Handle): boolean {
+  try {
+    const view = reply as Route | null | undefined;
+    return !!view && typeof view.cleanup?.state === "string" && sameHandle(view.handle, handle);
+  } catch {
+    return false;
+  }
+}
+
 /** The route a throw carries, if any, read without trusting the thrown value. */
 function routeOn(thrown: unknown): Route | null {
   try {
-    const route = (thrown as { route?: Route } | null | undefined)?.route;
-    return route && typeof route === "object" && route.handle && route.cleanup ? route : null;
+    return (thrown as { route?: Route } | null | undefined)?.route ?? null;
   } catch {
     return null;
   }
 }
 
+// The only cleanup states close evidence may contribute. "confirmed" is never taken from it here.
+const OWED_CLEANUP_STATES = new Set<string>(["none", "unconfirmed"]);
+
 /**
- * The evidence for a route a superseded start still owes. Only a view naming the allocation's
- * exact handle counts, the first such view wins, and the original allocation is the fallback.
- * Stop has withdrawn publication, so the view is never published, and a view claiming
- * confirmation is not believed here: a thrown or partial close outcome is unknown.
+ * The route a superseded start still owes. It is built from the allocation's own fields: the
+ * evidence it may add is one cleanup state, from a view naming the allocation's exact handle and
+ * from a known set. Every read of a view is guarded, so a malformed view cannot throw here. Stop
+ * has withdrawn publication, so the route is never published, and a thrown or partial close is
+ * never recorded as confirmed.
  */
-function owedRoute(allocation: Route, views: (Route | null | undefined)[]): Route {
-  const view = views.find((candidate) => candidate && sameHandle(candidate.handle, allocation.handle)) ?? allocation;
+function owedRoute(allocation: Route, views: unknown[]): Route {
+  let state: string = allocation.cleanup.state;
+  for (const view of views) {
+    try {
+      const candidate = view as Route | null | undefined;
+      const seen = candidate?.cleanup?.state;
+      if (candidate && sameHandle(candidate.handle, allocation.handle) && typeof seen === "string" && OWED_CLEANUP_STATES.has(seen)) {
+        state = seen;
+        break;
+      }
+    } catch {
+      // A malformed view is ignored.
+    }
+  }
   return {
-    ...view,
-    cleanup: view.cleanup.state === "confirmed" ? { nextAction: null, state: "unconfirmed" } : view.cleanup,
+    ...allocation,
+    cleanup: { nextAction: null, state: (OWED_CLEANUP_STATES.has(state) ? state : "unconfirmed") as Route["cleanup"]["state"] },
     published: null,
   };
 }

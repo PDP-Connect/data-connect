@@ -15,6 +15,25 @@ export function sameHandle(a: Handle, b: Handle): boolean {
   return handleKey(a) === handleKey(b);
 }
 
+/**
+ * A bounded classification of an error's `cause` for the failure log: its constructor name and,
+ * when it is a short identifier-shaped string, its `code`. Never the object or its message.
+ */
+function causeSummary(error: unknown): string {
+  try {
+    const cause = error instanceof Error ? error.cause : undefined;
+    if (cause === undefined) return "cause=none";
+    const isObject = cause !== null && typeof cause === "object";
+    const constructorName = isObject ? (cause as object).constructor?.name : undefined;
+    const name = typeof constructorName === "string" && /^[A-Za-z0-9_$]{1,60}$/.test(constructorName) ? constructorName : typeof cause;
+    const code = isObject ? (cause as { code?: unknown }).code : undefined;
+    const safeCode = typeof code === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : "none";
+    return `cause=${name} cause_code=${safeCode}`;
+  } catch {
+    return "cause=unreadable";
+  }
+}
+
 export type OperationRecord = {
   intent: {
     instanceId: string;
@@ -305,7 +324,8 @@ export class ReachabilityOperations {
         const original = error instanceof Error ? error : null;
         console.error(
           `[reachability] operation ${operationId} (${kind}) failed: code=${typeof supplied === "string" ? supplied : "none"} ` +
-          `name=${original?.name ?? typeof error} message=${(original?.message ?? "").slice(0, 300)}`
+          `name=${original?.name ?? typeof error} message=${(original?.message ?? "").slice(0, 300)} ` +
+          causeSummary(error)
         );
         await this.serialized(operationId, async () => this.write(await this.merged({
           ...pending,

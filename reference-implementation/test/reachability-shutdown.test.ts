@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 import type { Handle, RouteView as Route } from "@tnunamak/gozar";
 import { fakeRouteScenarios } from "@tnunamak/gozar/testing";
 import { initialLifecycle } from "../server/reachability/lifecycle.ts";
@@ -461,4 +461,97 @@ test("a thrown close never lets another handle's route, or a claim of confirmati
   assert.deepEqual(claimed.failure.route?.handle, claimed.handle);
   assert.notEqual(claimed.failure.route?.cleanup.state, "confirmed");
   assert.notEqual(claimed.inner.routes.get(claimed.handle.id)?.cleanup.state, "confirmed");
+});
+
+// A close reply that names another handle says nothing about the allocation, even if it claims
+// confirmation: it is installed nowhere, and the allocation stays owed.
+const foreignConfirmed = (): Promise<Route> =>
+  Promise.resolve({ ...seed, handle: wrongHandle, cleanup: { nextAction: null, state: "confirmed" }, published: null });
+
+test("a confirmed close reply for another handle leaves the late allocation an unconfirmed restart candidate", { timeout: 5000 }, async () => {
+  const f = await lateAllocation("attached", foreignConfirmed);
+  try {
+    assert.equal(f.record.stage, "unknown-possibly-live");
+    assert.deepEqual(f.record.handle, f.handle);
+    assert.notEqual(f.record.cleanupConfirmed, true);
+    assert.deepEqual(restartCandidates(await f.operations.list()), [{ handle: f.handle, operationId: f.operationId }]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a confirmed close reply for another handle is not installed as the allocation's view", async () => {
+  const { failure, handle, inner } = await supersededApply(foreignConfirmed);
+  assert.equal(failure.code, "operation_superseded");
+  assert.deepEqual(failure.route?.handle, handle, "the failure still carries the owed allocation");
+  assert.notEqual(failure.route?.cleanup.state, "confirmed");
+  const view = inner.routes.get(handle.id);
+  assert.deepEqual(view?.handle, handle, "the in-memory view was not replaced by the foreign reply");
+  assert.notEqual(view?.cleanup.state, "confirmed");
+  assert.equal(view?.published, null);
+});
+
+// Malformed evidence on a same-handle route must not make the failure itself throw.
+const malformedViews: { name: string; view: (route: Route) => unknown }[] = [
+  { name: "a throwing cleanup state", view: (route) => ({ handle: route.handle, cleanup: { get state(): string { throw new Error("boom"); } } }) },
+  { name: "a throwing cleanup", view: (route) => ({ handle: route.handle, get cleanup(): unknown { throw new Error("boom"); } }) },
+  { name: "a non-object cleanup", view: (route) => ({ handle: route.handle, cleanup: 7 }) },
+  { name: "a throwing handle", view: () => ({ get handle(): unknown { throw new Error("boom"); }, cleanup: { state: "unconfirmed" } }) },
+  {
+    name: "a handle that throws after its first read",
+    view: (route) => {
+      let reads = 0;
+      return {
+        get handle(): unknown {
+          if (++reads > 1) throw new Error("boom");
+          return route.handle;
+        },
+        cleanup: { state: "unconfirmed" },
+      };
+    },
+  },
+  {
+    name: "a cleanup that throws after its first read",
+    view: (route) => {
+      let reads = 0;
+      return {
+        handle: route.handle,
+        get cleanup(): unknown {
+          if (++reads > 1) throw new Error("boom");
+          return { state: "unconfirmed" };
+        },
+      };
+    },
+  },
+];
+for (const { name, view } of malformedViews) {
+  test(`a same-handle cause with ${name} still yields the fresh error with the exact handle`, async () => {
+    const { failure, handle } = await supersededApply((route) =>
+      Promise.reject(Object.assign(new Error("close failed"), { route: view(route) }))
+    );
+    assert.equal(failure.code, "operation_superseded");
+    assert.ok(failure.cause instanceof Error);
+    assert.deepEqual(failure.route?.handle, handle);
+    assert.equal(failure.route?.published, null);
+    assert.notEqual(failure.route?.cleanup.state, "confirmed");
+  });
+}
+
+test("the failure log carries a bounded summary of the close error's cause, never its message", { timeout: 5000 }, async () => {
+  const lines: string[] = [];
+  const spy = mock.method(console, "error", (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  let f: Awaited<ReturnType<typeof lateAllocation>> | undefined;
+  try {
+    f = await lateAllocation("attached", () =>
+      Promise.reject(Object.assign(new Error("secret provider detail"), { code: "provider_unavailable" }))
+    );
+  } finally {
+    spy.mock.restore();
+    await f?.cleanup();
+  }
+  const line = lines.find((entry) => entry.includes("failed: code=")) ?? "";
+  assert.match(line, /cause=Error cause_code=provider_unavailable/);
+  assert.ok(!line.includes("secret provider detail"), "the cause's message is not logged");
 });
