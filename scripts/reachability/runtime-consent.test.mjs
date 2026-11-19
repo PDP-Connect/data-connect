@@ -6,6 +6,27 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { createPreparedFixture } from "./prepared-fixture.mjs";
 
+test("fresh owner review discloses the observed positive paid rate without starting a route", {
+	timeout: 30000,
+}, async () => {
+	const fixture = await createPreparedFixture(undefined, { runtimeObservations: true });
+	try {
+		const starts = await fixture.startCount();
+		await fixture.registry.setRuntimeCost("paid", 125);
+		const fresh = await fixture.api.call(`/drafts/${fixture.draftId}/review`, { usage: "attached" });
+		assert.deepEqual(fresh.candidate.consent.disclosures.cost, {
+			kind: "paid",
+			summary: "Fixture paid rate",
+			amount: 125,
+			currency: "USD",
+			period: "month",
+		});
+		assert.equal(await fixture.startCount(), starts, "Review must not start the synthetic route");
+	} finally {
+		await fixture.close();
+	}
+});
+
 test("runtime consent drift withdraws publication, and initial-only proof offers only stop", {
 	timeout: 60000,
 }, async () => {
