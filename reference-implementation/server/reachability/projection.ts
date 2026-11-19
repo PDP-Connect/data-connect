@@ -195,6 +195,7 @@ export function projectConfiguration(config: ProviderConfiguration) {
 }
 export function projectDraft(draft: Draft) {
   return {
+    ...(draft.detection ? { detection: { checkedAt: draft.detection.checkedAt, fresh: draft.detection.fresh, refreshing: draft.detection.refreshing } } : {}),
     baseRevision: draft.baseRevision,
     configuration: projectConfiguration(draft.configuration),
     draftId: draft.draftId,
@@ -261,6 +262,7 @@ export function projectInventory(list: ProviderList) {
       ),
       configuration: projectConfiguration(provider.configuration as ProviderConfiguration),
       facts: (provider.facts as Fact[]).map(projectFact),
+      ...(provider.detection ? { detection: { checkedAt: provider.detection.checkedAt, fresh: provider.detection.fresh, refreshing: provider.detection.refreshing } } : {}),
       label: provider.label,
       prerequisites: (provider.prerequisites as import("@tnunamak/gozar").Prerequisite[]).map((item) => ({
         id: item.id,

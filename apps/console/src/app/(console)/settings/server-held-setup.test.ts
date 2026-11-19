@@ -365,7 +365,7 @@ test("polling starts only after the browser-storage migration finishes", async (
   const request = (async (url: string) => {
     calls.push(url)
     if (url === "/setups/adopt") return new Promise(resolve => (finish = resolve))
-    return { ok: true, data: url === "/catalog" ? { providers: [] } : url === "/state" ? { routes: [], reasons: {}, starting: false } : url === "/host-settings" ? { known: false, reason: "unavailable" } : {} }
+    return { ok: true, data: url.startsWith("/catalog") ? { providers: [] } : url === "/state" ? { routes: [], reasons: {}, starting: false } : url === "/host-settings" ? { known: false, reason: "unavailable" } : {} }
   }) as unknown as typeof requestReachability
   const screen = await mountSetting(request, dom => {
     Object.defineProperty(globalThis, "localStorage", { value: dom.window.localStorage, configurable: true })
@@ -375,7 +375,7 @@ test("polling starts only after the browser-storage migration finishes", async (
   try {
     assert.deepEqual(calls, ["/setups/adopt"], "a poll ran before the migration finished")
     await act(async () => finish({ ok: true, data: { adopted: true } }))
-    assert.ok(calls.includes("/catalog") && calls.includes("/state"))
+    assert.ok(calls.includes("/catalog?refresh=true") && calls.includes("/state"))
   } finally {
     await screen.stop()
   }

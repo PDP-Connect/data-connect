@@ -172,7 +172,7 @@ export async function prepareTurnOn(
     if (!result.ok) throw new ReachabilityFailure(result);
     return result.data as T;
   };
-  const inventory = await send<Inventory>("/catalog");
+  const inventory = await send<Inventory>("/catalog?refresh=true");
   const provider = inventory.providers.find((item) => item.providerId === choice.providerId);
   if (!provider) throw new ReachabilityFailure(publicError("configuration_stale"));
   const state = await send<{ services?: ServiceEntry[]; passwordSet?: boolean }>("/state");
@@ -187,7 +187,7 @@ export async function prepareTurnOn(
   try {
     if (entry?.draftId) {
       draft = await send<Draft>(
-        `/drafts/${encodeURIComponent(entry.draftId)}?providerId=${encodeURIComponent(choice.providerId)}`
+        `/drafts/${encodeURIComponent(entry.draftId)}?providerId=${encodeURIComponent(choice.providerId)}&refresh=true`
       );
       committed = entry.committed;
     }

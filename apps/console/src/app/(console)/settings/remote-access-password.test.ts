@@ -29,7 +29,7 @@ async function mount(passwordSet: boolean | undefined, hash = "") {
   const request = (async (url: string) => ({
     ok: true,
     data:
-      url === "/catalog" ? { providers: [] }
+      url.startsWith("/catalog") ? { providers: [] }
       : url === "/state" ? { routes: [], reasons: {}, starting: false, ...(passwordSet === undefined ? {} : { passwordSet }) }
       : url === "/host-settings" ? { known: false, reason: "unavailable" }
       : {},

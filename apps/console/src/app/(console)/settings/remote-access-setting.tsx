@@ -239,19 +239,20 @@ export function RemoteAccessSetting({
         (read): Outcome => ({ read }),
         (thrown: unknown): Outcome => ({ thrown })
       );
-    // The catalog probes this computer, and on some computers that takes seconds. So it is read
-    // on its own schedule instead of with every poll: one read at a time, replaced in the
-    // background when the held one is old, and waited for when nothing is held or it got no
-    // answer. The other reads keep their pace and report the catalog held at the time.
-    // `forgetCatalog` drops it after a change the owner made.
+    // Refresh detection once for the initial choice and after an owner change.
+    // Polls read cached detection on the existing independent schedule, so a
+    // slow provider still cannot hold up state or host-setting reads.
     let catalogLast: { outcome: Outcome; at: number; tookMs: number } | null = null;
     let catalogRead: Promise<Outcome> | null = null;
     let catalogEpoch = 0;
+    let needsDetection = true;
     const readCatalog = (): Promise<Outcome> => {
       if (catalogRead === null) {
         const epoch = catalogEpoch;
         const startedAt = Date.now();
-        const run: Promise<Outcome> = settle("/catalog").then((outcome) => {
+        const path = needsDetection ? "/catalog?refresh=true" : "/catalog";
+        needsDetection = false;
+        const run: Promise<Outcome> = settle(path).then((outcome) => {
           if (epoch === catalogEpoch) {
             catalogLast = { outcome, at: Date.now(), tookMs: Date.now() - startedAt };
           }
@@ -265,6 +266,7 @@ export function RemoteAccessSetting({
       return catalogRead;
     };
     const forgetCatalog = () => {
+      needsDetection = true;
       catalogEpoch++;
       catalogLast = null;
       catalogRead = null;
@@ -1004,6 +1006,9 @@ export function RemoteAccessSetting({
       ) : returnedFromPassword ? (
         <p className="text-sm" role="status">Password saved ✓ Step 2: turn on.</p>
       ) : null}
+      {way?.detection ? <p role="status">
+        {way.detection.checkedAt ? `Provider checked ${formatLocalTime(way.detection.checkedAt)}${way.detection.fresh ? "" : " (stale)"}.` : "Provider has not been checked."}
+      </p> : null}
       <RecoveryContext.Provider value={recover}>
         {error ? <ErrorNotice error={error} /> : null}
         {prepError ? <ErrorNotice action="prepare" error={prepError} /> : null}

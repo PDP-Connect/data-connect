@@ -265,14 +265,16 @@ export class ReachabilityService {
     if (observed.target.known) {
       this.host.query.target = observed.target.value;
     }
+    await this.inventory(true);
     return observed;
   }
-  async inventory() {
-    return this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner });
+  async inventory(refresh = false) {
+    return this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner, ...(refresh ? { refresh: true } : {}) });
   }
   async begin(providerId: string, expectedConfigurationRevision: string): Promise<Draft> {
     const draft = await this.api.beginConfigurationDraft({
       expectedConfigurationRevision,
+      refresh: true,
       home: this.host.query.home,
       owner: this.host.query.owner,
       providerId,
@@ -281,16 +283,16 @@ export class ReachabilityService {
     this.drafts.set(draft.draftId, { providerId, session: new ConfigurationDraftSession(draft) });
     return draft;
   }
-  async reload(providerId: string, draftId: string): Promise<Draft> {
+  async reload(providerId: string, draftId: string, refresh = false): Promise<Draft> {
     const session = new ConfigurationDraftSession(null);
-    const draft = await session.reload(this.api, this.ref(providerId, draftId));
+    const draft = await session.reload(this.api, { ...this.ref(providerId, draftId), ...(refresh ? { refresh: true } : {}) });
     this.drafts.set(draftId, { providerId, session });
     return draft;
   }
   // Picks up a draft the host already holds (for example after a restart) so the
   // service keeps one draft. It enters the draft phase like `begin` does.
   async resume(providerId: string, draftId: string): Promise<Draft> {
-    const draft = await this.reload(providerId, draftId);
+    const draft = await this.reload(providerId, draftId, true);
     this.transition({ type: "choose" });
     return draft;
   }
@@ -301,11 +303,15 @@ export class ReachabilityService {
   private setupReference(input: SetupReference): SetupOperationRef {
     return { ...input, home: this.host.query.home, owner: this.host.query.owner };
   }
+  private async refreshAfterSetup(operation: SetupOperation): Promise<SetupOperation> {
+    await this.inventory(true);
+    return operation;
+  }
   readSetupOperation(reference: SetupReference): Promise<SetupOperation> {
     return this.api.readSetupOperation(this.setupReference(reference));
   }
-  cancelSetupOperation(reference: SetupReference): Promise<SetupOperation> {
-    return this.api.cancelSetupOperation(this.setupReference(reference));
+  async cancelSetupOperation(reference: SetupReference): Promise<SetupOperation> {
+    return this.refreshAfterSetup(await this.api.cancelSetupOperation(this.setupReference(reference)));
   }
   private currentSetupAction(view: SetupOperation, input: SetupCommand) {
     const action = view.nextAction;
@@ -330,7 +336,7 @@ export class ReachabilityService {
       if (value !== undefined || secret !== undefined || input.approval !== undefined) {
         throw new ReachabilityError("invalid_input");
       }
-      return this.api.runSetupAction(request);
+      return this.refreshAfterSetup(await this.api.runSetupAction(request));
     }
 
     const view = await this.api.readSetupOperation(request);
@@ -349,7 +355,7 @@ export class ReachabilityService {
     this.reviews.clear();
     if (draftId) this.drafts.get(draftId)?.session.invalidate();
     if (secret === undefined) {
-      return this.api.runSetupAction({ ...request, approval, ...(value === undefined ? {} : { value }) });
+      return this.refreshAfterSetup(await this.api.runSetupAction({ ...request, approval, ...(value === undefined ? {} : { value }) }));
     }
     if (!action.inputId || !secret) throw new ReachabilityError("secret_input_unavailable");
     const bytes = new TextEncoder().encode(secret);
@@ -364,7 +370,7 @@ export class ReachabilityService {
       bytes.fill(0);
     }
     try {
-      return await this.api.runSetupAction({ ...request, approval, secretHandle: handle });
+      return this.refreshAfterSetup(await this.api.runSetupAction({ ...request, approval, secretHandle: handle }));
     } finally {
       // The SDK protects handles bound to a configuration or the current setup operation.
       await this.api.discardSecret({ home: request.home, handle }).catch(() => {});
@@ -438,6 +444,7 @@ export class ReachabilityService {
         ...(secretHandle === undefined ? {} : { secretHandle }),
       });
       saved.session.acceptSetup(prior, result);
+      await saved.session.reload(this.api, { ...ref, refresh: true });
       this.transition({ type: "setup-complete" });
       return saved.session.snapshot.configuration;
     } catch (error) {
@@ -468,6 +475,7 @@ export class ReachabilityService {
       inputId: action.inputId,
     });
     saved.session.acceptClear(prior, configuration);
+    await saved.session.reload(this.api, { ...this.ref(saved.providerId, id), refresh: true });
     return saved.session.snapshot.configuration;
   }
   async discard(id: string): Promise<{ discarded: boolean }> {
@@ -492,12 +500,13 @@ export class ReachabilityService {
       expectedConfigurationRevision: expectedRevision,
     });
     this.reviews.clear();
+    await this.inventory(true);
     return config;
   }
   async review(id: string, usage: Query["usage"]): Promise<Review> {
     const saved = this.draft(id);
     // Host preparation observes the final listener/password/port before catalog.
-    const inventory = await this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner });
+    const inventory = await this.inventory(true);
     const variants = inventory.providers.filter((item: ProviderInventory) => item.providerId === saved.providerId);
     if (variants.length !== 1 || !variants[0]) {
       throw new ReachabilityError("ambiguous_selection");

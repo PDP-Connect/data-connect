@@ -588,7 +588,7 @@ test("a read the service answers with a specific error is shown even when anothe
   const handler = world({ "/state": fail("host_path_too_long") });
   await withScreen(
     ((url: string, body?: Record<string, unknown>) => {
-      if (url === "/catalog") throw new Error("fetch failed");
+      if (url.startsWith("/catalog")) throw new Error("fetch failed");
       return handler(url, body);
     }) as unknown as Handler,
     async ({ container }) => {
@@ -608,7 +608,7 @@ test("an older poll that throws after a newer good poll does not pause the card 
   let polls = 0;
   await withScreen(
     ((url: string, body?: Record<string, unknown>) => {
-      if (url === "/catalog" && ++polls === 1) {
+      if (url.startsWith("/catalog") && ++polls === 1) {
         return new Promise<never>((_, reject) => {
           rejectFirst = reject;
         });
@@ -736,7 +736,7 @@ test("a failed background poll does not replace an action error, and a good poll
   t.mock.timers.enable({ apis: ["setInterval"] });
   let catalog: Result | null = null;
   const base = readyWorld({ "/operations": fail("brand_new_server_code") });
-  const handler: Handler = (url, body) => (url === "/catalog" && catalog ? catalog : base(url, body));
+  const handler: Handler = (url, body) => (url.startsWith("/catalog") && catalog ? catalog : base(url, body));
   await withScreen(handler, async ({ container, act: run, settle }) => {
     await failFirstAction(container, run, settle);
     assert.match(alertText(container), /couldn.t turn on/);
@@ -758,7 +758,7 @@ test("a poll that started before an action cannot overwrite the action's error w
   let hold = false;
   const base = readyWorld({ "/operations": fail("brand_new_server_code") });
   const handler = ((url: string, body?: Record<string, unknown>) => {
-    if (hold && url === "/catalog") {
+    if (hold && url.startsWith("/catalog")) {
       hold = false;
       return new Promise<Result>((resolve) => {
         release = resolve;
@@ -892,4 +892,25 @@ test("copied details show a local time, never an ISO time", () => {
   const text = diagnosticsText({ code: "setup_required", message: "m", at: Date.parse("2026-11-18T13:05:42Z"), source: "load" } as never, "0.7.63");
   assert.deepEqual(bannedIn(text.replace(/^Code: .*$/m, "")), []);
   assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}T/);
+});
+
+test("provider detection shows its checked time and stale state; subsequent catalog polls do not refresh", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+  const paths: string[] = [];
+  const base = world({
+    "/catalog": ok({ catalogRevision: "c1", observedAt: isoA, schemaVersion: 1, providers: [{
+      ...provider("p-tunnel", "Tunnel for reachability", "public"),
+      detection: { checkedAt: isoA, fresh: false, refreshing: false },
+    }] }),
+  });
+  await withScreen((url, body) => { paths.push(url); return base(url, body); }, async ({ container, act: run, settle }) => {
+    assert.match(container.textContent ?? "", /Provider checked .*\(stale\)/);
+    assert.equal(paths.filter(path => path === "/catalog?refresh=true").length, 1);
+    for (let n = 0; n < 3; n++) {
+      await run(async () => t.mock.timers.tick(3000));
+      await settle();
+    }
+    assert.ok(paths.includes("/catalog"));
+    assert.equal(paths.filter(path => path === "/catalog?refresh=true").length, 1);
+  });
 });

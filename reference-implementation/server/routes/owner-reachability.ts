@@ -431,7 +431,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       )
     );
   });
-  get("/catalog", async () => projectInventory(await service().inventory()));
+  get("/catalog", async (request) => projectInventory(await service().inventory(request.query?.refresh === "true")));
   get("/events", async () => {
     const state = service().state();
     return {
@@ -492,7 +492,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     };
   });
   get("/drafts/:id", async (request) =>
-    projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id)))
+    projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id), request.query?.refresh === "true"))
   );
   // Per-router single flight includes the journal read, host effect and durable record.
   // Once settled, a later request follows the normal resume path below.

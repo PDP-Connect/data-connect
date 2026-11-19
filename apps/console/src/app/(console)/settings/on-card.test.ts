@@ -958,7 +958,7 @@ for (const providerId of ["localhost-run", "cloudflare-named"]) {
       "/catalog": ok(selectedCatalog),
       "/state": onState(live),
     }), async ({ container, calls }) => {
-      assert.ok(calls.some((call) => call.url === "/catalog"));
+      assert.ok(calls.some((call) => call.url.startsWith("/catalog")));
       const address = container.querySelector("[aria-label='Your address']");
       assert.ok(address, "the live route is mounted");
       assert.ok(

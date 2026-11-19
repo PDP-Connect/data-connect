@@ -13,9 +13,10 @@ export async function readConfigurationDraft(
       owner?: string;
       providerId: string;
       draftId: string;
+      refresh?: boolean;
     }) => Promise<Draft>;
   },
-  request: { home: string; owner?: string; providerId: string; draftId: string }
+  request: { home: string; owner?: string; providerId: string; draftId: string; refresh?: boolean }
 ): Promise<Draft> {
   if (!api.readConfigurationDraft) {
     throw new ReachabilityError("draft_read_unavailable");

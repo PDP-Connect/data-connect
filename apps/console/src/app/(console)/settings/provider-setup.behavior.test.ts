@@ -257,8 +257,9 @@ for (const viaPoll of [false, true]) {
         "/host-settings": { known: false, reason: "unavailable" },
         "/host-capabilities": {},
       }
-      assert.ok(Object.hasOwn(observations, url), url)
-      return { ok: true, data: observations[url] }
+      const observationPath = url.split("?")[0]!
+      assert.ok(Object.hasOwn(observations, observationPath), url)
+      return { ok: true, data: observations[observationPath] }
     }
     const button = (label: string) =>
       [...container.querySelectorAll("button")].find(
