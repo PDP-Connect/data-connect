@@ -7,6 +7,14 @@ import type { Handle, RouteView as Route } from "@tnunamak/gozar";
 import { ReachabilityError } from "./approvals.ts";
 import type { projectRoute } from "./projection.ts";
 
+/** The one handle identity: a handle is the whole of kind, id and generation. Key per-handle state by it. */
+export function handleKey(handle: Handle): string {
+  return JSON.stringify([handle.kind, handle.id, handle.generation]);
+}
+export function sameHandle(a: Handle, b: Handle): boolean {
+  return handleKey(a) === handleKey(b);
+}
+
 export type OperationRecord = {
   intent: {
     instanceId: string;
@@ -156,6 +164,20 @@ export class ReachabilityOperations {
       });
     });
   }
+  /**
+   * Every write that settles a start or stop from its own effect goes through here. The effect
+   * may finish after another path recorded stronger evidence, so the write merges against the
+   * record on disk (read inside the queue): a confirmed or absent outcome for the same handle is
+   * final, and an explicit unconfirmed record is replaced only by a confirmation.
+   */
+  private async merged(next: OperationRecord): Promise<OperationRecord> {
+    const prior = await this.read(next.operationId).catch(() => null);
+    if (!prior || prior.operationId !== next.operationId) return next;
+    if (prior.handle && next.handle && !sameHandle(prior.handle, next.handle)) return next;
+    if (prior.cleanupConfirmed === true) return { ...prior, handle: prior.handle ?? next.handle };
+    if (prior.cleanupConfirmed === false && next.cleanupConfirmed !== true) return prior;
+    return next;
+  }
   async list(): Promise<OperationRecord[]> {
     return (await this.scan()).records;
   }
@@ -231,13 +253,13 @@ export class ReachabilityOperations {
       try {
         const route = await effect(operationId);
         allocated = route.handle;
-        await this.serialized(operationId, () => this.write({
+        await this.serialized(operationId, async () => this.write(await this.merged({
           ...pending,
           ...(kind === "stop" ? { cleanupConfirmed: route.cleanup?.state === "confirmed" } : {}),
           handle: route.handle,
           route: null,
           stage: "settled",
-        }));
+        })));
       } catch (error) {
         const partial = error && typeof error === "object" && "route" in error
           ? (error as { route?: { handle?: Handle } | null }).route
@@ -268,7 +290,7 @@ export class ReachabilityOperations {
           `[reachability] operation ${operationId} (${kind}) failed: code=${typeof supplied === "string" ? supplied : "none"} ` +
           `name=${original?.name ?? typeof error} message=${(original?.message ?? "").slice(0, 300)}`
         );
-        await this.serialized(operationId, () => this.write({
+        await this.serialized(operationId, async () => this.write(await this.merged({
           ...pending,
           handle: allocated ?? partial?.handle ?? pending.handle,
           failureCode,
@@ -277,7 +299,7 @@ export class ReachabilityOperations {
             reason: this.recoveryAvailable ? "route_reconciliation_required" : "public_operation_recovery_unavailable",
           },
           stage: "unknown-possibly-live",
-        }));
+        })));
       } finally {
         this.running.delete(operationId);
       }

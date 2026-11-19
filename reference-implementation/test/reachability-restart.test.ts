@@ -780,3 +780,54 @@ test("a session route Gozar no longer holds settles as absent and does not block
     await f.cleanup();
   }
 });
+
+for (const strong of ["recovered", "absent"] as const) {
+  for (const finish of ["success", "failure"] as const) {
+    test(`a start effect that finishes ${finish} after ${strong} cleanup evidence cannot erase it`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "reachability-merge-"));
+      try {
+        const operations = new ReachabilityOperations(root, true);
+        let end!: (result: { route?: Route; error?: Error }) => void;
+        const { operationId } = await operations.start(
+          "start",
+          null,
+          () => new Promise<Route>((resolve, reject) => (end = ({ route, error }) => (route ? resolve(route) : reject(error)))),
+          intentFor("gozar-owned")
+        );
+        const route: Route = { ...seed, cleanup: { nextAction: null, state: "confirmed" }, handle: route1, published: null, state: "released" };
+        if (strong === "recovered") await operations.recordRecovered(operationId, route);
+        else await operations.recordAbsent(operationId);
+        // The operation effect only now returns, behind a settlement the journal already holds.
+        end(finish === "success" ? { route } : { error: Object.assign(new Error("late"), { route }) });
+        const running = (operations as unknown as { running: Set<string> }).running;
+        await until(() => !running.has(operationId));
+        const record = await operations.read(operationId);
+        assert.equal(record.cleanupConfirmed, true);
+        assert.equal(record.stage, "settled");
+        assert.equal(record.recovery, null);
+        assert.deepEqual(restartCandidates([record]), []);
+      } finally {
+        await rm(root, { force: true, maxRetries: 10, recursive: true, retryDelay: 25 });
+      }
+    });
+  }
+}
+
+test("a start effect that finishes after an explicit unconfirmed record leaves it unconfirmed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "reachability-merge-"));
+  try {
+    const operations = new ReachabilityOperations(root, true);
+    let end!: (route: Route) => void;
+    const { operationId } = await operations.start("start", null, () => new Promise<Route>((resolve) => (end = resolve)), intentFor("gozar-owned"));
+    await operations.recordCleanupUnconfirmed(operationId, route1);
+    end({ ...seed, handle: route1 });
+    const running = (operations as unknown as { running: Set<string> }).running;
+    await until(() => !running.has(operationId));
+    const record = await operations.read(operationId);
+    assert.equal(record.cleanupConfirmed, false);
+    assert.equal(record.stage, "unknown-possibly-live");
+    assert.equal(record.recovery?.available, true);
+  } finally {
+    await rm(root, { force: true, maxRetries: 10, recursive: true, retryDelay: 25 });
+  }
+});
