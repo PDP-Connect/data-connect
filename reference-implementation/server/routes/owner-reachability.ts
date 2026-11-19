@@ -46,7 +46,10 @@ export type OwnerReachabilityContext = {
   statePaths?: { inspect: () => Promise<StatePathReport>; fix: () => Promise<StatePathReport> };
   /** Whether the owner has chosen a password. Absent where remote access is not hosted. */
   passwordSet?: () => Promise<boolean>;
+  /** How long /state waits for the operation journal before it answers degraded. */
+  stateJournalTimeoutMs?: number;
 };
+const STATE_JOURNAL_TIMEOUT_MS = 2000;
 const safeCodes = new Set([
   "host_policy_denied",
   "artifact_integrity_failed",
@@ -430,9 +433,27 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       type: "snapshot",
     };
   });
+  // A journal that fails or stalls is the very condition /state must still report. Answer from
+  // the service's own state, with the scan marked unavailable, instead of failing or hanging.
+  async function readOperations(): Promise<OperationRecord[] | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        ctx.operations.list(),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), ctx.stateJournalTimeoutMs ?? STATE_JOURNAL_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
   get("/state", async () => {
     const state = service().state();
-    const records = await ctx.operations.list();
+    const listed = await readOperations();
+    const records = listed ?? [];
     const operations = records
       .filter((record) => record.stage !== "settled")
       .map((record) => ({
@@ -445,12 +466,14 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       }));
     return {
       evidenceSource: state.evidenceSource,
-      journalScan: state.journalScan,
+      journalScan: listed === null ? ("unavailable" as const) : state.journalScan,
       journalUnreadable: state.journalUnreadable,
       lifecycle: state.lifecycle,
+      // False: the journal could not be read in time, so `operations` is unknown, not empty.
+      operationsAvailable: listed !== null,
       operations,
       reasons: state.reasons,
-      routes: await projectRoutes(state.routes, records),
+      routes: await projectRoutes(state.routes, listed ?? undefined),
       passwordSet: ctx.passwordSet ? await ctx.passwordSet() : true,
       services: await ctx.setups.list(),
       starting: state.starting,
