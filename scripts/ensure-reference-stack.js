@@ -644,7 +644,25 @@ function writeLaunchScript(stageRoot) {
   writeFileSync(launcherPath, launchScript(), { mode: 0o755 })
 }
 
+// The wrapper and the native optional dependency must travel together. This
+// checks the staged target, not a developer's ambient node_modules.
+export function assertBundledNgrok(stageRoot, { platform = process.platform, arch = process.arch, libc = hostLibc() } = {}) {
+  const suffix = platform === "linux" ? `-${libc === "musl" ? "musl" : "gnu"}` : platform === "win32" ? "-msvc" : ""
+  const native = `@ngrok/ngrok-${platform}-${arch}${suffix}`
+  for (const name of ["@ngrok/ngrok", native]) {
+    const directory = join(stageRoot, "node_modules", name)
+    const manifestPath = join(directory, "package.json")
+    if (!existsSync(manifestPath)) fail(`ngrok package ${name} is missing from the staged dependency tree`)
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+    if (manifest.name !== name || manifest.version !== "1.7.0" ||
+        !existsSync(join(directory, manifest.main || "index.js"))) {
+      fail(`ngrok package ${name} is incomplete or has the wrong version`)
+    }
+  }
+}
+
 function assertNativeFiles(stageRoot) {
+  assertBundledNgrok(stageRoot)
   for (const [name, relativePath] of Object.entries(
     nativeArtifactPaths(stageRoot)
   )) {

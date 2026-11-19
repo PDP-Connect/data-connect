@@ -4,6 +4,7 @@ import type { GozarOptions as EmbeddingFactoryOptions } from "@tnunamak/gozar";
 
 type EmbeddingApi = ReturnType<typeof import("@tnunamak/gozar").createGozar>;
 
+import { bundledRuntimeModules } from "./runtime-modules.ts";
 import { ReachabilityError } from "./approvals.ts";
 import { type HostPolicy, ReachabilityService } from "./service.ts";
 
@@ -20,6 +21,7 @@ export async function createReachabilityService(
   let service: ReachabilityService;
   const api = createGozar({
     ...options,
+    runtimeModules: { ...bundledRuntimeModules(), ...options.runtimeModules },
     acknowledgeOrigin: async (request) => service.acknowledgeOrigin(request),
     originAckTimeoutMs: 10_000,
   });
