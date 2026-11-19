@@ -13,7 +13,7 @@ import { ReachabilityService, restartCandidates } from "../server/reachability/s
 
 const seed = fakeRouteScenarios().find((route) => route.handle.kind === "attached" && route.published)!;
 
-type Spec = { id: string; kind: Handle["kind"]; ownership: Route["ownership"] };
+type Spec = { id: string; kind: Handle["kind"]; ownership: Route["ownership"]; generation?: number };
 type Intent = NonNullable<OperationRecord["intent"]>;
 
 const intentFor = (ownership: Route["ownership"]): Intent => ({
@@ -43,10 +43,10 @@ async function crashedProcess(
     const started = await before.start(
       "start",
       null,
-      async () => ({ ...seed, handle: { id: spec.id, generation: 1, kind: spec.kind }, ownership: spec.ownership }),
+      async () => ({ ...seed, handle: { id: spec.id, generation: spec.generation ?? 1, kind: spec.kind }, ownership: spec.ownership }),
       intentFor(spec.ownership)
     );
-    operationIds.set(spec.id, started.operationId);
+    operationIds.set(spec.generation ? `${spec.id}@${spec.generation}` : spec.id, started.operationId);
   }
   for (let attempt = 0; attempt < 200 && !(await before.list()).every((r) => r.stage === "settled"); attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -776,6 +776,88 @@ test("a session route Gozar no longer holds settles as absent and does not block
     assert.deepEqual(await f.service.reconcileAfterRestart(2000, f.operations), { confirmed: ["session-1"], unconfirmed: [] });
     assert.equal((await f.operations.read(f.operationIds.get("session-1")!)).cleanupConfirmed, true);
     await f.turnOn();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+const gen = (generation: number): Handle => ({ generation, id: "route-1", kind: "attached" });
+
+test("two generations of one id are two handles: separate closes, separate outcomes, only the outstanding one blocks Turn on", async () => {
+  let secondConfirms = false;
+  const f = await crashedProcess(
+    [
+      { ...attachedOwned, generation: 1 },
+      { ...attachedOwned, generation: 2 },
+    ],
+    (handle) => (handle.generation === 1 || secondConfirms ? confirm(handle) : unconfirmed(handle))
+  );
+  try {
+    const outcome = await f.service.reconcileAfterRestart(2000, f.operations);
+    // One close per exact handle: the second generation never joins the first one's provider call.
+    assert.deepEqual(f.closes.map((handle) => handle.generation).sort(), [1, 2]);
+    assert.deepEqual(outcome, { confirmed: ["route-1"], unconfirmed: ["route-1"] });
+    const first = await f.operations.read(f.operationIds.get("route-1@1")!);
+    const second = await f.operations.read(f.operationIds.get("route-1@2")!);
+    assert.equal(first.cleanupConfirmed, true, "generation 1 confirmed");
+    assert.equal(second.cleanupConfirmed, false, "generation 2 stays owed");
+    assert.equal(second.stage, "unknown-possibly-live");
+    // The confirmed generation does not clear the other's route or its debt.
+    assert.deepEqual(f.service.state().routes.map((route) => route.handle.generation), [2]);
+    await assert.rejects(f.turnOn(), { code: "cleanup_debt" });
+    // An owner stop for the outstanding handle closes only that handle, and clears the debt.
+    secondConfirms = true;
+    await f.service.reconcileKnownHandle(gen(2), true);
+    assert.equal(f.closes.filter((handle) => handle.generation === 1).length, 1);
+    await f.turnOn();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("two generations of one id close concurrently and settle independently when both are slow", async () => {
+  const releases = new Map<number, (route: Route) => void>();
+  const f = await crashedProcess(
+    [
+      { ...attachedOwned, generation: 1 },
+      { ...attachedOwned, generation: 2 },
+    ],
+    (handle) => new Promise<Route>((resolve) => releases.set(handle.generation, resolve))
+  );
+  try {
+    const pass = f.service.reconcileAfterRestart(5000, f.operations);
+    await until(() => f.closes.length === 2);
+    releases.get(2)!(await confirm(gen(2)));
+    releases.get(1)!(await unconfirmed(gen(1)));
+    assert.deepEqual(await pass, { confirmed: ["route-1"], unconfirmed: ["route-1"] });
+    assert.equal((await f.operations.read(f.operationIds.get("route-1@2")!)).cleanupConfirmed, true);
+    assert.equal((await f.operations.read(f.operationIds.get("route-1@1")!)).cleanupConfirmed, false);
+    await assert.rejects(f.turnOn(), { code: "cleanup_debt" });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("shutdown still answers, unconfirmed, when the journal hangs under a boot-pending close", async () => {
+  const f = await crashedProcess([attachedOwned], () => new Promise<Route>(() => {}));
+  try {
+    const real = f.operations;
+    const journal = {
+      scan: () => real.scan(),
+      recordAbsent: real.recordAbsent.bind(real),
+      recordCleanupUnconfirmed: () => new Promise<void>(() => {}),
+      recordRecovered: () => new Promise<void>(() => {}),
+      requestStop: real.requestStop.bind(real),
+    };
+    void f.service.reconcileAfterRestart(5000, journal);
+    await until(() => f.closes.length === 1);
+    const started = Date.now();
+    const outcome = await settleWithin(f.service.shutdown(60, journal), 2000);
+    assert.notEqual(outcome, "hung", "shutdown is bounded by its budget, not by the stalled journal");
+    assert.ok(Date.now() - started < 1000);
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: ["route-1"] });
+    assert.deepEqual(f.closes, [route1]);
+    assert.deepEqual(restartCandidates(await real.list()).map((c) => c.handle.id), ["route-1"], "the record is still a candidate next boot");
   } finally {
     await f.cleanup();
   }
