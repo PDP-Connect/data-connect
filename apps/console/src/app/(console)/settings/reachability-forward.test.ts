@@ -93,3 +93,16 @@ test('a request that outlives its deadline is reported as slow; one the browser 
     assert.equal(droppedResult.status, 502, 'the browser leaving is not a slow service');
   } finally { fetchMock.mock.restore(); }
 });
+
+test('a request the browser already dropped never reaches the reference server', async () => {
+  const { forwardReachability } = await load();
+  const fetchMock = mock.method(globalThis, 'fetch', (_input: RequestInfo | URL, init?: RequestInit) =>
+    init?.signal?.aborted ? Promise.reject(new DOMException('aborted', 'AbortError')) : Promise.resolve(new Response('{}')));
+  try {
+    const gone = new AbortController();
+    gone.abort();
+    const result = await forwardReachability('/state', undefined, gone.signal);
+    assert.equal(result.status, 502);
+    assert.equal(fetchMock.mock.calls.every((call) => call.arguments[1]?.signal?.aborted), true);
+  } finally { fetchMock.mock.restore(); }
+});

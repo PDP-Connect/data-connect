@@ -29,16 +29,21 @@ export async function forwardReachability(
     throw new Error("Invalid remote access path");
   }
   const controller = new AbortController();
-  const deadline = setTimeout(() => controller.abort(), FORWARD_DEADLINE_MS);
   // The browser gave up: stop the work on its behalf too.
   const gone = () => controller.abort();
   signal?.addEventListener("abort", gone, { once: true });
+  if (signal?.aborted) {
+    controller.abort();
+  }
   let timedOut = false;
   controller.signal.addEventListener("abort", () => {
     timedOut = !signal?.aborted;
   });
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     const token = await getOwnerToken();
+    // The deadline covers the request to the reference server, not reading the token.
+    deadline = setTimeout(() => controller.abort(), FORWARD_DEADLINE_MS);
     const response = await fetch(url, {
       signal: controller.signal,
       method: body === undefined ? "GET" : "POST",
