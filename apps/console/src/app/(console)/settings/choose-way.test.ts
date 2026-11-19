@@ -152,6 +152,10 @@ test("a missing prerequisite the owner can supply during setup does not block th
   assert.equal(cloudflare.missing, null);
   const blocked = rows.find((row) => row.providerId === "ngrok-https-edge")!;
   assert.equal(blocked.usable, false, "a missing program with no remedy still blocks");
+  const link = { ...remedy, kind: "open-url", href: "https://example.invalid/" };
+  const viaLink = way("cloudflare-named", { availability: attached, prerequisites: [{ ...prerequisite("credential", "missing"), remedy: link }] });
+  const linkRow = otherWays(inv({ ...noTailscale, providers: [viaLink] }), caps, null).flatMap((group) => group.rows)[0]!;
+  assert.equal(linkRow.usable, false, "a remedy the owner cannot type here still blocks");
   assert.equal(
     recommendedWay(inv({ ...noTailscale, providers: [managed] }), caps, {}, new Set())?.providerId,
     "cloudflare-named",
@@ -176,6 +180,7 @@ test("a way the host cannot run says so in plain words", () => {
 
 // ---------- the screen ----------
 
+const draft = (id: string) => ({ draftId: id, configuration: { revision: "r2", actions: [], inputRequirements: [], values: {}, credentials: {} } });
 async function withScreen<T>(
   catalog: unknown,
   run: (screen: {
@@ -184,7 +189,8 @@ async function withScreen<T>(
     press: (label: RegExp) => Promise<void>;
     text: () => string;
     settle: () => Promise<void>;
-  }) => Promise<T>
+  }) => Promise<T>,
+  draftFor: (providerId: string) => unknown = (providerId) => draft(`d-${providerId}`)
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
   Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
@@ -192,7 +198,6 @@ async function withScreen<T>(
   const container = dom.window.document.querySelector("#root")!;
   const root = createRoot(container);
   const calls: Call[] = [];
-  const draft = (id: string) => ({ draftId: id, configuration: { revision: "r2", actions: [], inputRequirements: [], values: {}, credentials: {} } });
   const candidate = (providerId: string) => ({
     providerId,
     display: { label: providerId, description: "", needs: "" },
@@ -214,7 +219,7 @@ async function withScreen<T>(
     if (path === "/state") return ok({ routes: [], reasons: {}, starting: false, services: [] });
     if (path === "/host-settings") return ok({ known: false, reason: "unavailable" });
     if (path === "/host-capabilities") return ok({});
-    if (path === "/drafts") return ok(draft(`d-${String(body?.providerId)}`));
+    if (path === "/drafts") return ok(draftFor(String(body?.providerId)));
     if (path.endsWith("/commit")) return ok(draft("x").configuration);
     if (path.endsWith("/review")) {
       const providerId = path.split("/")[2]!.slice(2);
@@ -290,4 +295,57 @@ test("choosing another way prepares that way and never approves without the clic
     await settle();
     assert.deepEqual(mutating(calls), []);
   });
+});
+
+test("choosing a way that needs a token shows an empty token field and sends no value", async () => {
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const token = {
+    id: "token",
+    kind: "provide-secret",
+    label: "Tunnel token",
+    secretLabel: "Tunnel token",
+    digest: "token-digest",
+    disclosure: { revision: "1", text: "", links: [] },
+    consent: {
+      consentFactsDigest: "token-facts",
+      facts: [],
+      disclosures: { action: {} },
+      scope: { kind: "setup", actionId: "token", actionDigest: "token-digest", disclosureRevision: "1" },
+    },
+  };
+  const managed = way("cloudflare-named", {
+    availability: attached,
+    prerequisites: [prerequisite("connector-binary", "present"), { ...prerequisite("credential", "missing"), remedy: token }],
+  });
+  const catalog = { ...noTailscale, providers: noTailscale.providers.map((item) => (item.providerId === "cloudflare-named" ? managed : item)) };
+  const needsToken = (providerId: string) =>
+    providerId === "cloudflare-named"
+      ? {
+          draftId: `d-${providerId}`,
+          configuration: {
+            revision: "r2",
+            actions: [token],
+            inputRequirements: [{ actionId: "token", id: "token", label: "Tunnel token", secret: true }],
+            values: {},
+            credentials: {},
+          },
+        }
+      : draft(`d-${providerId}`);
+  await withScreen(
+    catalog,
+    async ({ calls, container, press, settle }) => {
+      await press(/^Other ways$/);
+      const label = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!;
+      const radio = label.querySelector("input")!;
+      assert.equal(radio.disabled, false, "the way can be chosen");
+      await act(async () => radio.click());
+      await settle();
+      const field = container.querySelector<HTMLInputElement>("input[type='password'], input[autocomplete='off'][type='text']");
+      assert.ok(field, `no token field: ${container.textContent}`);
+      assert.equal(field.value, "");
+      assert.ok(!calls.some((call) => JSON.stringify(call.body ?? {}).includes("secret")), "no value was sent");
+      assert.deepEqual(mutating(calls), []);
+    },
+    needsToken
+  );
 });

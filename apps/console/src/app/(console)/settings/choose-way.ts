@@ -81,16 +81,23 @@ const prerequisiteState = (provider: Provider, id: string) => provider.prerequis
 const isTailscale = (provider: Provider) => provider.providerId.startsWith("tailscale-");
 
 /**
+ * A missing prerequisite the owner fixes by typing a token or a value during
+ * setup does not block the way: choosing it starts that setup. Other remedies
+ * (a link, an administrator step, a kind this console does not know) still block.
+ */
+function typedDuringSetup(remedy: { kind?: unknown } | null | undefined): boolean {
+  return remedy?.kind === "provide-secret" || remedy?.kind === "provide-value";
+}
+
+/**
  * What the host reports for Tailscale: `local-setup` is present when the
  * Tailscale app is installed and signed in. A prerequisite the host reports as
  * missing or denied (for example Funnel not allowed) blocks the way.
  */
 function blockedStep(provider: Provider): Missing | null {
   if (!isTailscale(provider)) {
-    // A missing prerequisite with a remedy (a token or value the owner types
-    // during setup) does not block: choosing the way starts that setup.
     const missing = provider.prerequisites.find(
-      (item) => item.state === "denied" || (item.state === "missing" && !item.remedy)
+      (item) => item.state === "denied" || (item.state === "missing" && !typedDuringSetup(item.remedy))
     );
     return missing ? { text: `Needs ${plain(missing.label)} (${missing.state}).` } : null;
   }
