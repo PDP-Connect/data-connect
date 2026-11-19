@@ -12,7 +12,7 @@
 use crate::commands::process_supervisor::{
     allocate_loopback_port, loopback_port_range_is_free, EnvironmentSpec, EventSink,
     LifecycleState, ProcessLifecycleEvent, ProcessSpec, Readiness, RestartPolicy, StopPolicy,
-    Supervisor, SupervisorError, SupervisorHandle,
+    Supervisor, SupervisorError, SupervisorHandle, DESKTOP_PROCESS_GROUP_GRACE,
 };
 use crate::commands::{
     attach_reference_server, login_reference_server_with_password,
@@ -840,7 +840,7 @@ fn ri_process_spec(
         },
         process_group: true,
         stop: StopPolicy {
-            grace: Duration::from_secs(5),
+            grace: DESKTOP_PROCESS_GROUP_GRACE,
             escalate: Duration::from_secs(3),
             total: Duration::from_secs(8),
         },
