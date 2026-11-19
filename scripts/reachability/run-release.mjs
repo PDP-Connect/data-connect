@@ -70,6 +70,7 @@ if (results[0].exitCode === 0) {
 		"--test-force-exit",
 		"scripts/reachability/draft-boundary.test.mjs",
 		"scripts/reachability/recovery.test.mjs",
+		"scripts/reachability/restart-sigkill.test.mjs",
 		"scripts/reachability/runtime-consent.test.mjs",
 		"scripts/reachability/initial-proof.test.mjs",
 		"scripts/reachability/host-route-history.test.mjs",
