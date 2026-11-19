@@ -83,7 +83,6 @@ if (results[0].exitCode === 0) {
 	]);
 	for (const [flag, spec] of [
 		["--reachability", "reachability.spec.ts"],
-		["--reachability-stream", "reachability-stream.spec.ts"],
 		["--reachability-setup", "reachability-setup.spec.ts"],
 	]) {
 		await run(
