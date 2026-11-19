@@ -820,10 +820,11 @@ export class ReachabilityService {
       throw error;
     }
     const { approval, event, review } = checked;
+    const applyingOrigin = reviewedOrigin(review);
     this.lifecycle = event.state;
     const epoch = ++this.epoch;
     this.starting = true;
-    this.applying = { origin: reviewedOrigin(review) };
+    this.applying = { origin: applyingOrigin };
     let settled!: () => void;
     this.startSettled = new Promise<void>((resolve) => {
       settled = resolve;

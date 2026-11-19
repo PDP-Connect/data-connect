@@ -83,7 +83,7 @@ async function crashedProcess(
         {
           candidate: {
             candidateToken: "tok",
-            configuration: { revision: "r1" },
+            configuration: { revision: "r1", values: {} },
             consent: { consentFactsDigest: "d", disclosures: {}, facts: [], scope: { kind: "route" } },
             consentFactsDigest: "d",
             disclosure: { revision: "1" },

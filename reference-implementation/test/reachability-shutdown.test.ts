@@ -141,7 +141,7 @@ test("a start requested after shutdown began is refused and reaches no provider"
     const review = {
       candidate: {
         candidateToken: "tok",
-        configuration: { revision: "r1" },
+        configuration: { revision: "r1", values: {} },
         consent: { consentFactsDigest: "d", disclosures: {}, facts: [], scope: { kind: "route" } },
         consentFactsDigest: "d",
         disclosure: { revision: "1" },
@@ -299,7 +299,7 @@ async function lateAllocation(
   inner.reviews.set("rev-1", {
     candidate: {
       candidateToken: "tok",
-      configuration: { revision: "r1" },
+      configuration: { revision: "r1", values: {} },
       consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
       consentFactsDigest: "consent-v1:abc",
       disclosure: { revision: "1" },
@@ -415,7 +415,7 @@ async function supersededApply(close: (route: Route) => Promise<Route>) {
   inner.reviews.set("rev-1", {
     candidate: {
       candidateToken: "tok",
-      configuration: { revision: "r1" },
+      configuration: { revision: "r1", values: {} },
       consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
       consentFactsDigest: "consent-v1:abc",
       disclosure: { revision: "1" },
