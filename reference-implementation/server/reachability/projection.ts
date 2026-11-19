@@ -277,7 +277,12 @@ export function projectInventory(list: ProviderList) {
     schemaVersion: list.schemaVersion,
   };
 }
-export function projectRoute(route: Route, creator?: { providerId: string } | null) {
+// `journaled` is what the host's own start record says about this exact route: the provider that
+// created it and the digest of the facts the owner approved. Null when no verified record exists.
+export function projectRoute(
+  route: Route,
+  journaled?: { providerId: string | null; approvedConsentFactsDigest: string | null } | null
+) {
   const proof = route.verification;
   return {
     actions: route.actions,
@@ -300,7 +305,8 @@ export function projectRoute(route: Route, creator?: { providerId: string } | nu
       origin: observation(route.hostConfiguration.origin),
     },
     operationId: route.operationId,
-    providerId: creator?.providerId ?? null,
+    providerId: journaled?.providerId ?? null,
+    approvedConsentFactsDigest: journaled?.approvedConsentFactsDigest ?? null,
     origin: route.origin,
     ownership: route.ownership,
     published: route.published,

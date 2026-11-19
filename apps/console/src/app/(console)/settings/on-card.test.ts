@@ -42,13 +42,15 @@ const fact = (id: string, value: string | null, known = true) => ({
   asOf: null,
 });
 
-type RouteOver = { providerId?: string | null; id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string };
+type RouteOver = { providerId?: string | null; approvedConsentFactsDigest?: string | null; id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string };
 function routeAt(over: RouteOver = {}) {
   const observedAt = over.observedAt ?? T0;
   const validUntil = over.validUntil === undefined ? observedAt + 30_000 : over.validUntil;
   const expiresAt = over.expiresAt === undefined ? T0 + 3_600_000 : over.expiresAt;
   return {
     providerId: over.providerId ?? null,
+    // What the host's start record says the owner approved; "digest-1" is what review() shows by default.
+    approvedConsentFactsDigest: over.approvedConsentFactsDigest === undefined ? "digest-1" : over.approvedConsentFactsDigest,
     handle: { id: over.id ?? "route-1", generation: 1, kind: "session" },
     origin: over.origin ?? "https://one.example.invalid",
     binding: { authority: "host", remedy: null, target: { known: false, reason: "x" } },
@@ -672,6 +674,67 @@ test("Turn on again turns off, turns on with the facts already approved, and say
     const copy = [...document.querySelectorAll("button")].find((node) => node.textContent === "Copy address");
     assert.ok(copy, "Copy is offered for the new address");
     assert.doesNotMatch(text(), /Your address: https:\/\/one/, "the replaced route is not a second card");
+  }, t);
+});
+
+// The page opens on a route the host lost without an owner stop: nothing was approved in this page's lifetime.
+// The route carries the digest the host recorded for it; the next review shows `nextDigest`.
+function pageLoadWalk(approved: string | null, nextDigest: string) {
+  let stage: "lost" | "off2" | "on2" = "lost";
+  const lostRoute = { ...routeAt({ state: "released", approvedConsentFactsDigest: approved }), cleanup: { state: "confirmed", nextAction: null }, verification: { ...routeAt().verification, status: "unverified" } };
+  const world = (): Result => {
+    if (stage === "lost") return ok({ routes: [lostRoute], reasons: {}, starting: false, services: [], lifecycle: lifecycle("stopping", { reason: "agent-exited" }), operations: [] });
+    if (stage === "off2") return ok({ routes: [lostRoute], reasons: {}, starting: false, services: [], operations: [] });
+    return ok({ routes: [lostRoute, routeAt({ id: "route-2", origin: "https://two.example.invalid", observedAt: Date.now(), validUntil: Date.now() + 30_000 })], reasons: {}, starting: false, services: [], lifecycle: lifecycle("verified", { handle: { id: "route-2", generation: 1, kind: "session" } }), operations: [] });
+  };
+  return host({
+    "/state": () => world(),
+    "/drafts/d-1/review": () => ok(review(`rev-${nextDigest}`, nextDigest)),
+    "/operations": () => {
+      stage = "on2";
+      return ok({ operationId: "op-3" });
+    },
+    "/operations/op-3": ok({ operationId: "op-3", stage: "settled", kind: "start", failureCode: null, recovery: null }),
+    "/routes/route-1/stop": () => {
+      stage = "off2";
+      return ok({ operationId: "op-2" });
+    },
+    "/operations/op-2": ok({ operationId: "op-2", stage: "settled", kind: "stop", failureCode: null, recovery: null }),
+  });
+}
+
+test("Turn on again reaches On in one click when this page never saw the owner approve (route already on at page load)", async (t) => {
+  await withScreen(pageLoadWalk("digest-1", "digest-1"), async ({ calls, press, tick, text }) => {
+    assert.match(text(), /Needs your action/);
+    await press(/^Turn on again$/);
+    await tick(3_000);
+    await tick(3_000);
+    const approvals = calls.filter((call) => call.url === "/operations");
+    assert.equal(approvals.length, 1, "the turn-on request is sent exactly once, with no second click");
+    assert.equal(approvals[0]!.body?.consentFactsDigest, "digest-1", "on the facts the host recorded as approved");
+    assert.match(text(), /Your address: https:\/\/two\.example\.invalid/);
+    assert.doesNotMatch(text(), /Turn on remote access/, "the card does not fall back to the chooser");
+  }, t);
+});
+
+test("Turn on again at page load shows what changed and waits when the next review differs from the recorded approval", async (t) => {
+  await withScreen(pageLoadWalk("digest-1", "digest-2"), async ({ calls, press, tick, text }) => {
+    await press(/^Turn on again$/);
+    await tick(3_000);
+    await tick(3_000);
+    assert.equal(calls.filter((call) => call.url === "/operations").length, 0, "facts the owner did not approve are not turned on");
+    assert.match(text(), /Details of this connection changed/);
+    assert.match(text(), /Turn on remote access/);
+  }, t);
+});
+
+test("Turn on again at page load does not approve unseen facts when the host has no approval on record", async (t) => {
+  await withScreen(pageLoadWalk(null, "digest-1"), async ({ calls, press, tick, text }) => {
+    await press(/^Turn on again$/);
+    await tick(3_000);
+    await tick(3_000);
+    assert.equal(calls.filter((call) => call.url === "/operations").length, 0, "no turn-on without a click");
+    assert.match(text(), /Turn on remote access/, "the owner reviews on the Turn on card");
   }, t);
 });
 

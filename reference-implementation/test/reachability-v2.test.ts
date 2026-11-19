@@ -239,6 +239,11 @@ test("state and event projections bind provider identity to the exact journaled 
       await handlers.get("/v1/owner/reachability" + path)!({ params: {} }, res);
       assert.deepEqual(response.data.routes.map((route: { providerId: string | null }) => route.providerId),
         ["localhost-run", null, null, null]);
+      // The approved digest comes from the same verified record: present for the matching start,
+      // null when the handle generation, handle id or operation id does not match.
+      assert.deepEqual(
+        response.data.routes.map((route: { approvedConsentFactsDigest: string | null }) => route.approvedConsentFactsDigest),
+        ["fixture-digest", null, null, null]);
       // State reuses its existing journal list; events deduplicate per operation ID.
       assert.equal(counts.get(start.operationId), 1);
       assert.equal(counts.get(missing), 1);
@@ -249,6 +254,9 @@ test("state and event projections bind provider identity to the exact journaled 
     const res = { setHeader() {}, status() { return res; }, json(body: unknown) { response = body; } };
     await handlers.get("/v1/owner/reachability/events")!({ params: {} }, res);
     assert.deepEqual(response.data.routes.map((route: { providerId: string | null }) => route.providerId),
+      [null, null, null, null]);
+    assert.deepEqual(
+      response.data.routes.map((route: { approvedConsentFactsDigest: string | null }) => route.approvedConsentFactsDigest),
       [null, null, null, null]);
   } finally {
     await rm(root, { force: true, recursive: true });

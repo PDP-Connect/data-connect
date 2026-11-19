@@ -153,10 +153,9 @@ export function RemoteAccessSetting({
   const [closingPage, setClosingPage] = useState(false);
   // Track the displayed address and keep its change notice through later polls.
   const [seenAddress, setSeenAddress] = useState<{ origin: string; changed: boolean } | null>(null);
-  // Set by Turn on again: the digest of the facts the owner last approved.
-  const againPending = useRef(false);
-  // The digest of the facts the owner approved with the last Turn on click.
-  const approvedDigest = useRef<string | null>(null);
+  // Set by Turn on again: turn on as soon as the next review is ready, but only if it shows the
+  // facts the host recorded as approved for the route being replaced (null: none recorded).
+  const againPending = useRef<{ approvedDigest: string | null } | null>(null);
   // One preparation at a time per selection token, never across superseded ways.
   const preparing = useRef<{ token: number; tail: Promise<unknown> } | null>(null);
   // The expired review whose refresh is under way. The expiry timer starts no
@@ -513,12 +512,13 @@ export function RemoteAccessSetting({
     return () => clearInterval(timer);
   }, [readyReview]);
 
-  // After Turn on again: turn on once the review is ready and shows the facts
-  // the owner approved before. Different facts wait for a click.
+  // After Turn on again: turn on once the review is ready, only when it shows the facts
+  // the host recorded as approved for the route. Different facts, or no record, wait for a click.
   useEffect(() => {
     if (!readyReview || !againPending.current || busy) return;
-    againPending.current = false;
-    if (readyReview.candidate.consentFactsDigest === approvedDigest.current) {
+    const { approvedDigest } = againPending.current;
+    againPending.current = null;
+    if (approvedDigest !== null && readyReview.candidate.consentFactsDigest === approvedDigest) {
       void turnOn(readyReview);
     } else {
       setChanged([]);
@@ -588,7 +588,6 @@ export function RemoteAccessSetting({
             acknowledgeDisconnect: true,
           });
           if (!isCurrent()) return;
-          approvedDigest.current = shown.candidate.consentFactsDigest;
           setOperation({ ...pending, kind: "start", stage: "applying", recovery: null });
           setCancel(null);
           setChanged(null);
@@ -745,19 +744,19 @@ export function RemoteAccessSetting({
       route,
       () => {
         setSeenAddress(null);
-        againPending.current = false;
+        againPending.current = null;
       },
       farAway
     );
   }
-  // Turn off, then turn on again on the facts the owner already approved. If the
-  // facts changed, the owner sees what changed and clicks again.
+  // Turn off, then turn on again on the facts the host recorded as approved for this route.
+  // If they changed, or the host has no record, the owner reviews and clicks.
   function turnOnAgain(route: Route, farAway = false) {
     return stopRoute(
       route,
       () => {
         setSeenAddress(route.origin ? { origin: route.origin, changed: false } : null);
-        againPending.current = approvedDigest.current !== null;
+        againPending.current = { approvedDigest: route.approvedConsentFactsDigest };
       },
       farAway
     );

@@ -161,7 +161,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
             record.handle.generation === route.handle.generation
         );
   async function projectOwnedRoute(route: Route, records: Records = new Map(), stopped?: boolean) {
-    let creator: { providerId: string } | null = null;
+    let journaled: { providerId: string | null; approvedConsentFactsDigest: string | null } | null = null;
     if (route.operationId) {
       let pending = records.get(route.operationId);
       if (!pending) {
@@ -169,14 +169,18 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         records.set(route.operationId, pending);
       }
       const record = await pending;
+      // The one identity check: only the start record that created this exact handle speaks for the route.
       if (record?.kind === "start" && record.operationId === route.operationId &&
           record.handle?.kind === route.handle.kind && record.handle.id === route.handle.id &&
-          record.handle.generation === route.handle.generation &&
-          typeof record.intent?.providerId === "string" && record.intent.providerId.length > 0) {
-        creator = { providerId: record.intent.providerId };
+          record.handle.generation === route.handle.generation) {
+        const nonEmpty = (value: unknown) => (typeof value === "string" && value.length > 0 ? value : null);
+        journaled = {
+          providerId: nonEmpty(record.intent?.providerId),
+          approvedConsentFactsDigest: nonEmpty(record.intent?.consentFactsDigest),
+        };
       }
     }
-    return { ...projectRoute(route, creator), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
+    return { ...projectRoute(route, journaled), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
   }
   function projectRoutes(routes: Route[], known?: OperationRecord[]) {
     const records: Records = new Map((known ?? []).map((record) => [record.operationId, Promise.resolve(record)]));
