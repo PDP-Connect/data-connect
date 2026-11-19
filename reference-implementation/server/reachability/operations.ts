@@ -119,6 +119,13 @@ export class ReachabilityOperations {
     }
     if (record.stage === "applying" && !runningBefore && !this.running.has(operationId)) {
       // An unrecorded handle does not prove no route was created. Do not replay.
+      // Like the tombstone flag above, this normalization is a read projection,
+      // never a write: a read that captured a stale "applying" copy must not land
+      // an unknown-possibly-live record over confirmed evidence a recovery has
+      // since written. No caller depends on the projection being persisted: each
+      // either reports it as-is (operation status, /state, restart candidate
+      // selection, which treats both stages alike) or persists a stronger record
+      // of its own through the serialized queue.
       record = {
         ...record,
         recovery: {
@@ -127,7 +134,6 @@ export class ReachabilityOperations {
         },
         stage: "unknown-possibly-live",
       };
-      await this.write(record);
     }
     return record;
   }

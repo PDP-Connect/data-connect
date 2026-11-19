@@ -915,6 +915,51 @@ test("a start effect that finishes after an explicit unconfirmed record leaves i
   }
 });
 
+for (const strong of ["recovered", "absent"] as const) {
+  test(`a read that normalizes an orphan after ${strong} cleanup evidence cannot erase it`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "reachability-read-race-"));
+    try {
+      // The journal a crashed process left: an "applying" record no live operation owns.
+      const before = new ReachabilityOperations(root, true);
+      const { operationId } = await before.start("start", null, () => new Promise<Route>(() => {}), intentFor("gozar-owned"));
+      // The restarted host's status read. If it still normalizes on disk, that
+      // write hangs on this gate until the recovery below has finished, so a
+      // stale write can only land after the confirmed evidence, which is the
+      // ordering the old code allowed and this test forbids.
+      const operations = new ReachabilityOperations(root, true);
+      let releaseStale: (() => void) | undefined;
+      const patch = operations as unknown as { write(record: OperationRecord): Promise<void> };
+      const realWrite = patch.write.bind(operations);
+      patch.write = (record: OperationRecord) => {
+        if (
+          record.recovery !== null && record.stage === "unknown-possibly-live" &&
+          record.failureCode === null && record.cleanupConfirmed === undefined && releaseStale === undefined
+        ) {
+          return new Promise<void>((resolve) => {
+            releaseStale = resolve;
+          }).then(() => realWrite(record));
+        }
+        return realWrite(record);
+      };
+      const stale = operations.read(operationId);
+      // A separate recovery writes confirmed evidence through its own journal.
+      const fresh = new ReachabilityOperations(root, true);
+      const route: Route = { ...seed, cleanup: { nextAction: null, state: "confirmed" }, handle: route1, published: null, state: "released" };
+      if (strong === "recovered") await fresh.recordRecovered(operationId, route);
+      else await fresh.recordAbsent(operationId);
+      releaseStale?.();
+      await stale;
+      const record = await fresh.read(operationId);
+      assert.equal(record.stage, "settled");
+      assert.equal(record.cleanupConfirmed, true);
+      assert.equal(record.recovery, null);
+      if (strong === "recovered") assert.deepEqual(record.handle, route1);
+    } finally {
+      await rm(root, { force: true, maxRetries: 10, recursive: true, retryDelay: 25 });
+    }
+  });
+}
+
 test("/state answers degraded, never all-clear, when the journal listing fails or never answers", async () => {
   const f = await crashedProcess([attachedOwned], confirm);
   try {
