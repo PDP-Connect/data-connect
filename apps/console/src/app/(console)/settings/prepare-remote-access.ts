@@ -13,7 +13,7 @@ import type {
   projectDraft,
   projectInventory,
 } from "pdpp-reference-implementation/reachability-projection";
-import type { requestReachability } from "./reachability-actions.ts";
+import type { requestReachability } from "./reachability-client.ts";
 import { publicError, ReachabilityFailure } from "./reachability-errors.ts";
 import type { ServiceEntry } from "./setup-services.ts";
 
@@ -131,7 +131,6 @@ const codeOf = (failure: unknown) => (failure instanceof ReachabilityFailure ? f
 
 type Choice = { providerId: string; usage: string };
 
-export const PREPARATION_REQUEST_TIMEOUT_MS = 15_000;
 // A restart re-reads the host's state, so another preparer's committed draft is picked up. A few
 // restarts cover a few preparers racing; the chain never retries without a bound.
 export const MAX_PREPARATION_RESTARTS = 6;
@@ -166,20 +165,12 @@ export async function prepareTurnOn(
   const proceed = () => {
     if (options.isCurrent?.() === false || options.mayRunActions?.() === false) throw new PreparationStopped();
   };
+  // No timer here: the transport's own deadline counts from the moment each request is sent,
+  // so every call below ends, and a timer started before the request ran would charge it for waiting.
   const send = async <T>(path: string, body?: Record<string, unknown>): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const result = await Promise.race([
-        request(path, body),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new ReachabilityFailure(publicError("reachability_unavailable"))), PREPARATION_REQUEST_TIMEOUT_MS);
-        }),
-      ]);
-      if (!result.ok) throw new ReachabilityFailure(result);
-      return result.data as T;
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-    }
+    const result = await request(path, body);
+    if (!result.ok) throw new ReachabilityFailure(result);
+    return result.data as T;
   };
   const inventory = await send<Inventory>("/catalog");
   const provider = inventory.providers.find((item) => item.providerId === choice.providerId);

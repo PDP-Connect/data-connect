@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom"
 import * as React from "react"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
-import type { requestReachability } from "./reachability-actions.ts"
+import type { requestReachability } from "./reachability-client.ts"
 
 const opened: string[] = []
 mock.module(new URL("../../../../../../src/lib/open-resource.ts", import.meta.url).href, {

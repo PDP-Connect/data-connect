@@ -8,7 +8,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { Button } from "@/components/ui/button.tsx";
 import { formatLocalTime } from "./plain-text.ts";
 import { type ButtonKind, recoveryFor } from "./failure-recovery.ts";
-import type { requestReachability } from "./reachability-actions.ts";
+import type { requestReachability } from "./reachability-client.ts";
 import {
   type ActionKind,
   GENERIC_ERROR,

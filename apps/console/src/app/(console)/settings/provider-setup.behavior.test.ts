@@ -7,7 +7,7 @@ import { JSDOM } from "jsdom"
 import * as React from "react"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
-import type { requestReachability } from "./reachability-actions.ts"
+import type { requestReachability } from "./reachability-client.ts"
 import { ProviderSetup } from "./provider-setup.tsx"
 
 test("only completed setup enables route review, including when instructions are visible", async () => {
@@ -103,7 +103,7 @@ test("only completed setup enables route review, including when instructions are
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 })
-mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {
       throw new Error("Use the test transport")
