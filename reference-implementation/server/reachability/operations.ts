@@ -150,6 +150,11 @@ export class ReachabilityOperations {
     const record = await this.read(operationId);
     await this.write({ ...record, handle: route.handle, recovery: null, route: null, stage: "settled" });
   }
+  /** The library has no route under the record's handle, so nothing of it can still be live. */
+  async recordAbsent(operationId: string): Promise<void> {
+    const record = await this.read(operationId);
+    await this.write({ ...record, recovery: null, route: null, stage: "settled" });
+  }
   async start(
     kind: OperationRecord["kind"],
     handle: Handle | null,

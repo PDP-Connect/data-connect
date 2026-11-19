@@ -40,7 +40,7 @@ export const REACHABILITY_SHUTDOWN_DEADLINE_MS = 3000;
 /** The part of the operation journal the restart pass reads and writes. */
 export type RestartJournal = Pick<
   ReachabilityOperations,
-  "list" | "recordCleanupUnconfirmed" | "recordRecovered" | "requestStop"
+  "list" | "recordAbsent" | "recordCleanupUnconfirmed" | "recordRecovered" | "requestStop"
 >;
 /**
  * Budget for the pass that closes routes a crashed process left behind. The
@@ -1027,8 +1027,17 @@ export class ReachabilityService {
           return;
         }
         this.routes.set(handle.id, route);
-      } catch {
-        // The library refused or failed; the route may still be live.
+      } catch (error) {
+        // No such route: the library holds nothing under this handle, so nothing is owed.
+        // An owner stop would get the same answer, so keeping debt would block Turn on for good.
+        if ((error as { code?: string } | null)?.code === "route_not_found") {
+          outcome.confirmed.push(handle.id);
+          this.unreconciled.delete(handle.id);
+          this.routes.delete(handle.id);
+          await journal.recordAbsent(operationId).catch(ignore);
+          return;
+        }
+        // Otherwise the library refused or failed; the route may still be live.
       }
       outcome.unconfirmed.push(handle.id);
       await journal.recordCleanupUnconfirmed(operationId, handle).catch(ignore);

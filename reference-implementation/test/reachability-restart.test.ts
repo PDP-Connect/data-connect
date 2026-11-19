@@ -9,7 +9,7 @@ import type { Handle, RouteView as Route } from "@tnunamak/gozar";
 import { fakeRouteScenarios } from "@tnunamak/gozar/testing";
 import { initialLifecycle } from "../server/reachability/lifecycle.ts";
 import { type OperationRecord, ReachabilityOperations } from "../server/reachability/operations.ts";
-import { ReachabilityService } from "../server/reachability/service.ts";
+import { ReachabilityService, restartCandidates } from "../server/reachability/service.ts";
 
 const seed = fakeRouteScenarios().find((route) => route.handle.kind === "attached" && route.published)!;
 
@@ -159,6 +159,27 @@ test("a close that is not confirmed exposes a stop remedy, not the generic busy 
     const closed = await f.service.stop("route-1", 1, true);
     assert.equal(closed.cleanup.state, "confirmed");
     await f.turnOn();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a handle the library no longer knows settles as closed and a Turn on is accepted", async () => {
+  const gone = async () => {
+    throw Object.assign(new Error("No such attached route"), { code: "route_not_found" });
+  };
+  const f = await crashedProcess([attachedOwned], gone);
+  try {
+    const outcome = await f.service.reconcileAfterRestart(2000, f.operations);
+    assert.deepEqual(outcome, { confirmed: ["route-1"], unconfirmed: [] });
+    const record = await f.operations.read(f.operationIds.get("route-1")!);
+    assert.equal(record.stage, "settled");
+    assert.equal(record.stopTombstone, true);
+    assert.equal(record.recovery, null);
+    assert.deepEqual(f.service.state().routes, []);
+    await f.turnOn();
+    // The next restart finds nothing owed.
+    assert.deepEqual(restartCandidates(await f.operations.list()), []);
   } finally {
     await f.cleanup();
   }
