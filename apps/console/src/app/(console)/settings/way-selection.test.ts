@@ -358,11 +358,11 @@ const addressFact = (id: string, value: string) => ({
 const html = (providerId: string, values: string[]) =>
   renderToStaticMarkup(createElement(ConsentFacts, { providerId, facts: values.map((value, index) => addressFact(`c-${index}`, value)) as never }));
 
-test("the known-false list matches the installed localhost.run definition, so an upgrade breaks here", () => {
+test("the legacy condition suppression remains for saved views and is absent from the current definition", () => {
   const definition = JSON.parse(readFileSync(new URL("adapters/providers/localhost-run/definition.json", gozarDir), "utf8"));
   assert.ok(
-    JSON.stringify(definition).includes(`"${falseLine}"`),
-    "gozar no longer says this; remove or update the entry in known-false-conditions.ts"
+    !JSON.stringify(definition).includes(`"${falseLine}"`),
+    "the current provider must not repeat the legacy limit"
   );
   assert.deepEqual([...knownFalseConditions["localhost-run"]!], [falseLine]);
   assert.deepEqual(Object.keys(knownFalseConditions), ["localhost-run"]);
