@@ -241,3 +241,20 @@ test("a hung tombstone write does not keep the provider close from starting", { 
     await f.cleanup();
   }
 });
+
+test("a start that never settles does not delay the close of an already-known owned route", { timeout: 2000 }, async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], confirmed);
+  try {
+    // An embedded provider start that never returns: its settlement promise is the
+    // only thing shutdown must not wait for before closing known routes. The
+    // per-test timeout catches a true hang; the deadline bounds this run.
+    (f.inner as unknown as { startSettled: Promise<void> | null }).startSettled = new Promise<void>(() => {});
+    const started = Date.now();
+    const outcome = await f.service.shutdown(80, f.operations);
+    assert.ok(Date.now() - started < 1000, "shutdown stays within its deadline plus journal grace");
+    assert.equal(f.calls.length, 1, "the already-known route's close was dispatched without waiting for the start");
+    assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
+  } finally {
+    await f.cleanup();
+  }
+});

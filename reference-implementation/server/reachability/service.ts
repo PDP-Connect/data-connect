@@ -991,31 +991,45 @@ export class ReachabilityService {
       }
     };
     const close = async (): Promise<void> => {
-      // A start already in flight allocates its handle only when it returns.
-      await this.startSettled;
-      await Promise.all(
-        owned().map(async (route) => {
-          const { handle } = route;
-          // The tombstone is journaled beside the close, never ahead of it: a stalled journal
-          // must not keep the provider call from starting. If the process dies before the tombstone
-          // lands, the record still has no cleanup evidence, so the next boot closes the handle.
-          if (route.operationId) void journal.requestStop(route.operationId).catch(ignore);
-          advance(handle, "stop");
-          if (route.cleanup.state !== "confirmed") {
-            this.routes.set(handle.id, { ...route, published: null });
-            const closed = await this.closeShared(handle);
-            this.routes.set(handle.id, closed);
-            if (closed.cleanup.state !== "confirmed") {
-              return;
-            }
+      // Already-known routes close at once: an embedded provider start that never
+      // returns must not hold back their closes. A start still in flight allocates
+      // its handle only when it returns, so its route - if any - is swept after the
+      // start settles, and the single-flight close keeps the two passes off one
+      // exact handle. The sweep runs under the same deadline as everything else,
+      // so a start that never settles ends at the deadline, after the known closes
+      // were already dispatched.
+      const dispatched = new Set<string>();
+      const one = async (route: Route): Promise<void> => {
+        const { handle } = route;
+        dispatched.add(handleKey(handle));
+        // The tombstone is journaled beside the close, never ahead of it: a stalled journal
+        // must not keep the provider call from starting. If the process dies before the tombstone
+        // lands, the record still has no cleanup evidence, so the next boot closes the handle.
+        if (route.operationId) void journal.requestStop(route.operationId).catch(ignore);
+        advance(handle, "stop");
+        if (route.cleanup.state !== "confirmed") {
+          this.routes.set(handle.id, { ...route, published: null });
+          const closed = await this.closeShared(handle);
+          this.routes.set(handle.id, closed);
+          if (closed.cleanup.state !== "confirmed") {
+            return;
           }
-          confirmed.set(handleKey(handle), handle);
-          advance(handle, "cleanup-confirmed");
-          if (route.operationId) {
-            await journal.recordRecovered(route.operationId, this.routes.get(handle.id) ?? route).catch(ignore);
-          }
-        })
+        }
+        confirmed.set(handleKey(handle), handle);
+        advance(handle, "cleanup-confirmed");
+        if (route.operationId) {
+          await journal.recordRecovered(route.operationId, this.routes.get(handle.id) ?? route).catch(ignore);
+        }
+      };
+      const sweepLateAllocation = (this.startSettled ?? Promise.resolve()).then(
+        async () => {
+          await Promise.all(
+            owned().filter((route) => !dispatched.has(handleKey(route.handle))).map((route) => one(route))
+          );
+        },
+        () => undefined
       );
+      await Promise.all([...owned().map((route) => one(route)), sweepLateAllocation]);
     };
     // Budget: `deadlineMs` bounds the close work, then one capped grace
     // (SHUTDOWN_JOURNAL_GRACE_MS) bounds the journal writes for what is still owed. Nothing
