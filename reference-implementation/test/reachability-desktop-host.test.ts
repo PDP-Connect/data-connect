@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -146,4 +146,58 @@ test("desktop custody seals bytes, scopes access and survives reopening with the
   process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY = key;
   assert.deepEqual(await reopened.delete(ref), { deleted: true });
   assert.deepEqual(await reopened.presence(ref), { known: true, value: false });
+});
+
+test("desktop host repairs group- and other-writable state folders inside the data directory at start", async (t) => {
+  const root = await scratch();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, "unified");
+  const outside = join(root, "outside");
+  const home = join(dataDir, "reachability");
+  await Promise.all([
+    mkdir(home, { recursive: true, mode: 0o777 }),
+    mkdir(outside, { recursive: true, mode: 0o777 }),
+  ]);
+  await chmod(home, 0o777);
+  await chmod(outside, 0o777);
+
+  const env = {
+    PDPP_DATA_DIR: dataDir,
+    PDPP_MANAGED_DESKTOP_HOST: "1",
+    PDPP_OWNER_CREDENTIAL_REVEAL_PROOF: randomBytes(32).toString("hex"),
+    HOSTNAME: "127.0.0.1",
+    PORT: "",
+    PDPP_OWNER_PASSWORD: randomBytes(32).toString("hex"),
+    PDPP_CREDENTIAL_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
+  };
+  const previous = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  const leases = join(root, "run");
+  await mkdir(leases, { recursive: true });
+  const lease = { pid: process.ppid, owner_pid: process.pid, owner_started_at_ticks: 123, port: 12345 };
+  await writeFile(join(leases, "console.json"), JSON.stringify({ ...lease, label: "console" }));
+  await writeFile(join(leases, "reference-implementation.json"), JSON.stringify({
+    ...lease, pid: process.ppid, label: "reference-implementation",
+  }));
+
+  const input = { dataDir, bindHost: "127.0.0.1", owner: "owned-fixture", passwordConfigured: true };
+  const host = await startDesktopReachability(input);
+  assert.ok(host?.statePaths);
+  t.after(() => host.service?.closeObservers());
+
+  const homeMode = (await lstat(home)).mode & 0o777;
+  const outsideMode = (await lstat(outside)).mode & 0o777;
+
+  assert.equal(homeMode & 0o022, 0, "state folder inside dataDir had group and other write bits stripped");
+  assert.equal(outsideMode, 0o777, "folder outside dataDir is unchanged");
+
+  const report = await host.statePaths.inspect();
+  assert.deepEqual(report.paths, []);
 });
