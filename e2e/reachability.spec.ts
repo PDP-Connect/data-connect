@@ -15,6 +15,10 @@ import {
   turnOnCard,
 } from "./reachability-fixture.ts"
 
+// Turn on and Turn off each wait on a real provider round trip; the default 5 s
+// expect timeout is a scheduling guess that fails on a loaded machine.
+const PROVIDER_ROUND_TRIP_MS = 30_000
+
 test("unknown registry data drives Turn on: stale facts are refused, fresh facts turn it on, Turn off confirms cleanup", async ({
   page,
 }) => {
@@ -91,14 +95,14 @@ test("unknown registry data drives Turn on: stale facts are refused, fresh facts
   ).toBeVisible()
   await turnOnButton(surface).click()
   const on = onCard(surface)
-  await expect(on).toBeVisible()
+  await expect(on).toBeVisible({ timeout: PROVIDER_ROUND_TRIP_MS })
   await expect(
     on.getByRole("status").filter({ hasText: "Test data: Works on this computer" })
-  ).toBeVisible()
+  ).toBeVisible({ timeout: PROVIDER_ROUND_TRIP_MS })
   expect(await surface.textContent()).not.toContain(canary)
   await on.getByRole("button", { name: "Turn off", exact: true }).click()
   // Off shows only once the host confirms the route is closed.
-  await expect(offState(surface)).toBeVisible()
+  await expect(offState(surface)).toBeVisible({ timeout: PROVIDER_ROUND_TRIP_MS })
   await expect(onCard(surface)).toHaveCount(0)
   await expect(
     surface.getByText("Couldn't confirm the service closed your address.")
