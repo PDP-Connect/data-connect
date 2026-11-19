@@ -297,7 +297,7 @@ const route1: Handle = { id: "route-1", generation: 1, kind: "attached" };
 const gone = () => Object.assign(new Error("No such attached route"), { code: "route_not_found" });
 
 // The owner routes over the real service and journal, called without a socket.
-async function ownerApi(f: Awaited<ReturnType<typeof crashedProcess>>) {
+async function ownerApi(f: Awaited<ReturnType<typeof crashedProcess>>, extra: Record<string, unknown> = {}) {
   const { mountOwnerReachability } = await import("../server/routes/owner-reachability.ts");
   const routes = new Map<string, (request: unknown, response: unknown) => Promise<unknown>>();
   const pass = async (_r: unknown, _s: unknown, next?: () => void) => next?.();
@@ -316,6 +316,7 @@ async function ownerApi(f: Awaited<ReturnType<typeof crashedProcess>>) {
     usage: () => {
       throw new Error("unused");
     },
+    ...extra,
   } as never);
   return async (method: "GET" | "POST", path: string, body?: unknown, params: Record<string, string> = {}) => {
     let payload: { data?: any; error?: any } = {};
@@ -911,5 +912,29 @@ test("a start effect that finishes after an explicit unconfirmed record leaves i
     assert.equal(record.recovery?.available, true);
   } finally {
     await rm(root, { force: true, maxRetries: 10, recursive: true, retryDelay: 25 });
+  }
+});
+
+test("/state answers degraded, never all-clear, when the journal listing fails or never answers", async () => {
+  const f = await crashedProcess([attachedOwned], confirm);
+  try {
+    const call = await ownerApi(f, { stateJournalTimeoutMs: 50 });
+    const healthy = (await call("GET", "/state")).data;
+    assert.equal(healthy.journalScan, "ok");
+    assert.equal(healthy.operationsAvailable, true);
+    f.operations.list = async () => {
+      throw new Error("disk");
+    };
+    const rejected = await settleWithin(call("GET", "/state"), 2000);
+    assert.notEqual(rejected, "hung");
+    assert.equal((rejected as { data?: { journalScan: string } }).data?.journalScan, "unavailable", JSON.stringify(rejected));
+    assert.equal((rejected as { data: { operationsAvailable: boolean } }).data.operationsAvailable, false);
+    f.operations.list = () => new Promise<never>(() => {});
+    const stalled = await settleWithin(call("GET", "/state"), 2000);
+    assert.notEqual(stalled, "hung");
+    assert.equal((stalled as { data?: { journalScan: string } }).data?.journalScan, "unavailable", JSON.stringify(stalled));
+    assert.equal((stalled as { data: { operationsAvailable: boolean } }).data.operationsAvailable, false);
+  } finally {
+    await f.cleanup();
   }
 });
