@@ -13,10 +13,10 @@ const SAVE_LABEL = "Save password and continue";
 export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate = generatePassphrase }) {
   const form = document.getElementById("password-form");
   const passwordInput = document.getElementById("password-input");
-  const confirmInput = document.getElementById("confirm-input") || document.getElementById("confirmation-input");
+  const confirmInput = document.getElementById("confirm-input");
   const toggleButton = document.getElementById("toggle-button");
   const copyButton = document.getElementById("copy-button");
-  const suggestButton = document.getElementById("suggest-button") || document.getElementById("suggested-button");
+  const suggestButton = document.getElementById("suggest-button");
   const button = document.getElementById("submit-button");
   const errorBox = document.getElementById("error");
 
@@ -30,31 +30,16 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
     errorBox.classList.remove("visible");
   }
 
-  // Masked by default, suggestion is no longer pre-filled.
-  passwordInput.value = "";
-  passwordInput.readOnly = false;
-  passwordInput.type = "password";
-  if (confirmInput) {
-    confirmInput.value = "";
-    confirmInput.readOnly = false;
-    confirmInput.type = "password";
-  }
-  if (toggleButton) {
-    toggleButton.textContent = "Show";
-    toggleButton.setAttribute("aria-pressed", "false");
-    toggleButton.setAttribute("aria-controls", "password-input confirm-input");
+  function reveal(shown) {
+    passwordInput.type = shown ? "text" : "password";
+    confirmInput.type = shown ? "text" : "password";
+    toggleButton.textContent = shown ? "Hide" : "Show";
+    toggleButton.setAttribute("aria-pressed", String(shown));
   }
 
-  toggleButton?.addEventListener("click", () => {
-    const isMasked = passwordInput.type === "password";
-    const nextType = isMasked ? "text" : "password";
-    passwordInput.type = nextType;
-    if (confirmInput) confirmInput.type = nextType;
-    toggleButton.textContent = isMasked ? "Hide" : "Show";
-    toggleButton.setAttribute("aria-pressed", isMasked ? "true" : "false");
-  });
+  toggleButton.addEventListener("click", () => reveal(passwordInput.type === "password"));
 
-  copyButton?.addEventListener("click", async () => {
+  copyButton.addEventListener("click", async () => {
     try {
       await clipboard.writeText(passwordInput.value);
       copyButton.textContent = "Copied";
@@ -64,17 +49,12 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
     }
   });
 
-  suggestButton?.addEventListener("click", () => {
+  suggestButton.addEventListener("click", () => {
     clearError();
     const suggestion = generate();
     passwordInput.value = suggestion;
-    if (confirmInput) confirmInput.value = suggestion;
-    passwordInput.type = "text";
-    if (confirmInput) confirmInput.type = "text";
-    if (toggleButton) {
-      toggleButton.textContent = "Hide";
-      toggleButton.setAttribute("aria-pressed", "true");
-    }
+    confirmInput.value = suggestion;
+    reveal(true);
   });
 
   form.addEventListener("submit", (event) => {
@@ -84,7 +64,7 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
 
   async function submitPassword() {
     const password = passwordInput.value;
-    const confirmation = confirmInput ? confirmInput.value : password;
+    const confirmation = confirmInput.value;
     clearError();
     const problem = ownPasswordProblem(password);
     if (problem) {
