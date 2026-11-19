@@ -6,6 +6,8 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Readable } from "node:stream";
+import { createGunzip } from "node:zlib";
 import { firstTreeDifference, linkInstalledPackage } from "./installed-package.mjs";
 import { RELEASE_DISK_FLOOR_BYTES, requireDiskFloor } from "./disk-floor.mjs";
 
@@ -22,8 +24,12 @@ export async function installTarball({ env = process.env, cwd = process.cwd(), r
 	const actual = createHash("sha256").update(bytes).digest("hex");
 	if (actual !== expected)
 		throw new Error("Tarball checksum mismatch; nothing installed");
-	// Reserve space for package expansion and metadata above the mandatory floor.
-	const reserve = 100_000_000 + bytes.byteLength * 20;
+	// Count the checked archive's expanded bytes without retaining the expanded tar in memory.
+	const expanded = Readable.from([bytes]).pipe(createGunzip());
+	let expandedBytes = 0;
+	for await (const chunk of expanded) expandedBytes += chunk.byteLength;
+	// The staged archive, npm install, and verification extraction coexist.
+	const reserve = 100_000_000 + bytes.byteLength + 2 * expandedBytes;
 	await diskFloor(env, cwd, RELEASE_DISK_FLOOR_BYTES, { reserveBytes: reserve });
 	const modules = resolve(cwd, "node_modules");
 	await mkdir(modules, { recursive: true });

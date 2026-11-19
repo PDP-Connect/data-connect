@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const runner = fileURLToPath(new URL("./run-release.mjs", import.meta.url));
 const waiver = {
@@ -169,12 +171,16 @@ test("failed install still blocks every later step", async (t) => {
 });
 // The runner's step floor is not the only check: the installer and the e2e
 // fixture are separate processes and must apply the same helper and waiver.
+// A real gzip archive: the installer sizes its disk reserve from the expanded bytes.
+const EXPANDED_BYTES = 1000;
+const TARBALL = gzipSync(Buffer.alloc(EXPANDED_BYTES, "x"));
+const TARBALL_SHA256 = createHash("sha256").update(TARBALL).digest("hex");
 async function standalone(t, script, available, overrides, nodeArgs = []) {
 	const root = await mkdtemp(join(tmpdir(), "standalone-disk-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	const tarball = join(root, "package.tgz"),
 		preload = join(root, "preload.mjs");
-	await writeFile(tarball, "x");
+	await writeFile(tarball, TARBALL);
 	await writeFile(
 		preload,
 		`
@@ -202,8 +208,7 @@ syncBuiltinESMExports();
 			env: {
 				...env,
 				GOZAR_TARBALL: tarball,
-				GOZAR_TARBALL_SHA256:
-					"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4f1",
+				GOZAR_TARBALL_SHA256: TARBALL_SHA256,
 				GOZAR_SOURCE_SHA: "a".repeat(40),
 				...overrides,
 			},
@@ -221,17 +226,17 @@ syncBuiltinESMExports();
 	return { status: child.status, stderr: child.stderr, npmRan };
 }
 test("installer applies the release floor and the local waiver", async (t) => {
-	const sha = (await import("node:crypto")).createHash("sha256").update("x").digest("hex");
-	const base = { GOZAR_TARBALL_SHA256: sha };
+	const base = { GOZAR_TARBALL_SHA256: TARBALL_SHA256 };
+	// The reserve is 100 MB plus the archive plus two expanded copies, on top of the release floor.
+	const required = 105_000_000_000 + 100_000_000 + TARBALL.byteLength + 2 * EXPANDED_BYTES;
 	const refused = await standalone(t, "./install-tarball.mjs", 50_000_000_000, base);
 	assert.notEqual(refused.status, 0);
 	assert.match(refused.stderr, /NOT RUN \(disk\): need 105 GB free/);
 	assert.equal(refused.npmRan, false);
-	// A one-byte tarball reserves 100 MB + 20 bytes on top of the release floor.
-	const belowTotal = await standalone(t, "./install-tarball.mjs", 105_100_000_019, base);
+	const belowTotal = await standalone(t, "./install-tarball.mjs", required - 1, base);
 	assert.match(belowTotal.stderr, /NOT RUN \(disk\)/);
 	assert.equal(belowTotal.npmRan, false);
-	const atFloor = await standalone(t, "./install-tarball.mjs", 105_100_000_020, base);
+	const atFloor = await standalone(t, "./install-tarball.mjs", required, base);
 	assert.doesNotMatch(atFloor.stderr, /NOT RUN \(disk\)/);
 	assert.equal(atFloor.npmRan, true);
 	const waived = await standalone(t, "./install-tarball.mjs", 50_000_000_000, { ...base, ...waiver });

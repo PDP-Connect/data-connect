@@ -8,16 +8,18 @@ import { mkdir, mkdtemp, readFile, readlink, readdir, rm, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { gunzipSync } from "node:zlib";
 import { installTarball } from "./install-tarball.mjs";
 
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
-async function fixture(t) {
+async function fixture(t, { extraBytes = 0 } = {}) {
 	const root = await mkdtemp(join(tmpdir(), "gozar-gate-test-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	const pkg = join(root, "input");
 	await mkdir(pkg);
 	await writeFile(join(pkg, "package.json"), JSON.stringify({name:"@tnunamak/gozar",version:"1.0.0"}));
 	await writeFile(join(pkg, "index.js"), "export const inert = true;\n");
+	if (extraBytes) await writeFile(join(pkg, "data.bin"), Buffer.alloc(extraBytes));
 	const env = {...process.env, npm_config_cache:join(root,"npm-cache"), npm_config_offline:"true", npm_config_audit:"false", npm_config_fund:"false"};
 	// The pack output format differs across npm majors; read the one tarball from its own folder.
 	const packed = join(root, "packed");
@@ -47,12 +49,36 @@ test("install uses a private staged copy and each success repoints the link", as
 	assert.equal(await readlink(join(opts.cwd,"node_modules/@tnunamak/gozar")),join(b.prefix,"node_modules/@tnunamak/gozar"));
 });
 
-test("failed install leaves no prefix receipt or link", async t => {
+test("disk preflight accounts for two expanded copies and the staged tarball", async t => {
+	const {opts,bytes} = await fixture(t, { extraBytes: 256 * 1024 });
+	const stop = new Error("stop before install");
+	let reserve;
+	await assert.rejects(installTarball({...opts,
+		run() { assert.fail("must not install before preflight succeeds"); },
+		async diskFloor(_env, _cwd, _floor, { reserveBytes }) {
+			reserve = reserveBytes;
+			throw stop;
+		},
+	}), error => error === stop);
+	assert.equal(reserve, 100_000_000 + bytes.byteLength + 2 * gunzipSync(bytes).byteLength);
+	assert.ok(reserve >= 100_000_000 + 2 * 256 * 1024);
+});
+
+test("malformed gzip fails before disk preflight or installation", async t => {
 	const {opts} = await fixture(t);
 	const bad = Buffer.from("invalid archive");
 	await writeFile(opts.env.GOZAR_TARBALL,bad);
 	opts.env.GOZAR_TARBALL_SHA256 = digest(bad);
-	assert.notEqual((await installTarball(opts)).status,0);
+	await assert.rejects(installTarball({...opts,
+		diskFloor() { assert.fail("must not preflight an invalid gzip"); },
+		run() { assert.fail("must not install an invalid gzip"); },
+	}), { code: "Z_DATA_ERROR" });
+	assert.ok(!(await readdir(opts.cwd)).includes("node_modules"));
+});
+
+test("failed install leaves no prefix receipt or link", async t => {
+	const {opts} = await fixture(t);
+	assert.notEqual((await installTarball({...opts, run: () => ({ status: 1 })})).status,0);
 	assert.deepEqual(await readdir(join(opts.cwd,"node_modules")),[]);
 });
 
