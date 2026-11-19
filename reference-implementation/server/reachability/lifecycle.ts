@@ -22,6 +22,8 @@ export const phases = [
 export type Phase = (typeof phases)[number];
 export const events = [
   "restore-intent",
+  "recovery-timeout",
+  "recovery-cleared",
   "recovered-handle",
   "choose",
   "setup",
@@ -236,6 +238,19 @@ allow(["reconciling", "unknown"], "reconcile", (state, event) => {
   }
   return reject(state, "observation-missing");
 });
+// Boot recovery could not list the library before its deadline. A route the
+// last process left may still be live, so the answer is unknown, never off.
+allow(["inactive", "unknown", "failed"], "recovery-timeout", (state) =>
+  state.handle || state.operationId
+    ? reject(state, "intent-already-recorded")
+    : accept(state, { cleanup: "unconfirmed", evidence: "unknown", phase: "unknown", reason: "unknown-possibly-live" })
+);
+// A later listing succeeded: the library is readable again and holds no intent.
+allow(["unknown"], "recovery-cleared", (state) =>
+  state.reason === "unknown-possibly-live" && !state.handle && !state.operationId
+    ? accept(state, { cleanup: "none", phase: "inactive", reason: null })
+    : reject(state, "not-a-recovery-unknown")
+);
 allow(phases, "agent-exit", (state) =>
   state.handle
     ? accept(state, { epoch: state.epoch + 1, evidence: "unknown", phase: "stopping", reason: "agent-exited" }, [

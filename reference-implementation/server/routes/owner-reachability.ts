@@ -422,6 +422,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       ? { known: true, value: projectHostSettings(observation.value) }
       : { known: false, reason: observation.reason };
   });
+  post("/recovery/check", async () => service().recoverFromLibrary());
   post("/host-settings", async (request) => {
     const input = body(request);
     return projectHostSettings(
@@ -437,6 +438,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     return {
       evidenceSource: state.evidenceSource,
       lifecycle: state.lifecycle,
+      recovery: state.recovery,
       reasons: state.reasons,
       routes: await projectRoutes(state.routes),
       type: "snapshot",
@@ -478,6 +480,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       journalScan: listed === null ? ("unavailable" as const) : state.journalScan,
       journalUnreadable: state.journalUnreadable,
       lifecycle: state.lifecycle,
+      recovery: state.recovery,
       // False: the journal could not be read in time, so `operations` is unknown, not empty.
       operationsAvailable: listed !== null,
       operations,

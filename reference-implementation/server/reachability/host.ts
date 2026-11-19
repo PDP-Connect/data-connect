@@ -126,6 +126,7 @@ export async function startServerReachability(input: ReachabilityHostInput): Pro
     {
       // A route change never rebinds this server's own listener, so there is no
       // connection of the owner's for it to cut off.
+      recoverAtBoot: true,
       acknowledgeDisconnect: async () => undefined,
       prepare: async () => requireUsableSocketHome(home),
       query: {
