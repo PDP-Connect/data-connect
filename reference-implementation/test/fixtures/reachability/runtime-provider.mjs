@@ -5,12 +5,10 @@
 
 import { readFile } from "node:fs/promises";
 import provider from "./index.mjs";
+import { cost } from "./runtime-cost.mjs";
 
 const observation = async () =>
   JSON.parse(await readFile(new URL("../../../runtime-observations.json", import.meta.url), "utf8"));
-const cost = (kind) => kind === "paid"
-  ? { kind, summary: "Fixture paid rate", amount: 0, currency: "USD", period: "month" }
-  : { kind, summary: kind === "free" ? "Fixture free rate" : "Fixture rate unknown" };
 export default {
   ...provider,
   async detect(context) {
