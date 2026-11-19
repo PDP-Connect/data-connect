@@ -40,23 +40,28 @@ function isJson(request: Request): boolean {
   return request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/json";
 }
 
-/** The body as text, or null once it passes MAX_BODY_BYTES. Stops reading at the limit. */
-async function boundedText(request: Request): Promise<string | null> {
+/** The body as text, or "too-large" once it passes MAX_BODY_BYTES. Stops reading at the limit. */
+async function boundedText(request: Request): Promise<string | "too-large"> {
   const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return "too-large";
   if (!request.body) return "";
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MAX_BODY_BYTES) {
-      await reader.cancel();
-      return null;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        // Best effort: the answer does not wait for the sender to stop.
+        reader.cancel().catch(() => {});
+        return "too-large";
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    reader.releaseLock();
   }
   return Buffer.concat(chunks).toString("utf8");
 }
@@ -88,8 +93,15 @@ async function handle(request: Request, post: boolean): Promise<NextResponse> {
   }
   let body: Record<string, unknown> | undefined;
   if (post) {
-    const text = await boundedText(request).catch(() => null);
-    if (text === null) return reply(413, { ok: false, ...publicError("invalid_input") });
+    let text: string;
+    try {
+      const read = await boundedText(request);
+      if (read === "too-large") return reply(413, { ok: false, ...publicError("invalid_input") });
+      text = read;
+    } catch {
+      // The body could not be read (the sender went away): not a size problem.
+      return reply(400, { ok: false, ...publicError("invalid_input") });
+    }
     try {
       const parsed: unknown = JSON.parse(text);
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
