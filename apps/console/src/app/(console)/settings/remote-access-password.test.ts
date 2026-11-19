@@ -66,7 +66,8 @@ test("with a password set there is no step 1 and step 2 is open", async () => {
     const screen = await mount(passwordSet)
     try {
       assert.doesNotMatch(screen.container.textContent ?? "", /Set a password|Password saved/)
-      assert.match(screen.container.textContent ?? "", /Step 2 of 2 · Turn on/)
+      assert.match(screen.container.textContent ?? "", /Step 2 of 2/)
+      assert.match(screen.container.textContent ?? "", /Turn on/)
     } finally {
       await screen.stop()
     }

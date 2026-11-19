@@ -454,7 +454,7 @@ export function formatDisclosures(candidate: Candidate): { lines: FactLine[]; re
   lines.push({
     kind: "deal",
     text:
-      usage === "session" ? "Turns off by itself. The time shows once it's on."
+      usage === "session" ? "Turns off by itself."
       : usage === "durable" ? "Stays on until you turn it off."
       : usage === "attached" ? "Stays on while DataConnect runs."
       : "We can't tell how long this lasts.",
@@ -474,6 +474,58 @@ export function formatDisclosures(candidate: Candidate): { lines: FactLine[]; re
   });
 
   return { lines, remaining: isDisclosureRecord(original) ? rest : original, unread };
+}
+
+/** The deal kind's fragments joined into the one line the card shows: the cost sentence, then one sentence from the rest. */
+function joinDealFragments(fragments: string[]): string {
+  const parts = fragments.map((text) => text.trim()).filter((text) => text !== "");
+  const [head, second, ...more] = parts;
+  if (head === undefined) return "";
+  const sentence = (text: string) => (text.endsWith(".") ? text : `${text}.`);
+  const headSentence = sentence(head);
+  if (second === undefined) return headSentence;
+  if (more.length === 0) return `${headSentence} ${sentence(second)}`;
+  // Three or more: the cost keeps its own sentence; the rest join into one
+  // sentence after it, so only the fragments inside that sentence lose their capital.
+  const clause = (text: string, first: boolean) => {
+    const bare = sentence(text).slice(0, -1);
+    return first ? bare : `${bare.charAt(0).toLowerCase()}${bare.slice(1)}`;
+  };
+  const clauses = [clause(second, true), ...more.map((text) => clause(text, false))];
+  const last = clauses.pop();
+  if (last === undefined) return headSentence;
+  return `${headSentence} ${clauses.length > 0 ? `${clauses.join(", ")} and ${last}` : last}.`;
+}
+
+const factKindOrder: FactKind[] = ["access", "traffic", "deal"];
+
+/**
+ * The one line each kind shows above Turn on, and every line that then belongs
+ * in Details: access reads best as the sign-in line the classifier emits first;
+ * traffic as the payload reading, which names who sees what passes through; the
+ * deal kind joins all of its fragments into one sentence. Null when a kind has
+ * no line, so the caller keeps every line above the button (fail closed).
+ */
+export function shortFactLines(lines: FactLine[]): { shown: FactLine[]; rest: FactLine[] } | null {
+  const shown: FactLine[] = [];
+  const used = new Set<FactLine>();
+  for (const kind of factKindOrder) {
+    const ofKind = lines.filter((line) => line.kind === kind && !used.has(line));
+    const first = ofKind[0];
+    if (first === undefined) return null;
+    if (kind === "deal") {
+      shown.push({ kind, text: joinDealFragments(ofKind.map((line) => line.text)) });
+      for (const line of ofKind) used.add(line);
+      continue;
+    }
+    const pick =
+      kind === "traffic"
+        ? (ofKind.find((line) => line.text.endsWith("what passes through.")) ?? first)
+        : first;
+    used.add(pick);
+    shown.push(pick);
+  }
+  return { shown, rest: lines.filter((line) => !used.has(line)) };
 }
 
 /** The facts whose value differs between two reviews, by label. */

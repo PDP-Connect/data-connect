@@ -93,6 +93,21 @@ type Prep =
   | { status: "preparing" }
   | { status: "done"; providerId: string; result: Prepared };
 
+/**
+ * The Off status row: one inline text flow, so on a narrow screen the words
+ * wrap under the dot instead of splitting into columns. As the start card's
+ * header band it carries the divider (`framed`); above Step 1 it floats alone.
+ */
+function OffStatusRow({ journalWarning, framed = false }: { journalWarning: string | null; framed?: boolean }) {
+  return (
+    <p className={`text-sm font-medium ${framed ? "border-b px-4 py-3" : ""}`} role="status">
+      <span aria-hidden="true" className="mr-2 inline-block size-2.5 rounded-full bg-muted-foreground/50 align-middle" />
+      {"Off "}
+      {journalWarning ? null : <span className="font-normal text-muted-foreground">· Only this computer can open DataConnect.</span>}
+    </p>
+  );
+}
+
 export function RemoteAccessSetting({
   request = requestReachability,
   appVersion,
@@ -324,6 +339,8 @@ export function RemoteAccessSetting({
   const wayUsage = way ? pickUsage(way, capabilities) : null;
   const wayId = way?.providerId ?? null;
   const wayLabel = way ? plain(way.label) : undefined;
+  // The selected way's card title, as the Turn on card's caption reads it.
+  const wayTitle = way ? plain(wayRow(way, capabilities, blocks).title) : null;
   // Read by a sign-in step already under way: it must not show or open for a way the owner has left.
   const wayIdNow = useRef<string | null>(null);
   wayIdNow.current = wayId;
@@ -912,79 +929,83 @@ export function RemoteAccessSetting({
         <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
       {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
-      {idle && visibleRoutes.length === 0 && !operation ? (
-        <p className="flex items-center gap-2 text-sm font-medium" role="status">
-          <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-muted-foreground/50" />
-          {journalWarning ? "Off" : "Off · Only this computer can open DataConnect."}
-        </p>
+      {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
+        <OffStatusRow journalWarning={journalWarning} />
       ) : null}
       {idle && !passwordMissing ? (
-        <section aria-label="Turn on remote access" className="grid gap-4">
-          <h3 className="pdpp-label">Step 2 of 2 · Turn on</h3>
-          {inventory && recommended ? (
-            <RecommendedWay
-              checked={wayId === recommended.providerId}
-              disabled={mutationBlocked}
-              onPick={pickWay}
-              row={wayRow(recommended, capabilities, blocks)}
-            />
-          ) : null}
-          {switchNote ? <p className="text-sm text-muted-foreground" role="status">{switchNote}</p> : null}
-          {prep.status === "preparing" ? <p className="text-sm text-muted-foreground" role="status">Checking this computer…</p> : null}
-          {done?.kind === "allow" && declined !== wayId ? (
-            <AllowCard
-              action={done.action}
-              busy={mutationBlocked}
-              draft={done.draft}
-              onAllow={(action, input) => void allow(done.draft, action, input)}
-              onOther={chooseAnotherWay}
-            />
-          ) : null}
-          {done?.kind === "sign-in" && !reservations.some((item) => item.providerId === wayId) ? (
-            // A step the page cannot show as a sign-in: never a blank card.
-            <section aria-label="Turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
-              <p className="text-sm" role="status">{genericErrorFor("turn-on")}</p>
-              <div className="flex flex-wrap gap-3">
-                <Button disabled={busy} onClick={refresh} type="button">
-                  Try again
-                </Button>
-              </div>
-            </section>
-          ) : null}
-          {done?.kind === "ready" ? (
-            <TurnOnCard
-              busy={mutationBlocked}
-              changed={changed}
-              key={done.review.id}
-              onTurnOn={(review) => void turnOn(review)}
-              review={done.review}
-              steps={done.steps}
-            />
-          ) : null}
-          {wayId && wayUsage === null ? (
-            <p className="text-sm text-muted-foreground" role="status">Remote access can't start with this way on this computer.</p>
-          ) : null}
-          <Button
-            aria-expanded={showOtherWays}
-            className="justify-self-start"
-            disabled={busy}
-            onClick={() => setShowOtherWays((open) => !open)}
-            type="button"
-            variant="outline"
-          >
-            Other ways
-          </Button>
-          {showOtherWays && inventory ? (
-            <OtherWays
-              blocks={blocks}
-              capabilities={capabilities}
-              disabled={mutationBlocked}
-              inventory={inventory}
-              onPick={pickWay}
-              pickedId={wayId}
-              recommendedId={recommended?.providerId ?? null}
-            />
-          ) : null}
+        <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
+          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed journalWarning={journalWarning} /> : null}
+          <div className="grid gap-4 p-4">
+            <div className="grid gap-1">
+              <p className="pdpp-label uppercase tracking-wide">Step 2 of 2</p>
+              <h3 className="text-base font-semibold">Turn on</h3>
+            </div>
+            {inventory && recommended ? (
+              <RecommendedWay
+                checked={wayId === recommended.providerId}
+                disabled={mutationBlocked}
+                onPick={pickWay}
+                row={wayRow(recommended, capabilities, blocks)}
+              />
+            ) : null}
+            {switchNote ? <p className="text-sm text-muted-foreground" role="status">{switchNote}</p> : null}
+            {prep.status === "preparing" ? <p className="text-sm text-muted-foreground" role="status">Checking this computer…</p> : null}
+            {done?.kind === "allow" && declined !== wayId ? (
+              <AllowCard
+                action={done.action}
+                busy={mutationBlocked}
+                draft={done.draft}
+                onAllow={(action, input) => void allow(done.draft, action, input)}
+                onOther={chooseAnotherWay}
+              />
+            ) : null}
+            {done?.kind === "sign-in" && !reservations.some((item) => item.providerId === wayId) ? (
+              // A step the page cannot show as a sign-in: never a blank card.
+              <section aria-label="Turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+                <p className="text-sm" role="status">{genericErrorFor("turn-on")}</p>
+                <div className="flex flex-wrap gap-3">
+                  <Button disabled={busy} onClick={refresh} type="button">
+                    Try again
+                  </Button>
+                </div>
+              </section>
+            ) : null}
+            {done?.kind === "ready" ? (
+              <TurnOnCard
+                busy={mutationBlocked}
+                changed={changed}
+                key={done.review.id}
+                onTurnOn={(review) => void turnOn(review)}
+                review={done.review}
+                steps={done.steps}
+                wayTitle={wayTitle}
+              />
+            ) : null}
+            {wayId && wayUsage === null ? (
+              <p className="text-sm text-muted-foreground" role="status">Remote access can't start with this way on this computer.</p>
+            ) : null}
+            <Button
+              aria-expanded={showOtherWays}
+              className="justify-self-start"
+              disabled={busy}
+              onClick={() => setShowOtherWays((open) => !open)}
+              type="button"
+              variant="outline"
+            >
+              Other ways
+            </Button>
+            {showOtherWays && inventory ? (
+              <OtherWays
+                blocks={blocks}
+                capabilities={capabilities}
+                disabled={mutationBlocked}
+                inventory={inventory}
+                onPick={pickWay}
+                pickedId={wayId}
+                recommendedId={recommended?.providerId ?? null}
+              />
+            ) : null}
+          </div>
         </section>
       ) : null}
       {reservations.map((reservation) => (
@@ -1101,8 +1122,8 @@ export function RemoteAccessSetting({
           const sentence = routeSentence(route, headline);
           const now = Date.now();
           const { shown: knownFacts, unknown: unknownFacts } = splitFacts(route.facts);
-          const details = (
-            <Diagnostics label={`Details · everything ${serviceLabel} tells us about this connection`}>
+          const detailsBody = (
+            <>
               <p className="break-words">
                 Requested target:{" "}
                 {route.hostConfiguration.target.known
@@ -1125,8 +1146,9 @@ export function RemoteAccessSetting({
               </p>
               <ConsentFacts facts={knownFacts} providerId={route.providerId} />
               <UnknownFactsCount count={unknownFacts} service={serviceLabel} />
-            </Diagnostics>
+            </>
           );
+          const details = <Diagnostics label={`Details · everything ${serviceLabel} tells us about this connection`}>{detailsBody}</Diagnostics>;
           const extras = (
             <>
               {route.binding.remedy ? (
@@ -1145,20 +1167,28 @@ export function RemoteAccessSetting({
             </>
           );
           if (headline === "On" && route.cleanup.state !== "confirmed") {
+            // The way the route runs through, from the provider that created it — never the way
+            // the catalog happens to select now.
+            const routeProvider = route.providerId != null ? inventory?.providers.find((item) => item.providerId === route.providerId) : undefined;
+            const onWay = routeProvider
+              ? { title: plain(wayRow(routeProvider, capabilities, blocks).title), provider: plain(routeProvider.label) }
+              : null;
             return (
-              <div className="grid gap-3 rounded-xl border p-4" key={route.handle.id}>
-                <OnCard
-                  addressChanged={addressChanged && route.origin === onOrigin}
-                  busy={busy}
-                  now={now}
-                  onTurnOff={() => requestStop(route, false)}
-                  route={route}
-                  synthetic={state.evidenceSource === "synthetic"}
-                >
-                  {extras}
-                  {details}
-                </OnCard>
-              </div>
+              <OnCard
+                addressChanged={addressChanged && route.origin === onOrigin}
+                busy={busy}
+                key={route.handle.id}
+                now={now}
+                onTurnOff={() => requestStop(route, false)}
+                route={route}
+                synthetic={state.evidenceSource === "synthetic"}
+                way={onWay}
+              >
+                {extras}
+                <Diagnostics label="Details" note={`What we checked, and everything ${routeProvider ? plain(routeProvider.label) : serviceLabel} reports`}>
+                  {detailsBody}
+                </Diagnostics>
+              </OnCard>
             );
           }
           const cardProof = routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
