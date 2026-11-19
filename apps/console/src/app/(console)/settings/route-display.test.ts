@@ -90,6 +90,18 @@ test("a lost route, a failed re-check and an unrenewed stale proof need the owne
   assert.match(attentionSentence("recheck-failed", staleRoute, "Tunnel service"), /^We can't confirm the address still works\. Turn it on again/);
 });
 
+test("a route the host could not confirm closed needs the owner and offers Turn off, not Turning off", () => {
+  const unconfirmed: RouteDisplayInput = { ...staleRoute, cleanup: { state: "unconfirmed" } };
+  const stopping = { ...base, lifecyclePhase: "stopping" };
+  assert.equal(routeHeadline(unconfirmed, "stopping", false), "Turning off", "without the host's report the phase alone reads as under way");
+  assert.equal(routeAttention(unconfirmed, { ...stopping, cleanupUnconfirmed: true }), "cleanup-unconfirmed");
+  assert.equal(routeHeadline(unconfirmed, "stopping", false, "cleanup-unconfirmed"), "Needs your action");
+  assert.equal(routeAttention(unconfirmed, stopping), null, "a stop still under way is not attention");
+  assert.equal(routeAttention({ ...unconfirmed, cleanup: { state: "confirmed" } }, { ...stopping, cleanupUnconfirmed: true }), null);
+  assert.equal(routeAttention(unconfirmed, { ...stopping, cleanupUnconfirmed: true, acknowledged: true }), null);
+  assert.match(attentionSentence("cleanup-unconfirmed", unconfirmed, "Tunnel service"), /^We couldn't confirm your address closed\. It may still work\. Turn it off/);
+});
+
 test("an address past its end time with a proof no longer verified needs the owner; a skewed clock alone does not", () => {
   const ended = { ...staleRoute, expiresAt: { known: true as const, value: "2026-11-18T07:08:00Z" } };
   const unverified = { ...ended, verification: { ...ended.verification, status: "unverified" } };

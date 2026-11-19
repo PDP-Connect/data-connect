@@ -37,6 +37,26 @@ export type ShutdownJournal = Pick<ReachabilityOperations, "recordCleanupUnconfi
  * gets 3 s and leaves 2 s of margin.
  */
 export const REACHABILITY_SHUTDOWN_DEADLINE_MS = 3000;
+/** The part of the operation journal the restart pass reads and writes. */
+export type RestartJournal = Pick<
+  ReachabilityOperations,
+  "list" | "recordCleanupUnconfirmed" | "recordRecovered" | "requestStop"
+>;
+/**
+ * Budget for the pass that closes routes a crashed process left behind. The
+ * replacement library stops a lost owner's controller after a 20 s lease and
+ * then bounds its own removal at 30 s, so a close that arrives early can wait
+ * that long for the controller's attempt. The pass runs in the background with
+ * the start fence held, so this bounds how long a Turn on is refused, not
+ * server readiness.
+ */
+export const REACHABILITY_RESTART_RECONCILE_DEADLINE_MS = 75_000;
+export type RestartOutcome = {
+  /** Handle ids whose close this pass confirmed. */
+  confirmed: string[];
+  /** Handle ids not confirmed closed when the pass ended. The stop tombstone stays. */
+  unconfirmed: string[];
+};
 export type ShutdownOutcome = {
   /** Handle ids whose close this call confirmed. */
   confirmed: string[];
@@ -87,6 +107,11 @@ export class ReachabilityService {
   private startSettled: Promise<void> | null = null;
   private epoch = 0;
   private shutdownRun: Promise<ShutdownOutcome> | null = null;
+  private restartRun: Promise<RestartOutcome> | null = null;
+  // True from the moment the restart pass is requested until it settles.
+  private restartPending = false;
+  // Handles a previous process left that this one has not yet confirmed closed.
+  private readonly unreconciled = new Set<string>();
 
   constructor(api: EmbeddingApi, host: HostPolicy) {
     this.api = api;
@@ -131,6 +156,7 @@ export class ReachabilityService {
         stopRequested: this.lifecycle.stopTombstone,
       },
       reasons: Object.fromEntries(this.reasons),
+      reconciling: this.restartPending,
       routes: [...this.routes.values()],
       starting: this.starting,
     };
@@ -506,6 +532,7 @@ export class ReachabilityService {
       this.transition({ type: "stop" });
       const route = await this.api.closeRoute({ handle, home: this.host.query.home, mode: "remove" });
       this.routes.set(handle.id, route);
+      if (route.cleanup.state === "confirmed") this.unreconciled.delete(handle.id);
       this.transition({ type: route.cleanup.state === "confirmed" ? "cleanup-confirmed" : "cleanup-unconfirmed" });
       return route;
     }
@@ -626,6 +653,12 @@ export class ReachabilityService {
     });
     if (this.shutdownRun) {
       throw new ReachabilityError("host_supervisor_unavailable");
+    }
+    if (this.restartPending) {
+      throw new ReachabilityError("operation_in_progress");
+    }
+    if (this.unreconciled.size > 0) {
+      throw new ReachabilityError("cleanup_debt");
     }
     if (this.starting || [...this.routes.values()].some((route) => route.cleanup.state !== "confirmed")) {
       throw new ReachabilityError("configuration_in_use");
@@ -814,6 +847,7 @@ export class ReachabilityService {
     this.routes.set(id, { ...route, published: null });
     const closed = await this.api.closeRoute({ handle: route.handle, home: this.host.query.home, mode: "remove" });
     this.routes.set(id, closed);
+    if (closed.cleanup.state === "confirmed") this.unreconciled.delete(id);
     this.transition({ type: closed.cleanup.state === "confirmed" ? "cleanup-confirmed" : "cleanup-unconfirmed" });
     return closed;
   }
@@ -929,10 +963,144 @@ export class ReachabilityService {
     );
     return { confirmed: [...confirmed], unconfirmed: unconfirmed.map((route) => route.handle.id) };
   }
+  /**
+   * Closes the attached routes a crashed process left behind, within
+   * `deadlineMs`. Call once at startup, before the HTTP surface accepts a start.
+   * The start fence is held until the pass settles; the pass itself runs
+   * without blocking the caller's readiness. Idempotent.
+   *
+   * Only a journaled start with an attached, library-owned handle whose cleanup
+   * the journal never confirmed is closed, with its exact retained handle. A
+   * crashed owner's route is never adopted as the current route. External,
+   * durable and session routes are not touched. A close that is not confirmed
+   * keeps the Stop tombstone, journals cleanup unconfirmed, and leaves the
+   * handle in `unreconciled`: a Turn on is refused as `cleanup_debt` until an
+   * owner stop confirms it.
+   */
+  reconcileAfterRestart(deadlineMs: number, journal: RestartJournal): Promise<RestartOutcome> {
+    if (!this.restartRun) {
+      // Raised synchronously, so a start cannot slip in before the first await.
+      this.restartPending = true;
+      this.restartRun = this.runRestartReconcile(deadlineMs, journal).finally(() => {
+        this.restartPending = false;
+      });
+    }
+    return this.restartRun;
+  }
+  private async runRestartReconcile(deadlineMs: number, journal: RestartJournal): Promise<RestartOutcome> {
+    const ignore = () => undefined;
+    const outcome: RestartOutcome = { confirmed: [], unconfirmed: [] };
+    let pending: ReturnType<typeof restartCandidates>;
+    try {
+      pending = restartCandidates(await journal.list());
+    } catch (error) {
+      // An unreadable journal cannot name a route to close. Do not hold the fence forever.
+      console.error(`[reachability] restart reconcile could not read the journal: ${(error as Error)?.name ?? typeof error}`);
+      return outcome;
+    }
+    for (const { handle } of pending) this.unreconciled.add(handle.id);
+    if (this.shutdownRun) return { ...outcome, unconfirmed: pending.map(({ handle }) => handle.id) };
+    let expired = false;
+    let expiredWrites: Promise<unknown> = Promise.resolve();
+    const confirmedClose = async (operationId: string, handle: Handle, route: Route) => {
+      this.unreconciled.delete(handle.id);
+      this.routes.delete(handle.id);
+      await journal.recordRecovered(operationId, route).catch(ignore);
+    };
+    const attempts = pending.map(async ({ handle, operationId }) => {
+      await journal.requestStop(operationId).catch(ignore);
+      const closing = this.api.closeRoute({ handle, home: this.host.query.home, mode: "remove" });
+      // A close that returns after the deadline still settles the record if it confirms.
+      void closing
+        .then(async (route) => {
+          if (expired && route.cleanup.state === "confirmed") {
+            await expiredWrites;
+            await confirmedClose(operationId, handle, route);
+          }
+        })
+        .catch(ignore);
+      try {
+        const route = await closing;
+        if (route.cleanup.state === "confirmed") {
+          outcome.confirmed.push(handle.id);
+          await confirmedClose(operationId, handle, route);
+          return;
+        }
+        this.routes.set(handle.id, route);
+      } catch {
+        // The library refused or failed; the route may still be live.
+      }
+      outcome.unconfirmed.push(handle.id);
+      await journal.recordCleanupUnconfirmed(operationId, handle).catch(ignore);
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        expired = true;
+        resolve();
+      }, deadlineMs);
+    });
+    try {
+      await Promise.race([Promise.all(attempts.map((attempt) => attempt.catch(ignore))), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+    const settled = new Set([...outcome.confirmed, ...outcome.unconfirmed]);
+    const late = pending.filter(({ handle }) => !settled.has(handle.id));
+    expiredWrites = Promise.all(
+      late.map(({ handle, operationId }) => journal.recordCleanupUnconfirmed(operationId, handle).catch(ignore))
+    );
+    await expiredWrites;
+    outcome.unconfirmed.push(...late.map(({ handle }) => handle.id));
+    // Show the first unconfirmed route as stopping, never as the current route:
+    // the tombstone is set, so it cannot be checked or kept.
+    const shown = outcome.unconfirmed.map((id) => this.routes.get(id)).find((route) => route !== undefined);
+    if (shown && this.lifecycle.phase === "inactive") {
+      for (const event of [
+        { handle: shown.handle, type: "restore-intent" },
+        { type: "stop" },
+        { type: "cleanup-unconfirmed" },
+      ] as const) {
+        const next = reduceLifecycle(this.lifecycle, event);
+        if (next.accepted) this.lifecycle = next.state;
+      }
+    }
+    return outcome;
+  }
   closeObservers(): void {
     for (const watcher of this.watchers.values()) {
       watcher.abort();
     }
     this.watchers.clear();
   }
+}
+
+/**
+ * Journaled starts a crashed process may have left live: attached, library-owned,
+ * with a retained handle, and no record that a close confirmed. A close is
+ * confirmed when the start record settled under a Stop tombstone (shutdown and
+ * explicit reconcile record it only after a confirmed close) or an owner stop
+ * for the same handle settled without a failure.
+ */
+export function restartCandidates(records: OperationRecord[]): { handle: Handle; operationId: string }[] {
+  const ownerStopped = (handle: Handle) =>
+    records.some(
+      (record) =>
+        record.kind === "stop" &&
+        record.stage === "settled" &&
+        record.failureCode === null &&
+        record.handle?.id === handle.id &&
+        record.handle.generation === handle.generation
+    );
+  const seen = new Set<string>();
+  const found: { handle: Handle; operationId: string }[] = [];
+  for (const record of records) {
+    const { handle } = record;
+    if (record.kind !== "start" || handle?.kind !== "attached" || record.intent?.ownership !== "gozar-owned") continue;
+    if (record.stage === "settled" && record.stopTombstone && record.recovery === null) continue;
+    if (ownerStopped(handle) || seen.has(handle.id)) continue;
+    seen.add(handle.id);
+    found.push({ handle, operationId: record.operationId });
+  }
+  return found;
 }

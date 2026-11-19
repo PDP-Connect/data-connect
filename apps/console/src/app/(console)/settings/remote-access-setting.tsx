@@ -399,6 +399,11 @@ export function RemoteAccessSetting({
       now: Date.now(),
       lifecyclePhase: phaseOf(route),
       recheckUnderWay: recheckUnderWay(route),
+      cleanupUnconfirmed:
+        state.lifecycle?.handle?.id === route.handle.id &&
+        state.lifecycle.cleanup === "unconfirmed" &&
+        !(operation?.kind === "stop" && operation.stage === "applying") &&
+        cancel !== "stopping",
     });
   const headlineOf = (route: Route) =>
     routeHeadline(route, shownPhase(route), unsupportedOf(route), attentionOf(route));
@@ -1177,7 +1182,7 @@ export function RemoteAccessSetting({
                 </button>
               ) : null}
               <button disabled={busy} onClick={() => requestStop(route, false)}>
-                {route.cleanup.state === "unconfirmed" ? "Try again" : "Turn off"}
+                {attention === "cleanup-unconfirmed" ? "Turn off" : route.cleanup.state === "unconfirmed" ? "Try again" : "Turn off"}
               </button>
             </div> : null}
             {details}

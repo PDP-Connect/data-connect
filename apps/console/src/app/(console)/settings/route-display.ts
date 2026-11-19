@@ -21,7 +21,7 @@ export type RouteDisplayInput = {
 };
 
 /** Why a route needs the owner, when the server's state alone would show On or Off. */
-export type Attention = "lost" | "expired" | "recheck-failed";
+export type Attention = "lost" | "expired" | "recheck-failed" | "cleanup-unconfirmed";
 
 // The four words the owner sees: Off, Turning on, On, Needs your action
 // (plus Turning off while a stop is under way).
@@ -142,9 +142,12 @@ export function routeAttention(
     now: number;
     lifecyclePhase: string | null;
     recheckUnderWay: boolean;
+    /** The host tried to close this route and could not confirm it, and no stop is under way now. */
+    cleanupUnconfirmed?: boolean;
   }
 ): Attention | null {
   if (context.acknowledged) return null;
+  if (context.cleanupUnconfirmed && route.cleanup.state !== "confirmed") return "cleanup-unconfirmed";
   if (route.state === "lost" || context.lifecycleReason === "agent-exited") return "lost";
   if (route.cleanup.state === "confirmed") {
     // Off is only for a stop the owner asked for. A route that ended with no such stop (the tunnel
@@ -170,6 +173,9 @@ export function attentionSentence(attention: Attention, route: RouteDisplayInput
   const name = service;
   if (attention === "lost") {
     return `Your address stopped working. ${name} closed the connection. Turn it on again to get a new address, then update it wherever you pasted the old one.`;
+  }
+  if (attention === "cleanup-unconfirmed") {
+    return "We couldn't confirm your address closed. It may still work. Turn it off to try again.";
   }
   if (attention === "expired") {
     const end = expiryTime(route);

@@ -393,7 +393,10 @@ import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
 import { startDesktopReachability } from "./reachability/desktop-host.ts";
 import { ReachabilityOperations } from "./reachability/operations.ts";
-import { REACHABILITY_SHUTDOWN_DEADLINE_MS } from "./reachability/service.ts";
+import {
+  REACHABILITY_RESTART_RECONCILE_DEADLINE_MS,
+  REACHABILITY_SHUTDOWN_DEADLINE_MS,
+} from "./reachability/service.ts";
 import { ReachabilitySetups } from "./reachability/setups.ts";
 import { mountOwnerReachability, type OwnerReachabilityContext } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
@@ -9528,6 +9531,21 @@ export async function startServer(opts: ServerOpts = {}) {
     path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"),
     !!reachability?.service
   );
+  // A crash or SIGKILL leaves the last owner's route behind. Close it with its
+  // retained handle before any start is accepted. The call raises the start
+  // fence synchronously and returns at once; readiness does not wait for the
+  // close, only a Turn on does (refused until the pass settles).
+  void reachability?.service
+    ?.reconcileAfterRestart(REACHABILITY_RESTART_RECONCILE_DEADLINE_MS, reachabilityOperations)
+    .then((restart) => {
+      if (restart.confirmed.length || restart.unconfirmed.length) {
+        logger.info(
+          { confirmed: restart.confirmed.length, unconfirmed: restart.unconfirmed.length },
+          "reachability restart reconcile finished"
+        );
+      }
+    })
+    .catch(() => logger.warn("reachability restart reconcile failed"));
   const rsApp = buildRsApp({
     connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,

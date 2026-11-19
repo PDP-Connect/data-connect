@@ -17,6 +17,7 @@ test("server startup forwards the trusted reachability service to authenticated 
   const expected = { "fixture.authority": { known: true, value: false } }
   let reads = 0
   const service = {
+    reconcileAfterRestart: async () => ({ confirmed: [], unconfirmed: [] }),
     capabilities: () => {
       reads++
       return expected
