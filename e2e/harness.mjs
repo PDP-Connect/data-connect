@@ -258,7 +258,6 @@ async function waitReady(url, child, signal) {
 }
 
 const reachabilityModes = new Map([
-  ["--reachability-stream", "stream"],
   ["--reachability-setup", "setup"],
   ["--reachability", "unknown"],
 ])

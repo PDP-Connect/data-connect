@@ -11,8 +11,6 @@ import { startServer } from "../../reference-implementation/server/index.ts";
 import { projectRoute } from "../../reference-implementation/server/reachability/projection.ts";
 import { ReachabilityService } from "../../reference-implementation/server/reachability/service.ts";
 import { FixtureSecretBackend } from "../../reference-implementation/test/fixtures/reachability/secret-backend.ts";
-import { createEffectFixtures } from "./effect-fixtures.ts";
-import { createEffectFixtureHost } from "./testing-effects.mjs";
 import { requireDiskFloor } from "./disk-floor.mjs";
 import { createSetupRegistry } from "./setup-registry.mjs";
 import { createUnknownRegistry } from "./unknown-registry.mjs";
@@ -25,7 +23,7 @@ const target = new URL(process.env.PDPP_REFERENCE_ORIGIN);
 if (target.hostname !== "127.0.0.1")
 	throw new Error("Fixture target must be the owned loopback console");
 const mode = process.argv[2] ?? "unknown";
-if (!["unknown", "stream", "setup"].includes(mode))
+if (!["unknown", "setup"].includes(mode))
 	throw new Error("Unknown fixture mode");
 // The desktop app reports its autostart state to the data directory. There is no
 // desktop app here, so report the state it would, or the settings page logs a 500.
@@ -55,27 +53,14 @@ const hostCapabilities = Object.fromEntries(
 let registry =
 	mode === "unknown"
 		? await createUnknownRegistry(join(data, "reachability-registry"))
-		: mode === "setup" ? await createSetupRegistry(join(data, "reachability-registry")) : null;
-const effects =
-	mode === "stream"
-		? createEffectFixtures({ streamDelayMs: 2500, failInitialStream: true })
-		: null;
-const harness = effects
-	? await createEffectFixtureHost(
-			{ secretBackend: backend, identity, hostCapabilities },
-			effects.effects,
-		)
-	: null;
-let gozar =
-	mode === "stream"
-		? harness.gozar
-		: createGozar({
-				manifest: registry.manifest,
-				root: registry.root,
-				secretBackend: backend,
-				identity,
-				hostCapabilities,
-			});
+		: await createSetupRegistry(join(data, "reachability-registry"));
+let gozar = createGozar({
+	manifest: registry.manifest,
+	root: registry.root,
+	secretBackend: backend,
+	identity,
+	hostCapabilities,
+});
 const inventory = await gozar
 	.listProviders({ home, owner: "fixture-owner" })
 	.catch((error) => {
@@ -83,18 +68,7 @@ const inventory = await gozar
 			`Fixture inventory failed (${error.code}): ${error.message}`,
 		);
 	});
-const provider = registry
-	? inventory.providers[0]
-	: inventory.providers.find(
-			(item) =>
-				item.transport === "https" &&
-				item.configuration.inputRequirements.some((field) => field.secret) &&
-				item.prerequisites.every(
-					(item) =>
-						item.state !== "missing" ||
-						["provide-secret", "provide-value"].includes(item.remedy?.kind),
-				),
-		);
+const provider = inventory.providers[0];
 if (!provider)
 	throw new Error(
 		"No executable fixture provider matches the declared protocol requirements",
@@ -110,7 +84,7 @@ const query = {
 		payloadAccess: "allow-provider",
 		address: "any",
 		setup: "allow",
-		protocols: mode === "stream" ? ["sse"] : [],
+		protocols: [],
 	},
 };
 function makeService(currentGozar, currentQuery) {
@@ -202,55 +176,7 @@ const controls = http.createServer(async (request, response) => {
             response.end(JSON.stringify({ reloaded: true, starts: 0 }));
             return;
         }
-		if (request.url !== "/concurrent-observations") {
-			response.writeHead(404).end();
-			return;
-		}
-		const deadline = Date.now() + 8000;
-		while (effects && !effects.initialStreamSeen) {
-			if (Date.now() > deadline)
-				throw new Error("Initial stream was never reached");
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
-		const listed = await gozar.listRoutes({ home, owner: "fixture-owner" });
-		const observations = await Promise.all(
-			listed.routes.map(async (route) => {
-				const abort = new AbortController();
-				const iterator = gozar
-					.watchRoutes({ home, handle: route.handle, signal: abort.signal })
-					[Symbol.asyncIterator]();
-				const pending = { pending: true };
-				const limit = (promise) =>
-					Promise.race([
-						promise,
-						new Promise((resolve) => setTimeout(() => resolve(pending), 100)),
-					]);
-				const [status, watch] = await Promise.all([
-					limit(
-						gozar
-							.routeStatus({ home, handle: route.handle })
-							.then(projectRoute),
-					),
-					limit(
-						iterator
-							.next()
-							.then((event) =>
-								event.value ? projectRoute(event.value.route) : pending,
-							),
-					),
-				]);
-				abort.abort();
-				void iterator.return?.();
-				return { status, watch };
-			}),
-		);
-		response.setHeader("content-type", "application/json");
-		response.end(
-			JSON.stringify({
-				initialStreamSeen: effects?.initialStreamSeen,
-				observations,
-			}),
-		);
+		response.writeHead(404).end();
 	} catch {
 		response
 			.writeHead(409)
@@ -283,8 +209,6 @@ async function close() {
 	for (const route of (await gozar.listRoutes({ home, owner: "fixture-owner" }))
 		.routes)
 		await gozar.closeRoute({ home, handle: route.handle, mode: "remove" });
-	await harness?.close();
-	await effects?.close();
 	controls.close();
 	servers.asServer.closeAllConnections();
 	servers.rsServer.closeAllConnections();
