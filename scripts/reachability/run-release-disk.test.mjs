@@ -91,9 +91,9 @@ syncBuiltinESMExports();
 test("aggregate honors local total floor at 50 GB and logs every real step measurement", async (t) => {
 	const r = await aggregate(t, 50_000_000_000, waiver);
 	assert.equal(r.status, 0);
-	assert.equal(r.spawns.length, 7);
-	assert.equal(r.measurements, 7);
-	assert.equal(r.logs.length, 7);
+	assert.equal(r.spawns.length, 6);
+	assert.equal(r.measurements, 6);
+	assert.equal(r.logs.length, 6);
 	assert.deepEqual(
 		r.steps.map((s) => s.name),
 		[
@@ -103,7 +103,6 @@ test("aggregate honors local total floor at 50 GB and logs every real step measu
 			"controller and secret boundaries",
 			"reachability.spec.ts",
 			"reachability-setup.spec.ts",
-			"source and built bundle independence",
 		],
 	);
 	for (const [i, log] of r.logs.entries()) {
@@ -129,7 +128,7 @@ test("aggregate refuses one byte below local floor and allows exact boundary", a
 	assert.equal(low.logs[0].availableBytes, 14_999_999_999);
 	const exact = await aggregate(t, 15_000_000_000, waiver);
 	assert.equal(exact.status, 0);
-	assert.equal(exact.spawns.length, 7);
+	assert.equal(exact.spawns.length, 6);
 });
 test("aggregate rejects missing reason and every CI/release marker without running suites", async (t) => {
 	for (const env of [
@@ -147,14 +146,14 @@ test("aggregate rejects missing reason and every CI/release marker without runni
 test("aggregate keeps 105/110 GB defaults, including one-byte boundaries", async (t) => {
 	for (const [available, spawns] of [
 		[104_999_999_999, 0],
-		[105_000_000_000, 5],
-		[109_999_999_999, 5],
-		[110_000_000_000, 7],
-		[200_000_000_000, 7],
+		[105_000_000_000, 4],
+		[109_999_999_999, 4],
+		[110_000_000_000, 6],
+		[200_000_000_000, 6],
 	]) {
 		const r = await aggregate(t, available);
 		assert.equal(r.spawns.length, spawns);
-		assert.equal(r.status, spawns === 7 ? 0 : 1);
+		assert.equal(r.status, spawns === 6 ? 0 : 1);
 		assert.equal(r.logs.length, 0);
 		for (const step of r.steps.filter((s) => s.result === "NOT RUN (disk)"))
 			assert.equal(

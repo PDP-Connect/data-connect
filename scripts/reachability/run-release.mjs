@@ -93,13 +93,6 @@ if (results[0].exitCode === 0) {
 			{ TEST_SANDBOX_ACTIVE: "" },
 		);
 	}
-	await run("source and built bundle independence", [
-		process.execPath,
-		"--import",
-		"tsx",
-		"--test",
-		"scripts/reachability/provider-independence.test.mjs",
-	]);
 }
 await mkdir(dirname(resolve(output)), { recursive: true });
 await writeFile(

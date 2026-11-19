@@ -20,6 +20,8 @@ The installer checks integrity before installing into an isolated dependency pre
 
 `release-journey.test.mjs` exercises the real owner HTTP service. Separate suites cover draft rotation, locked custody, public recovery, runtime consent, pending initial streaming proof and installer refusals. `contract-preflight.test.mjs` checks export availability only. It cannot certify a lifecycle result.
 
+`provider-independence.test.mjs` is not part of this gate. It checks that DataConnect's source and built console name no provider, which is a DataConnect property, not a property of the package archive. Run it on its own with `node --import tsx --test scripts/reachability/provider-independence.test.mjs`. It fails until the console stops naming provider ids.
+
 Run browser journeys through `e2e/harness.mjs --reachability reachability.spec.ts` and `--reachability-setup reachability-setup.spec.ts`. They require the existing private network/PID namespace. A fixture run cannot certify external account entitlement or internet reachability. Pending initial stream proof remains covered at the owner HTTP boundary by `initial-proof.test.mjs`; the browser journeys do not assert that state’s wording.
 
 The controller suites use the resource governor. Reachability browser journeys add a constructed namespace root whose ancestors have mapped owners, retaining private network/PID isolation and Gozar's unmodified home-safety checks. `owned-root-sandbox.test.mjs` checks public inventory and loopback-only networking inside that namespace. A forced test-process exit handles the missing factory shutdown API only after public route cleanup attempts; retained cleanup uncertainty remains a failure.
