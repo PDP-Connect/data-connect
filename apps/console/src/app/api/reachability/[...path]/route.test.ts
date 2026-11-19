@@ -93,19 +93,44 @@ test("a write must come from this console's own pages, as JSON", async () => {
 });
 
 test("a write is read only after the session check, only as exact JSON, and only up to the size limit", async () => {
-  const { POST, MAX_BODY_BYTES } = await load();
+  const { POST } = await load();
+  const { MAX_BODY_BYTES } = await import("../../../(console)/settings/reachability-forward.ts");
   const fetchMock = upstream(() => data({ done: true }));
   const big = JSON.stringify({ pad: "x".repeat(MAX_BODY_BYTES) });
   try {
     signedIn = false;
-    const anonymous = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/json", body: big }));
-    assert.equal(anonymous.status, 401, "no session: refused before the body is read");
+    const unread = call("POST", "/drafts", { origin: "http://console.test", type: "application/json", body: big });
+    const anonymous = await POST(unread);
+    assert.equal(anonymous.status, 401);
+    assert.equal(unread.bodyUsed, false, "no session: the body is never read");
     signedIn = true;
     const lookalike = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/jsonp", body: "{}" }));
     assert.equal(lookalike.status, 415);
     const tooBig = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/json", body: big }));
     assert.equal(tooBig.status, 413);
     assert.equal(fetchMock.mock.callCount(), 0, "none of those reached the service");
+    let pulled = 0;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++;
+        controller.enqueue(new Uint8Array(16 * 1024));
+      },
+    });
+    const streamed = await POST(new Request("http://console.test/api/reachability/drafts", {
+      method: "POST",
+      headers: { host: "console.test", origin: "http://console.test", "content-type": "application/json" },
+      body: endless,
+      duplex: "half",
+    } as RequestInit));
+    assert.equal(streamed.status, 413, "a body with no declared length is cut off at the limit");
+    assert.ok(pulled <= MAX_BODY_BYTES / (16 * 1024) + 2, "reading stopped near the limit");
+    const broken = await POST(new Request("http://console.test/api/reachability/drafts", {
+      method: "POST",
+      headers: { host: "console.test", origin: "http://console.test", "content-type": "application/json" },
+      body: new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error("sender went away")); } }),
+      duplex: "half",
+    } as RequestInit));
+    assert.equal(broken.status, 400, "a failed read is not reported as too large");
     const withCharset = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/json; charset=utf-8", body: "{}" }));
     assert.equal(withCharset.status, 200);
   } finally {

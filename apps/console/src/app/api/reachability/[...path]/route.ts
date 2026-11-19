@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
 import { isAllowedConsoleRequestHost } from "../../../../lib/console-host.ts";
 import { readDashboardOwnerSession } from "../../../(console)/lib/owner-token.ts";
 import { publicOrigin } from "../../../(console)/lib/same-origin-route.ts";
-import { forwardReachability } from "../../../(console)/settings/reachability-forward.ts";
+import { forwardReachability, MAX_BODY_BYTES } from "../../../(console)/settings/reachability-forward.ts";
 import { publicError } from "../../../(console)/settings/reachability-errors.ts";
 
 export const dynamic = "force-dynamic";
@@ -16,9 +16,6 @@ export const runtime = "nodejs";
 
 const BASE = "/api/reachability";
 const NO_STORE = { "Cache-Control": "no-store" };
-
-/** Bodies here are small JSON objects; anything larger is refused before it is read in full. */
-export const MAX_BODY_BYTES = 64 * 1024;
 
 /**
  * A POST must come from this console's own pages: its Origin names the host the browser used.
@@ -40,23 +37,28 @@ function isJson(request: Request): boolean {
   return request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/json";
 }
 
-/** The body as text, or null once it passes MAX_BODY_BYTES. Stops reading at the limit. */
-async function boundedText(request: Request): Promise<string | null> {
+/** The body as text, or "too-large" once it passes MAX_BODY_BYTES. Stops reading at the limit. */
+async function boundedText(request: Request): Promise<string | "too-large"> {
   const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return "too-large";
   if (!request.body) return "";
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MAX_BODY_BYTES) {
-      await reader.cancel();
-      return null;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) {
+        // Best effort: the answer does not wait for the sender to stop.
+        reader.cancel().catch(() => {});
+        return "too-large";
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    reader.releaseLock();
   }
   return Buffer.concat(chunks).toString("utf8");
 }
@@ -88,8 +90,15 @@ async function handle(request: Request, post: boolean): Promise<NextResponse> {
   }
   let body: Record<string, unknown> | undefined;
   if (post) {
-    const text = await boundedText(request).catch(() => null);
-    if (text === null) return reply(413, { ok: false, ...publicError("invalid_input") });
+    let text: string;
+    try {
+      const read = await boundedText(request);
+      if (read === "too-large") return reply(413, { ok: false, ...publicError("invalid_input") });
+      text = read;
+    } catch {
+      // The body could not be read (the sender went away): not a size problem.
+      return reply(400, { ok: false, ...publicError("invalid_input") });
+    }
     try {
       const parsed: unknown = JSON.parse(text);
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");

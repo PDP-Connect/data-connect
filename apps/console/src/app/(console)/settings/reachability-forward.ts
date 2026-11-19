@@ -14,6 +14,9 @@ export type Forwarded = { status: number; result: ReachabilityResult };
 
 /** How long one request to the reference server may run. It counts from when the request is sent. */
 export const FORWARD_DEADLINE_MS = 15_000;
+
+/** Write bodies are small JSON objects; the route refuses anything larger before it is read in full. */
+export const MAX_BODY_BYTES = 64 * 1024;
 const PREFIX = "/v1/owner/reachability";
 
 export async function forwardReachability(
