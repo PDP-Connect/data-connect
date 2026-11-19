@@ -762,7 +762,7 @@ const routeDisclosures = {
     stability: "ephemeral",
   },
   cost: { kind: "free", summary: "The free tier costs nothing and needs no signup." },
-  disclosure: { links: [], revision: "disc-e68dce2053c0-facts-83b757334442", text: "Start a public HTTPS trial through the relay." },
+  disclosure: { links: [], revision: "disc-60cfdc367ce9-facts-83b757334442", text: "Start a public HTTPS trial through the relay." },
 };
 
 test("What this does renders plain sentences for a real action and a real route, never keys or revisions", () => {

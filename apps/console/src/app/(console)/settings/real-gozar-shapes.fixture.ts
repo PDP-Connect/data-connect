@@ -5,7 +5,7 @@
 // Addresses use example.com and example.test only.
 
 const trialDisclosureText =
-  "Start a public HTTPS trial through the relay for the requested lifetime (15 minutes by default). " +
+  "Start a public HTTPS trial through the relay for the requested lifetime. " +
   "This allows outbound SSH on TCP port 22 and first-use trust in the session's private known-hosts file. " +
   "The relay terminates TLS and can read payloads.";
 
@@ -24,7 +24,7 @@ export const trialConsentAction = {
     "Allow this computer to connect to relay.example.com on outbound TCP port 22 for the approved trial lifetime. " +
     "The relay terminates HTTPS and can read application payloads. No provider account is needed. " +
     "Start the route through the Gozar route approval to open the connection.",
-  disclosure: { revision: "disc-e68dce2053c0", text: trialDisclosureText, links: [] },
+  disclosure: { revision: "disc-60cfdc367ce9", text: trialDisclosureText, links: [] },
   step: {
     actor: "owner",
     verification: "host",
@@ -53,7 +53,7 @@ export const trialConsentAction = {
         kind: "instructions",
         label: "Review the public HTTPS trial",
         digest: "9102587c43e2623a09590d64789ab205ebb593dd33a5b5676c069767883be6e4",
-        disclosure: { revision: "disc-e68dce2053c0", text: trialDisclosureText, links: [] },
+        disclosure: { revision: "disc-60cfdc367ce9", text: trialDisclosureText, links: [] },
         step: { actor: "owner", verification: "host", purpose: "authorize", permission: { id: "trial-consent", label: "Review the public HTTPS trial" } },
       },
     },
@@ -61,7 +61,7 @@ export const trialConsentAction = {
       kind: "setup",
       actionId: "trial-consent",
       actionDigest: "9102587c43e2623a09590d64789ab205ebb593dd33a5b5676c069767883be6e4",
-      disclosureRevision: "disc-e68dce2053c0",
+      disclosureRevision: "disc-60cfdc367ce9",
       providerId: "localhost-run",
     },
   },
