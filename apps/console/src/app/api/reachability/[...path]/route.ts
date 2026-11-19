@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
 import { isAllowedConsoleRequestHost } from "../../../../lib/console-host.ts";
 import { readDashboardOwnerSession } from "../../../(console)/lib/owner-token.ts";
 import { publicOrigin } from "../../../(console)/lib/same-origin-route.ts";
-import { forwardReachability } from "../../../(console)/settings/reachability-forward.ts";
+import { forwardReachability, MAX_BODY_BYTES } from "../../../(console)/settings/reachability-forward.ts";
 import { publicError } from "../../../(console)/settings/reachability-errors.ts";
 
 export const dynamic = "force-dynamic";
@@ -16,9 +16,6 @@ export const runtime = "nodejs";
 
 const BASE = "/api/reachability";
 const NO_STORE = { "Cache-Control": "no-store" };
-
-/** Bodies here are small JSON objects; anything larger is refused before it is read in full. */
-export const MAX_BODY_BYTES = 64 * 1024;
 
 /**
  * A POST must come from this console's own pages: its Origin names the host the browser used.

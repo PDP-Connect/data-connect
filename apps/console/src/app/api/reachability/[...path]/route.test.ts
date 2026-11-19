@@ -93,7 +93,8 @@ test("a write must come from this console's own pages, as JSON", async () => {
 });
 
 test("a write is read only after the session check, only as exact JSON, and only up to the size limit", async () => {
-  const { POST, MAX_BODY_BYTES } = await load();
+  const { POST } = await load();
+  const { MAX_BODY_BYTES } = await import("../../../(console)/settings/reachability-forward.ts");
   const fetchMock = upstream(() => data({ done: true }));
   const big = JSON.stringify({ pad: "x".repeat(MAX_BODY_BYTES) });
   try {
