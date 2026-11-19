@@ -87,7 +87,11 @@ const isTailscale = (provider: Provider) => provider.providerId.startsWith("tail
  */
 function blockedStep(provider: Provider): Missing | null {
   if (!isTailscale(provider)) {
-    const missing = provider.prerequisites.find((item) => item.state === "denied" || item.state === "missing");
+    // A missing prerequisite with a remedy (a token or value the owner types
+    // during setup) does not block: choosing the way starts that setup.
+    const missing = provider.prerequisites.find(
+      (item) => item.state === "denied" || (item.state === "missing" && !item.remedy)
+    );
     return missing ? { text: `Needs ${plain(missing.label)} (${missing.state}).` } : null;
   }
   const local = prerequisiteState(provider, "local-setup");
@@ -134,7 +138,7 @@ function missingFor(provider: Provider, capabilities: Capabilities, blocks: Bloc
 
 /**
  * True when the way can no longer be used: the host says it is not available,
- * a prerequisite is missing or denied, or its setup ended blocked. A
+ * a prerequisite is denied or missing with no remedy, or its setup ended blocked. A
  * prerequisite the host cannot read right now (`unknown`, for example while an
  * app restarts) does not count, so a pinned way survives a short gap.
  */
@@ -148,10 +152,11 @@ export function wayUnusable(provider: Provider, capabilities: Capabilities, bloc
  * version "not-observed" (gozar embedding-state.mjs prerequisitesFor). That is the
  * same whether the daemon is stopped, signed out or signed in, so it proves
  * nothing about sign-in. Only a way the owner already set up (`setUp`) or a
- * prerequisite the host observed with a version counts.
+ * prerequisite the host observed with a version counts. Any other way counts
+ * once no prerequisite is missing, so one that still needs setup input is not.
  */
 function confirmedReady(provider: Provider, setUp: ReadonlySet<string>): boolean {
-  if (!isTailscale(provider)) return true;
+  if (!isTailscale(provider)) return !provider.prerequisites.some((item) => item.state === "missing");
   if (setUp.has(provider.providerId)) return true;
   const local = provider.prerequisites.find((item) => item.id === "local-setup");
   return local?.state === "present" && local.version.known === true;

@@ -136,6 +136,37 @@ test("Other ways has three groups, no development row, and no code in any text",
   }
 });
 
+test("a missing prerequisite the owner can supply during setup does not block the way", () => {
+  // Real 0.5.1 shape for managed Cloudflare with the connector installed: the
+  // saved credential is missing, with a remedy (the token the setup asks for).
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const remedy = { id: "token", kind: "provide-secret", label: "Tunnel token" };
+  const managed = way("cloudflare-named", {
+    availability: attached,
+    prerequisites: [prerequisite("connector-binary", "present"), { ...prerequisite("credential", "missing"), remedy }],
+  });
+  const noRemedy = way("ngrok-https-edge", { availability: attached, prerequisites: [prerequisite("binary", "missing")] });
+  const rows = otherWays(inv({ ...noTailscale, providers: [managed, noRemedy] }), caps, null).flatMap((group) => group.rows);
+  const cloudflare = rows.find((row) => row.providerId === "cloudflare-named")!;
+  assert.equal(cloudflare.usable, true);
+  assert.equal(cloudflare.missing, null);
+  const blocked = rows.find((row) => row.providerId === "ngrok-https-edge")!;
+  assert.equal(blocked.usable, false, "a missing program with no remedy still blocks");
+  assert.equal(
+    recommendedWay(inv({ ...noTailscale, providers: [managed] }), caps, {}, new Set())?.providerId,
+    "cloudflare-named",
+    "still the fallback when nothing else can run"
+  );
+});
+
+test("a way that still needs setup is not recommended over one that needs none", () => {
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const remedy = { id: "token", kind: "provide-secret", label: "Tunnel token" };
+  const managed = way("cloudflare-named", { availability: attached, prerequisites: [{ ...prerequisite("credential", "missing"), remedy }] });
+  const providers = [managed, way("own-address")];
+  assert.equal(recommendedWay(inv({ ...noTailscale, providers }), caps)?.providerId, "own-address");
+});
+
 test("a way the host cannot run says so in plain words", () => {
   const broken = way("ngrok-https-edge", { availability: { session: { reason: "usage-not-supported", state: "unsupported" } } });
   const row = otherWays(inv({ ...noTailscale, providers: [broken] }), caps, null)[0]!.rows[0]!;
