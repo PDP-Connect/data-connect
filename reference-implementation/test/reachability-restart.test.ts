@@ -979,6 +979,23 @@ test("/state answers degraded, never all-clear, when the journal listing fails o
     assert.notEqual(stalled, "hung");
     assert.equal((stalled as { data?: { journalScan: string } }).data?.journalScan, "unavailable", JSON.stringify(stalled));
     assert.equal((stalled as { data: { operationsAvailable: boolean } }).data.operationsAvailable, false);
+    // An in-memory route the service still tracks must not make the degraded
+    // answer await a per-route journal read: the bounded list is /state's only
+    // journal source, so its attribution and stop intent stay unknown.
+    const routes = (f.inner as unknown as { routes: Map<string, Route> }).routes;
+    routes.set(
+      "live-route",
+      { ...seed, handle: { id: "live-route", generation: 1, kind: "attached" }, operationId: "22222222-2222-2222-2222-222222222222" }
+    );
+    f.operations.read = () => new Promise<never>(() => {});
+    const degraded = await settleWithin(call("GET", "/state"), 2000);
+    assert.notEqual(degraded, "hung", "the degraded answer does not wait on the per-route journal read");
+    const data = (degraded as { data?: { journalScan: string; operationsAvailable: boolean; routes: Array<{ handle: { id: string }; providerId: string | null; stopRequested?: boolean }> } }).data!;
+    assert.equal(data.journalScan, "unavailable");
+    assert.equal(data.operationsAvailable, false);
+    const projected = data.routes.find((route) => route.handle.id === "live-route")!;
+    assert.equal(projected.providerId, null, "attribution stays unknown when the record is not in the bounded list");
+    assert.equal("stopRequested" in projected, false, "stop intent stays unknown without the journal list");
   } finally {
     await f.cleanup();
   }

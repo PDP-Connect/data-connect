@@ -244,9 +244,11 @@ test("state and event projections bind provider identity to the exact journaled 
       assert.deepEqual(
         response.data.routes.map((route: { approvedConsentFactsDigest: string | null }) => route.approvedConsentFactsDigest),
         ["fixture-digest", null, null, null]);
-      // State reuses its existing journal list; events deduplicate per operation ID.
+      // State reads each journal record once through its bounded list and never
+      // falls back per route, so a route missing from the list keeps unknown
+      // attribution without a journal read; events deduplicate per operation ID.
       assert.equal(counts.get(start.operationId), 1);
-      assert.equal(counts.get(missing), 1);
+      assert.equal(counts.get(missing), path === "/state" ? undefined : 1);
     }
     operations.read = async () => { throw new Error("journal read unavailable"); };
     // Events need only the guarded creator lookup, not the separate operation-list endpoint.

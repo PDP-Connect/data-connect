@@ -163,16 +163,10 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
             record.handle?.id === route.handle.id &&
             record.handle.generation === route.handle.generation
         );
-  async function projectOwnedRoute(route: Route, records: Records = new Map(), stopped?: boolean) {
+  async function projectOwnedRoute(route: Route, records: Records = new Map(), stopped?: boolean, readMissing = true) {
     let journaled: { providerId: string | null; approvedConsentFactsDigest: string | null } | null = null;
-    if (route.operationId) {
-      let pending = records.get(route.operationId);
-      if (!pending) {
-        pending = Promise.resolve().then(() => ctx.operations.read(route.operationId!)).catch(() => null);
-        records.set(route.operationId, pending);
-      }
-      const record = await pending;
-      // The one identity check: only the start record that created this exact handle speaks for the route.
+    // The one identity check: only the start record that created this exact handle speaks for the route.
+    const attributed = (record: OperationRecord | null) => {
       if (record?.kind === "start" && record.operationId === route.operationId &&
           record.handle?.kind === route.handle.kind && record.handle.id === route.handle.id &&
           record.handle.generation === route.handle.generation) {
@@ -182,12 +176,25 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
           approvedConsentFactsDigest: nonEmpty(record.intent?.consentFactsDigest),
         };
       }
+    };
+    if (route.operationId) {
+      const pending = records.get(route.operationId);
+      if (pending) {
+        attributed(await pending);
+      } else if (readMissing) {
+        const started = Promise.resolve().then(() => ctx.operations.read(route.operationId!)).catch(() => null);
+        records.set(route.operationId, started);
+        attributed(await started);
+      }
+      // Without readMissing the supplied list is the only journal source:
+      // attribution and stop intent stay unknown rather than await a journal
+      // read a degraded /state must not depend on.
     }
     return { ...projectRoute(route, journaled), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
   }
-  function projectRoutes(routes: Route[], known?: OperationRecord[]) {
+  function projectRoutes(routes: Route[], known?: OperationRecord[], readMissing = true) {
     const records: Records = new Map((known ?? []).map((record) => [record.operationId, Promise.resolve(record)]));
-    return Promise.all(routes.map((route) => projectOwnedRoute(route, records, ownerStopped(route, known))));
+    return Promise.all(routes.map((route) => projectOwnedRoute(route, records, ownerStopped(route, known), readMissing)));
   }
   const guarded = [ctx.requireToken, ctx.requireOwner];
   function get(path: string, run: (request: Request) => Promise<unknown>) {
@@ -473,7 +480,10 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       operationsAvailable: listed !== null,
       operations,
       reasons: state.reasons,
-      routes: await projectRoutes(state.routes, listed ?? undefined),
+      // The bounded list is /state's only journal source: on the degraded path,
+      // and for a route whose record it does not carry, attribution and stop
+      // intent stay unknown instead of awaiting an unbounded journal read.
+      routes: await projectRoutes(state.routes, listed ?? undefined, false),
       passwordSet: ctx.passwordSet ? await ctx.passwordSet() : true,
       services: await ctx.setups.list(),
       starting: state.starting,
