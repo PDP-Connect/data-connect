@@ -324,9 +324,13 @@ export async function runAction(
 
 // ---------- what the Turn on button shows ----------
 
+/** The reading each short fact line gets, and so the icon it carries. */
+export type FactKind = "access" | "traffic" | "deal";
+export type FactLine = { kind: FactKind; text: string };
+
 /** One short line per material fact, all read from the review being shown. */
 export function disclosureLines(candidate: Candidate): string[] {
-  return formatDisclosures(candidate).lines;
+  return formatDisclosures(candidate).lines.map((line) => line.text);
 }
 
 const isDisclosureRecord = (value: unknown): value is Record<string, unknown> =>
@@ -344,12 +348,14 @@ const listOf = (item: (value: unknown) => boolean) => (value: unknown): value is
  * or identified as metadata. The unclassified remainder is still available to the generic text walker.
  * Invalid known values open Details even if they happen to look like machine words.
  */
-export function formatDisclosures(candidate: Candidate): { lines: string[]; remaining: unknown; unread: boolean } {
+export function formatDisclosures(candidate: Candidate): { lines: FactLine[]; remaining: unknown; unread: boolean } {
   const consent = candidate.consent;
   const original = consent?.disclosures;
   const rest: Record<string, unknown> = isDisclosureRecord(original) ? { ...original } : {};
   let unread = original != null && !isDisclosureRecord(original);
-  const lines = ["People who open the address must sign in with your password. Apps also need your permission."];
+  const lines: FactLine[] = [
+    { kind: "access", text: "People who open the address must sign in with your password. Apps also need your permission." },
+  ];
 
   function take<T>(parent: Record<string, unknown>, key: string, valid: (value: unknown) => value is T): T | undefined {
     if (!Object.hasOwn(parent, key)) return;
@@ -373,9 +379,9 @@ export function formatDisclosures(candidate: Candidate): { lines: string[]; rema
     if (Object.keys(fields).length === 0) delete rest[key];
     else rest[key] = fields;
   }
-  function wordEnum(parent: Record<string, unknown>, key: string, words: Record<string, string>) {
+  function wordEnum(parent: Record<string, unknown>, key: string, words: Record<string, string>, kind: FactKind) {
     const value = take(parent, key, oneOf(...Object.keys(words)));
-    if (value !== undefined && words[value]) lines.push(words[value]);
+    if (value !== undefined && words[value]) lines.push({ kind, text: words[value] });
   }
 
   wordEnum(rest, "reach", {
@@ -384,14 +390,14 @@ export function formatDisclosures(candidate: Candidate): { lines: string[]; rema
     lan: "Only people on your local network can reach the sign-in page.",
     "this-device": "Only this device can reach the sign-in page.",
     unknown: "We can't tell who can reach the sign-in page.",
-  });
+  }, "access");
   wordEnum(rest, "transport", {
     http: "This connection uses unencrypted HTTP. Traffic may be readable in transit.",
     tcp: "This connection uses TCP without transport encryption.",
     // Encrypted transports are the expected default and need no words.
     https: "",
     tls: "",
-  });
+  }, "traffic");
   const service = candidate.display.label;
   let payloadReading = `We can't tell whether ${service} can read what passes through.`;
   section("traffic", (traffic) => {
@@ -403,16 +409,16 @@ export function formatDisclosures(candidate: Candidate): { lines: string[]; rema
       endpoint: "",
       provider: "The secure connection ends at the service, not at your device.",
       unknown: "We can't tell where the secure connection ends.",
-    });
+    }, "traffic");
     const readers = take(traffic, "readers", listOf(isText));
     // Named here, above the button: Details sits below it unless something is unreadable.
-    if (readers?.length) lines.push(`These can read your traffic: ${readers.join(", ")}.`);
+    if (readers?.length) lines.push({ kind: "traffic", text: `These can read your traffic: ${readers.join(", ")}.` });
     const metadata = take(traffic, "metadataVisibleTo", listOf(isText));
-    if (metadata?.length) lines.push(`These can see when and how much you connect: ${metadata.join(", ")}.`);
+    if (metadata?.length) lines.push({ kind: "traffic", text: `These can see when and how much you connect: ${metadata.join(", ")}.` });
     // Reference to supporting evidence, not a statement about the connection.
     take(traffic, "evidenceRef", (v): v is string | null => v === null || typeof v === "string");
   });
-  lines.push(payloadReading);
+  lines.push({ kind: "traffic", text: payloadReading });
 
   let price = "We can't tell what this costs.";
   section("cost", (cost) => {
@@ -433,24 +439,26 @@ export function formatDisclosures(candidate: Candidate): { lines: string[]; rema
     }
     // Leave the cost summary to the walker: it can include terms not covered by the amount.
   });
-  lines.push(price);
+  lines.push({ kind: "deal", text: price });
   section("address", (address) => {
     wordEnum(address, "stability", {
       stable: "The address stays the same.",
       ephemeral: "The address changes each time.",
       unknown: "We can't tell whether the address stays the same.",
-    });
+    }, "deal");
     // Describes how the address is allocated; reach, stability and the actual address are shown separately.
     take(address, "scope", (v): v is string => typeof v === "string");
   });
 
   const usage = consent?.scope?.query.usage?.kind;
-  lines.push(
-    usage === "session" ? "Turns off by itself. The time shows once it's on."
+  lines.push({
+    kind: "deal",
+    text:
+      usage === "session" ? "Turns off by itself. The time shows once it's on."
       : usage === "durable" ? "Stays on until you turn it off."
       : usage === "attached" ? "Stays on while DataConnect runs."
-      : "We can't tell how long this lasts."
-  );
+      : "We can't tell how long this lasts.",
+  });
   // Supported modes are catalog metadata; the usage above is the one being approved.
   take(rest, "lifetimes", listOf(oneOf("session", "attached", "durable")));
   // Lifecycle implementation and ownership are not reach, privacy, or the approved usage.

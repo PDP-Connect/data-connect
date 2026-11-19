@@ -150,7 +150,7 @@ async function withScreen<T>(
     // A test that opens a second screen keeps the clock it already has.
   }
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
-  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
   const { RemoteAccessSetting } = await import("./remote-access-setting.tsx");
   const container = dom.window.document.querySelector("#root")!;
   const root = createRoot(container);
@@ -204,9 +204,11 @@ test("On shows the address, Copy, the check age, the server's end time and Turn 
   const route = routeAt({ expiresAt: T0 + 5 * 60_000 + 3_600_000 });
   await withScreen(host({ "/state": onState(route) }), async ({ container, text }) => {
     const visible = text();
-    assert.match(visible, /^Remote access/);
+    assert.ok(container.querySelector('section[aria-label="Remote access"]'), "the card is the page's Remote access section");
     assert.match(visible, /On/);
-    assert.match(visible, /Your address: https:\/\/one\.example\.invalid/);
+    // The address sits in a copyable field with its own label.
+    assert.match(visible, /Your address/);
+    assert.ok(visible.includes("https://one.example.invalid"), visible);
     assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Copy address"));
     assert.match(visible, /Works from the internet · checked just now/);
     assert.ok(visible.includes(`Turns off at ${formatLocalTime(T0 + 5 * 60_000 + 3_600_000)}`), visible);
@@ -611,7 +613,8 @@ const ADDRESS_CHANGED_NOTICE = /Your address changed\. Update it wherever you pa
 test("an On card reports a changed address from polling without any action", async (t) => {
   let route = routeAt();
   await withScreen(host({ "/state": () => onState(route) }), async ({ text, tick, container, calls }) => {
-    assert.match(text(), /Your address: https:\/\/one\.example\.invalid/);
+    assert.match(text(), /Your address/);
+    assert.ok(text().includes("https://one.example.invalid"));
     assert.doesNotMatch(text(), ADDRESS_CHANGED_NOTICE);
     await tick(3_000);
     assert.doesNotMatch(text(), ADDRESS_CHANGED_NOTICE, "unchanged addresses do not show a change notice");
@@ -620,7 +623,7 @@ test("an On card reports a changed address from polling without any action", asy
     route = { ...routeAt({ origin }), published: origin };
     await tick(3_000);
     assert.ok(container.querySelector('section[aria-label="On"]'));
-    assert.match(text(), /Your address: https:\/\/two\.example\.invalid/);
+    assert.ok(text().includes("https://two.example.invalid"));
     assert.match(text(), ADDRESS_CHANGED_NOTICE);
 
     await tick(3_000);
@@ -657,7 +660,7 @@ test("Turn on again turns off, turns on with the facts already approved, and say
   await withScreen(handler, async ({ calls, press, tick, text }) => {
     await press(/^Turn on remote access$/);
     await tick(3_000);
-    assert.match(text(), /Your address: https:\/\/one\.example\.invalid/);
+    assert.ok(text().includes("https://one.example.invalid"));
     assert.doesNotMatch(text(), /Your address changed/);
     stage = "lost";
     await tick(3_000);
@@ -669,11 +672,11 @@ test("Turn on again turns off, turns on with the facts already approved, and say
     assert.equal(approvals[1]!.body?.consentFactsDigest, "digest-1", "on the facts the owner already approved");
     assert.ok(calls.some((call) => call.url === "/routes/route-1/stop"));
     await tick(3_000);
-    assert.match(text(), /Your address: https:\/\/two\.example\.invalid/);
+    assert.ok(text().includes("https://two.example.invalid"));
     assert.match(text(), /Your address changed\. Update it wherever you pasted the old one, like ChatGPT\./);
     const copy = [...document.querySelectorAll("button")].find((node) => node.textContent === "Copy address");
     assert.ok(copy, "Copy is offered for the new address");
-    assert.doesNotMatch(text(), /Your address: https:\/\/one/, "the replaced route is not a second card");
+    assert.doesNotMatch(text(), /https:\/\/one\.example\.invalid/, "the replaced route is not a second card");
   }, t);
 });
 
@@ -712,7 +715,7 @@ test("Turn on again reaches On in one click when this page never saw the owner a
     const approvals = calls.filter((call) => call.url === "/operations");
     assert.equal(approvals.length, 1, "the turn-on request is sent exactly once, with no second click");
     assert.equal(approvals[0]!.body?.consentFactsDigest, "digest-1", "on the facts the host recorded as approved");
-    assert.match(text(), /Your address: https:\/\/two\.example\.invalid/);
+    assert.ok(text().includes("https://two.example.invalid"));
     assert.doesNotMatch(text(), /Turn on remote access/, "the card does not fall back to the chooser");
   }, t);
 });

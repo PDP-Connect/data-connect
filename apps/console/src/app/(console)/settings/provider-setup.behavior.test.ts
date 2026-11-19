@@ -17,6 +17,10 @@ test("only completed setup enables route review, including when instructions are
     window: dom.window,
     document: dom.window.document,
     IS_REACT_ACT_ENVIRONMENT: true,
+    // The shared Button reads these as globals when it mounts.
+    Element: dom.window.Element,
+    HTMLElement: dom.window.HTMLElement,
+    HTMLButtonElement: dom.window.HTMLButtonElement,
   })
   const container = dom.window.document.querySelector("#root")!
   const root = createRoot(container)

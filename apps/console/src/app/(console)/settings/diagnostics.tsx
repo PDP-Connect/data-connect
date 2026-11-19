@@ -5,6 +5,7 @@
 // Details block that holds host internals. Everything inside `Diagnostics`
 // may show codes and flags; nothing outside it may.
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { Button } from "@/components/ui/button.tsx";
 import { formatLocalTime } from "./plain-text.ts";
 import { type ButtonKind, recoveryFor } from "./failure-recovery.ts";
 import type { requestReachability } from "./reachability-actions.ts";
@@ -69,8 +70,8 @@ export function diagnosticsText(error: DisplayError, appVersion?: string): strin
 
 export function Diagnostics({ children, label = "Details" }: { children: ReactNode; label?: string }) {
   return (
-    <details className="pdpp-caption grid gap-2" data-diagnostics="">
-      <summary className="cursor-pointer">{label}</summary>
+    <details className="grid gap-2" data-diagnostics="">
+      <summary className="cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline">{label}</summary>
       <div className="grid gap-2">{children}</div>
     </details>
   );
@@ -79,21 +80,22 @@ export function Diagnostics({ children, label = "Details" }: { children: ReactNo
 function CopyButton({ label, text }: { label: string; text: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button
+    <Button
       onClick={() => {
         void navigator.clipboard?.writeText(text).then(() => setCopied(true));
       }}
       type="button"
+      variant="outline"
     >
       {copied ? "Copied" : label}
-    </button>
+    </Button>
   );
 }
 
 type PathReport = { paths: { path: string; fixable: boolean }[]; command: string | null };
 
-// A folder Gozar refuses because others can write to it. The host repairs the
-// ones inside DataConnect's own directory; for any other it shows the command.
+// A folder the service refuses because others can write to it. The host repairs
+// the ones inside DataConnect's own directory; for any other it shows the command.
 function StatePathsFix({ recover }: { recover: Recover }) {
   const [report, setReport] = useState<PathReport | null>(null);
   const [busy, setBusy] = useState(false);
@@ -128,20 +130,20 @@ function StatePathsFix({ recover }: { recover: Recover }) {
   return (
     <div className="grid gap-2">
       {fixable ? (
-        <button disabled={busy} onClick={() => void fix()} type="button">
+        <Button disabled={busy} onClick={() => void fix()} type="button">
           Fix permissions
-        </button>
+        </Button>
       ) : null}
       {report?.command ? (
         <>
           <p className="pdpp-caption">{fixable ? "Others need a command from you. Run it, then try again:" : "Run this command, then try again:"}</p>
-          <code className="break-all">{report.command}</code>
+          <code className="rounded-lg border bg-muted/40 px-3 py-2 font-mono text-sm break-all">{report.command}</code>
           <div className="flex flex-wrap gap-3">
             <CopyButton label="Copy command" text={report.command} />
             {fixable ? null : (
-              <button onClick={recover.onRefresh} type="button">
+              <Button onClick={recover.onRefresh} type="button" variant="outline">
                 Try again
-              </button>
+              </Button>
             )}
           </div>
         </>
@@ -160,23 +162,29 @@ export function ErrorNotice({ error, action = "turn-on" }: { error: DisplayError
   const text = diagnosticsText(error, appVersion);
   const recovery = recoveryFor(error.code, action);
   const copyOutside = recovery.buttons.some((button) => button.kind === "copy-diagnostics");
+  const actions = recovery.buttons.filter((button) => button.kind !== "copy-diagnostics");
   return (
-    <div className="grid gap-2" data-status={recovery.status} role="alert">
-      {recovery.status === "needs-action" ? <p className="pdpp-label">Needs your action</p> : null}
-      <p className="pdpp-caption text-destructive">{error.message}</p>
+    <div className="grid gap-2 rounded-xl border border-destructive/40 bg-destructive/5 p-4" data-status={recovery.status} role="alert">
+      {recovery.status === "needs-action" ? (
+        <p className="flex items-center gap-2 text-sm font-medium">
+          <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-amber-500 ring-4 ring-amber-500/15" />
+          Needs your action
+        </p>
+      ) : null}
+      <p className="text-sm text-destructive">{error.message}</p>
       {recover && recovery.buttons.some((button) => button.kind === "fix-permissions") ? <StatePathsFix recover={recover} /> : null}
       <div className="flex flex-wrap gap-3">
-        {recovery.buttons.map((button) => {
-          if (button.kind === "copy-diagnostics") return <CopyButton key={button.kind} label={button.label} text={text} />;
+        {copyOutside ? <CopyButton label="Copy diagnostics" text={text} /> : null}
+        {actions.map((button, index) => {
           const run = recover ? handlerFor(button.kind, recover) : null;
           return run ? (
-            <button key={button.kind} onClick={run} type="button">
+            <Button key={button.kind} onClick={run} type="button" variant={index === 0 ? "default" : "outline"}>
               {button.label}
-            </button>
+            </Button>
           ) : null;
         })}
       </div>
-      <Diagnostics>
+      <Diagnostics label={copyOutside ? "Details for support" : "Details"}>
         <pre className="whitespace-pre-wrap break-words">{text}</pre>
         {copyOutside ? null : <CopyButton label="Copy diagnostics" text={text} />}
       </Diagnostics>

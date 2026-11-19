@@ -2,10 +2,19 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { useState } from "react";
+import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import { ApprovalDisclosure, ConsentDisclosures, ConsentFacts, PlainDisclosure, readDisclosure, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
-import { type Action, type Draft, formatDisclosures, effectLines, type Review } from "./prepare-remote-access.ts";
+import { type Action, type Draft, type FactKind, formatDisclosures, effectLines, type Review } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
+
+// The icon each short fact line carries, as in the approved mockups: who must
+// sign in, who can read traffic, and what it costs or how long it lasts.
+const factIcons: Record<FactKind, string> = {
+  access: "🔒",
+  traffic: "👁",
+  deal: "⏱",
+};
 
 /**
  * The review's disclosure lines, a Details list, and the one button. The click
@@ -37,57 +46,72 @@ export function TurnOnCard({
     steps.every((step) => step.consent?.facts !== undefined && step.consent.disclosures != null);
   const { shown, unknown } = splitFacts(consent?.facts ?? []);
   const { lines: routeLines, remaining, unread } = formatDisclosures(candidate);
-  const lines = [...routeLines, ...steps.map((step) => step.disclosure.text), ...steps.map((step) => step.label)];
+  const lines = [...routeLines.map((line) => line.text), ...steps.map((step) => step.disclosure.text), ...steps.map((step) => step.label)];
   const bound = [remaining, ...steps.map((step) => step.consent?.disclosures)];
   // An unreadable shape opens Details: the owner is never asked to approve text that is hidden.
-  const readable = readDisclosure(bound);
+  const readable = readDisclosure(bound, candidate.providerId);
   const detailsOpen = readable.unreadable || unread;
-  // Unreadable disclosures sit above the button, so the raw values are read before the approval.
+  // Everything the service reports that the short lines do not carry, one click away.
   const details = complete ? (
-    <details open={detailsOpen}>
-      <summary>Details</summary>
-      <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
-      {consent.scope?.query.expectedOrigin ? (
-        <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
-      ) : null}
-      <ConsentDisclosures value={consent.disclosures} />
-      <ConsentFacts facts={shown} providerId={candidate.providerId} />
-      <UnknownFactsCount count={unknown} service={candidate.display.label} />
-      {steps.map((step) => (
-        <div className="grid gap-2" key={step.id}>
-          <h4 className="pdpp-label">{plain(step.label)}</h4>
-          {step.instructions ? <p className="pdpp-caption break-words">{step.instructions}</p> : null}
-          <ConsentDisclosures value={step.consent?.disclosures} />
-          <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} providerId={candidate.providerId} />
-        </div>
-      ))}
+    <details className="grid gap-2" open={detailsOpen}>
+      <summary className="cursor-pointer text-sm text-muted-foreground">
+        Details · everything {plain(candidate.display.label)} tells us about this connection
+      </summary>
+      <div className="grid gap-3">
+        <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
+        {consent.scope?.query.expectedOrigin ? (
+          <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
+        ) : null}
+        <PlainDisclosure value={bound} except={lines} providerId={candidate.providerId} />
+        <ConsentDisclosures value={consent.disclosures} providerId={candidate.providerId} />
+        <ConsentFacts facts={shown} providerId={candidate.providerId} />
+        <UnknownFactsCount count={unknown} service={candidate.display.label} />
+        {steps.map((step) => (
+          <div className="grid gap-2" key={step.id}>
+            <h4 className="pdpp-label">{plain(step.label)}</h4>
+            {step.instructions ? <p className="pdpp-caption break-words">{step.instructions}</p> : null}
+            <ConsentDisclosures value={step.consent?.disclosures} providerId={candidate.providerId} />
+            <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} providerId={candidate.providerId} />
+          </div>
+        ))}
+      </div>
     </details>
   ) : null;
   return (
     <section aria-label="Turn on" className="grid gap-4">
       {changed ? (
-        <p role="status">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm" role="status">
           Details of this connection changed: {changed.length > 0 ? changed.map((label) => plain(label)).join(", ") : "see Details"}.
         </p>
       ) : null}
       {complete ? (
         <ul className="grid gap-2">
           {routeLines.map((line) => (
-            <li key={line}>{line}</li>
+            <li className="flex items-start gap-2.5 text-sm" key={line.text}>
+              <span aria-hidden="true" className="w-4 flex-none text-center text-muted-foreground">
+                {factIcons[line.kind]}
+              </span>
+              <span>{line.text}</span>
+            </li>
           ))}
           {steps.map((step) => (
-            <li key={step.id}>{plain(step.disclosure.text)}</li>
+            <li className="grid gap-1" key={step.id}>
+              <span className="text-sm font-medium">{plain(step.label)}</span>
+              <span className="text-sm text-muted-foreground">{step.disclosure.text}</span>
+            </li>
           ))}
         </ul>
       ) : (
-        <p role="status">We couldn't load this service's details. Try again.</p>
+        <p className="text-sm" role="status">
+          We couldn't load this service's details. Try again.
+        </p>
       )}
-      {complete ? <PlainDisclosure value={bound} except={lines} /> : null}
-      {detailsOpen ? details : null}
-      <button disabled={busy || !complete} onClick={() => onTurnOn(review)} type="button">
-        Turn on remote access
-      </button>
-      {detailsOpen ? null : details}
+      <div className="flex flex-wrap gap-3">
+        <Button disabled={busy || !complete} onClick={() => onTurnOn(review)} type="button">
+          Turn on remote access
+        </Button>
+      </div>
+      {details}
     </section>
   );
 }
@@ -110,17 +134,19 @@ export function AllowCard({
   const field = draft.configuration.inputRequirements.find((item) => item.actionId === action.id);
   const complete = action.consent?.facts !== undefined && action.consent.disclosures != null;
   return (
-    <section aria-label="Allow this step" className="grid gap-3">
+    <section aria-label="Allow this step" className="grid gap-3 rounded-xl border p-4">
       <h3 className="pdpp-label">{plain(action.label)}</h3>
       <ul className="grid gap-1">
         {effectLines(action).map((line) => (
-          <li key={line}>{plain(line)}</li>
+          <li className="text-sm" key={line}>
+            {plain(line)}
+          </li>
         ))}
       </ul>
       {action.consent && complete ? <ApprovalDisclosure actionDisclosure={action.disclosure} consent={action.consent} shown={[action.label, ...effectLines(action)]} /> : null}
       {field ? (
         <label className="grid gap-2">
-          <span>{plain(field.label)}</span>
+          <span className="text-sm">{plain(field.label)}</span>
           <Input
             autoComplete="off"
             onChange={(event) => setValue(event.target.value)}
@@ -131,9 +157,13 @@ export function AllowCard({
           {field.help ? <span className="pdpp-caption">{field.help}</span> : null}
         </label>
       ) : null}
-      {complete ? null : <p role="status">We couldn't load this service's details. Try again.</p>}
+      {complete ? null : (
+        <p className="text-sm" role="status">
+          We couldn't load this service's details. Try again.
+        </p>
+      )}
       <div className="flex flex-wrap gap-3">
-        <button
+        <Button
           disabled={busy || !complete || (field !== undefined && value === "")}
           onClick={() => {
             onAllow(action, field ? { [field.secret ? "secret" : "value"]: value } : {});
@@ -142,10 +172,10 @@ export function AllowCard({
           type="button"
         >
           Allow
-        </button>
-        <button disabled={busy} onClick={onOther} type="button">
+        </Button>
+        <Button disabled={busy} onClick={onOther} type="button" variant="outline">
           Choose another way
-        </button>
+        </Button>
       </div>
     </section>
   );
@@ -171,22 +201,35 @@ export function TurningOnChecklist({
   onCancel: () => void;
 }) {
   return (
-    <section aria-label="Turning on" className="grid gap-3">
-      <p role="status">Turning on · This usually takes a few seconds.</p>
-      <ol className="grid gap-1">
+    <section aria-label="Turning on" className="grid gap-3 rounded-xl border p-4">
+      <p className="flex items-center gap-2 text-sm font-medium" role="status">
+        <span aria-hidden="true" className="size-2.5 flex-none animate-pulse rounded-full bg-blue-500" />
+        Turning on · This usually takes a few seconds.
+      </p>
+      <ol className="grid gap-2.5">
         {steps.map((label, index) => {
           const text = index === 1 ? `${label} ${plain(service)}…` : label;
           const mark = index < step ? "✓" : index === step ? "◌" : "○";
           return (
-            <li aria-current={index === step ? "step" : undefined} key={label}>
-              {mark} {text}
+            <li aria-current={index === step ? "step" : undefined} className="flex items-center gap-2.5 text-sm" key={label}>
+              <span
+                aria-hidden="true"
+                className={`flex size-5 flex-none items-center justify-center rounded-full text-xs ${
+                  index < step ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : index === step ? "text-blue-500" : "text-muted-foreground"
+                }`}
+              >
+                {mark}
+              </span>
+              {text}
             </li>
           );
         })}
       </ol>
-      <button disabled={busy} onClick={onCancel} type="button">
-        Cancel
-      </button>
+      <div className="flex flex-wrap gap-3">
+        <Button disabled={busy} onClick={onCancel} type="button" variant="outline">
+          Cancel
+        </Button>
+      </div>
     </section>
   );
 }

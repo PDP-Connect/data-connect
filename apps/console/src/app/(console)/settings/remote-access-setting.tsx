@@ -8,6 +8,8 @@ import type {
   projectRuntimeReview,
 } from "pdpp-reference-implementation/reachability-projection";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button.tsx";
+import { Input } from "@/components/ui/input.tsx";
 import { migrateLegacySetupReservations } from "../../../lib/legacy-setup-reservations.ts";
 import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
@@ -858,15 +860,13 @@ export function RemoteAccessSetting({
   const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
     <DiagnosticsContext.Provider value={appVersion === undefined ? {} : { appVersion }}>
-    <section aria-label="Remote access" className="grid gap-6">
-      <div>
-        <h2 className="pdpp-heading">Remote access</h2>
-      </div>
+    {/* The page's Section already names this card; no second heading here. */}
+    <section aria-label="Remote access" className="grid gap-4">
       {confirmStop ? (
-        <div aria-label="Turn off remote access" aria-modal="true" className="grid gap-3 rounded-lg border p-4" role="alertdialog">
-          <p>You're using this address now. Turning it off will close this page.</p>
+        <div aria-label="Turn off remote access" aria-modal="true" className="grid gap-3 rounded-xl border p-4" role="alertdialog">
+          <p className="text-sm font-medium">You're using this address now. Turning it off will close this page.</p>
           <div className="flex flex-wrap gap-3">
-            <button
+            <Button
               onClick={() => {
                 const { route, again } = confirmStop;
                 setConfirmStop(null);
@@ -875,43 +875,48 @@ export function RemoteAccessSetting({
               type="button"
             >
               Turn off
-            </button>
-            <button onClick={() => setConfirmStop(null)} type="button">
+            </Button>
+            <Button onClick={() => setConfirmStop(null)} type="button" variant="outline">
               Cancel
-            </button>
+            </Button>
           </div>
         </div>
       ) : null}
-      {closingPage ? <p role="status">Turning off… this page will stop working in a moment.</p> : null}
+      {closingPage ? <p className="text-sm" role="status">Turning off… this page will stop working in a moment.</p> : null}
       {passwordMissing ? (
-        <div className="grid gap-2">
+        <div className="grid gap-2 rounded-xl border p-4">
           <h3 className="pdpp-label">Step 1: Set a password</h3>
-          <p>
+          <p className="max-w-prose text-sm">
             Once remote access is on, anyone with your address can reach the sign-in page. Your password is the only
             thing stopping them, so choose one first.
           </p>
-          <button type="button" disabled={busy || stale} onClick={() => void setPassword()}>
-            Set password
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <Button disabled={busy || stale} onClick={() => void setPassword()} type="button">
+              Set password
+            </Button>
+          </div>
         </div>
       ) : returnedFromPassword ? (
-        <p role="status">Password saved ✓ Step 2: turn on.</p>
+        <p className="text-sm" role="status">Password saved ✓ Step 2: turn on.</p>
       ) : null}
       <RecoveryContext.Provider value={recover}>
         {error ? <ErrorNotice error={error} /> : null}
         {prepError ? <ErrorNotice error={prepError} /> : null}
       </RecoveryContext.Provider>
-      {stale ? <p role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
-      {hostReasonShown && !error ? <p role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
+      {stale ? <p className="text-sm text-muted-foreground" role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
+      {hostReasonShown && !error ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
       {state.lifecycle?.cleanup === "unconfirmed" ? (
-        <p role="status">{CLEANUP_UNCONFIRMED}</p>
+        <p className="text-sm text-muted-foreground" role="status">{CLEANUP_UNCONFIRMED}</p>
       ) : null}
       {inventory ? null : (
-        <p role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
+        <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
-      {journalWarning ? <p role="status">{journalWarning}</p> : null}
+      {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
       {idle && visibleRoutes.length === 0 && !operation ? (
-        <p role="status">{journalWarning ? "Off" : "Off · Only this computer can open DataConnect."}</p>
+        <p className="flex items-center gap-2 text-sm font-medium" role="status">
+          <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-muted-foreground/50" />
+          {journalWarning ? "Off" : "Off · Only this computer can open DataConnect."}
+        </p>
       ) : null}
       {idle && !passwordMissing ? (
         <section aria-label="Turn on remote access" className="grid gap-4">
@@ -924,8 +929,8 @@ export function RemoteAccessSetting({
               row={wayRow(recommended, capabilities, blocks)}
             />
           ) : null}
-          {switchNote ? <p role="status">{switchNote}</p> : null}
-          {prep.status === "preparing" ? <p role="status">Checking this computer…</p> : null}
+          {switchNote ? <p className="text-sm text-muted-foreground" role="status">{switchNote}</p> : null}
+          {prep.status === "preparing" ? <p className="text-sm text-muted-foreground" role="status">Checking this computer…</p> : null}
           {done?.kind === "allow" && declined !== wayId ? (
             <AllowCard
               action={done.action}
@@ -937,11 +942,13 @@ export function RemoteAccessSetting({
           ) : null}
           {done?.kind === "sign-in" && !reservations.some((item) => item.providerId === wayId) ? (
             // A step the page cannot show as a sign-in: never a blank card.
-            <section aria-label="Turn on" className="grid gap-3">
-              <p role="status">{genericErrorFor("turn-on")}</p>
-              <button disabled={busy} onClick={refresh} type="button">
-                Try again
-              </button>
+            <section aria-label="Turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+              <p className="text-sm" role="status">{genericErrorFor("turn-on")}</p>
+              <div className="flex flex-wrap gap-3">
+                <Button disabled={busy} onClick={refresh} type="button">
+                  Try again
+                </Button>
+              </div>
             </section>
           ) : null}
           {done?.kind === "ready" ? (
@@ -954,10 +961,19 @@ export function RemoteAccessSetting({
               steps={done.steps}
             />
           ) : null}
-          {wayId && wayUsage === null ? <p role="status">Remote access can't start with this way on this computer.</p> : null}
-          <button aria-expanded={showOtherWays} disabled={busy} onClick={() => setShowOtherWays((open) => !open)} type="button">
+          {wayId && wayUsage === null ? (
+            <p className="text-sm text-muted-foreground" role="status">Remote access can't start with this way on this computer.</p>
+          ) : null}
+          <Button
+            aria-expanded={showOtherWays}
+            className="justify-self-start"
+            disabled={busy}
+            onClick={() => setShowOtherWays((open) => !open)}
+            type="button"
+            variant="outline"
+          >
             Other ways
-          </button>
+          </Button>
           {showOtherWays && inventory ? (
             <OtherWays
               blocks={blocks}
@@ -1003,9 +1019,9 @@ export function RemoteAccessSetting({
         />
       ))}
       {operation && operation.kind === "stop" && outcome === "turning-on" ? (
-        <p role="status">Turning off…</p>
+        <p className="text-sm" role="status">Turning off…</p>
       ) : null}
-      {operation && operation.kind !== "stop" && cancel === "stopping" ? <p role="status">Turning off…</p> : null}
+      {operation && operation.kind !== "stop" && cancel === "stopping" ? <p className="text-sm" role="status">Turning off…</p> : null}
       {operation && operation.kind !== "stop" && cancel === null && outcome === "turning-on" ? (
         <TurningOnChecklist
           busy={busy}
@@ -1015,27 +1031,32 @@ export function RemoteAccessSetting({
         />
       ) : null}
       {operation && (cancel === "unconfirmed" || (cancel === null && outcome === "needs-action")) ? (
-        <section aria-label="Needs your action" className="grid gap-3">
-          <h3 className="pdpp-label">Needs your action</h3>
-          <p role="status">
+        <section aria-label="Needs your action" className="grid gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <span aria-hidden="true" className="size-2.5 flex-none rounded-full bg-amber-500 ring-4 ring-amber-500/15" />
+            Needs your action
+          </h3>
+          <p className="text-sm" role="status">
             {cancel === "unconfirmed"
               ? "Couldn't confirm remote access is off. This address may still work."
               : "We lost track of the address. It may still be on."}
           </p>
-          {cancel === null && operation.failureCode ? <p>{publicError(operation.failureCode).message}</p> : null}
-          {cancel === null && operation.recovery ? <p>{publicError(operation.recovery.reason).message}</p> : null}
-          <button
-            disabled={busy || (cancel === null && operation.recovery !== null && !operation.recovery.available)}
-            onClick={() => void stopOperation(operation)}
-            type="button"
-          >
-            {operation.stage === "unknown-possibly-live" && cancel === null ? "Turn off" : "Check and turn off"}
-          </button>
-          {cancel === null && operation.recovery?.available ? (
-            <button disabled={busy} onClick={() => void retryOperation(operation)} type="button">
-              Try again
-            </button>
-          ) : null}
+          {cancel === null && operation.failureCode ? <p className="text-sm">{publicError(operation.failureCode).message}</p> : null}
+          {cancel === null && operation.recovery ? <p className="text-sm">{publicError(operation.recovery.reason).message}</p> : null}
+          <div className="flex flex-wrap gap-3">
+            <Button
+              disabled={busy || (cancel === null && operation.recovery !== null && !operation.recovery.available)}
+              onClick={() => void stopOperation(operation)}
+              type="button"
+            >
+              {operation.stage === "unknown-possibly-live" && cancel === null ? "Turn off" : "Check and turn off"}
+            </Button>
+            {cancel === null && operation.recovery?.available ? (
+              <Button disabled={busy} onClick={() => void retryOperation(operation)} type="button" variant="outline">
+                Try again
+              </Button>
+            ) : null}
+          </div>
           {operation.failureCode || operation.recovery ? (
             <Diagnostics>
               {operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}
@@ -1045,13 +1066,15 @@ export function RemoteAccessSetting({
         </section>
       ) : null}
       {operation && operation.kind !== "stop" && cancel === null && outcome === "did-not-turn-on" ? (
-        <section aria-label="Did not turn on" className="grid gap-3">
+        <section aria-label="Did not turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
           <h3 className="pdpp-label">Remote access did not turn on</h3>
-          {operation.failureCode ? <p role="status">{publicError(operation.failureCode).message}</p> : null}
-          <button disabled={busy} onClick={startOver} type="button">
-            Try again
-          </button>
-          <Diagnostics>{operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}</Diagnostics>
+          {operation.failureCode ? <p className="text-sm text-destructive" role="status">{publicError(operation.failureCode).message}</p> : null}
+          <div className="flex flex-wrap gap-3">
+            <Button disabled={busy} onClick={startOver} type="button">
+              Try again
+            </Button>
+          </div>
+          <Diagnostics label="Details for support">{operation.failureCode ? <p>Code: {operation.failureCode}</p> : null}</Diagnostics>
         </section>
       ) : null}
       {runtimeReview ? (
@@ -1079,7 +1102,7 @@ export function RemoteAccessSetting({
           const now = Date.now();
           const { shown: knownFacts, unknown: unknownFacts } = splitFacts(route.facts);
           const details = (
-            <Diagnostics>
+            <Diagnostics label={`Details · everything ${serviceLabel} tells us about this connection`}>
               <p className="break-words">
                 Requested target:{" "}
                 {route.hostConfiguration.target.known
@@ -1123,7 +1146,7 @@ export function RemoteAccessSetting({
           );
           if (headline === "On" && route.cleanup.state !== "confirmed") {
             return (
-              <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
+              <div className="grid gap-3 rounded-xl border p-4" key={route.handle.id}>
                 <OnCard
                   addressChanged={addressChanged && route.origin === onOrigin}
                   busy={busy}
@@ -1139,23 +1162,32 @@ export function RemoteAccessSetting({
             );
           }
           const cardProof = routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
+          const needsOwner = headline === "Needs your action";
           return (
-          <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
-            <h3 className="pdpp-label">{headline}</h3>
-            {sentence ? <p role="status">{sentence}</p> : null}
-            {attention ? <p role="status">{attentionSentence(attention, route, serviceLabel)}</p> : null}
-            {unsupportedRefresh ? <p role="status">{ERROR_MESSAGES.proof_refresh_unsupported}</p> : null}
+          <div className="grid gap-3 rounded-xl border p-4" key={route.handle.id}>
+            <h3 className="flex items-center gap-2 text-sm font-medium">
+              <span
+                aria-hidden="true"
+                className={`size-2.5 flex-none rounded-full ${
+                  needsOwner ? "bg-amber-500 ring-4 ring-amber-500/15" : "bg-muted-foreground/50"
+                }`}
+              />
+              {headline}
+            </h3>
+            {sentence ? <p className="text-sm" role="status">{sentence}</p> : null}
+            {attention ? <p className="text-sm text-muted-foreground" role="status">{attentionSentence(attention, route, serviceLabel)}</p> : null}
+            {unsupportedRefresh ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.proof_refresh_unsupported}</p> : null}
             <p className="pdpp-caption break-words">Your address: {route.origin ?? "Not available yet"}</p>
             {cardProof ? <p className="pdpp-caption">{cardProof}</p> : null}
             {extras}
             {route.cleanup.state !== "confirmed" || attention ? <div className="flex flex-wrap gap-3">
-              {headline === "Needs your action" && route.cleanup.state !== "unconfirmed" ? (
-                <button disabled={busy} onClick={() => requestStop(route, true)} type="button">
+              {needsOwner && route.cleanup.state !== "unconfirmed" ? (
+                <Button disabled={busy} onClick={() => requestStop(route, true)} type="button">
                   {unsupportedRefresh ? "Turn off and on" : "Turn on again"}
-                </button>
+                </Button>
               ) : null}
               {state.lifecycle?.phase === "review" && !unsupportedRefresh && !attention ? (
-                <button
+                <Button
                   disabled={busy}
                   onClick={() =>
                     void edit(async () => {
@@ -1166,12 +1198,14 @@ export function RemoteAccessSetting({
                       setRuntimeReview({ routeId: route.handle.id, generation: route.handle.generation, snapshot });
                     })
                   }
+                  type="button"
+                  variant="outline"
                 >
                   Review changes
-                </button>
+                </Button>
               ) : null}
               {!state.lifecycle?.stopRequested && !unsupportedRefresh && !attention ? (
-                <button
+                <Button
                   disabled={busy}
                   onClick={() =>
                     void checkIt(async () => {
@@ -1180,21 +1214,22 @@ export function RemoteAccessSetting({
                       });
                     })
                   }
+                  type="button"
+                  variant="outline"
                 >
                   Check again
-                </button>
+                </Button>
               ) : null}
-              <button disabled={busy} onClick={() => requestStop(route, false)}>
+              <Button disabled={busy} onClick={() => requestStop(route, false)} type="button" variant="outline">
                 {attention === "cleanup-unconfirmed" ? "Turn off" : route.cleanup.state === "unconfirmed" ? "Try again" : "Turn off"}
-              </button>
+              </Button>
             </div> : null}
             {details}
           </div>
           );
         })}
       </section>
-      <Diagnostics>
-        <h3 className="pdpp-label">This computer</h3>
+      <Diagnostics label="This computer">
         {Object.entries(capabilities).map(([id, observation]) => (
           <p key={id}>
             {id}: {observation.known ? String(observation.value) : `Unknown: ${observation.reason}`}
@@ -1213,35 +1248,43 @@ export function RemoteAccessSetting({
             <p className="break-words">
               Target: {host.value.target.known ? host.value.target.value : `Unknown: ${host.value.target.reason}`}
             </p>
-            <label>
-              Port
-              <input
-                inputMode="numeric"
-                onChange={(event) => setPort(event.target.value)}
-                placeholder={host.value.port.known ? String(host.value.port.value ?? "Unpinned") : "Unknown"}
-                value={port}
-              />
-            </label>
-            <button
-              disabled={mutationBlocked}
-              onClick={() =>
-                void edit(async () => {
-                  const value = port.trim() === "" ? null : Number(port);
-                  if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
-                    throw new ReachabilityFailure({ code: "invalid_input", message: "Enter a port between 1 and 65535." });
+            <div className="grid gap-2">
+              <label className="grid gap-1 text-sm" htmlFor="remote-access-port">
+                Port
+                <Input
+                  className="w-32"
+                  id="remote-access-port"
+                  inputMode="numeric"
+                  onChange={(event) => setPort(event.target.value)}
+                  placeholder={host.value.port.known ? String(host.value.port.value ?? "Unpinned") : "Unknown"}
+                  value={port}
+                />
+              </label>
+              <div className="flex flex-wrap gap-3">
+                <Button
+                  disabled={mutationBlocked}
+                  onClick={() =>
+                    void edit(async () => {
+                      const value = port.trim() === "" ? null : Number(port);
+                      if (value !== null && (!Number.isInteger(value) || value < 1 || value > 65_535)) {
+                        throw new ReachabilityFailure({ code: "invalid_input", message: "Enter a port between 1 and 65535." });
+                      }
+                      const updated = await send<HostSettings>("/host-settings", {
+                        expectedRevision: host.value.revision,
+                        mode: host.value.mode,
+                        port: value,
+                        acknowledgeDisconnect: true,
+                      });
+                      setHost({ known: true, value: updated });
+                    })
                   }
-                  const updated = await send<HostSettings>("/host-settings", {
-                    expectedRevision: host.value.revision,
-                    mode: host.value.mode,
-                    port: value,
-                    acknowledgeDisconnect: true,
-                  });
-                  setHost({ known: true, value: updated });
-                })
-              }
-            >
-              Save port
-            </button>
+                  type="button"
+                  variant="outline"
+                >
+                  Save port
+                </Button>
+              </div>
+            </div>
           </>
         ) : (
           <p>Host settings unavailable: {host.reason}.</p>

@@ -92,7 +92,7 @@ async function withScreen<T>(
   }) => Promise<T>
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
-  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement });
   const { RemoteAccessSetting } = await import("./remote-access-setting.tsx");
   const container = dom.window.document.querySelector("#root")!;
   const root = createRoot(container);

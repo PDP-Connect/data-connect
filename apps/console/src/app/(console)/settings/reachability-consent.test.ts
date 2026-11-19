@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Action as SetupAction } from "@tnunamak/gozar";
 import { projectAction, projectCandidate } from "pdpp-reference-implementation/reachability-projection";
+import * as React from "react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import fixture from "../../../../../../reference-implementation/test/fixtures/reachability/configuration.json" with {
@@ -11,6 +12,9 @@ import fixture from "../../../../../../reference-implementation/test/fixtures/re
 };
 import { SetupApprovalCard } from "./reachability-consent.tsx";
 import { TurnOnCard } from "./turn-on.tsx";
+
+// The shared Button (vendored, classic JSX runtime) reads the React global while rendering.
+Object.assign(globalThis, { React });
 
 const turnOnCard = (candidate: ReturnType<typeof projectCandidate>) =>
   createElement(TurnOnCard, { review: { id: "review-1", kind: "route", candidate }, busy: false, changed: null, onTurnOn: () => {} });

@@ -25,7 +25,7 @@ let dom: JSDOM | null = null
 
 async function mount(passwordSet: boolean | undefined, hash = "") {
   dom = new JSDOM('<div id="root"></div>', { url: `http://localhost/settings${hash}` })
-  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+  Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true, Element: dom.window.Element, HTMLElement: dom.window.HTMLElement, HTMLButtonElement: dom.window.HTMLButtonElement })
   const request = (async (url: string) => ({
     ok: true,
     data:
