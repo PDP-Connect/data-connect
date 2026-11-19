@@ -491,9 +491,13 @@ test("the default way opens at Turn on, in plain words, with no old setup screen
     await settle();
     const text = visibleText(container);
     assertClean("ready to turn on", text);
-    assert.match(text, /Step 2 of 2 · Turn on/);
+    assert.match(text, /Step 2 of 2/);
+    assert.match(text, /Turn on/);
+    // One line per kind under the caption naming the selected way.
+    assert.match(text, /For Tunnel for remote access:/);
+    assert.match(text, /People who open the address must sign in with your password\. Apps also need your permission\./);
     assert.match(text, /Tunnel service can see what passes through\./);
-    assert.match(text, /Turns off by itself\./);
+    assert.match(text, /Free\. The address changes each time and turns off by itself\./);
     assert.doesNotMatch(text, /\b\d+\s*(seconds?|minutes?|hours?)\b|1 hour|15 minutes/);
     assert.match(text, /Turn on remote access/);
     assert.doesNotMatch(text, /Continue setup|Staged configuration|Reload|Start setup|Save and review|Discard|Review reachability|Apply reachability/);

@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { Input } from "@/components/ui/input.tsx";
 import { ApprovalDisclosure, ConsentDisclosures, ConsentFacts, PlainDisclosure, readDisclosure, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
-import { type Action, type Draft, type FactKind, formatDisclosures, effectLines, type Review } from "./prepare-remote-access.ts";
+import { type Action, type Draft, type FactKind, formatDisclosures, effectLines, type Review, shortFactLines } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
 
 // The icon each short fact line carries, as in the approved mockups: who must
@@ -16,10 +16,26 @@ const factIcons: Record<FactKind, string> = {
   deal: "⏱",
 };
 
+/** One short fact line with its icon. */
+function FactLineItem({ line }: { line: { kind: FactKind; text: string } }) {
+  return (
+    <li className="flex items-start gap-2.5 text-sm">
+      <span aria-hidden="true" className="w-4 flex-none text-center text-muted-foreground">
+        {factIcons[line.kind]}
+      </span>
+      <span>{line.text}</span>
+    </li>
+  );
+}
+
 /**
- * The review's disclosure lines, a Details list, and the one button. The click
- * sends the review id and digest of the facts rendered here, read from this
- * same `review` value, so what the owner sees and what is approved cannot differ.
+ * The review's disclosure lines, a Details list, and the one button. Above the
+ * button sits one line per kind (access, traffic, deal) under a caption naming
+ * the selected way; every other line, and the owner steps' own words, sit in the
+ * Details below — unless a kind has no line or a shape is unclassified, when
+ * every line stays above the button and Details opens. The click sends the
+ * review id and digest of the facts rendered here, read from this same `review`
+ * value, so what the owner sees and what is approved cannot differ.
  */
 export function TurnOnCard({
   review,
@@ -27,6 +43,7 @@ export function TurnOnCard({
   changed,
   onTurnOn,
   steps = [],
+  wayTitle = null,
 }: {
   review: Review;
   /** Owner steps the route approval satisfies (the trial's consent). Their facts are shown here, beside the review's. */
@@ -35,6 +52,8 @@ export function TurnOnCard({
   /** Labels of the facts that changed since the owner last saw them. */
   changed: string[] | null;
   onTurnOn: (review: Review) => void;
+  /** The selected way's name, above the one line per kind. */
+  wayTitle?: string | null;
 }) {
   const candidate = review.candidate;
   const consent = candidate.consent;
@@ -46,11 +65,18 @@ export function TurnOnCard({
     steps.every((step) => step.consent?.facts !== undefined && step.consent.disclosures != null);
   const { shown, unknown } = splitFacts(consent?.facts ?? []);
   const { lines: routeLines, remaining, unread } = formatDisclosures(candidate);
+  const reduced = shortFactLines(routeLines);
   const lines = [...routeLines.map((line) => line.text), ...steps.map((step) => step.disclosure.text), ...steps.map((step) => step.label)];
   const bound = [remaining, ...steps.map((step) => step.consent?.disclosures)];
   // An unreadable shape opens Details: the owner is never asked to approve text that is hidden.
   const readable = readDisclosure(bound, candidate.providerId);
-  const detailsOpen = readable.unreadable || unread;
+  // One line per kind above the button only when every kind has a line and
+  // nothing is unclassified; otherwise every line stays above the button and
+  // Details opens instead, so no approved text is ever hidden.
+  const compact = reduced !== null && !readable.unreadable && !unread;
+  const shownLines = compact && reduced ? reduced.shown : routeLines;
+  const movedLines = compact && reduced ? reduced.rest : [];
+  const detailsOpen = !compact;
   // Everything the service reports that the short lines do not carry, one click away.
   const details = complete ? (
     <details className="grid gap-2" open={detailsOpen}>
@@ -62,6 +88,13 @@ export function TurnOnCard({
         {consent.scope?.query.expectedOrigin ? (
           <p className="pdpp-caption break-words">Your address will be: {consent.scope.query.expectedOrigin}</p>
         ) : null}
+        {movedLines.length > 0 ? (
+          <ul className="grid gap-2">
+            {movedLines.map((line) => (
+              <FactLineItem key={line.text} line={line} />
+            ))}
+          </ul>
+        ) : null}
         <PlainDisclosure value={bound} except={lines} providerId={candidate.providerId} />
         <ConsentDisclosures value={consent.disclosures} providerId={candidate.providerId} />
         <ConsentFacts facts={shown} providerId={candidate.providerId} />
@@ -69,6 +102,7 @@ export function TurnOnCard({
         {steps.map((step) => (
           <div className="grid gap-2" key={step.id}>
             <h4 className="pdpp-label">{plain(step.label)}</h4>
+            {compact ? <p className="pdpp-caption whitespace-pre-wrap break-words">{step.disclosure.text}</p> : null}
             {step.instructions ? <p className="pdpp-caption break-words">{step.instructions}</p> : null}
             <ConsentDisclosures value={step.consent?.disclosures} providerId={candidate.providerId} />
             <ConsentFacts facts={splitFacts(step.consent?.facts ?? []).shown} providerId={candidate.providerId} />
@@ -85,22 +119,22 @@ export function TurnOnCard({
         </p>
       ) : null}
       {complete ? (
-        <ul className="grid gap-2">
-          {routeLines.map((line) => (
-            <li className="flex items-start gap-2.5 text-sm" key={line.text}>
-              <span aria-hidden="true" className="w-4 flex-none text-center text-muted-foreground">
-                {factIcons[line.kind]}
-              </span>
-              <span>{line.text}</span>
-            </li>
-          ))}
-          {steps.map((step) => (
-            <li className="grid gap-1" key={step.id}>
-              <span className="text-sm font-medium">{plain(step.label)}</span>
-              <span className="text-sm text-muted-foreground">{step.disclosure.text}</span>
-            </li>
-          ))}
-        </ul>
+        <>
+          {compact && wayTitle ? <p className="pdpp-caption">For {wayTitle}:</p> : null}
+          <ul className="grid gap-2">
+            {shownLines.map((line) => (
+              <FactLineItem key={line.text} line={line} />
+            ))}
+            {!compact
+              ? steps.map((step) => (
+                  <li className="grid gap-1" key={step.id}>
+                    <span className="text-sm font-medium">{plain(step.label)}</span>
+                    <span className="text-sm text-muted-foreground">{step.disclosure.text}</span>
+                  </li>
+                ))
+              : null}
+          </ul>
+        </>
       ) : (
         <p className="text-sm" role="status">
           We couldn't load this service's details. Try again.

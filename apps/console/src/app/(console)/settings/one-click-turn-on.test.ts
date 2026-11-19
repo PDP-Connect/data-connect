@@ -8,7 +8,7 @@ import { JSDOM } from "jsdom";
 import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { type Action, MAX_PREPARATION_RESTARTS, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn } from "./prepare-remote-access.ts";
+import { type Action, type FactLine, MAX_PREPARATION_RESTARTS, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn, shortFactLines } from "./prepare-remote-access.ts";
 import type { requestReachability } from "./reachability-actions.ts";
 import { publicError } from "./reachability-errors.ts";
 import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
@@ -323,6 +323,39 @@ test("a finished operation reads as Off only when it failed before any effect", 
   assert.equal(operationOutcome({ stage: "unknown-possibly-live" }), "needs-action");
   assert.equal(operationOutcome({ stage: "applying" }), "turning-on");
   assert.equal(operationOutcome({ stage: "settled" }), "done");
+});
+
+// ---------- one line per kind ----------
+
+test("one line per kind: the sign-in line, the payload reading, the deal fragments joined; a missing kind fails closed", () => {
+  const lines: FactLine[] = [
+    { kind: "access", text: "People who open the address must sign in with your password. Apps also need your permission." },
+    { kind: "access", text: "People can reach the sign-in page over the internet." },
+    { kind: "traffic", text: "These can read your traffic: localhost relay." },
+    { kind: "traffic", text: "Workshop can see what passes through." },
+    { kind: "deal", text: "Free." },
+    { kind: "deal", text: "The address changes each time." },
+    { kind: "deal", text: "Turns off by itself." },
+  ];
+  const short = shortFactLines(lines);
+  assert.ok(short, "every kind has a line");
+  assert.deepEqual(short.shown.map((line) => [line.kind, line.text]), [
+    ["access", "People who open the address must sign in with your password. Apps also need your permission."],
+    ["traffic", "Workshop can see what passes through."],
+    ["deal", "Free. The address changes each time and turns off by itself."],
+  ]);
+  assert.deepEqual(short.rest.map((line) => line.text), [
+    "People can reach the sign-in page over the internet.",
+    "These can read your traffic: localhost relay.",
+  ]);
+  // Every other line stays above the button when a kind has no line: fail closed.
+  for (const kind of ["access", "traffic", "deal"] as const) {
+    assert.equal(shortFactLines(lines.filter((line) => line.kind !== kind)), null, `no ${kind} line`);
+  }
+  // Two deal fragments stay two sentences; a lone fragment keeps its own sentence.
+  const two = shortFactLines([...lines.slice(0, 4), { kind: "deal", text: "We can't tell what this costs." }]);
+  assert.ok(two, "a shorter deal kind still reduces");
+  assert.equal(two.shown.at(-1)?.text, "We can't tell what this costs.");
 });
 
 // ---------- the screen ----------
@@ -963,9 +996,30 @@ test("real trial-consent action: Turn on shows the trial's own facts, and one cl
     "/operations": ok({ operationId: "op-1" }),
   });
   await withScreen(handler, async ({ calls, press, text, container }) => {
-    assert.match(text(), /The relay terminates TLS and can read payloads\./);
+    const card = container.querySelector('section[aria-label="Turn on"]');
+    assert.ok(card, "the turn-on card is on screen");
     const button = [...container.querySelectorAll("button")].find((node) => node.textContent === "Turn on remote access");
     assert.ok(button, "the Turn on button is on screen");
+    // One line per kind above the button, under the caption naming the way.
+    assert.match(text(), /For Tunnel service:/);
+    const factLines = [...card.querySelectorAll("ul > li")].map((node) => node.textContent ?? "");
+    assert.equal(factLines.length, 3, `exactly one line per kind: ${factLines.join("|")}`);
+    assert.match(factLines[0] ?? "", /🔒/);
+    assert.match(factLines[0] ?? "", /must sign in with your password\. Apps also need your permission\./);
+    assert.match(factLines[1] ?? "", /👁/);
+    assert.match(factLines[1] ?? "", /Tunnel service can see what passes through\./);
+    assert.match(factLines[2] ?? "", /⏱/);
+    assert.match(factLines[2] ?? "", /Free\. The address changes each time and turns off by itself\./);
+    // The trial's own review heading and paragraph moved into the closed Details below the button.
+    const details = card.querySelector("details");
+    assert.ok(details, "the card has one Details");
+    assert.equal(details.hasAttribute("open"), false, "nothing is unreadable, so Details starts closed");
+    assert.ok(button.compareDocumentPosition(details) & 4, "Details sits below the button");
+    assert.match(details.textContent ?? "", /Review the public HTTPS trial/);
+    assert.match(details.textContent ?? "", /Start a public HTTPS trial through the relay/);
+    const outsideDetails = card.cloneNode(true) as Element;
+    for (const node of outsideDetails.querySelectorAll("details")) node.remove();
+    assert.doesNotMatch(outsideDetails.textContent ?? "", /Review the public HTTPS trial|Start a public HTTPS trial/);
     assert.equal(button.disabled, false);
     assert.ok(!calls.some((call) => call.url === "/setups"), "no setup is started for a consent-only step");
     await press(/^Turn on remote access$/);

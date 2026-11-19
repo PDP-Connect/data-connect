@@ -68,10 +68,22 @@ export function diagnosticsText(error: DisplayError, appVersion?: string): strin
   ].join("\n");
 }
 
-export function Diagnostics({ children, label = "Details" }: { children: ReactNode; label?: string }) {
+export function Diagnostics({ children, label = "Details", note }: { children: ReactNode; label?: string; note?: string }) {
   return (
     <details className="grid gap-2" data-diagnostics="">
-      <summary className="cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline">{label}</summary>
+      <summary className="cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline">
+        {note ? (
+          <span className="flex flex-wrap items-center justify-between gap-3">
+            <span className="pdpp-caption">{note}</span>
+            <span className="flex-none text-sm">
+              {label}{" "}
+              <span aria-hidden="true">›</span>
+            </span>
+          </span>
+        ) : (
+          label
+        )}
+      </summary>
       <div className="grid gap-2">{children}</div>
     </details>
   );

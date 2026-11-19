@@ -269,7 +269,9 @@ test("the card recommends the temporary address and Other ways opens in three gr
     assert.doesNotMatch(text(), /Needs the Tailscale app/, "Other ways is closed");
     await press(/^Other ways$/);
     const headings = [...container.querySelectorAll("fieldset h4, fieldset summary")].map((node) => node.textContent);
-    assert.deepEqual(headings, ["Lasting address for AI apps", "Only my own devices", "Advanced"]);
+    assert.deepEqual(headings.slice(0, 2), ["Lasting address for AI apps", "Only my own devices"]);
+    // The advanced row lists its ways inline, next to the group title.
+    assert.match(headings[2] ?? "", /^Advanced · Your own address, ngrok \(advanced, TLS\), tunnl\.gg›$/, headings[2] ?? "no advanced row");
     assert.match(text(), /Needs the Tailscale app, signed in\. Get Tailscale/);
     assert.equal((container.querySelector("fieldset details") as HTMLDetailsElement).open, false, "Advanced starts closed");
     const shown = container.querySelector("fieldset")!.textContent!;

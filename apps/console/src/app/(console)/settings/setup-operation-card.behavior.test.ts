@@ -377,15 +377,28 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
     assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
     const typedCases = [
       { name: "complete typed route", disclosures: typedRouteDisclosures, open: false,
-        words: [/over the internet/, /The address stays the same/, /secure connection ends at the service/, /These can read your traffic: route-service\./, /These can see when and how much you connect: route-service, connection-operator\./],
+        // One line per kind above the button, in the approved order.
+        words: [
+          /People who open the address must sign in with your password\. Apps also need your permission\./,
+          /Workshop can see what passes through\./,
+          /Free\. The address stays the same and stays on while DataConnect runs\./,
+        ],
+        // Every other classified line moved into Details, one click below the button.
+        detailsWords: [
+          /People can reach the sign-in page over the internet\./,
+          /The secure connection ends at the service, not at your device\./,
+          /These can read your traffic: route-service\./,
+          /These can see when and how much you connect: route-service, connection-operator\./,
+        ],
         // The cost summary is a leftover sentence: it lives in Details, one click away.
         cardWords: [/There is no charge/] },
       { name: "unencrypted transport", disclosures: { ...typedRouteDisclosures, transport: "http" }, open: false,
-        words: [/unencrypted HTTP/], cardWords: [] as RegExp[] },
+        words: [/Workshop can see what passes through\./],
+        detailsWords: [/unencrypted HTTP/], cardWords: [] as RegExp[] },
       { name: "unrecognized reach", disclosures: { ...readableRoute, reach: "regional" }, open: true,
-        words: [] as RegExp[], cardWords: [/regional/] },
+        words: [] as RegExp[], detailsWords: [] as RegExp[], cardWords: [/regional/] },
     ]
-    for (const { name, disclosures, open, words, cardWords } of typedCases) {
+    for (const { name, disclosures, open, words, detailsWords, cardWords } of typedCases) {
       await act(async () => root.render(createElement(TurnOnCard, { review: review(disclosures), busy: false, changed: null, onTurnOn: () => {} } as never)))
       const details = container.querySelector("details")!
       const button = container.querySelector("button")!
@@ -394,15 +407,17 @@ test("the turn-on card shows unreadable route and step disclosures, open, above 
       range.setStart(container.querySelector("section")!, 0)
       range.setEndBefore(button)
       const before = range.toString()
-      // The classified short lines stay above the button, where the approval is read.
+      // One line per kind stays above the button, where the approval is read.
       for (const word of words) assert.match(before, word, name)
+      // The lines the short set replaced sit inside Details, still on the card.
+      for (const word of detailsWords) assert.match(details.textContent ?? "", word, name)
       for (const word of cardWords) assert.match(container.textContent ?? "", word, name)
       // Reader names are approved values and show above the button; the evidence reference is metadata.
       if (!open) assert.doesNotMatch(before, /route-evidence/, name)
     }
     // Gozar reports "unknown" stability for routes it did not create; the card says so in words.
     await act(async () => root.render(createElement(TurnOnCard, { review: review({ ...readableRoute, address: { stability: "unknown" } }), busy: false, changed: null, onTurnOn: () => {} } as never)))
-    assert.match(shownText(container), /We can't tell whether the address stays the same\./)
+    assert.match(shownText(container), /We can't tell whether the address stays the same and stays on while DataConnect runs\./)
     assert.equal(container.querySelector("details")!.hasAttribute("open"), false)
   } finally {
     await act(async () => root.unmount())

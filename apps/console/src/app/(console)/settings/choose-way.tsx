@@ -124,7 +124,13 @@ export function OtherWays({
         if (group.rows.length === 0) return null;
         return group.id === "advanced" ? (
           <details className="grid gap-2" key={group.id}>
-            <summary className="cursor-pointer text-sm font-medium">{group.title}</summary>
+            <summary className="flex cursor-pointer items-center justify-between gap-3 text-sm font-medium">
+              <span>
+                {group.title}
+                <span className="font-normal text-[13px] text-muted-foreground"> · {group.rows.map((row) => row.title).join(", ")}</span>
+              </span>
+              <span aria-hidden="true">›</span>
+            </summary>
             <div className="grid gap-2.5">{rows}</div>
           </details>
         ) : (

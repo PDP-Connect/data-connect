@@ -200,8 +200,15 @@ const checks = (calls: Call[]) => calls.filter((call) => call.url === "/routes/r
 
 // ---------- the card ----------
 
-test("On shows the address, Copy, the check age, the server's end time and Turn off, and a link on", async (t) => {
-  const route = routeAt({ expiresAt: T0 + 5 * 60_000 + 3_600_000 });
+test("On shows the address, Copy, the check age, the server's end time, the way it runs through, and a link on", async (t) => {
+  const route = routeAt({
+    expiresAt: T0 + 5 * 60_000 + 3_600_000,
+    facts: [
+      fact("Cost", "free"),
+      { ...fact("payload-readers", "The tunnel relay can read the traffic."), group: "privacy" },
+    ],
+    providerId: "p-tunnel",
+  });
   await withScreen(host({ "/state": onState(route) }), async ({ container, text }) => {
     const visible = text();
     assert.ok(container.querySelector('section[aria-label="Remote access"]'), "the card is the page's Remote access section");
@@ -212,10 +219,29 @@ test("On shows the address, Copy, the check age, the server's end time and Turn 
     assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Copy address"));
     assert.match(visible, /Works from the internet · checked just now/);
     assert.ok(visible.includes(`Turns off at ${formatLocalTime(T0 + 5 * 60_000 + 3_600_000)}`), visible);
+    assert.ok(visible.includes("Keep this computer awake and online until then."), visible);
     assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Turn off"));
-    const link = [...container.querySelectorAll("a")].find((node) => /connect ChatGPT or Claude/.test(node.textContent ?? ""));
-    assert.equal(link?.textContent, "Next: connect ChatGPT or Claude");
+    // Three fact lines under the address: when it ends, the way and cost it runs
+    // through, and who can read the traffic.
+    const onCard = container.querySelector('section[aria-label="On"]');
+    assert.ok(onCard, "the On card is mounted");
+    const factLines = [...onCard.querySelectorAll(":scope > div > ul > li")].map((node) => node.textContent ?? "");
+    assert.equal(factLines.length, 3, factLines.join("|"));
+    assert.match(factLines[0] ?? "", /⏱/);
+    assert.match(factLines[0] ?? "", /Turns off at .*\. Keep this computer awake and online until then\./);
+    assert.match(factLines[1] ?? "", /↔/);
+    assert.ok((factLines[1] ?? "").includes("Through Tunnel service (Tunnel service) · Free"), factLines[1] ?? "no way line");
+    assert.match(factLines[2] ?? "", /👁/);
+    assert.ok((factLines[2] ?? "").includes("The tunnel relay can read the traffic."), factLines[2] ?? "no readers line");
+    // The next step names the apps; the link to them sits on its right.
+    assert.ok(visible.includes("Next: connect ChatGPT or Claude"), visible);
+    const link = [...container.querySelectorAll("a")].find((node) => node.textContent === "Connect apps ›");
     assert.equal(link?.getAttribute("href"), "/connect");
+    // Details is a footer row: what was checked on the left, the toggle on the right.
+    const footer = onCard.querySelector("[data-diagnostics]");
+    assert.ok(footer, "the On card carries one Details");
+    assert.match(footer.textContent ?? "", /What we checked, and everything Tunnel service reports/);
+    assert.match(footer.querySelector("summary")?.textContent ?? "", /›$/);
     assert.doesNotMatch(visible, /connected to|is connected|QR/i);
     assert.doesNotMatch(visible, /\b1 hour\b|15 minutes/);
   }, t);
