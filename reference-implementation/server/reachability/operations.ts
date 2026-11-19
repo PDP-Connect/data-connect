@@ -98,6 +98,10 @@ export class ReachabilityOperations {
     }
   }
   async read(operationId: string): Promise<OperationRecord> {
+    // Sampled before the file is read: a start that finishes while this read is
+    // in flight writes its settled record and only then leaves `running`, so a
+    // stale "applying" copy must not be mistaken for an orphan.
+    const runningBefore = this.running.has(operationId);
     let record: OperationRecord;
     try {
       record = JSON.parse(await readFile(this.path(operationId), "utf8")) as OperationRecord;
@@ -113,7 +117,7 @@ export class ReachabilityOperations {
     if (record.operationId !== operationId) {
       throw new ReachabilityError("operation_not_found");
     }
-    if (record.stage === "applying" && !this.running.has(operationId)) {
+    if (record.stage === "applying" && !runningBefore && !this.running.has(operationId)) {
       // An unrecorded handle does not prove no route was created. Do not replay.
       record = {
         ...record,
@@ -243,9 +247,16 @@ export class ReachabilityOperations {
       stage: "applying",
       stopTombstone: kind === "stop",
     };
-    // Durable intent precedes the first library effect and the 202 response.
-    await this.write(pending);
+    // Durable intent precedes the first library effect and the 202 response. The
+    // operation counts as running before its record exists, so no read sees the
+    // new "applying" record as a crash orphan.
     this.running.add(operationId);
+    try {
+      await this.write(pending);
+    } catch (error) {
+      this.running.delete(operationId);
+      throw error;
+    }
     void (async () => {
       // Set once the effect has returned: a later settlement-write failure must
       // not drop the handle the effect already allocated.
