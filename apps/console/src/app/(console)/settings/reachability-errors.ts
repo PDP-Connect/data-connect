@@ -107,3 +107,12 @@ export function publicError(code: string | undefined, serverMessage?: string, ac
     ...(serverMessage ? { serverMessage } : {}),
   };
 }
+
+/** A failure that carries the public code and message the card shows. */
+export class ReachabilityFailure extends Error {
+  readonly detail: PublicError;
+  constructor(detail: PublicError) {
+    super(detail.message);
+    this.detail = detail;
+  }
+}

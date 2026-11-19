@@ -9,7 +9,16 @@ import { Button } from "@/components/ui/button.tsx";
 import { formatLocalTime } from "./plain-text.ts";
 import { type ButtonKind, recoveryFor } from "./failure-recovery.ts";
 import type { requestReachability } from "./reachability-actions.ts";
-import { type ActionKind, GENERIC_ERROR, genericErrorFor, type PublicError, publicError } from "./reachability-errors.ts";
+import {
+  type ActionKind,
+  GENERIC_ERROR,
+  genericErrorFor,
+  type PublicError,
+  publicError,
+  ReachabilityFailure,
+} from "./reachability-errors.ts";
+
+export { ReachabilityFailure };
 
 export const DiagnosticsContext = createContext<{ appVersion?: string }>({});
 
@@ -31,13 +40,6 @@ export type DisplayError = PublicError & {
 };
 
 // An error a person caused or can fix, worded for them. The code stays in Details.
-export class ReachabilityFailure extends Error {
-  readonly detail: PublicError;
-  constructor(detail: PublicError) {
-    super(detail.message);
-    this.detail = detail;
-  }
-}
 
 export function toDisplayError(
   failure: unknown,

@@ -13,9 +13,8 @@ import type {
   projectDraft,
   projectInventory,
 } from "pdpp-reference-implementation/reachability-projection";
-import { ReachabilityFailure } from "./diagnostics.tsx";
 import type { requestReachability } from "./reachability-actions.ts";
-import { publicError } from "./reachability-errors.ts";
+import { publicError, ReachabilityFailure } from "./reachability-errors.ts";
 import type { ServiceEntry } from "./setup-services.ts";
 
 type Request = typeof requestReachability;
