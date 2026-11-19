@@ -104,13 +104,6 @@ const OWNER_PASSWORD_SOURCE_ENV: &str = "PDPP_OWNER_PASSWORD_SOURCE";
 const OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED: &str = "desktop_generated";
 const OWNER_CREDENTIAL_REVEAL_PROOF_ENV: &str = "PDPP_OWNER_CREDENTIAL_REVEAL_PROOF";
 const OWNER_CREDENTIAL_REVEAL_COOKIE: &str = "pdpp_owner_credential_reveal";
-/// Set to "1" or "0" alongside `MANAGED_DESKTOP_HOST_ENV`, reporting whether
-/// `cloudflared` is on `PATH` at RS-spawn time -- see
-/// `remote_access_cloudflare::cloudflared_binary_is_installed`'s doc comment
-/// for why this must be knowable before the owner commits to the Cloudflare
-/// Tunnel option, not discovered only as a spawn failure after they submit a
-/// token.
-const CLOUDFLARED_BINARY_PRESENT_ENV: &str = "PDPP_CLOUDFLARED_BINARY_PRESENT";
 const UNIFIED_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1012,22 +1005,11 @@ fn ri_environment(
         );
     }
     env.extend(managed_desktop_environment(data_dir, owner_password_source));
-    if remote_access_configuration_supported() {
-        // The owner needs to know whether `cloudflared` is already installed
-        // BEFORE they pick the Cloudflare Tunnel option and paste a token --
-        // see `cloudflared_binary_is_installed`'s doc comment. Checked here,
-        // at the same RS-spawn boundary `MANAGED_DESKTOP_HOST_ENV` already
-        // uses, so `inspectCloudflareTunnel` (the RS-side TypeScript mirror)
-        // can fold it into the same capability probe the console already
-        // polls before rendering the provider picker.
-        env.insert(
-            OsString::from(CLOUDFLARED_BINARY_PRESENT_ENV),
-            OsString::from(if crate::remote_access_cloudflare::cloudflared_binary_is_installed() {
-                "1"
-            } else {
-                "0"
-            }),
-        );
+    // Remote access providers find their programs (`cloudflared`, `ssh`,
+    // `tailscale`) on `PATH` from inside the RI, so a cleared environment
+    // without it reports every installed program as missing.
+    if let Some(path) = std::env::var_os("PATH") {
+        env.insert(OsString::from("PATH"), path);
     }
     env
 }
@@ -6857,6 +6839,24 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert!(!debug.contains(reveal_proof));
         assert!(!debug.contains(credential_key));
         assert!(!debug.contains(database_key));
+    }
+
+    #[test]
+    fn ri_environment_carries_the_desktop_path() {
+        let environment = ri_environment(
+            Path::new("/tmp/unified"),
+            "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test",
+            false,
+        );
+
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("PATH")),
+            std::env::var_os("PATH").as_ref()
+        );
     }
 
     #[test]

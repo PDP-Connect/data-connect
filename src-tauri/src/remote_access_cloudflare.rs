@@ -1127,10 +1127,8 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// The owner needs to know cloudflared is missing BEFORE picking this
-    /// option, not as a post-submit spawn error -- this is the exact check
-    /// `ri_environment` (`unified.rs`) runs at RS-spawn time to populate
-    /// `PDPP_CLOUDFLARED_BINARY_PRESENT`. Uses a controlled `PATH` value
+    /// The check `ensure_cloudflared_available` uses to prefer a system
+    /// `cloudflared` over a download. Uses a controlled `PATH` value
     /// (`binary_is_on_path`) rather than the real process `PATH`, since
     /// mutating that would be unsafe across parallel test threads.
     #[test]
