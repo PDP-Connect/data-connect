@@ -81,6 +81,13 @@ type SetupCommand = Pick<RunSetupOperationRequest, "actionId" | "expectedConfigu
 };
 type SavedDraft = { providerId: string; session: ConfigurationDraftSession };
 type Review = { id: string; candidate: RouteCandidate; query: Query; draftId: string };
+
+// The address a review asks the owner to approve: the one the app named, else the
+// one committed to the provider's configuration (an owner-kept address is only
+// ever there). Null when the route has no owner-named address to prove.
+const reviewedOrigin = (review: Review): string | null =>
+  review.query.origin ?? review.candidate.configuration.values.origin ?? null;
+
 export type HostPolicy = {
   // Host-owned query: the browser cannot choose home, owner, target or authority.
   query: Omit<Query, "providerId" | "usage">;
@@ -114,6 +121,12 @@ export class ReachabilityService {
   }
   private starting = false;
   private startSettled: Promise<void> | null = null;
+  // The route `apply` is starting. The review is gone by then and the route is not
+  // yet held, yet the library probes the origin while it starts. `origin` is null
+  // when the provider picks the address itself (a tunnel): nothing is known to
+  // approve until the library allocates it, so the challenge answers any Host for
+  // the length of the start and no longer.
+  private applying: { origin: string | null } | null = null;
   private epoch = 0;
   private shutdownRun: Promise<ShutdownOutcome> | null = null;
   private restartRun: Promise<RestartOutcome> | null = null;
@@ -542,6 +555,27 @@ export class ReachabilityService {
     this.transition({ approvalIdentity: review.id, type: "review" });
     return review;
   }
+  // The one question the ownership challenge asks: is this public authority the
+  // origin the owner approved, now or earlier? Approval lives in a review being
+  // shown, the route being started, or a route this process holds. Any other
+  // name gets no answer. `authority` is the library verifier's own canonical
+  // Host, compared with the authority of each approved origin.
+  approvesChallengeAuthority(authority: string): boolean {
+    if (this.applying && this.applying.origin === null) return true;
+    const origins = [
+      this.applying?.origin,
+      ...[...this.reviews.values()].map(reviewedOrigin),
+      ...[...this.routes.values()].filter((route) => route.cleanup.state !== "confirmed").map((route) => route.origin),
+    ];
+    return origins.some((origin) => {
+      if (!origin) return false;
+      try {
+        return new URL(origin).host === authority;
+      } catch {
+        return false;
+      }
+    });
+  }
   operationIntent(reviewId: string) {
     const review = this.reviews.get(reviewId);
     if (!review) {
@@ -789,6 +823,7 @@ export class ReachabilityService {
     this.lifecycle = event.state;
     const epoch = ++this.epoch;
     this.starting = true;
+    this.applying = { origin: reviewedOrigin(review) };
     let settled!: () => void;
     this.startSettled = new Promise<void>((resolve) => {
       settled = resolve;
@@ -853,6 +888,7 @@ export class ReachabilityService {
       throw error;
     } finally {
       this.starting = false;
+      this.applying = null;
       settled();
     }
   }

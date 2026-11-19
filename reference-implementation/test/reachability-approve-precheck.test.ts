@@ -19,7 +19,7 @@ const reviewFor = (expiresAt: string) => ({
     consentFactsDigest: DIGEST,
     disclosure: { revision: "1" },
     expiresAt,
-    configuration: { revision: "r1" },
+    configuration: { revision: "r1", values: {} },
     consent: { facts: [], disclosures: {}, scope: { kind: "route" }, consentFactsDigest: DIGEST },
   },
 });

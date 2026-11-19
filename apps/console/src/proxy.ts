@@ -3,9 +3,10 @@
 
 import { type NextRequest, NextResponse } from "next/server";
 import { OWNER_AUTH_COOKIE_NAME } from "pdpp-reference-implementation/owner-session-constants";
+import { SERVICE_CHALLENGE_PATH } from "pdpp-reference-implementation/reachability-service-challenge";
 import { resolveReferenceTopology } from "pdpp-reference-implementation/reference-topology";
 import { normalizeDashboardReturnTo } from "@/app/(console)/lib/return-to.ts";
-import { proxyReferenceRequest } from "./app/reference-proxy.ts";
+import { proxyReferenceRequest, proxyServiceChallenge } from "./app/reference-proxy.ts";
 
 const referenceTopology = resolveReferenceTopology();
 const AS_PROXY_TARGET = referenceTopology.asInternalUrl;
@@ -166,6 +167,19 @@ export default function proxy(request: NextRequest) {
     (request.nextUrl.searchParams.has("request_uri") || request.nextUrl.searchParams.has("approval_id"))
   ) {
     return proxyReferenceRequest(request, "as", ["consent"]);
+  }
+
+  // Where a standalone server hosts remote access, the resource server answers
+  // the service challenge, and its answer binds the Host it received. This is
+  // the only proxied path that forwards the public Host unchanged. A desktop
+  // supervisor answers it inside the console process instead (see the rewrite
+  // in next.config), so that case falls through.
+  if (
+    request.nextUrl.pathname === SERVICE_CHALLENGE_PATH &&
+    request.method === "GET" &&
+    process.env.PDPP_MANAGED_DESKTOP_HOST !== "1"
+  ) {
+    return proxyServiceChallenge(request);
   }
 
   // AS-proxied protocol paths first, so paths that share a prefix with an owner

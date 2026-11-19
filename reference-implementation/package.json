@@ -38,6 +38,7 @@
     "./reachability-projection": "./server/reachability/projection.ts",
     "./reachability-console-proof": "./server/reachability/console-proof.ts",
     "./reachability-service-proof": "./server/reachability/service-proof.ts",
+    "./reachability-service-challenge": "./server/reachability/service-challenge.ts",
     "./reachability-host-settings": "./server/reachability/host-settings.ts"
   },
   "bin": {
