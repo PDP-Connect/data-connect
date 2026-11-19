@@ -5,7 +5,7 @@ import { useEffect, useEffectEvent, useRef, useState } from "react"
 import type { projectSetupOperation } from "pdpp-reference-implementation/reachability-projection"
 import { Input } from "@/components/ui/input.tsx"
 import { openResource } from "../../../../../../src/lib/open-resource"
-import type { requestReachability } from "./reachability-actions.ts"
+import type { requestReachability } from "./reachability-client.ts"
 import {
   ApprovalDisclosure,
   SetupApprovalCard,

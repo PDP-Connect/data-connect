@@ -16,13 +16,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { recommendedWay, wayRow, wayUnusable } from "./choose-way.ts";
 import { knownFalseConditions } from "./known-false-conditions.ts";
 import { ConsentDisclosures, ConsentFacts } from "./reachability-consent.tsx";
-import type { requestReachability } from "./reachability-actions.ts";
+import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
-mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {
       throw new Error("Use the test transport");
@@ -185,7 +185,7 @@ const positiveFor = (calls: Call[], providerId: string) =>
 // ---------- defect 1: polls do not switch the way ----------
 
 test("catalog polls do not switch the way being prepared", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"] });
   let catalog: unknown = tailscaleReady;
   const slow = deferred<Result>();
   const handler = host(() => catalog, {
@@ -211,7 +211,7 @@ test("catalog polls do not switch the way being prepared", async (t) => {
 });
 
 test("a pinned way that truly becomes unusable is replaced, and the owner is told why", async (t) => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"] });
   let catalog: unknown = tailscaleReady;
   await withScreen(host(() => catalog), async ({ calls, settle, text }) => {
     assert.deepEqual(draftsFor(calls), ["tailscale-funnel"]);
@@ -389,7 +389,7 @@ test("typed disclosures hide only the exact localhost-run false condition", () =
 
 for (const alternative of [true, false]) {
   test("denied temporary prerequisite moves the pin only to a usable alternative: " + alternative, async (t) => {
-    t.mock.timers.enable({ apis: ["setInterval"] });
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
     let catalog = { ...noTailscale, providers: [way("localhost-run"), ...(alternative ? [way("cloudflare-named")] : [])] };
     await withScreen(host(() => catalog), async ({ calls, settle, text }) => {
       assert.deepEqual(draftsFor(calls), ["localhost-run"]);
@@ -451,7 +451,7 @@ test("recommendation, rows and pinned usability agree on every provider prerequi
 });
 
 for (const initialFailure of [false, true]) test(`setup polling survives ${initialFailure ? "an initial dashboard rejection" : "a hung dashboard refresh"}`, async t => {
-  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.mock.timers.enable({ apis: ["setInterval", "Date"] });
   let capabilityReads = 0, setupReads = 0, finished = false;
   const never = deferred<Result>();
   const browser = action({ id: "tailscale-browser", kind: "open-url",

@@ -24,6 +24,7 @@ type EmbeddingApi = ReturnType<typeof import("@tnunamak/gozar").createGozar>;
 type RuntimeConsentReview = Awaited<ReturnType<typeof import("@tnunamak/gozar").reviewRouteConsent>>;
 
 import { ReachabilityError, requireRouteApproval, requireSetupApproval } from "./approvals.ts";
+import { CatalogCache, watchForChanges } from "./catalog-cache.ts";
 import { ConfigurationDraftSession } from "./drafts.ts";
 import { handleKey, type OperationRecord, type ReachabilityOperations, sameHandle } from "./operations.ts";
 
@@ -98,6 +99,8 @@ export type HostPolicy = {
 export class ReachabilityService {
   private readonly api: EmbeddingApi;
   private readonly host: HostPolicy;
+  // What the catalog page reads. The review that Turn on approves reads the library directly.
+  private readonly catalog: CatalogCache<Awaited<ReturnType<EmbeddingApi["listProviders"]>>>;
   private readonly drafts = new Map<string, SavedDraft>();
   private readonly reviews = new Map<string, Review>();
   private readonly routes = new Map<string, Route>();
@@ -134,7 +137,8 @@ export class ReachabilityService {
   private journalScan: "ok" | "unavailable" = "ok";
 
   constructor(api: EmbeddingApi, host: HostPolicy) {
-    this.api = api;
+    this.catalog = new CatalogCache(() => api.listProviders({ home: this.host.query.home, owner: this.host.query.owner }));
+    this.api = watchForChanges(api, () => this.catalog.invalidate());
     this.host = host;
   }
   private ref(providerId: string, draftId: string) {
@@ -239,7 +243,14 @@ export class ReachabilityService {
         }
       }
     }
-    const observed = await this.host.hostSettings.apply(input);
+    // The listener, password and port the catalog was read against are about to change.
+    this.catalog.invalidate();
+    let observed: Awaited<ReturnType<HostSettingsBridge["apply"]>>;
+    try {
+      observed = await this.host.hostSettings.apply(input);
+    } finally {
+      this.catalog.invalidate();
+    }
     this.observeHostConfinement(observed.confinement);
     if (input.mode === "off") {
       for (const route of this.routes.values()) {
@@ -253,8 +264,9 @@ export class ReachabilityService {
     }
     return observed;
   }
+  /** The provider catalog, shared between readers (see CatalogCache); `observedAt` says when it was made. */
   async inventory() {
-    return this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner });
+    return this.catalog.read();
   }
   async begin(providerId: string, expectedConfigurationRevision: string): Promise<Draft> {
     const draft = await this.api.beginConfigurationDraft({

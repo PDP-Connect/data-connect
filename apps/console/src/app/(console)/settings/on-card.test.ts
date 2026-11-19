@@ -11,13 +11,13 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import ts from "typescript";
 import { formatLocalTime } from "./plain-text.ts";
-import type { requestReachability } from "./reachability-actions.ts";
+import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
-mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {
       throw new Error("Use the test transport");

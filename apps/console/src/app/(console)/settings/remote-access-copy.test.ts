@@ -14,7 +14,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
-import type { requestReachability } from "./reachability-actions.ts";
+import type { requestReachability } from "./reachability-client.ts";
 import { ERROR_MESSAGES, GENERIC_ERROR, genericErrorFor, publicError } from "./reachability-errors.ts";
 import { ReachabilityFailure, toDisplayError } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
@@ -28,7 +28,7 @@ import { TurnOnCard } from "./turn-on.tsx";
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
-mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {
       throw new Error("Use the test transport");
@@ -64,7 +64,7 @@ const sourceFiles = [
   "on-card.tsx",
   "choose-way.tsx",
   "choose-way.ts",
-  "reachability-actions.ts",
+  "reachability-client.ts",
   "diagnostics.tsx",
   "page.tsx",
 ];
@@ -130,7 +130,9 @@ const nonDisplayCallsForCodes = new Set([...nonDisplayCalls, "publicError", "gen
 const allowedBannedLiterals = new Set<string>([
   "reachability-errors.ts: reachability_unavailable",
   // The request path. It is a URL, never displayed.
-  "reachability-actions.ts: /v1/owner/reachability",
+  "reachability-client.ts: /api/reachability",
+  // The sign-in address the browser is sent to; never displayed.
+  "reachability-client.ts: /owner/login?return_to=",
 ]);
 
 export function bannedLiteralsAnywhere(fileName: string, code: string): string[] {
@@ -187,7 +189,7 @@ test("the wide scan catches a code shown through a variable or a lookup table", 
 test("user-facing string literals in the Remote access files use the closed vocabulary", () => {
   for (const file of sourceFiles) {
     const literals = userFacingLiterals(file, readFileSync(new URL(file, dir), "utf8"));
-    assert.ok(file === "route-display.ts" || file === "reachability-actions.ts" || literals.length > 0, `${file}: no literals found; the scanner is broken`);
+    assert.ok(file === "route-display.ts" || file === "reachability-client.ts" || literals.length > 0, `${file}: no literals found; the scanner is broken`);
     for (const literal of literals) assertClean(`${file}: "${literal}"`, literal);
   }
 });

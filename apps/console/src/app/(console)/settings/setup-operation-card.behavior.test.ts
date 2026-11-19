@@ -3,13 +3,13 @@
 import assert from "node:assert/strict"
 import test, { mock } from "node:test"
 import { JSDOM } from "jsdom"
-import type { requestReachability } from "./reachability-actions.ts"
+import type { requestReachability } from "./reachability-client.ts"
 
 // react-dom decides whether the page can fire input events when it loads, so a window must exist first.
 const boot = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost" })
 Object.assign(globalThis, { window: boot.window, document: boot.window.document })
 
-mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {
       throw new Error("Use the test transport")

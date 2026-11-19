@@ -14,7 +14,7 @@ import { migrateLegacySetupReservations } from "../../../lib/legacy-setup-reserv
 import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts";
 import { ProviderSetup } from "./provider-setup.tsx";
 import { type ServiceEntry, setupCards } from "./setup-services.ts";
-import { requestReachability } from "./reachability-actions.ts";
+import { requestReachability } from "./reachability-client.ts";
 import { OnCard } from "./on-card.tsx";
 import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
 import { type Attention, attentionSentence, journalUnreadableWarning, recheckDelay, routeAttention, routeCardProofLine, routeHeadline, routeSentence } from "./route-display.ts";
@@ -103,6 +103,14 @@ type Prep =
 // card: the service may still be working on it, so "can't reach" would be
 // wrong, and the owner can try again.
 const gotNoAnswer = (code: string) => code === "service_unreachable";
+// How old the page's catalog may get before it is read again. A computer that answers at once is read
+// with every poll (3 s). A slow one is read after eight times as long as the last read took, so the
+// reads use about an eighth of its time, and never less often than once a minute.
+const CATALOG_MIN_REFRESH_MS = 3_000;
+const CATALOG_MAX_REFRESH_MS = 60_000;
+const CATALOG_COST_FACTOR = 8;
+const catalogRefreshAfter = (tookMs: number) =>
+  Math.min(CATALOG_MAX_REFRESH_MS, Math.max(CATALOG_MIN_REFRESH_MS, tookMs * CATALOG_COST_FACTOR));
 
 /**
  * The Off status row: one inline text flow, so on a narrow screen the words
@@ -222,6 +230,61 @@ export function RemoteAccessSetting({
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setInterval> | undefined;
+    // A request that throws got no answer. Each read settles on its own, so
+    // one throw cannot hide what another read was answered.
+    type Read = Awaited<ReturnType<typeof request>>;
+    type Outcome = { read: Read } | { thrown: unknown };
+    const settle = (path: string) =>
+      request(path).then(
+        (read): Outcome => ({ read }),
+        (thrown: unknown): Outcome => ({ thrown })
+      );
+    // The catalog probes this computer, and on some computers that takes seconds. So it is read
+    // on its own schedule instead of with every poll: one read at a time, replaced in the
+    // background when the held one is old, and waited for when nothing is held or it got no
+    // answer. The other reads keep their pace and report the catalog held at the time.
+    // `forgetCatalog` drops it after a change the owner made.
+    let catalogLast: { outcome: Outcome; at: number; tookMs: number } | null = null;
+    let catalogRead: Promise<Outcome> | null = null;
+    let catalogEpoch = 0;
+    const readCatalog = (): Promise<Outcome> => {
+      if (catalogRead === null) {
+        const epoch = catalogEpoch;
+        const startedAt = Date.now();
+        const run: Promise<Outcome> = settle("/catalog").then((outcome) => {
+          if (epoch === catalogEpoch) {
+            catalogLast = { outcome, at: Date.now(), tookMs: Date.now() - startedAt };
+          }
+          if (catalogRead === run) {
+            catalogRead = null;
+          }
+          return outcome;
+        });
+        catalogRead = run;
+      }
+      return catalogRead;
+    };
+    const forgetCatalog = () => {
+      catalogEpoch++;
+      catalogLast = null;
+      catalogRead = null;
+    };
+    const catalogOutcome = async (): Promise<Outcome> => {
+      const last = catalogLast;
+      const answered = last !== null && "read" in last.outcome && last.outcome.read.ok;
+      // Nothing held, or what is held got no answer: this poll waits for a read, as it always did.
+      if (last === null || !answered) {
+        return readCatalog();
+      }
+      if (Date.now() - last.at >= catalogRefreshAfter(last.tookMs) && catalogRead === null) {
+        void readCatalog().then((outcome) => {
+          if (active && "read" in outcome && outcome.read.ok) {
+            void load().catch(() => undefined);
+          }
+        });
+      }
+      return last.outcome;
+    };
     const load = async () => {
       const seq = ++loadSeq.current;
       const startedInEpoch = actionEpoch.current;
@@ -229,17 +292,8 @@ export function RemoteAccessSetting({
       // since, or a later poll already landed, this answer is out of date and
       // must not replace what the action or the later poll set.
       const outdated = () => !active || seq < appliedSeq.current || startedInEpoch !== actionEpoch.current;
-      type Read = Awaited<ReturnType<typeof request>>;
-      // A request that throws got no answer. Each read settles on its own, so
-      // one throw cannot hide what another read was answered.
-      type Outcome = { read: Read } | { thrown: unknown };
-      const settle = (path: string) =>
-        request(path).then(
-          (read): Outcome => ({ read }),
-          (thrown: unknown): Outcome => ({ thrown })
-        );
       const [catalog, stateRead, hostRead, capabilityRead] = await Promise.all([
-        settle("/catalog"),
+        catalogOutcome(),
         settle("/state"),
         settle("/host-settings"),
         settle("/host-capabilities"),
@@ -302,7 +356,10 @@ export function RemoteAccessSetting({
         setError((current) => (current?.source === "load" ? null : current));
       }
     };
-    loadRef.current = load;
+    loadRef.current = () => {
+      forgetCatalog();
+      return load();
+    };
     // Setups an older console kept in the browser move to the host first, and
     // polling starts only after that finishes.
     void migrateLegacySetupReservations(request)

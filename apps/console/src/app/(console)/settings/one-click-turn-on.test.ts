@@ -9,14 +9,14 @@ import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { type Action, type FactLine, MAX_PREPARATION_RESTARTS, PreparationStopped, hasEffects, operationOutcome, prepareTurnOn, shortFactLines } from "./prepare-remote-access.ts";
-import type { requestReachability } from "./reachability-actions.ts";
+import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
 import { trialConsentAction } from "./real-gozar-shapes.fixture.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
 });
-mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: {
     requestReachability: async () => {
       throw new Error("Use the test transport");
@@ -975,19 +975,19 @@ test("a private missing-password observation restarts preparation after a true p
   });
 });
 
-test("a hung preparation times out with Try again and cannot resume positive requests", async (t) => {
+// The transport ends every request at its own deadline (reachability-client.test.ts), so a request
+// that outlives it reaches the chain as this failure. The chain has no timer of its own.
+test("a request that outlives the transport's deadline ends the preparation with Try again and sends nothing more", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
-  const slow = deferred<Result>();
   let drafts = 0;
-  const handler = host({ "/drafts": () => ++drafts === 1 ? slow.promise as unknown as Result : ok(draftWith()) });
+  const lateFailure = () =>
+    new Promise<Result>((resolve) => setTimeout(() => resolve(fail("reachability_unavailable")), 15_000));
+  const handler = host({ "/drafts": () => (++drafts === 1 ? (lateFailure() as unknown as Result) : ok(draftWith())) });
   await withScreen(handler, async ({ calls, settle, text, press }) => {
     await act(async () => t.mock.timers.tick(15_001));
     await settle();
     assert.match(text(), /Try again/);
     assert.ok(!calls.some((call) => call.url.endsWith("/commit")));
-    await act(async () => slow.resolve(ok(draftWith())));
-    await settle();
-    assert.ok(!calls.some((call) => call.url.endsWith("/commit")), "late timeout response cannot continue the chain");
     await press(/^Try again$/);
     assert.match(text(), /Turn on remote access/);
   });
@@ -1048,5 +1048,74 @@ test("an owner step with no setup card says its details did not load and offers 
     assert.doesNotMatch(text(), /couldn't turn on/);
     assert.deepEqual(approvals(calls), []);
     assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Try again"));
+  });
+});
+
+// ---------- a slow catalog must not starve Turn on ----------
+
+// The console used to reach the service through Server Actions. Next.js runs one
+// client's actions one at a time (next/dist/client/components/app-router-instance.js
+// keeps one action queue), so a request waited behind every earlier one. This lane
+// keeps that property on purpose: a transport that serializes must still get Turn on ready.
+function serialLane(handler: Handler): Handler {
+  let tail: Promise<unknown> = Promise.resolve();
+  return (call) => {
+    const run = tail.then(() => handler(call));
+    tail = run.catch(() => undefined);
+    return run;
+  };
+}
+
+test("Turn on is prepared while the page polls a catalog that takes seconds to answer", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const after = <T>(ms: number, value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
+  // Slow like a computer whose provider probes are slow; the rest answer at once.
+  const handler = serialLane(
+    host({
+      "/catalog": () => after(4_000, ok(catalog)) as unknown as Result,
+      "/drafts": () => after(4_000, ok(draftWith())) as unknown as Result,
+    })
+  );
+  await withScreen(handler, async ({ settle, text }) => {
+    // 3 minutes of the page's own clock, in steps; stop as soon as Turn on is ready or has failed.
+    for (let elapsed = 0; elapsed < 180_000; elapsed += 250) {
+      if (/Turn on remote access/.test(text()) || /couldn.t get this way ready/.test(text())) break;
+      await act(async () => t.mock.timers.tick(250));
+      await settle();
+    }
+    assert.doesNotMatch(text(), /couldn.t get this way ready/);
+    assert.match(text(), /Turn on remote access/);
+  });
+});
+
+test("the page polls the fast reads every 3 s, and reads a catalog that is slow to answer one at a time and rarely", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"] });
+  const after = <T>(ms: number, value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
+  const handler = host({ "/catalog": () => after(8_000, ok(catalog)) as unknown as Result });
+  await withScreen(handler, async ({ calls, settle, text }) => {
+    for (let elapsed = 0; elapsed < 90_000; elapsed += 500) {
+      await act(async () => t.mock.timers.tick(500));
+      await settle();
+    }
+    const count = (url: string) => calls.filter((call) => call.url === url).length;
+    assert.ok(count("/state") >= 25, `/state kept its pace: ${count("/state")} reads in 90 s`);
+    // The first read, then one when the held one is old: eight times its 8 s, capped at a minute.
+    assert.ok(count("/catalog") <= 5, `/catalog was read ${count("/catalog")} times in 90 s`);
+    assert.doesNotMatch(text(), /couldn.t get this way ready|couldn.t check/);
+    assert.match(text(), /Turn on remote access/);
+  });
+});
+
+test("a catalog read that fails at once is tried again on the poll, 3 s on, never in a loop", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"] });
+  const handler = host({ "/catalog": fail("service_unreachable") });
+  await withScreen(handler, async ({ calls, settle, text }) => {
+    for (let elapsed = 0; elapsed < 30_000; elapsed += 500) {
+      await act(async () => t.mock.timers.tick(500));
+      await settle();
+    }
+    const reads = calls.filter((call) => call.url === "/catalog").length;
+    assert.ok(reads >= 5 && reads <= 12, `/catalog was read ${reads} times in 30 s`);
+    assert.match(text(), /couldn.t check remote access|background service isn.t running/i);
   });
 });

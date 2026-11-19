@@ -6,10 +6,10 @@ import { JSDOM } from "jsdom"
 import * as React from "react"
 import { act, createElement } from "react"
 import { createRoot } from "react-dom/client"
-import type { requestReachability } from "./reachability-actions.ts"
+import type { requestReachability } from "./reachability-client.ts"
 
 const windowCalls: string[] = []
-mock.module(new URL("./reachability-actions.ts", import.meta.url).href, {
+mock.module(new URL("./reachability-client.ts", import.meta.url).href, {
   namedExports: { requestReachability: async () => { throw new Error("Use the test transport") } },
 })
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
