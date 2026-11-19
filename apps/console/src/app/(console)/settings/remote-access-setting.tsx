@@ -15,7 +15,7 @@ import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-actions.ts";
 import { OnCard } from "./on-card.tsx";
 import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
-import { type Attention, attentionSentence, journalUnreadableWarning, proofLine, recheckDelay, routeAttention, routeHeadline, routeSentence } from "./route-display.ts";
+import { type Attention, attentionSentence, journalUnreadableWarning, recheckDelay, routeAttention, routeCardProofLine, routeHeadline, routeSentence } from "./route-display.ts";
 import {
   type DisplayError,
   Diagnostics,
@@ -1138,6 +1138,7 @@ export function RemoteAccessSetting({
               </div>
             );
           }
+          const cardProof = routeCardProofLine(route, now, { synthetic: state.evidenceSource === "synthetic" });
           return (
           <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
             <h3 className="pdpp-label">{headline}</h3>
@@ -1145,9 +1146,7 @@ export function RemoteAccessSetting({
             {attention ? <p role="status">{attentionSentence(attention, route, serviceLabel)}</p> : null}
             {unsupportedRefresh ? <p role="status">{ERROR_MESSAGES.proof_refresh_unsupported}</p> : null}
             <p className="pdpp-caption break-words">Your address: {route.origin ?? "Not available yet"}</p>
-            <p className="pdpp-caption">
-              {proofLine(route, now, { synthetic: state.evidenceSource === "synthetic" })}
-            </p>
+            {cardProof ? <p className="pdpp-caption">{cardProof}</p> : null}
             {extras}
             {route.cleanup.state !== "confirmed" || attention ? <div className="flex flex-wrap gap-3">
               {headline === "Needs your action" && route.cleanup.state !== "unconfirmed" ? (

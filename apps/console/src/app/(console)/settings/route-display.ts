@@ -108,6 +108,16 @@ export function proofLine(
   return `${options.synthetic ? "Test data: " : ""}${base}`;
 }
 
+// Reachability proof is no longer relevant once the host confirms the route ended.
+export function routeCardProofLine(
+  route: RouteDisplayInput,
+  now: number,
+  options: { synthetic?: boolean } = {}
+): string | null {
+  if (route.state === "released" && route.cleanup.state === "confirmed") return null;
+  return proofLine(route, now, options);
+}
+
 /**
  * How long after the browser received a proof to re-check it: the window length
  * the server reported (its end minus its observation, both on the server's

@@ -9,6 +9,7 @@ import {
   proofLine,
   recheckDelay,
   routeAttention,
+  routeCardProofLine,
   routeHeadline,
   routeSentence,
   type RouteDisplayInput,
@@ -46,6 +47,18 @@ test("an unverified route is not called working; test data is labelled; no check
   assert.match(proofLine(staleRoute, Date.parse("2026-11-18T07:09:00Z"), { synthetic: true }), /^Test data: Works from the internet/);
   const unknownTime = { ...staleRoute, verification: { ...staleRoute.verification, observedAt: null } };
   assert.match(proofLine(unknownTime, 0), /check time unknown/);
+});
+
+test("the ended route card omits proof when cleanup is confirmed", () => {
+  const now = Date.parse("2026-11-18T07:11:24Z");
+  assert.equal(routeCardProofLine(releasedRoute, now), null);
+  assert.equal(routeCardProofLine(releasedRoute, now, { synthetic: true }), null);
+});
+
+test("the ended route card keeps unverified proof when cleanup is unconfirmed", () => {
+  const now = Date.parse("2026-11-18T07:11:24Z");
+  const route = { ...releasedRoute, cleanup: { state: "unconfirmed" } };
+  assert.equal(routeCardProofLine(route, now), "Not confirmed yet · checked just now");
 });
 
 test("the one lifetime is the server's expiry, formatted local; nothing is computed from a label", () => {
