@@ -146,8 +146,10 @@ export function routeAttention(
     cleanupUnconfirmed?: boolean;
   }
 ): Attention | null {
-  if (context.acknowledged) return null;
+  // A close that did not confirm outranks an earlier acknowledgement: the owner's own Turn off
+  // acknowledges the route, and that is exactly when an unconfirmed close must still show.
   if (context.cleanupUnconfirmed && route.cleanup.state !== "confirmed") return "cleanup-unconfirmed";
+  if (context.acknowledged) return null;
   if (route.state === "lost" || context.lifecycleReason === "agent-exited") return "lost";
   if (route.cleanup.state === "confirmed") {
     // Off is only for a stop the owner asked for. A route that ended with no such stop (the tunnel

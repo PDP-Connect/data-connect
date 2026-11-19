@@ -98,7 +98,20 @@ test("a route the host could not confirm closed needs the owner and offers Turn 
   assert.equal(routeHeadline(unconfirmed, "stopping", false, "cleanup-unconfirmed"), "Needs your action");
   assert.equal(routeAttention(unconfirmed, stopping), null, "a stop still under way is not attention");
   assert.equal(routeAttention({ ...unconfirmed, cleanup: { state: "confirmed" } }, { ...stopping, cleanupUnconfirmed: true }), null);
-  assert.equal(routeAttention(unconfirmed, { ...stopping, cleanupUnconfirmed: true, acknowledged: true }), null);
+  assert.equal(
+    routeAttention(unconfirmed, { ...stopping, cleanupUnconfirmed: true, acknowledged: true }),
+    "cleanup-unconfirmed",
+    "the owner's own Turn off acknowledges the route; an unconfirmed close must still show"
+  );
+  for (const state of ["released", "usable"]) {
+    const route = { ...unconfirmed, state };
+    assert.equal(routeAttention(route, { ...base, cleanupUnconfirmed: true, acknowledged: true }), "cleanup-unconfirmed", state);
+    assert.equal(
+      routeAttention({ ...route, cleanup: { state: "confirmed" } }, { ...base, cleanupUnconfirmed: true, acknowledged: true }),
+      null,
+      `${state}: a confirmed close needs nothing`
+    );
+  }
   assert.match(attentionSentence("cleanup-unconfirmed", unconfirmed, "Tunnel service"), /^We couldn't confirm your address closed\. It may still work\. Turn it off/);
 });
 
