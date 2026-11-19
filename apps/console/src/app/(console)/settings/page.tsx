@@ -23,6 +23,8 @@ export const metadata: Metadata = {
 
 export default async function SettingsPage() {
   const identity = getProductIdentity()
+  // Desktop and vault-recovery settings write command files only the managed
+  // desktop host answers; on a server they would do nothing.
   const managedDesktopHost = process.env.PDPP_MANAGED_DESKTOP_HOST === "1"
   const [hasLocalRevealProof, ownerSessions, ownerPasswordSource, ownerPasswordSet] =
     await Promise.all([

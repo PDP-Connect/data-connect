@@ -119,12 +119,12 @@ const catalogRefreshAfter = (tookMs: number) =>
  * wrap under the dot instead of splitting into columns. As the start card's
  * header band it carries the divider (`framed`); above Step 1 it floats alone.
  */
-function OffStatusRow({ possiblyLive, framed = false }: { possiblyLive: boolean; framed?: boolean }) {
+function OffStatusRow({ possiblyLive, framed = false, localOnly = true }: { possiblyLive: boolean; framed?: boolean; localOnly?: boolean }) {
   return (
     <p className={`text-sm font-medium ${framed ? "border-b px-4 py-3" : ""}`} role="status">
       <span aria-hidden="true" className="mr-2 inline-block size-2.5 rounded-full bg-muted-foreground/50 align-middle" />
       {possiblyLive ? "Unknown, possibly live " : "Off "}
-      {possiblyLive ? null : <span className="font-normal text-muted-foreground">· Only this computer can open DataConnect.</span>}
+      {possiblyLive || !localOnly ? null : <span className="font-normal text-muted-foreground">· Only this computer can open DataConnect.</span>}
     </p>
   );
 }
@@ -963,7 +963,9 @@ export function RemoteAccessSetting({
       chooseAnotherWay();
     },
   };
-  const hostReasonShown = !host.known && host.reason !== "loading";
+  const desktopControlsAbsent = !host.known && host.reason === "host-supervisor-unavailable";
+  const hostReasonShown = !host.known && host.reason !== "loading" && !desktopControlsAbsent;
+  const localOnly = !desktopControlsAbsent && !(state.lifecycle?.confinement.known && state.lifecycle.confinement.value === false);
   const journalWarning = state.recovery?.pending
     ? "Checking addresses from before the restart. An earlier address may still work."
     : state.recovery?.blockedBy
@@ -1049,11 +1051,11 @@ export function RemoteAccessSetting({
         <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>
       ) : null}
       {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
-        <OffStatusRow possiblyLive={possiblyLive} />
+        <OffStatusRow localOnly={localOnly} possiblyLive={possiblyLive} />
       ) : null}
       {idle && !passwordMissing ? (
         <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
-          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed possiblyLive={possiblyLive} /> : null}
+          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed localOnly={localOnly} possiblyLive={possiblyLive} /> : null}
           <div className="grid gap-4 p-4">
             <div className="grid gap-1">
               <p className="pdpp-label uppercase tracking-wide">Step 2 of 2</p>

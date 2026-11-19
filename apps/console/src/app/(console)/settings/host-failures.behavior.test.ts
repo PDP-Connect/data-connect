@@ -349,6 +349,16 @@ test("boot listing timeout shows possibly live and offers a recovery check", asy
   });
 });
 
+test("a headless host without desktop controls does not claim its service is down or local-only", async () => {
+  await withScreen(host({
+    "/host-settings": ok({ known: false, reason: "host-supervisor-unavailable" }),
+    "/state": ok({ ...idleState, lifecycle: { confinement: { known: true, value: false }, cleanup: "none", stopRequested: false } }),
+  }), async ({ mainText }) => {
+    assert.doesNotMatch(mainText(), /background service isn't running/);
+    assert.doesNotMatch(mainText(), /Only this computer can open/);
+    assert.match(mainText(), /Turn on/);
+  });
+});
 
 test("earlier setup is a non-blocking notice that clears after reentry", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 1_800_000_000_000 });
