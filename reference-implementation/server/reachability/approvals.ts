@@ -11,8 +11,8 @@ export class ReachabilityError extends Error {
    * journal records its exact handle, the same way it records a library error's partial route.
    */
   readonly route?: import("@tnunamak/gozar").RouteView;
-  constructor(code: string, route?: import("@tnunamak/gozar").RouteView) {
-    super(code);
+  constructor(code: string, route?: import("@tnunamak/gozar").RouteView, cause?: unknown) {
+    super(code, cause === undefined ? undefined : { cause });
     this.code = code;
     if (route) this.route = route;
   }

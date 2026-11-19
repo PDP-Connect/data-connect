@@ -808,21 +808,24 @@ export class ReachabilityService {
       // just created and closes it, whatever its kind, because the owner is told this Turn on
       // failed. A durable route is kept only when the start completes under its own epoch.
       if (epoch !== this.epoch) {
-        // A close that does not confirm leaves the route owed. The failure carries it, so the
-        // start's journal record keeps the exact handle for the next restart. A confirmed close
-        // owes nothing, and the journal's merge never lets this record replace confirmed evidence.
+        // A close that does not confirm, or that throws, leaves the route owed. The failure
+        // carries it, so the start's journal record keeps the exact handle for the next restart.
+        // A confirmed close owes nothing, and the journal's merge never lets this record replace
+        // confirmed evidence.
         let closed: Route;
         try {
           closed = await this.stop(route.handle.id, route.handle.generation, true);
         } catch (closeError) {
-          if (closeError && typeof closeError === "object" && !("route" in closeError)) {
-            (closeError as { route?: Route }).route = route;
-          }
-          throw closeError;
+          // The close outcome is unknown. Wrap the cause; never mutate it.
+          throw new ReachabilityError(
+            "operation_superseded",
+            owedRoute(route, [routeOn(closeError), this.routes.get(route.handle.id)]),
+            closeError
+          );
         }
         throw new ReachabilityError(
           "operation_superseded",
-          closed.cleanup.state === "confirmed" ? undefined : closed
+          closed.cleanup.state === "confirmed" ? undefined : owedRoute(route, [closed]),
         );
       }
       this.transition({ handle: route.handle, type: "allocated" });
@@ -1273,6 +1276,31 @@ function hostStartedKind(handle: Handle): boolean {
   return handle.kind === "attached" || handle.kind === "session";
 }
 
+
+/** The route a throw carries, if any, read without trusting the thrown value. */
+function routeOn(thrown: unknown): Route | null {
+  try {
+    const route = (thrown as { route?: Route } | null | undefined)?.route;
+    return route && typeof route === "object" && route.handle && route.cleanup ? route : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The evidence for a route a superseded start still owes. Only a view naming the allocation's
+ * exact handle counts, the first such view wins, and the original allocation is the fallback.
+ * Stop has withdrawn publication, so the view is never published, and a view claiming
+ * confirmation is not believed here: a thrown or partial close outcome is unknown.
+ */
+function owedRoute(allocation: Route, views: (Route | null | undefined)[]): Route {
+  const view = views.find((candidate) => candidate && sameHandle(candidate.handle, allocation.handle)) ?? allocation;
+  return {
+    ...view,
+    cleanup: view.cleanup.state === "confirmed" ? { nextAction: null, state: "unconfirmed" } : view.cleanup,
+    published: null,
+  };
+}
 
 export function restartCandidates(records: OperationRecord[]): { handle: Handle; operationId: string }[] {
   const ownerStopped = (handle: Handle) =>

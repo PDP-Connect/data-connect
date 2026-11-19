@@ -259,100 +259,206 @@ test("a start that never settles does not delay the close of an already-known ow
   }
 });
 
+// A start superseded by shutdown: its provider call is held across shutdown's debt snapshot, then
+// returns an allocation whose close `close` decides. Resolves once the start's record settles.
+async function lateAllocation(
+  kind: Handle["kind"],
+  close: (handle: Handle, route: Route) => Promise<Route>
+) {
+  const root = await mkdtemp(join(tmpdir(), "reachability-shutdown-late-"));
+  const operations = new ReachabilityOperations(root, true);
+  let release!: (route: Route) => void;
+  const allocation = new Promise<Route>((resolve) => {
+    release = resolve;
+  });
+  let exposed!: () => void;
+  const exposeCalled = new Promise<void>((resolve) => {
+    exposed = resolve;
+  });
+  const closes: Handle[] = [];
+  const held: { route: Route | null } = { route: null };
+  const service = new ReachabilityService(
+    {
+      closeRoute: async (input: { handle: Handle }) => {
+        closes.push(input.handle);
+        return close(input.handle, held.route!);
+      },
+      expose: async () => {
+        exposed();
+        return allocation;
+      },
+      watchRoutes: async function* () {},
+    } as never,
+    {
+      acknowledgeDisconnect: async () => undefined,
+      identity: { bootId: "b", instanceId: "i" },
+      query: { home: "fixture-home" },
+    } as never
+  );
+  const inner = service as unknown as { reviews: Map<string, unknown>; lifecycle: unknown };
+  inner.reviews.set("rev-1", {
+    candidate: {
+      candidateToken: "tok",
+      configuration: { revision: "r1" },
+      consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
+      consentFactsDigest: "consent-v1:abc",
+      disclosure: { revision: "1" },
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      ownership: "gozar-owned",
+      providerId: "svc",
+    },
+    draftId: "d1",
+    id: "rev-1",
+    query: { target: "127.0.0.1:1", usage: { kind } },
+  });
+  inner.lifecycle = { ...initialLifecycle(), approvalIdentity: "rev-1", phase: "review" };
+  const input = { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" };
+  const intent = {
+    bootId: "b",
+    configurationRevision: "r1",
+    consentFactsDigest: "consent-v1:abc",
+    expectedOrigin: null,
+    instanceId: "i",
+    ownership: "gozar-owned",
+    providerId: "svc",
+    target: "127.0.0.1:1",
+    usage: { kind },
+  } as never;
+  const { operationId } = await operations.start("start", null, (id) => service.apply(id, "rev-1", input), intent);
+  await exposeCalled;
+  // The start is still inside the provider call, so the debt snapshot has nothing to record.
+  const outcome = await service.shutdown(20, operations);
+  assert.deepEqual(outcome, { confirmed: [], unconfirmed: [] });
+  assert.equal(closes.length, 0, "no handle existed to close at the deadline");
+  const handle: Handle = { generation: 3, id: "late-route", kind };
+  held.route = { ...seed, handle, operationId, ownership: "gozar-owned" };
+  release(held.route);
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if ((await operations.read(operationId)).stage !== "applying") break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return {
+    closes,
+    handle,
+    operationId,
+    operations,
+    record: await operations.read(operationId),
+    cleanup: () => rm(root, { force: true, recursive: true }),
+  };
+}
+
+const unconfirmedClose = (_handle: Handle, route: Route): Promise<Route> =>
+  Promise.resolve({ ...route, cleanup: { nextAction: null, state: "unconfirmed" }, published: null });
+
 for (const kind of ["attached", "session"] as const) {
   test(`the ${kind} route of a start allocated after the shutdown debt snapshot keeps its exact handle when both closes stay unconfirmed`, { timeout: 5000 }, async () => {
-    const root = await mkdtemp(join(tmpdir(), "reachability-shutdown-late-"));
+    const f = await lateAllocation(kind, unconfirmedClose);
     try {
-      const operations = new ReachabilityOperations(root, true);
-      let release!: (route: Route) => void;
-      const allocation = new Promise<Route>((resolve) => {
-        release = resolve;
-      });
-      let exposed!: () => void;
-      const exposeCalled = new Promise<void>((resolve) => {
-        exposed = resolve;
-      });
-      const closes: Handle[] = [];
-      const unconfirmed = (route: Route): Route => ({
-        ...route,
-        cleanup: { nextAction: null, state: "unconfirmed" },
-        published: null,
-      });
-      const held: { route: Route | null } = { route: null };
-      const service = new ReachabilityService(
-        {
-          closeRoute: async (input: { handle: Handle }) => {
-            closes.push(input.handle);
-            return unconfirmed(held.route!);
-          },
-          expose: async () => {
-            exposed();
-            return allocation;
-          },
-          watchRoutes: async function* () {},
-        } as never,
-        {
-          acknowledgeDisconnect: async () => undefined,
-          identity: { bootId: "b", instanceId: "i" },
-          query: { home: "fixture-home" },
-        } as never
-      );
-      const inner = service as unknown as { reviews: Map<string, unknown>; lifecycle: unknown };
-      inner.reviews.set("rev-1", {
-        candidate: {
-          candidateToken: "tok",
-          configuration: { revision: "r1" },
-          consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
-          consentFactsDigest: "consent-v1:abc",
-          disclosure: { revision: "1" },
-          expiresAt: "2999-01-01T00:00:00.000Z",
-          ownership: "gozar-owned",
-          providerId: "svc",
-        },
-        draftId: "d1",
-        id: "rev-1",
-        query: { target: "127.0.0.1:1", usage: { kind } },
-      });
-      inner.lifecycle = { ...initialLifecycle(), approvalIdentity: "rev-1", phase: "review" };
-      const input = { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" };
-      const intent = {
-        bootId: "b",
-        configurationRevision: "r1",
-        consentFactsDigest: "consent-v1:abc",
-        expectedOrigin: null,
-        instanceId: "i",
-        ownership: "gozar-owned",
-        providerId: "svc",
-        target: "127.0.0.1:1",
-        usage: { kind },
-      } as never;
-      const { operationId } = await operations.start(
-        "start",
-        null,
-        (id) => service.apply(id, "rev-1", input),
-        intent
-      );
-      await exposeCalled;
-      // The start is still inside the provider call, so the debt snapshot has nothing to record.
-      const outcome = await service.shutdown(20, operations);
-      assert.deepEqual(outcome, { confirmed: [], unconfirmed: [] });
-      assert.equal(closes.length, 0, "no handle existed to close at the deadline");
-      const handle: Handle = { generation: 3, id: "late-route", kind };
-      held.route = { ...seed, handle, operationId, ownership: "gozar-owned" };
-      release(held.route);
-      for (let attempt = 0; attempt < 400; attempt++) {
-        if ((await operations.read(operationId)).stage !== "applying") break;
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-      const record = await operations.read(operationId);
+      const { record, handle, operationId, closes } = f;
       assert.equal(record.stage, "unknown-possibly-live");
       assert.deepEqual(record.handle, handle, "the record keeps the exact allocated handle");
       assert.notEqual(record.cleanupConfirmed, true);
       assert.ok(closes.length >= 1);
       assert.ok(closes.every((closed) => closed.id === handle.id && closed.generation === 3 && closed.kind === kind));
-      assert.deepEqual(restartCandidates(await operations.list()), [{ handle, operationId }]);
+      assert.deepEqual(restartCandidates(await f.operations.list()), [{ handle, operationId }]);
     } finally {
-      await rm(root, { force: true, recursive: true });
+      await f.cleanup();
     }
   });
 }
+
+// A close that throws has an unknown outcome. Whatever it throws, the start's record keeps the
+// exact allocated handle, and nothing about the thrown value is trusted or mutated.
+const wrongHandle: Handle = { generation: 9, id: "someone-else", kind: "attached" };
+const thrownCases: { name: string; thrown: (route: Route) => unknown }[] = [
+  { name: "a frozen rejection", thrown: () => Object.freeze(new Error("close failed")) },
+  { name: "a primitive rejection", thrown: () => "close failed" },
+  { name: "a rejection already carrying another handle's route", thrown: (route) => Object.assign(new Error("close failed"), { route: { ...route, handle: wrongHandle } }) },
+  { name: "a rejection carrying an undefined route", thrown: () => Object.assign(new Error("close failed"), { route: undefined }) },
+];
+for (const { name, thrown } of thrownCases) {
+  test(`a late start whose close throws ${name} keeps the exact allocated handle as a restart candidate`, { timeout: 5000 }, async () => {
+    const f = await lateAllocation("attached", (_handle, route) => Promise.reject(thrown(route)));
+    try {
+      assert.equal(f.record.stage, "unknown-possibly-live");
+      assert.deepEqual(f.record.handle, f.handle);
+      assert.notEqual(f.record.cleanupConfirmed, true);
+      assert.deepEqual(restartCandidates(await f.operations.list()), [{ handle: f.handle, operationId: f.operationId }]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+}
+
+// Drives apply alone: the provider call bumps the epoch, as a shutdown or a stop would, so the
+// allocation it returns is superseded and closed by apply itself.
+async function supersededApply(close: (route: Route) => Promise<Route>) {
+  const handle: Handle = { generation: 3, id: "late-route", kind: "attached" };
+  const route: Route = { ...seed, handle, ownership: "gozar-owned" };
+  assert.ok(route.published, "the fixture allocation is published");
+  const service = new ReachabilityService(
+    {
+      closeRoute: async () => close(route),
+      expose: async () => {
+        (service as unknown as { epoch: number }).epoch += 1;
+        return route;
+      },
+      watchRoutes: async function* () {},
+    } as never,
+    {
+      acknowledgeDisconnect: async () => undefined,
+      identity: { bootId: "b", instanceId: "i" },
+      query: { home: "fixture-home" },
+    } as never
+  );
+  const inner = service as unknown as { reviews: Map<string, unknown>; lifecycle: unknown; routes: Map<string, Route> };
+  inner.reviews.set("rev-1", {
+    candidate: {
+      candidateToken: "tok",
+      configuration: { revision: "r1" },
+      consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
+      consentFactsDigest: "consent-v1:abc",
+      disclosure: { revision: "1" },
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      ownership: "gozar-owned",
+      providerId: "svc",
+    },
+    draftId: "d1",
+    id: "rev-1",
+    query: { target: "127.0.0.1:1", usage: { kind: "attached" } },
+  });
+  inner.lifecycle = { ...initialLifecycle(), approvalIdentity: "rev-1", phase: "review" };
+  const failure = await service
+    .apply("op-1", "rev-1", { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" })
+    .then(
+      () => assert.fail("a superseded start must fail"),
+      (error: unknown) => error as { code: string; cause?: unknown; route?: Route }
+    );
+  return { failure, handle, inner };
+}
+
+test("a thrown close of a superseded start carries the withdrawn view of the exact allocation, never the published one", async () => {
+  const cause = new Error("close failed");
+  const { failure, handle, inner } = await supersededApply(() => Promise.reject(cause));
+  assert.equal(failure.code, "operation_superseded");
+  assert.equal(failure.cause, cause, "the cause is carried, not replaced");
+  assert.deepEqual(failure.route?.handle, handle);
+  assert.equal(failure.route?.published, null, "stop withdrew publication before the close");
+  assert.notEqual(failure.route?.cleanup.state, "confirmed", "a thrown close is an unknown outcome");
+  assert.equal(inner.routes.get(handle.id)?.published, null, "the service does not reinstate the published allocation");
+  assert.notEqual(inner.routes.get(handle.id)?.cleanup.state, "confirmed");
+});
+
+test("a thrown close never lets another handle's route, or a claim of confirmation, stand for the allocation", async () => {
+  const other = { ...seed, handle: wrongHandle };
+  const foreign = await supersededApply(() => Promise.reject(Object.assign(new Error("x"), { route: other })));
+  assert.deepEqual(foreign.failure.route?.handle, foreign.handle);
+  const claimed = await supersededApply((route) =>
+    Promise.reject(
+      Object.assign(new Error("x"), { route: { ...route, cleanup: { nextAction: null, state: "confirmed" } } })
+    )
+  );
+  assert.deepEqual(claimed.failure.route?.handle, claimed.handle);
+  assert.notEqual(claimed.failure.route?.cleanup.state, "confirmed");
+  assert.notEqual(claimed.inner.routes.get(claimed.handle.id)?.cleanup.state, "confirmed");
+});
