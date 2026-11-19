@@ -151,8 +151,8 @@ export function RemoteAccessSetting({
   const [confirmStop, setConfirmStop] = useState<{ route: Route; again: boolean } | null>(null);
   // The stop was confirmed from far away; this page is about to stop working.
   const [closingPage, setClosingPage] = useState(false);
-  // The address the owner had before Turn on again, to tell if it changed.
-  const [previousOrigin, setPreviousOrigin] = useState<string | null>(null);
+  // Track the displayed address and keep its change notice through later polls.
+  const [seenAddress, setSeenAddress] = useState<{ origin: string; changed: boolean } | null>(null);
   // Set by Turn on again: the digest of the facts the owner last approved.
   const againPending = useRef(false);
   // The digest of the facts the owner approved with the last Turn on click.
@@ -744,7 +744,7 @@ export function RemoteAccessSetting({
     return stopRoute(
       route,
       () => {
-        setPreviousOrigin(null);
+        setSeenAddress(null);
         againPending.current = false;
       },
       farAway
@@ -756,7 +756,7 @@ export function RemoteAccessSetting({
     return stopRoute(
       route,
       () => {
-        setPreviousOrigin(route.origin);
+        setSeenAddress(route.origin ? { origin: route.origin, changed: false } : null);
         againPending.current = approvedDigest.current !== null;
       },
       farAway
@@ -814,6 +814,21 @@ export function RemoteAccessSetting({
       !(settledOff(route) && state.routes.some((other) => other !== route && !settledOff(other))) &&
       !(settledOff(route) && route.stopRequested === true && !acknowledged.has(route.handle.id))
   );
+  const onOrigin =
+    visibleRoutes.find(
+      (route) => route.origin !== null && headlineOf(route) === "On" && route.cleanup.state !== "confirmed"
+    )?.origin ?? null;
+  useEffect(() => {
+    if (onOrigin === null) {
+      return;
+    }
+    setSeenAddress((current) =>
+      current?.origin === onOrigin ? current : { origin: onOrigin, changed: current !== null }
+    );
+  }, [onOrigin]);
+  // Until the effect above records a new address, a different one already counts as changed.
+  const addressChanged =
+    onOrigin !== null && seenAddress !== null && (seenAddress.origin !== onOrigin || seenAddress.changed);
   // What the buttons on an error do. None of them reload the page.
   const refresh = () => {
     setError(null);
@@ -1102,7 +1117,7 @@ export function RemoteAccessSetting({
             return (
               <div className="grid gap-3 rounded-lg border p-4" key={route.handle.id}>
                 <OnCard
-                  addressChanged={previousOrigin !== null && route.origin !== null && route.origin !== previousOrigin}
+                  addressChanged={addressChanged && route.origin === onOrigin}
                   busy={busy}
                   now={now}
                   onTurnOff={() => requestStop(route, false)}

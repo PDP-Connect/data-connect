@@ -604,6 +604,29 @@ for (const label of ["Turn on again", "Turn off"]) {
 
 // ---------- Turn on again and the new address ----------
 
+const ADDRESS_CHANGED_NOTICE = /Your address changed\. Update it wherever you pasted the old one, like ChatGPT\./;
+
+test("an On card reports a changed address from polling without any action", async (t) => {
+  let route = routeAt();
+  await withScreen(host({ "/state": () => onState(route) }), async ({ text, tick, container, calls }) => {
+    assert.match(text(), /Your address: https:\/\/one\.example\.invalid/);
+    assert.doesNotMatch(text(), ADDRESS_CHANGED_NOTICE);
+    await tick(3_000);
+    assert.doesNotMatch(text(), ADDRESS_CHANGED_NOTICE, "unchanged addresses do not show a change notice");
+
+    const origin = "https://two.example.invalid";
+    route = { ...routeAt({ origin }), published: origin };
+    await tick(3_000);
+    assert.ok(container.querySelector('section[aria-label="On"]'));
+    assert.match(text(), /Your address: https:\/\/two\.example\.invalid/);
+    assert.match(text(), ADDRESS_CHANGED_NOTICE);
+
+    await tick(3_000);
+    assert.match(text(), ADDRESS_CHANGED_NOTICE, "an unchanged follow-up poll does not hide an unread notice");
+    assert.ok(!calls.some((call) => call.url === "/operations" || call.url.endsWith("/stop")));
+  }, t);
+});
+
 test("Turn on again turns off, turns on with the facts already approved, and says the address changed", async (t) => {
   // Off -> the owner turns on -> On (address one) -> the host loses it -> Turn on again -> On (address two).
   let stage: "off" | "on1" | "lost" | "off2" | "on2" = "off";

@@ -36,7 +36,7 @@ export function OnCard({
   route: RouteDisplayInput & { origin: string | null };
   now: number;
   synthetic: boolean;
-  /** True after Turn on again produced a different address. */
+  /** True when the displayed address replaced one the owner saw on this page. */
   addressChanged: boolean;
   busy: boolean;
   onTurnOff: () => void;
