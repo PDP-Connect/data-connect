@@ -96,6 +96,7 @@ export type HostPolicy = {
   hostSettings?: HostSettingsBridge;
   recoverAtBoot?: boolean;
   recoveryRetry?: Partial<RecoveryRetry>;
+  checkConfiguration?: (scopes: string[]) => Promise<void>;
   currentTarget?: () => Promise<string>;
   evidenceSource?: "synthetic";
   prepare: (input: { usage: Query["usage"]; reach: string; transport: string }) => Promise<void>;
@@ -319,7 +320,9 @@ export class ReachabilityService {
     return observed;
   }
   async inventory() {
-    return this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner });
+    const inventory = await this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner });
+    await this.host.checkConfiguration?.(inventory.providers.map(provider => provider.configuration.scopeId));
+    return inventory;
   }
   async begin(providerId: string, expectedConfigurationRevision: string): Promise<Draft> {
     this.assertRecovered();
@@ -560,7 +563,7 @@ export class ReachabilityService {
     this.assertRecovered();
     const saved = this.draft(id);
     // Host preparation observes the final listener/password/port before catalog.
-    const inventory = await this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner });
+    const inventory = await this.inventory();
     const variants = inventory.providers.filter((item: ProviderInventory) => item.providerId === saved.providerId);
     if (variants.length !== 1 || !variants[0]) {
       throw new ReachabilityError("ambiguous_selection");

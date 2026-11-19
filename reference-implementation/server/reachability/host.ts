@@ -8,6 +8,7 @@ import type { OwnerReachabilityContext } from "../routes/owner-reachability.ts";
 import { createCredentialCipher, resolveCredentialEncryptionKey, type CredentialCipher } from "../stores/credential-encryption.ts";
 import { ReachabilityError } from "./approvals.ts";
 import { startDesktopReachability, requireUsableSocketHome } from "./desktop-host.ts";
+import { requireCompatibleConfiguration } from "./configuration-compatibility.ts";
 import { createReachabilityService } from "./factory.ts";
 import { loadHostIdentity } from "./identity.ts";
 import { createHostSecretBackend } from "./secret-backend.ts";
@@ -50,6 +51,9 @@ const SERVER_ROW: Row = {
   // A session route has no owner-visible lifetime control in this host.
   usage: new Set<Usage["kind"]>(["attached", "durable"]),
 };
+// This is a storage namespace, independent of the authenticated login subject.
+// Existing server installations key their provider configuration and routes by it.
+const SERVER_STORAGE_OWNER = "pdpp-reference-server";
 const DURABLE_ROUTE_ID = "owner-route";
 
 export type ReachabilityHostInput = {
@@ -126,12 +130,13 @@ export async function startServerReachability(input: ReachabilityHostInput): Pro
     {
       // A route change never rebinds this server's own listener, so there is no
       // connection of the owner's for it to cut off.
+      checkConfiguration: (scopes) => requireCompatibleConfiguration(home, scopes),
       recoverAtBoot: true,
       acknowledgeDisconnect: async () => undefined,
       prepare: async () => requireUsableSocketHome(home),
       query: {
         home,
-        owner: input.owner,
+        owner: SERVER_STORAGE_OWNER,
         requirements: {
           address: "any",
           payloadAccess: "allow-provider",
