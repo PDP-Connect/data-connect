@@ -26,6 +26,7 @@ import {
   type Recover,
   RecoveryContext,
   ReachabilityFailure,
+  diagnosticsText,
   toDisplayError,
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
@@ -93,10 +94,12 @@ type Prep =
   | { status: "preparing" }
   | { status: "done"; providerId: string; result: Prepared };
 
-// Codes for a read that got no answer: the service is restarting (saving the
-// password restarts it) or is down. The card goes stale, its status line says
-// the service can't be reached, and the next poll retries. No error card.
-const gotNoAnswer = (code: string) => code === "service_unreachable" || code === "reachability_unavailable";
+// A read that got no answer: the service is restarting (saving the password
+// restarts it) or is down. The card goes stale, its status line says the
+// service can't be reached and keeps the code under Details, and the next poll
+// retries. No error card. A read the service answered with an error, even its
+// generic one, is a real failure and shows its card.
+const gotNoAnswer = (code: string) => code === "service_unreachable";
 
 /**
  * The Off status row: one inline text flow, so on a narrow screen the words
@@ -160,6 +163,8 @@ export function RemoteAccessSetting({
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [stale, setStale] = useState(false);
+  // The last read that got no answer, for Details under the stale line.
+  const [noAnswer, setNoAnswer] = useState<DisplayError | null>(null);
   const [error, setError] = useState<DisplayError | null>(null);
   const [operation, setOperation] = useState<Operation | null>(null);
   // After Cancel: the host is turning it off, or could not confirm it is off.
@@ -217,29 +222,45 @@ export function RemoteAccessSetting({
     const load = async () => {
       const seq = ++loadSeq.current;
       const startedInEpoch = actionEpoch.current;
-      const [catalogResult, stateResult, hostResult, capabilityResult] = await Promise.all([
-        request("/catalog"),
-        request("/state"),
-        request("/host-settings"),
-        request("/host-capabilities"),
-      ]);
       // A poll reports on the moment it started. If an action began or ended
       // since, or a later poll already landed, this answer is out of date and
       // must not replace what the action or the later poll set.
       const outdated = () => !active || seq < appliedSeq.current || startedInEpoch !== actionEpoch.current;
+      type Read = Awaited<ReturnType<typeof request>>;
+      let results: [Read, Read, Read, Read];
+      try {
+        results = await Promise.all([
+          request("/catalog"),
+          request("/state"),
+          request("/host-settings"),
+          request("/host-capabilities"),
+        ]);
+      } catch (failure) {
+        // The request itself threw: no answer. Same ordering rule as an answer.
+        if (!outdated()) {
+          appliedSeq.current = seq;
+          setStale(true);
+          setNoAnswer(toDisplayError(failure, "load", undefined, "check"));
+        }
+        return;
+      }
+      const [catalogResult, stateResult, hostResult, capabilityResult] = results;
       if (outdated()) {
         return;
       }
       appliedSeq.current = seq;
-      // The first read that failed names the problem; a later one that succeeds clears it.
-      const failedRead = !catalogResult.ok ? catalogResult : !stateResult.ok ? stateResult : null;
+      // A read the service answered with an error names the problem, before one that got no answer.
+      const failed = [catalogResult, stateResult].filter((result): result is Extract<Read, { ok: false }> => !result.ok);
+      const failedRead = failed.find((result) => !gotNoAnswer(result.code)) ?? null;
+      const unanswered = failed.find((result) => gotNoAnswer(result.code));
+      setNoAnswer(unanswered ? toDisplayError(new ReachabilityFailure(unanswered), "load", undefined, "check") : null);
       if (catalogResult.ok) {
         setInventory(catalogResult.data as Inventory);
         setStale(false);
       } else {
         setStale(true);
       }
-      if (failedRead && !gotNoAnswer(failedRead.code)) {
+      if (failedRead) {
         setError((current) =>
           current?.source === "action" || (current?.source === "load" && current.code === failedRead.code)
             ? current
@@ -278,12 +299,9 @@ export function RemoteAccessSetting({
           return;
         }
         const refresh = () => {
-          // A poll that threw got no answer either: the next one retries.
-          void load().catch(() => {
-            if (active) {
-              setStale(true);
-            }
-          });
+          // load() handles a request that throws itself; this only keeps a
+          // bug in applying an answer from becoming an unhandled rejection.
+          void load().catch(() => undefined);
         };
         // Setup observations must not wait on unrelated dashboard requests.
         timer = setInterval(() => {
@@ -926,7 +944,16 @@ export function RemoteAccessSetting({
         {error ? <ErrorNotice error={error} /> : null}
         {prepError ? <ErrorNotice action="prepare" error={prepError} /> : null}
       </RecoveryContext.Provider>
-      {stale ? <p className="text-sm text-muted-foreground" role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
+      {stale ? (
+        <div className="grid gap-1" role="status">
+          <p className="text-sm text-muted-foreground">Can't reach DataConnect's background service. Changes are paused.</p>
+          {noAnswer ? (
+            <Diagnostics>
+              <pre className="whitespace-pre-wrap break-words">{diagnosticsText(noAnswer, appVersion)}</pre>
+            </Diagnostics>
+          ) : null}
+        </div>
+      ) : null}
       {hostReasonShown && !error ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
       {state.lifecycle?.cleanup === "unconfirmed" ? (
         <p className="text-sm text-muted-foreground" role="status">{CLEANUP_UNCONFIRMED}</p>

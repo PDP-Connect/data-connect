@@ -530,9 +530,9 @@ test("a failed first load says what to do, keeps the code in Details, and clears
 });
 
 // Saving the password restarts the service, so the polls around it get no answer.
-test("reads that get no answer while the service restarts show the paused line, never an error card", async (t) => {
+test("reads that get no answer while the service restarts show the paused line with Details, never an error card", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
-  let mode: "service_unreachable" | "reachability_unavailable" | "thrown" | "healthy" = "service_unreachable";
+  let mode: "service_unreachable" | "thrown" | "healthy" = "service_unreachable";
   const handler = world();
   await withScreen(
     (url, body) => {
@@ -541,25 +541,62 @@ test("reads that get no answer while the service restarts show the paused line, 
       return fail(mode);
     },
     async ({ container, act: run }) => {
-      for (const next of ["reachability_unavailable", "thrown", "healthy"] as const) {
+      for (const [next, code] of [["thrown", "service_unreachable"], ["healthy", "client_error"]] as const) {
         const text = visibleText(container);
         assert.equal(container.querySelector("[role=alert]"), null, `${mode}: no error card`);
         assert.match(text, /Can't reach DataConnect's background service\. Changes are paused\./, mode);
         assert.doesNotMatch(text, /couldn't turn on|isn't running/, mode);
+        const details = container.querySelector("[role=status] [data-diagnostics]")?.textContent ?? "";
+        assert.match(details, new RegExp(`Code: ${code}`), `${mode}: the code stays under Details`);
         mode = next;
         await run(async () => t.mock.timers.tick(3000));
       }
-      assert.doesNotMatch(visibleText(container), /Can't reach DataConnect's background service/, "a good read clears it");
+      const text = visibleText(container);
+      assert.doesNotMatch(text, /Can't reach DataConnect's background service/, "a good read clears it");
+      const turnOff = [...container.querySelectorAll("button")].find((node) => node.textContent === "Turn off");
+      assert.ok(turnOff && !(turnOff as HTMLButtonElement).disabled, "changes are possible again after a good read");
     }
   );
 });
 
-test("a read the service refuses with a fallback code says it couldn't check, not that it couldn't turn on", async () => {
-  await withScreen(world({ "/state": fail("internal_error") }), async ({ container }) => {
+test("a read the service answers with its generic error shows a card that says it couldn't check", async () => {
+  await withScreen(world({ "/state": fail("reachability_unavailable") }), async ({ container }) => {
     const alert = container.querySelector("[role=alert]")?.textContent ?? "";
     assert.match(alert, /We couldn't check remote access\. Try again, or copy the details for support\./);
+    assert.match(alert, /Code: reachability_unavailable/);
     assert.doesNotMatch(visibleText(container), /couldn't turn on/);
   });
+});
+
+test("a read the service answers with a specific error is shown even when another read got no answer", async () => {
+  await withScreen(world({ "/catalog": fail("service_unreachable"), "/state": fail("host_path_too_long") }), async ({ container }) => {
+    const alert = container.querySelector("[role=alert]")?.textContent ?? "";
+    assert.match(alert, /too long for remote access/);
+    assert.match(visibleText(container), /Can't reach DataConnect's background service/);
+  });
+});
+
+test("an older poll that throws after a newer good poll does not pause the card again", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const handler = world();
+  let rejectFirst: (reason: Error) => void = () => undefined;
+  let polls = 0;
+  await withScreen(
+    ((url: string, body?: Record<string, unknown>) => {
+      if (url === "/catalog" && ++polls === 1) {
+        return new Promise<never>((_, reject) => {
+          rejectFirst = reject;
+        });
+      }
+      return handler(url, body);
+    }) as unknown as Handler,
+    async ({ container, act: run }) => {
+      await run(async () => t.mock.timers.tick(3000));
+      assert.doesNotMatch(visibleText(container), /Can't reach DataConnect's background service/, "the newer poll landed");
+      await run(async () => rejectFirst(new Error("fetch failed")));
+      assert.doesNotMatch(visibleText(container), /Can't reach DataConnect's background service/, "the late failure is dropped");
+    }
+  );
 });
 
 test("an unknown error code shows the generic message, and an action error survives a later load", async (t) => {
