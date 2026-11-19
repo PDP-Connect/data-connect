@@ -7,7 +7,8 @@ import { createContext, type ReactNode, useContext, useSyncExternalStore } from 
 
 type Theme = "dark" | "light";
 const ThemeSetterContext = createContext<((next: Theme) => void) | null>(null);
-const serverTheme = (): Theme => "dark";
+// The server cannot see the saved choice, so it renders a neutral label.
+const serverTheme = (): Theme | null => null;
 
 function paintedTheme(): Theme {
   const root = document.documentElement;
@@ -30,9 +31,8 @@ export function ShellThemeProvider({ children, setTheme }: { children: ReactNode
 }
 
 export function ShellThemeButton() {
-  const theme = useSyncExternalStore(subscribeToPaintedTheme, paintedTheme, serverTheme);
+  const theme = useSyncExternalStore<Theme | null>(subscribeToPaintedTheme, paintedTheme, serverTheme);
   const setTheme = useContext(ThemeSetterContext);
-  const next = theme === "dark" ? "light" : "dark";
 
   function toggle() {
     const target = paintedTheme() === "dark" ? "light" : "dark";
@@ -46,8 +46,13 @@ export function ShellThemeButton() {
   }
 
   return (
-    <button className="rr-side__theme rr-chrome-btn" onClick={toggle} title={`Switch to ${next}`} type="button">
-      {theme === "dark" ? "Dark" : "Light"}
+    <button
+      className="rr-side__theme rr-chrome-btn"
+      onClick={toggle}
+      title={theme ? `Switch to ${theme === "dark" ? "light" : "dark"}` : undefined}
+      type="button"
+    >
+      {theme === null ? "Theme" : theme === "dark" ? "Dark" : "Light"}
     </button>
   );
 }
