@@ -24,8 +24,9 @@ export type OperationRecord = {
   stage: "applying" | "settled" | "unknown-possibly-live";
   stopTombstone: boolean;
   /**
-   * Stop records only: whether the close the stop ran confirmed cleanup. Absent on
-   * older records, which the restart pass treats as not confirmed.
+   * Cleanup evidence: true only where a close confirmed, or the library reported the
+   * route absent. A Stop intent (tombstone) is not evidence. Absent on older records,
+   * which the restart pass treats as not confirmed.
    */
   cleanupConfirmed?: boolean;
   failureCode: string | null;
@@ -124,6 +125,7 @@ export class ReachabilityOperations {
     const record = await this.read(operationId);
     await this.write({
       ...record,
+      cleanupConfirmed: false,
       failureCode: record.failureCode ?? "reachability_unavailable",
       handle,
       recovery: {
@@ -134,31 +136,47 @@ export class ReachabilityOperations {
     });
   }
   async list(): Promise<OperationRecord[]> {
+    return (await this.scan()).records;
+  }
+  /** Every readable record, plus how many matching records could not be read. */
+  async scan(): Promise<{ records: OperationRecord[]; unreadable: number }> {
     let names: string[];
     try {
       names = await readdir(this.root);
     } catch (error) {
       if ((error as { code?: string }).code === "ENOENT") {
-        return [];
+        return { records: [], unreadable: 0 };
       }
       throw error;
     }
-    const records = [];
+    const records: OperationRecord[] = [];
+    let unreadable = 0;
     for (const name of names) {
       if (/^[a-f0-9-]{36}\.json$/.test(name)) {
-        records.push(await this.read(name.slice(0, -5)));
+        try {
+          records.push(await this.read(name.slice(0, -5)));
+        } catch {
+          unreadable += 1;
+        }
       }
     }
-    return records;
+    return { records, unreadable };
   }
   async recordRecovered(operationId: string, route: Route): Promise<void> {
     const record = await this.read(operationId);
-    await this.write({ ...record, handle: route.handle, recovery: null, route: null, stage: "settled" });
+    await this.write({
+      ...record,
+      cleanupConfirmed: route.cleanup.state === "confirmed",
+      handle: route.handle,
+      recovery: null,
+      route: null,
+      stage: "settled",
+    });
   }
   /** The library has no route under the record's handle, so nothing of it can still be live. */
   async recordAbsent(operationId: string): Promise<void> {
     const record = await this.read(operationId);
-    await this.write({ ...record, recovery: null, route: null, stage: "settled" });
+    await this.write({ ...record, cleanupConfirmed: true, recovery: null, route: null, stage: "settled" });
   }
   async start(
     kind: OperationRecord["kind"],

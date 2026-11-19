@@ -245,7 +245,26 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
           record.stopTombstone || input.acknowledgeDisconnect === true,
           record.stopTombstone
         );
-    await ctx.operations.recordRecovered(record.operationId, route);
+    if (route === null) {
+      // The library holds no route under the handle: nothing is owed, so the record settles.
+      await ctx.operations.recordAbsent(record.operationId);
+      return {
+        failureCode: null,
+        handle: record.handle ? { id: record.handle.id, kind: record.handle.kind, generation: record.handle.generation } : null,
+        kind: record.kind,
+        operationId: record.operationId,
+        recovery: null,
+        route: null,
+        stage: "settled",
+      };
+    }
+    // A close that did not confirm leaves the operation unresolved, so /state keeps its retry
+    // and Turn on stays refused until a close confirms. Only the route stop settles unconfirmed.
+    if (record.stopTombstone && route.cleanup.state !== "confirmed") {
+      await ctx.operations.recordCleanupUnconfirmed(record.operationId, route.handle);
+    } else {
+      await ctx.operations.recordRecovered(record.operationId, route);
+    }
     return projectOwnedRoute(route);
   });
   function setupReference(request: Request, providerId: unknown) {
@@ -426,6 +445,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       }));
     return {
       evidenceSource: state.evidenceSource,
+      journalUnreadable: state.journalUnreadable,
       lifecycle: state.lifecycle,
       operations,
       reasons: state.reasons,
