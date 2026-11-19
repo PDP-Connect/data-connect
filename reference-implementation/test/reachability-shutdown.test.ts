@@ -206,3 +206,43 @@ test("shutdown closes a library-owned session route by its exact handle, because
     await f.cleanup();
   }
 });
+
+const hangingJournal = {
+  recordCleanupUnconfirmed: () => new Promise<void>(() => {}),
+  recordRecovered: () => new Promise<void>(() => {}),
+  requestStop: () => new Promise<void>(() => {}),
+};
+
+test("a stalled journal does not hold shutdown past its budget, and the close was still dispatched", async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], () => new Promise<Route>(() => {}));
+  try {
+    const started = Date.now();
+    const outcome = await Promise.race([
+      f.service.shutdown(80, hangingJournal),
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2000)),
+    ]);
+    assert.notEqual(outcome, "hung", "shutdown returns within the deadline plus the journal grace");
+    assert.ok(Date.now() - started < 1000);
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: ["route-0"] });
+    assert.equal(f.calls.length, 1, "the provider close was dispatched");
+    // The writes never landed: the record is still a restart candidate, not confirmed.
+    assert.notEqual((await f.operations.read(f.held[0]!.operationId!)).cleanupConfirmed, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a hung tombstone write does not keep the provider close from starting", async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], confirmed);
+  try {
+    const outcome = await Promise.race([
+      f.service.shutdown(80, hangingJournal),
+      new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2000)),
+    ]);
+    assert.notEqual(outcome, "hung");
+    assert.equal(f.calls.length, 1, "the close starts without waiting for the tombstone");
+    assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
+  } finally {
+    await f.cleanup();
+  }
+});
