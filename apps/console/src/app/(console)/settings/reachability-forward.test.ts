@@ -101,8 +101,10 @@ test('a request the browser already dropped never reaches the reference server',
   try {
     const gone = new AbortController();
     gone.abort();
+    const before = credentialsRead;
     const result = await forwardReachability('/state', undefined, gone.signal);
     assert.equal(result.status, 502);
-    assert.equal(fetchMock.mock.calls.every((call) => call.arguments[1]?.signal?.aborted), true);
+    assert.equal(fetchMock.mock.callCount(), 0);
+    assert.equal(credentialsRead, before, 'the owner credential is not even read');
   } finally { fetchMock.mock.restore(); }
 });

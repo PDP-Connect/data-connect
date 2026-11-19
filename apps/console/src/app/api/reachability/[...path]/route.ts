@@ -17,7 +17,15 @@ export const runtime = "nodejs";
 const BASE = "/api/reachability";
 const NO_STORE = { "Cache-Control": "no-store" };
 
-/** A POST must come from this console's own pages: its Origin names the host the browser used. */
+/** Bodies here are small JSON objects; anything larger is refused before it is read in full. */
+export const MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * A POST must come from this console's own pages: its Origin names the host the browser used.
+ * Only the host is compared. Behind a tunnel this server cannot learn the scheme from anything
+ * it trusts, and publicOrigin guesses https for every non-loopback host, which would refuse a
+ * plain-http address on the local network.
+ */
 function fromThisConsole(request: Request): boolean {
   const origin = request.headers.get("origin");
   if (!origin) return false;
@@ -26,6 +34,31 @@ function fromThisConsole(request: Request): boolean {
   } catch {
     return false;
   }
+}
+
+function isJson(request: Request): boolean {
+  return request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() === "application/json";
+}
+
+/** The body as text, or null once it passes MAX_BODY_BYTES. Stops reading at the limit. */
+async function boundedText(request: Request): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function reply(status: number, result: unknown): NextResponse {
@@ -41,26 +74,29 @@ async function handle(request: Request, post: boolean): Promise<NextResponse> {
   const url = new URL(request.url);
   // The path as the browser wrote it, still encoded: a draft id may hold characters a segment would lose.
   const path = `${url.pathname.slice(BASE.length)}${url.search}`;
-  let body: Record<string, unknown> | undefined;
   if (post) {
     if (!fromThisConsole(request)) return reply(403, { ok: false, ...publicError("forbidden") });
-    if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
-      return reply(415, { ok: false, ...publicError("invalid_input") });
-    }
-    try {
-      const parsed: unknown = await request.json();
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-      body = parsed as Record<string, unknown>;
-    } catch {
-      return reply(400, { ok: false, ...publicError("invalid_input") });
-    }
+    if (!isJson(request)) return reply(415, { ok: false, ...publicError("invalid_input") });
   }
+  // The session is checked before the body is read, so a caller without one costs no parsing.
   try {
     if (!(await readDashboardOwnerSession())) {
       return reply(401, { ok: false, ...publicError("owner_session_required") });
     }
   } catch {
     return reply(502, { ok: false, ...publicError("service_unreachable") });
+  }
+  let body: Record<string, unknown> | undefined;
+  if (post) {
+    const text = await boundedText(request).catch(() => null);
+    if (text === null) return reply(413, { ok: false, ...publicError("invalid_input") });
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+      body = parsed as Record<string, unknown>;
+    } catch {
+      return reply(400, { ok: false, ...publicError("invalid_input") });
+    }
   }
   try {
     const { status, result } = await forwardReachability(path, body, request.signal);

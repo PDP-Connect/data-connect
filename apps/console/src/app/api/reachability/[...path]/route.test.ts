@@ -92,6 +92,28 @@ test("a write must come from this console's own pages, as JSON", async () => {
   }
 });
 
+test("a write is read only after the session check, only as exact JSON, and only up to the size limit", async () => {
+  const { POST, MAX_BODY_BYTES } = await load();
+  const fetchMock = upstream(() => data({ done: true }));
+  const big = JSON.stringify({ pad: "x".repeat(MAX_BODY_BYTES) });
+  try {
+    signedIn = false;
+    const anonymous = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/json", body: big }));
+    assert.equal(anonymous.status, 401, "no session: refused before the body is read");
+    signedIn = true;
+    const lookalike = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/jsonp", body: "{}" }));
+    assert.equal(lookalike.status, 415);
+    const tooBig = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/json", body: big }));
+    assert.equal(tooBig.status, 413);
+    assert.equal(fetchMock.mock.callCount(), 0, "none of those reached the service");
+    const withCharset = await POST(call("POST", "/drafts", { origin: "http://console.test", type: "application/json; charset=utf-8", body: "{}" }));
+    assert.equal(withCharset.status, 200);
+  } finally {
+    signedIn = true;
+    fetchMock.mock.restore();
+  }
+});
+
 test("a path outside the remote access family is refused before the service is called", async () => {
   const { GET } = await load();
   const fetchMock = upstream(() => {

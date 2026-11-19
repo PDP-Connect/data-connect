@@ -41,7 +41,10 @@ export async function forwardReachability(
   });
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
+    // A request the browser already dropped never reaches the reference server.
+    if (controller.signal.aborted) throw new Error("dropped");
     const token = await getOwnerToken();
+    if (controller.signal.aborted) throw new Error("dropped");
     // The deadline covers the request to the reference server, not reading the token.
     deadline = setTimeout(() => controller.abort(), FORWARD_DEADLINE_MS);
     const response = await fetch(url, {
