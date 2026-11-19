@@ -1034,6 +1034,9 @@ export function RemoteAccessSetting({
       {inventory ? null : (
         <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
+      {inventory?.earlierSetup === "needs_reentry" ? (
+        <p className="text-sm text-muted-foreground">An earlier setup was saved by an older version. Enter it again to turn remote access on.</p>
+      ) : null}
       {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
       {state.recovery?.actions.includes("check") ? (
         <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>

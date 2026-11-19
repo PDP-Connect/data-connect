@@ -15,6 +15,7 @@ import type {
   RouteView as Route,
   Candidate as RouteCandidate,
 } from "@tnunamak/gozar";
+import type { EarlierSetup } from "./configuration-compatibility.ts";
 import type { HostSettingsBridge } from "./host-settings.ts";
 import type { LifecycleEvent } from "./lifecycle.ts";
 import { initialLifecycle, reduceLifecycle } from "./lifecycle.ts";
@@ -96,7 +97,7 @@ export type HostPolicy = {
   hostSettings?: HostSettingsBridge;
   recoverAtBoot?: boolean;
   recoveryRetry?: Partial<RecoveryRetry>;
-  checkConfiguration?: (scopes: string[]) => Promise<void>;
+  readEarlierSetup?: (scopes: string[]) => Promise<EarlierSetup>;
   currentTarget?: () => Promise<string>;
   evidenceSource?: "synthetic";
   prepare: (input: { usage: Query["usage"]; reach: string; transport: string }) => Promise<void>;
@@ -140,6 +141,7 @@ function pause(ms: number, signal: AbortSignal): Promise<void> {
 export class ReachabilityService {
   private readonly api: EmbeddingApi;
   private readonly host: HostPolicy;
+  private earlierSetup: EarlierSetup = null;
   private readonly drafts = new Map<string, SavedDraft>();
   private readonly reviews = new Map<string, Review>();
   private readonly routes = new Map<string, Route>();
@@ -233,6 +235,7 @@ export class ReachabilityService {
       }
     }
     return {
+      earlierSetup: this.earlierSetup,
       evidenceSource: this.host.evidenceSource ?? null,
       lifecycle: {
         handle: this.lifecycle.handle ? { id: this.lifecycle.handle.id, generation: this.lifecycle.handle.generation, kind: this.lifecycle.handle.kind } : null,
@@ -321,8 +324,8 @@ export class ReachabilityService {
   }
   async inventory() {
     const inventory = await this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner });
-    await this.host.checkConfiguration?.(inventory.providers.map(provider => provider.configuration.scopeId));
-    return inventory;
+    this.earlierSetup = await this.host.readEarlierSetup?.(inventory.providers.map(provider => provider.configuration.scopeId)) ?? null;
+    return { ...inventory, earlierSetup: this.earlierSetup };
   }
   async begin(providerId: string, expectedConfigurationRevision: string): Promise<Draft> {
     this.assertRecovered();

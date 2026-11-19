@@ -249,8 +249,9 @@ export function projectCandidate(candidate: RouteCandidate) {
     providerId: candidate.providerId,
   };
 }
-export function projectInventory(list: ProviderList) {
+export function projectInventory(list: ProviderList & { earlierSetup?: import("./configuration-compatibility.ts").EarlierSetup }) {
   return {
+    earlierSetup: list.earlierSetup ?? null,
     catalogRevision: list.catalogRevision,
     observedAt: list.observedAt,
     providers: list.providers.map((provider: ProviderInventory) => ({

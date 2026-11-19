@@ -445,6 +445,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   get("/events", async () => {
     const state = service().state();
     return {
+      earlierSetup: state.earlierSetup,
       evidenceSource: state.evidenceSource,
       lifecycle: state.lifecycle,
       recovery: state.recovery,
@@ -485,6 +486,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         stage: record.stage,
       }));
     return {
+      earlierSetup: state.earlierSetup,
       evidenceSource: state.evidenceSource,
       journalScan: listed === null ? ("unavailable" as const) : state.journalScan,
       journalUnreadable: state.journalUnreadable,
