@@ -206,6 +206,37 @@ test("a setup action with effects waits for Allow; the chain runs nothing", asyn
   }
 });
 
+test("an input the draft already holds is not asked for again; the next input is", async () => {
+  const secret = action({ id: "act-secret", kind: "provide-secret" });
+  const label = action({ id: "act-label", kind: "provide-value" });
+  const fields = [
+    { actionId: "act-secret", id: "act-secret", label: "Credential", secret: true },
+    { actionId: "act-label", id: "act-label", label: "Label", secret: false },
+  ];
+  const held = (credentials: Record<string, unknown>, values: Record<string, unknown>) => ({
+    draftId: "d-1",
+    configuration: { revision: "r2", actions: [secret, label], inputRequirements: fields, values, credentials },
+  });
+  const next = async (credentials: Record<string, unknown>, values: Record<string, unknown> = {}) => {
+    const { request } = recorder({ ...baseTable, "/drafts": ok(held(credentials, values)) });
+    return prepareTurnOn(request, choice);
+  };
+  const first = await next({});
+  assert.equal(first.kind === "allow" && first.action.id, "act-secret");
+  const second = await next({ "act-secret": { known: true, value: true } });
+  assert.equal(second.kind === "allow" && second.action.id, "act-label");
+  const done = await next({ "act-secret": { known: true, value: true } }, { "act-label": "x" });
+  assert.equal(done.kind, "ready");
+  const forget = action({ id: "act-forget", kind: "clear-input", label: "Forget configured input" });
+  const { request: withForget } = recorder({
+    ...baseTable,
+    "/drafts": ok({ draftId: "d-1", configuration: { revision: "r2", actions: [secret, forget, label], inputRequirements: fields, values: { "act-label": "x" }, credentials: { "act-secret": { known: true, value: true } } } }),
+  });
+  assert.equal((await prepareTurnOn(withForget, choice)).kind, "ready");
+  const unknown = await next({ "act-secret": { known: false, reason: "locked" } });
+  assert.equal(unknown.kind === "allow" && unknown.action.id, "act-secret");
+});
+
 test("an action that declares no effects runs on its own, then the chain goes on", async () => {
   const quiet = action({ effects: none });
   const { request, urls, calls } = recorder({
