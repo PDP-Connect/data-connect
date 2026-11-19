@@ -190,7 +190,8 @@ async function withScreen<T>(
     text: () => string;
     settle: () => Promise<void>;
   }) => Promise<T>,
-  draftFor: (providerId: string) => unknown = (providerId) => draft(`d-${providerId}`)
+  draftFor: (providerId: string) => unknown = (providerId) => draft(`d-${providerId}`),
+  route: (path: string, body?: Record<string, unknown>) => Result | undefined = () => undefined
 ): Promise<T> {
   const dom = new JSDOM('<div id="root"></div>', { url: "http://localhost" });
   Object.assign(globalThis, { React, window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
@@ -215,6 +216,8 @@ async function withScreen<T>(
   const request = (async (url: string, body?: Record<string, unknown>) => {
     calls.push({ url, ...(body ? { body } : {}) });
     const path = url.split("?")[0]!;
+    const routed = route(path, body);
+    if (routed) return routed;
     if (path === "/catalog") return ok(catalog);
     if (path === "/state") return ok({ routes: [], reasons: {}, starting: false, services: [] });
     if (path === "/host-settings") return ok({ known: false, reason: "unavailable" });
@@ -347,5 +350,105 @@ test("choosing a way that needs a token shows an empty token field and sends no 
       assert.deepEqual(mutating(calls), []);
     },
     needsToken
+  );
+});
+
+test("choosing managed Cloudflare reserves its sign-in step and shows an empty token field", async () => {
+  // Real 0.5.1 shape: the first action is a provide-secret with a step, so the console reserves a
+  // setup operation for it, and the token is typed into that operation's card.
+  const attached = { attached: { reason: "provider-action-required", state: "action-required" } };
+  const remedy = { id: "token", kind: "provide-secret", label: "Tunnel token" };
+  const managedToken = {
+    id: "managed-api-token",
+    kind: "provide-secret",
+    label: "Authorize managed Cloudflare setup",
+    secretLabel: "Scoped Cloudflare API token",
+    required: true,
+    digest: "managed-digest",
+    disclosure: { revision: "1", text: "Managed setup uses separate approvals.", links: [] },
+    step: { actor: "owner", verification: "provider", purpose: "authorize", permission: { id: "managed-api-token", label: "Authorize managed Cloudflare setup" } },
+    consent: {
+      consentFactsDigest: "managed-facts",
+      facts: [],
+      disclosures: { action: {} },
+      scope: { kind: "setup", actionId: "managed-api-token", actionDigest: "managed-digest", disclosureRevision: "1" },
+    },
+  };
+  const managed = way("cloudflare-named", {
+    availability: attached,
+    prerequisites: [prerequisite("connector-binary", "present"), { ...prerequisite("credential", "missing"), remedy }],
+  });
+  const catalog = { ...noTailscale, providers: noTailscale.providers.map((item) => (item.providerId === "cloudflare-named" ? managed : item)) };
+  const needsAuthorization = (providerId: string) =>
+    providerId === "cloudflare-named"
+      ? {
+          draftId: "d-cloudflare-named",
+          configuration: {
+            revision: "r2",
+            actions: [managedToken],
+            inputRequirements: [{ actionId: "token", id: "token", label: "Tunnel token", secret: true }],
+            values: {},
+            credentials: {},
+          },
+        }
+      : draft(`d-${providerId}`);
+  let reserved = false;
+  const setupView = {
+    operationId: "op-cf",
+    revision: 1,
+    state: "authorization-required",
+    resources: [],
+    evidence: { known: false },
+    scope: { providerId: "cloudflare-named", draftId: "d-cloudflare-named", configurationRevision: "r2" },
+    nextAction: managedToken,
+  };
+  const route = (path: string): Result | undefined => {
+    if (path === "/setups") {
+      reserved = true;
+      return ok({ operationId: "op-cf" });
+    }
+    if (path === "/state" && reserved) {
+      const setup = { operationId: "op-cf", actionId: "managed-api-token", expectedConfigurationRevision: "r2" };
+      const service = { providerId: "cloudflare-named", providerLabel: "Cloudflare Tunnel", draftId: "d-cloudflare-named", usage: "attached", committed: false, setup };
+      return ok({ routes: [], reasons: {}, starting: false, services: [service] });
+    }
+    if (path === "/setup-operations/op-cf") return ok(setupView);
+    return undefined;
+  };
+  await withScreen(
+    catalog,
+    async ({ calls, container, press, settle }) => {
+      await press(/^Other ways$/);
+      const radio = [...container.querySelectorAll("label")].find((node) => /^\s*Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
+      assert.equal(radio.disabled, false, "the way can be chosen");
+      await act(async () => radio.click());
+      await settle();
+      await settle();
+      const setups = calls.filter((call) => call.url === "/setups");
+      assert.equal(setups.length, 1, "one setup reserved");
+      assert.deepEqual(setups[0]!.body, {
+        providerId: "cloudflare-named",
+        draftId: "d-cloudflare-named",
+        actionId: "managed-api-token",
+        expectedConfigurationRevision: "r2",
+        usage: "attached",
+      });
+      const card = container.querySelector("section[aria-label='Details for Cloudflare']");
+      assert.ok(card, `no token card: ${container.textContent}`);
+      const field = card.querySelector<HTMLInputElement>("label input[type='password']");
+      assert.ok(field, "the card asks for the token in a hidden field");
+      assert.match(field.closest("label")!.textContent!, /Scoped Cloudflare API token/);
+      assert.equal(field.value, "");
+      const save = [...card.querySelectorAll("button")].find((node) => node.textContent === "Save token");
+      assert.equal(save?.disabled, true, "nothing can be sent while the field is empty");
+      // Only reads and the reservation went out: no value, no approval, no start.
+      const sent = calls.filter((call) => call.body !== undefined && ("secret" in call.body || "value" in call.body));
+      assert.deepEqual(sent, []);
+      assert.deepEqual(mutating(calls), []);
+      const setupWrites = calls.filter((call) => /^\/setup-operations\/op-cf\/./.test(call.url.split("?")[0]!));
+      assert.deepEqual(setupWrites, [], "no action was taken on the setup");
+    },
+    needsAuthorization,
+    route
   );
 });
