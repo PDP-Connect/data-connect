@@ -17,7 +17,7 @@ import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-client.ts";
 import { OnCard } from "./on-card.tsx";
 import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
-import { type Attention, attentionSentence, journalUnreadableWarning, recheckDelay, routeAttention, routeCardProofLine, routeHeadline, routeSentence } from "./route-display.ts";
+import { type Attention, attentionSentence, journalUnreadableWarning, listedRoutes, recheckDelay, routeAttention, routeCardProofLine, routeHeadline, routeSentence } from "./route-display.ts";
 import {
   type DisplayError,
   Diagnostics,
@@ -924,15 +924,9 @@ export function RemoteAccessSetting({
     }, "change");
   }
   // A route turned off and replaced is history: the newest one is the card.
-  // So is one the owner turned off and the host confirmed: this page shows its
-  // Off card once, right after the stop, and a reload shows the start card.
-  // A route that ended with no owner stop stays, as Needs your action.
-  const settledOff = (route: Route) => route.state === "released" && route.cleanup.state === "confirmed";
-  const visibleRoutes = state.routes.filter(
-    (route) =>
-      !(settledOff(route) && state.routes.some((other) => other !== route && !settledOff(other))) &&
-      !(settledOff(route) && route.stopRequested === true && !acknowledged.has(route.handle.id))
-  );
+  // One the owner turned off shows its Off card once, right after the stop, and
+  // a reload shows the start card. A route that ended with no owner stop stays.
+  const visibleRoutes = listedRoutes(state.routes, [...acknowledged]);
   const onOrigin =
     visibleRoutes.find(
       (route) => route.origin !== null && headlineOf(route) === "On" && route.cleanup.state !== "confirmed"

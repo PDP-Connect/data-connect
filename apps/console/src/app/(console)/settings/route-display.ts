@@ -63,6 +63,27 @@ export function routeSentence(route: RouteDisplayInput, headline: string, option
   return null;
 }
 
+type ListedRoute = { state: string; cleanup: { state: string }; stopRequested?: boolean; handle: { id: string } };
+
+/**
+ * The routes the card lists. A route that is off and cleaned up is history once
+ * any other route is not. One the owner turned off shows only after this page saw
+ * the stop (`stopsSeen`, oldest first), and of those only the latest stop shows,
+ * so turning on and off again does not add another Off entry each time.
+ */
+export function listedRoutes<R extends ListedRoute>(routes: readonly R[], stopsSeen: readonly string[]): R[] {
+  const settledOff = (route: R) => route.state === "released" && route.cleanup.state === "confirmed";
+  const listed = routes.filter(
+    (route) =>
+      !(settledOff(route) && routes.some((other) => other !== route && !settledOff(other))) &&
+      !(settledOff(route) && route.stopRequested === true && !stopsSeen.includes(route.handle.id))
+  );
+  const latestStop = [...stopsSeen].reverse().find((id) => listed.some((route) => route.handle.id === id && settledOff(route) && route.stopRequested === true));
+  return latestStop === undefined
+    ? listed
+    : listed.filter((route) => !(settledOff(route) && route.stopRequested === true) || route.handle.id === latestStop);
+}
+
 /** The route's end time in ms, only when the server reports one. */
 export function expiryTime(route: RouteDisplayInput): number | null {
   const until = route.expiresAt;

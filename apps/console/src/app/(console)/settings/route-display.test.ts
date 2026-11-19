@@ -6,6 +6,7 @@ import {
   attentionSentence,
   expiryLine,
   journalUnreadableWarning,
+  listedRoutes,
   proofLine,
   recheckDelay,
   routeAttention,
@@ -188,4 +189,16 @@ test("an owner's confirmed stop is Off, and a route with no stop information is 
 test("a session that ran out with no owner stop says when it turned off", () => {
   const ranOut = { ...diedRoute, expiresAt: { known: true as const, value: "2026-11-18T07:00:00Z" } };
   assert.equal(routeAttention(ranOut, { ...base, lifecyclePhase: "inactive" }), "expired");
+});
+
+test("turning on and off twice lists one Off entry, the latest stop", () => {
+  const off = (id: string) => ({ state: "released", cleanup: { state: "confirmed" }, stopRequested: true, handle: { id } });
+  const routes = [off("first"), off("second")];
+  assert.deepEqual(listedRoutes(routes, ["first", "second"]).map((route) => route.handle.id), ["second"]);
+  assert.deepEqual(listedRoutes(routes, ["second", "first"]).map((route) => route.handle.id), ["first"]);
+  assert.deepEqual(listedRoutes(routes, []), [], "a reload, which saw no stop, lists none");
+  const on = { state: "usable", cleanup: { state: "none" }, handle: { id: "live" } };
+  assert.deepEqual(listedRoutes([...routes, on], ["first", "second"]).map((route) => route.handle.id), ["live"], "a live route hides the history");
+  const died = { state: "released", cleanup: { state: "confirmed" }, stopRequested: false, handle: { id: "died" } };
+  assert.deepEqual(listedRoutes([died, off("first")], ["first"]).map((route) => route.handle.id), ["died", "first"], "an end the owner did not ask for stays");
 });
