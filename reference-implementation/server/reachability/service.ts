@@ -119,6 +119,8 @@ const DEFAULT_RECOVERY_RETRY: RecoveryRetry = {
 // owns; a durable route outlives it.
 const endsWithThisProcess = (handle: Handle): boolean => handle.kind === "attached" || handle.kind === "session";
 
+const PROOF_REFRESH_MS = 5_000;
+
 function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const done = () => {
@@ -702,6 +704,7 @@ export class ReachabilityService {
       const route = await this.api.routeStatus({ handle, home: this.host.query.home });
       this.routes.set(handle.id, route);
       this.transition({ observed: "present", type: "reconcile" });
+      this.watch(handle);
       return this.check(handle.id, handle.generation);
     } catch (error) {
       const failed = reduceLifecycle(this.lifecycle, { observed: "failed", type: "reconcile" });
@@ -885,6 +888,7 @@ export class ReachabilityService {
     }
     this.transition({ handle: route.handle, operationId, type: "restore-intent" });
     this.transition({ observed: "present", type: "reconcile" });
+    this.watch(route.handle);
     return action === "stop"
       ? this.stop(route.handle.id, route.handle.generation, acknowledged)
       : this.check(route.handle.id, route.handle.generation);
@@ -1046,39 +1050,74 @@ export class ReachabilityService {
       settled();
     }
   }
+  // One watcher per route, for every route this process holds: one started here,
+  // one found at boot, one recovered from an operation.
   private watch(handle: Handle): void {
+    const live = this.watchers.get(handle.id);
+    if (live && !live.signal.aborted) {
+      return;
+    }
+    live?.abort();
     const abort = new AbortController();
-    this.watchers.get(handle.id)?.abort();
     this.watchers.set(handle.id, abort);
-    void (async () => {
-      try {
-        for await (const event of this.api.watchRoutes({ handle, home: this.host.query.home, signal: abort.signal })) {
-          if (
-            !abort.signal.aborted &&
-            event.route.handle.id === handle.id &&
-            event.route.handle.generation === handle.generation
-          ) {
-            this.routes.set(handle.id, event.route);
-            if (event.route.state === "lost") {
-              this.transition({ type: "agent-exit" });
-              await this.stop(handle.id, handle.generation, true);
-            } else if (event.type === "consent_changed") {
-              this.transition({ type: "approval-changed" });
-            } else if (
-              this.lifecycle.phase === "verified" &&
-              (!event.route.published || event.route.verification.status !== "verified")
-            ) {
-              this.transition({ type: "proof-expired" });
-            }
+    void this.observeChanges(handle, abort.signal);
+    void this.refreshProof(handle, abort.signal);
+  }
+  private noteProof(route: Route): void {
+    if (this.lifecycle.phase === "verified" && (!route.published || route.verification.status !== "verified")) {
+      this.transition({ type: "proof-expired" });
+    }
+  }
+  private async observeChanges(handle: Handle, signal: AbortSignal): Promise<void> {
+    try {
+      for await (const event of this.api.watchRoutes({ handle, home: this.host.query.home, signal })) {
+        if (
+          !signal.aborted &&
+          event.route.handle.id === handle.id &&
+          event.route.handle.generation === handle.generation
+        ) {
+          this.routes.set(handle.id, event.route);
+          if (event.type === "terminal") {
+            this.unsettled.delete(handle.id);
+            this.watchers.get(handle.id)?.abort();
+            this.watchers.delete(handle.id);
+          }
+          if (event.route.state === "lost") {
+            this.transition({ type: "agent-exit" });
+            await this.stop(handle.id, handle.generation, true);
+          } else if (event.type === "consent_changed") {
+            this.transition({ type: "approval-changed" });
+          } else {
+            this.noteProof(event.route);
           }
         }
-      } catch {
-        if (!abort.signal.aborted) {
-          this.reasons.set(handle.id, "route_observation_unavailable");
-          if (this.lifecycle.phase === "verified") this.transition({ type: "proof-expired" });
-        }
       }
-    })();
+    } catch {
+      if (!signal.aborted) {
+        this.reasons.set(handle.id, "route_observation_unavailable");
+        if (this.lifecycle.phase === "verified") this.transition({ type: "proof-expired" });
+      }
+    }
+  }
+  // The library's watcher reports changes, not polls, and a proof timestamp is
+  // not a change: left alone, a healthy route would keep its first proof and
+  // read as expired once that lapsed.
+  private async refreshProof(handle: Handle, signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      await pause(PROOF_REFRESH_MS, signal);
+      if (signal.aborted) {
+        return;
+      }
+      try {
+        const current = await this.api.routeStatus({ handle, home: this.host.query.home });
+        if (!signal.aborted && current.handle.generation === handle.generation) {
+          this.routes.set(handle.id, current);
+          this.noteProof(current);
+        }
+      } catch {
+        // The change watcher reports a route it cannot observe; try again next round.
+      }
+    }
   }
   async check(id: string, generation: number): Promise<Route> {
     const route = this.route(id, generation);
@@ -1120,6 +1159,8 @@ export class ReachabilityService {
     const route = this.route(id, generation);
     await this.host.acknowledgeDisconnect(acknowledged);
     if (route.cleanup.state === "confirmed") {
+      this.watchers.get(id)?.abort();
+      this.watchers.delete(id);
       const closed = await this.closeShared(route.handle);
       this.routes.set(id, closed);
       return closed;
