@@ -391,14 +391,15 @@ import { mountOwnerConnectorTemplates, parseUatConnectorAllowlist } from "./rout
 import { mountOwnerConnectorInstall } from "./routes/owner-connector-install.ts";
 import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
-import { startDesktopReachability } from "./reachability/desktop-host.ts";
+import { type StartedReachability, startHostReachability } from "./reachability/host.ts";
 import { ReachabilityOperations } from "./reachability/operations.ts";
+import { mountServiceChallenge } from "./reachability/service-challenge.ts";
 import {
   REACHABILITY_RESTART_RECONCILE_DEADLINE_MS,
   REACHABILITY_SHUTDOWN_DEADLINE_MS,
 } from "./reachability/service.ts";
 import { ReachabilitySetups } from "./reachability/setups.ts";
-import { mountOwnerReachability, type OwnerReachabilityContext } from "./routes/owner-reachability.ts";
+import { mountOwnerReachability } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
 import { mountOwnerAutostart } from "./routes/owner-autostart.ts";
 import { mountOwnerLiveAs, mountOwnerLiveRs } from "./routes/owner-live.ts";
@@ -819,7 +820,9 @@ interface MutationContext {
 
 interface ServerOpts {
   /** Trusted host injects one long-lived reachability service and its usage policy. */
-  reachability?: Pick<OwnerReachabilityContext, "passwordSet" | "service" | "statePaths" | "usage">;
+  reachability?: StartedReachability;
+  /** Which host row to start when no desktop supervisor is present. The CLI asks for "server". */
+  reachabilityProfile?: "server";
   /** The operation journal shared by the owner routes and the shutdown path. */
   reachabilityOperations?: ReachabilityOperations;
   acceptedCollectorProtocolVersions?: readonly string[];
@@ -7472,6 +7475,17 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const reachabilityContract = opts.reachabilityContract ?? parseReachabilityContract();
   const hosted = opts.ownerExposurePosture?.hosted ?? reachabilityContractIsHosted(reachabilityContract);
+  // The service challenge arrives with the public Host, which the host check
+  // below does not know, so it is registered first and gates on the owner's
+  // approval itself. Only a host row that answers on this listener supplies a verifier.
+  if (opts.reachability?.serviceVerifier) {
+    const { service } = opts.reachability;
+    mountServiceChallenge(
+      app as unknown as Parameters<typeof mountServiceChallenge>[0],
+      opts.reachability.serviceVerifier,
+      (authority) => service?.approvesChallengeAuthority(authority) ?? false
+    );
+  }
   app.use(((req: ReqLike, res: ResLike, next: () => void) => {
     const decision = evaluateReachabilityRequest(req, reachabilityContract, {
       hosted,
@@ -9520,11 +9534,12 @@ export async function startServer(opts: ServerOpts = {}) {
   logger.info({ port: asPort, url: `http://${bindUrlHost}:${asPort}` }, "authorization server listening");
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured AS public origin", configuredAsPublicUrl, asPort);
 
-  const reachability = opts.reachability ?? await startDesktopReachability({
-    dataDir: runtimeDataDir, bindHost, owner: ownerAuthSubjectId,
+  const reachability = opts.reachability ?? await startHostReachability({
+    dataDir: runtimeDataDir, bindHost, env: process.env, owner: ownerAuthSubjectId,
     passwordConfigured: Boolean(earlyOwnerAuthConfig.password),
-  }).catch(() => {
-    logger.warn("Desktop reachability is unavailable");
+    profile: opts.reachabilityProfile, rsPort: requestedRsPort,
+  }).catch((err) => {
+    logger.warn({ code: (err as { code?: string }).code }, "Remote access host is unavailable");
     return undefined;
   });
   const reachabilityOperations = new ReachabilityOperations(
@@ -11183,6 +11198,8 @@ if (isMainModule(import.meta.url, process.argv[1])) {
   startServer({
     ...(process.env.PDPP_BIND_HOST ? { bindHost: process.env.PDPP_BIND_HOST } : {}),
     logger: cliLogger,
+    // A standalone server process hosts remote access itself; a desktop supervisor, when present, takes precedence.
+    reachabilityProfile: "server",
   })
     .then((result) => {
       server.asServer = result.asServer;
