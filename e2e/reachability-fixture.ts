@@ -68,7 +68,8 @@ export function offState(surface: Locator): Locator {
 export async function openDetails(card: Locator) {
   const details = card.locator("details").first()
   if ((await details.getAttribute("open")) === null)
-    await details.getByText("Details", { exact: true }).click()
+    // The summary is the toggle; its wording names the service and may change.
+    await details.locator("summary").click()
   return details
 }
 

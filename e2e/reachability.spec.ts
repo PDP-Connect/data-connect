@@ -92,7 +92,9 @@ test("unknown registry data drives Turn on: stale facts are refused, fresh facts
   await turnOnButton(surface).click()
   const on = onCard(surface)
   await expect(on).toBeVisible()
-  await expect(on.getByText(/^Test data: Works on this computer/)).toBeVisible()
+  await expect(
+    on.getByRole("status").filter({ hasText: "Test data: Works on this computer" })
+  ).toBeVisible()
   expect(await surface.textContent()).not.toContain(canary)
   await on.getByRole("button", { name: "Turn off", exact: true }).click()
   // Off shows only once the host confirms the route is closed.
