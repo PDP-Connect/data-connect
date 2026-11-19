@@ -4,24 +4,19 @@
 import { generatePassphrase, ownPasswordProblem } from "./generate.js";
 
 const SAVE_LABEL = "Save password and continue";
-const SUGGESTED_HINT =
-  "We made a strong one for you. Put it in your password manager; you will need it to sign in on your phone.";
 
 /**
  * The behavior of the native "Set owner password" window (`public/owner-password.html`).
- * The suggested passphrase is the default. "Use my own" swaps it for an empty field,
- * and "Use the suggested password" brings the same suggestion back. A password that is
- * too short is refused in the error box, the same place the shell's other refusals show.
+ * Fields are masked by default. "Suggest a password" fills both the new password and
+ * confirm fields and reveals them. Show/Hide toggles masking with aria-pressed.
  */
 export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate = generatePassphrase }) {
   const form = document.getElementById("password-form");
   const passwordInput = document.getElementById("password-input");
-  const fieldLabel = document.getElementById("field-label");
-  const fieldHint = document.getElementById("field-hint");
+  const confirmInput = document.getElementById("confirm-input") || document.getElementById("confirmation-input");
   const toggleButton = document.getElementById("toggle-button");
   const copyButton = document.getElementById("copy-button");
-  const ownButton = document.getElementById("own-button");
-  const suggestedButton = document.getElementById("suggested-button");
+  const suggestButton = document.getElementById("suggest-button") || document.getElementById("suggested-button");
   const button = document.getElementById("submit-button");
   const errorBox = document.getElementById("error");
 
@@ -35,30 +30,31 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
     errorBox.classList.remove("visible");
   }
 
-  // Copy is the confirmation of the suggestion, so there is no second field for it.
-  const suggested = generate();
-  function showSuggested() {
-    clearError();
-    passwordInput.readOnly = true;
-    passwordInput.value = suggested;
-    passwordInput.type = "text";
-    toggleButton.textContent = "Hide";
-    fieldLabel.textContent = "Your new password";
-    fieldHint.textContent = SUGGESTED_HINT;
-    copyButton.textContent = "Copy";
-    copyButton.hidden = false;
-    ownButton.hidden = false;
-    suggestedButton.hidden = true;
+  // Masked by default, suggestion is no longer pre-filled.
+  passwordInput.value = "";
+  passwordInput.readOnly = false;
+  passwordInput.type = "password";
+  if (confirmInput) {
+    confirmInput.value = "";
+    confirmInput.readOnly = false;
+    confirmInput.type = "password";
   }
-  showSuggested();
+  if (toggleButton) {
+    toggleButton.textContent = "Show";
+    toggleButton.setAttribute("aria-pressed", "false");
+    toggleButton.setAttribute("aria-controls", "password-input confirm-input");
+  }
 
-  toggleButton.addEventListener("click", () => {
-    const hidden = passwordInput.type === "password";
-    passwordInput.type = hidden ? "text" : "password";
-    toggleButton.textContent = hidden ? "Hide" : "Show";
+  toggleButton?.addEventListener("click", () => {
+    const isMasked = passwordInput.type === "password";
+    const nextType = isMasked ? "text" : "password";
+    passwordInput.type = nextType;
+    if (confirmInput) confirmInput.type = nextType;
+    toggleButton.textContent = isMasked ? "Hide" : "Show";
+    toggleButton.setAttribute("aria-pressed", isMasked ? "true" : "false");
   });
 
-  copyButton.addEventListener("click", async () => {
+  copyButton?.addEventListener("click", async () => {
     try {
       await clipboard.writeText(passwordInput.value);
       copyButton.textContent = "Copied";
@@ -68,19 +64,18 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
     }
   });
 
-  ownButton.addEventListener("click", () => {
+  suggestButton?.addEventListener("click", () => {
     clearError();
-    passwordInput.readOnly = false;
-    passwordInput.value = "";
-    passwordInput.focus();
-    fieldLabel.textContent = "Your own password";
-    fieldHint.textContent = "At least 15 characters. Longer is safer.";
-    ownButton.hidden = true;
-    copyButton.hidden = true;
-    suggestedButton.hidden = false;
+    const suggestion = generate();
+    passwordInput.value = suggestion;
+    if (confirmInput) confirmInput.value = suggestion;
+    passwordInput.type = "text";
+    if (confirmInput) confirmInput.type = "text";
+    if (toggleButton) {
+      toggleButton.textContent = "Hide";
+      toggleButton.setAttribute("aria-pressed", "true");
+    }
   });
-
-  suggestedButton.addEventListener("click", showSuggested);
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -89,10 +84,15 @@ export function mountOwnerPasswordDialog(document, { invoke, clipboard, generate
 
   async function submitPassword() {
     const password = passwordInput.value;
+    const confirmation = confirmInput ? confirmInput.value : password;
     clearError();
     const problem = ownPasswordProblem(password);
     if (problem) {
       showError(problem);
+      return;
+    }
+    if (password !== confirmation) {
+      showError("The passwords do not match.");
       return;
     }
     if (typeof invoke !== "function") {
