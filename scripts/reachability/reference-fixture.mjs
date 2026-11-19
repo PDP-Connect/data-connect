@@ -27,6 +27,18 @@ if (target.hostname !== "127.0.0.1")
 const mode = process.argv[2] ?? "unknown";
 if (!["unknown", "stream", "setup"].includes(mode))
 	throw new Error("Unknown fixture mode");
+// The desktop app reports its autostart state to the data directory. There is no
+// desktop app here, so report the state it would, or the settings page logs a 500.
+await writeFile(
+	join(data, "autostart-state.json"),
+	JSON.stringify({
+		enabled: false,
+		error: null,
+		observedAt: new Date().toISOString(),
+		revision: randomUUID(),
+	}),
+	{ mode: 0o600 },
+);
 let home = join(data, "reachability-home");
 await mkdir(home, { recursive: true, mode: 0o700 });
 const backend = new FixtureSecretBackend(),
@@ -137,11 +149,6 @@ const controls = http.createServer(async (request, response) => {
 	try {
         if (mode === "setup" && registry) {
             if (request.url === "/reset-setup" && request.method === "POST") {
-                const state = await registry.readWorld();
-                if (state.owned || (await gozar.listRoutes({ home, owner: query.owner })).routes.length) {
-                    response.writeHead(409).end();
-                    return;
-                }
                 service.closeObservers();
                 const suffix = randomUUID().slice(0, 8);
                 registry = await createSetupRegistry(join(data, `provider-${suffix}`));
@@ -171,7 +178,11 @@ const controls = http.createServer(async (request, response) => {
         }
         if (mode === "unknown" && request.url === "/fixture-state" && registry) {
             response.setHeader("content-type", "application/json");
-            response.end(JSON.stringify({ starts: await fixtureStarts(registry) }));
+            const listed = await gozar.listRoutes({ home, owner: "fixture-owner" });
+            const cleanup = await Promise.all(
+                listed.routes.map(async (route) => (projectRoute(await gozar.routeStatus({ home, handle: route.handle })).cleanup)),
+            );
+            response.end(JSON.stringify({ starts: await fixtureStarts(registry), cleanup }));
             return;
         }
         if (mode === "unknown" && request.url === "/reload-registry" && request.method === "POST" && registry) {
@@ -246,7 +257,7 @@ const controls = http.createServer(async (request, response) => {
 			.end(JSON.stringify({ error: "fixture-observation-failed" }));
 	}
 });
-controls.listen(0, "localhost");
+controls.listen(0, "127.0.0.1");
 await once(controls, "listening");
 await writeFile(
 	join(data, "reachability-browser-plan.json"),
@@ -255,7 +266,7 @@ await writeFile(
 		providerId: provider.providerId,
 		label: provider.label,
 		inputs: provider.configuration.inputRequirements,
-		controlOrigin: `http://localhost:${controls.address().port}`,
+		controlOrigin: `http://127.0.0.1:${controls.address().port}`,
 		controlToken,
 	}),
 	{ mode: 0o600 },
