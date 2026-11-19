@@ -6,9 +6,15 @@ type SetupApproval = import("@tnunamak/gozar").RunSetupActionRequest["approval"]
 
 export class ReachabilityError extends Error {
   readonly code: string;
-  constructor(code: string) {
+  /**
+   * The route a failed start allocated and still owes a close for. The operation
+   * journal records its exact handle, the same way it records a library error's partial route.
+   */
+  readonly route?: import("@tnunamak/gozar").RouteView;
+  constructor(code: string, route?: import("@tnunamak/gozar").RouteView) {
     super(code);
     this.code = code;
+    if (route) this.route = route;
   }
 }
 

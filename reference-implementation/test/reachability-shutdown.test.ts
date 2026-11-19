@@ -9,7 +9,7 @@ import type { Handle, RouteView as Route } from "@tnunamak/gozar";
 import { fakeRouteScenarios } from "@tnunamak/gozar/testing";
 import { initialLifecycle } from "../server/reachability/lifecycle.ts";
 import { ReachabilityOperations } from "../server/reachability/operations.ts";
-import { ReachabilityService } from "../server/reachability/service.ts";
+import { ReachabilityService, restartCandidates } from "../server/reachability/service.ts";
 
 const seed = fakeRouteScenarios().find((route) => route.handle.kind === "attached" && route.published)!;
 
@@ -258,3 +258,101 @@ test("a start that never settles does not delay the close of an already-known ow
     await f.cleanup();
   }
 });
+
+for (const kind of ["attached", "session"] as const) {
+  test(`the ${kind} route of a start allocated after the shutdown debt snapshot keeps its exact handle when both closes stay unconfirmed`, { timeout: 5000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), "reachability-shutdown-late-"));
+    try {
+      const operations = new ReachabilityOperations(root, true);
+      let release!: (route: Route) => void;
+      const allocation = new Promise<Route>((resolve) => {
+        release = resolve;
+      });
+      let exposed!: () => void;
+      const exposeCalled = new Promise<void>((resolve) => {
+        exposed = resolve;
+      });
+      const closes: Handle[] = [];
+      const unconfirmed = (route: Route): Route => ({
+        ...route,
+        cleanup: { nextAction: null, state: "unconfirmed" },
+        published: null,
+      });
+      const held: { route: Route | null } = { route: null };
+      const service = new ReachabilityService(
+        {
+          closeRoute: async (input: { handle: Handle }) => {
+            closes.push(input.handle);
+            return unconfirmed(held.route!);
+          },
+          expose: async () => {
+            exposed();
+            return allocation;
+          },
+          watchRoutes: async function* () {},
+        } as never,
+        {
+          acknowledgeDisconnect: async () => undefined,
+          identity: { bootId: "b", instanceId: "i" },
+          query: { home: "fixture-home" },
+        } as never
+      );
+      const inner = service as unknown as { reviews: Map<string, unknown>; lifecycle: unknown };
+      inner.reviews.set("rev-1", {
+        candidate: {
+          candidateToken: "tok",
+          configuration: { revision: "r1" },
+          consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
+          consentFactsDigest: "consent-v1:abc",
+          disclosure: { revision: "1" },
+          expiresAt: "2999-01-01T00:00:00.000Z",
+          ownership: "gozar-owned",
+          providerId: "svc",
+        },
+        draftId: "d1",
+        id: "rev-1",
+        query: { target: "127.0.0.1:1", usage: { kind } },
+      });
+      inner.lifecycle = { ...initialLifecycle(), approvalIdentity: "rev-1", phase: "review" };
+      const input = { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" };
+      const intent = {
+        bootId: "b",
+        configurationRevision: "r1",
+        consentFactsDigest: "consent-v1:abc",
+        expectedOrigin: null,
+        instanceId: "i",
+        ownership: "gozar-owned",
+        providerId: "svc",
+        target: "127.0.0.1:1",
+        usage: { kind },
+      } as never;
+      const { operationId } = await operations.start(
+        "start",
+        null,
+        (id) => service.apply(id, "rev-1", input),
+        intent
+      );
+      await exposeCalled;
+      // The start is still inside the provider call, so the debt snapshot has nothing to record.
+      const outcome = await service.shutdown(20, operations);
+      assert.deepEqual(outcome, { confirmed: [], unconfirmed: [] });
+      assert.equal(closes.length, 0, "no handle existed to close at the deadline");
+      const handle: Handle = { generation: 3, id: "late-route", kind };
+      held.route = { ...seed, handle, operationId, ownership: "gozar-owned" };
+      release(held.route);
+      for (let attempt = 0; attempt < 400; attempt++) {
+        if ((await operations.read(operationId)).stage !== "applying") break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const record = await operations.read(operationId);
+      assert.equal(record.stage, "unknown-possibly-live");
+      assert.deepEqual(record.handle, handle, "the record keeps the exact allocated handle");
+      assert.notEqual(record.cleanupConfirmed, true);
+      assert.ok(closes.length >= 1);
+      assert.ok(closes.every((closed) => closed.id === handle.id && closed.generation === 3 && closed.kind === kind));
+      assert.deepEqual(restartCandidates(await operations.list()), [{ handle, operationId }]);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+}

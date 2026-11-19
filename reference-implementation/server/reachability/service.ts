@@ -808,8 +808,22 @@ export class ReachabilityService {
       // just created and closes it, whatever its kind, because the owner is told this Turn on
       // failed. A durable route is kept only when the start completes under its own epoch.
       if (epoch !== this.epoch) {
-        await this.stop(route.handle.id, route.handle.generation, true);
-        throw new ReachabilityError("operation_superseded");
+        // A close that does not confirm leaves the route owed. The failure carries it, so the
+        // start's journal record keeps the exact handle for the next restart. A confirmed close
+        // owes nothing, and the journal's merge never lets this record replace confirmed evidence.
+        let closed: Route;
+        try {
+          closed = await this.stop(route.handle.id, route.handle.generation, true);
+        } catch (closeError) {
+          if (closeError && typeof closeError === "object" && !("route" in closeError)) {
+            (closeError as { route?: Route }).route = route;
+          }
+          throw closeError;
+        }
+        throw new ReachabilityError(
+          "operation_superseded",
+          closed.cleanup.state === "confirmed" ? undefined : closed
+        );
       }
       this.transition({ handle: route.handle, type: "allocated" });
       if (route.verification.status === "verified" && route.published) {
