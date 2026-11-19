@@ -445,6 +445,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       }));
     return {
       evidenceSource: state.evidenceSource,
+      journalScan: state.journalScan,
       journalUnreadable: state.journalUnreadable,
       lifecycle: state.lifecycle,
       operations,

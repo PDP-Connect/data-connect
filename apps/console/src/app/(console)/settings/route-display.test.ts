@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   attentionSentence,
   expiryLine,
+  journalUnreadableWarning,
   proofLine,
   recheckDelay,
   routeAttention,
@@ -74,6 +75,23 @@ test("the re-check delay comes from the window length the server reports, never 
   assert.equal(recheckDelay(staleRoute, "stale"), 2_000, "stale reports also have a minimum positive delay");
   const noWindow = { ...staleRoute, verification: { ...staleRoute.verification, validUntil: { known: false as const, reason: "x" } } };
   assert.equal(recheckDelay(noWindow, "verified"), null);
+});
+
+test("a whole-scan failure warns even when no record count is reported", () => {
+  assert.equal(journalUnreadableWarning(0, "ok"), null);
+  assert.equal(
+    journalUnreadableWarning(0, "unavailable"),
+    "Remote-access records could not be read after a restart. An earlier address may still work; check your provider."
+  );
+});
+
+test("an unreadable startup journal warns only when the host reports unreadable records", () => {
+  assert.equal(journalUnreadableWarning(), null);
+  assert.equal(journalUnreadableWarning(0), null);
+  assert.equal(
+    journalUnreadableWarning(2),
+    "Some remote-access records could not be read after a restart. An earlier address may still work; check your provider."
+  );
 });
 
 const base = { lifecycleReason: null, recheckFailed: false, acknowledged: false, now: Date.parse("2026-11-18T07:08:30Z"), lifecyclePhase: "verified", recheckUnderWay: false };

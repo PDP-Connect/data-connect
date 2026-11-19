@@ -98,7 +98,7 @@ async function crashedProcess(
     ]);
     return service.precheckApply("rev-1", { consentFactsDigest: "d", kind: "route" });
   };
-  return { closes, inner, operationIds, operations, root, service, turnOn, cleanup: () => rm(root, { force: true, recursive: true }) };
+  return { closes, inner, operationIds, operations, root, service, turnOn, cleanup: () => rm(root, { force: true, maxRetries: 10, recursive: true, retryDelay: 25 }) };
 }
 
 const confirm = (handle: Handle): Promise<Route> =>
@@ -352,15 +352,19 @@ test("a prior restart Stop intent without confirmation is retried", async () => 
 
 test("restart debt keeps an owner retry after unconfirmed reconcile", async () => {
   let calls = 0;
+  let bootClose!: () => void;
   const f = await crashedProcess([attachedOwned], (handle) => {
     calls += 1;
-    if (calls === 1) return new Promise<Route>(() => {}); // the boot close times out
+    if (calls === 1) return new Promise<Route>((resolve) => (bootClose = () => resolve({ ...seed, cleanup: { nextAction: null, state: "unconfirmed" }, handle }))); // the boot close outlasts the deadline
     return calls === 2 ? unconfirmed(handle) : confirm(handle);
   });
   try {
     const call = await ownerApi(f);
     const id = f.operationIds.get("route-1")!;
     assert.deepEqual(await f.service.reconcileAfterRestart(60, f.operations), { confirmed: [], unconfirmed: ["route-1"] });
+    // A retry joins the close still in flight; it starts its own only after that one settled.
+    bootClose();
+    await until(() => (f.inner as unknown as { closing: Map<string, unknown> }).closing.size === 0);
     const actionable = async () => (await call("GET", "/state")).data.operations.filter((op: { operationId: string }) => op.operationId === id);
     assert.equal((await actionable())[0]?.recovery?.available, true);
     await assert.rejects(f.turnOn(), { code: "cleanup_debt" });
@@ -425,7 +429,7 @@ test("late not-found wins over a delayed deadline record", async () => {
     };
     let returned: unknown = null;
     const running = f.service.reconcileAfterRestart(40, journal).then((outcome) => (returned = outcome));
-    await until(() => timeoutWriteStarted);
+    await until(() => timeoutWriteStarted && f.closes.length === 1);
     closeFails(gone());
     await new Promise((resolve) => setTimeout(resolve, 20));
     releaseTimeoutWrite();
@@ -550,6 +554,196 @@ test("one unreadable receipt does not discard a valid pending close", async () =
     // since no owner action can clear an unreadable file.
     assert.equal(f.service.state().journalUnreadable, 1);
     await f.turnOn();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+const settleWithin = async <T>(promise: Promise<T>, ms: number): Promise<T | "hung"> =>
+  Promise.race([promise, new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), ms))]);
+
+test("a retry after the restart deadline joins the in-flight close and never overlaps it", async () => {
+  let active = 0;
+  let peak = 0;
+  const releases: Array<(route: Route) => void> = [];
+  const f = await crashedProcess([attachedOwned], () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    return new Promise<Route>((resolve) =>
+      releases.push((route) => {
+        active -= 1;
+        resolve(route);
+      })
+    );
+  });
+  try {
+    assert.deepEqual(await f.service.reconcileAfterRestart(40, f.operations), { confirmed: [], unconfirmed: ["route-1"] });
+    // The deadline has passed and the provider call is still open: a retry waits on it.
+    const retry = f.service.reconcileKnownHandle(route1, true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(f.closes.length, 1, "no second provider close while the first is open");
+    releases[0]!(await unconfirmed(route1));
+    await retry;
+    // Only now may another close start.
+    const next = f.service.reconcileKnownHandle(route1, true);
+    await until(() => f.closes.length === 2);
+    assert.equal(peak, 1, "provider closes never overlapped");
+    releases[1]!(await confirm(route1));
+    await next;
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("an owner stop of a confirmed route joins a close already in flight for the same handle", async () => {
+  let release!: (route: Route) => void;
+  const f = await crashedProcess([attachedOwned], () => new Promise<Route>((resolve) => (release = resolve)));
+  try {
+    const routes = (f.inner as unknown as { routes: Map<string, Route> }).routes;
+    routes.set("route-1", { ...seed, cleanup: { nextAction: null, state: "confirmed" }, handle: route1 });
+    const close = f.service.reconcileKnownHandle(route1, true);
+    await until(() => f.closes.length === 1);
+    const stop = f.service.stop("route-1", 1, true);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(f.closes.length, 1, "the confirmed-route stop did not start a second provider close");
+    release(await confirm(route1));
+    await Promise.all([close, stop]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a confirmed or absent outcome stays recorded whatever order independent writers run in", async () => {
+  const f = await crashedProcess([attachedOwned], confirm);
+  try {
+    const journal = f.operations;
+    const id = f.operationIds.get("route-1")!;
+    await journal.recordAbsent(id);
+    await journal.recordCleanupUnconfirmed(id, route1);
+    let record = await journal.read(id);
+    assert.equal(record.cleanupConfirmed, true);
+    assert.equal(record.stage, "settled");
+    // Concurrent writers, weak call first, then strong.
+    const second = await f.operations.read(id);
+    assert.equal(second.cleanupConfirmed, true);
+    for (const order of ["weak-first", "strong-first"]) {
+      const root = await mkdtemp(join(tmpdir(), "reachability-journal-"));
+      try {
+        const ops = new ReachabilityOperations(root, true);
+        const { operationId } = await ops.start("start", null, async () => seed, intentFor("gozar-owned"));
+        await until(async () => (await ops.read(operationId)).stage === "settled");
+        const weak = () => ops.recordCleanupUnconfirmed(operationId, route1);
+        const strong = () => ops.recordRecovered(operationId, { ...seed, cleanup: { nextAction: null, state: "confirmed" }, handle: route1 });
+        await Promise.all(order === "weak-first" ? [weak(), strong()] : [strong(), weak()]);
+        await ops.recordCleanupUnconfirmed(operationId, route1);
+        record = await ops.read(operationId);
+        assert.equal(record.cleanupConfirmed, true, order);
+        assert.equal(record.stage, "settled", order);
+        assert.equal(record.recovery, null, order);
+      } finally {
+        await rm(root, { force: true, recursive: true });
+      }
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("slow journal writes do not hold the restart outcome past the deadline, and the debt stays", async () => {
+  const f = await crashedProcess([attachedOwned], () => new Promise<Route>(() => {}));
+  try {
+    const real = f.operations;
+    const journal = {
+      scan: () => real.scan(),
+      recordAbsent: real.recordAbsent.bind(real),
+      recordRecovered: real.recordRecovered.bind(real),
+      requestStop: real.requestStop.bind(real),
+      recordCleanupUnconfirmed: () => new Promise<void>(() => {}),
+    };
+    const started = Date.now();
+    const outcome = await settleWithin(f.service.reconcileAfterRestart(40, journal), 2000);
+    assert.notEqual(outcome, "hung", "the caller outcome is bounded");
+    assert.ok(Date.now() - started < 1500);
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: ["route-1"] });
+    assert.equal(f.service.state().reconciling, false);
+    await assert.rejects(f.turnOn(), { code: "cleanup_debt" });
+    assert.deepEqual(restartCandidates(await real.list()).map((c) => c.handle.id), ["route-1"], "the record is still a candidate next boot");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a journal scan that fails, or misses the deadline, is reported apart from unreadable records", async () => {
+  const f = await crashedProcess([attachedOwned], confirm);
+  try {
+    assert.equal(f.service.state().journalScan, "ok");
+    const real = f.operations;
+    const journal = { ...{ scan: async (): Promise<never> => { throw new Error("disk"); } }, recordAbsent: real.recordAbsent.bind(real), recordCleanupUnconfirmed: real.recordCleanupUnconfirmed.bind(real), recordRecovered: real.recordRecovered.bind(real), requestStop: real.requestStop.bind(real) };
+    assert.deepEqual(await f.service.reconcileAfterRestart(500, journal), { confirmed: [], unconfirmed: [] });
+    const state = f.service.state();
+    assert.equal(state.journalScan, "unavailable");
+    assert.equal(state.journalUnreadable, 0);
+  } finally {
+    await f.cleanup();
+  }
+  const slow = await crashedProcess([attachedOwned], confirm);
+  try {
+    const real = slow.operations;
+    const journal = { scan: () => new Promise<never>(() => {}), recordAbsent: real.recordAbsent.bind(real), recordCleanupUnconfirmed: real.recordCleanupUnconfirmed.bind(real), recordRecovered: real.recordRecovered.bind(real), requestStop: real.requestStop.bind(real) };
+    const outcome = await settleWithin(slow.service.reconcileAfterRestart(40, journal), 2000);
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: [] });
+    assert.equal(slow.service.state().journalScan, "unavailable");
+    assert.equal(slow.service.state().reconciling, false);
+  } finally {
+    await slow.cleanup();
+  }
+});
+
+test("exact-handle evidence uses the whole handle: kind, id and generation", () => {
+  const start = (operationId: string, handle: Handle): OperationRecord => ({
+    cleanupConfirmed: false,
+    failureCode: null,
+    handle,
+    intent: intentFor("gozar-owned"),
+    kind: "start",
+    operationId,
+    recovery: null,
+    route: null,
+    stage: "unknown-possibly-live",
+    stopTombstone: false,
+  });
+  const stop = (operationId: string, handle: Handle): OperationRecord => ({
+    ...start(operationId, handle),
+    cleanupConfirmed: true,
+    kind: "stop",
+    stage: "settled",
+  });
+  const g1: Handle = { generation: 1, id: "r", kind: "attached" };
+  const g2: Handle = { generation: 2, id: "r", kind: "attached" };
+  const other: Handle = { generation: 1, id: "r", kind: "external" };
+  // An owner stop for another generation or kind of the same id is not evidence for g1.
+  assert.deepEqual(restartCandidates([start("a", g1), stop("b", g2)]).map((c) => c.operationId), ["a"]);
+  assert.deepEqual(restartCandidates([start("a", g1), stop("b", other)]).map((c) => c.operationId), ["a"]);
+  assert.deepEqual(restartCandidates([start("a", g1), stop("b", g1)]), []);
+  // Two generations of one id are two candidates, not one.
+  assert.deepEqual(restartCandidates([start("a", g1), start("b", g2)]).map((c) => c.operationId), ["a", "b"]);
+  assert.deepEqual(restartCandidates([start("a", g1), start("b", g1)]).map((c) => c.operationId), ["a"]);
+});
+
+test("a retry for a retained handle does not rebind or stop the route the lifecycle tracks", async () => {
+  const f = await crashedProcess([attachedOwned], () => unconfirmed(route1));
+  try {
+    const tracked: Handle = { generation: 1, id: "live-route", kind: "attached" };
+    f.inner.lifecycle = { ...initialLifecycle(), evidence: "verified", handle: tracked, phase: "verified" } as never;
+    const before = f.service.state().lifecycle;
+    const route = await f.service.reconcileKnownHandle(route1, true);
+    assert.equal(route?.cleanup.state, "unconfirmed");
+    const after = f.service.state().lifecycle;
+    assert.deepEqual(after.handle, tracked, "the tracked handle stays bound");
+    assert.equal(after.phase, before.phase);
+    assert.equal(after.stopRequested, false, "the tracked route is not stopped");
+    // And the lifecycle is not stuck: the tracked route can still be stopped normally.
+    assert.equal(f.closes.length, 1);
   } finally {
     await f.cleanup();
   }

@@ -37,6 +37,8 @@ export type ShutdownJournal = Pick<ReachabilityOperations, "recordCleanupUnconfi
  * gets 3 s and leaves 2 s of margin.
  */
 export const REACHABILITY_SHUTDOWN_DEADLINE_MS = 3000;
+/** How long past the restart deadline the caller waits for the journal's unconfirmed writes. */
+export const RESTART_JOURNAL_GRACE_MS = 250;
 /** The part of the operation journal the restart pass reads and writes. */
 export type RestartJournal = Pick<
   ReachabilityOperations,
@@ -119,6 +121,9 @@ export class ReachabilityService {
   private readonly bootOpen = new Map<string, { handle: Handle; settleWeak: () => Promise<void> }>();
   // Journal records the boot pass could not read. Each may hide a live route.
   private journalUnreadable = 0;
+  // "unavailable": the whole scan failed or missed the restart deadline, so no record
+  // could be read. Reported apart from the per-record count above.
+  private journalScan: "ok" | "unavailable" = "ok";
 
   constructor(api: EmbeddingApi, host: HostPolicy) {
     this.api = api;
@@ -163,6 +168,7 @@ export class ReachabilityService {
         stopRequested: this.lifecycle.stopTombstone,
       },
       reasons: Object.fromEntries(this.reasons),
+      journalScan: this.journalScan,
       journalUnreadable: this.journalUnreadable,
       reconciling: this.restartPending,
       routes: [...this.routes.values()],
@@ -534,6 +540,8 @@ export class ReachabilityService {
       usage: review.query.usage,
     };
   }
+  // The entry lives until the provider call itself settles. A caller may stop waiting
+  // (a deadline) but a retry joins this call; it never starts a second one beside it.
   private closeShared(handle: Handle): Promise<Route> {
     const existing = this.closing.get(handle.id);
     if (existing) return existing;
@@ -548,12 +556,18 @@ export class ReachabilityService {
   /** Returns null when the library holds no route under the handle (nothing is owed). */
   async reconcileKnownHandle(handle: Handle, stopTombstone: boolean): Promise<Route | null> {
     if (stopTombstone) {
-      // A retry arrives from any phase (an open review, or a stop that did not confirm).
-      // Restore the intent where the lifecycle takes it; otherwise just bind the handle.
-      const restored = reduceLifecycle(this.lifecycle, { handle, type: "restore-intent" });
-      if (restored.accepted) this.lifecycle = restored.state;
-      else this.transition({ handle, type: "recovered-handle" });
-      this.transition({ type: "stop" });
+      // The lifecycle follows one route. A retry for another retained handle closes that handle
+      // without rebinding, stopping or settling the route the lifecycle tracks.
+      const tracked = this.lifecycle.handle;
+      const own = tracked === null || sameHandle(tracked, handle);
+      if (own) {
+        // A retry arrives from any phase (an open review, or a stop that did not confirm).
+        // Restore the intent where the lifecycle takes it; otherwise just bind the handle.
+        const restored = reduceLifecycle(this.lifecycle, { handle, type: "restore-intent" });
+        if (restored.accepted) this.lifecycle = restored.state;
+        else this.transition({ handle, type: "recovered-handle" });
+        this.transition({ type: "stop" });
+      }
       let route: Route;
       try {
         route = await this.closeShared(handle);
@@ -561,12 +575,12 @@ export class ReachabilityService {
         if ((error as { code?: string } | null)?.code !== "route_not_found") throw error;
         this.unreconciled.delete(handle.id);
         this.routes.delete(handle.id);
-        this.transition({ type: "cleanup-confirmed" });
+        if (own) this.transition({ type: "cleanup-confirmed" });
         return null;
       }
       this.routes.set(handle.id, route);
       if (route.cleanup.state === "confirmed") this.unreconciled.delete(handle.id);
-      this.transition({ type: route.cleanup.state === "confirmed" ? "cleanup-confirmed" : "cleanup-unconfirmed" });
+      if (own) this.transition({ type: route.cleanup.state === "confirmed" ? "cleanup-confirmed" : "cleanup-unconfirmed" });
       return route;
     }
     this.transition({ handle, type: "restore-intent" });
@@ -591,8 +605,7 @@ export class ReachabilityService {
     const { home, owner } = this.host.query;
     const { routes } = await this.api.listRoutes({ home, owner });
     const matches = routes.filter(route => record.handle
-      ? route.handle.kind === record.handle.kind && route.handle.id === record.handle.id &&
-        route.handle.generation === record.handle.generation
+      ? sameHandle(route.handle, record.handle)
       : route.operationId === record.operationId);
     if (matches.length !== 1 || !matches[0] || !this.matchesExternalOperation(matches[0], record)) {
       throw new ReachabilityError("operation_recovery_unauthorized");
@@ -869,7 +882,7 @@ export class ReachabilityService {
     const route = this.route(id, generation);
     await this.host.acknowledgeDisconnect(acknowledged);
     if (route.cleanup.state === "confirmed") {
-      const closed = await this.api.closeRoute({ home: this.host.query.home, handle: route.handle, mode: "remove" });
+      const closed = await this.closeShared(route.handle);
       this.routes.set(id, closed);
       return closed;
     }
@@ -1031,15 +1044,32 @@ export class ReachabilityService {
     return this.restartRun;
   }
   private async runRestartReconcile(deadlineMs: number, journal: RestartJournal): Promise<RestartOutcome> {
+    // One deadline bounds everything the caller waits for: the scan, the closes and their
+    // journal writes. Work still running at the deadline continues as recoverable debt.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"deadline">((resolve) => {
+      timer = setTimeout(() => resolve("deadline"), deadlineMs);
+    });
+    try {
+      return await this.restartPass(journal, deadline);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  private async restartPass(journal: RestartJournal, deadline: Promise<"deadline">): Promise<RestartOutcome> {
     const ignore = () => undefined;
     let scanned: Awaited<ReturnType<RestartJournal["scan"]>>;
     try {
-      scanned = await journal.scan();
+      const result = await Promise.race([journal.scan(), deadline]);
+      if (result === "deadline") throw new Error("deadline");
+      scanned = result;
     } catch (error) {
       // An unreadable journal cannot name a route to close. Do not hold the fence forever.
-      console.error(`[reachability] restart reconcile could not read the journal: ${(error as Error)?.name ?? typeof error}`);
+      this.journalScan = "unavailable";
+      console.error(`[reachability] restart reconcile could not read the journal: ${(error as Error)?.message ?? typeof error}`);
       return { confirmed: [], unconfirmed: [] };
     }
+    this.journalScan = "ok";
     // Unreadable receipts may hide a live route. The owner sees the count; Turn on is not
     // refused, because nothing the owner can press would clear it.
     this.journalUnreadable = scanned.unreadable;
@@ -1092,32 +1122,35 @@ export class ReachabilityService {
           await settle(false, () => undefined, unconfirmedWrite);
         }
       };
-      return { attempt, handle, settleWeak, wait: () => chain };
+      return { attempt, handle, settleWeak };
     });
     if (this.shutdownRun) {
-      await Promise.all(candidates.map((candidate) => candidate.settleWeak()));
+      await Promise.race([Promise.all(candidates.map((candidate) => candidate.settleWeak())), deadline]);
       return { confirmed: [], unconfirmed: pending.map(({ handle }) => handle.id) };
     }
     const attempts = candidates.map((candidate) => candidate.attempt().catch(ignore));
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, deadlineMs);
-    });
+    await Promise.race([Promise.all(attempts), deadline]);
+    // Candidates with no result at the deadline are unconfirmed. Their weak write gets a short
+    // grace so a healthy journal has it on disk at return; slow storage must not hold the
+    // outcome past that. The write runs on, and until it lands the record stays a candidate for
+    // the next boot. A close that answers later still settles through the same ordered write and
+    // may only improve the journal, never this outcome.
+    const lateWrites = candidates.filter(({ handle }) => !results.has(handle.id)).map(({ settleWeak }) => settleWeak().catch(ignore));
+    let grace: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([Promise.all(attempts), deadline]);
+      await Promise.race([
+        Promise.all(lateWrites),
+        new Promise<void>((resolve) => {
+          grace = setTimeout(resolve, RESTART_JOURNAL_GRACE_MS);
+        }),
+      ]);
     } finally {
-      clearTimeout(timer);
+      clearTimeout(grace);
     }
-    // Candidates with no result at the deadline are unconfirmed. A close that answers later still
-    // settles through the same ordered write and may only improve the journal, never this outcome.
-    const late = candidates.filter(({ handle }) => !results.has(handle.id));
-    for (const { handle } of late) this.closing.delete(handle.id);
-    await Promise.all(late.map((candidate) => candidate.settleWeak()));
     const outcome: RestartOutcome = { confirmed: [], unconfirmed: [] };
     for (const { handle } of pending) {
       (results.get(handle.id) === "confirmed" ? outcome.confirmed : outcome.unconfirmed).push(handle.id);
     }
-    await Promise.all(candidates.map((candidate) => candidate.wait()));
     // Show the first unconfirmed route as stopping, never as the current route:
     // the tombstone is set, so it cannot be checked or kept.
     const shown = outcome.unconfirmed.map((id) => this.routes.get(id)).find((route) => route !== undefined);
@@ -1151,6 +1184,11 @@ export class ReachabilityService {
  * whose close did not confirm settles too, so the route can offer its retry, but it
  * leaves the route a candidate.
  */
+/** The one handle equality: a handle is the whole of kind, id and generation. */
+export function sameHandle(a: Handle, b: Handle): boolean {
+  return a.kind === b.kind && a.id === b.id && a.generation === b.generation;
+}
+
 export function restartCandidates(records: OperationRecord[]): { handle: Handle; operationId: string }[] {
   const ownerStopped = (handle: Handle) =>
     records.some(
@@ -1159,17 +1197,17 @@ export function restartCandidates(records: OperationRecord[]): { handle: Handle;
         record.stage === "settled" &&
         record.failureCode === null &&
         record.cleanupConfirmed === true &&
-        record.handle?.id === handle.id &&
-        record.handle.generation === handle.generation
+        record.handle !== null &&
+        sameHandle(record.handle, handle)
     );
-  const seen = new Set<string>();
+  const seen: Handle[] = [];
   const found: { handle: Handle; operationId: string }[] = [];
   for (const record of records) {
     const { handle } = record;
     if (record.kind !== "start" || handle?.kind !== "attached" || record.intent?.ownership !== "gozar-owned") continue;
     if (record.stage === "settled" && record.cleanupConfirmed === true) continue;
-    if (ownerStopped(handle) || seen.has(handle.id)) continue;
-    seen.add(handle.id);
+    if (ownerStopped(handle) || seen.some((other) => sameHandle(other, handle))) continue;
+    seen.push(handle);
     found.push({ handle, operationId: record.operationId });
   }
   return found;

@@ -43,6 +43,9 @@ export type OperationRecord = {
 export class ReachabilityOperations {
   private readonly root: string;
   private readonly running = new Set<string>();
+  // Tail of the write chain per record. Every read-modify-write of one record queues here,
+  // so independent writers (boot pass, owner retry, shutdown) cannot interleave.
+  private readonly tails = new Map<string, Promise<unknown>>();
   constructor(root: string, privateRecoveryAvailable = false) {
     this.root = root;
     this.recoveryAvailable = privateRecoveryAvailable;
@@ -53,6 +56,19 @@ export class ReachabilityOperations {
       throw new ReachabilityError("operation_not_found");
     }
     return join(this.root, `${id}.json`);
+  }
+  private serialized<T>(operationId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(operationId) ?? Promise.resolve();
+    const run = previous.then(task, task);
+    const tail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    this.tails.set(operationId, tail);
+    void tail.then(() => {
+      if (this.tails.get(operationId) === tail) this.tails.delete(operationId);
+    });
+    return run;
   }
   private async write(record: OperationRecord): Promise<void> {
     await mkdir(this.root, { mode: 0o700, recursive: true });
@@ -121,18 +137,23 @@ export class ReachabilityOperations {
   }
   // The stop tombstone stays and the record says the route may still be live,
   // so a later boot reconciles it instead of trusting a close that never confirmed.
+  // A confirmed or absent outcome is final: a weaker write that arrives later, from any
+  // path, leaves the record as it is.
   async recordCleanupUnconfirmed(operationId: string, handle: Handle): Promise<void> {
-    const record = await this.read(operationId);
-    await this.write({
-      ...record,
-      cleanupConfirmed: false,
-      failureCode: record.failureCode ?? "reachability_unavailable",
-      handle,
-      recovery: {
-        available: this.recoveryAvailable,
-        reason: this.recoveryAvailable ? "route_reconciliation_required" : "public_operation_recovery_unavailable",
-      },
-      stage: "unknown-possibly-live",
+    await this.serialized(operationId, async () => {
+      const record = await this.read(operationId);
+      if (record.cleanupConfirmed === true) return;
+      await this.write({
+        ...record,
+        cleanupConfirmed: false,
+        failureCode: record.failureCode ?? "reachability_unavailable",
+        handle,
+        recovery: {
+          available: this.recoveryAvailable,
+          reason: this.recoveryAvailable ? "route_reconciliation_required" : "public_operation_recovery_unavailable",
+        },
+        stage: "unknown-possibly-live",
+      });
     });
   }
   async list(): Promise<OperationRecord[]> {
@@ -163,20 +184,24 @@ export class ReachabilityOperations {
     return { records, unreadable };
   }
   async recordRecovered(operationId: string, route: Route): Promise<void> {
-    const record = await this.read(operationId);
-    await this.write({
-      ...record,
-      cleanupConfirmed: route.cleanup.state === "confirmed",
-      handle: route.handle,
-      recovery: null,
-      route: null,
-      stage: "settled",
+    await this.serialized(operationId, async () => {
+      const record = await this.read(operationId);
+      await this.write({
+        ...record,
+        cleanupConfirmed: record.cleanupConfirmed === true || route.cleanup.state === "confirmed",
+        handle: route.handle,
+        recovery: null,
+        route: null,
+        stage: "settled",
+      });
     });
   }
   /** The library has no route under the record's handle, so nothing of it can still be live. */
   async recordAbsent(operationId: string): Promise<void> {
-    const record = await this.read(operationId);
-    await this.write({ ...record, cleanupConfirmed: true, recovery: null, route: null, stage: "settled" });
+    await this.serialized(operationId, async () => {
+      const record = await this.read(operationId);
+      await this.write({ ...record, cleanupConfirmed: true, recovery: null, route: null, stage: "settled" });
+    });
   }
   async start(
     kind: OperationRecord["kind"],
@@ -206,13 +231,13 @@ export class ReachabilityOperations {
       try {
         const route = await effect(operationId);
         allocated = route.handle;
-        await this.write({
+        await this.serialized(operationId, () => this.write({
           ...pending,
           ...(kind === "stop" ? { cleanupConfirmed: route.cleanup?.state === "confirmed" } : {}),
           handle: route.handle,
           route: null,
           stage: "settled",
-        });
+        }));
       } catch (error) {
         const partial = error && typeof error === "object" && "route" in error
           ? (error as { route?: { handle?: Handle } | null }).route
@@ -243,7 +268,7 @@ export class ReachabilityOperations {
           `[reachability] operation ${operationId} (${kind}) failed: code=${typeof supplied === "string" ? supplied : "none"} ` +
           `name=${original?.name ?? typeof error} message=${(original?.message ?? "").slice(0, 300)}`
         );
-        await this.write({
+        await this.serialized(operationId, () => this.write({
           ...pending,
           handle: allocated ?? partial?.handle ?? pending.handle,
           failureCode,
@@ -252,7 +277,7 @@ export class ReachabilityOperations {
             reason: this.recoveryAvailable ? "route_reconciliation_required" : "public_operation_recovery_unavailable",
           },
           stage: "unknown-possibly-live",
-        });
+        }));
       } finally {
         this.running.delete(operationId);
       }

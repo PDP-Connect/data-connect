@@ -15,7 +15,7 @@ import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-actions.ts";
 import { OnCard } from "./on-card.tsx";
 import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
-import { type Attention, attentionSentence, proofLine, recheckDelay, routeAttention, routeHeadline, routeSentence } from "./route-display.ts";
+import { type Attention, attentionSentence, journalUnreadableWarning, proofLine, recheckDelay, routeAttention, routeHeadline, routeSentence } from "./route-display.ts";
 import {
   type DisplayError,
   Diagnostics,
@@ -67,6 +67,8 @@ type Operation = {
 };
 type State = {
   evidenceSource?: "synthetic" | null;
+  journalScan?: "ok" | "unavailable";
+  journalUnreadable?: number;
   operations?: Operation[];
   lifecycle?: {
     handle: Route["handle"] | null;
@@ -851,6 +853,7 @@ export function RemoteAccessSetting({
     },
   };
   const hostReasonShown = !host.known && host.reason !== "loading";
+  const journalWarning = journalUnreadableWarning(state.journalUnreadable, state.journalScan);
   const serviceLabel = wayLabel ?? "the service";
   const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
@@ -906,8 +909,9 @@ export function RemoteAccessSetting({
       {inventory ? null : (
         <p role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
+      {journalWarning ? <p role="status">{journalWarning}</p> : null}
       {idle && visibleRoutes.length === 0 && !operation ? (
-        <p role="status">Off · Only this computer can open DataConnect.</p>
+        <p role="status">{journalWarning ? "Off" : "Off · Only this computer can open DataConnect."}</p>
       ) : null}
       {idle && !passwordMissing ? (
         <section aria-label="Turn on remote access" className="grid gap-4">

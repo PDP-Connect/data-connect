@@ -129,6 +129,19 @@ export function recheckDelay(route: RouteDisplayInput, lifecyclePhase: string | 
 }
 
 /**
+ * The startup journal can hide a route that the current process does not know about:
+ * some records were unreadable, or the whole scan failed.
+ */
+export function journalUnreadableWarning(journalUnreadable?: number, journalScan?: "ok" | "unavailable"): string | null {
+  if (journalScan === "unavailable") {
+    return "Remote-access records could not be read after a restart. An earlier address may still work; check your provider.";
+  }
+  return (journalUnreadable ?? 0) > 0
+    ? "Some remote-access records could not be read after a restart. An earlier address may still work; check your provider."
+    : null;
+}
+
+/**
  * The reason a route that looks On or Off needs the owner: the host lost it,
  * its end time passed with cleanup unconfirmed, or the automatic re-check failed.
  * `acknowledged` is set once the owner chose Turn on again for this route.
