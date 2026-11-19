@@ -23,6 +23,11 @@ export type OperationRecord = {
   kind: "start" | "stop" | "check";
   stage: "applying" | "settled" | "unknown-possibly-live";
   stopTombstone: boolean;
+  /**
+   * Stop records only: whether the close the stop ran confirmed cleanup. Absent on
+   * older records, which the restart pass treats as not confirmed.
+   */
+  cleanupConfirmed?: boolean;
   failureCode: string | null;
   handle: Handle | null;
   route: ReturnType<typeof projectRoute> | null;
@@ -183,7 +188,13 @@ export class ReachabilityOperations {
       try {
         const route = await effect(operationId);
         allocated = route.handle;
-        await this.write({ ...pending, handle: route.handle, route: null, stage: "settled" });
+        await this.write({
+          ...pending,
+          ...(kind === "stop" ? { cleanupConfirmed: route.cleanup?.state === "confirmed" } : {}),
+          handle: route.handle,
+          route: null,
+          stage: "settled",
+        });
       } catch (error) {
         const partial = error && typeof error === "object" && "route" in error
           ? (error as { route?: { handle?: Handle } | null }).route

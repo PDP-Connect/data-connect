@@ -213,7 +213,7 @@ test("a route whose cleanup the journal confirmed is not touched", async () => {
       await operations.recordRecovered(one, { ...seed, handle: { id: "route-1", generation: 1, kind: "attached" } });
       // route-2: the owner turned it off and the stop settled.
       const two: Handle = { id: "route-2", generation: 1, kind: "attached" };
-      await operations.start("stop", two, async () => ({ ...seed, handle: two }));
+      await operations.start("stop", two, () => confirm(two));
       for (let attempt = 0; attempt < 200 && !(await operations.list()).every((r) => r.stage === "settled"); attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
@@ -223,6 +223,26 @@ test("a route whose cleanup the journal confirmed is not touched", async () => {
     const outcome = await f.service.reconcileAfterRestart(2000, f.operations);
     assert.deepEqual(f.closes, [{ id: "route-3", generation: 1, kind: "attached" }]);
     assert.deepEqual(outcome, { confirmed: ["route-3"], unconfirmed: [] });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("an owner stop that settled without confirming cleanup leaves the route to the restart pass", async () => {
+  const f = await crashedProcess([attachedOwned], confirm, async (operations) => {
+    const handle: Handle = { id: "route-1", generation: 1, kind: "attached" };
+    await operations.start("stop", handle, () => unconfirmed(handle));
+    for (let attempt = 0; attempt < 200 && !(await operations.list()).every((r) => r.stage === "settled"); attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const stop = (await operations.list()).find((record) => record.kind === "stop");
+    assert.equal(stop?.stage, "settled", "the stop settles so the route keeps its retry action");
+    assert.equal(stop?.cleanupConfirmed, false);
+  });
+  try {
+    const outcome = await f.service.reconcileAfterRestart(2000, f.operations);
+    assert.deepEqual(f.closes, [{ id: "route-1", generation: 1, kind: "attached" }]);
+    assert.deepEqual(outcome, { confirmed: ["route-1"], unconfirmed: [] });
   } finally {
     await f.cleanup();
   }

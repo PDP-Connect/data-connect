@@ -558,15 +558,11 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       expected = generation(input.generation);
     const handle = current.routeReference(id, expected);
     await current.authorizeDisconnect(input.acknowledgeDisconnect === true);
-    return ctx.operations.start("stop", handle, async () => {
-      const closed = await current.stop(id, expected, input.acknowledgeDisconnect === true);
-      // A close that did not confirm is not a settled stop: the journal must keep the
-      // route as possibly live so a later start reconciles it.
-      if (closed.cleanup.state !== "confirmed") {
-        throw Object.assign(new Error("cleanup unconfirmed"), { code: "cleanup_unconfirmed", route: closed });
-      }
-      return closed;
-    });
+    // A stop whose close did not confirm still settles: the route keeps its cleanup debt
+    // and retry action, and the journal records that cleanup did not confirm.
+    return ctx.operations.start("stop", handle, async () =>
+      current.stop(id, expected, input.acknowledgeDisconnect === true)
+    );
   });
   post("/routes/:id/review", async (request) =>
     projectRuntimeReview(await service().reviewRuntime(text(request.params.id), generation(body(request).generation)))

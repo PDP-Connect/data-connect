@@ -1089,7 +1089,9 @@ export class ReachabilityService {
  * with a retained handle, and no record that a close confirmed. A close is
  * confirmed when the start record settled under a Stop tombstone (shutdown and
  * explicit reconcile record it only after a confirmed close) or an owner stop
- * for the same handle settled without a failure.
+ * for the same handle settled with its cleanup confirmed. An owner stop whose
+ * close did not confirm settles too, so the route can offer its retry, but it
+ * leaves the route a candidate.
  */
 export function restartCandidates(records: OperationRecord[]): { handle: Handle; operationId: string }[] {
   const ownerStopped = (handle: Handle) =>
@@ -1098,6 +1100,7 @@ export function restartCandidates(records: OperationRecord[]): { handle: Handle;
         record.kind === "stop" &&
         record.stage === "settled" &&
         record.failureCode === null &&
+        record.cleanupConfirmed === true &&
         record.handle?.id === handle.id &&
         record.handle.generation === handle.generation
     );
