@@ -113,6 +113,21 @@ export class ReachabilityOperations {
       await directory.close();
     }
   }
+  // The stop tombstone stays and the record says the route may still be live,
+  // so a later boot reconciles it instead of trusting a close that never confirmed.
+  async recordCleanupUnconfirmed(operationId: string, handle: Handle): Promise<void> {
+    const record = await this.read(operationId);
+    await this.write({
+      ...record,
+      failureCode: record.failureCode ?? "reachability_unavailable",
+      handle,
+      recovery: {
+        available: this.recoveryAvailable,
+        reason: this.recoveryAvailable ? "route_reconciliation_required" : "public_operation_recovery_unavailable",
+      },
+      stage: "unknown-possibly-live",
+    });
+  }
   async list(): Promise<OperationRecord[]> {
     let names: string[];
     try {

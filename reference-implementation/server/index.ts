@@ -393,6 +393,7 @@ import { mountOwnerControl } from "./routes/owner-control.ts";
 import { mountOwnerRemoteAccess } from "./routes/owner-remote-access.ts";
 import { startDesktopReachability } from "./reachability/desktop-host.ts";
 import { ReachabilityOperations } from "./reachability/operations.ts";
+import { REACHABILITY_SHUTDOWN_DEADLINE_MS } from "./reachability/service.ts";
 import { ReachabilitySetups } from "./reachability/setups.ts";
 import { mountOwnerReachability, type OwnerReachabilityContext } from "./routes/owner-reachability.ts";
 import { mountOwnerAppConfig } from "./routes/owner-app-config.ts";
@@ -816,6 +817,8 @@ interface MutationContext {
 interface ServerOpts {
   /** Trusted host injects one long-lived reachability service and its usage policy. */
   reachability?: Pick<OwnerReachabilityContext, "passwordSet" | "service" | "statePaths" | "usage">;
+  /** The operation journal shared by the owner routes and the shutdown path. */
+  reachabilityOperations?: ReachabilityOperations;
   acceptedCollectorProtocolVersions?: readonly string[];
   /** Internal onboarding handoff. This value is never accepted from the PAR request. */
   acceptedProviderNativeRevision?: {
@@ -8524,7 +8527,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     service: opts.reachability?.service ?? null,
     passwordSet: opts.reachability?.passwordSet,
     statePaths: opts.reachability?.statePaths,
-    operations: new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
+    operations: opts.reachabilityOperations ?? new ReachabilityOperations(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"), !!opts.reachability?.service),
     setups: new ReachabilitySetups(path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-setups")),
     usage: opts.reachability?.usage ?? (() => { throw Object.assign(new Error("unsupported"), { code: "unsupported" }); }),
     requireToken, requireOwner, requireCsrf: requireReachabilityMutationCsrf,
@@ -9521,6 +9524,10 @@ export async function startServer(opts: ServerOpts = {}) {
     logger.warn("Desktop reachability is unavailable");
     return undefined;
   });
+  const reachabilityOperations = new ReachabilityOperations(
+    path.join(process.env.PDPP_DATA_DIR || path.join(process.cwd(), "data"), "reachability-operations"),
+    !!reachability?.service
+  );
   const rsApp = buildRsApp({
     connectorInstallService,
     agentDiscoveryOrigin: referenceTopology.browserOrigin,
@@ -9554,6 +9561,7 @@ export async function startServer(opts: ServerOpts = {}) {
     providerName,
     referenceRevision: opts.referenceRevision,
     reachability,
+    reachabilityOperations,
     reachabilityContract,
     resolveIntrospectionAudience: () => configuredRsPublicUrl || runtimeContext.rsUrl,
     resolveIntrospectionIssuer: () => configuredAsIssuer || runtimeContext.referenceBaseUrl,
@@ -9929,6 +9937,13 @@ export async function startServer(opts: ServerOpts = {}) {
     // evidence-sweep round — see connector-maintenance-sweep.ts).
     stopConnectorMaintenanceSweep,
     stopPostgresDerivedIndexMaintenance,
+    // Closes the routes this host owns. The CLI shutdown path awaits it before
+    // storage closes; it is bounded and idempotent.
+    stopReachability: async () => {
+      if (!opts.reachability && reachability?.service) {
+        await reachability.service.shutdown(REACHABILITY_SHUTDOWN_DEADLINE_MS, reachabilityOperations);
+      }
+    },
   };
 }
 
@@ -10992,6 +11007,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     stopClientEventDeliveryWorker: StartServerResult["stopClientEventDeliveryWorker"] | null;
     stopConnectorMaintenanceSweep: StartServerResult["stopConnectorMaintenanceSweep"] | null;
     stopPostgresDerivedIndexMaintenance: StartServerResult["stopPostgresDerivedIndexMaintenance"] | null;
+    stopReachability: StartServerResult["stopReachability"] | null;
   } = {
     abortStartupBackfill: null,
     asServer: null,
@@ -11005,6 +11021,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     stopClientEventDeliveryWorker: null,
     stopConnectorMaintenanceSweep: null,
     stopPostgresDerivedIndexMaintenance: null,
+    stopReachability: null,
   };
   const exitOnSignal = (signal: string) => async () => {
     if (shuttingDown) {
@@ -11062,6 +11079,12 @@ if (isMainModule(import.meta.url, process.argv[1])) {
           finish();
         }
       });
+    // Close the remote-access route this process owns. It runs beside the HTTP
+    // drain, is bounded by REACHABILITY_SHUTDOWN_DEADLINE_MS, and must settle
+    // before storage closes so its journal writes land.
+    const reachabilityClosed = (server.stopReachability?.() ?? Promise.resolve()).catch((err) => {
+      cliLogger.warn({ err }, "remote access route close failed during shutdown");
+    });
     const httpDrains = [closeTimeout(server.asServer), closeTimeout(server.rsServer)];
     // Signal the startup retrieval backfill to wind down ALONGSIDE the
     // HTTP drain. Without this, a backfill mid-`upsertMany` keeps the
@@ -11118,7 +11141,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
     // rely on. Sidekiq draws the same line between *quiet* and *drain*.
     // Chromium residue is still cleaned on next boot by
     // polyfill-connectors/src/profile-lock.ts (Layer C).
-    await Promise.allSettled([...httpDrains, Promise.race([awaitStartupTasks, backfillDeadline])]);
+    await Promise.allSettled([...httpDrains, reachabilityClosed, Promise.race([awaitStartupTasks, backfillDeadline])]);
     // See shutdownStorageClose's own doc comment for the drain-gates-close
     // invariant and why exit(1) here does not mean the in-flight job
     // finishes safely -- only that this process is not the one that raced
@@ -11156,6 +11179,7 @@ if (isMainModule(import.meta.url, process.argv[1])) {
       server.stopClientEventDeliveryWorker = result.stopClientEventDeliveryWorker;
       server.stopConnectorMaintenanceSweep = result.stopConnectorMaintenanceSweep;
       server.stopPostgresDerivedIndexMaintenance = result.stopPostgresDerivedIndexMaintenance;
+      server.stopReachability = result.stopReachability;
     })
     .catch((err) => {
       closePostgresStorage().finally(() => closeDb());

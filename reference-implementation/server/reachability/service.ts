@@ -25,7 +25,24 @@ type RuntimeConsentReview = Awaited<ReturnType<typeof import("@tnunamak/gozar").
 
 import { ReachabilityError, requireRouteApproval, requireSetupApproval } from "./approvals.ts";
 import { ConfigurationDraftSession } from "./drafts.ts";
-import type { OperationRecord } from "./operations.ts";
+import type { OperationRecord, ReachabilityOperations } from "./operations.ts";
+
+/** The part of the operation journal the shutdown path writes. */
+export type ShutdownJournal = Pick<ReachabilityOperations, "recordCleanupUnconfirmed" | "recordRecovered" | "requestStop">;
+/**
+ * Budget for closing owned routes at process shutdown. The desktop supervisor
+ * sends SIGTERM to the server's process group and waits a 5 s grace before it
+ * escalates to SIGKILL (stop policy in src-tauri/src/unified.rs). HTTP drain
+ * (2 s, run in parallel) and storage close still follow, so the route close
+ * gets 3 s and leaves 2 s of margin.
+ */
+export const REACHABILITY_SHUTDOWN_DEADLINE_MS = 3000;
+export type ShutdownOutcome = {
+  /** Handle ids whose close this call confirmed. */
+  confirmed: string[];
+  /** Handle ids still not confirmed closed when the deadline ended. The stop tombstone stays. */
+  unconfirmed: string[];
+};
 
 type SetupReference = Pick<SetupOperationRef, "operationId" | "providerId">;
 type SetupCommand = Pick<RunSetupOperationRequest, "actionId" | "expectedConfigurationRevision" | "expectedSetupRevision" | "draftId" | "value"> & {
@@ -67,7 +84,9 @@ export class ReachabilityService {
     this.lifecycle = result.state;
   }
   private starting = false;
+  private startSettled: Promise<void> | null = null;
   private epoch = 0;
+  private shutdownRun: Promise<ShutdownOutcome> | null = null;
 
   constructor(api: EmbeddingApi, host: HostPolicy) {
     this.api = api;
@@ -605,6 +624,9 @@ export class ReachabilityService {
       disclosureRevision: review.candidate.disclosure.revision,
       kind: input.kind,
     });
+    if (this.shutdownRun) {
+      throw new ReachabilityError("host_supervisor_unavailable");
+    }
     if (this.starting || [...this.routes.values()].some((route) => route.cleanup.state !== "confirmed")) {
       throw new ReachabilityError("configuration_in_use");
     }
@@ -659,6 +681,10 @@ export class ReachabilityService {
     this.lifecycle = event.state;
     const epoch = ++this.epoch;
     this.starting = true;
+    let settled!: () => void;
+    this.startSettled = new Promise<void>((resolve) => {
+      settled = resolve;
+    });
     this.reviews.delete(reviewId);
     try {
       await this.host.acknowledgeDisconnect(input.acknowledgeDisconnect);
@@ -701,6 +727,7 @@ export class ReachabilityService {
       throw error;
     } finally {
       this.starting = false;
+      settled();
     }
   }
   private watch(handle: Handle): void {
@@ -820,6 +847,87 @@ export class ReachabilityService {
     });
     this.routes.set(id, current);
     return current;
+  }
+  /**
+   * Closes every attached route this host owns, within `deadlineMs`, for the
+   * process shutdown path. Idempotent: later calls return the first run.
+   *
+   * Order: refuse new starts, journal a Stop tombstone, withdraw publication,
+   * then close with the retained exact handle. A route the host does not own
+   * (external) or that outlives the process by design (durable, session) is not
+   * touched. A route not confirmed closed by the deadline keeps its tombstone
+   * and is journaled as cleanup unconfirmed; success is never recorded for it.
+   */
+  shutdown(deadlineMs: number, journal: ShutdownJournal): Promise<ShutdownOutcome> {
+    this.shutdownRun ??= this.runShutdown(deadlineMs, journal);
+    return this.shutdownRun;
+  }
+  private async runShutdown(deadlineMs: number, journal: ShutdownJournal): Promise<ShutdownOutcome> {
+    // Fence first. The epoch bump makes a start still awaiting the library close
+    // its own route when it returns.
+    this.epoch += 1;
+    this.reviews.clear();
+    this.runtimeReviews.clear();
+    this.closeObservers();
+    // Shutdown is best effort per step: a failed journal write must not stop the close.
+    const ignore = () => undefined;
+    const owned = () =>
+      [...this.routes.values()].filter(
+        (route) => route.handle.kind === "attached" && route.ownership === "gozar-owned"
+      );
+    const confirmed = new Set<string>();
+    // Best-effort lifecycle bookkeeping for the route the lifecycle tracks.
+    const advance = (handle: Handle, type: "stop" | "cleanup-confirmed" | "cleanup-unconfirmed") => {
+      const event = reduceLifecycle(this.lifecycle, { type });
+      if (event.accepted && this.lifecycle.handle?.id === handle.id) {
+        this.lifecycle = event.state;
+      }
+    };
+    const close = async (): Promise<void> => {
+      // A start already in flight allocates its handle only when it returns.
+      await this.startSettled;
+      await Promise.all(
+        owned().map(async (route) => {
+          const { handle } = route;
+          if (route.operationId) {
+            await journal.requestStop(route.operationId).catch(ignore);
+          }
+          advance(handle, "stop");
+          if (route.cleanup.state !== "confirmed") {
+            this.routes.set(handle.id, { ...route, published: null });
+            const closed = await this.api.closeRoute({ handle, home: this.host.query.home, mode: "remove" });
+            this.routes.set(handle.id, closed);
+            if (closed.cleanup.state !== "confirmed") {
+              return;
+            }
+          }
+          confirmed.add(handle.id);
+          advance(handle, "cleanup-confirmed");
+          if (route.operationId) {
+            await journal.recordRecovered(route.operationId, this.routes.get(handle.id) ?? route).catch(ignore);
+          }
+        })
+      );
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, deadlineMs);
+    });
+    try {
+      await Promise.race([close().catch(ignore), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+    const unconfirmed = owned().filter((route) => !confirmed.has(route.handle.id));
+    await Promise.all(
+      unconfirmed.map(async (route) => {
+        advance(route.handle, "cleanup-unconfirmed");
+        if (route.operationId) {
+          await journal.recordCleanupUnconfirmed(route.operationId, route.handle).catch(ignore);
+        }
+      })
+    );
+    return { confirmed: [...confirmed], unconfirmed: unconfirmed.map((route) => route.handle.id) };
   }
   closeObservers(): void {
     for (const watcher of this.watchers.values()) {
