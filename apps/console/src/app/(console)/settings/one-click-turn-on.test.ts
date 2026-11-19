@@ -586,8 +586,11 @@ test("Choose another way drops the step without running it", async () => {
 test("a failed preparation says so and Try again runs it again", async () => {
   let drafts = 0;
   const handler = host({ "/drafts": () => (++drafts === 1 ? fail("brand_new_server_code") : ok(draftWith())) });
-  await withScreen(handler, async ({ press, text, container }) => {
-    assert.match(text(), /Remote access couldn.t turn on\. Try again/);
+  await withScreen(handler, async ({ calls, press, text, container }) => {
+    // Nothing turned on yet, so the sentence must not say turning on failed.
+    assert.match(text(), /We couldn.t get this way ready\. Try again/);
+    assert.doesNotMatch(text(), /couldn.t turn on/);
+    assert.deepEqual(approvals(calls), []);
     assert.ok(container.querySelector("[role=alert] [data-diagnostics]")!.textContent!.includes("brand_new_server_code"));
     await press(/^Try again$/);
     assert.match(text(), /Turn on remote access/);
@@ -1034,14 +1037,16 @@ test("real trial-consent action: Turn on shows the trial's own facts, and one cl
 });
 
 // A step the page cannot show as a sign-in must not leave a blank card.
-test("an owner step with no setup card shows the generic sentence and Try again, never nothing", async () => {
+test("an owner step with no setup card says its details did not load and offers Try again, never nothing", async () => {
   const unknownStep = { ...trialConsentAction, id: "other-step", step: { ...trialConsentAction.step, actor: "administrator", purpose: "configure" } };
   const handler = host({
     "/drafts": ok(draftWith([unknownStep])),
     "/setups": ok({ operationId: "op-x" }),
   });
-  await withScreen(handler, async ({ text, container }) => {
-    assert.match(text(), /couldn't turn on/);
+  await withScreen(handler, async ({ calls, text, container }) => {
+    assert.match(text(), /We couldn't load this service's details\. Try again\./);
+    assert.doesNotMatch(text(), /couldn't turn on/);
+    assert.deepEqual(approvals(calls), []);
     assert.ok([...container.querySelectorAll("button")].some((node) => node.textContent === "Try again"));
   });
 });

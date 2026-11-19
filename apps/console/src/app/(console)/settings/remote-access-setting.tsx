@@ -30,7 +30,7 @@ import {
 } from "./diagnostics.tsx";
 import { formatLocalTime, plain } from "./plain-text.ts";
 import { isOpenThroughRoute } from "./remote-origin.ts";
-import { type ActionKind, CLEANUP_UNCONFIRMED, ERROR_MESSAGES, genericErrorFor, publicError } from "./reachability-errors.ts";
+import { type ActionKind, CLEANUP_UNCONFIRMED, ERROR_MESSAGES, publicError, SERVICE_DETAILS } from "./reachability-errors.ts";
 import { ConsentFacts, RuntimeRouteConsentCard, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import {
   type Action,
@@ -515,7 +515,7 @@ export function RemoteAccessSetting({
         refreshing.current = null;
         setPrep({ status: "idle" });
         if (failure instanceof PreparationStopped) return;
-        setPrepError(toDisplayError(failure, "action", wayLabel));
+        setPrepError(toDisplayError(failure, "action", wayLabel, "prepare"));
       });
     return () => {
       active = false;
@@ -918,7 +918,7 @@ export function RemoteAccessSetting({
       ) : null}
       <RecoveryContext.Provider value={recover}>
         {error ? <ErrorNotice error={error} /> : null}
-        {prepError ? <ErrorNotice error={prepError} /> : null}
+        {prepError ? <ErrorNotice action="prepare" error={prepError} /> : null}
       </RecoveryContext.Provider>
       {stale ? <p className="text-sm text-muted-foreground" role="status">Can't reach DataConnect's background service. Changes are paused.</p> : null}
       {hostReasonShown && !error ? <p className="text-sm text-muted-foreground" role="status">{ERROR_MESSAGES.host_supervisor_unavailable}</p> : null}
@@ -962,7 +962,7 @@ export function RemoteAccessSetting({
             {done?.kind === "sign-in" && !reservations.some((item) => item.providerId === wayId) ? (
               // A step the page cannot show as a sign-in: never a blank card.
               <section aria-label="Turn on" className="grid gap-3 rounded-xl border border-destructive/40 bg-destructive/5 p-4">
-                <p className="text-sm" role="status">{genericErrorFor("turn-on")}</p>
+                <p className="text-sm" role="status">{SERVICE_DETAILS}</p>
                 <div className="flex flex-wrap gap-3">
                   <Button disabled={busy} onClick={refresh} type="button">
                     Try again

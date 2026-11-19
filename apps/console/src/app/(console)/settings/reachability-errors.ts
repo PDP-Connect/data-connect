@@ -6,11 +6,13 @@
 
 // What the owner was doing when it failed. The fallback names that action, so
 // a failed turn-off never says it couldn't turn on.
-export type ActionKind = "turn-on" | "turn-off" | "check" | "change";
+// "prepare" is getting a chosen way ready before Turn on: nothing has turned on yet.
+export type ActionKind = "prepare" | "turn-on" | "turn-off" | "check" | "change";
 
 const SUPPORT = "Try again, or copy the details for support.";
 export const GENERIC_ERROR = `Remote access couldn't turn on. ${SUPPORT}`;
 const GENERIC_BY_ACTION: Readonly<Record<ActionKind, string>> = {
+  prepare: `We couldn't get this way ready. ${SUPPORT}`,
   "turn-on": GENERIC_ERROR,
   "turn-off": `Remote access couldn't turn off. It may still be on. ${SUPPORT}`,
   check: `We couldn't check remote access. ${SUPPORT}`,
@@ -21,7 +23,7 @@ export const genericErrorFor = (action: ActionKind): string => GENERIC_BY_ACTION
 export const CLEANUP_UNCONFIRMED = "Couldn't confirm the service closed your address.";
 const TRY_AGAIN = "Something changed while we were connecting. Try again.";
 const SERVICE_DOWN = "DataConnect's background service isn't running. Quit and reopen DataConnect.";
-const SERVICE_DETAILS = "We couldn't load this service's details. Try again.";
+export const SERVICE_DETAILS = "We couldn't load this service's details. Try again.";
 const ALREADY_WORKING = "Remote access is already changing. Wait a moment, then try again.";
 const STEP_GONE = "That step is no longer available. Reload this page and try again.";
 const KEYCHAIN = "DataConnect couldn't use your saved sign-in details. Enter them again.";
