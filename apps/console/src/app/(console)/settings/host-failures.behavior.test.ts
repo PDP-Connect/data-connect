@@ -323,3 +323,17 @@ test("the real host's unsafe-folder error becomes the permissions card with its 
     assert.ok(buttons().includes("Fix permissions"));
   });
 });
+
+test("boot listing timeout shows possibly live and offers a recovery check", async () => {
+  let checked = false;
+  await withScreen(host({
+    "/state": () => ok({ ...idleState, recovery: { pending: false, blockedBy: checked ? null : "recovery_timed_out", actions: checked ? [] : ["check"] } }),
+    "/recovery/check": () => { checked = true; return ok({ closed: 0, failed: 0, reproved: 0 }); },
+  }), async ({ mainText, press, calls }) => {
+    assert.match(mainText(), /Unknown, possibly live/);
+    assert.doesNotMatch(mainText(), /Only this computer can open/);
+    await press(/^Check earlier addresses$/);
+    assert.ok(calls.some(call => call.url === "/recovery/check" && call.body));
+    assert.doesNotMatch(mainText(), /Unknown, possibly live/);
+  });
+});

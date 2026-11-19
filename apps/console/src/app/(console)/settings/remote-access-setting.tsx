@@ -70,6 +70,7 @@ type Operation = {
 };
 type State = {
   evidenceSource?: "synthetic" | null;
+  recovery?: { pending: boolean; blockedBy: string | null; actions: string[] };
   journalScan?: "ok" | "unavailable";
   journalUnreadable?: number;
   operations?: Operation[];
@@ -121,7 +122,7 @@ function OffStatusRow({ journalWarning, framed = false }: { journalWarning: stri
   return (
     <p className={`text-sm font-medium ${framed ? "border-b px-4 py-3" : ""}`} role="status">
       <span aria-hidden="true" className="mr-2 inline-block size-2.5 rounded-full bg-muted-foreground/50 align-middle" />
-      {"Off "}
+      {journalWarning ? "Unknown, possibly live " : "Off "}
       {journalWarning ? null : <span className="font-normal text-muted-foreground">· Only this computer can open DataConnect.</span>}
     </p>
   );
@@ -960,7 +961,11 @@ export function RemoteAccessSetting({
     },
   };
   const hostReasonShown = !host.known && host.reason !== "loading";
-  const journalWarning = journalUnreadableWarning(state.journalUnreadable, state.journalScan);
+  const journalWarning = state.recovery?.pending
+    ? "Checking addresses from before the restart. An earlier address may still work."
+    : state.recovery?.blockedBy
+      ? "An earlier address may still work. Check remote access before starting another route."
+      : journalUnreadableWarning(state.journalUnreadable, state.journalScan);
   const serviceLabel = wayLabel ?? "the service";
   const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
@@ -1030,6 +1035,9 @@ export function RemoteAccessSetting({
         <p className="text-sm text-muted-foreground" role="status">{stale ? "Remote access can't start on this computer." : "Checking this computer…"}</p>
       )}
       {journalWarning ? <p className="text-sm text-muted-foreground" role="status">{journalWarning}</p> : null}
+      {state.recovery?.actions.includes("check") ? (
+        <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>
+      ) : null}
       {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
         <OffStatusRow journalWarning={journalWarning} />
       ) : null}
