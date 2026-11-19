@@ -98,7 +98,10 @@ type Prep =
 // restarts it) or is down. The card goes stale, its status line says the
 // service can't be reached and keeps the code under Details, and the next poll
 // retries. No error card. A read the service answered with an error, even its
-// generic one, is a real failure and shows its card.
+// generic one, is a real failure and shows its card. A read that outlived its
+// deadline (reachability_unavailable from the transport) also shows the check
+// card: the service may still be working on it, so "can't reach" would be
+// wrong, and the owner can try again.
 const gotNoAnswer = (code: string) => code === "service_unreachable";
 
 /**
@@ -227,54 +230,64 @@ export function RemoteAccessSetting({
       // must not replace what the action or the later poll set.
       const outdated = () => !active || seq < appliedSeq.current || startedInEpoch !== actionEpoch.current;
       type Read = Awaited<ReturnType<typeof request>>;
-      let results: [Read, Read, Read, Read];
-      try {
-        results = await Promise.all([
-          request("/catalog"),
-          request("/state"),
-          request("/host-settings"),
-          request("/host-capabilities"),
-        ]);
-      } catch (failure) {
-        // The request itself threw: no answer. Same ordering rule as an answer.
-        if (!outdated()) {
-          appliedSeq.current = seq;
-          setStale(true);
-          setNoAnswer(toDisplayError(failure, "load", undefined, "check"));
-        }
-        return;
-      }
-      const [catalogResult, stateResult, hostResult, capabilityResult] = results;
+      // A request that throws got no answer. Each read settles on its own, so
+      // one throw cannot hide what another read was answered.
+      type Outcome = { read: Read } | { thrown: unknown };
+      const settle = (path: string) =>
+        request(path).then(
+          (read): Outcome => ({ read }),
+          (thrown: unknown): Outcome => ({ thrown })
+        );
+      const [catalog, stateRead, hostRead, capabilityRead] = await Promise.all([
+        settle("/catalog"),
+        settle("/state"),
+        settle("/host-settings"),
+        settle("/host-capabilities"),
+      ]);
       if (outdated()) {
         return;
       }
       appliedSeq.current = seq;
+      const answered = (outcome: Outcome) => ("read" in outcome && outcome.read.ok ? outcome.read : null);
+      const catalogResult = answered(catalog);
+      const stateResult = answered(stateRead);
+      const hostResult = answered(hostRead);
+      const capabilityResult = answered(capabilityRead);
       // A read the service answered with an error names the problem, before one that got no answer.
-      const failed = [catalogResult, stateResult].filter((result): result is Extract<Read, { ok: false }> => !result.ok);
-      const failedRead = failed.find((result) => !gotNoAnswer(result.code)) ?? null;
-      const unanswered = failed.find((result) => gotNoAnswer(result.code));
-      setNoAnswer(unanswered ? toDisplayError(new ReachabilityFailure(unanswered), "load", undefined, "check") : null);
-      if (catalogResult.ok) {
+      let failedRead: Extract<Read, { ok: false }> | null = null;
+      let unanswered: DisplayError | null = null;
+      for (const outcome of [catalog, stateRead]) {
+        if ("thrown" in outcome) {
+          unanswered ??= toDisplayError(outcome.thrown, "load", undefined, "check");
+        } else if (!outcome.read.ok && gotNoAnswer(outcome.read.code)) {
+          unanswered ??= toDisplayError(new ReachabilityFailure(outcome.read), "load", undefined, "check");
+        } else if (!outcome.read.ok) {
+          failedRead ??= outcome.read;
+        }
+      }
+      setNoAnswer(unanswered);
+      if (catalogResult) {
         setInventory(catalogResult.data as Inventory);
         setStale(false);
       } else {
         setStale(true);
       }
-      if (failedRead) {
+      const specific = failedRead;
+      if (specific) {
         setError((current) =>
-          current?.source === "action" || (current?.source === "load" && current.code === failedRead.code)
+          current?.source === "action" || (current?.source === "load" && current.code === specific.code)
             ? current
             : // A read failed, so the fallback sentence names a check, never a turn-on.
-              toDisplayError(new ReachabilityFailure(failedRead), "load", undefined, "check")
+              toDisplayError(new ReachabilityFailure(specific), "load", undefined, "check")
         );
       }
-      if (hostResult.ok) {
+      if (hostResult) {
         setHost(hostResult.data as typeof host);
       }
-      if (capabilityResult.ok) {
+      if (capabilityResult) {
         setCapabilities(capabilityResult.data as typeof capabilities);
       }
-      if (stateResult.ok) {
+      if (stateResult) {
         const next = stateResult.data as State;
         setState(next);
         setStateLoaded(true);
@@ -285,7 +298,7 @@ export function RemoteAccessSetting({
         setStale(true);
       }
       // A load that succeeds retires the load error it replaced; an action error stays until the next action.
-      if (catalogResult.ok && stateResult.ok) {
+      if (catalogResult && stateResult) {
         setError((current) => (current?.source === "load" ? null : current));
       }
     };
@@ -946,7 +959,11 @@ export function RemoteAccessSetting({
       </RecoveryContext.Provider>
       {stale ? (
         <div className="grid gap-1" role="status">
-          <p className="text-sm text-muted-foreground">Can't reach DataConnect's background service. Changes are paused.</p>
+          <p className="text-sm text-muted-foreground">
+            {noAnswer
+              ? "Can't reach DataConnect's background service. Changes are paused."
+              : "Changes are paused until remote access can be checked."}
+          </p>
           {noAnswer ? (
             <Diagnostics>
               <pre className="whitespace-pre-wrap break-words">{diagnosticsText(noAnswer, appVersion)}</pre>

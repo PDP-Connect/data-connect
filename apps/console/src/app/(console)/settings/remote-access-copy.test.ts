@@ -516,7 +516,9 @@ test("a failed first load says what to do, keeps the code in Details, and clears
       const text = visibleText(container);
       assertClean("failed load", text);
       assert.match(text, /Set a password first/);
-      assert.match(text, /Can't reach DataConnect's background service/);
+      // The service answered, so it is reachable: the paused line says why changes wait.
+      assert.doesNotMatch(text, /Can't reach DataConnect's background service/);
+      assert.match(text, /Changes are paused until remote access can be checked\./);
       const details = container.querySelector("[role=alert] [data-diagnostics]")!.textContent!;
       assert.match(details, /Code: owner_password_required/);
       assert.match(details, /App version: 0\.0\.0-test/);
@@ -564,7 +566,11 @@ test("a read the service answers with its generic error shows a card that says i
     const alert = container.querySelector("[role=alert]")?.textContent ?? "";
     assert.match(alert, /We couldn't check remote access\. Try again, or copy the details for support\./);
     assert.match(alert, /Code: reachability_unavailable/);
-    assert.doesNotMatch(visibleText(container), /couldn't turn on/);
+    const text = visibleText(container);
+    assert.doesNotMatch(text, /couldn't turn on/);
+    // The service answered, so the paused line must not say it can't be reached.
+    assert.doesNotMatch(text, /Can't reach DataConnect's background service/);
+    assert.match(text, /Changes are paused until remote access can be checked\./);
   });
 });
 
@@ -574,6 +580,23 @@ test("a read the service answers with a specific error is shown even when anothe
     assert.match(alert, /too long for remote access/);
     assert.match(visibleText(container), /Can't reach DataConnect's background service/);
   });
+});
+
+test("a read the service answers with a specific error is shown even when another read throws", async () => {
+  const handler = world({ "/state": fail("host_path_too_long") });
+  await withScreen(
+    ((url: string, body?: Record<string, unknown>) => {
+      if (url === "/catalog") throw new Error("fetch failed");
+      return handler(url, body);
+    }) as unknown as Handler,
+    async ({ container }) => {
+      const alert = container.querySelector("[role=alert]")?.textContent ?? "";
+      assert.match(alert, /too long for remote access/);
+      assert.match(visibleText(container), /Can't reach DataConnect's background service/);
+      const details = container.querySelector("[role=status] [data-diagnostics]")?.textContent ?? "";
+      assert.match(details, /Code: client_error/, "the thrown read keeps its code under Details");
+    }
+  );
 });
 
 test("an older poll that throws after a newer good poll does not pause the card again", async (t) => {
