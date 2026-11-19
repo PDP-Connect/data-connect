@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Observation, SecretBackend } from "@tnunamak/gozar";
 import type { CredentialCipher } from "../stores/credential-encryption.ts";
@@ -26,6 +26,15 @@ function coded(code: string): Error {
 // plaintext.
 export function createSealedFileSecretBackend(dir: string, cipherNow: () => CredentialCipher | null): SecretBackend {
   mkdirSync(dir, { mode: 0o700, recursive: true });
+  // `mkdir` leaves an existing directory as it is. Take it back to owner-only,
+  // and refuse one that another user owns: its entries are not ours to trust.
+  const stat = statSync(dir);
+  if (process.getuid && stat.uid !== process.getuid()) {
+    throw coded("secret_dir_foreign_owner");
+  }
+  if (process.platform !== "win32" && (stat.mode & 0o077) !== 0) {
+    chmodSync(dir, 0o700);
+  }
   const pathOf = (handle: string) => {
     if (!HANDLE.test(handle)) {
       throw coded("secret_not_found");

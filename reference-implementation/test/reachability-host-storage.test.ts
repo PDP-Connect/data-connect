@@ -1,7 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import assert from "node:assert/strict"
-import { copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -150,7 +150,7 @@ test("sealed backend: the presence cache keeps one entry per handle, so it stays
   }
 })
 
-test("sealed backend: a file moved across scopes or onto a foreign name is refused", async () => {
+test("sealed backend: a file moved across scopes, or copied under another handle, opens only in its own scope", async () => {
   const dir = temp()
   try {
     const backend = createSealedFileSecretBackend(dir, () => cipher)
@@ -193,6 +193,17 @@ test("identity: the instance survives a restart and every start has a new boot",
     // A damaged file is not silently replaced by a new instance.
     writeFileSync(join(dir, "reachability", "instance-id"), "not-a-uuid\n")
     assert.throws(() => loadHostIdentity(join(dir, "reachability")), /instance_id_unreadable/)
+  } finally {
+    rmSync(dir, { force: true, recursive: true })
+  }
+})
+
+test("sealed backend: an existing directory open to others is taken back to owner-only", { skip: process.platform === "win32" }, async () => {
+  const dir = temp()
+  try {
+    chmodSync(dir, 0o755)
+    createSealedFileSecretBackend(dir, () => cipher)
+    assert.equal(statSync(dir).mode & 0o777, 0o700)
   } finally {
     rmSync(dir, { force: true, recursive: true })
   }
