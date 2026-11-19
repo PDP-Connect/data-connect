@@ -748,3 +748,35 @@ test("a retry for a retained handle does not rebind or stop the route the lifecy
     await f.cleanup();
   }
 });
+
+test("a session route the last process left live is closed by its exact handle and never adopted", async () => {
+  const session: Spec = { id: "session-1", kind: "session", ownership: "gozar-owned" };
+  const f = await crashedProcess([session, { id: "durable-1", kind: "durable", ownership: "gozar-owned" }], confirm);
+  try {
+    const outcome = await f.service.reconcileAfterRestart(2000, f.operations);
+    assert.deepEqual(f.closes, [{ id: "session-1", generation: 1, kind: "session" }]);
+    assert.deepEqual(outcome, { confirmed: ["session-1"], unconfirmed: [] });
+    const record = await f.operations.read(f.operationIds.get("session-1")!);
+    assert.equal(record.stage, "settled");
+    assert.equal(record.cleanupConfirmed, true);
+    assert.equal(f.service.state().lifecycle.handle, null, "the old session route is never adopted");
+    assert.deepEqual(f.service.state().routes, []);
+    await f.turnOn();
+    // A second pass finds nothing owed.
+    await f.service.reconcileAfterRestart(2000, f.operations);
+    assert.equal(f.closes.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a session route Gozar no longer holds settles as absent and does not block Turn on", async () => {
+  const f = await crashedProcess([{ id: "session-1", kind: "session", ownership: "gozar-owned" }], () => Promise.reject(gone()));
+  try {
+    assert.deepEqual(await f.service.reconcileAfterRestart(2000, f.operations), { confirmed: ["session-1"], unconfirmed: [] });
+    assert.equal((await f.operations.read(f.operationIds.get("session-1")!)).cleanupConfirmed, true);
+    await f.turnOn();
+  } finally {
+    await f.cleanup();
+  }
+});

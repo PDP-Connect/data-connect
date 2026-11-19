@@ -181,3 +181,28 @@ test("routes the host does not own are left alone", async () => {
     await f.cleanup();
   }
 });
+
+test("shutdown closes a library-owned session route by its exact handle, because its daemon outlives the host", async () => {
+  const f = await fixture(
+    [
+      { kind: "session", ownership: "gozar-owned" },
+      { kind: "durable", ownership: "gozar-owned" },
+      { kind: "external", ownership: "external-owned" },
+    ],
+    confirmed
+  );
+  try {
+    const outcome = await f.service.shutdown(2000, f.operations);
+    assert.deepEqual(f.calls, [{ handle: f.held[0]!.handle, mode: "remove" }]);
+    assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
+    const record = await f.operations.read(f.held[0]!.operationId!);
+    assert.equal(record.stopTombstone, true);
+    assert.equal(record.stage, "settled");
+    assert.equal(record.cleanupConfirmed, true);
+    for (const other of f.held.slice(1)) {
+      assert.equal((await f.operations.read(other.operationId!)).stopTombstone, false);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});

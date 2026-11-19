@@ -954,7 +954,7 @@ export class ReachabilityService {
     const ignore = () => undefined;
     const owned = () =>
       [...this.routes.values()].filter(
-        (route) => route.handle.kind === "attached" && route.ownership === "gozar-owned"
+        (route) => hostStartedKind(route.handle) && route.ownership === "gozar-owned"
       );
     const confirmed = new Set<string>();
     // Best-effort lifecycle bookkeeping for the route the lifecycle tracks.
@@ -1020,15 +1020,15 @@ export class ReachabilityService {
     };
   }
   /**
-   * Closes the attached routes a crashed process left behind, within
+   * Closes the attached and session routes a crashed process left behind, within
    * `deadlineMs`. Call once at startup, before the HTTP surface accepts a start.
    * The start fence is held until the pass settles; the pass itself runs
    * without blocking the caller's readiness. Idempotent.
    *
-   * Only a journaled start with an attached, library-owned handle whose cleanup
+   * Only a journaled start with an attached or session, library-owned handle whose cleanup
    * the journal never confirmed is closed, with its exact retained handle. A
-   * crashed owner's route is never adopted as the current route. External,
-   * durable and session routes are not touched. A close that is not confirmed
+   * crashed owner's route is never adopted as the current route. External
+   * and durable routes are not touched. A close that is not confirmed
    * keeps the Stop tombstone, journals cleanup unconfirmed, and leaves the
    * handle in `unreconciled`: a Turn on is refused as `cleanup_debt` until an
    * owner stop confirms it.
@@ -1175,7 +1175,7 @@ export class ReachabilityService {
 }
 
 /**
- * Journaled starts a crashed process may have left live: attached, library-owned,
+ * Journaled starts a crashed process may have left live: attached or session, library-owned,
  * with a retained handle, and no cleanup evidence. Evidence is a start record whose
  * `cleanupConfirmed` is true (a close confirmed, or the library reported the route
  * absent), or a settled owner stop for the same handle with `cleanupConfirmed`
@@ -1184,6 +1184,15 @@ export class ReachabilityService {
  * whose close did not confirm settles too, so the route can offer its retry, but it
  * leaves the route a candidate.
  */
+/**
+ * Route kinds whose lifetime this host owns. An attached route dies with its caller;
+ * a session route runs on a detached daemon that outlives it, so the host must close
+ * both. Durable and external routes are never the host's to close.
+ */
+function hostStartedKind(handle: Handle): boolean {
+  return handle.kind === "attached" || handle.kind === "session";
+}
+
 /** The one handle equality: a handle is the whole of kind, id and generation. */
 export function sameHandle(a: Handle, b: Handle): boolean {
   return a.kind === b.kind && a.id === b.id && a.generation === b.generation;
@@ -1204,7 +1213,7 @@ export function restartCandidates(records: OperationRecord[]): { handle: Handle;
   const found: { handle: Handle; operationId: string }[] = [];
   for (const record of records) {
     const { handle } = record;
-    if (record.kind !== "start" || handle?.kind !== "attached" || record.intent?.ownership !== "gozar-owned") continue;
+    if (record.kind !== "start" || !handle || !hostStartedKind(handle) || record.intent?.ownership !== "gozar-owned") continue;
     if (record.stage === "settled" && record.cleanupConfirmed === true) continue;
     if (ownerStopped(handle) || seen.some((other) => sameHandle(other, handle))) continue;
     seen.push(handle);
