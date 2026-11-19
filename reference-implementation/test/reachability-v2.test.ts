@@ -271,17 +271,21 @@ test("state marks a route as owner-stopped only when a settled stop names its ex
   const seed = fakeRouteScenarios()[0]!;
   const stopped = { ...seed, handle: { ...seed.handle, id: "stopped-handle" }, operationId: null };
   const died = { ...seed, handle: { ...seed.handle, id: "died-handle" }, operationId: null };
+  const otherKind = { ...seed, handle: { ...seed.handle, id: "kind-mismatch" }, operationId: null };
   // Journal shape of a stop (operations.ts record: kind stop, stage settled, failureCode null, handle).
-  const stopRecord = {
+  const stopRecord = (handle: { kind: string; id: string; generation: number }) => ({
     operationId: "11111111-1111-1111-1111-111111111111", kind: "stop", stage: "settled", failureCode: null,
-    recovery: null, handle: { kind: seed.handle.kind, id: "stopped-handle", generation: seed.handle.generation },
-  };
+    recovery: null, handle,
+  });
+  // The third record names the same id and generation as the third route but a
+  // different kind: not the same handle, so it is not that route's stop intent.
+  const foreignKind = stopRecord({ kind: "attached", id: "kind-mismatch", generation: seed.handle.generation });
   const handlers = new Map<string, (...args: any[]) => Promise<unknown>>();
   const app = { get(path: string, ...args: any[]) { handlers.set(path, args.at(-1)); }, post() {} };
   const noop = () => undefined;
   mountOwnerReachability(app as Parameters<typeof mountOwnerReachability>[0], {
-    operations: { list: async () => [stopRecord], read: async () => null } as unknown as Context["operations"],
-    service: { state: () => ({ routes: [stopped, died], reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
+    operations: { list: async () => [stopRecord({ kind: seed.handle.kind, id: "stopped-handle", generation: seed.handle.generation }), foreignKind], read: async () => null } as unknown as Context["operations"],
+    service: { state: () => ({ routes: [stopped, died, otherKind], reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
     setups: { list: async () => [] } as unknown as Context["setups"],
     requireToken: noop, requireOwner: noop, requireCsrf: noop,
     usage: () => ({ kind: "session", lifetimeMs: 3_600_000 }),
@@ -289,5 +293,5 @@ test("state marks a route as owner-stopped only when a settled stop names its ex
   let response: any;
   const res = { setHeader() {}, status() { return res; }, json(body: unknown) { response = body; } };
   await handlers.get("/v1/owner/reachability/state")!({ params: {} }, res);
-  assert.deepEqual(response.data.routes.map((route: { stopRequested: boolean }) => route.stopRequested), [true, false]);
+  assert.deepEqual(response.data.routes.map((route: { stopRequested: boolean }) => route.stopRequested), [true, false, false]);
 });

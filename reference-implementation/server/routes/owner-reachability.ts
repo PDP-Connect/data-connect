@@ -4,7 +4,7 @@
 import type { Usage } from "@tnunamak/gozar";
 import { ReachabilityError } from "../reachability/approvals.ts";
 import { projectHostSettings, validateHostSettingsInput } from "../reachability/host-settings.ts";
-import type { OperationRecord, ReachabilityOperations } from "../reachability/operations.ts";
+import { type OperationRecord, type ReachabilityOperations, sameHandle } from "../reachability/operations.ts";
 import type { ReachabilitySetups } from "../reachability/setups.ts";
 import {
   projectCandidate,
@@ -150,8 +150,10 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   // Attribution is bound to the journaled creation, never the current selection.
   type Route = Parameters<typeof projectRoute>[0];
   type Records = Map<string, Promise<OperationRecord | null>>;
-  // True when a settled stop the owner asked for names this route's handle. Unknown (undefined) when
-  // the operation records were not read, so a caller never reads "no stop" from a missing list.
+  // True when a settled stop the owner asked for names this route's whole handle
+  // (kind, id and generation - the shared exact-handle equality). Unknown (undefined)
+  // when the operation records were not read, so a caller never reads "no stop"
+  // from a missing list.
   const ownerStopped = (route: Route, known: OperationRecord[] | undefined) =>
     known === undefined
       ? undefined
@@ -160,8 +162,8 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
             record.kind === "stop" &&
             record.stage === "settled" &&
             record.failureCode === null &&
-            record.handle?.id === route.handle.id &&
-            record.handle.generation === route.handle.generation
+            record.handle !== null &&
+            sameHandle(record.handle, route.handle)
         );
   async function projectOwnedRoute(route: Route, records: Records = new Map(), stopped?: boolean, readMissing = true) {
     let journaled: { providerId: string | null; approvedConsentFactsDigest: string | null } | null = null;
