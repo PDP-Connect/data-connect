@@ -324,6 +324,11 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Provider app secrets/config depend on the credential encryption key.",
   },
+  provider_invalidation_proofs: {
+    classification: "backup_required",
+    reason:
+      "Runtime-observed sign-in proofs and their repaired markers; losing the markers would replay an already-handled sign-in prompt.",
+  },
   record_acquisition_provenance: {
     classification: "backup_required",
     reason: "Acquisition provenance must match restored records and artifacts.",

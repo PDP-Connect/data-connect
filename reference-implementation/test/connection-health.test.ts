@@ -622,6 +622,38 @@ test("surface: an exact verified provider proof remains a monotonic one-repair a
   }
 });
 
+test("surface: a verified proof is evaluated before the credentials-accepted branch when the run has no failure reason", () => {
+  const proof = providerInvalidationProof();
+  const context = { connectionId: proof.connection_id, evidence: proof, provider: proof.provider };
+  for (const latestStatus of ["failed", "succeeded"] as const) {
+    const proven = computeConnectionHealth(
+      managedBrowserSessionInput({
+        browserSurfaceRepair: context,
+        run: run({ latestStatus, reasonCode: null }),
+      })
+    );
+    assert.equal(
+      findCondition(proven, "CredentialsValid")?.remediation?.surface?.kind,
+      "browser_session",
+      `a verified proof must prompt for sign-in on a ${latestStatus} run with no reason`
+    );
+  }
+  const withoutProof = computeConnectionHealth(
+    managedBrowserSessionInput({ run: run({ latestStatus: "succeeded", reasonCode: null }) })
+  );
+  assert.equal(findCondition(withoutProof, "CredentialsValid")?.remediation, null);
+  const repaired = computeConnectionHealth(
+    managedBrowserSessionInput({
+      browserSurfaceRepair: {
+        ...context,
+        repairedProofKeys: [`${proof.connection_id}\n${proof.provider}\n${proof.evidence_id}`],
+      },
+      run: run({ latestStatus: "succeeded", reasonCode: null }),
+    })
+  );
+  assert.equal(findCondition(repaired, "CredentialsValid")?.remediation, null);
+});
+
 test("surface: structured attention remains the owner-action authority", () => {
   const snap = computeConnectionHealth(
     managedBrowserSessionInput({

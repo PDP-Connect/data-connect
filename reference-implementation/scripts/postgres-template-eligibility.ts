@@ -128,6 +128,7 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/postgres-test-database-guard.test.ts",
   "test/postgres-transaction-connector-instance-lock.test.ts",
   "test/provider-app-config-store-postgres.test.ts",
+  "test/provider-invalidation-proof-store-postgres.test.ts",
   "test/reconcile-active-summary-evidence-oracle.test.ts",
   "test/reconcile-schedule-and-lifecycle-checkpoints.test.ts",
   "test/reconcile-summary-evidence-failure-persistence-postgres.test.ts",

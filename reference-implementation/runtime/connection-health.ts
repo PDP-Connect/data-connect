@@ -2601,6 +2601,13 @@ function credentialsValidCondition(input: ComputeConnectionHealthInput): Connect
   if (credentialAbsent) {
     return credentialRequiredCondition();
   }
+  // A runtime-verified provider invalidation proof outranks the success
+  // branch below: a run with no failure reason must not read as "credentials
+  // accepted" while an unrepaired proof stands. Replay suppression is inside
+  // `browserSessionRepairAuthorized`.
+  if (browserSessionRepairAuthorized(input)) {
+    return browserSessionRequiredCondition(null);
+  }
   if (input.run?.latestStatus === "succeeded") {
     return condition({
       message: "The latest successful run proved credentials were accepted.",
