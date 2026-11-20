@@ -14,7 +14,7 @@
  *
  *   - drive the collector loop (collector-runner.ts);
  *   - speak the device-exporter ingest contract (local-device-client.ts,
- *     local-device-envelope.ts, local-device-queue.ts, local-device-outbox.ts);
+ *     local-device-envelope.ts, local-device-outbox.ts);
  *   - advertise runtime capabilities (runtime-capabilities.ts).
  *
  * The connector-facing JSONL wire-protocol message types
@@ -64,7 +64,6 @@ export {
   CollectorStateReadError,
   collectorScopeFingerprint,
   deriveLocalCollectorLifecycleState,
-  drainCollectorQueue,
   enrollCollector,
   LOCAL_COLLECTOR_LIFECYCLE_STATES,
   type LocalCollectorLifecycleInput,
@@ -141,12 +140,6 @@ export {
   type LocalDeviceOutboxSummary,
   type LocalDeviceOutboxTerminalCommitSupersessionInput,
 } from "./local-device-outbox.ts";
-export {
-  LocalDeviceQueue,
-  type LocalDeviceQueueItem,
-  type LocalDeviceQueueOptions,
-  type LocalDeviceQueueStatus,
-} from "./local-device-queue.ts";
 export {
   assertPlacementOrThrow,
   COLLECTOR_RUNTIME_CAPABILITIES,
