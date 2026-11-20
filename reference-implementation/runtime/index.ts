@@ -23,6 +23,7 @@ import {
   RETRYABLE_DETAIL_GAP_REASONS,
   STREAM_EVIDENCE_CAPABILITY,
   unsupportedRequiredProtocolCapabilities,
+  validateHostBlobMessage,
   validateRuntimeContinuationFact,
 } from "@pdpp/connector-protocol/connector-runtime-protocol";
 import { connectorChildArgs } from "../connector-dependency-loader.mjs";
@@ -97,6 +98,14 @@ import {
   validateDoneRecordsEmitted,
   validateDoneStatus,
 } from "./done-validators.ts";
+import { createHostBlobAcceptance, type HeldHostBlob, hostBlobRefOf } from "./host-blob-acceptance.ts";
+import {
+  createHostBlobSpool,
+  HOST_BLOB_SPOOL_ENV,
+  type HostBlobSpool,
+  readHostBlobWriteDeclaration,
+  readVerifiedSpoolBlob,
+} from "./host-blob-spool.ts";
 import type { IngestResult as StrictIngestResult } from "./ingest-failure.ts";
 import { readIngestResponse as strictReadIngestResponse } from "./ingest-failure.ts";
 import {
@@ -2603,45 +2612,39 @@ export function buildBrowserSurfaceLaunchEnv({
 /**
  * Protocol capabilities this runtime implements, listed in
  * START.protocol_capabilities. It accepts DETAIL_COVERAGE empty_keys and
- * unchanged_keys, and validates STREAM_EVIDENCE. It has no BLOB transport and
- * no OBSERVATION handler, so it does not list them.
+ * unchanged_keys, validates STREAM_EVIDENCE, and ingests BLOB through a
+ * per-run spool directory (see host-blob-spool.ts and host-blob-acceptance.ts).
+ * It has no OBSERVATION handler, so it does not list OBSERVATION.
  */
 const RUNTIME_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [
   DETAIL_COVERAGE_KEY_SETS_CAPABILITY,
+  HOST_BLOB_CAPABILITY,
   STREAM_EVIDENCE_CAPABILITY,
 ];
-
-/**
- * Declared capabilities this runtime starts a connector with although it does
- * not implement them. BLOB is a runtime-specific extension (Collection Profile
- * Section 7). chatgpt and anthropic declare it but emit BLOB only for an item
- * over the inline cap, so most of their runs never send one. Such a run
- * completes; a run that does send BLOB fails at that line as an unknown
- * message type. BLOB stays out of START until this runtime implements it.
- */
-const SPAWN_TOLERATED_PROTOCOL_CAPABILITIES: readonly ConnectorProtocolCapability[] = [HOST_BLOB_CAPABILITY];
 
 /**
  * Pre-spawn capability gate (Collection Profile Sections 3.4 and 4). An
  * absent `protocol_capabilities` declares none. A malformed list or an unknown
  * name fails closed, and so does a required capability this runtime does not
- * implement, except BLOB (see SPAWN_TOLERATED_PROTOCOL_CAPABILITIES). An
- * advisory capability never blocks the run.
+ * implement. An advisory capability never blocks the run.
  */
 function validateRequiredProtocolCapabilities(manifest: ConnectorManifest): void {
   const declared = manifest.protocol_capabilities === undefined ? [] : manifest.protocol_capabilities;
   if (!isConnectorProtocolCapabilityArray(declared)) {
     throw new Error("Connector manifest protocol_capabilities must be an array of known capability names");
   }
-  const unsupported = unsupportedRequiredProtocolCapabilities(declared, [
-    ...RUNTIME_PROTOCOL_CAPABILITIES,
-    ...SPAWN_TOLERATED_PROTOCOL_CAPABILITIES,
-  ]);
+  const unsupported = unsupportedRequiredProtocolCapabilities(declared, RUNTIME_PROTOCOL_CAPABILITIES);
   if (unsupported.length > 0) {
     throw new Error(
       `Connector requires protocol capabilities this runtime does not support: ${unsupported.join(", ")}`
     );
   }
+}
+
+/** True when the manifest lists BLOB in `protocol_capabilities`. */
+function declaresHostBlob(manifest: ConnectorManifest): boolean {
+  const declared = manifest.protocol_capabilities;
+  return Array.isArray(declared) && declared.includes(HOST_BLOB_CAPABILITY);
 }
 
 function validateRequiredRuntimeBindings(
@@ -3153,6 +3156,13 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     streamingRegistrationEnv,
   } = launchConfig;
 
+  // A connector that declares BLOB and a usable `host_blob_write` gets a
+  // private per-run spool directory. Any other connector gets none, so a
+  // BLOB message from it fails closed. The directory is removed on every
+  // terminal path (see `cleanupChildHandles`) and on a pre-START failure.
+  const hostBlobWrite = declaresHostBlob(manifest) ? readHostBlobWriteDeclaration({ capabilities: manifest.capabilities }) : null;
+  const hostBlobSpool: HostBlobSpool | null = hostBlobWrite ? createHostBlobSpool() : null;
+
   // `detached: true` puts the connector child into its OWN process group
   // (POSIX setsid), with the child's PID as the group leader. This is the
   // load-bearing half of the run-lifecycle lease invariant: a descendant
@@ -3192,6 +3202,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         ...streamingRegistrationEnv,
         ...browserSurfaceLaunchEnv,
         ...runAutomationEnv,
+        ...(hostBlobSpool ? { [HOST_BLOB_SPOOL_ENV]: hostBlobSpool.dir } : {}),
       },
       manifest,
     }),
@@ -3462,6 +3473,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     // we already terminated.
     terminateConnectorChildGroup("SIGTERM");
     unregisterOwnedConnectorChild(proc.pid);
+    hostBlobSpool?.dispose();
     // cleanupChildHandles does not exist yet, so release any leases a partial
     // claim already registered. A release failure must not mask `err`.
     if (allServedGapLeases.size > 0 && typeof detailGapStore.releaseLeasedGaps === "function") {
@@ -3697,6 +3709,9 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
   // `cleanupChildHandles` on every terminal path. See
   // STREAM-EVIDENCE-TERMINAL-DESIGN-REVIEW.md §10.1(b)/(c), §10.2.
   const acceptedKeysDb = createAcceptedKeysStore();
+  // BLOB -> RECORD ordering decisions; see host-blob-acceptance.ts. Holds one
+  // verified blob in memory between a BLOB and its RECORD, never on disk.
+  const hostBlobAcceptance = createHostBlobAcceptance<Buffer>();
   let recordsAttempted = 0;
   let recordsAccepted = 0;
   let recordsPermanentlyRejected = 0;
@@ -4658,6 +4673,70 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     });
   }
 
+  /**
+   * Store a verified host blob through the RS blob endpoint and return the
+   * blob id the RS read path serves it under.
+   *
+   * The body goes up as `application/octet-stream`, with the real type in
+   * `mime_type`. The RS parses an `application/json` body into an object and
+   * the upload would then store re-encoded bytes with a different sha256.
+   * The upload is content-addressed and its binding insert is idempotent, so a
+   * retried or re-run upload of the same bytes for the same record key adds no
+   * second blob. The RS checks the owner token and the connector instance
+   * before it writes.
+   */
+  async function uploadHostBlob(blob: HeldHostBlob<Buffer>): Promise<string> {
+    const url = new URL("/v1/blobs", rsUrl);
+    url.searchParams.set("connector_id", connectorId);
+    if (connectorInstanceEnv.PDPP_CONNECTOR_INSTANCE_ID) {
+      url.searchParams.set("connector_instance_id", connectorInstanceEnv.PDPP_CONNECTOR_INSTANCE_ID);
+    }
+    url.searchParams.set("stream", blob.stream);
+    url.searchParams.set("record_key", encodeKey(blob.key));
+    url.searchParams.set("mime_type", blob.mimeType);
+    const response = await fetchWithNetworkRetry(
+      url.toString(),
+      {
+        body: blob.bytes,
+        headers: { Authorization: `Bearer ${ownerToken}`, "Content-Type": "application/octet-stream" },
+        method: "POST",
+        signal: cancelSignal ?? null,
+      },
+      blob.stream,
+      "ingest_retry"
+    );
+    const bodyText = await response.text().catch(() => "");
+    if (!response.ok) {
+      throw buildIngestHttpFailure(
+        `Blob upload for ${blob.stream} failed`,
+        blob.stream,
+        1,
+        response.status,
+        bodyText,
+        response.headers.get("content-type")
+      );
+    }
+    type StoredBlob = { blob_id?: unknown; sha256?: unknown; size_bytes?: unknown };
+    let stored: StoredBlob | null;
+    try {
+      stored = JSON.parse(bodyText) as StoredBlob | null;
+    } catch {
+      stored = null;
+    }
+    // The RS hashes what it received. A different hash or size means the bytes
+    // changed on the way, so the record must not point at them. Blob ids are
+    // content addressed, so any other id would not resolve to these bytes.
+    if (
+      !stored ||
+      stored.blob_id !== `blob_sha256_${blob.sha256}` ||
+      stored.sha256 !== blob.sha256 ||
+      stored.size_bytes !== blob.sizeBytes
+    ) {
+      throw new Error(`Blob upload for ${blob.stream} returned a blob that does not match the connector's BLOB`);
+    }
+    return stored.blob_id;
+  }
+
   async function flushBatch(stream: string): Promise<void> {
     // Cancellation owns the terminal outcome. Do not start another ingest for
     // a RECORD that was already buffered in the parent after the child was
@@ -5158,6 +5237,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       // makes it idempotent across the multiple call sites).
       settleFinalDetailCoverage();
       acceptedKeysDb.close();
+      // A BLOB held without its RECORD is dropped here: nothing about it was
+      // stored. The spool directory goes with it.
+      hostBlobAcceptance.release();
+      hostBlobSpool?.dispose();
       if (cancelSignal) {
         cancelSignal.removeEventListener("abort", handleCancellation);
       }
@@ -6050,6 +6133,79 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       }
     }
 
+    /** Fail the run when the acceptance rules reject a message. */
+    function enforceHostBlobDecision(decision: ReturnType<typeof hostBlobAcceptance.decide>): void {
+      if (decision.action === "violation") {
+        throw new Error(decision.reason);
+      }
+    }
+
+    /**
+     * BLOB: read the spool file the descriptor names, check it, and hold the
+     * bytes until the RECORD that references them. Nothing is stored yet.
+     */
+    function handleBlobMessage(msg: ConnectorMessage): Promise<void> {
+      validateHostBlobMessage(msg);
+      if (!(hostBlobSpool && hostBlobWrite)) {
+        throw new Error(
+          "Connector emitted BLOB without declaring BLOB and capabilities.host_blob_write in its manifest"
+        );
+      }
+      if (!scopeByStream.has(msg.stream)) {
+        throw new Error(`Connector emitted BLOB for undeclared stream: ${msg.stream}`);
+      }
+      if (!hostBlobWrite.streams.has(msg.stream)) {
+        throw new Error(`Connector emitted BLOB for stream '${msg.stream}' outside host_blob_write.streams`);
+      }
+      const bytes = readVerifiedSpoolBlob(hostBlobSpool, msg, hostBlobWrite);
+      enforceHostBlobDecision(
+        hostBlobAcceptance.decide({
+          blob: {
+            bytes,
+            key: msg.key,
+            mimeType: msg.mime_type,
+            sha256: msg.sha256,
+            sizeBytes: msg.size_bytes,
+            stream: msg.stream,
+          },
+          kind: "blob",
+        })
+      );
+      return Promise.resolve();
+    }
+
+    /**
+     * RECORD side of the BLOB contract. For a connector that declares BLOB, a
+     * record whose `blob_ref.blob_id` is `sha256:<hex>` must follow the BLOB
+     * with the same stream, key, hash, size and type. The bytes are uploaded
+     * and the record's `blob_id` is replaced with the id the RS serves. Any
+     * other record is returned unchanged.
+     */
+    async function bindHostBlob(msg: ConnectorMessage, stream: string, data: unknown): Promise<unknown> {
+      const blobRef = hostBlobRefOf(data);
+      const decision = hostBlobAcceptance.decide({
+        key: msg.key as string | string[],
+        kind: "record",
+        refsHostBlob: declaresHostBlob(manifest) && blobRef !== null,
+        stream,
+      });
+      enforceHostBlobDecision(decision);
+      if (decision.action !== "bind" || blobRef === null) {
+        return data;
+      }
+      const { blob } = decision;
+      if (
+        blobRef.blob_id !== `sha256:${blob.sha256}` ||
+        blobRef.sha256 !== blob.sha256 ||
+        blobRef.size_bytes !== blob.sizeBytes ||
+        blobRef.mime_type !== blob.mimeType
+      ) {
+        throw new Error("Connector emitted a RECORD whose blob_ref does not match the BLOB before it");
+      }
+      const blobId = await uploadHostBlob(blob);
+      return { ...(data as Record<string, unknown>), blob_ref: { ...blobRef, blob_id: blobId } };
+    }
+
     async function handleRecordMessage(msg: ConnectorMessage): Promise<void> {
       assertValidRecordEnvelope(msg);
       const { key, data, emitted_at, op } = msg;
@@ -6077,12 +6233,17 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
       const manifestStream = manifestByStream.get(stream) || null;
       validateRecordAdmission(stream, streamScope, manifestStream, key, data);
 
+      // A host blob is stored before its record is buffered, so no accepted
+      // record ever points at a blob the RS lacks. If the upload fails the run
+      // fails and the record is never sent.
+      const storedData = await bindHostBlob(msg, stream, data);
+
       let streamBatch = recordBatch[stream];
       if (!streamBatch) {
         streamBatch = [];
         recordBatch[stream] = streamBatch;
       }
-      streamBatch.push({ data, emitted_at, key, op });
+      streamBatch.push({ data: storedData, emitted_at, key, op });
       totalEmitted += 1;
       emittedByStream.set(stream, (emittedByStream.get(stream) || 0) + 1);
 
@@ -6475,6 +6636,7 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
     const protocolHandlers: Record<string, (msg: ConnectorMessage) => Promise<void>> = {
       ASSISTANCE: handleAssistanceMessage,
       ASSISTANCE_STATUS: handleAssistanceStatusMessage,
+      BLOB: handleBlobMessage,
       DETAIL_COVERAGE: handleDetailCoverageMessage,
       DETAIL_GAP: handleDetailGapMessage,
       DETAIL_GAP_ATTEMPTED: handleDetailGapAttempted,
@@ -6497,6 +6659,10 @@ export async function runConnector(opts: RuntimeRunConnectorOptions): Promise<Ru
         throw new Error(`Connector emitted ${msg.type} after DONE`);
       }
 
+      // While a BLOB is held, only its RECORD (and PROGRESS) may follow.
+      if (msg.type && msg.type !== "BLOB" && msg.type !== "RECORD" && msg.type !== "__PARSE_ERROR__") {
+        enforceHostBlobDecision(hostBlobAcceptance.decide({ kind: "message", type: msg.type }));
+      }
       const handler = msg.type ? protocolHandlers[msg.type] : undefined;
       if (handler) {
         await handler(msg);
