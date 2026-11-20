@@ -3,8 +3,7 @@
 
 // GENERATED FILE — do not hand-edit. Produced by
 // reference-implementation/scripts/generate-connector-registry.ts from the
-// shipped connector manifests (packages/polyfill-connectors/manifests/,
-// reference-implementation/fixtures/seed-manifests/) and
+// shipped connector manifests (packages/polyfill-connectors/manifests/) and
 // @pdpp/polyfill-connectors's LOCAL_COLLECTOR_DEFINITIONS. Regenerate with
 // `pnpm --filter pdpp-reference-implementation run generate:connector-registry`.
 // scripts/check-generated-artifacts.ts fails CI if this file drifts from
@@ -15,9 +14,6 @@
 
 /** Every first-party manifest's canonical connector_key. */
 export const FIRST_PARTY_CONNECTOR_KEYS: readonly string[] = Object.freeze(["amazon", "anthropic", "apple-contacts", "apple-health", "apple-photos", "chase", "chatgpt", "claude-code", "codex", "doordash", "github", "gmail", "google-calendar", "google-contacts", "google-maps", "google-maps-data-portability", "google-messages", "google-takeout", "groupme", "heb", "ical", "imessage", "jellyfin", "linkedin", "loom", "meta", "netflix-export", "notion", "oura", "pocket", "reddit", "shopify", "signal", "slack", "spotify", "steam", "strava", "twitter-archive", "uber", "usaa", "venmo", "whatsapp", "wholefoods", "whoop", "ynab"]);
-
-/** Native (storage_binding.connector_id) reference-fixture connector keys. */
-export const NATIVE_CONNECTOR_KEYS: readonly string[] = Object.freeze(["northstar_hr_native"]);
 
 /**
  * Legacy snake_case local-collector bundle id -> canonical manifest

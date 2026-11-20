@@ -49,6 +49,61 @@ function validBody(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// A connector no build ever listed must match its own identity, and only its own.
+async function commitFromDeviceSendingWhatsappWeb(sourceConnectorId: string) {
+  const capture = responseCapture();
+  let committed: ResolvedTerminalRunCommit | null = null;
+  await handleLocalDeviceTerminalRunCommit({
+    ctx: {
+      canonicalConnectorKey,
+      commitTerminalRun: (commitInput) => {
+        committed = commitInput;
+        return Promise.resolve({
+          replayed: false,
+          response: {
+            commit_id: commitInput.commitId,
+            envelope_hash: commitInput.envelopeHash,
+            object: "device_terminal_run_commit",
+            run_id: commitInput.runId,
+            terminal_event_id: "evt-unlisted",
+          },
+        });
+      },
+      emitSpineEvent: () => Promise.resolve(),
+      handleError: (_res, error) => {
+        throw error;
+      },
+      pdppError: (_res, status, code) => {
+        capture.response.status(status).json({ code });
+      },
+    },
+    req: {
+      body: validBody({ connector_id: "whatsapp-web" }),
+      deviceExporter: { deviceId: "dev-1" },
+      params: { deviceId: "dev-1", sourceInstanceId: "src-1" },
+    },
+    res: capture.response,
+    resolveAuthorizedSource: () =>
+      Promise.resolve({
+        connectorInstance: { connectorInstanceId: "cin-1" },
+        sourceInstance: { connectorId: sourceConnectorId },
+      }),
+  });
+  return { committed: committed as ResolvedTerminalRunCommit | null, snapshot: capture.snapshot() };
+}
+
+test("a device sending an unlisted connector key commits against a source of the same key", async () => {
+  const { committed, snapshot } = await commitFromDeviceSendingWhatsappWeb("whatsapp-web");
+  assert.equal(snapshot.status, 201);
+  assert.equal(committed?.connectorId, "whatsapp-web");
+});
+
+test("a device sending an unlisted connector key is rejected against a source of another unlisted key", async () => {
+  const { committed, snapshot } = await commitFromDeviceSendingWhatsappWeb("other-unlisted");
+  assert.deepEqual(snapshot, { body: { code: "invalid_request" }, status: 400 });
+  assert.equal(committed, null, "mismatched connector ids must not reach the store");
+});
+
 test("terminal run commit resolves authorization before receipt lookup and passes canonical binding", async () => {
   const capture = responseCapture();
   let authorized = false;
