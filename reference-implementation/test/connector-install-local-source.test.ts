@@ -14,7 +14,7 @@ import { afterEach, test } from "node:test"
 import {
   createFileLocalConnectorSourceStore,
   inspectActiveLocalConnectorSource,
-} from "./local-source.ts"
+} from "../server/connector-install/local-source.ts"
 
 const temporaryRoots: string[] = []
 

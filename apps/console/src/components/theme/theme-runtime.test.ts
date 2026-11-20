@@ -39,7 +39,7 @@ const DISABLE_COLOR_SCHEME = /enableColorScheme=\{false\}/;
 const ENABLE_SYSTEM = /enableSystem/;
 const STORAGE_KEY = /storageKey="pdpp-theme"/;
 const THEME_COOKIE_BRIDGE = /document\.cookie\s*=\s*`\$\{THEME_KEY\}=.*Path=\/.*SameSite=Lax/;
-const ROOT_PROVIDER = /<ThemeProvider>/;
+const ROOT_PROVIDER = /<ThemeProvider[\s>]/;
 const SUPPRESS_HYDRATION = /suppressHydrationWarning/;
 const THEME_COOKIE_IMPORT = /components\/theme\/theme-state/;
 const THEME_FOUC_GUARD = /launchFoucGuardCss|dangerouslySetInnerHTML/;
