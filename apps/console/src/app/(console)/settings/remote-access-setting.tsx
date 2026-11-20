@@ -360,11 +360,14 @@ export function RemoteAccessSetting({
   )
   const runningOption = useMemo(() => activeOption(config), [config])
   const originDisplay = useMemo(() => remoteAccessOriginDisplay(config), [config])
-  // Evaluated against the clock when the config loads: a reading that was
-  // already stale then is shown as stale, never as verified.
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000))
+  useEffect(() => {
+    const timer = setInterval(() => setNowSeconds(Math.floor(Date.now() / 1000)), 1000)
+    return () => clearInterval(timer)
+  }, [])
   const originVerification = useMemo(
-    () => originVerificationDisplay(config, Math.floor(Date.now() / 1000)),
-    [config]
+    () => originVerificationDisplay(config, nowSeconds),
+    [config, nowSeconds]
   )
 
   const choosePosture = (nextPosture: RemoteAccessPosture) => {
@@ -920,23 +923,14 @@ export function RemoteAccessSetting({
               ) : null}
             </div>
           ) : config.provider === "cloudflare_tunnel" &&
-            cloudflareTunnelConnection.status.phase !== "idle" ? (
-            // Grounded in the same real "Registered tunnel connection"
-            // signal the form above polls for (`CloudflareTunnelConnectionBanner`),
-            // not a static line -- this is what stays on screen once
-            // `pendingPosture` clears and the form collapses, which is
-            // exactly when an owner who just saved needs to see progress
-            // instead of a state that never updates itself. `idle` is
-            // excluded deliberately: it means no poll ever ran this session
-            // (a normal page load of an ALREADY-connected tunnel, since the
-            // load effect above only calls `start()` when the origin is
-            // still missing) -- falling through to the plain origin line
-            // below is correct there, not a gap.
+            (cloudflareTunnelConnection.status.phase === "connecting" ||
+              cloudflareTunnelConnection.status.phase === "failed") ? (
+            // Current verification below owns the steady-state connection claim.
             <CloudflareTunnelConnectionBanner status={cloudflareTunnelConnection.status} />
           ) : (
             <p className="break-all font-mono text-xs text-foreground/80">
               {originDisplay.kind === "origin"
-                ? originDisplay.origin
+                ? `Saved address: ${originDisplay.origin}`
                 : "Waiting for the provider to report an address…"}
             </p>
           )}
@@ -1292,7 +1286,10 @@ export function RemoteAccessSetting({
                   check both came from the same tunnel in the dashboard.
                 </span>
               </label>
-              <CloudflareTunnelConnectionBanner status={cloudflareTunnelConnection.status} />
+              {cloudflareTunnelConnection.status.phase === "connecting" ||
+                cloudflareTunnelConnection.status.phase === "failed" ? (
+                <CloudflareTunnelConnectionBanner status={cloudflareTunnelConnection.status} />
+              ) : null}
             </>
           ) : null}
 
