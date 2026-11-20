@@ -306,8 +306,14 @@ function validateGroupByTime(
   }
 }
 
-function toOptionalString(value: unknown): string | null {
-  return value === null || value === "" ? null : String(value).trim();
+function toOptionalString(value: unknown, name: string): string | null {
+  if (isNullish(value)) {
+    return null;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    throw invalidQueryError(`${name} must be a nonblank string`);
+  }
+  return value.trim();
 }
 
 function parseAggregateRequestDimensions(requestParams: AggregateRequestParams): {
@@ -318,11 +324,11 @@ function parseAggregateRequestDimensions(requestParams: AggregateRequestParams):
   timeZoneRaw: string | null;
 } {
   return {
-    field: toOptionalString(requestParams.field),
-    granularityRaw: toOptionalString(requestParams.granularity),
-    groupBy: toOptionalString(requestParams.group_by),
-    groupByTime: toOptionalString(requestParams.group_by_time),
-    timeZoneRaw: toOptionalString(requestParams.time_zone),
+    field: toOptionalString(requestParams.field, "field"),
+    granularityRaw: toOptionalString(requestParams.granularity, "granularity"),
+    groupBy: toOptionalString(requestParams.group_by, "group_by"),
+    groupByTime: toOptionalString(requestParams.group_by_time, "group_by_time"),
+    timeZoneRaw: toOptionalString(requestParams.time_zone, "time_zone"),
   };
 }
 
