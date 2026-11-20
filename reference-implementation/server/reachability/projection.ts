@@ -4,6 +4,7 @@ import type {
   ConsentDisclosures,
   ConfigurationDraft as Draft,
   Fact,
+  Properties,
   Configuration as ProviderConfiguration,
   ProviderInventory,
   RouteView as Route,
@@ -225,6 +226,15 @@ function routeScope(scope: import("@tnunamak/gozar").RouteConsentScope) {
     scopeId: scope.scopeId,
   };
 }
+// What a route costs, who can read its traffic and whether it needs an account, as the library states
+// them. An allowlist of the structured fields only: apps read these instead of the prose facts.
+export function projectProperties(properties: Properties) {
+  return {
+    cost: { kind: properties.cost.kind },
+    needsAccount: properties.needsAccount,
+    traffic: { providerCanReadPayload: properties.traffic.providerCanReadPayload },
+  };
+}
 export function projectCandidate(candidate: RouteCandidate) {
   return {
     configuration: projectConfiguration(candidate.configuration),
@@ -247,6 +257,7 @@ export function projectCandidate(candidate: RouteCandidate) {
     expiresAt: candidate.expiresAt,
     facts: candidate.facts.map(projectFact),
     ownership: candidate.ownership,
+    properties: projectProperties(candidate.properties),
     providerId: candidate.providerId,
   };
 }
@@ -314,6 +325,7 @@ export function projectRoute(
     approvedConsentFactsDigest: journaled?.approvedConsentFactsDigest ?? null,
     origin: route.origin,
     ownership: route.ownership,
+    properties: projectProperties(route.properties),
     published: route.published,
     routeState: route.routeState,
     state: route.state,

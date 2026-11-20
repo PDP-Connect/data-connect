@@ -8,7 +8,7 @@ import { readConfigurationDraft } from "../server/reachability/draft-read.ts";
 import { ConfigurationDraftSession, configurationFromSetup } from "../server/reachability/drafts.ts";
 import { hostCapability, observationText, routePresentation } from "../server/reachability/presentation.ts";
 import { createHostSecretBackend } from "../server/reachability/secret-backend.ts";
-import { projectRoute } from "../server/reachability/projection.ts";
+import { projectCandidate, projectProperties, projectRoute } from "../server/reachability/projection.ts";
 import { fakeRouteScenarios } from "@tnunamak/gozar/testing";
 import fixture from "./fixtures/reachability/configuration.json" with { type: "json" };
 
@@ -176,6 +176,34 @@ test("route projections retain required proof and cleanup keys, including unknow
     assert.equal(projected.cleanup.state, route.cleanup.state)
   }
 })
+
+test("route projections keep the library's structured cost, reader and account fields, and no prose summaries", () => {
+  for (const route of fakeRouteScenarios()) {
+    const projected = projectRoute(route);
+    assert.deepEqual(projected.properties, {
+      cost: { kind: route.properties.cost.kind },
+      needsAccount: route.properties.needsAccount,
+      traffic: { providerCanReadPayload: route.properties.traffic.providerCanReadPayload },
+    });
+  }
+});
+
+test("the properties projection is an allowlist and keeps null for what the library does not know", () => {
+  const route = fakeRouteScenarios()[0]!;
+  const projected = projectProperties({
+    ...route.properties,
+    cost: { kind: "paid", summary: "paid prose", amount: 5, currency: "USD", period: "month" },
+    needsAccount: null,
+    traffic: { ...route.properties.traffic, providerCanReadPayload: null, readers: ["someone"] },
+  });
+  assert.deepEqual(projected, { cost: { kind: "paid" }, needsAccount: null, traffic: { providerCanReadPayload: null } });
+});
+
+test("a candidate projection carries the same structured properties", () => {
+  const route = fakeRouteScenarios()[0]!;
+  const candidate = { properties: route.properties, configuration: draft.configuration, display: { label: "x", description: "", needs: "" }, disclosure: { revision: "r", text: "t", links: [] }, facts: [], consent: null } as unknown as RouteCandidate;
+  assert.deepEqual(projectCandidate(candidate).properties, projectProperties(route.properties));
+});
 
 test("state and event projections bind provider identity to the exact journaled creation handle", async () => {
   const { mkdtemp, rm } = await import("node:fs/promises");
