@@ -151,21 +151,117 @@ fn privacy() -> RemoteAccessPrivacy {
 
 struct OwnedCloudflaredProcess {
     child: Child,
-    /// Set once a background reader thread observes `cloudflared` report a
-    /// registered connection on stdout/stderr, or the process exits before
-    /// that happens. `Ok(())` never carries data -- the hostname is already
-    /// known from config (`hostname` on `CloudflareTunnelProvider`), so
-    /// nothing is parsed OUT of `cloudflared`'s output the way ngrok's SDK
-    /// returns a URL; this channel only answers "did it connect."
-    connected: mpsc::Receiver<Result<(), String>>,
     exited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    retirement: CloudflaredRetirement,
+    ready: bool,
 }
 
-impl OwnedCloudflaredProcess {
-    fn is_running(&mut self) -> bool {
-        !self
-            .exited
-            .load(std::sync::atomic::Ordering::SeqCst)
+#[derive(Default)]
+struct CloudflaredRetirement {
+    leader_reaped: bool,
+}
+
+trait RetirementChild {
+    fn observe_exit(&mut self) -> std::io::Result<bool>;
+    fn terminate(&mut self, force: bool) -> std::io::Result<()>;
+    fn reap(&mut self) -> std::io::Result<()>;
+    fn group_absent(&self) -> std::io::Result<bool>;
+}
+
+impl CloudflaredRetirement {
+    // Never signal a numeric group once our leader has been reaped. On
+    // unconfirmed cleanup, keep both the child handle and the existing lease.
+    fn poll(&mut self, child: &mut impl RetirementChild, force: bool) -> std::io::Result<bool> {
+        if !self.leader_reaped {
+            if !child.observe_exit()? {
+                if force { child.terminate(true)?; }
+                return Ok(false);
+            }
+            #[cfg(unix)]
+            child.terminate(true)?;
+            child.reap()?;
+            self.leader_reaped = true;
+        }
+        child.group_absent()
+    }
+}
+
+impl RetirementChild for Child {
+    fn observe_exit(&mut self) -> std::io::Result<bool> {
+        #[cfg(unix)]
+        {
+            // Match the supervisor's WNOWAIT anchor: observe without releasing
+            // the process/group identity before the final owned group signal.
+            loop {
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                let rc = unsafe { libc::waitid(libc::P_PID, self.id() as libc::id_t,
+                    &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+                if rc == 0 { return Ok(unsafe { info.si_pid() } != 0); }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted { return Err(error); }
+            }
+        }
+        #[cfg(not(unix))]
+        { self.try_wait().map(|status| status.is_some()) }
+    }
+
+    fn terminate(&mut self, force: bool) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            let sig = if force { libc::SIGKILL } else { libc::SIGTERM };
+            let rc = unsafe { libc::kill(-(self.id() as libc::pid_t), sig) };
+            if rc == 0 { return Ok(()); }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) { Ok(()) } else { Err(error) }
+        }
+        #[cfg(not(unix))]
+        { if force { self.kill() } else { Ok(()) } }
+    }
+
+    fn reap(&mut self) -> std::io::Result<()> {
+        self.wait().map(|_| ())
+    }
+
+    fn group_absent(&self) -> std::io::Result<bool> {
+        #[cfg(unix)]
+        {
+            // Probe only. A present foreign/reused group is conservative
+            // debt, never authority to send another signal.
+            let rc = unsafe { libc::kill(-(self.id() as libc::pid_t), 0) };
+            if rc == 0 { return Ok(false); }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => Ok(true),
+                Some(libc::EPERM) => Ok(false),
+                _ => Err(error),
+            }
+        }
+        #[cfg(not(unix))]
+        { Ok(true) }
+    }
+}
+
+fn cloudflared_start_result(
+    connected: Result<Result<(), String>, mpsc::RecvTimeoutError>,
+    cancelled: bool,
+    retire: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let reason = if cancelled {
+        "Cloudflare tunnel start was cancelled".to_string()
+    } else {
+        match connected {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(reason)) => format!("cloudflared failed to connect: {reason}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => format!(
+                "cloudflared did not report a registered connection within {CONNECT_TIMEOUT:?}. Check that the tunnel token is valid and the hostname is routed to this tunnel in the Cloudflare dashboard."
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) =>
+                "cloudflared exited before reporting a connection".to_string(),
+        }
+    };
+    match retire() {
+        Ok(()) => Err(reason),
+        Err(cleanup) => Err(format!("{reason}; {cleanup}")),
     }
 }
 
@@ -250,7 +346,7 @@ impl<R> CloudflareTunnelProvider<R> {
         let Some(process) = self.process.as_mut() else {
             return TunnelAgentHealth::Stopped;
         };
-        if process.is_running() {
+        if process.ready && !process.exited.load(std::sync::atomic::Ordering::SeqCst) {
             TunnelAgentHealth::Running
         } else {
             TunnelAgentHealth::Exited
@@ -302,39 +398,35 @@ impl<R> CloudflareTunnelProvider<R> {
     }
 
     fn stop_owned(&mut self) -> Result<(), String> {
-        let Some(mut process) = self.process.take() else {
+        let Some(process) = self.process.as_mut() else {
             return Ok(());
         };
-        #[cfg(unix)]
-        {
-            let pid = process.child.id() as libc::pid_t;
-            // SAFETY: sending SIGTERM to a process group this process owns
-            // (its own child is the group leader, see `process_group(0)` in
-            // `start`) is always sound; a graceful shutdown lets cloudflared
-            // deregister the tunnel from Cloudflare's edge before exiting.
-            // Signalling the GROUP rather than the bare pid also reaches
-            // anything cloudflared spawned for itself.
-            unsafe {
-                libc::kill(-pid, libc::SIGTERM);
+        process.ready = false;
+        const UNCONFIRMED: &str = "cloudflared stop unconfirmed";
+        let failed = |_| UNCONFIRMED.to_string();
+        let grace = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = grace + Duration::from_secs(1);
+        if !process.retirement.leader_reaped {
+            // Confirm we still own the waitable child without reaping it
+            // before any numeric group signal.
+            if !process.child.observe_exit().map_err(failed)? {
+                process.child.terminate(false).map_err(failed)?;
             }
         }
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            match process.child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() >= deadline => {
-                    let _ = process.child.kill();
-                    let _ = process.child.wait();
-                    break;
+            let now = std::time::Instant::now();
+            if process.retirement.poll(&mut process.child, now >= grace).map_err(failed)? {
+                self.process.take();
+                if let Some(hook) = &self.lease_hook {
+                    hook.stopped();
                 }
-                Ok(None) => thread::sleep(Duration::from_millis(20)),
-                Err(error) => return Err(format!("cloudflared stop failed: {error}")),
+                return Ok(());
             }
+            if now >= deadline {
+                return Err(UNCONFIRMED.to_string());
+            }
+            thread::sleep(Duration::from_millis(20).min(deadline.saturating_duration_since(now)));
         }
-        if let Some(hook) = &self.lease_hook {
-            hook.stopped();
-        }
-        Ok(())
     }
 }
 
@@ -437,53 +529,39 @@ where
         let (connected_tx, connected_rx) = mpsc::channel();
         let exited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        spawn_output_watcher(stdout, stderr, connected_tx, exited.clone());
-
-        if cancellation.is_cancelled() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("Cloudflare tunnel start was cancelled".to_string());
-        }
-
-        match connected_rx.recv_timeout(CONNECT_TIMEOUT) {
-            Ok(Ok(())) => {}
-            Ok(Err(reason)) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("cloudflared failed to connect: {reason}"));
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "cloudflared did not report a registered connection within {CONNECT_TIMEOUT:?}. \
-                     Check that the tunnel token is valid and the hostname is routed to this tunnel \
-                     in the Cloudflare dashboard."
-                ));
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("cloudflared exited before reporting a connection".to_string());
-            }
-        }
-
+        let pid = child.id();
+        self.process = Some(OwnedCloudflaredProcess {
+            child,
+            exited: exited.clone(),
+            retirement: CloudflaredRetirement::default(),
+            ready: false,
+        });
         if let Some(hook) = &self.lease_hook {
-            let pid = child.id();
-            // The child is its own group leader (process_group(0) above), so
-            // the pgid equals the pid.
+            // The child was spawned in its own group. This is custody only:
+            // the start result is not public until a connection is reported.
             #[cfg(unix)]
             let pgid = Some(pid as i32);
             #[cfg(not(unix))]
             let pgid = None;
             hook.started(pid, pgid, target.port);
         }
+        spawn_output_watcher(stdout, stderr, connected_tx, exited);
 
-        self.process = Some(OwnedCloudflaredProcess {
-            child,
-            connected: connected_rx,
-            exited,
-        });
+        let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+        let connected = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if cancellation.is_cancelled() || remaining.is_zero() {
+                break Err(mpsc::RecvTimeoutError::Timeout);
+            }
+            match connected_rx.recv_timeout(remaining.min(Duration::from_millis(50))) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                result => break result,
+            }
+        };
+        cloudflared_start_result(connected, cancellation.is_cancelled(), || self.stop_owned())?;
+        if let Some(process) = self.process.as_mut() {
+            process.ready = true;
+        }
 
         Ok(RemoteAccessHandle {
             provider_id: self.config.provider_id.clone(),
@@ -905,6 +983,89 @@ fn validate_tunnel_hostname(hostname: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[derive(Default)]
+    struct ScriptedChild {
+        exited: bool,
+        observe_fails: bool,
+        kill_fails: bool,
+        reap_fails: bool,
+        group_present: bool,
+        signals: usize,
+        reaps: usize,
+    }
+
+    impl RetirementChild for ScriptedChild {
+        fn observe_exit(&mut self) -> std::io::Result<bool> {
+            if self.observe_fails { return Err(std::io::Error::other("observe")); }
+            Ok(self.exited)
+        }
+        fn terminate(&mut self, _: bool) -> std::io::Result<()> {
+            self.signals += 1;
+            if self.kill_fails { Err(std::io::Error::other("terminate")) } else { Ok(()) }
+        }
+        fn reap(&mut self) -> std::io::Result<()> {
+            self.reaps += 1;
+            if self.reap_fails { Err(std::io::Error::other("reap")) } else { Ok(()) }
+        }
+        fn group_absent(&self) -> std::io::Result<bool> { Ok(!self.group_present) }
+    }
+
+    #[test]
+    fn retirement_confirms_exit_and_absence_or_keeps_custody() {
+        let mut progress = CloudflaredRetirement::default();
+        let mut child = ScriptedChild { observe_fails: true, ..Default::default() };
+        assert!(progress.poll(&mut child, false).is_err());
+        assert_eq!(child.signals, 0);
+        assert_eq!(child.reaps, 0);
+        assert!(!progress.leader_reaped);
+
+        child.observe_fails = false;
+        child.kill_fails = true;
+        assert!(progress.poll(&mut child, true).is_err());
+        assert!(!progress.leader_reaped);
+        assert_eq!(child.reaps, 0);
+
+        child.kill_fails = false;
+        child.reap_fails = true;
+        child.exited = true;
+        assert!(progress.poll(&mut child, true).is_err());
+        assert!(!progress.leader_reaped);
+
+        child.reap_fails = false;
+        child.group_present = true;
+        assert!(!progress.poll(&mut child, true).unwrap());
+        assert!(progress.leader_reaped);
+        let actions = (child.signals, child.reaps);
+        // A remaining (possibly foreign) group means no lease removal;
+        // never signal or reap again through only the old numeric identity.
+        assert!(!progress.poll(&mut child, true).unwrap());
+        assert_eq!((child.signals, child.reaps), actions);
+        child.group_present = false;
+        assert!(progress.poll(&mut child, true).unwrap());
+        assert_eq!((child.signals, child.reaps), actions);
+    }
+
+    #[test]
+    fn startup_failures_share_retirement_and_preserve_unconfirmed_cleanup() {
+        let cases = [
+            (Ok(Ok(())), true, "cancelled"),
+            (Ok(Err("fixed failure".into())), false, "fixed failure"),
+            (Err(mpsc::RecvTimeoutError::Timeout), false, "registered connection"),
+            (Err(mpsc::RecvTimeoutError::Disconnected), false, "exited before"),
+        ];
+        for (connection, cancelled, expected) in cases {
+            let mut stops = 0;
+            let error = cloudflared_start_result(connection, cancelled, || {
+                stops += 1;
+                Err("cloudflared stop unconfirmed".into())
+            }).unwrap_err();
+            assert_eq!(stops, 1);
+            assert!(error.contains(expected));
+            assert!(error.ends_with("cloudflared stop unconfirmed"));
+        }
+        assert!(cloudflared_start_result(Ok(Ok(())), false, || panic!("ready is not retired")).is_ok());
+    }
     use super::*;
     use crate::remote_access::CredentialResolver;
 

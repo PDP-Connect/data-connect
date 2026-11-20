@@ -299,24 +299,22 @@ impl UnifiedStack {
                 }),
             )
         });
-        if let Some(mut provider) = self.cloudflare_tunnel.take() {
-            if let Err(error) =
-                crate::remote_access::RemoteAccessProvider::stop(&mut provider)
-            {
-                log::error!("Failed to stop the Cloudflare tunnel: {error}");
-            }
+        let cloudflare_error = self.cloudflare_tunnel.as_mut().and_then(|provider| {
+            crate::remote_access::RemoteAccessProvider::stop(provider).err()
+        });
+        if cloudflare_error.is_none() {
+            self.cloudflare_tunnel.take();
         }
-        let console_error = console_error.err().map(|error| error.to_string());
-        let ri_error = ri_error.err().map(|error| error.to_string());
-        match (console_error, ri_error) {
-            (None, None) => {
-                log::info!("Unified sidecar shutdown completed");
-                Ok(())
-            }
-            (Some(error), None) | (None, Some(error)) => Err(error),
-            (Some(console), Some(ri)) => Err(format!(
-                "console stop failed: {console}; RI stop failed: {ri}"
-            )),
+        let errors = [
+            console_error.err().map(|error| format!("console stop failed: {error}")),
+            ri_error.err().map(|error| format!("RI stop failed: {error}")),
+            cloudflare_error.map(|error| format!("Cloudflare tunnel stop failed: {error}")),
+        ].into_iter().flatten().collect::<Vec<_>>();
+        if errors.is_empty() {
+            log::info!("Unified sidecar shutdown completed");
+            Ok(())
+        } else {
+            Err(errors.join("; "))
         }
     }
 }
