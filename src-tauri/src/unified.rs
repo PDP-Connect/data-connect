@@ -1193,6 +1193,14 @@ fn start_managed_stack(
     held_ngrok: Option<HeldNgrok>,
     owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<ManagedStackStart, String> {
+    if shutdown_has_been_requested(app) {
+        if let Some(mut held) = held_ngrok {
+            if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(&mut held.provider) {
+                log::error!("Failed to stop held ngrok tunnel during startup cancellation: {error}");
+            }
+        }
+        return Err("Unified sidecar startup cancelled by shutdown".to_string());
+    }
     let resource_dir = app
         .path()
         .resource_dir()
@@ -2132,17 +2140,61 @@ pub(crate) fn shutdown_has_been_requested(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn store_stack(app: &AppHandle, stack: UnifiedStack) -> Result<(), String> {
-    let state = app.state::<UnifiedRuntimeState>();
-    let mut stored = state
-        .stack
-        .lock()
-        .map_err(|_| "Unified runtime state is poisoned".to_string())?;
-    if stored.is_some() {
-        return Err("Unified sidecars are already running".to_string());
+// Serialize the decision and publication with the shutdown request. A
+// rejected handoff retains ownership and stops its handles outside the lock.
+fn settle_managed_start<T, R>(
+    shutdown: &Mutex<ShutdownState>,
+    started: T,
+    publish: impl FnOnce(&mut Option<T>) -> Result<R, String>,
+    stop: impl FnOnce(T),
+) -> Result<R, String> {
+    let mut pending = Some(started);
+    let result = (|| {
+        let shutdown = shutdown
+            .lock()
+            .map_err(|_| "Unified shutdown state is poisoned".to_string())?;
+        if shutdown.requested || shutdown.complete {
+            return Err("Unified sidecar startup cancelled by shutdown".to_string());
+        }
+        publish(&mut pending)
+    })();
+    if let Some(rejected) = pending {
+        stop(rejected);
     }
-    *stored = Some(stack);
-    Ok(())
+    result
+}
+
+fn publish_managed_start(app: &AppHandle, started: ManagedStackStart) -> Result<(String, String), String> {
+    let state = app.state::<UnifiedRuntimeState>();
+    settle_managed_start(
+        &state.shutdown,
+        started,
+        |pending| {
+            let mut stack = state.stack.lock()
+                .map_err(|_| "Unified runtime state is poisoned".to_string())?;
+            let mut ngrok = state.ngrok.lock()
+                .map_err(|_| "Unified tunnel state is poisoned".to_string())?;
+            if stack.is_some() {
+                return Err("Unified sidecars are already running".to_string());
+            }
+            let started = pending.take().expect("handoff owns its handles");
+            *stack = Some(started.stack);
+            if let Some(held) = started.ngrok {
+                *ngrok = Some(held);
+            }
+            Ok((started.ri_origin, started.console_url))
+        },
+        |mut rejected| {
+            if let Err(error) = rejected.stack.stop() {
+                log::error!("Failed to stop unpublished unified sidecars: {error}");
+            }
+            if let Some(mut held) = rejected.ngrok.take() {
+                if let Err(error) = crate::remote_access::RemoteAccessProvider::stop(&mut held.provider) {
+                    log::error!("Failed to stop unpublished ngrok tunnel: {error}");
+                }
+            }
+        },
+    )
 }
 
 fn take_stack(app: &AppHandle) -> Result<Option<UnifiedStack>, String> {
@@ -2161,15 +2213,6 @@ fn take_held_ngrok<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Option<HeldN
         .lock()
         .map_err(|_| "Unified runtime state is poisoned".to_string())
         .map(|mut held| held.take())
-}
-
-fn store_held_ngrok(app: &AppHandle, held: HeldNgrok) -> Result<(), String> {
-    let state = app.state::<UnifiedRuntimeState>();
-    *state
-        .ngrok
-        .lock()
-        .map_err(|_| "Unified runtime state is poisoned".to_string())? = Some(held);
-    Ok(())
 }
 
 /// Stop and drop any held ngrok tunnel. Only called where the tunnel is
@@ -2310,11 +2353,8 @@ enum ShutdownRequest {
 }
 
 fn startup_is_in_progress(app: &AppHandle) -> bool {
-    app.state::<UnifiedRuntimeState>()
-        .status
-        .lock()
-        .map(|status| *status == UnifiedStatus::Starting)
-        .unwrap_or(false)
+    // Ownership of startup/restart outlives the tray's Starting label.
+    app.state::<UnifiedRuntimeState>().stack_start_gate.try_lock().is_err()
 }
 
 fn begin_background_shutdown(app: &AppHandle, initial_stack: Option<UnifiedStack>, exit_code: i32) {
@@ -2780,8 +2820,8 @@ async fn bootstrap_and_open_console_with_stack_guard(
         let app_for_sidecars = app.clone();
         let remote_access_for_sidecars = remote_access.clone();
         let held_ngrok = take_held_ngrok(&app)?;
-        let result = tokio::task::spawn_blocking(move || {
-            start_managed_stack(
+        let (ri_origin, console_url) = tokio::task::spawn_blocking(move || {
+            let result = start_managed_stack(
                 &app_for_sidecars,
                 &password_for_sidecar,
                 owner_password_source,
@@ -2790,16 +2830,11 @@ async fn bootstrap_and_open_console_with_stack_guard(
                 &remote_access_for_sidecars,
                 held_ngrok,
                 owner_session_reset,
-            )
+            )?;
+            publish_managed_start(&app_for_sidecars, result)
         })
         .await
         .map_err(|error| format!("Unified sidecar startup task failed: {error}"))??;
-        let ri_origin = result.ri_origin.clone();
-        let console_url = result.console_url.clone();
-        store_stack(&app, result.stack)?;
-        if let Some(ngrok) = result.ngrok {
-            store_held_ngrok(&app, ngrok)?;
-        }
         (ri_origin, console_url, true)
     };
 
@@ -3175,7 +3210,7 @@ async fn import_database_encryption_recovery_code_with_stack_guard(
         // key, and that failure's teardown (`StopReason::VaultKeyRejected`)
         // already tore down anything that was running, including any tunnel.
         // This is a fresh start, not a config-change restart.
-        start_managed_stack(
+        let started = start_managed_stack(
             &app_for_attempt,
             &password_for_attempt,
             if configured_owner_password().is_some() {
@@ -3191,19 +3226,16 @@ async fn import_database_encryption_recovery_code_with_stack_guard(
             // again: the RI revokes owner sessions and bearers before it
             // serves or schedules anything.
             Some(OwnerSessionReset::Recovery),
-        )
+        )?;
+        publish_managed_start(&app_for_attempt, started)
     })
     .await
     .map_err(|error| format!("Recovery attempt task failed: {error}"))?;
 
     let result = match attempt {
-        Ok(started) => {
-            store_stack(&app, started.stack)?;
-            if let Some(ngrok) = started.ngrok {
-                store_held_ngrok(&app, ngrok)?;
-            }
+        Ok(origins) => {
             log::info!("Recovery import: candidate code started the managed stack successfully");
-            Ok((started.ri_origin, started.console_url))
+            Ok(origins)
         }
         Err(error) => {
             log::info!("Recovery import: candidate code failed to start the managed stack");
@@ -3223,7 +3255,7 @@ async fn import_database_encryption_recovery_code_with_stack_guard(
             // sidecar up and the other not -- e.g. the RI itself refused to
             // open the vault (assertDatabaseKey threw). stop_stack's
             // take_stack is a safe no-op when nothing was ever stored (the
-            // Err branch above never calls store_stack), so this is safe to
+            // Err branch above never publishes a stack), so this is safe to
             // call unconditionally: it is exactly what every other bootstrap
             // failure path in this file already does.
             teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
@@ -4779,6 +4811,43 @@ mod tests {
     use std::thread;
     use std::time::Instant;
     use tempfile::{tempdir, NamedTempFile};
+
+    #[test]
+    fn quit_during_managed_launch_stops_late_handles_without_publication() {
+        use std::sync::Barrier;
+
+        let shutdown = Arc::new(Mutex::new(ShutdownState::default()));
+        let stopped = Arc::new(Mutex::new(Vec::new()));
+        let shared_stack = Arc::new(Mutex::new(None));
+        let reached_handoff = Arc::new(Barrier::new(2));
+        let continue_handoff = Arc::new(Barrier::new(2));
+        let worker = {
+            let (shutdown, stopped, shared_stack, reached_handoff, continue_handoff) = (
+                shutdown.clone(), stopped.clone(), shared_stack.clone(),
+                reached_handoff.clone(), continue_handoff.clone(),
+            );
+            thread::spawn(move || {
+                let fake = "fake-sidecar";
+                reached_handoff.wait();
+                continue_handoff.wait();
+                settle_managed_start(
+                    &shutdown,
+                    fake,
+                    |pending| {
+                        *shared_stack.lock().unwrap() = pending.take();
+                        Ok(())
+                    },
+                    |rejected| stopped.lock().unwrap().push(rejected),
+                )
+            })
+        };
+        reached_handoff.wait();
+        shutdown.lock().unwrap().requested = true;
+        continue_handoff.wait();
+        assert!(worker.join().unwrap().is_err());
+        assert_eq!(*shared_stack.lock().unwrap(), None);
+        assert_eq!(*stopped.lock().unwrap(), vec!["fake-sidecar"]);
+    }
 
     #[test]
     fn unhandled_deep_link_notice_omits_the_grant_secret() {
