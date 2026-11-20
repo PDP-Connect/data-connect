@@ -125,13 +125,14 @@ function StatePathsFix({ recover }: { recover: Recover }) {
     };
   }, [request]);
   const fixable = report?.paths.some((item) => item.fixable) ?? false;
+  const hasUnfixable = report?.paths.some((item) => !item.fixable) ?? false;
   async function fix() {
     setBusy(true);
     setFailed(null);
     try {
       const result = await request("/state-paths/fix", {});
       if (!result.ok) {
-        setFailed("Couldn't change the permissions. Try the command below, or copy the details for support.");
+        setFailed("Couldn't change the permissions. Try again, or copy the details for support.");
         return;
       }
       const after = result.data as PathReport;
@@ -148,9 +149,9 @@ function StatePathsFix({ recover }: { recover: Recover }) {
           Fix permissions
         </Button>
       ) : null}
-      {report?.command ? (
+      {hasUnfixable && report?.command ? (
         <>
-          <p className="pdpp-caption">{fixable ? "Others need a command from you. Run it, then try again:" : "Run this command, then try again:"}</p>
+          <p className="pdpp-caption">Run this command, then try again:</p>
           <code className="rounded-lg border bg-muted/40 px-3 py-2 font-mono text-sm break-all">{report.command}</code>
           <div className="flex flex-wrap gap-3">
             <CopyButton label="Copy command" text={report.command} />

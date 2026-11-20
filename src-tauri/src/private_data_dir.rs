@@ -17,10 +17,10 @@ use std::path::Path;
 /// directory itself changes: no ancestors, no contents. A symlink is refused
 /// so the chmod can never land on a target the app does not own.
 pub(crate) fn ensure_private(dir: &Path) -> io::Result<()> {
-    std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         if std::fs::symlink_metadata(dir)?.file_type().is_symlink() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -29,6 +29,8 @@ pub(crate) fn ensure_private(dir: &Path) -> io::Result<()> {
         }
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
     Ok(())
 }
 
@@ -93,5 +95,40 @@ mod tests {
         ensure_private(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
         assert!(dir.join("keep").exists());
+    }
+
+    #[test]
+    fn mkdirs_start_private_under_permissive_umask() {
+        // umask is process-wide; never change the parallel test runner's mask.
+        // Only the exact child fixture does so, before touching its temp tree.
+        const CHILD: &str = "DATACONNECT_PRIVATE_DIR_UMASK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let filter = format!(
+                "{}::mkdirs_start_private_under_permissive_umask",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", "umask 000 && exec \"$@\"", "private-dir-test"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", &filter])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "fixture did not pass: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let intermediate = root.path().join("missing-parent");
+        let leaf = intermediate.join("new-app-data");
+        ensure_private(&leaf).unwrap();
+        assert_eq!(mode(&intermediate), 0o700, "the intermediate is never repaired later");
+        assert_eq!(mode(&leaf), 0o700);
     }
 }

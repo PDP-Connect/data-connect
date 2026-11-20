@@ -24,6 +24,12 @@ function coded(code: string): Error {
 // present but does not open the file is a different fault: `secret_key_mismatch`
 // does not clear until the key or the file changes. The host never falls back to
 // plaintext.
+//
+// Trust boundary: `dir` sits in the app's owner-only data directory. Other
+// users are kept out by its 0700 mode. A process running as the same user is
+// out of scope: it can read the key and the files directly. File operations
+// therefore use plain paths inside `dir`; they are not anchored to a directory
+// handle and do not defend against entries swapped by such a process.
 export function createSealedFileSecretBackend(dir: string, cipherNow: () => CredentialCipher | null): SecretBackend {
   mkdirSync(dir, { mode: 0o700, recursive: true });
   // `mkdir` leaves an existing directory as it is. Take it back to owner-only,
