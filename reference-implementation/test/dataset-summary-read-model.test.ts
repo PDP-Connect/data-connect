@@ -35,6 +35,7 @@ import {
 const BULK_CONNECTOR_DELETE_ERROR = /bulk connector record delete/;
 const BULK_STREAM_DELETE_ERROR = /bulk stream record delete/;
 const DIRTY_BOUNDS_ERROR = /could not be safely reconciled/;
+const DROPPED_DELTA_ERROR = /record delta arrived during projection rebuild/;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T/;
 const REBUILT_HIGH_WATERMARK = /^rebuilt:/;
 const SECRET_TOKEN_ERROR = /secret-token/;
@@ -516,6 +517,9 @@ test("repairing dirty record-time bounds keeps a projection stale while a droppe
     await rebuildFromCurrentDb();
 
     assert.equal(await deleteRecord("gmail", "messages", "m1"), 1);
+    // An earlier reconcile pass left the dirty-bounds reason; a later dropped
+    // delta must replace it rather than hide behind it.
+    markDatasetSummaryProjectionStale("dirty record-time bounds could not be safely reconciled");
     markDatasetSummaryProjectionStale("record delta arrived during projection rebuild");
 
     const result = await reconcileDirtyDatasetSummaryRecordTimeBounds({
@@ -526,8 +530,7 @@ test("repairing dirty record-time bounds keeps a projection stale while a droppe
     assert.deepEqual(result, { deferred: 0, reconciled: 1, residual: 0 });
     assert.equal(getStreamDirtyFlag("gmail", "messages"), 0);
     assert.equal(repaired.metadata.state, "stale");
-    assert.equal(repaired.metadata.needs_full_rebuild, true);
-    assert.ok(repaired.metadata.last_error);
+    assert.match(repaired.metadata.last_error ?? "", DROPPED_DELTA_ERROR);
 
     await rebuildFromCurrentDb();
     const rebuilt = getDatasetSummaryProjection();
@@ -538,7 +541,7 @@ test("repairing dirty record-time bounds keeps a projection stale while a droppe
     await reconcileDirtyDatasetSummaryRecordTimeBounds({
       getStreamRecordTimeBounds: getDatasetSummaryStreamRecordTimeBounds,
     });
-    assert.equal(getDatasetSummaryProjection().metadata.state, "fresh", "a full rebuild clears the marker");
+    assert.equal(getDatasetSummaryProjection().metadata.state, "fresh", "after a full rebuild, a time repair clears stale state again");
   }));
 
 test("dirty record-time reconciliation defers unsafe rows instead of clearing stale state", async () =>

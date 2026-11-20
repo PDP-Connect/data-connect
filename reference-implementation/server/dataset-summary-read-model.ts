@@ -41,7 +41,6 @@ interface DatasetSummary {
 interface ProjectionMetadata {
   computed_at: IsoTimestamp | null;
   last_error: string | null;
-  needs_full_rebuild?: boolean;
   rebuild_status: string;
   source_high_watermark: string | null;
   stale_since: IsoTimestamp | null;
@@ -528,7 +527,18 @@ export function applyDatasetSummaryBlobDelta(delta: DatasetSummaryBlobDelta): vo
   }
 }
 
-export function markDatasetSummaryProjectionStale(reason: string, needsFullRebuild = true): void {
+const DIRTY_TIME_BOUNDS_REASON = "dirty record-time bounds could not be safely reconciled";
+
+/**
+ * Whether the projection is stale for a reason other than dirty record-time
+ * bounds. Repairing time bounds does not repair the counts or bytes behind
+ * such a reason, so only a full rebuild may clear it.
+ */
+function owesFullRebuild(metadata: ProjectionMetadata): boolean {
+  return metadata.state === "stale" && metadata.last_error !== null && metadata.last_error !== DIRTY_TIME_BOUNDS_REASON;
+}
+
+export function markDatasetSummaryProjectionStale(reason: string): void {
   assertSqliteBackendForDatasetSummary("markDatasetSummaryProjectionStale");
   try {
     const current = getDatasetSummaryProjection();
@@ -544,8 +554,8 @@ export function markDatasetSummaryProjectionStale(reason: string, needsFullRebui
       {
         computed_at: current.metadata.computed_at,
         last_error:
-          current.metadata.last_error || sanitizeProjectionError(reason || "dataset summary projection is stale"),
-        needs_full_rebuild: needsFullRebuild || needsIndependentDatasetSummaryRebuild(current.metadata),
+          (current.metadata.last_error !== DIRTY_TIME_BOUNDS_REASON && current.metadata.last_error) ||
+          sanitizeProjectionError(reason || "dataset summary projection is stale"),
         rebuild_status: current.metadata.rebuild_status || "idle",
         source_high_watermark: current.metadata.source_high_watermark || null,
         stale_since: current.metadata.stale_since || staleAt,
@@ -675,7 +685,6 @@ function supersededRebuildMetadata(after: DatasetSummaryProjection, conflictAt: 
   return {
     computed_at: after.metadata.computed_at,
     last_error: after.metadata.last_error || "dataset summary projection rebuild superseded by concurrent delta",
-    needs_full_rebuild: true,
     rebuild_status: "idle",
     source_high_watermark: after.metadata.source_high_watermark || null,
     stale_since: after.metadata.stale_since || conflictAt,
@@ -701,7 +710,6 @@ function rebuildFailureMetadata(
         sanitizeProjectionError(
           err instanceof Error ? err.message || "dataset summary projection rebuild cancelled" : err
         ),
-      needs_full_rebuild: true,
       rebuild_status: "idle",
       source_high_watermark: current.metadata.source_high_watermark || null,
       stale_since: current.metadata.stale_since || startedAt,
@@ -905,12 +913,7 @@ export async function reconcileDirtyDatasetSummaryRecordTimeBounds(
         // or the projection. Leave the dirty rows dirty for the next
         // pass and mark the projection stale (not failed) so the
         // operator surface keeps last-known values honestly.
-        markDatasetSummaryProjectionStale(
-          err instanceof Error
-            ? err.message || "dataset summary projection reconcile cancelled"
-            : "dataset summary projection reconcile cancelled",
-          false
-        );
+        markDatasetSummaryProjectionStale(DIRTY_TIME_BOUNDS_REASON);
         throw err;
       }
       markDatasetSummaryProjectionFailed(err);
@@ -938,17 +941,6 @@ export async function reconcileDirtyDatasetSummaryRecordTimeBounds(
   return { deferred: finalDeferred, reconciled, residual: residual ? 1 : 0 };
 }
 
-const DIRTY_TIME_BOUNDS_REASON = "dirty record-time bounds could not be safely reconciled";
-
-function needsIndependentDatasetSummaryRebuild(metadata: ProjectionMetadata): boolean {
-  // Before the marker was written, an unexplained stale error is not proof
-  // that repairing time bounds also repaired counts or retained bytes.
-  return (
-    metadata.needs_full_rebuild ??
-    (metadata.state === "stale" && metadata.last_error !== null && metadata.last_error !== DIRTY_TIME_BOUNDS_REASON)
-  );
-}
-
 function commitReconciledDatasetSummaryRows(
   repairedRows: readonly RepairedStreamRow[],
   computedAt: IsoTimestamp,
@@ -968,18 +960,14 @@ function commitReconciledDatasetSummaryRows(
       retained_bytes: current.retained_bytes,
       top_connector_candidates: current.top_connector_candidates,
     };
-    if (current.metadata.state !== "failed" && needsIndependentDatasetSummaryRebuild(current.metadata)) {
-      // Repaired time bounds do not repair the counts or bytes a dropped
-      // delta left behind; only a full rebuild may clear this state.
-      const staleSince = current.metadata.stale_since || computedAt;
-      writeDatasetSummaryProjection(summary, { ...current.metadata, stale_since: staleSince, state: "stale" }, computedAt);
+    if (owesFullRebuild(current.metadata)) {
+      writeDatasetSummaryProjection(summary, current.metadata, computedAt);
       return;
     }
     const metadata: ProjectionMetadata = stillDirty
       ? {
           computed_at: computedAt,
-          last_error: current.metadata.last_error || DIRTY_TIME_BOUNDS_REASON,
-          needs_full_rebuild: false,
+          last_error: current.metadata.last_error || "dirty record-time bounds could not be safely reconciled",
           rebuild_status: current.metadata.rebuild_status === "running" ? "running" : "idle",
           source_high_watermark: `reconcile:${computedAt}`,
           stale_since: current.metadata.stale_since || computedAt,
@@ -1158,7 +1146,6 @@ function metadataAfterDelta(
     return {
       computed_at: computedAt,
       last_error: current.metadata.last_error,
-      needs_full_rebuild: needsIndependentDatasetSummaryRebuild(current.metadata),
       rebuild_status: current.metadata.rebuild_status === "running" ? "running" : "idle",
       source_high_watermark: `delta:${computedAt}`,
       stale_since: current.metadata.stale_since || computedAt,
@@ -1339,8 +1326,7 @@ function markDatasetSummaryProjectionRebuilding(at: IsoTimestamp): number {
     },
     {
       computed_at: current.metadata.computed_at,
-      last_error: needsIndependentDatasetSummaryRebuild(current.metadata) ? current.metadata.last_error : null,
-      needs_full_rebuild: needsIndependentDatasetSummaryRebuild(current.metadata),
+      last_error: null,
       rebuild_status: "running",
       source_high_watermark: current.metadata.source_high_watermark || null,
       stale_since: current.metadata.stale_since || at,
