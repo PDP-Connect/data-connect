@@ -53,7 +53,7 @@ import { writeFileSync } from 'node:fs';
 const rl = createInterface({ input: process.stdin, terminal: false });
 rl.on('line', (line) => {
   if (JSON.parse(line).type !== 'START') return;
-  const seen = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PDPP_') && !key.startsWith('PDPP_BROWSER_') && !key.startsWith('PDPP_RUN_') && !key.startsWith('PDPP_CONNECTOR_') && !['PDPP_OWNER_TOKEN', 'PDPP_RS_URL', 'PDPP_REFERENCE_BASE_URL', 'PDPP_STREAMING_REGISTRATION_TOKEN'].includes(key)));
+  const seen = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('PDPP_') && !key.startsWith('PDPP_BROWSER_') && !key.startsWith('PDPP_RUN_') && !key.startsWith('PDPP_CONNECTOR_') && !['PDPP_OWNER_TOKEN', 'PDPP_BLOB_UPLOAD_TOKEN', 'PDPP_RS_URL', 'PDPP_REFERENCE_BASE_URL', 'PDPP_STREAMING_REGISTRATION_TOKEN'].includes(key)));
   writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(seen));
   process.stdout.write(JSON.stringify({ type: 'DONE', status: 'succeeded', records_emitted: 0 }) + '\\n');
   rl.close();

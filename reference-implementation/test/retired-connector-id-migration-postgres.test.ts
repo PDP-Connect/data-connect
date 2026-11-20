@@ -12,7 +12,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CONNECTOR_ID_RENAME_MIGRATION_ID } from "../server/connector-id-rename-migration.ts";
+import {
+  CONNECTOR_ID_RENAME_MIGRATION_ID,
+  migrateRenamedConnectorIdsPostgres,
+} from "../server/connector-id-rename-migration.ts";
 import {
   bootstrapPostgresSchema,
   closePostgresStorage,
@@ -105,6 +108,39 @@ if (POSTGRES_URL) {
       const label = await pool.query<{ display_name: string }>("SELECT display_name FROM connector_instances");
       assert.equal(label.rows[0]?.display_name, "claude-code", "a placeholder label equal to the old id follows the rename");
       assert.equal(await receiptStatus(pool), "complete");
+    });
+  });
+
+  test("re-running the rename after it completed changes nothing, with or without the receipt", async () => {
+    await withTempDb(POSTGRES_URL, async (url) => {
+      await initPostgresStorage({ backend: "postgres", databaseUrl: url });
+      const pool = getPostgresPool();
+      await seedConnector(pool, "google_messages");
+      await seedInstance(pool, "inst_gm", "google_messages", "binding-a");
+      await rearm(pool);
+      await bootstrapPostgresSchema();
+      assert.deepEqual(await ids(pool, "connector_instances"), ["google-messages"]);
+
+      const snapshot = async () =>
+        JSON.stringify([
+          (await pool.query("SELECT * FROM connectors ORDER BY connector_id")).rows,
+          (await pool.query("SELECT * FROM connector_instances ORDER BY connector_instance_id")).rows,
+        ]);
+      const afterFirstRun = await snapshot();
+
+      // The receipt is gone, so the scan runs again over rows that no longer hold a retired id.
+      await rearm(pool);
+      await bootstrapPostgresSchema();
+      assert.equal(await receiptStatus(pool), "complete");
+      assert.equal(await snapshot(), afterFirstRun, "a second scan rewrites nothing");
+
+      const client = await pool.connect();
+      try {
+        assert.equal(await migrateRenamedConnectorIdsPostgres(client), 0, "the function itself is a no-op on a migrated store");
+      } finally {
+        client.release();
+      }
+      assert.equal(await snapshot(), afterFirstRun);
     });
   });
 
