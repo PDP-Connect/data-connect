@@ -33,6 +33,7 @@ interface RunHistoryTestRow {
   readonly connector_id: string;
   readonly connector_instance_id: string;
   readonly facts_json: string | null;
+  readonly failure_reason: string | null;
   readonly run_id: string;
   readonly scheduler_managed: 0 | 1;
   readonly started_at: string;
@@ -209,6 +210,9 @@ test("a runtime-authored terminal failure stores its failure_message as the conn
     const row = readRunHistoryRow(runId);
     assert.equal(row?.status, "failed");
     assert.equal(row?.terminal_reason, "connector_protocol_violation");
+    // The product read model surfaces `failure_reason`; it must carry the
+    // runtime's terminal explanation, not stay null.
+    assert.equal(row?.failure_reason, failureMessage);
     assert.ok(row?.connector_error_json, "a terminal failure must not be stored with an empty error");
     assert.deepEqual(JSON.parse(row?.connector_error_json ?? "null"), {
       code: null,
@@ -218,6 +222,105 @@ test("a runtime-authored terminal failure stores its failure_message as the conn
     });
   } finally {
     closeDb();
+  }
+});
+
+// failure_message/failure_origin are failure semantics. A succeeded terminal
+// event that carries them (a stale or misrouted payload) must not leave a
+// failure reason or runtime error on a succeeded row, whether the row was
+// finalized from running or inserted by the missing-start fallback.
+const RUNTIME_FAILURE_DATA = {
+  failure_message: "stale runtime failure",
+  failure_origin: "runtime",
+  reason: "connector_protocol_violation",
+  runtime_failure: { code: "runtime_code", retryable: true },
+};
+
+function runtimeFailurePayload(runId: string, connectorInstanceId: string, eventType: "run.completed" | "run.failed") {
+  const status = eventType === "run.completed" ? "succeeded" : "failed";
+  const base = terminalEvent(runId, connectorInstanceId, eventType, status);
+  return { ...base, data: { ...base.data, ...RUNTIME_FAILURE_DATA } };
+}
+
+test("SQLite: a succeeded terminal event stores no runtime failure fields (running row and missing-start insert)", async () => {
+  const dbPath = makeTemporaryDbPath("pdpp-run-history-writer-succeeded-gate-");
+  initDb(dbPath);
+  try {
+    await emitSpineEvent(startedEvent("run_ok_running", "cin_ok_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_ok_running", "cin_ok_running", "run.completed"));
+    await emitSpineEvent(runtimeFailurePayload("run_ok_insert", "cin_ok_insert", "run.completed"));
+    for (const runId of ["run_ok_running", "run_ok_insert"]) {
+      const row = readRunHistoryRow(runId);
+      assert.equal(row?.status, "succeeded", runId);
+      assert.equal(row?.failure_reason, null, runId);
+      assert.equal(row?.connector_error_json, null, runId);
+    }
+
+    // The identical payload as run.failed keeps the exact reason and error.
+    await emitSpineEvent(startedEvent("run_bad_running", "cin_bad_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_bad_running", "cin_bad_running", "run.failed"));
+    await emitSpineEvent(runtimeFailurePayload("run_bad_insert", "cin_bad_insert", "run.failed"));
+    for (const runId of ["run_bad_running", "run_bad_insert"]) {
+      const row = readRunHistoryRow(runId);
+      assert.equal(row?.status, "failed", runId);
+      assert.equal(row?.failure_reason, "stale runtime failure", runId);
+      assert.equal(row?.terminal_reason, "connector_protocol_violation", runId);
+      assert.deepEqual(
+        JSON.parse(row?.connector_error_json ?? "null"),
+        { code: "runtime_code", message: "stale runtime failure", origin: "runtime", retryable: true },
+        runId
+      );
+    }
+  } finally {
+    closeDb();
+  }
+});
+
+test("PostgreSQL: a succeeded terminal event stores no runtime failure fields (running row and missing-start insert)", {
+  skip: !POSTGRES_URL,
+}, async () => {
+  assert.ok(POSTGRES_URL, "Postgres URL is configured when this test runs");
+  await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });
+  try {
+    await emitSpineEvent(startedEvent("run_pg_ok_running", "cin_pg_ok_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_ok_running", "cin_pg_ok_running", "run.completed"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_ok_insert", "cin_pg_ok_insert", "run.completed"));
+    await emitSpineEvent(startedEvent("run_pg_bad_running", "cin_pg_bad_running"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_bad_running", "cin_pg_bad_running", "run.failed"));
+    await emitSpineEvent(runtimeFailurePayload("run_pg_bad_insert", "cin_pg_bad_insert", "run.failed"));
+    const read = async (runId: string) =>
+      (
+        await postgresQuery<{ connector_error_json: unknown; failure_reason: string | null; status: string }>(
+          "SELECT status, failure_reason, connector_error_json FROM run_history WHERE run_id = $1",
+          [runId]
+        )
+      ).rows[0];
+    const okIds = ["run_pg_ok_running", "run_pg_ok_insert"];
+    const okRows = await Promise.all(okIds.map(read));
+    for (const [i, runId] of okIds.entries()) {
+      const row = okRows[i];
+      assert.equal(row?.status, "succeeded", runId);
+      assert.equal(row?.failure_reason, null, runId);
+      assert.equal(row?.connector_error_json, null, runId);
+    }
+    const badIds = ["run_pg_bad_running", "run_pg_bad_insert"];
+    const badRows = await Promise.all(badIds.map(read));
+    for (const [i, runId] of badIds.entries()) {
+      const row = badRows[i];
+      assert.equal(row?.status, "failed", runId);
+      assert.equal(row?.failure_reason, "stale runtime failure", runId);
+      assert.deepEqual(
+        typeof row?.connector_error_json === "string"
+          ? JSON.parse(row.connector_error_json)
+          : row?.connector_error_json,
+        { code: "runtime_code", message: "stale runtime failure", origin: "runtime", retryable: true },
+        runId
+      );
+    }
+  } finally {
+    await postgresQuery("DELETE FROM spine_events WHERE actor_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await postgresQuery("DELETE FROM run_history WHERE connector_id = $1", [CONNECTOR_ID]).catch(() => undefined);
+    await closePostgresStorage();
   }
 });
 
