@@ -22,17 +22,24 @@ export interface LocalDeviceQueueItem {
 
 export interface LocalDeviceQueueOptions {
   clock?: () => Date;
+  /** After this interval an unacknowledged send is eligible for at-least-once redelivery. */
+  inFlightLeaseMs?: number;
   path: string;
   retryBackoffMs?: (retryCount: number) => number;
 }
 
 export class LocalDeviceQueue {
   readonly #clock: () => Date;
+  readonly #inFlightLeaseMs: number;
   readonly #path: string;
   readonly #retryBackoffMs: (retryCount: number) => number;
 
   constructor(options: LocalDeviceQueueOptions) {
     this.#clock = options.clock ?? (() => new Date());
+    this.#inFlightLeaseMs = options.inFlightLeaseMs ?? 5 * 60_000;
+    if (!Number.isSafeInteger(this.#inFlightLeaseMs) || this.#inFlightLeaseMs <= 0) {
+      throw new Error("in-flight lease must be a positive integer in milliseconds");
+    }
     this.#path = options.path;
     this.#retryBackoffMs = options.retryBackoffMs ?? defaultRetryBackoffMs;
   }
@@ -69,7 +76,7 @@ export class LocalDeviceQueue {
   async dequeueReady(): Promise<LocalDeviceQueueItem | null> {
     const now = this.#clock().toISOString();
     const items = await this.#readItems();
-    const index = items.findIndex((candidate) => isReadyHeadOfSource(candidate, items, now));
+    const index = items.findIndex((candidate) => isReadyHeadOfSource(candidate, items, now, this.#inFlightLeaseMs));
     if (index < 0) {
       return null;
     }
@@ -165,8 +172,16 @@ function compareQueueItems(a: LocalDeviceQueueItem, b: LocalDeviceQueueItem): nu
   return a.batch_seq - b.batch_seq;
 }
 
-function isReadyHeadOfSource(item: LocalDeviceQueueItem, items: LocalDeviceQueueItem[], now: string): boolean {
-  if (item.status !== "pending" || item.available_at > now) {
+function isReadyHeadOfSource(
+  item: LocalDeviceQueueItem,
+  items: LocalDeviceQueueItem[],
+  now: string,
+  inFlightLeaseMs: number
+): boolean {
+  const eligible = item.status === "pending"
+    ? item.available_at <= now
+    : item.status === "in_flight" && Date.parse(now) - Date.parse(item.updated_at) >= inFlightLeaseMs;
+  if (!eligible) {
     return false;
   }
   return !items.some(

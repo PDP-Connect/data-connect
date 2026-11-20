@@ -48,6 +48,34 @@ test("LocalDeviceQueue persists batches and dequeues in source-instance batch or
   assert.equal(await reloaded.dequeueReady(), null);
 });
 
+test("LocalDeviceQueue recovers an expired in-flight head after restart", async () => {
+  let nowMs = Date.parse("2026-04-30T12:00:00.000Z");
+  const inFlightLeaseMs = 5000;
+  const options = { clock: () => new Date(nowMs), inFlightLeaseMs, path: await tempQueuePath() };
+  const queue = new LocalDeviceQueue(options);
+  for (const batchSeq of [1, 2]) {
+    await queue.enqueue({
+      batchId: `source-1-${batchSeq}`,
+      batchSeq,
+      records: [record("source-1", batchSeq)],
+      sourceInstanceId: "source-1",
+    });
+  }
+  const original = await queue.dequeueReady();
+  assert.ok(original);
+  assert.equal(original.batch_id, "source-1-1");
+
+  const reopened = new LocalDeviceQueue(options);
+  nowMs += inFlightLeaseMs - 1;
+  assert.equal(await reopened.dequeueReady(), null);
+  nowMs += 1;
+  const recovered = await reopened.dequeueReady();
+  assert.deepEqual(recovered, { ...original, updated_at: new Date(nowMs).toISOString() });
+  assert.equal(await reopened.dequeueReady(), null);
+  await reopened.markSent(original.batch_id);
+  assert.equal((await reopened.dequeueReady())?.batch_id, "source-1-2");
+});
+
 test("LocalDeviceQueue records retry metadata and waits for backoff before redelivery", async () => {
   let nowMs = Date.parse("2026-04-30T12:00:00.000Z");
   const queue = new LocalDeviceQueue({
