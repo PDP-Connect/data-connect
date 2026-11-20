@@ -80,7 +80,8 @@ type SetupCommand = Pick<RunSetupOperationRequest, "actionId" | "expectedConfigu
   secret?: string;
   acknowledgeDisconnect?: boolean;
 };
-type SavedDraft = { providerId: string; session: ConfigurationDraftSession };
+// `committed`: this service committed the draft, so the library already consumed it.
+type SavedDraft = { providerId: string; session: ConfigurationDraftSession; committed?: boolean };
 type Review = { id: string; candidate: RouteCandidate; query: Query; draftId: string };
 
 // The address a review asks the owner to approve: the one the app named, else the
@@ -531,7 +532,10 @@ export class ReachabilityService {
   async discard(id: string): Promise<{ discarded: boolean }> {
     const saved = this.draft(id);
     const result = await this.api.discardConfigurationDraft(this.ref(saved.providerId, id));
-    if (result.discarded !== true) return result;
+    // The library drops a draft when it is committed, so it then answers
+    // discarded:false for a draft this service itself consumed. That is not
+    // a draft another preparer holds: forget it locally and report it gone.
+    if (result.discarded !== true && !saved.committed) return result;
     // The library discards only draft-owned, unreferenced staged bytes.
     // Promoted/live bindings remain under its authorization checks.
     this.drafts.delete(id);
@@ -545,7 +549,7 @@ export class ReachabilityService {
       }
     }
 
-    return result;
+    return { discarded: true };
   }
   async commit(id: string, expectedRevision: string): Promise<ProviderConfiguration> {
     this.assertRecovered();
@@ -560,6 +564,7 @@ export class ReachabilityService {
       ...this.ref(saved.providerId, id),
       expectedConfigurationRevision: expectedRevision,
     });
+    saved.committed = true;
     this.reviews.clear();
     return config;
   }
