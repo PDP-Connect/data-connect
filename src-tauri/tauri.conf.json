@@ -31,13 +31,6 @@
       "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://* http://localhost:* http://127.0.0.1:*; img-src 'self' data: https://*"
     }
   },
-  "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": ["vana"]
-      }
-    }
-  },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,
@@ -51,16 +44,6 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../connectors/github/**/*": "connectors/github/",
-      "../connectors/linkedin/**/*": "connectors/linkedin/",
-      "../connectors/meta/**/*": "connectors/meta/",
-      "../connectors/openai/**/*": "connectors/openai/",
-      "../connectors/google/**/*": "connectors/google/",
-      "../connectors/heb/**/*": "connectors/heb/",
-      "../connectors/spotify/**/*": "connectors/spotify/",
-      "../connectors/oura/**/*": "connectors/oura/",
-      "../connectors/shopify/**/*": "connectors/shopify/",
-      "../connectors/wholefoods/**/*": "connectors/wholefoods/",
       "../connectors/collection-profiles/": "connectors/collection-profiles/",
       "../connectors/lock.json": "connectors/lock.json",
       "../playwright-runner/dist/": "playwright-runner/dist/",

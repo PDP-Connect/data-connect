@@ -10,7 +10,6 @@
     "runtime/browser-surface-readiness.ts": 22,
     "runtime/browser-surface/allocator-observation.ts": 5,
     "runtime/browser-surface/profile-key.ts": 4,
-    "runtime/browser-surface/replacement-receipt-reader.ts": 1,
     "runtime/browser-surface/run-coordinator.ts": 51,
     "runtime/classify-runtime-failure.ts": 3,
     "runtime/connection-health.ts": 82,
@@ -208,7 +207,7 @@
     "runtime/record-message-validator.ts": 1,
     "server/grant-package-lifecycle.ts": 100
   },
-  "total": 7220,
+  "total": 7219,
   "meta": {
     "biomeVersion": "2.5.6",
     "maxAllowedComplexity": 5

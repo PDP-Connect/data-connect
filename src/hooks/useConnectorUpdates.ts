@@ -23,10 +23,9 @@ export function useConnectorUpdates() {
   const [error, setError] = useState<string | null>(null);
 
   const checkForUpdates = useCallback(
-    async (force = false) => {
+    async () => {
       setError(null);
       return checkConnectorUpdates(dispatch, {
-        force,
         onError: err => {
           const errorMsg =
             err instanceof Error ? err.message : 'Failed to check for updates';
