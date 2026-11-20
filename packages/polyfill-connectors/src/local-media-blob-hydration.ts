@@ -102,14 +102,14 @@ export function uploadMediaBlob(args: {
   stream: string;
 }): Promise<ReferenceBlobRef | null> {
   const rsUrl = process.env.PDPP_RS_URL || process.env.RS_URL;
-  const ownerToken = process.env.PDPP_OWNER_TOKEN;
-  if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && ownerToken)) {
+  const uploadToken = process.env.PDPP_BLOB_UPLOAD_TOKEN;
+  if (!(runtimeBlobUploadAvailable(process.env) && rsUrl && uploadToken)) {
     return Promise.resolve(null);
   }
   const uploader = makeReferenceBlobUploader({
     connectorInstanceId: process.env.PDPP_CONNECTOR_INSTANCE_ID || null,
-    ownerToken,
     rsUrl,
+    uploadToken,
   });
   return uploader({
     connectorId: args.connectorId,

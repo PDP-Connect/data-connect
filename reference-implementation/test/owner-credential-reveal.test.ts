@@ -7,7 +7,7 @@ import {
   hasLocalOwnerCredentialRevealProof,
   localOwnerCredentialRevealProofHeader,
   mountOwnerCredentialReveal,
-} from "./owner-credential-reveal.ts";
+} from "../server/routes/owner-credential-reveal.ts";
 
 type Handler = (req: { headers?: Record<string, string> }, res: TestResponse, next?: () => void) => unknown;
 
