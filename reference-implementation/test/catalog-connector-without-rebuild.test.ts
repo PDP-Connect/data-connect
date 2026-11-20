@@ -124,12 +124,15 @@ rl.on('line', (line) => {
 `;
 }
 
-/** The runtime's own PDPP_* variables, plus the one declared knob and nothing else. */
+/**
+ * The runtime's own PDPP_* variables, plus the one declared knob and nothing else.
+ * The owner bearer the run was started with is not among them: a child gets only
+ * a run-scoped blob credential, and only when the run supplies one.
+ */
 function assertOnlyDeclaredKnob(seen: Record<string, string>): void {
   assert.deepEqual(seen, {
     PDPP_CONNECTOR_ID: KEY,
     PDPP_CONNECTOR_INSTANCE_ID: "cin_catalog",
-    PDPP_OWNER_TOKEN: "test-token",
     PDPP_RS_URL: seen.PDPP_RS_URL,
     [OWN_KNOB]: "25",
   });
