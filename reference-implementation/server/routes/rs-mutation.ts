@@ -512,6 +512,9 @@ export interface MountRsMutationContext {
   readonly requireClient: MiddlewareHandler;
   readonly requireCoreEndpointToken: MiddlewareHandler;
   readonly requireOwner: MiddlewareHandler;
+  // POST /v1/blobs auth: a live run-scoped upload credential for its bound
+  // connector instance, or the owner bearer.
+  readonly requireBlobUploadAuth: MiddlewareHandler;
   // Auth middleware
   readonly requireToken: MiddlewareHandler;
 
@@ -589,8 +592,7 @@ export function mountRsBlobsUpload(app: AppLike, ctx: MountRsMutationContext): v
   app.post(
     "/v1/blobs",
     { contract: "uploadBlob" },
-    ctx.requireToken,
-    ctx.requireOwner,
+    ctx.requireBlobUploadAuth,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const connectorInstanceId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_instance_id);
