@@ -757,3 +757,69 @@ test("a review that expires between the console's check and the approve is refus
     assert.match(text(), /Turning on/);
   });
 });
+
+test("a hung old draft does not block preparation of a newly selected way", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const never = deferred<Result>();
+  const other = { ...provider, providerId: "cloudflare-named", label: "Cloudflare" };
+  const nextDraft = { ...draftWith(), draftId: "d-next" };
+  const nextReview = review("rev-next", "digest-next");
+  nextReview.candidate.providerId = other.providerId;
+  const handler = host({
+    "/catalog": ok({ ...catalog, providers: [provider, other] }),
+    "/drafts": (call) => call.body?.providerId === other.providerId ? ok(nextDraft) : never.promise as unknown as Result,
+    "/drafts/d-next/commit": ok(nextDraft.configuration),
+    "/drafts/d-next/review": ok(nextReview),
+  });
+  await withScreen(handler, async ({ container, calls, press, settle, text }) => {
+    assert.equal(calls.filter((call) => call.url === "/drafts").length, 1);
+    await press(/^Other ways$/);
+    const radio = [...container.querySelectorAll("label")].find((node) => /Cloudflare/.test(node.textContent ?? ""))!.querySelector("input")!;
+    await act(async () => radio.click());
+    await settle();
+    assert.ok(calls.some((call) => call.url === "/drafts/d-next/review"), "new selection prepares before old request settles");
+    assert.match(text(), /Turn on remote access/);
+    await act(async () => t.mock.timers.tick(15_001));
+    await settle();
+    assert.ok(!calls.some((call) => call.url === "/drafts/d-1/commit" || call.url === "/drafts/d-1/review"));
+    assert.match(text(), /Turn on remote access/, "old timeout cannot replace the new card");
+  });
+});
+
+test("a private missing-password observation restarts preparation after a true poll without a click", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const privateState = deferred<Result>();
+  let states = 0;
+  const handler = host({
+    "/state": () => ++states === 2 ? privateState.promise as unknown as Result : ok({ ...idleState, passwordSet: true }),
+  });
+  await withScreen(handler, async ({ calls, settle, text }) => {
+    assert.equal(states, 2, "initial poll followed by the chain's private read");
+    await act(async () => privateState.resolve(ok({ ...idleState, passwordSet: false })));
+    await settle();
+    assert.match(text(), /Step 1: Set a password/);
+    assert.equal(calls.filter((call) => call.url === "/drafts").length, 0);
+    await act(async () => t.mock.timers.tick(3_000));
+    await settle();
+    assert.match(text(), /Turn on remote access/);
+    assert.equal(calls.filter((call) => call.url === "/drafts").length, 1);
+  });
+});
+
+test("a hung preparation times out with Try again and cannot resume positive requests", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const slow = deferred<Result>();
+  let drafts = 0;
+  const handler = host({ "/drafts": () => ++drafts === 1 ? slow.promise as unknown as Result : ok(draftWith()) });
+  await withScreen(handler, async ({ calls, settle, text, press }) => {
+    await act(async () => t.mock.timers.tick(15_001));
+    await settle();
+    assert.match(text(), /Try again/);
+    assert.ok(!calls.some((call) => call.url.endsWith("/commit")));
+    await act(async () => slow.resolve(ok(draftWith())));
+    await settle();
+    assert.ok(!calls.some((call) => call.url.endsWith("/commit")), "late timeout response cannot continue the chain");
+    await press(/^Try again$/);
+    assert.match(text(), /Turn on remote access/);
+  });
+});

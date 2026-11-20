@@ -148,9 +148,8 @@ export function RemoteAccessSetting({
   const againPending = useRef(false);
   // The digest of the facts the owner approved with the last Turn on click.
   const approvedDigest = useRef<string | null>(null);
-  // One preparation at a time. A newer one starts only after the one before it
-  // has settled, so two never overlap, and a replaced one is told to stop.
-  const preparing = useRef<Promise<unknown>>(Promise.resolve());
+  // One preparation at a time per selection token, never across superseded ways.
+  const preparing = useRef<{ token: number; tail: Promise<unknown> } | null>(null);
   // The expired review whose refresh is under way. The expiry timer starts no
   // second refresh for it.
   const refreshing = useRef<string | null>(null);
@@ -305,14 +304,24 @@ export function RemoteAccessSetting({
   const requirePassword = () => {
     if (passwordMissingNow.current) throw new ReachabilityFailure(publicError("owner_password_required"));
   };
-  // Runs the preparation chain after any earlier one has settled. `isCurrent`
-  // is checked before each positive request the chain would send.
+  // Serialize only within the current selection. A hung superseded selection
+  // must not hold up a new way; both chains retain their positive-request guards.
   function prepare(providerId: string, usage: string, isCurrent: () => boolean): Promise<Prepared> {
-    const run = preparing.current.then(() => {
+    const token = selection.current;
+    const previous = preparing.current?.token === token ? preparing.current.tail : Promise.resolve();
+    const run = previous.then(() => {
       if (!isCurrent()) throw new PreparationStopped();
-      return prepareTurnOn(request, { providerId, usage }, { isCurrent, mayRunActions: () => !passwordMissingNow.current });
+      return prepareTurnOn(request, { providerId, usage }, {
+        isCurrent,
+        mayRunActions: () => !passwordMissingNow.current,
+        onPasswordMissing: () => {
+          if (!isCurrent()) return;
+          passwordMissingNow.current = true;
+          setState((current) => ({ ...current, passwordSet: false }));
+        },
+      });
     });
-    preparing.current = run.catch(() => undefined);
+    preparing.current = { token, tail: run.catch(() => undefined) };
     return run;
   }
   const phaseOf = (route: Route) => (state.lifecycle?.handle?.id === route.handle.id ? (state.lifecycle?.phase ?? null) : null);

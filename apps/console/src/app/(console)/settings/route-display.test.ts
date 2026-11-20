@@ -68,7 +68,9 @@ test("the re-check delay comes from the window length the server reports, never 
   assert.equal(recheckDelay(staleRoute, "verified"), 20_000);
   const longWindow = { ...staleRoute, verification: { ...staleRoute.verification, observedAt: "2026-11-18T07:00:00Z", validUntil: { known: true as const, value: "2026-11-18T08:00:00Z" } } };
   assert.equal(recheckDelay(longWindow, "verified"), 3_540_000, "the margin is capped at a minute");
-  assert.equal(recheckDelay(staleRoute, "stale"), 0, "a stale report is due now");
+  const shortWindow = { ...staleRoute, verification: { ...staleRoute.verification, observedAt: "2026-11-18T07:00:00Z", validUntil: { known: true as const, value: "2026-11-18T07:00:01Z" } } };
+  assert.equal(recheckDelay(shortWindow, "verified"), 2_000, "one-second windows cannot spin");
+  assert.equal(recheckDelay(staleRoute, "stale"), 2_000, "stale reports also have a minimum positive delay");
   const noWindow = { ...staleRoute, verification: { ...staleRoute.verification, validUntil: { known: false as const, reason: "x" } } };
   assert.equal(recheckDelay(noWindow, "verified"), null);
 });

@@ -109,20 +109,21 @@ export function proofLine(
 /**
  * How long after the browser received a proof to re-check it: the window length
  * the server reported (its end minus its observation, both on the server's
- * clock) less a margin of a third of the window (at least five seconds, at most
- * a minute). It never compares a server time with the browser's clock. Zero when
+ * clock) less a margin capped to a third of that window and at most a minute.
+ * It never compares a server time with the browser's clock. A positive delay applies when
  * the host already calls the proof stale. Null when the server reports no
  * window, so nothing is guessed.
  */
 export function recheckDelay(route: RouteDisplayInput, lifecyclePhase: string | null): number | null {
   const until = route.verification.validUntil;
   if (!until?.known) return null;
-  if (lifecyclePhase === "stale") return 0;
+  if (lifecyclePhase === "stale") return 2_000;
   const end = Date.parse(until.value);
   if (!Number.isFinite(end)) return null;
   const start = route.verification.observedAt ? Date.parse(route.verification.observedAt) : Number.NaN;
   const window = Number.isFinite(start) && end > start ? end - start : 30_000;
-  return window - Math.min(60_000, Math.max(5_000, Math.floor(window / 3)));
+  const margin = Math.min(window / 3, 60_000, Math.max(5_000, Math.floor(window / 3)));
+  return Math.max(2_000, window - margin);
 }
 
 /**

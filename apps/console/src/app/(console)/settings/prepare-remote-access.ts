@@ -110,6 +110,8 @@ const codeOf = (failure: unknown) => (failure instanceof ReachabilityFailure ? f
 
 type Choice = { providerId: string; usage: string };
 
+export const PREPARATION_REQUEST_TIMEOUT_MS = 15_000;
+
 /**
  * The preparation may no longer send a positive request: its screen went away,
  * a newer preparation replaced it, or the password is gone. Not a failure to
@@ -130,7 +132,7 @@ export class PreparationStopped extends Error {
 export async function prepareTurnOn(
   request: Request,
   choice: Choice,
-  options: { restarted?: boolean; mayRunActions?: () => boolean; isCurrent?: () => boolean } = {}
+  options: { restarted?: boolean; mayRunActions?: () => boolean; isCurrent?: () => boolean; onPasswordMissing?: () => void } = {}
 ): Promise<Prepared> {
   // Checked before every positive request (draft, action, commit, review, discard).
   // Reads are never guarded: a stopped chain may finish the read it already sent.
@@ -138,16 +140,29 @@ export async function prepareTurnOn(
     if (options.isCurrent?.() === false || options.mayRunActions?.() === false) throw new PreparationStopped();
   };
   const send = async <T>(path: string, body?: Record<string, unknown>): Promise<T> => {
-    const result = await request(path, body);
-    if (!result.ok) throw new ReachabilityFailure(result);
-    return result.data as T;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([
+        request(path, body),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new ReachabilityFailure(publicError("service_unreachable"))), PREPARATION_REQUEST_TIMEOUT_MS);
+        }),
+      ]);
+      if (!result.ok) throw new ReachabilityFailure(result);
+      return result.data as T;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   };
   const inventory = await send<Inventory>("/catalog");
   const provider = inventory.providers.find((item) => item.providerId === choice.providerId);
   if (!provider) throw new ReachabilityFailure(publicError("configuration_stale"));
   const state = await send<{ services?: ServiceEntry[]; passwordSet?: boolean }>("/state");
   // This read is newer than the caller's last poll. Without a password nothing positive runs.
-  if (state.passwordSet === false) throw new PreparationStopped();
+  if (state.passwordSet === false) {
+    if (options.isCurrent?.() !== false) options.onPasswordMissing?.();
+    throw new PreparationStopped();
+  }
   const entry = state.services?.find((item) => item.providerId === choice.providerId);
   let draft: Draft | null = null;
   let committed = false;
@@ -200,7 +215,7 @@ export async function prepareTurnOn(
     const code = codeOf(failure);
     if (!options.restarted && code && restartCodes.has(code)) {
       proceed();
-      if (draft) await request(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
+      if (draft) await send(`/drafts/${encodeURIComponent(draft.draftId)}/discard`, {});
       return prepareTurnOn(request, choice, { ...options, restarted: true });
     }
     throw failure;
