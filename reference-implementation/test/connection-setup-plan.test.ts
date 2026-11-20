@@ -7,7 +7,6 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import type { ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import {
-  browserEnrollmentSupport,
   buildConnectionSetupPlan,
   classifyConnectorIntentModality,
   classifyConnectorSetupModality,
@@ -160,6 +159,7 @@ test("setup planner supports manual/upload connectors that declare an import env
 
 test("setup planner keeps browser-bound connectors proof-gated before live proof", () => {
   const amazon = buildConnectionSetupPlan({
+    browserEnrollmentRunnable: true,
     connectorKey: "amazon",
     manifest: manifest("amazon", { browser: { required: true }, network: { required: true } }),
   });
@@ -174,6 +174,7 @@ test("setup planner keeps browser-bound connectors proof-gated before live proof
   assert.equal(amazon.runbookPath, null);
 
   const chase = buildConnectionSetupPlan({
+    browserEnrollmentRunnable: true,
     connectorKey: "chase",
     manifest: manifest("chase", { browser: { required: true } }),
   });
@@ -181,32 +182,26 @@ test("setup planner keeps browser-bound connectors proof-gated before live proof
   assert.equal(chase.enrollmentKey, "chase");
 });
 
-test("setup planner offers browser setup by browserEnrollmentSupport, not by production readiness", () => {
-  // acme-shop is a catalog-installed connector that no bundled key list names.
-  const acme = buildConnectionSetupPlan({
-    connectorKey: "acme-shop",
-    manifest: manifest("acme-shop", { browser: { required: true } }),
-  });
-  assert.equal(acme.catalogDisposition, "browser_collector_manual");
-  assert.equal(acme.nextStepKind, "enroll_browser_collector");
-  assert.equal(acme.enrollmentKey, "acme-shop");
-
-  const scaffold = buildConnectionSetupPlan({
-    connectorKey: "anthropic",
-    manifest: manifest("anthropic", { browser: { required: true } }),
-  });
-  assert.equal(scaffold.catalogDisposition, "browser_bound_runbook");
-  assert.equal(scaffold.nextStepKind, "manual_runbook");
-  assert.equal(scaffold.enrollmentKey, undefined);
-
+test("setup planner offers browser setup only on the readiness verdict, never by connector key", () => {
+  // The verdict is the server-owned readiness projection's `connect`. The
+  // planner reads nothing else: not the key, the tier, or a roster.
   for (const key of ["acme-shop", "anthropic", "amazon", "doordash", "reddit"]) {
     const keyManifest = manifest(key, { browser: { required: true } });
-    const plan = buildConnectionSetupPlan({ connectorKey: key, manifest: keyManifest });
-    assert.equal(
-      plan.catalogDisposition === "browser_collector_manual",
-      browserEnrollmentSupport(key, keyManifest).canAddAccount,
-      key
-    );
+    const runnable = buildConnectionSetupPlan({
+      browserEnrollmentRunnable: true,
+      connectorKey: key,
+      manifest: keyManifest,
+    });
+    assert.equal(runnable.catalogDisposition, "browser_collector_manual", key);
+    assert.equal(runnable.nextStepKind, "enroll_browser_collector", key);
+    assert.equal(runnable.enrollmentKey, key, key);
+
+    for (const notRunnable of [{ browserEnrollmentRunnable: false }, {}]) {
+      const plan = buildConnectionSetupPlan({ connectorKey: key, manifest: keyManifest, ...notRunnable });
+      assert.equal(plan.catalogDisposition, "browser_bound_runbook", key);
+      assert.equal(plan.nextStepKind, "manual_runbook", key);
+      assert.equal(plan.enrollmentKey, undefined, key);
+    }
   }
 });
 
@@ -541,7 +536,7 @@ test("wave-0807 static-secret connectors (Steam, Jellyfin, Apple Contacts) surfa
 test("iMessage is a supported local_collector_enroll connector, not proof-gated", async () => {
   // iMessage reads chat.db via node:sqlite (no native module), so it ships in
   // the published @pdpp/local-collector bundle like Claude Code/Codex and is
-  // registered in SUPPORTED_LOCAL_COLLECTOR_CONNECTORS — the enroll path
+  // declared proven in its manifest — the enroll path
   // must reflect that, not the older filesystem-shaped-but-unproven state.
   const connectorId = "imessage";
   const shippedManifest = readShippedPolyfillManifest(`${connectorId}.json`);
@@ -557,7 +552,7 @@ test("google_takeout's committed manifest classifies as local_collector_enroll (
   // Google Takeout reads an already-extracted GOOGLE_TAKEOUT_DIR from the
   // local filesystem it runs on — exactly the local-collector shape, not a
   // browser-upload or provider-API connector. It is now bundled into
-  // @pdpp/local-collector (SUPPORTED_LOCAL_COLLECTOR_CONNECTORS), so it must
+  // @pdpp/local-collector (its manifest claims `proven.local_collector`), so it must
   // classify as the proven, actionable disposition, not the unproven
   // `local_collector_unproven` disposition a filesystem-shaped connector
   // gets before it ships in that bundle (see the synthetic-manifest test
@@ -573,7 +568,7 @@ test("google_takeout's committed manifest classifies as local_collector_enroll (
 
 test("Apple Photos and Google Messages are supported local_collector_enroll connectors, not proof-gated", async () => {
   // Both now ship in the published @pdpp/local-collector bundle
-  // (LOCAL_COLLECTOR_DEFINITIONS + SUPPORTED_LOCAL_COLLECTOR_CONNECTORS +
+  // (LOCAL_COLLECTOR_DEFINITIONS + a `proven.local_collector` claim +
   // tsconfig.build.json packaging), so Add Source must surface the guided
   // enroll path, not the proof-gated "classified but not advertised" state.
   // Real device/account proof (a macOS Photos.app export; a gmcli-paired

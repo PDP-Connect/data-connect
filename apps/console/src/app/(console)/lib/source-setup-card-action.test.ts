@@ -42,7 +42,7 @@ function entry(overrides: Partial<ConnectorCatalogEntry>): ConnectorCatalogEntry
     disposition: "static_secret_connect",
     externalDocs: [],
     icon: null,
-    isKnownScaffold: false,
+    readiness: null,
     listingNote: null,
     modality: "api_network",
     nextStepKind: "capture_static_secret",

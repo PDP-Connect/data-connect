@@ -19,10 +19,8 @@
  *   - displayNameForConnector: manifest.display_name → manifest.name → the key.
  *   - isProviderAuthLifecycleProven / isStaticSecretLiveProven: the claim in
  *     the connector's own manifest (`capabilities.proven`), never a key list.
- *   - isSupportedLocalCollectorConnector: membership over the ENROLLMENT key
- *     (so `claude-code` matches `claude_code`); non-string => false.
- *   - isSupportedBrowserCollectorConnector / isBrowserBoundConnector: shipped
- *     capability membership over the canonical key; non-string => false.
+ *   - isLocalCollectorProven: the manifest's `capabilities.proven.local_collector`.
+ *   - classifyConnectorIntentModality: browser-bound from the manifest's bindings.
  *
  * Pure classification over shipped connector capability data — no DB, no
  * server, no fixtures.
@@ -33,14 +31,13 @@ import test from "node:test";
 
 import {
   canonicalConnectorKey,
+  classifyConnectorIntentModality,
   connectorKeyFromManifest,
   displayNameForConnector,
   enrollmentKeyForCanonicalKey,
-  isBrowserBoundConnector,
+  isLocalCollectorProven,
   isProviderAuthLifecycleProven,
   isStaticSecretLiveProven,
-  isSupportedBrowserCollectorConnector,
-  isSupportedLocalCollectorConnector,
 } from "../server/connection-setup-plan.ts";
 
 // --- canonicalConnectorKey --------------------------------------------------
@@ -120,48 +117,24 @@ test("isStaticSecretLiveProven: reads capabilities.proven.static_secret_live.pro
   assert.equal(isStaticSecretLiveProven(undefined), false, "no manifest");
 });
 
-// --- isSupportedLocalCollectorConnector -------------------------------------
+// --- isLocalCollectorProven -------------------------------------------------
 
-test("isSupportedLocalCollectorConnector: membership over the ENROLLMENT key", () => {
-  assert.equal(isSupportedLocalCollectorConnector("claude_code"), true, "direct enrollment key");
-  // The canonical key `claude-code` maps to the enrollment key `claude_code`,
-  // so the hyphenated form must ALSO be recognized.
-  assert.equal(isSupportedLocalCollectorConnector("claude-code"), true, "hyphenated form via enrollment mapping");
-  assert.equal(isSupportedLocalCollectorConnector("codex"), true);
-  assert.equal(isSupportedLocalCollectorConnector("amazon"), false, "browser connector is not a local collector");
-  assert.equal(isSupportedLocalCollectorConnector(null), false, "null => false");
-  assert.equal(isSupportedLocalCollectorConnector(undefined), false, "undefined => false");
+test("isLocalCollectorProven: reads capabilities.proven.local_collector, strictly true", () => {
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: true } } }), true);
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: false } } }), false);
+  assert.equal(isLocalCollectorProven({ capabilities: { proven: { local_collector: 1 } } }), false);
+  assert.equal(isLocalCollectorProven(null), false, "no manifest");
 });
 
-// --- isSupportedBrowserCollectorConnector -----------------------------------
+// --- classifyConnectorIntentModality ----------------------------------------
 
-test("isSupportedBrowserCollectorConnector: production-ready browser runtimes; canonical-key based", () => {
-  assert.equal(isSupportedBrowserCollectorConnector("amazon"), true);
-  assert.equal(
-    isSupportedBrowserCollectorConnector("https://registry.pdpp.dev/connectors/amazon"),
-    true,
-    "registry-url id matches"
+test("classifyConnectorIntentModality: browser-bound comes from the manifest's own bindings", () => {
+  const browserManifest = { runtime_requirements: { bindings: { browser: { required: true } } } };
+  assert.equal(classifyConnectorIntentModality(browserManifest), "browser_bound");
+  assert.notEqual(
+    classifyConnectorIntentModality({ runtime_requirements: { bindings: { network: {} } } }),
+    "browser_bound",
+    "a manifest that declares no browser binding is not browser-bound"
   );
-  for (const key of ["chase", "chatgpt", "heb", "reddit", "usaa"]) {
-    assert.equal(isSupportedBrowserCollectorConnector(key), true, `${key} is a shipped browser runtime`);
-  }
-  assert.equal(isSupportedBrowserCollectorConnector("anthropic"), false, "unlisted scaffold stays unavailable");
-  assert.equal(isSupportedBrowserCollectorConnector("claude_code"), false, "local collector is not browser");
-  assert.equal(isSupportedBrowserCollectorConnector(null), false);
-});
-
-// --- isBrowserBoundConnector ------------------------------------------------
-
-test("isBrowserBoundConnector: recognizes the browser-bound allowlist, rejects others", () => {
-  for (const key of ["amazon", "chase", "chatgpt", "reddit", "usaa"]) {
-    assert.equal(isBrowserBoundConnector(key), true, `${key} is browser-bound`);
-  }
-  assert.equal(isBrowserBoundConnector("gmail"), false, "gmail (static-secret) is not browser-bound");
-  assert.equal(isBrowserBoundConnector("codex"), false, "codex (local) is not browser-bound");
-  assert.equal(isBrowserBoundConnector(null), false, "null => false");
-  assert.equal(
-    isBrowserBoundConnector("https://registry.pdpp.dev/connectors/chatgpt"),
-    true,
-    "registry-url id matches via canonicalization"
-  );
+  assert.equal(classifyConnectorIntentModality(null), "unknown", "no manifest");
 });
