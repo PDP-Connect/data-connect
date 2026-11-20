@@ -187,6 +187,24 @@ test("an empty body is not cached as a valid logo", async () => {
   assert.equal(logo, null);
 });
 
+test("a changed logo URI for the same client is fetched, not served from the old URI's cache", async () => {
+  const key = freshKey();
+  const nextUri = "https://persistent.oaistatic.com/sonic/misc/next-logo.png";
+  const nextBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9]);
+  const fetched: string[] = [];
+  const fetchImpl = (async (uri: string) => {
+    fetched.push(uri);
+    return imageResponse(uri === nextUri ? nextBytes : PNG_BYTES);
+  }) as never;
+
+  await fetchAndCacheClientLogo(key, LOGO_URI, { dnsLookupImpl: publicDns, fetchImpl });
+  const next = await fetchAndCacheClientLogo(key, nextUri, { dnsLookupImpl: publicDns, fetchImpl });
+
+  assert.deepEqual(fetched, [LOGO_URI, nextUri]);
+  assert.equal(next?.sourceUri, nextUri);
+  assert.deepEqual([...(next?.bytes ?? [])], [...nextBytes]);
+});
+
 test("an invalidated logo is refetched, so a withdrawn approval takes effect", async () => {
   const key = freshKey();
   let fetches = 0;
