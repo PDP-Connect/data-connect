@@ -76,6 +76,12 @@ const installerCorePath = require.resolve("@opendatalabs/data-connectors-tools/i
 const { assertCatalog } = await import(
   pathToFileURL(join(dirname(installerCorePath), "catalog-schema.mjs")).href
 );
+// The install-route tests below never read readiness.
+const unusedReadinessResolver = {
+  resolve: () => assert.fail("unexpected readiness read"),
+  resolveMany: () => assert.fail("unexpected readiness read"),
+};
+
 const entry: ConnectorCatalogEntry = {
   bindings: { browser: "optional" },
   config_digest: configDigest,
@@ -1800,6 +1806,7 @@ test("owner connector-install routes register both guards and reject missing ins
   const tokenGuard = () => undefined;
   const ownerGuard = () => undefined;
   mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
     handleError: () => assert.fail("unexpected error"),
     pdppError: (_res, statusCode, code, message, param) => {
       status = statusCode;
@@ -1808,6 +1815,7 @@ test("owner connector-install routes register both guards and reject missing ins
     requireOwner: ownerGuard,
     requireToken: tokenGuard,
     service: {
+      inspectSelected: async () => ({ status: "none" }),
       catalog: async () => [],
       install: async () => assert.fail("should not install"),
       uninstall: async () => assert.fail("should not uninstall"),
@@ -1815,7 +1823,7 @@ test("owner connector-install routes register both guards and reject missing ins
       update: async () => assert.fail("should not update"),
     },
   });
-  assert.equal(registrations.size, 10, "the complete owner connector-install route set is registered");
+  assert.equal(registrations.size, 11, "the complete owner connector-install route set is registered");
   for (const [route, handlers] of registrations) {
     assert.equal(handlers.length, 3, `${route} registers two guards and one handler`);
     assert.equal(handlers[0], tokenGuard, `${route} requires an owner token`);
@@ -1857,11 +1865,13 @@ test("owner uninstall route calls the service and returns the completed action",
     },
   };
   mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
     handleError: (_res, error) => assert.fail(String(error)),
     pdppError: (_res, status, code) => assert.fail(`${status} ${code}`),
     requireOwner: () => undefined,
     requireToken: () => undefined,
     service: {
+      inspectSelected: async () => ({ status: "none" }),
       catalog: async () => [],
       install: async () => assert.fail("unexpected install"),
       uninstall: async (connectorId) => {
@@ -1907,6 +1917,7 @@ test("owner update route reports an implementation change only after the update 
     },
   };
   mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
     handleError: () => undefined,
     onImplementationChanged: () => {
       changes += 1;
@@ -1915,6 +1926,7 @@ test("owner update route reports an implementation change only after the update 
     requireOwner: () => undefined,
     requireToken: () => undefined,
     service: {
+      inspectSelected: async () => ({ status: "none" }),
       catalog: async () => [],
       install: async () => assert.fail("unexpected install"),
       status: async () => [],
@@ -1958,6 +1970,7 @@ test("owner uninstall route returns the source count refusal", async () => {
     },
   };
   mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
     handleError: (_res, error) => {
       seenError = error;
     },
@@ -1965,6 +1978,7 @@ test("owner uninstall route returns the source count refusal", async () => {
     requireOwner: () => undefined,
     requireToken: () => undefined,
     service: {
+      inspectSelected: async () => ({ status: "none" }),
       catalog: async () => [],
       install: async () => assert.fail("unexpected install"),
       uninstall: async () => {
@@ -2006,11 +2020,13 @@ test("owner catalog route returns the verified catalog projection", async () => 
     },
   };
   mountOwnerConnectorInstall(app as never, {
+    readinessResolver: unusedReadinessResolver,
     handleError: () => assert.fail("unexpected error"),
     pdppError: () => assert.fail("unexpected error"),
     requireOwner: () => undefined,
     requireToken: () => undefined,
     service: {
+      inspectSelected: async () => ({ status: "none" }),
       catalog: async () => [
         {
           ...entry,
