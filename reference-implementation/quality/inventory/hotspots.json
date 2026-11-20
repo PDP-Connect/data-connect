@@ -1486,15 +1486,6 @@
       "nogo": false
     },
     {
-      "file": "server/run-summary-read-model.ts",
-      "loc": 303,
-      "churn": 4,
-      "cog": 4,
-      "coupling": 0,
-      "score": 20,
-      "nogo": false
-    },
-    {
       "file": "runtime/scheduler-domain-types.ts",
       "loc": 500,
       "churn": 10,
@@ -1644,15 +1635,6 @@
       "churn": 5,
       "cog": 1,
       "coupling": 5,
-      "score": 15,
-      "nogo": false
-    },
-    {
-      "file": "server/aggregate-request-validation.ts",
-      "loc": 371,
-      "churn": 3,
-      "cog": 4,
-      "coupling": 0,
       "score": 15,
       "nogo": false
     },
@@ -1995,15 +1977,6 @@
       "churn": 1,
       "cog": 7,
       "coupling": 1,
-      "score": 9,
-      "nogo": false
-    },
-    {
-      "file": "server/record-projection-read-model.ts",
-      "loc": 206,
-      "churn": 3,
-      "cog": 2,
-      "coupling": 0,
       "score": 9,
       "nogo": false
     },
@@ -3129,15 +3102,6 @@
       "churn": 1,
       "cog": 1,
       "coupling": 2,
-      "score": 2,
-      "nogo": false
-    },
-    {
-      "file": "server/record-aggregation.ts",
-      "loc": 404,
-      "churn": 1,
-      "cog": 1,
-      "coupling": 1,
       "score": 2,
       "nogo": false
     },

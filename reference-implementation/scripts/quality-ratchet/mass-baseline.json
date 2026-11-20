@@ -42,7 +42,6 @@
     "runtime/static-secret-setup-status.ts": 14,
     "runtime/stderr-tail.ts": 9,
     "runtime/terminal-reason.ts": 3,
-    "server/aggregate-request-validation.ts": 16,
     "server/attention-urgency.ts": 4,
     "server/auth-middleware.ts": 18,
     "server/auth.ts": 384,
@@ -100,11 +99,9 @@
     "server/postgres-search.ts": 15,
     "server/postgres-storage.ts": 90,
     "server/queries/index.ts": 23,
-    "server/record-aggregation.ts": 5,
     "server/record-expand-helpers.ts": 12,
     "server/record-filters.ts": 50,
     "server/record-ingest-semantic-time.ts": 9,
-    "server/record-projection-read-model.ts": 6,
     "server/record-query-helpers.ts": 22,
     "server/record-version-stats.ts": 36,
     "server/records.ts": 467,
@@ -157,7 +154,6 @@
     "server/routes/run-interaction.ts": 26,
     "server/routes/source-webhooks.ts": 2,
     "server/routes/web-push.ts": 11,
-    "server/run-summary-read-model.ts": 6,
     "server/runtime-collection-facts.ts": 4,
     "server/scheduler-manager-factory.ts": 78,
     "server/schema-capabilities.ts": 19,
@@ -207,7 +203,7 @@
     "runtime/record-message-validator.ts": 1,
     "server/grant-package-lifecycle.ts": 100
   },
-  "total": 7219,
+  "total": 7186,
   "meta": {
     "biomeVersion": "2.5.6",
     "maxAllowedComplexity": 5

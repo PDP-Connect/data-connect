@@ -365,12 +365,6 @@
     "date": "2026-08-09",
     "reason": "Ingest-crash-convergence terminal design (2026-08-09, +2 measured, 119 -> 121): the shared search route handler adds an honest global-backlog disclosure -- when the response envelope carries a `meta` object, a nonzero search_index_dirty count attaches an additive `meta.index_maintenance` hint rather than silently returning a complete-looking response while a background index-maintenance backlog exists somewhere on the server. The read-time self-heal trigger itself is unconditional/non-blocking (fire-and-forget, deduplicated internally in search-index-reconcile.ts) and adds no branch here; the one added branch is the `envelopeWithMeta.meta` presence check gating the disclosure attach. Deliberately coarse (process-wide, not scoped to this query's specific connector instances/streams) but never wrong in the direction that matters: it only ever adds a possible-incompleteness signal, never removes one. Review-flagged correction: the original design synchronously awaited a bounded reconcile round before every search request, but a single dirty scope's lexical/semantic backfill has no internal wall-clock bound (only the round's deadline check runs BETWEEN scopes) -- awaiting it could hang an ordinary search request indefinitely. Fixed to a fire-and-forget trigger before this diff; this specific mass delta is only the disclosure attach."
   },
-  "server/run-summary-read-model.ts": {
-    "allowed_mass": 9,
-    "baseline": 6,
-    "date": "2026-08-09",
-    "reason": "Collection-scope evidence preservation (2026-08-09). readCollectionFactsFromTerminalData discarded both the terminal event's `collection_scope` fingerprint and each stream's `scoped` flag, so the server could not tell coverage-of-a-declared-region from coverage-of-everything -- the staleness comparison downstream had no data to compare. The +3 mass is two guarded reads (a non-empty trimmed string for the fingerprint, a strict boolean for `scoped`) plus their conditional spreads. Both are deliberately absent-preserving rather than defaulted: an absent fingerprint means a pre-scope collector reported the run and must satisfy only an `unscoped` declaration, and an absent `scoped` means the run declared no boundary at all -- defaulting either would fabricate a claim the collector never made. Proven by test/collection-scope-staleness-projection.test.ts."
-  },
   "server/search-index-reconcile.ts": {
     "allowed_mass": 12,
     "date": "2026-08-09",

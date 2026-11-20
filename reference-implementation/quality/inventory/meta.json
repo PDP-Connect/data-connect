@@ -15,11 +15,11 @@
   "generated_at": "2026-08-23T14:48:49.476Z",
   "duration_ms": 4397,
   "counts": {
-    "flagged_fns": 1715,
-    "flagged_files": 255,
-    "total_excess_mass": 8672,
+    "flagged_fns": 1704,
+    "flagged_files": 251,
+    "total_excess_mass": 8636,
     "callbacks": 0,
-    "hotspot_files": 385,
+    "hotspot_files": 381,
     "test_files": 1028,
     "static_skips": 268,
     "zero_by_name_files": 44
