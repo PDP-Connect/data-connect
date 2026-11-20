@@ -1,6 +1,8 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { Writable } from "node:stream";
+
 /**
  * Shared safe emit/parse helpers for the PDPP connector JSONL protocol.
  *
@@ -63,23 +65,55 @@ export function stringifyForJsonl(msg: unknown): string {
 }
 
 /**
- * Write a message to process.stdout as a JSONL line with backpressure
- * handling. Returns a Promise that resolves once the write is drained.
- *
- * Large records (>64 KB, above the default Linux pipe buffer) are written in
- * chunks by Node; wait for `drain` before the next write to avoid queueing
- * up unbounded memory. Small records return a resolved promise immediately.
+ * Write one complete JSONL frame. Acceptance into the writable buffer is
+ * not completion: settle from the callback, or reject if the sink fails first.
  */
-export function emitToStdout(msg: unknown): Promise<void> {
+export function emitToStdout(msg: unknown, sink: Writable = process.stdout): Promise<void> {
   const line = stringifyForJsonl(msg);
-  const ok = process.stdout.write(line);
-  if (ok) {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    process.stdout.once("drain", () => {
-      resolve();
-    });
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      sink.off("error", onError);
+      sink.off("close", onClose);
+    };
+    const fail = (error: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      fail(error);
+    };
+    const onClose = () => {
+      cleanup();
+      fail(new Error("sink closed before JSONL write completed"));
+    };
+    sink.once("error", onError);
+    sink.once("close", onClose);
+    try {
+      sink.write(line, (error) => {
+        if (settled) {
+          return;
+        }
+        if (error) {
+          fail(error);
+          // Node can emit this same write error after invoking the callback.
+          // Leave the listener in place for that turn, including for stdout.
+          setImmediate(cleanup);
+          return;
+        }
+        settled = true;
+        cleanup();
+        resolve();
+      });
+    } catch (error) {
+      cleanup();
+      settled = true;
+      reject(error);
+    }
   });
 }
 
