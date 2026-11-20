@@ -3435,7 +3435,7 @@ setInterval(() => {}, 1000);
         let object = environment.as_object().unwrap();
         for key in object.keys() {
             assert!(
-                ["ALLOWED", "PORT", "REPORT_PATH"].contains(&key.as_str())
+                ["ALLOWED", "PORT", "REPORT_PATH", PARENT_LIFELINE_ENV].contains(&key.as_str())
                     || is_windows_runtime_environment_key(OsStr::new(key)),
                 "unexpected child environment variable: {key}"
             );
