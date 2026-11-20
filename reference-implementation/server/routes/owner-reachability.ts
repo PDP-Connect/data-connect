@@ -311,107 +311,115 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     return view;
   }
   get("/setup-operations/:id", async (request) =>
-    settled(projectSetupOperation(await service().readSetupOperation(setupReference(request, request.query?.providerId))))
+    service().withProvider(text(request.query?.providerId), async () =>
+      settled(projectSetupOperation(await service().readSetupOperation(setupReference(request, request.query?.providerId)))))
   );
   post("/setup-operations/:id", async (request) => {
     const input = body(request);
     return projectSetupOperation(await service().runSetupOperation(setupReference(request, input.providerId), setupCommand(input)));
   });
   post("/setup-operations/:id/cancel", async (request) =>
-    settled(projectSetupOperation(await service().cancelSetupOperation(setupReference(request, body(request).providerId))))
+    service().withProvider(text(body(request).providerId), async () =>
+      settled(projectSetupOperation(await service().cancelSetupOperation(setupReference(request, body(request).providerId)))))
   );
   // Starts a service's setup. A service has one setup: calling this again resumes it.
   post("/setups", async (request) => {
-    const input = body(request);
-    const current = service();
-    const providerId = text(input.providerId);
-    const draftId = text(input.draftId);
-    const actionId = text(input.actionId);
-    const expectedConfigurationRevision = text(input.expectedConfigurationRevision);
-    const usage = typeof input.usage === "string" && input.usage ? input.usage : null;
-    const known = await ctx.setups.get(providerId);
-    const { entry, created } = await ctx.setups.reserveSetup({
-      providerId,
-      providerLabel: known?.providerLabel ?? (await current.providerLabel(providerId)),
-      draftId,
-      usage,
-      actionId,
-      expectedConfigurationRevision,
+    return service().withProvider(text(body(request).providerId), async () => {
+      const input = body(request);
+      const current = service();
+      const providerId = text(input.providerId);
+      const draftId = text(input.draftId);
+      const actionId = text(input.actionId);
+      const expectedConfigurationRevision = text(input.expectedConfigurationRevision);
+      const usage = typeof input.usage === "string" && input.usage ? input.usage : null;
+      const known = await ctx.setups.get(providerId);
+      const { entry, created } = await ctx.setups.reserveSetup({
+        providerId,
+        providerLabel: known?.providerLabel ?? (await current.providerLabel(providerId)),
+        draftId,
+        usage,
+        actionId,
+        expectedConfigurationRevision,
+      });
+      const operationId = entry.setup!.operationId;
+      // The id is saved before the effect runs, so a retry reuses it.
+      const view = created
+        ? await current.runSetupOperation(
+            { operationId, providerId },
+            { actionId, expectedConfigurationRevision, expectedSetupRevision: 0, draftId: entry.draftId ?? draftId }
+          )
+        : await current.readSetupOperation({ operationId, providerId });
+      return { created, entry, view: await settled(projectSetupOperation(view)) };
     });
-    const operationId = entry.setup!.operationId;
-    // The id is saved before the effect runs, so a retry reuses it.
-    const view = created
-      ? await current.runSetupOperation(
-          { operationId, providerId },
-          { actionId, expectedConfigurationRevision, expectedSetupRevision: 0, draftId: entry.draftId ?? draftId }
-        )
-      : await current.readSetupOperation({ operationId, providerId });
-    return { created, entry, view: await settled(projectSetupOperation(view)) };
   });
   // One-time takeover of a setup an older console kept in the browser.
   post("/setups/adopt", async (request) => {
-    const input = body(request);
-    const providerId = text(input.providerId);
-    const operationId = text(input.operationId);
-    let view: ReturnType<typeof projectSetupOperation>;
-    try {
-      view = projectSetupOperation(await service().readSetupOperation({ operationId, providerId }));
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "route_not_found") {
-        return { adopted: false, reason: "unknown" };
+    return service().withProvider(text(body(request).providerId), async () => {
+      const input = body(request);
+      const providerId = text(input.providerId);
+      const operationId = text(input.operationId);
+      let view: ReturnType<typeof projectSetupOperation>;
+      try {
+        view = projectSetupOperation(await service().readSetupOperation({ operationId, providerId }));
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "route_not_found") {
+          return { adopted: false, reason: "unknown" };
+        }
+        throw error;
       }
-      throw error;
-    }
-    const removing = view.resources.some((item) => item.removal === "required" || item.removal === "unconfirmed");
-    if (view.state === "cancelled" && !removing) return { adopted: false, reason: "ended" };
-    const { adopted } = await ctx.setups.adoptSetup({
-      providerId,
-      providerLabel: text(input.providerLabel),
-      draftId: text(input.draftId),
-      usage: typeof input.usage === "string" && input.usage ? input.usage : null,
-      committed: false,
-      setup: {
-        operationId,
-        actionId: text(input.actionId),
-        expectedConfigurationRevision: text(input.expectedConfigurationRevision),
-      },
+      const removing = view.resources.some((item) => item.removal === "required" || item.removal === "unconfirmed");
+      if (view.state === "cancelled" && !removing) return { adopted: false, reason: "ended" };
+      const { adopted } = await ctx.setups.adoptSetup({
+        providerId,
+        providerLabel: text(input.providerLabel),
+        draftId: text(input.draftId),
+        usage: typeof input.usage === "string" && input.usage ? input.usage : null,
+        committed: false,
+        setup: {
+          operationId,
+          actionId: text(input.actionId),
+          expectedConfigurationRevision: text(input.expectedConfigurationRevision),
+        },
+      });
+      if (adopted) return { adopted: true };
+      const known = await ctx.setups.get(providerId);
+      if (known?.setup?.operationId === operationId) return { adopted: true };
+      // A second live setup for this service. The host still holds it, so it is
+      // cancelled if the host can do that with nothing left to remove. If not,
+      // the journal keeps its id as a leftover that needs cleaning up.
+      try {
+        const cancelled = projectSetupOperation(await service().cancelSetupOperation({ operationId, providerId }));
+        const leftover = cancelled.resources.some((item) => item.removal === "required" || item.removal === "unconfirmed");
+        if (cancelled.state === "cancelled" && !leftover) return { adopted: false, reason: "cancelled" };
+      } catch {
+        // The host could not cancel it. Treat it as a leftover below.
+      }
+      await ctx.setups.addCleanup({ providerId, providerLabel: text(input.providerLabel), operationId });
+      return { adopted: false, reason: "needs_cleanup" };
     });
-    if (adopted) return { adopted: true };
-    const known = await ctx.setups.get(providerId);
-    if (known?.setup?.operationId === operationId) return { adopted: true };
-    // A second live setup for this service. The host still holds it, so it is
-    // cancelled if the host can do that with nothing left to remove. If not,
-    // the journal keeps its id as a leftover that needs cleaning up.
-    try {
-      const cancelled = projectSetupOperation(await service().cancelSetupOperation({ operationId, providerId }));
-      const leftover = cancelled.resources.some((item) => item.removal === "required" || item.removal === "unconfirmed");
-      if (cancelled.state === "cancelled" && !leftover) return { adopted: false, reason: "cancelled" };
-    } catch {
-      // The host could not cancel it. Treat it as a leftover below.
-    }
-    await ctx.setups.addCleanup({ providerId, providerLabel: text(input.providerLabel), operationId });
-    return { adopted: false, reason: "needs_cleanup" };
   });
   // One-time takeover of a draft an older console kept in the browser.
   post("/setups/adopt-draft", async (request) => {
-    const input = body(request);
-    const providerId = text(input.providerId);
-    const draftId = text(input.draftId);
-    try {
-      await service().reload(providerId, draftId);
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "draft_not_found") {
-        return { adopted: false, reason: "unknown" };
+    return service().withProvider(text(body(request).providerId), async () => {
+      const input = body(request);
+      const providerId = text(input.providerId);
+      const draftId = text(input.draftId);
+      try {
+        await service().reload(providerId, draftId);
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "draft_not_found") {
+          return { adopted: false, reason: "unknown" };
+        }
+        throw error;
       }
-      throw error;
-    }
-    const { adopted } = await ctx.setups.adoptDraft({
-      providerId,
-      providerLabel: (await ctx.setups.get(providerId))?.providerLabel ?? (await service().providerLabel(providerId)),
-      draftId,
-      usage: typeof input.usage === "string" && input.usage ? input.usage : null,
+      const { adopted } = await ctx.setups.adoptDraft({
+        providerId,
+        providerLabel: (await ctx.setups.get(providerId))?.providerLabel ?? (await service().providerLabel(providerId)),
+        draftId,
+        usage: typeof input.usage === "string" && input.usage ? input.usage : null,
+      });
+      return adopted ? { adopted: true } : { adopted: false, reason: "service_has_draft" };
     });
-    return adopted ? { adopted: true } : { adopted: false, reason: "service_has_draft" };
   });
   post("/setup-operations/:id/handoff", async (request) => {
     const input = body(request);
@@ -523,7 +531,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     const usage = typeof input.usage === "string" && input.usage ? input.usage : null;
     const pending = draftFlights.get(providerId);
     if (pending) return pending;
-    const flight = (async () => {
+    const flight = current.withProvider(providerId, async () => {
       const known = await ctx.setups.get(providerId);
       if (known?.draftId && !known.committed) {
         try {
@@ -543,7 +551,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         usage,
       });
       return projectDraft(draft);
-    })();
+    });
     draftFlights.set(providerId, flight);
     try {
       return await flight;
@@ -580,17 +588,39 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     );
   });
   post("/drafts/:id/discard", async (request) => {
+    return service().withDraft(text(request.params.id), async () => {
+      const id = text(request.params.id);
+      const result = await service().discard(id);
+      if (result.discarded === true) await ctx.setups.dropDraft(id);
+      return result;
+    });
+  });
+  post("/drafts/:id/discard-if-stale", async (request) => {
+    const current = service();
     const id = text(request.params.id);
-    const result = await service().discard(id);
-    if (result.discarded === true) await ctx.setups.dropDraft(id);
-    return result;
+    let providerId: string;
+    try {
+      providerId = current.draftProvider(id);
+    } catch (error) {
+      if ((error as { code?: string }).code === "draft_not_found") return { discarded: false, reason: "not_found" };
+      throw error;
+    }
+    return current.withProvider(providerId, async () => {
+      const known = await ctx.setups.get(providerId);
+      if (known?.draftId !== id) return { discarded: false, reason: "replaced" };
+      const result = await current.discardIfStale(id, text(body(request).revision), known.committed);
+      if (result.discarded === true) await ctx.setups.dropDraft(id);
+      return result;
+    });
   });
   post("/drafts/:id/commit", async (request) => {
-    const configuration = projectConfiguration(
-      await service().commit(text(request.params.id), text(body(request).expectedRevision))
-    );
-    await ctx.setups.markCommitted(text(request.params.id));
-    return configuration;
+    return service().withDraft(text(request.params.id), async () => {
+      const configuration = projectConfiguration(
+        await service().commit(text(request.params.id), text(body(request).expectedRevision))
+      );
+      await ctx.setups.markCommitted(text(request.params.id));
+      return configuration;
+    });
   });
   post("/drafts/:id/review", async (request) => {
     const review = await service().review(text(request.params.id), ctx.usage(text(body(request).usage)));

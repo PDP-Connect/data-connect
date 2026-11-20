@@ -1,6 +1,7 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type {
   ConfigurationDraft as Draft,
@@ -144,6 +145,9 @@ export class ReachabilityService {
   private readonly api: EmbeddingApi;
   private readonly host: HostPolicy;
   private earlierSetup: EarlierSetup = null;
+  private readonly providerQueues = new Map<string, Promise<void>>();
+  private readonly providerLock = new AsyncLocalStorage<{ providerId: string; active: boolean }>();
+
   private readonly drafts = new Map<string, SavedDraft>();
   private readonly reviews = new Map<string, Review>();
   private readonly routes = new Map<string, Route>();
@@ -198,6 +202,31 @@ export class ReachabilityService {
     if (this.recoveryPending) {
       throw new ReachabilityError("recovery_in_progress");
     }
+  }
+  // Routes extend the same lock through their journal write. Nested service calls
+  // join that transaction; a settled transaction cannot grant a later call entry.
+  async withProvider<T>(providerId: string, fn: () => Promise<T>): Promise<T> {
+    const held = this.providerLock.getStore();
+    if (held?.active && held.providerId === providerId) return fn();
+    const previous = this.providerQueues.get(providerId) ?? Promise.resolve();
+    let release!: () => void;
+    const next = new Promise<void>(resolve => { release = resolve; });
+    this.providerQueues.set(providerId, next);
+    await previous;
+    const token = { providerId, active: true };
+    try {
+      return await this.providerLock.run(token, fn);
+    } finally {
+      token.active = false;
+      release();
+      if (this.providerQueues.get(providerId) === next) this.providerQueues.delete(providerId);
+    }
+  }
+  withDraft<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    return this.withProvider(this.draft(id).providerId, fn);
+  }
+  draftProvider(id: string): string {
+    return this.draft(id).providerId;
   }
   private ref(providerId: string, draftId: string) {
     return { draftId, home: this.host.query.home, owner: this.host.query.owner, providerId };
@@ -330,30 +359,36 @@ export class ReachabilityService {
     return { ...inventory, earlierSetup: this.earlierSetup };
   }
   async begin(providerId: string, expectedConfigurationRevision: string): Promise<Draft> {
-    this.assertRecovered();
-    const draft = await this.api.beginConfigurationDraft({
-      expectedConfigurationRevision,
-      refresh: true,
-      home: this.host.query.home,
-      owner: this.host.query.owner,
-      providerId,
+    return this.withProvider(providerId, async () => {
+      this.assertRecovered();
+      const draft = await this.api.beginConfigurationDraft({
+        expectedConfigurationRevision,
+        refresh: true,
+        home: this.host.query.home,
+        owner: this.host.query.owner,
+        providerId,
+      });
+      this.transition({ type: "choose" });
+      this.drafts.set(draft.draftId, { providerId, session: new ConfigurationDraftSession(draft) });
+      return draft;
     });
-    this.transition({ type: "choose" });
-    this.drafts.set(draft.draftId, { providerId, session: new ConfigurationDraftSession(draft) });
-    return draft;
   }
   async reload(providerId: string, draftId: string, refresh = false): Promise<Draft> {
-    const session = new ConfigurationDraftSession(null);
-    const draft = await session.reload(this.api, { ...this.ref(providerId, draftId), ...(refresh ? { refresh: true } : {}) });
-    this.drafts.set(draftId, { providerId, session });
-    return draft;
+    return this.withProvider(providerId, async () => {
+      const session = new ConfigurationDraftSession(null);
+      const draft = await session.reload(this.api, { ...this.ref(providerId, draftId), ...(refresh ? { refresh: true } : {}) });
+      this.drafts.set(draftId, { providerId, session });
+      return draft;
+    });
   }
   // Picks up a draft the host already holds (for example after a restart) so the
   // service keeps one draft. It enters the draft phase like `begin` does.
   async resume(providerId: string, draftId: string): Promise<Draft> {
-    const draft = await this.reload(providerId, draftId, true);
-    this.transition({ type: "choose" });
-    return draft;
+    return this.withProvider(providerId, async () => {
+      const draft = await this.reload(providerId, draftId, true);
+      this.transition({ type: "choose" });
+      return draft;
+    });
   }
   async providerLabel(providerId: string): Promise<string> {
     const inventory = await this.inventory();
@@ -370,7 +405,9 @@ export class ReachabilityService {
     return this.api.readSetupOperation(this.setupReference(reference));
   }
   async cancelSetupOperation(reference: SetupReference): Promise<SetupOperation> {
-    return this.refreshAfterSetup(await this.api.cancelSetupOperation(this.setupReference(reference)));
+    return this.withProvider(reference.providerId, async () => {
+      return this.refreshAfterSetup(await this.api.cancelSetupOperation(this.setupReference(reference)));
+    });
   }
   private currentSetupAction(view: SetupOperation, input: SetupCommand) {
     const action = view.nextAction;
@@ -386,54 +423,56 @@ export class ReachabilityService {
     return action;
   }
   async runSetupOperation(reference: SetupReference, input: SetupCommand): Promise<SetupOperation> {
-    const { actionId, expectedConfigurationRevision, expectedSetupRevision, draftId, value, secret } = input;
-    const request = {
-      ...this.setupReference(reference), actionId, expectedConfigurationRevision, expectedSetupRevision,
-      ...(draftId === undefined ? {} : { draftId }),
-    };
-    if (expectedSetupRevision === 0 || input.approval === undefined) {
-      if (value !== undefined || secret !== undefined || input.approval !== undefined) {
+    return this.withProvider(reference.providerId, async () => {
+      const { actionId, expectedConfigurationRevision, expectedSetupRevision, draftId, value, secret } = input;
+      const request = {
+        ...this.setupReference(reference), actionId, expectedConfigurationRevision, expectedSetupRevision,
+        ...(draftId === undefined ? {} : { draftId }),
+      };
+      if (expectedSetupRevision === 0 || input.approval === undefined) {
+        if (value !== undefined || secret !== undefined || input.approval !== undefined) {
+          throw new ReachabilityError("invalid_input");
+        }
+        return this.refreshAfterSetup(await this.api.runSetupAction(request));
+      }
+
+      const view = await this.api.readSetupOperation(request);
+      const action = this.currentSetupAction(view, input);
+      const approval = requireSetupApproval(action, input.approval);
+      if (action.kind === "open-url" || action.kind === "instructions") {
+        throw new ReachabilityError("setup_action_unavailable");
+      }
+      if ((secret !== undefined) !== (action.kind === "provide-secret") ||
+          (value !== undefined) !== (action.kind === "provide-value")) {
         throw new ReachabilityError("invalid_input");
       }
-      return this.refreshAfterSetup(await this.api.runSetupAction(request));
-    }
-
-    const view = await this.api.readSetupOperation(request);
-    const action = this.currentSetupAction(view, input);
-    const approval = requireSetupApproval(action, input.approval);
-    if (action.kind === "open-url" || action.kind === "instructions") {
-      throw new ReachabilityError("setup_action_unavailable");
-    }
-    if ((secret !== undefined) !== (action.kind === "provide-secret") ||
-        (value !== undefined) !== (action.kind === "provide-value")) {
-      throw new ReachabilityError("invalid_input");
-    }
-    if (["stop-connector", "remove-resource", "revoke-credential", "disconnect"].includes(action.step.purpose)) {
-      await this.host.acknowledgeDisconnect(input.acknowledgeDisconnect === true);
-    }
-    this.reviews.clear();
-    if (draftId) this.drafts.get(draftId)?.session.invalidate();
-    if (secret === undefined) {
-      return this.refreshAfterSetup(await this.api.runSetupAction({ ...request, approval, ...(value === undefined ? {} : { value }) }));
-    }
-    if (!action.inputId || !secret) throw new ReachabilityError("secret_input_unavailable");
-    const bytes = new TextEncoder().encode(secret);
-    let handle: string;
-    try {
-      const stored = await this.api.storeSecret({ ...request, bytes, inputId: action.inputId, scopeId: view.scope.scopeId });
-      if (stored.scopeId !== view.scope.scopeId || stored.configurationRevision !== expectedConfigurationRevision) {
-        throw new ReachabilityError("secret_reference_inconsistent");
+      if (["stop-connector", "remove-resource", "revoke-credential", "disconnect"].includes(action.step.purpose)) {
+        await this.host.acknowledgeDisconnect(input.acknowledgeDisconnect === true);
       }
-      handle = stored.handle;
-    } finally {
-      bytes.fill(0);
-    }
-    try {
-      return this.refreshAfterSetup(await this.api.runSetupAction({ ...request, approval, secretHandle: handle }));
-    } finally {
-      // The SDK protects handles bound to a configuration or the current setup operation.
-      await this.api.discardSecret({ home: request.home, handle }).catch(() => {});
-    }
+      this.reviews.clear();
+      if (draftId) this.drafts.get(draftId)?.session.invalidate();
+      if (secret === undefined) {
+        return this.refreshAfterSetup(await this.api.runSetupAction({ ...request, approval, ...(value === undefined ? {} : { value }) }));
+      }
+      if (!action.inputId || !secret) throw new ReachabilityError("secret_input_unavailable");
+      const bytes = new TextEncoder().encode(secret);
+      let handle: string;
+      try {
+        const stored = await this.api.storeSecret({ ...request, bytes, inputId: action.inputId, scopeId: view.scope.scopeId });
+        if (stored.scopeId !== view.scope.scopeId || stored.configurationRevision !== expectedConfigurationRevision) {
+          throw new ReachabilityError("secret_reference_inconsistent");
+        }
+        handle = stored.handle;
+      } finally {
+        bytes.fill(0);
+      }
+      try {
+        return this.refreshAfterSetup(await this.api.runSetupAction({ ...request, approval, secretHandle: handle }));
+      } finally {
+        // The SDK protects handles bound to a configuration or the current setup operation.
+        await this.api.discardSecret({ home: request.home, handle }).catch(() => {});
+      }
+    });
   }
   async setupHandoff(reference: SetupReference, input: SetupCommand): Promise<{ href: string }> {
     if (input.secret !== undefined || input.value !== undefined) throw new ReachabilityError("invalid_input");
@@ -458,184 +497,227 @@ export class ReachabilityService {
     id: string,
     input: { actionId: string; expectedRevision: string; approval: unknown; value?: string; secret?: string }
   ): Promise<ProviderConfiguration> {
-    const saved = this.draft(id);
-    const prior = saved.session.snapshot;
-    const action = saved.session.action(input.actionId, input.expectedRevision);
-    const approval = requireSetupApproval(action, input.approval);
-    if (action.step) throw new ReachabilityError("setup_required");
-    const ref = this.ref(saved.providerId, id);
-    this.transition({ type: "setup" });
-    saved.session.invalidate();
-    // After a mutation starts, no previously issued review remains redeemable.
-    this.reviews.clear();
-    try {
-      let secretHandle: string | undefined;
-      if (input.secret !== undefined) {
-        const requirement = prior.configuration.inputRequirements.find(
-          (field: InputRequirement) => field.actionId === action.id && field.secret
-        );
-        if (!requirement || action.kind !== "provide-secret") {
-          throw new ReachabilityError("secret_input_unavailable");
-        }
-        const bytes = new TextEncoder().encode(input.secret);
-        try {
-          const stored = await this.api.storeSecret({
-            ...ref,
-            bytes,
-            expectedConfigurationRevision: input.expectedRevision,
-            inputId: requirement.id,
-            scopeId: prior.scopeId,
-          });
-          if (stored.scopeId !== prior.scopeId || stored.configurationRevision !== input.expectedRevision) {
-            throw new ReachabilityError("secret_reference_inconsistent");
+    return this.withProvider(this.draft(id).providerId, async () => {
+      const saved = this.draft(id);
+      const prior = saved.session.snapshot;
+      const action = saved.session.action(input.actionId, input.expectedRevision);
+      const approval = requireSetupApproval(action, input.approval);
+      if (action.step) throw new ReachabilityError("setup_required");
+      const ref = this.ref(saved.providerId, id);
+      this.transition({ type: "setup" });
+      saved.session.invalidate();
+      // After a mutation starts, no previously issued review remains redeemable.
+      this.reviews.clear();
+      try {
+        let secretHandle: string | undefined;
+        if (input.secret !== undefined) {
+          const requirement = prior.configuration.inputRequirements.find(
+            (field: InputRequirement) => field.actionId === action.id && field.secret
+          );
+          if (!requirement || action.kind !== "provide-secret") {
+            throw new ReachabilityError("secret_input_unavailable");
           }
-          secretHandle = stored.handle;
-        } finally {
-          bytes.fill(0);
+          const bytes = new TextEncoder().encode(input.secret);
+          try {
+            const stored = await this.api.storeSecret({
+              ...ref,
+              bytes,
+              expectedConfigurationRevision: input.expectedRevision,
+              inputId: requirement.id,
+              scopeId: prior.scopeId,
+            });
+            if (stored.scopeId !== prior.scopeId || stored.configurationRevision !== input.expectedRevision) {
+              throw new ReachabilityError("secret_reference_inconsistent");
+            }
+            secretHandle = stored.handle;
+          } finally {
+            bytes.fill(0);
+          }
         }
+        const result = await this.api.runSetupAction({
+          ...ref,
+          actionId: action.id,
+          approval,
+          expectedConfigurationRevision: input.expectedRevision,
+          ...(input.value === undefined ? {} : { value: input.value }),
+          ...(secretHandle === undefined ? {} : { secretHandle }),
+        });
+        saved.session.acceptSetup(prior, result);
+        await saved.session.reload(this.api, { ...ref, refresh: true });
+        this.transition({ type: "setup-complete" });
+        return saved.session.snapshot.configuration;
+      } catch (error) {
+        const failed = reduceLifecycle(this.lifecycle, { type: "setup-failed" });
+        if (failed.accepted) {
+          this.lifecycle = failed.state;
+        }
+        throw error;
       }
-      const result = await this.api.runSetupAction({
-        ...ref,
-        actionId: action.id,
-        approval,
-        expectedConfigurationRevision: input.expectedRevision,
-        ...(input.value === undefined ? {} : { value: input.value }),
-        ...(secretHandle === undefined ? {} : { secretHandle }),
-      });
-      saved.session.acceptSetup(prior, result);
-      await saved.session.reload(this.api, { ...ref, refresh: true });
-      this.transition({ type: "setup-complete" });
-      return saved.session.snapshot.configuration;
-    } catch (error) {
-      const failed = reduceLifecycle(this.lifecycle, { type: "setup-failed" });
-      if (failed.accepted) {
-        this.lifecycle = failed.state;
-      }
-      throw error;
-    }
+    });
   }
   async clear(
     id: string,
     input: { actionId: string; expectedRevision: string; approval: unknown }
   ): Promise<ProviderConfiguration> {
-    const saved = this.draft(id);
-    const prior = saved.session.snapshot;
-    const action = saved.session.action(input.actionId, input.expectedRevision);
-    if (!action.inputId) {
-      throw new ReachabilityError("clear_input_unavailable");
-    }
-    const approval = requireSetupApproval(action, input.approval);
-    saved.session.invalidate();
-    this.reviews.clear();
-    const configuration = await this.api.clearConfigurationInput({
-      ...this.ref(saved.providerId, id),
-      approval,
-      expectedConfigurationRevision: input.expectedRevision,
-      inputId: action.inputId,
+    return this.withProvider(this.draft(id).providerId, async () => {
+      const saved = this.draft(id);
+      const prior = saved.session.snapshot;
+      const action = saved.session.action(input.actionId, input.expectedRevision);
+      if (!action.inputId) {
+        throw new ReachabilityError("clear_input_unavailable");
+      }
+      const approval = requireSetupApproval(action, input.approval);
+      saved.session.invalidate();
+      this.reviews.clear();
+      const configuration = await this.api.clearConfigurationInput({
+        ...this.ref(saved.providerId, id),
+        approval,
+        expectedConfigurationRevision: input.expectedRevision,
+        inputId: action.inputId,
+      });
+      saved.session.acceptClear(prior, configuration);
+      await saved.session.reload(this.api, { ...this.ref(saved.providerId, id), refresh: true });
+      return saved.session.snapshot.configuration;
     });
-    saved.session.acceptClear(prior, configuration);
-    await saved.session.reload(this.api, { ...this.ref(saved.providerId, id), refresh: true });
-    return saved.session.snapshot.configuration;
   }
   async discard(id: string): Promise<{ discarded: boolean }> {
-    const saved = this.draft(id);
-    const result = await this.api.discardConfigurationDraft(this.ref(saved.providerId, id));
-    if (result.discarded !== true) return result;
-    // The library discards only draft-owned, unreferenced staged bytes.
-    // Promoted/live bindings remain under its authorization checks.
-    this.drafts.delete(id);
-    this.reviews.clear();
-    // The last draft is gone, so no setup or review remains. A route that
-    // is live or being stopped keeps its phase: the reducer ignores it.
-    if (this.drafts.size === 0) {
-      const next = reduceLifecycle(this.lifecycle, { type: "discard" });
-      if (next.accepted) {
-        this.lifecycle = next.state;
+    return this.withProvider(this.draft(id).providerId, async () => {
+      const saved = this.draft(id);
+      const result = await this.api.discardConfigurationDraft(this.ref(saved.providerId, id));
+      if (result.discarded !== true) return result;
+      // The library discards only draft-owned, unreferenced staged bytes.
+      // Promoted/live bindings remain under its authorization checks.
+      this.drafts.delete(id);
+      for (const [key, review] of this.reviews) {
+        if (review.draftId === id) this.reviews.delete(key);
       }
-    }
+      // The last draft is gone, so no setup or review remains. A route that
+      // is live or being stopped keeps its phase: the reducer ignores it.
+      if (this.drafts.size === 0) {
+        const next = reduceLifecycle(this.lifecycle, { type: "discard" });
+        if (next.accepted) {
+          this.lifecycle = next.state;
+        }
+      }
 
-    return result;
+      return result;
+    });
+  }
+  async discardIfStale(id: string, revision: string, committed: boolean | undefined): Promise<{ discarded: boolean; reason?: string }> {
+    return this.withDraft(id, async () => {
+      if (committed !== false) return { discarded: false, reason: "committed_or_unknown" };
+      const providerId = this.draft(id).providerId;
+      let draft: Draft;
+      try {
+        // The library only returns drafts still held as uncommitted; a commit
+        // consumes them. The cached snapshot cannot establish that fact.
+        draft = await this.api.readConfigurationDraft(this.ref(providerId, id));
+      } catch (error) {
+        if (["configuration_stale", "draft_not_found"].includes((error as { code?: string }).code ?? "")) {
+          return { discarded: false, reason: "not_found" };
+        }
+        throw error;
+      }
+      if (!draft || !draft.configuration || typeof draft.baseRevision !== "string" || !draft.baseRevision ||
+          typeof draft.configuration?.revision !== "string" || !draft.configuration.revision ||
+          typeof draft.scopeId !== "string" || !draft.scopeId || draft.configuration.scopeId !== draft.scopeId) {
+        return { discarded: false, reason: "state_unknown" };
+      }
+      if (draft.draftId !== id) return { discarded: false, reason: "replaced" };
+      if (draft.configuration.revision !== revision) return { discarded: false, reason: "revision_changed" };
+      const current = (await this.inventory()).providers.find(item => item.providerId === providerId);
+      if (!current?.configuration || typeof current.configuration.revision !== "string" || !current.configuration.revision ||
+          current.configuration.scopeId !== draft.scopeId || current.configuration.revision === draft.baseRevision) return { discarded: false, reason: "current" };
+      return this.discard(id);
+    });
   }
   async commit(id: string, expectedRevision: string): Promise<ProviderConfiguration> {
     this.assertRecovered();
-    if (this.configurationBusy()) {
-      throw new ReachabilityError("configuration_in_use");
-    }
-    const saved = this.draft(id);
-    if (saved.session.snapshot.configuration.revision !== expectedRevision) {
-      throw new ReachabilityError("configuration_stale");
-    }
-    const config = await this.api.commitConfigurationDraft({
-      ...this.ref(saved.providerId, id),
-      expectedConfigurationRevision: expectedRevision,
+    if (this.configurationBusy()) throw new ReachabilityError("configuration_in_use");
+    return this.withProvider(this.draft(id).providerId, async () => {
+      this.assertRecovered();
+      if (this.configurationBusy()) {
+        throw new ReachabilityError("configuration_in_use");
+      }
+      const saved = this.draft(id);
+      if (saved.session.snapshot.configuration.revision !== expectedRevision) {
+        throw new ReachabilityError("configuration_stale");
+      }
+      const config = await this.api.commitConfigurationDraft({
+        ...this.ref(saved.providerId, id),
+        expectedConfigurationRevision: expectedRevision,
+      });
+      this.reviews.clear();
+      await this.inventory(true);
+      return config;
     });
-    this.reviews.clear();
-    await this.inventory(true);
-    return config;
   }
   async review(id: string, usage: Query["usage"]): Promise<Review> {
     this.assertRecovered();
-    const saved = this.draft(id);
-    // Host preparation observes the final listener/password/port before catalog.
-    const inventory = await this.inventory(true);
-    const variants = inventory.providers.filter((item: ProviderInventory) => item.providerId === saved.providerId);
-    if (variants.length !== 1 || !variants[0]) {
-      throw new ReachabilityError("ambiguous_selection");
-    }
-    const selected = variants[0];
-    if (selected.reach === "unknown") throw new ReachabilityError("unsupported", undefined, undefined, "reach_unknown");
-    if (selected.availability[usage.kind]?.state !== "available") {
-      throw new ReachabilityError("setup_required");
-    }
-    if (
-      !(
-        ["internet", "tailnet", "lan", "this-device"].includes(selected.reach) &&
-        ["http", "https", "tcp", "tls"].includes(selected.transport)
-      )
-    ) {
-      throw new ReachabilityError("unsupported", undefined, undefined, "provider_properties_unsupported");
-    }
-    await this.host.prepare({ reach: selected.reach, transport: selected.transport, usage });
-    let query: Query = {
-      ...this.host.query,
-      intent: "create",
-      target: await this.host.currentTarget?.() ?? this.host.query.target,
-      providerId: saved.providerId,
-      requirements: {
-        ...this.host.query.requirements,
-        reach: selected.reach as Query["requirements"]["reach"],
-        transport: selected.transport === "http" ? "any" : (selected.transport as Query["requirements"]["transport"]),
-      },
-      usage,
-    };
-    const offer = async () => (await this.api.catalogRoutes(query)).candidates
-      .find((item: RouteCandidate) => item.providerId === saved.providerId);
-    let candidate = await offer();
-    if (candidate?.ownership === "external-owned") {
-      const { configuration } = candidate;
-      const origins = configuration.inputRequirements
-        .filter(field => field.kind === "https-origin" && !field.secret)
-        .map(field => configuration.values[field.id])
-        .filter(Boolean);
-      const origin = query.origin ?? candidate.consent.scope.query.expectedOrigin ??
-        (origins.length === 1 ? URL.parse(origins[0] ?? "")?.origin : undefined);
-      if (!origin || usage.kind === "attached") throw new ReachabilityError("setup_required");
-      query = { ...query, origin };
-      candidate = await offer();
-      if (candidate?.ownership !== "external-owned" ||
-          candidate.consent.disclosures.ownership !== candidate.ownership ||
-          candidate.consent.scope.query.expectedOrigin !== origin ||
-          candidate.consent.scope.query.target !== query.target) {
-        throw new ReachabilityError("candidate_stale");
+    return this.withProvider(this.draft(id).providerId, async () => {
+      this.assertRecovered();
+      const saved = this.draft(id);
+      // Host preparation observes the final listener/password/port before catalog.
+      const inventory = await this.inventory(true);
+      const variants = inventory.providers.filter((item: ProviderInventory) => item.providerId === saved.providerId);
+      if (variants.length !== 1 || !variants[0]) {
+        throw new ReachabilityError("ambiguous_selection");
       }
-    }
-    if (!(candidate && candidate.eligible && candidate.candidateToken)) {
-      throw new ReachabilityError("setup_required");
-    }
-    const review = { candidate, draftId: id, id: randomUUID(), query };
-    this.reviews.set(review.id, review);
-    this.transition({ approvalIdentity: review.id, type: "review" });
-    return review;
+      const selected = variants[0];
+      if (selected.reach === "unknown") throw new ReachabilityError("unsupported", undefined, undefined, "reach_unknown");
+      if (selected.availability[usage.kind]?.state !== "available") {
+        throw new ReachabilityError("setup_required");
+      }
+      if (
+        !(
+          ["internet", "tailnet", "lan", "this-device"].includes(selected.reach) &&
+          ["http", "https", "tcp", "tls"].includes(selected.transport)
+        )
+      ) {
+        throw new ReachabilityError("unsupported", undefined, undefined, "provider_properties_unsupported");
+      }
+      await this.host.prepare({ reach: selected.reach, transport: selected.transport, usage });
+      let query: Query = {
+        ...this.host.query,
+        intent: "create",
+        target: await this.host.currentTarget?.() ?? this.host.query.target,
+        providerId: saved.providerId,
+        requirements: {
+          ...this.host.query.requirements,
+          reach: selected.reach as Query["requirements"]["reach"],
+          transport: selected.transport === "http" ? "any" : (selected.transport as Query["requirements"]["transport"]),
+        },
+        usage,
+      };
+      const offer = async () => (await this.api.catalogRoutes(query)).candidates
+        .find((item: RouteCandidate) => item.providerId === saved.providerId);
+      let candidate = await offer();
+      if (candidate?.ownership === "external-owned") {
+        const { configuration } = candidate;
+        const origins = configuration.inputRequirements
+          .filter(field => field.kind === "https-origin" && !field.secret)
+          .map(field => configuration.values[field.id])
+          .filter(Boolean);
+        const origin = query.origin ?? candidate.consent.scope.query.expectedOrigin ??
+          (origins.length === 1 ? URL.parse(origins[0] ?? "")?.origin : undefined);
+        if (!origin || usage.kind === "attached") throw new ReachabilityError("setup_required");
+        query = { ...query, origin };
+        candidate = await offer();
+        if (candidate?.ownership !== "external-owned" ||
+            candidate.consent.disclosures.ownership !== candidate.ownership ||
+            candidate.consent.scope.query.expectedOrigin !== origin ||
+            candidate.consent.scope.query.target !== query.target) {
+          throw new ReachabilityError("candidate_stale");
+        }
+      }
+      if (!(candidate && candidate.eligible && candidate.candidateToken)) {
+        throw new ReachabilityError("setup_required");
+      }
+      const review = { candidate, draftId: id, id: randomUUID(), query };
+      this.reviews.set(review.id, review);
+      this.transition({ approvalIdentity: review.id, type: "review" });
+      return review;
+    });
   }
   async acknowledgeOrigin(request: OriginAcknowledgmentRequest): Promise<OriginAcknowledgmentReply> {
     const applying = this.applying;

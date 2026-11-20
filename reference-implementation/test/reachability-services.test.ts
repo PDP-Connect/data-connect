@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ReachabilityError } from "../server/reachability/approvals.ts";
+import { ReachabilityService } from "../server/reachability/service.ts";
 import { ReachabilitySetups } from "../server/reachability/setups.ts";
 import { mountOwnerReachability } from "../server/routes/owner-reachability.ts";
 
@@ -45,7 +46,10 @@ async function harness(dir: string, setups = new ReachabilitySetups(dir), passwo
   const calls = { begin: 0, resume: 0, setupRuns: [] as string[], discards: 0 };
   const known = new Set<string>();
   let draftCounter = 0;
+  const queue = new ReachabilityService({} as never, {} as never);
   const service = {
+    withProvider: queue.withProvider.bind(queue),
+    withDraft: <T>(_id: string, run: () => Promise<T>) => queue.withProvider("svc", run),
     providerLabel: async () => "Tunnel service",
     begin: async () => {
       calls.begin++;

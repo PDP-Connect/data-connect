@@ -221,7 +221,7 @@ test("state and event projections bind provider identity to the exact journaled 
     const noop = () => undefined;
     mountOwnerReachability(app as Parameters<typeof mountOwnerReachability>[0], {
       operations,
-      service: { state: () => ({ routes, reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
+      service: { presentation: () => undefined, state: () => ({ routes, reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
       setups: { list: async () => [] } as unknown as Context["setups"],
       requireToken: noop, requireOwner: noop, requireCsrf: noop,
       usage: () => ({ kind: "session", lifetimeMs: 3_600_000 }),
@@ -285,7 +285,7 @@ test("state marks a route as owner-stopped only when a settled stop names its ex
   const noop = () => undefined;
   mountOwnerReachability(app as Parameters<typeof mountOwnerReachability>[0], {
     operations: { list: async () => [stopRecord({ kind: seed.handle.kind, id: "stopped-handle", generation: seed.handle.generation }), foreignKind], read: async () => null } as unknown as Context["operations"],
-    service: { state: () => ({ routes: [stopped, died, otherKind], reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
+    service: { presentation: () => undefined, state: () => ({ routes: [stopped, died, otherKind], reasons: {}, starting: false, lifecycle: null }) } as unknown as Context["service"],
     setups: { list: async () => [] } as unknown as Context["setups"],
     requireToken: noop, requireOwner: noop, requireCsrf: noop,
     usage: () => ({ kind: "session", lifetimeMs: 3_600_000 }),

@@ -139,14 +139,14 @@ test("a committed address whose reach the library cannot tell keeps failing clos
   })
 })
 
-test("discarding the draft returns the lifecycle to inactive", realLibrary, async () => {
+test("a declined committed-draft discard keeps the review", realLibrary, async () => {
   await withService(async (service) => {
     const { draft, revision } = await setUp(service, ORIGIN)
     await service.commit(draft.draftId, revision)
     await service.review(draft.draftId, DURABLE)
     assert.equal(service.state().lifecycle.phase, "review")
-    await service.discard(draft.draftId)
-    assert.equal(service.state().lifecycle.phase, "inactive")
+    assert.deepEqual(await service.discard(draft.draftId), { discarded: false })
+    assert.equal(service.state().lifecycle.phase, "review")
     assert.equal(service.state().lifecycle.reason, null)
   })
 })
@@ -215,14 +215,14 @@ test("the ownership challenge verifies for the approved Host, in the verifier's 
   })
 })
 
-test("the ownership challenge is refused once no review or route holds the address", realLibrary, async () => {
+test("a declined discard preserves the review and its approved challenge origin", realLibrary, async () => {
   await withService(async (service) => {
     const { draft, revision } = await setUp(service, ORIGIN)
     await service.commit(draft.draftId, revision)
     await service.review(draft.draftId, DURABLE)
-    await service.discard(draft.draftId)
+    assert.deepEqual(await service.discard(draft.draftId), { discarded: false })
     await withChallenge(service, async (ask) => {
-      assert.equal(await ask("fixture.invalid"), 404)
+      assert.equal(await ask("fixture.invalid"), 200)
     })
   })
 })

@@ -152,13 +152,13 @@ export class PreparationStopped extends Error {
  * step. Other preparers on the same profile share the host's one draft for the
  * service, so a restart code means the state moved, not that this draft is bad:
  * the chain re-reads the state, up to MAX_PREPARATION_RESTARTS times. A restart
- * discards a draft only when it is the service's uncommitted draft (or has failed
- * twice), because a draft another preparer committed or is reviewing is shared work.
+ * discards a draft only when the host confirms it is uncommitted and stale at the
+ * observed revision, because another preparer may have committed the shared work.
  */
 export async function prepareTurnOn(
   request: Request,
   choice: Choice,
-  options: { restarts?: number; failedDrafts?: ReadonlySet<string>; mayRunActions?: () => boolean; isCurrent?: () => boolean; onPasswordMissing?: () => void } = {}
+  options: { restarts?: number; mayRunActions?: () => boolean; isCurrent?: () => boolean; onPasswordMissing?: () => void } = {}
 ): Promise<Prepared> {
   // Checked before every positive request (draft, action, commit, review, discard).
   // Reads are never guarded: a stopped chain may finish the read it already sent.
@@ -250,37 +250,35 @@ export async function prepareTurnOn(
     const restarts = options.restarts ?? 0;
     if (restarts < MAX_PREPARATION_RESTARTS && code && restartCodes.has(code)) {
       proceed();
-      const failedDrafts = new Set(options.failedDrafts);
       if (draft) {
-        const repeated = failedDrafts.has(draft.draftId);
-        failedDrafts.add(draft.draftId);
-        await discardIfOnlyOurs(send, choice.providerId, draft.draftId, repeated, proceed);
+        await discardIfOnlyOurs(send, choice.providerId, draft.draftId, draft.configuration.revision, proceed);
       }
-      return prepareTurnOn(request, choice, { ...options, restarts: restarts + 1, failedDrafts });
+      return prepareTurnOn(request, choice, { ...options, restarts: restarts + 1 });
     }
     throw failure;
   }
 }
 
 /**
- * Drops a draft that failed with a restart code, so a restart does not resume it again. Without
- * this, the host hands back its stale uncommitted draft and the chain would fail the same way.
+ * Asks the host to drop a stale uncommitted draft at the observed revision. Without
+ * this, the host hands back that stale draft and the chain would fail the same way.
  * The host's current state decides: a draft that is gone, replaced or committed by another
- * preparer is left alone (committed work is reviewed, not thrown away) unless it already failed once.
+ * preparer is left alone. The host checks the observed revision and stale base atomically.
  */
 async function discardIfOnlyOurs(
   send: <T>(path: string, body?: Record<string, unknown>) => Promise<T>,
   providerId: string,
   draftId: string,
-  repeated: boolean,
+  revision: string,
   proceed: () => void
 ): Promise<void> {
   const state = await send<{ services?: ServiceEntry[] }>("/state");
   const entry = state.services?.find((item) => item.providerId === providerId);
-  if (entry?.draftId !== draftId || (entry.committed && !repeated)) return;
+  if (entry?.draftId !== draftId || entry.committed) return;
   proceed();
   try {
-    await send(`/drafts/${encodeURIComponent(draftId)}/discard`, {});
+    // A declined discard also returns to the restart's fresh state read.
+    await send(`/drafts/${encodeURIComponent(draftId)}/discard-if-stale`, { revision });
   } catch (failure) {
     // Already gone is the state this wanted.
     if (codeOf(failure) !== "draft_not_found") throw failure;
