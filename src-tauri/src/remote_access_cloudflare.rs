@@ -833,11 +833,13 @@ fn spawn_output_watcher(
 }
 
 /// cloudflared logs a line containing "Registered tunnel connection" once
-/// the tunnel is live, and lines containing "connection error"/"failed to
-/// " on a fatal startup failure (for example an invalid token). Matched
-/// case-insensitively against both stdout and stderr, since cloudflared's
-/// log destination has varied across versions and this adapter does not pin
-/// one.
+/// the tunnel is live. A line with one of the phrases below maps to a fixed
+/// reason; the raw line is never passed on. The two token phrases are a best
+/// effort: cloudflared's source does not print them verbatim, and a bad token
+/// can instead end the process or never register. The exit and timeout paths
+/// refuse those cases. Matched case-insensitively against both stdout and
+/// stderr, since cloudflared's log destination has varied across versions and
+/// this adapter does not pin one.
 fn watch_stream<R: std::io::Read>(reader: BufReader<R>, connected: mpsc::Sender<Result<(), String>>) {
     for line in reader.lines() {
         let Ok(line) = line else { break };
