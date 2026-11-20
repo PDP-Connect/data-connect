@@ -11,7 +11,8 @@
  */
 
 import { collectionProfileDeclarationError } from "@pdpp/connector-protocol";
-import { tuningEnvironmentKeyOwner } from "../runtime/connector-child-environment.ts";
+import { ownsTuningKey } from "../runtime/connector-child-environment.ts";
+import { isServerOwnedEnvironmentKey } from "./server-owned-environment.ts";
 import {
   normalizeStaticSecretCredentialCapture,
   StaticSecretCredentialCaptureError,
@@ -21,7 +22,6 @@ import {
   canonicalConnectorKey,
   canonicalConnectorKeyFromManifest,
   connectorIdMustBeKeyShaped,
-  firstPartyConnectorKeys,
   isConnectorKey,
 } from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
@@ -560,6 +560,12 @@ function validateLocalPathEntry(entry: unknown, index: number, code: string): vo
       code
     );
   }
+  if (typeof obj.env_override === "string" && isServerOwnedEnvironmentKey(obj.env_override)) {
+    throw invalidConnectorManifest(
+      `runtime_requirements.local_paths.paths[${index}].env_override ${obj.env_override} is a server-owned environment variable`,
+      code
+    );
+  }
   if (obj.required_for_readiness !== undefined && typeof obj.required_for_readiness !== "boolean") {
     throw invalidConnectorManifest(
       `runtime_requirements.local_paths.paths[${index}].required_for_readiness must be a boolean`,
@@ -599,6 +605,12 @@ function validateLocalPaths(req: Record<string, unknown>, code: string): void {
       code
     );
   }
+  if (typeof obj.home_env_override === "string" && isServerOwnedEnvironmentKey(obj.home_env_override)) {
+    throw invalidConnectorManifest(
+      `runtime_requirements.local_paths.home_env_override ${obj.home_env_override} is a server-owned environment variable`,
+      code
+    );
+  }
   if (!Array.isArray(obj.paths)) {
     throw invalidConnectorManifest("runtime_requirements.local_paths.paths must be an array", code);
   }
@@ -610,10 +622,16 @@ function validateLocalPaths(req: Record<string, unknown>, code: string): void {
 const TUNING_ENVIRONMENT_KEY = /^[A-Z][A-Z0-9_]*$/;
 
 // Validates `runtime_requirements.tuning_environment`: the operator tuning
-// knobs a connector reads. A first-party manifest may only declare keys in its
-// own PDPP_<KEY>_ namespace; the runtime would drop any other key at spawn, so
-// the mistake fails here instead of silently at run time.
-function validateTuningEnvironment(manifest: Record<string, unknown>, req: Record<string, unknown>, code: string) {
+// knobs a connector reads. A manifest may only declare keys in its own
+// PDPP_<KEY>_ namespace and never a server-owned name; the runtime would drop
+// any other key at spawn, so the mistake fails here instead of silently at run
+// time.
+function validateTuningEnvironment(
+  manifest: Record<string, unknown>,
+  req: Record<string, unknown>,
+  code: string,
+  installedConnectorKeys: readonly string[]
+) {
   const declared = req.tuning_environment;
   if (declared === undefined) {
     return;
@@ -622,8 +640,7 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
     throw invalidConnectorManifest("runtime_requirements.tuning_environment must be an array when declared", code);
   }
   // The same identity registration stores and the runtime spawns with.
-  const firstPartyKey = canonicalConnectorKey(canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id);
-  const isFirstPartyKey = firstPartyKey !== null && firstPartyConnectorKeys().includes(firstPartyKey);
+  const ownKey = canonicalConnectorKey(canonicalConnectorKeyFromManifest(manifest) ?? manifest.connector_id);
   const seen = new Set<string>();
   for (const [index, key] of declared.entries()) {
     if (typeof key !== "string" || !TUNING_ENVIRONMENT_KEY.test(key)) {
@@ -636,9 +653,15 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
       throw invalidConnectorManifest(`runtime_requirements.tuning_environment duplicates ${key}`, code);
     }
     seen.add(key);
-    if (firstPartyKey !== null && isFirstPartyKey && tuningEnvironmentKeyOwner(key) !== firstPartyKey) {
+    if (isServerOwnedEnvironmentKey(key)) {
       throw invalidConnectorManifest(
-        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${firstPartyKey} tuning namespace`,
+        `runtime_requirements.tuning_environment[${index}] ${key} is a server-owned environment variable`,
+        code
+      );
+    }
+    if (ownKey !== null && !ownsTuningKey(ownKey, key, installedConnectorKeys)) {
+      throw invalidConnectorManifest(
+        `runtime_requirements.tuning_environment[${index}] ${key} is outside the ${ownKey} tuning namespace or belongs to a longer installed namespace`,
         code
       );
     }
@@ -649,7 +672,11 @@ function validateTuningEnvironment(manifest: Record<string, unknown>, req: Recor
 // Full manifest validation keeps main's hardened `detect.executable` contract;
 // runtime-requirements-only calls keep the branch's direct-helper compatibility
 // for legacy unit coverage.
-export function validateRuntimeRequirements(manifest: Record<string, unknown>, code: string): void {
+export function validateRuntimeRequirements(
+  manifest: Record<string, unknown>,
+  code: string,
+  installedConnectorKeys: readonly string[] = []
+): void {
   const requirements = manifest.runtime_requirements;
   if (requirements === undefined || requirements === null) {
     return;
@@ -658,7 +685,7 @@ export function validateRuntimeRequirements(manifest: Record<string, unknown>, c
     throw invalidConnectorManifest("runtime_requirements must be an object when declared", code);
   }
   const req = requirements as Record<string, unknown>;
-  validateTuningEnvironment(manifest, req, code);
+  validateTuningEnvironment(manifest, req, code, installedConnectorKeys);
   if (!validateRuntimeBindings(req, code)) {
     return;
   }
@@ -2195,7 +2222,12 @@ function validateManifestStream({
 export function validateConnectorManifest(
   manifest: Record<string, unknown> = {},
   code = "invalid_request",
-  opts: { skipCollectionProfileCheck?: boolean; skipCursorFieldSortCheck?: boolean } = {}
+  opts: {
+    /** Canonical keys of the installed connectors, for the tuning-namespace rule. */
+    installedConnectorKeys?: readonly string[];
+    skipCollectionProfileCheck?: boolean;
+    skipCursorFieldSortCheck?: boolean;
+  } = {}
 ): void {
   const hasConnectorId = isNonEmptyString(manifest.connector_id);
   const hasConnectorKey = isNonEmptyString(manifest.connector_key);
@@ -2246,7 +2278,7 @@ export function validateConnectorManifest(
   if (!opts.skipCollectionProfileCheck) {
     validateCollectionProfileDeclaration(manifest, code);
   }
-  validateRuntimeRequirements(manifest, code);
+  validateRuntimeRequirements(manifest, code, opts.installedConnectorKeys);
   validateRefreshPolicyCapability(manifest, code);
   validateDeclaredReasonTokensCapability(manifest, code);
   validateProvenCapability(manifest, code);

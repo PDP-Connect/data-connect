@@ -229,6 +229,24 @@ test("validateRuntimeRequirements: rejects an unsupported local_paths key", () =
   );
 });
 
+test("validateRuntimeRequirements: rejects a local path override that names a server-owned variable", () => {
+  assertRejects(
+    withBindingsAndLocalPaths({
+      home_default_relative_to_user_home: ".x",
+      paths: [{ default_relative_to_home: "data", env_override: "PDPP_DATABASE_URL", label: "data directory" }],
+    }),
+    "local_paths.paths[0].env_override PDPP_DATABASE_URL is a server-owned environment variable"
+  );
+  assertRejects(
+    withBindingsAndLocalPaths({
+      home_default_relative_to_user_home: ".x",
+      home_env_override: "PDPP_OWNER_TOKEN",
+      paths: [],
+    }),
+    "local_paths.home_env_override PDPP_OWNER_TOKEN is a server-owned environment variable"
+  );
+});
+
 test("validateRuntimeRequirements: rejects a missing home_default_relative_to_user_home", () => {
   assertRejects(
     withBindingsAndLocalPaths({ paths: [] }),
@@ -285,15 +303,23 @@ function withTuning(connector_id: string, tuning_environment: unknown): Record<s
   return { connector_id, runtime_requirements: { tuning_environment } };
 }
 
-test("validateRuntimeRequirements: tuning_environment accepts keys in the first-party namespace", () => {
+test("validateRuntimeRequirements: tuning_environment accepts keys in the connector's own namespace", () => {
   const chatgpt = "https://registry.pdpp.dev/connectors/chatgpt";
   assert.equal(validateRuntimeRequirements(withTuning(chatgpt, ["PDPP_CHATGPT_PACING_MIN_INTERVAL_MS"]), CODE), undefined);
   assert.equal(validateRuntimeRequirements(withTuning(chatgpt, []), CODE), undefined);
-  // A third-party manifest has no namespace; its keys still need an operator binding.
-  assert.equal(
-    validateRuntimeRequirements(withTuning("https://registry.example.com/connectors/x", ["EXAMPLE_PAGE_SIZE"]), CODE),
-    undefined
-  );
+});
+
+test("validateRuntimeRequirements: a connector in no list owns its own PDPP_<KEY>_ namespace and no other", () => {
+  // The key `acme-widgets` appears in no list. Its own namespace is accepted;
+  // another connector's namespace and a bare key are rejected, as for any manifest.
+  const acme = { connector_key: "acme-widgets" };
+  const declare = (...keys: string[]) => ({ ...acme, runtime_requirements: { tuning_environment: keys } });
+  assert.equal(validateRuntimeRequirements(declare("PDPP_ACME_WIDGETS_PAGE_SIZE"), CODE), undefined);
+  assertRejects(declare("PDPP_OTHER_PAGE_SIZE"), "PDPP_OTHER_PAGE_SIZE is outside the acme-widgets tuning namespace");
+  assertRejects(declare("EXAMPLE_PAGE_SIZE"), "EXAMPLE_PAGE_SIZE is outside the acme-widgets tuning namespace");
+  assertRejects(declare("PDPP_ACME_WIDGETS_"), "outside the acme-widgets tuning namespace");
+  // A manifest identified only by a foreign registry URL has no usable namespace.
+  assertRejects(withTuning("https://registry.example.com/connectors/x", ["EXAMPLE_PAGE_SIZE"]), "tuning namespace");
 });
 
 test("validateRuntimeRequirements: tuning_environment is validated even without bindings", () => {
@@ -320,4 +346,24 @@ test("validateRuntimeRequirements: tuning_environment uses the connector_key ide
     ),
     undefined
   );
+});
+
+test("validateRuntimeRequirements: a manifest keyed database cannot declare a server-owned name", () => {
+  const declare = (...keys: string[]) => ({
+    connector_key: "database",
+    runtime_requirements: { tuning_environment: keys },
+  });
+  assertRejects(declare("PDPP_DATABASE_URL"), "PDPP_DATABASE_URL is a server-owned environment variable");
+  assertRejects(declare("PDPP_DATABASE_PAGE_SIZE"), "is a server-owned environment variable");
+});
+
+test("validateRuntimeRequirements: a key in a longer installed namespace is not the shorter connector's", () => {
+  const foo = { connector_key: "foo", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  assert.equal(validateRuntimeRequirements(foo, CODE), undefined, "no longer connector installed");
+  assert.throws(
+    () => validateRuntimeRequirements(foo, CODE, ["foo", "foo_bar"]),
+    /belongs to a longer installed namespace/
+  );
+  const fooBar = { connector_key: "foo_bar", runtime_requirements: { tuning_environment: ["PDPP_FOO_BAR_X"] } };
+  assert.equal(validateRuntimeRequirements(fooBar, CODE, ["foo", "foo_bar"]), undefined);
 });

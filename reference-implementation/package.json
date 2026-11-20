@@ -48,7 +48,6 @@
     "dev:trace-gc": "sh -c 'mkdir -p ../tmp/node-reports && node --env-file-if-exists=../.env.local --import ./server/dev-env-defaults.ts --report-on-fatalerror --report-uncaught-exception --report-exclude-env --report-exclude-network --report-directory=../tmp/node-reports --trace-gc --trace-gc-verbose server/index.ts'",
     "example-client": "node examples/third-party-app/server.ts",
     "fix": "ultracite fix",
-    "generate:connector-registry": "node --experimental-strip-types scripts/generate-connector-registry.ts",
     "provision:test-database": "node --experimental-strip-types scripts/provision-test-database.ts",
     "server": "sh -c 'PDPP_REFERENCE_OPERATIONAL_DEFAULTS=${PDPP_REFERENCE_OPERATIONAL_DEFAULTS:-1} node --env-file-if-exists=../.env.local server/index.ts'",
     "test": "node --import tsx ../scripts/test-scratch/run-command.ts -- scripts/test-sandboxed.sh --cpu 800 --mem 16G -- node scripts/run-tests.ts",

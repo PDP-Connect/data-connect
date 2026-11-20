@@ -5544,7 +5544,9 @@ export async function registerConnector(
     skipManifestPersistence?: boolean;
   } = {}
 ): Promise<string> {
-  validateConnectorManifest(manifest);
+  validateConnectorManifest(manifest, "invalid_request", {
+    installedConnectorKeys: await listInstalledConnectorKeys(),
+  });
   const { connectorId, storedManifest } = normalizeConnectorManifestForStorage(manifest);
   if (!options.skipManifestPersistence) {
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
@@ -5687,6 +5689,16 @@ export function normalizeConnectorManifestForStorage(manifest: Record<string, un
 export async function listRegisteredConnectorIds(): Promise<string[]> {
   const rows = await getConnectorCatalogStore().listIds();
   return rows.flatMap((row) => (isNonEmptyString(row.connector_id) ? [row.connector_id] : []));
+}
+
+/**
+ * Canonical keys of every installed connector (vendored, signed-catalog and
+ * local sources; all are registered in the connector catalog). Tuning-namespace
+ * ownership uses it to give a key to the connector with the longest namespace.
+ */
+export async function listInstalledConnectorKeys(): Promise<string[]> {
+  const ids = await listRegisteredConnectorIds();
+  return [...new Set(ids.map((id) => canonicalConnectorKey(id) ?? id))];
 }
 
 /**

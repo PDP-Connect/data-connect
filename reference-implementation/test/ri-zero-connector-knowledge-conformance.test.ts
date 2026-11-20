@@ -915,8 +915,8 @@ test("falsifiability (rule 5 counterweight): a helper missing the reject-on-esca
 // --- Rule (5) widened fix: import.meta.resolve("@pdpp/polyfill-connectors/manifests")
 // as a recognized manifest-root anchor --------------------------------------
 //
-// runtime/controller.ts:1374 and scripts/generate-connector-registry.ts:104
-// both resolve the installed @pdpp/polyfill-connectors package's manifests
+// runtime/controller.ts:1374
+// resolves the installed @pdpp/polyfill-connectors package's manifests
 // directory via `dirname(fileURLToPath(import.meta.resolve(
 // "@pdpp/polyfill-connectors/manifests")))` -- that package is a pinned
 // tarball dependency (node_modules/@pdpp/polyfill-connectors), not a
