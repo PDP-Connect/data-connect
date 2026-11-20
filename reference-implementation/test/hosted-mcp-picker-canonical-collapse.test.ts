@@ -32,35 +32,39 @@ import test from "node:test";
 import { getConnectorManifest, listRegisteredConnectorIds, registerConnector } from "../server/auth.ts";
 import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { closeDb, initDb } from "../server/db.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 function claudeCodeManifest(connectorId: string, displayName: string) {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: connectorId,
-    display_name: displayName,
-    manifest_uri: connectorId.startsWith("http") ? connectorId : "https://registry.pdpp.dev/connectors/claude-code",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        consent_time_field: "ts",
-        cursor_field: "ts",
-        name: "sessions",
-        primary_key: ["id"],
-        query: {},
-        schema: {
-          properties: {
-            id: { type: "string" },
-            ts: { format: "date-time", type: "string" },
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: connectorId,
+      display_name: displayName,
+      manifest_uri: connectorId.startsWith("http") ? connectorId : "https://registry.pdpp.dev/connectors/claude-code",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          consent_time_field: "ts",
+          cursor_field: "ts",
+          name: "sessions",
+          primary_key: ["id"],
+          query: {},
+          schema: {
+            properties: {
+              id: { type: "string" },
+              ts: { format: "date-time", type: "string" },
+            },
+            required: ["id", "ts"],
+            type: "object",
           },
-          required: ["id", "ts"],
-          type: "object",
+          selection: { fields: true, resources: true },
+          semantics: "mutable_state",
         },
-        selection: { fields: true, resources: true },
-        semantics: "mutable_state",
-      },
-    ],
-    version: "1.0.0",
-  };
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: connectorId.startsWith("http") ? connectorId : "https://registry.pdpp.dev/connectors/claude-code" }
+  );
 }
 
 test("registering a legacy local-collector alias and its canonical id yields one canonical connector row", async () => {
@@ -117,33 +121,36 @@ test("alias registered before its canonical id still collapses to one canonical 
 test("registerConnector accepts connector_key plus manifest_uri manifests", async () => {
   initDb();
   try {
-    const manifest = {
-      capabilities: { human_interaction: [] },
-      connector_key: "custom-source",
-      display_name: "Custom Source",
-      manifest_uri: "https://example.test/manifests/custom-source",
-      protocol_version: "0.1.0",
-      streams: [
-        {
-          consent_time_field: "updated_at",
-          cursor_field: "updated_at",
-          name: "items",
-          primary_key: ["id"],
-          query: {},
-          schema: {
-            properties: {
-              id: { type: "string" },
-              updated_at: { format: "date-time", type: "string" },
+    const manifest = withFixtureSourceDeclaration(
+      {
+        capabilities: { human_interaction: [] },
+        connector_key: "custom-source",
+        display_name: "Custom Source",
+        manifest_uri: "https://example.test/manifests/custom-source",
+        protocol_version: "0.1.0",
+        streams: [
+          {
+            consent_time_field: "updated_at",
+            cursor_field: "updated_at",
+            name: "items",
+            primary_key: ["id"],
+            query: {},
+            schema: {
+              properties: {
+                id: { type: "string" },
+                updated_at: { format: "date-time", type: "string" },
+              },
+              required: ["id", "updated_at"],
+              type: "object",
             },
-            required: ["id", "updated_at"],
-            type: "object",
+            selection: { fields: true, resources: true },
+            semantics: "mutable_state",
           },
-          selection: { fields: true, resources: true },
-          semantics: "mutable_state",
-        },
-      ],
-      version: "1.0.0",
-    };
+        ],
+        version: "1.0.0",
+      },
+      { sourceId: "https://example.test/manifests/custom-source" }
+    );
 
     const registeredId = await registerConnector(manifest);
     assert.equal(registeredId, "custom-source");

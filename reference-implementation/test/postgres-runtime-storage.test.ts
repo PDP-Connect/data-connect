@@ -78,6 +78,7 @@ import {
 } from "../server/stores/connector-instance-store.ts";
 import { createConnectorStateStore } from "../server/stores/connector-state-store.ts";
 import { createSchedulerStore } from "../server/stores/scheduler-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type ManifestLike = Record<string, unknown>;
 
@@ -590,12 +591,15 @@ if (POSTGRES_URL) {
 
   test("postgres lexical backfill rebuilds partial historical indexes", async () => {
     const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    const connectorId = `https://test.pdpp.dev/connectors/pg_lexical_backfill_${suffix}`;
+    const connectorId = `pg_lexical_backfill_${suffix}`;
+    const sourceId = `https://test.pdpp.dev/connectors/${connectorId}`;
     const connectorInstanceId = `cin_pg_lexical_backfill_${suffix}`;
     const stream = "messages";
-    const manifest = {
+    const manifest = withFixtureSourceDeclaration({
       connector_id: connectorId,
+      connector_key: connectorId,
       display_name: "Postgres Lexical Backfill Test",
+      manifest_uri: sourceId,
       protocol_version: "0.1.0",
       streams: [
         {
@@ -624,9 +628,9 @@ if (POSTGRES_URL) {
         },
       ],
       version: "1.0.0",
-    };
+    }, { sourceId });
     const grant = {
-      source: { id: connectorId, kind: "connector" },
+      source: { id: sourceId, kind: "connector" },
       streams: [
         {
           fields: ["id", "text"],
@@ -1877,16 +1881,19 @@ if (POSTGRES_URL) {
   //       #"Counts").
   test("postgres records list honors canonical sort and graded count", async () => {
     const suffix = `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-    const connectorId = `https://test.pdpp.dev/connectors/pg_canonical_${suffix}`;
+    const connectorId = `pg_canonical_${suffix}`;
+    const sourceId = `https://test.pdpp.dev/connectors/${connectorId}`;
     const connectorInstanceId = makeDefaultAccountConnectorInstanceId("owner_local", connectorId);
     const stream = "events";
     const grant = {
       streams: [{ fields: ["id", "title", "created_at"], name: stream }],
     };
-    const manifest = {
+    const manifest = withFixtureSourceDeclaration({
       capabilities: { human_interaction: [] },
       connector_id: connectorId,
+      connector_key: connectorId,
       display_name: "Postgres Canonical Contract Test",
+      manifest_uri: sourceId,
       protocol_version: "0.1.0",
       streams: [
         {
@@ -1908,7 +1915,7 @@ if (POSTGRES_URL) {
         },
       ],
       version: "1.0.0",
-    };
+    }, { sourceId });
 
     initDb(":memory:");
     await initPostgresStorage({ backend: "postgres", databaseUrl: POSTGRES_URL });

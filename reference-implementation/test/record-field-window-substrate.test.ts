@@ -21,6 +21,7 @@ import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { getRecordFieldWindow as getRecordFieldWindowUntyped, ingestRecord } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface QueryError extends Error {
   code?: string;
@@ -80,35 +81,38 @@ const STREAM = "emails";
 // A body long enough to exceed a single default window and prove paging.
 const LONG_BODY = "The quick brown fox jumps over the lazy dog. ".repeat(300).trim();
 
-const MANIFEST = {
-  connector_id: CONNECTOR_ID,
-  display_name: "Record field-window substrate",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "created_at",
-      cursor_field: "created_at",
-      name: STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          attachment: { type: "object" },
-          body: { type: "string" },
-          created_at: { format: "date-time", type: "string" },
-          id: { type: "string" },
-          read_count: { type: "integer" },
-          subject: { type: "string" },
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: CONNECTOR_ID,
+    display_name: "Record field-window substrate",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "created_at",
+        cursor_field: "created_at",
+        name: STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            attachment: { type: "object" },
+            body: { type: "string" },
+            created_at: { format: "date-time", type: "string" },
+            id: { type: "string" },
+            read_count: { type: "integer" },
+            subject: { type: "string" },
+          },
+          required: ["id"],
+          type: "object",
         },
-        required: ["id"],
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 const MUTATED_TIME_FIELD_MANIFEST = {
   ...MANIFEST,

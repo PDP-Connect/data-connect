@@ -29,6 +29,7 @@ import { basicIntrospectionAuthorization } from "../server/introspection-http.ts
 import { ingestRecord, queryRecordsAcrossBindings, resolveReadRequestBindings } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
 import { bindHostedMcpConsentChallenge } from "./helpers/hosted-mcp-consent-challenge.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 import {
   TEST_INTROSPECTION_SERVER_OPTS,
   TEST_RS_INTROSPECTION_CREDENTIALS,
@@ -4376,7 +4377,7 @@ test("hosted MCP picker excludes internal/test/stub connectors", async () => {
       version: "0.1.0",
     };
     const regResp = await fetchJson(`${asUrl}/connectors`, {
-      body: JSON.stringify(stubManifest),
+      body: JSON.stringify(withFixtureSourceDeclaration(stubManifest)),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });

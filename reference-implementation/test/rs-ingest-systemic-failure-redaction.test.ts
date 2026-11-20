@@ -38,6 +38,7 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { startServer } from "../server/index.ts";
 import { __setIngestFaultHookForTest } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // The reference owner-auth placeholder gate (server/owner-auth.ts) activates
 // whenever PDPP_OWNER_PASSWORD is set in the process environment, requiring
@@ -145,22 +146,25 @@ async function issueOwnerToken(asUrl: string, subjectId = "owner_local"): Promis
 }
 
 function manifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    display_name: "Redaction Probe Connector",
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: false },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Redaction Probe Connector",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: false },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 interface ReferenceTraceEvent {

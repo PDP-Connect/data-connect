@@ -28,6 +28,7 @@ import test from "node:test";
 import { runConnector } from "../runtime/index.ts";
 import { startServer } from "../server/index.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 /**
  * Minimal admission fixture for `runConnector`'s required `admitRunConnection`
@@ -50,7 +51,8 @@ function fakeAdmitRunConnection(): (input: {
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
 
 const STUB_MANIFEST = {
-  connector_id: "https://registry.pdpp.dev/connectors/test-failure-diagnostics-cp",
+  connector_id: "test-failure-diagnostics-cp",
+  connector_key: "test-failure-diagnostics-cp",
   display_name: "Failure diagnostics control-plane fixture",
   manifest_uri: "https://registry.pdpp.dev/connectors/test-failure-diagnostics-cp",
   protocol_version: "0.1.0",
@@ -174,7 +176,7 @@ test("connector failure diagnostics surface on owner timeline; not on /v1 surfac
 
   try {
     const registerResp = await fetch(`${asUrl}/connectors`, {
-      body: JSON.stringify(STUB_MANIFEST),
+      body: JSON.stringify(withFixtureSourceDeclaration(STUB_MANIFEST)),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });

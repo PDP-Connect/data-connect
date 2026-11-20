@@ -18,6 +18,7 @@ const TOP_LEVEL_REGEX_5 = /detect\.executable must be a non-empty string/u;
 import assert from "node:assert/strict";
 import test from "node:test";
 import { startServer } from "../server/index.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;
 
@@ -82,8 +83,9 @@ async function registerConnectorManifest(asUrl: string, manifest: unknown): Prom
 }
 
 function makeManifest(externalTools: unknown) {
-  return {
-    connector_id: "https://registry.pdpp.test/connectors/external-tools-fixture",
+  return withFixtureSourceDeclaration({
+    connector_id: "external-tools-fixture",
+    connector_key: "external-tools-fixture",
     display_name: "External tools fixture",
     protocol_version: "0.1.0",
     runtime_requirements: {
@@ -108,7 +110,7 @@ function makeManifest(externalTools: unknown) {
       },
     ],
     version: "0.1.0",
-  };
+  });
 }
 
 test("valid external tool declaration is accepted", async () => {

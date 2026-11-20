@@ -29,7 +29,6 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-
 import { projectRunAutomationPolicy } from "../runtime/run-automation-policy.ts";
 import {
   createRunExecutor,
@@ -40,6 +39,7 @@ import type { ConnectorSchedule } from "../runtime/scheduler-domain-types.ts";
 import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface DeviceAuthorization {
   device_code: string;
@@ -125,22 +125,25 @@ const OWNER_SUBJECT_ID = "owner_local";
 // fakeAdmitRunConnection, which relies on the same auto-provisioning.
 const CONNECTOR_INSTANCE_ID = makeDefaultAccountConnectorInstanceId(OWNER_SUBJECT_ID, CONNECTOR_ID);
 
-const MANIFEST = {
-  connector_id: CONNECTOR_ID,
-  display_name: "Timeout Honesty",
-  manifest_uri: "https://sources.example/timeout-honesty",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "items",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: CONNECTOR_ID,
+    display_name: "Timeout Honesty",
+    manifest_uri: "https://sources.example/timeout-honesty",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/timeout-honesty" }
+);
 
 const SCHEDULED_POLICY = projectRunAutomationPolicy({ refreshPolicy: null, triggerKind: "scheduled" });
 

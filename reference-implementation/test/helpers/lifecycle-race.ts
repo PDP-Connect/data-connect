@@ -29,6 +29,7 @@ import {
   postgresQuery,
 } from "../../server/postgres-storage.ts";
 import { ingestRecord } from "../../server/records.ts";
+import { withFixtureSourceDeclaration } from "./fixture-source-declaration.ts";
 import { withTemporaryPostgresDatabase } from "./postgres-temp-database.ts";
 
 export const CONNECTOR_ID = "lifecycle-race-probe";
@@ -107,33 +108,36 @@ export interface ManifestOptions {
 }
 
 export function lifecycleManifest(options: ManifestOptions): Record<string, unknown> {
-  return {
-    capabilities: { human_interaction: [] },
-    connector_id: CONNECTOR_ID,
-    display_name: "Lifecycle race probe",
-    manifest_uri: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: options.removedStream ? "other" : STREAM,
-        primary_key: ["id"],
-        query: {
-          search: {
-            ...(options.lexical === false ? {} : { lexical_fields: ["subject"] }),
-            ...(options.semantic ? { semantic_fields: ["subject"] } : {}),
+  return withFixtureSourceDeclaration(
+    {
+      capabilities: { human_interaction: [] },
+      connector_id: CONNECTOR_ID,
+      display_name: "Lifecycle race probe",
+      manifest_uri: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: options.removedStream ? "other" : STREAM,
+          primary_key: ["id"],
+          query: {
+            search: {
+              ...(options.lexical === false ? {} : { lexical_fields: ["subject"] }),
+              ...(options.semantic ? { semantic_fields: ["subject"] } : {}),
+            },
           },
+          schema: {
+            properties: { id: { type: "string" }, subject: { type: "string" } },
+            required: ["id", "subject"],
+            type: "object",
+          },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
         },
-        schema: {
-          properties: { id: { type: "string" }, subject: { type: "string" } },
-          required: ["id", "subject"],
-          type: "object",
-        },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "0.1.0",
-  };
+      ],
+      version: "0.1.0",
+    },
+    { sourceId: `https://registry.pdpp.dev/connectors/${CONNECTOR_ID}` }
+  );
 }
 
 export const TARGET = { connector_id: CONNECTOR_ID, connector_instance_id: INSTANCE_ID };

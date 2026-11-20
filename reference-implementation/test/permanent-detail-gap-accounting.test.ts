@@ -29,6 +29,7 @@ import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getDefaultConnectorDetailGapStore } from "../server/stores/connector-detail-gap-store.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 interface ClosableServer {
   abortStartupBackfill: (reason: string) => void;
@@ -124,31 +125,34 @@ async function issueOwnerToken(asUrl: string): Promise<string> {
   return token.access_token;
 }
 
-const MANIFEST = {
-  connector_id: "permanent-gap-accounting",
-  display_name: "Permanent Gap Accounting",
-  manifest_uri: "https://sources.example/permanent-gap-accounting",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "holdings",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      coverage_strategy: "parent_detail_accounting",
-      name: "valuations",
-      parent_streams: ["holdings"],
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "permanent-gap-accounting",
+    display_name: "Permanent Gap Accounting",
+    manifest_uri: "https://sources.example/permanent-gap-accounting",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "holdings",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+      {
+        coverage_strategy: "parent_detail_accounting",
+        name: "valuations",
+        parent_streams: ["holdings"],
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/permanent-gap-accounting" }
+);
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];
 function runtimeManifest(): RuntimeManifest {

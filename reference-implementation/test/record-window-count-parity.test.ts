@@ -18,6 +18,7 @@ import { registerConnector } from "../server/auth.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { ingestRecord, queryRecords as queryRecordsUntyped } from "../server/records.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 // queryRecords is imported from checkJs:false JS; its `manifest` parameter
 // is inferred as exactly `null` from a `manifest = null` default, which a
@@ -46,31 +47,34 @@ const POSTGRES_URL = process.env.PDPP_TEST_POSTGRES_URL;
 
 const CONNECTOR_ID = "window_parity_demo";
 const STREAM = "items";
-const MANIFEST = {
-  connector_id: CONNECTOR_ID,
-  display_name: "Record window count parity",
-  manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      consent_time_field: "created_at",
-      cursor_field: "created_at",
-      name: STREAM,
-      primary_key: ["id"],
-      schema: {
-        properties: {
-          body: { type: "string" },
-          created_at: { format: "date-time", type: "string" },
-          id: { type: "string" },
+const MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: CONNECTOR_ID,
+    display_name: "Record window count parity",
+    manifest_uri: `https://sources.example/${CONNECTOR_ID}`,
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        consent_time_field: "created_at",
+        cursor_field: "created_at",
+        name: STREAM,
+        primary_key: ["id"],
+        schema: {
+          properties: {
+            body: { type: "string" },
+            created_at: { format: "date-time", type: "string" },
+            id: { type: "string" },
+          },
+          type: "object",
         },
-        type: "object",
+        selection: { fields: true, resources: true },
+        semantics: "mutable_state",
       },
-      selection: { fields: true, resources: true },
-      semantics: "mutable_state",
-    },
-  ],
-  version: "1.0.0",
-};
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: `https://sources.example/${CONNECTOR_ID}` }
+);
 
 const SEED = [
   { body: "a", created_at: "2026-01-01T00:00:00.000Z", id: "r1" },

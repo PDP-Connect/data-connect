@@ -26,6 +26,7 @@ import { getConnectorManifest } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 /**
  * Admission fixture for `runConnector`'s required `admitRunConnection`
@@ -100,22 +101,25 @@ function streamSchema() {
 // Manifest as the RESOURCE SERVER sees it: only `items` (the drift stream is
 // absent, simulating a stale connectors row).
 function rsRegisteredManifest(connectorId: string) {
-  return {
-    connector_id: connectorId,
-    display_name: "Drift Test Connector",
-    manifest_uri: `https://sources.example/${connectorId}`,
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: streamSchema(),
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+  return withFixtureSourceDeclaration(
+    {
+      connector_id: connectorId,
+      display_name: "Drift Test Connector",
+      manifest_uri: `https://sources.example/${connectorId}`,
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: streamSchema(),
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: `https://sources.example/${connectorId}` }
+  );
 }
 
 // Manifest as the RUNTIME sees it: `items` + the drift stream. The runtime

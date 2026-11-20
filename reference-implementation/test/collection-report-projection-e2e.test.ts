@@ -6,10 +6,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-
 import { runConnector } from "../runtime/index.ts";
 import { startServer } from "../server/index.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { withFixtureSourceDeclaration } from "./helpers/fixture-source-declaration.ts";
 
 /**
  * Minimal admission fixture for `runConnector`'s required `admitRunConnection`
@@ -115,29 +115,32 @@ rl.on('line', (line) => {
   return { cleanup: () => rmSync(tmpDir, { force: true, recursive: true }), connectorPath };
 }
 
-const TWO_STREAM_MANIFEST = {
-  connector_id: "creport-two-stream",
-  display_name: "Collection Report Two-Stream",
-  manifest_uri: "https://sources.example/creport-two-stream",
-  protocol_version: "0.1.0",
-  streams: [
-    {
-      name: "items",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" }, value: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-    {
-      name: "other_items",
-      primary_key: ["id"],
-      schema: { properties: { id: { type: "string" }, value: { type: "string" } }, required: ["id"], type: "object" },
-      selection: { fields: true, resources: true },
-      semantics: "append_only",
-    },
-  ],
-  version: "1.0.0",
-};
+const TWO_STREAM_MANIFEST = withFixtureSourceDeclaration(
+  {
+    connector_id: "creport-two-stream",
+    display_name: "Collection Report Two-Stream",
+    manifest_uri: "https://sources.example/creport-two-stream",
+    protocol_version: "0.1.0",
+    streams: [
+      {
+        name: "items",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" }, value: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+      {
+        name: "other_items",
+        primary_key: ["id"],
+        schema: { properties: { id: { type: "string" }, value: { type: "string" } }, required: ["id"], type: "object" },
+        selection: { fields: true, resources: true },
+        semantics: "append_only",
+      },
+    ],
+    version: "1.0.0",
+  },
+  { sourceId: "https://sources.example/creport-two-stream" }
+);
 
 type RuntimeManifest = Parameters<typeof runConnector>[0]["manifest"];
 
@@ -392,22 +395,25 @@ test("2.4: a collected-records, no-gaps, no-considered run is NOT projected comp
 // ─── 2.6: a portable RECORD/STATE/DONE-only connector still yields a report ───
 
 test("2.6: a portable RECORD/STATE/DONE-only connector yields a valid report with unknown axes", async () => {
-  const manifest = {
-    connector_id: "creport-portable",
-    display_name: "Portable Floor",
-    manifest_uri: "https://sources.example/creport-portable",
-    protocol_version: "0.1.0",
-    streams: [
-      {
-        name: "items",
-        primary_key: ["id"],
-        schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
-        selection: { fields: true, resources: true },
-        semantics: "append_only",
-      },
-    ],
-    version: "1.0.0",
-  };
+  const manifest = withFixtureSourceDeclaration(
+    {
+      connector_id: "creport-portable",
+      display_name: "Portable Floor",
+      manifest_uri: "https://sources.example/creport-portable",
+      protocol_version: "0.1.0",
+      streams: [
+        {
+          name: "items",
+          primary_key: ["id"],
+          schema: { properties: { id: { type: "string" } }, required: ["id"], type: "object" },
+          selection: { fields: true, resources: true },
+          semantics: "append_only",
+        },
+      ],
+      version: "1.0.0",
+    },
+    { sourceId: "https://sources.example/creport-portable" }
+  );
   const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
   const { asPort, rsPort } = server;
   const asUrl = `http://localhost:${asPort}`;
