@@ -208,13 +208,13 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     return Promise.all(routes.map((route) => projectOwnedRoute(route, records, ownerStopped(route, known), readMissing)));
   }
   const guarded = [ctx.requireToken, ctx.requireOwner];
-  function get(path: string, run: (request: Request) => Promise<unknown>) {
-    app.get(`/v1/owner/reachability${path}`, ...guarded, wrap(run));
+  function get(path: string, run: (request: Request) => Promise<unknown>, notFoundCode?: string) {
+    app.get(`/v1/owner/reachability${path}`, ...guarded, wrap(run, notFoundCode));
   }
   function post(path: string, run: (request: Request) => Promise<unknown>) {
     app.post(`/v1/owner/reachability${path}`, ...guarded, ctx.requireCsrf, wrap(run));
   }
-  function wrap(run: (request: Request) => Promise<unknown>): Handler {
+  function wrap(run: (request: Request) => Promise<unknown>, notFoundCode?: string): Handler {
     return async (request, response) => {
       response.setHeader("Cache-Control", "no-store");
       try {
@@ -224,7 +224,8 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         }
         return response.json({ data });
       } catch (error) {
-        return response.status(409).json({ error: publicReachabilityError(error) });
+        const projected = publicReachabilityError(error);
+        return response.status(projected.code === notFoundCode ? 404 : 409).json({ error: projected });
       }
     };
   }
@@ -505,8 +506,11 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       starting: state.starting,
     };
   });
-  get("/drafts/:id", async (request) =>
-    projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id)))
+  get(
+    "/drafts/:id",
+    async (request) =>
+      projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id))),
+    "draft_not_found"
   );
   // Per-router single flight includes the journal read, host effect and durable record.
   // Once settled, a later request follows the normal resume path below.
