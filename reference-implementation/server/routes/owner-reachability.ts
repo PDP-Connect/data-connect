@@ -580,8 +580,9 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     );
   });
   post("/drafts/:id/discard", async (request) => {
-    const result = await service().discard(text(request.params.id));
-    await ctx.setups.dropDraft(text(request.params.id));
+    const id = text(request.params.id);
+    const result = await service().discard(id);
+    if (result.discarded === true) await ctx.setups.dropDraft(id);
     return result;
   });
   post("/drafts/:id/commit", async (request) => {

@@ -531,6 +531,7 @@ export class ReachabilityService {
   async discard(id: string): Promise<{ discarded: boolean }> {
     const saved = this.draft(id);
     const result = await this.api.discardConfigurationDraft(this.ref(saved.providerId, id));
+    if (result.discarded !== true) return result;
     // The library discards only draft-owned, unreferenced staged bytes.
     // Promoted/live bindings remain under its authorization checks.
     this.drafts.delete(id);
