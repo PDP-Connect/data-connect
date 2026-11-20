@@ -1,81 +1,118 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-
-# Run the already-compiled WebKitGTK cookie test binary directly, with its
-# output in a file (no pipe for a child to hold open), and report what keeps the
-# process alive if it does not exit after the test prints its RAN marker.
-# Usage (inside xvfb-run + dbus-run-session): webkitgtk-cookie-probe.sh <test-binary> <log>
-# Records only process state, syscall numbers and symbol-only stacks: no
-# environment, memory contents or network traffic.
+# Usage (inside xvfb-run + dbus-run-session): webkitgtk-cookie-probe.sh <test-binary>
+# Raw libtest stdout/stderr are private scratch. Only fixed summaries leave this script.
 set -uo pipefail
+# Bash job diagnostics are not part of the published summary.
+exec 2>/dev/null
+umask 077
 bin=$1
-log=$2
-: >"$log"
 name=unified::tests::the_console_webview_sends_the_session_and_reveal_cookies
-"$bin" --ignored --exact "$name" --nocapture >"$log" 2>&1 &
-pid=$!
-echo "probe: test binary pid=$pid"
-gdb_out="$log.gdb"
-
-tree() { # print pid and all descendants of $1
-  local p=$1 c
-  echo "$p"
-  for c in $(pgrep -P "$p" 2>/dev/null || true); do tree "$c"; done
+scratch=$(mktemp -d) || { echo 'probe: scratch setup failed'; exit 125; }
+log=$scratch/raw
+status=$scratch/status
+pid=''
+identity=''
+group_identity() {
+  local stat
+  local -a fields
+  IFS= read -r stat <"/proc/$pid/stat" || return 1
+  read -r -a fields <<< "${stat##*) }"
+  [[ "${fields[2]:-}" == "$pid" && -n "${fields[19]:-}" ]] || return 1
+  printf '%s\n' "${fields[19]}"
 }
+owns_group() { [[ -n "$identity" && "$(group_identity 2>/dev/null)" == "$identity" ]]; }
+retire_group() {
+  # With monitor mode, the single async subshell is the leader of its own
+  # process group. Check the group, not PPID: its leader may already have exited.
+  [[ -n "$pid" ]] || return 0
+  kill -0 -- "-$pid" 2>/dev/null || return 0
+  owns_group || return 1
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  # The supervisor intentionally remains alive; allow children a bounded grace.
+  sleep 0.5
+  owns_group || return 1
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  for ((i=0; i<20; i++)); do
+    kill -0 -- "-$pid" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
+}
+finish() {
+  local code=$?
+  trap - EXIT
+  trap '' TERM INT HUP
+  if ! retire_group; then
+    echo 'probe: process group retirement unconfirmed'
+    code=125
+  fi
+  rm -f -- "$log" "$status" 2>/dev/null && rmdir -- "$scratch" 2>/dev/null || {
+    echo 'probe: scratch cleanup failed'
+    code=125
+  }
+  ((code != 0)) || echo 'probe: cookie test RAN and passed'
+  exit "$code"
+}
+trap finish EXIT
+trap 'exit 124' TERM INT HUP
 
-# Wait for RAN (60 s), then for exit (10 s).
-for _ in $(seq 1 600); do
-  grep -q '^WEBKITGTK COOKIE TEST RAN$' "$log" && break
-  kill -0 "$pid" 2>/dev/null || break
-  sleep 0.1
+# Explicit runtime environment: executable lookup, isolated home/temp and XDG
+# directories, X display and authority, D-Bus, and the test's compile-root hint.
+# Do not forward the workflow lease, Cargo credentials, or an ambient env dump.
+allow=()
+for key in PATH HOME TMPDIR TMP TEMP DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_RUNTIME_DIR CARGO_MANIFEST_DIR TAURI_CONFIG; do
+  [[ -v "$key" ]] && allow+=("$key=${!key}")
 done
-for _ in $(seq 1 100); do
-  kill -0 "$pid" 2>/dev/null || break
-  sleep 0.1
+echo 'probe: starting cookie test'
+set -m
+(
+  set +m
+  # Hold the original group leader through normal child exit and TERM. A
+  # matching /proc birth witness is required before signaling any group.
+  trap ':' TERM
+  ( exec env -i "${allow[@]}" "$bin" --ignored --exact "$name" --nocapture )
+  printf '%d\n' "$?" >"$status"
+  while :; do sleep 1; done
+) >"$log" 2>&1 &
+pid=$!
+for ((i=0; i<10; i++)); do
+  identity=$(group_identity) && break
+  sleep 0.02
 done
-
-if kill -0 "$pid" 2>/dev/null; then
-  echo "probe: pid $pid STILL ALIVE after RAN (+10 s)"
-  echo "--- process tree (pid ppid stat wchan comm)"
-  for p in $(tree "$pid"); do
-    ps -o pid=,ppid=,stat=,wchan:24=,comm= -p "$p" 2>/dev/null
-  done
-  for p in $(tree "$pid"); do
-    echo "--- threads of $p $(cat /proc/"$p"/comm 2>/dev/null) (tid state wchan syscall-number comm)"
-    for t in /proc/"$p"/task/*; do
-      tid=${t##*/}
-      printf '%s %s %s %s %s\n' "$tid" \
-        "$(awk '/^State:/{print $2}' "$t/status" 2>/dev/null)" \
-        "$(cat "$t/wchan" 2>/dev/null)" \
-        "$(cut -d' ' -f1 "$t/syscall" 2>/dev/null)" \
-        "$(cat "$t/comm" 2>/dev/null)"
-    done
-  done
-  echo "--- stdout/stderr targets of the tree (fd 1, 2)"
-  for p in $(tree "$pid"); do
-    printf '%s: %s %s\n' "$p" "$(readlink /proc/"$p"/fd/1 2>/dev/null)" "$(readlink /proc/"$p"/fd/2 2>/dev/null)"
-  done
-  for p in $(tree "$pid"); do
-    case "$(cat /proc/"$p"/comm 2>/dev/null)" in bash|sh|tee|"") continue ;; esac
-    echo "--- gdb: all thread backtraces of $p $(cat /proc/"$p"/comm 2>/dev/null) (no frame arguments)"
-    # gdb writes to a file, not a pipe, so nothing it leaves behind can hold
-    # the probe open; TERM then KILL bounds gdb itself.
-    sudo -n timeout --kill-after=5s 40s gdb -p "$p" -batch -ex 'set pagination off' \
-      -ex 'set print frame-arguments none' -ex 'thread apply all bt 30' >"$gdb_out" 2>&1 \
-      || echo "probe: gdb failed"
-    tail -n 300 "$gdb_out"
-  done
-  echo "--- end probe"
-  for p in $(tree "$pid"); do kill -KILL "$p" 2>/dev/null || true; done
-  wait "$pid" 2>/dev/null
-  cat "$log"
-  exit 124
+if [[ -z "$identity" ]]; then
+  echo 'probe: process ownership could not be established'
+  exit 125
 fi
 
-wait "$pid"
-code=$?
-echo "probe: test binary exited with $code"
-echo "--- remaining children of the probe shell (pid ppid stat comm)"
-for p in $(pgrep -P $$ 2>/dev/null || true); do ps -o pid=,ppid=,stat=,comm= -p "$p" 2>/dev/null; done
-cat "$log"
-exit "$code"
+# A gate can only pass on this attempt's exit and exact RAN result. Before RAN
+# allow 60s; once seen, allow up to 10s more for clean binary exit.
+for ((i=0; i<600; i++)); do
+  grep -qxF 'WEBKITGTK COOKIE TEST RAN' "$log" && break
+  [[ -s "$status" ]] || owns_group || break
+  [[ ! -s "$status" ]] || break
+  sleep 0.1
+done
+for ((i=0; i<100; i++)); do
+  [[ -s "$status" ]] || owns_group || break
+  [[ ! -s "$status" ]] || break
+  sleep 0.1
+done
+if [[ ! -s "$status" ]]; then
+  echo 'probe: cookie test timed out'
+  exit 124
+fi
+IFS= read -r code <"$status" || exit 125
+if ((code != 0)); then
+  printf 'probe: cookie test exited with status %d\n' "$code"
+  exit "$code"
+fi
+if ! grep -qxF 'WEBKITGTK COOKIE TEST RAN' "$log"; then
+  echo 'probe: cookie test RAN marker missing'
+  exit 1
+fi
+if ! grep -q '^test result: ok\. 1 passed;' "$log"; then
+  echo 'probe: cookie test pass result missing'
+  exit 1
+fi
+echo 'probe: cookie test RAN and passed'
