@@ -140,3 +140,103 @@ test("recovery_hint accepts only actionable shapes", () => {
     assert.match(result.message, INVALID_RECOVERY_HINT_MESSAGE_PATTERN);
   }
 });
+
+// Pinned truth: Collection Profile 0.2.0 Sections 3.8, 5.10-5.11,
+// data-connectors 9e70c433. Direct deterministic rules complement the real-child
+// persistence/continuation tests in collection-profile.test.ts.
+test("OBSERVATION diagnosis limits scope to cited, live, declared facts", async () => {
+  const { createObservationRunRecord } = await import("../runtime/observation.ts");
+  const { diagnoseObservationFailure } = await import("../runtime/failure-diagnosis.ts");
+  const store = createObservationRunRecord({
+    diagnostic_descriptors: { expectations: [{ id: "email", step: "login" }], steps: [{ id: "login" }] },
+    protocol_capabilities: ["OBSERVATION"],
+  });
+  const observe = (id: string, fact: string, attrs: Record<string, unknown>, extra = {}) =>
+    store.accept({ attrs, fact, id, type: "OBSERVATION", ...extra }, 2048);
+  assert.equal(
+    observe(
+      "mismatch",
+      "element_expectation",
+      { expectation: "email", final: "hidden", states_seen: ["hidden"] },
+      { step: "login" }
+    ),
+    true
+  );
+  assert.equal(observe("wait", "wait_expired", { awaited: "email", budget_ms: 10 }, { step: "login" }), true);
+  assert.equal(observe("uncited", "provider_message", { kind: "auth_failure" }), true);
+  const diagnose = (basis: string[]) =>
+    diagnoseObservationFailure(store.snapshot(), { error: { basis }, status: "failed" });
+  assert.equal(diagnose(["wait"]).cause.category, "unknown");
+  assert.deepEqual(diagnose(["mismatch", "wait"]).cause, {
+    attribution: "connector",
+    basis: ["mismatch"],
+    category: "expectation_mismatch",
+  });
+  assert.equal(observe("recovered", "provider_message", { kind: "other" }, { resolves: ["mismatch"] }), true);
+  assert.equal(diagnose(["mismatch"]).cause.category, "unknown");
+  assert.equal(diagnose(["mismatch"]).facts.find((fact) => fact.id === "mismatch")?.retired, true);
+  assert.equal(observe("missing_rule", "provider_message", { kind: "auth_failure", rule: "not_declared" }), true);
+  assert.equal(diagnose(["missing_rule"]).cause.category, "unknown");
+  assert.equal(diagnoseObservationFailure(store.snapshot(), null).terminal_event, "process_exit");
+  const invalidDescriptors = createObservationRunRecord({
+    diagnostic_descriptors: {
+      expectations: [{ id: "email", step: "login" }],
+      steps: [{ id: "login" }, { id: "login" }],
+    },
+    protocol_capabilities: ["OBSERVATION"],
+  });
+  invalidDescriptors.accept(
+    {
+      attrs: { expectation: "email", final: "hidden", states_seen: ["hidden"] },
+      fact: "element_expectation",
+      id: "o1",
+      step: "login",
+      type: "OBSERVATION",
+    },
+    100
+  );
+  assert.equal(
+    diagnoseObservationFailure(invalidDescriptors.snapshot(), { error: { basis: ["o1"] }, status: "failed" }).cause
+      .category,
+    "unknown"
+  );
+});
+
+test("DONE.error.basis accepts only earlier connector facts with OBSERVATION declared", () => {
+  const observations = { declared: true, hasConnectorId: (id: string) => id === "o1" };
+  assert.deepEqual(validateDoneError("failed", { basis: ["o1"], message: "cause" }, observations), {
+    basis: ["o1"],
+    message: "cause",
+    retryable: null,
+  });
+  for (const basis of [["future"], ["runtime_record"], "o1", [1], null]) {
+    assert.ok(validateDoneError("failed", { basis, message: "cause" }, observations) instanceof Error);
+  }
+  assert.ok(
+    validateDoneError("failed", { basis: ["o1"], message: "cause" }, { ...observations, declared: false }) instanceof
+      Error
+  );
+});
+
+test("OBSERVATION evidence_ref accepts local handles and rejects URLs without //", async () => {
+  const { createObservationRunRecord } = await import("../runtime/observation.ts");
+  const store = createObservationRunRecord({ protocol_capabilities: ["OBSERVATION"] });
+  const fact = (id: string, evidence_ref: string) => ({
+    attrs: { kind: "other" },
+    evidence_ref,
+    fact: "provider_message",
+    id,
+    type: "OBSERVATION",
+  });
+  assert.equal(store.accept(fact("local", "trace:step-3"), 150), true);
+  assert.equal(store.accept(fact("relative", "artifacts/step-3.json"), 150), true);
+  for (const [index, reference] of [
+    "https:example.com",
+    "data:text/plain,provider-text",
+    "//example.com/private",
+    "file:/private",
+  ].entries()) {
+    assert.equal(store.accept(fact(`bad${index}`, reference), 150), false, reference);
+  }
+  assert.equal(store.snapshot().facts.filter((entry) => entry.source === "connector").length, 2);
+});

@@ -20,7 +20,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -766,6 +766,368 @@ function buildCoEmittedStreamManifest(connectorId = "test-co-emitted-stream") {
     ],
   };
 }
+
+test("DONE close-event exit codes", async (t) => {
+  for (const status of ["succeeded", "failed", "cancelled"] as const) {
+    // biome-ignore lint/performance/noAwaitInLoops: SQLite/global stores require sequential server isolation.
+    await t.test(`DONE(${status}) records the real exit code after delayed child close`, async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-delayed-done-exit-"));
+      const connectorPath = join(tmpDir, "connector.mjs");
+      const exitCode = status === "succeeded" ? 0 : 1;
+      try {
+        const { ownerToken, connectorId } = await setupConnector(server, server.asPort);
+        // EOF proves the parent already handled DONE. Hold the process open
+        // afterward so a premature finalizer cannot read a settled exit code.
+        writeFileSync(
+          connectorPath,
+          `
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  if (JSON.parse(line).type !== "START") return;
+  process.stdin.once("end", () => {
+    setTimeout(() => process.exit(${exitCode}), 50);
+  });
+  process.stdout.write(${JSON.stringify(JSON.stringify({ records_emitted: 0, status, type: "DONE" }) + "\n")});
+});
+`,
+          "utf8"
+        );
+        const result = await runTestConnector({
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: MINIMAL_MANIFEST,
+          ownerToken,
+          persistState: false,
+          rsUrl: `http://localhost:${server.rsPort}`,
+          state: null,
+        });
+        assert.equal(result.status, status);
+        assert.equal(result.exit_code, exitCode);
+        const { body } = await fetchJson<TimelineBody>(
+          `http://localhost:${server.asPort}/_ref/runs/${encodeURIComponent(requireRunId(result))}/timeline`
+        );
+        const terminalEvents = (body.data || []).filter(
+          (event) => event.event_type === "run.completed" || event.event_type === "run.failed"
+        );
+        assert.equal(terminalEvents.length, 1, "child close records exactly one terminal event");
+        const [terminal] = terminalEvents;
+        assert.ok(terminal);
+        assert.equal(terminal.status, status);
+        assert.equal(terminal.data.exit_code, exitCode);
+      } finally {
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    });
+  }
+});
+
+test("OBSERVATION conformance", async (t) => {
+  for (const scenario of [
+    { name: "mismatched declared step", factStep: "other_step", ruleStep: "sign_in", supported: false },
+    { name: "missing required step", factStep: undefined, ruleStep: "sign_in", supported: false },
+    { name: "matching declared step", factStep: "sign_in", ruleStep: "sign_in", supported: true },
+    { name: "unscoped rule with step", factStep: "other_step", ruleStep: undefined, supported: true },
+    { name: "unscoped rule without step", factStep: undefined, ruleStep: undefined, supported: true },
+  ]) {
+    // biome-ignore lint/performance/noAwaitInLoops: keep conformance subtests sequential.
+    await t.test(`OBSERVATION auth rule: ${scenario.name}`, async () => {
+      const { createObservationRunRecord } = await import("../runtime/observation.ts");
+      const { diagnoseObservationFailure } = await import("../runtime/failure-diagnosis.ts");
+      const record = createObservationRunRecord({
+        diagnostic_descriptors: {
+          rules: [{ id: "login", kind: "auth", ...(scenario.ruleStep ? { step: scenario.ruleStep } : {}) }],
+          steps: [{ id: "sign_in" }, { id: "other_step" }],
+        },
+        protocol_capabilities: ["OBSERVATION"],
+      });
+      assert.equal(
+        record.accept(
+          {
+            attrs: { kind: "auth_failure", rule: "login" },
+            fact: "provider_message",
+            id: "auth",
+            ...(scenario.factStep ? { step: scenario.factStep } : {}),
+            type: "OBSERVATION",
+          },
+          128
+        ),
+        true
+      );
+      const diagnosis = diagnoseObservationFailure({
+        ...record.snapshot(),
+        done: { error: { basis: ["auth"] }, status: "failed" },
+      });
+      assert.deepEqual(
+        diagnosis.cause,
+        scenario.supported
+          ? { attribution: "connector", basis: ["auth"], category: "auth_rejected" }
+          : { attribution: "none", basis: [], category: "unknown" }
+      );
+    });
+  }
+
+  for (const scenario of ["malformed", "truncated", "after_done"] as const) {
+    // biome-ignore lint/performance/noAwaitInLoops: SQLite/global stores require sequential server isolation.
+    await t.test(`OBSERVATION ${scenario}: excludes raw secrets from traces and exposed errors`, async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const tmpDir = mkdtempSync(join(tmpdir(), "pdpp-observation-parse-"));
+      const traceDir = join(tmpDir, "trace");
+      const connectorPath = join(tmpDir, "connector.mjs");
+      const priorTraceDir = process.env.PDPP_TRACE_DIR;
+      const sentinel = "synthetic_observation_parse_secret";
+      const rawLine =
+        scenario === "truncated"
+          ? `{"type":"OBSERVATION","attrs":{"text":"${sentinel}`
+          : `{"type":"OBSERVATION","attrs":${sentinel}}`;
+      const prefix =
+        scenario === "after_done"
+          ? JSON.stringify({ records_emitted: 0, status: "succeeded", type: "DONE" }) + "\n"
+          : "";
+      const output = prefix + rawLine + (scenario === "truncated" ? "" : "\n");
+      const progress: unknown[] = [];
+      try {
+        const { ownerToken, connectorId } = await setupConnector(server, server.asPort);
+        process.env.PDPP_TRACE_DIR = traceDir;
+        writeFileSync(
+          connectorPath,
+          `
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  if (JSON.parse(line).type !== "START") return;
+  process.stdout.write(${JSON.stringify(output)}, () => {
+    rl.close();
+    process.exit(0);
+  });
+});
+`,
+          "utf8"
+        );
+        let rejected: RuntimeRunConnectorError | undefined;
+        await assert.rejects(
+          runTestConnector({
+            collectionMode: "full_refresh",
+            connectorId,
+            connectorPath,
+            manifest: { ...MINIMAL_MANIFEST, protocol_capabilities: ["OBSERVATION"], protocol_version: "0.2.0" },
+            onProgress: (event) => progress.push(event),
+            ownerToken,
+            persistState: false,
+            rsUrl: `http://localhost:${server.rsPort}`,
+            state: null,
+          }),
+          (error: unknown) => {
+            rejected = asRuntimeError(error);
+            assert.ok(rejected.message.includes("invalid JSONL"));
+            assert.ok(rejected.message.includes("line_bytes="));
+            assert.ok(!rejected.message.includes(sentinel));
+            assert.ok(!String(rejected.stack).includes(sentinel));
+            assert.ok(!JSON.stringify(rejected).includes(sentinel));
+            return true;
+          }
+        );
+        const { body } = await fetchJson<TimelineBody>(
+          `http://localhost:${server.asPort}/_ref/runs/${encodeURIComponent(requireRunId(rejected))}/timeline`
+        );
+        assert.ok(!JSON.stringify(body).includes(sentinel));
+        assert.ok(!JSON.stringify(progress).includes(sentinel));
+        const traceFiles = readdirSync(traceDir);
+        assert.ok(traceFiles.length > 0);
+        const trace = traceFiles.map((file) => readFileSync(join(traceDir, file), "utf8")).join("\n");
+        assert.ok(!trace.includes(sentinel));
+        assert.ok(trace.includes("__PARSE_ERROR__"));
+      } finally {
+        if (priorTraceDir === undefined) {
+          delete process.env.PDPP_TRACE_DIR;
+        } else {
+          process.env.PDPP_TRACE_DIR = priorTraceDir;
+        }
+        rmSync(tmpDir, { force: true, recursive: true });
+        await closeServer(server);
+      }
+    });
+  }
+
+  // Collection Profile 0.2.0 Sections 5.10-5.11, data-connectors 9e70c433.
+  // A real child and SQLite spine test continuation and durable diagnosis.
+  for (const scenario of ["diagnosis", "violations", "truncated", "undeclared", "bad_basis"] as const) {
+    // biome-ignore lint/performance/noAwaitInLoops: SQLite/global stores require sequential server isolation.
+    await t.test(`OBSERVATION ${scenario}: preserves collection and stores typed evidence`, async () => {
+      const server = await startTestServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+      const { ownerToken, connectorId } = await setupConnector(server, server.asPort);
+      const observation = (id: string, extra: Record<string, unknown> = {}) => ({
+        attrs: { expectation: "email_input", final: "hidden", states_seen: ["absent", "hidden"] },
+        fact: "element_expectation",
+        id,
+        step: "sign_in",
+        type: "OBSERVATION",
+        ...extra,
+      });
+      let observations: Record<string, unknown>[];
+      if (scenario === "truncated") {
+        observations = Array.from({ length: 65 }, (_, index) => observation(`o${index}`));
+      } else if (scenario === "violations") {
+        observations = [
+          observation("o1"),
+          observation("o1"),
+          observation("bad", { attrs: { provider_text: "private_provider_text" } }),
+          observation("forged", { attrs: { outcome: "rejected" }, fact: "credential_submission" }),
+          observation("url", { evidence_ref: "https://provider.example/private" }),
+          observation("large", { evidence_ref: "é".repeat(1024) }),
+          observation("future", { resolves: ["not_yet_seen"] }),
+          observation("o2", {
+            attrs: { expectation: "email_input", final: "matched", states_seen: ["matched"] },
+            resolves: ["o1"],
+          }),
+        ];
+      } else {
+        observations = [
+          observation("o1"),
+          { attrs: { kind: "auth_failure" }, fact: "provider_message", id: "auth", type: "OBSERVATION" },
+          observation("undeclared_step", { step: "other_step" }),
+        ];
+      }
+      const failed = scenario === "diagnosis" || scenario === "bad_basis";
+      const { connectorPath, cleanup } = createTestConnector([
+        ...observations,
+        {
+          data: { id: "after_observation", value: "collected" },
+          emitted_at: "2026-01-01T00:00:00Z",
+          key: "after_observation",
+          stream: "items",
+          type: "RECORD",
+        },
+        { cursor: { after: "after_observation" }, stream: "items", type: "STATE" },
+        {
+          records_emitted: 1,
+          status: failed ? "failed" : "succeeded",
+          type: "DONE",
+          ...(failed
+            ? {
+                error: {
+                  basis: scenario === "bad_basis" ? ["missing"] : ["o1", "auth", "undeclared_step"],
+                  message: "connector original cause",
+                  recovery_hint: "refresh_credentials",
+                  retryable: true,
+                },
+              }
+            : {}),
+        },
+      ]);
+      const priorTraceDir = process.env.PDPP_TRACE_DIR;
+      const traceDir = scenario === "violations" ? mkdtempSync(join(tmpdir(), "pdpp-observation-trace-")) : null;
+      try {
+        if (traceDir) {
+          process.env.PDPP_TRACE_DIR = traceDir;
+        }
+        const options: CollectionProfileRunOptions = {
+          collectionMode: "full_refresh",
+          connectorId,
+          connectorPath,
+          manifest: {
+            ...MINIMAL_MANIFEST,
+            protocol_version: "0.2.0",
+            ...(scenario === "undeclared" ? {} : { protocol_capabilities: ["OBSERVATION"] }),
+            diagnostic_descriptors: {
+              expectations: [{ id: "email_input", step: "sign_in" }],
+              steps: [{ id: "sign_in" }],
+            },
+          },
+          onInteraction: async () => ({}),
+          ownerToken,
+          persistState: true,
+          rsUrl: `http://localhost:${server.rsPort}`,
+          state: null,
+        };
+        let runId = "";
+        if (scenario === "bad_basis") {
+          await assert.rejects(runTestConnector(options), (error: unknown) => {
+            const runtimeError = asRuntimeError(error);
+            runId = requireRunId(runtimeError);
+            assert.ok(runtimeError.message.includes("DONE.error.basis"));
+            return true;
+          });
+        } else {
+          const result = await runTestConnector(options);
+          assert.equal(result.status, failed ? "failed" : "succeeded");
+          if (!failed) {
+            assert.equal(result.records_emitted, 1);
+            const state = await loadSyncState(connectorId, ownerToken, { rsUrl: `http://localhost:${server.rsPort}` });
+            assert.deepEqual(state?.items, { after: "after_observation" });
+          }
+          runId = requireRunId(result);
+        }
+        const { body } = await fetchJson<TimelineBody>(
+          `http://localhost:${server.asPort}/_ref/runs/${encodeURIComponent(runId)}/timeline`
+        );
+        const terminal = body.data?.find((event) => event.event_type === (failed ? "run.failed" : "run.completed"));
+        assert.ok(terminal);
+        const record = asRecord(terminal.data.run_record);
+        if (scenario !== "bad_basis") {
+          assert.deepEqual(record.process_exit, { code: failed ? 1 : 0 }, "normal DONE records the actual exit code");
+        }
+        const facts = asArray(record.facts).map(asRecord);
+        if (scenario === "diagnosis") {
+          const diagnosis = asRecord(terminal.data.failure_diagnosis);
+          assert.deepEqual(diagnosis.cause, { attribution: "connector", basis: ["auth"], category: "auth_rejected" });
+          assert.deepEqual(diagnosis.contributing, [
+            { attribution: "connector", basis: ["o1"], category: "expectation_mismatch" },
+          ]);
+          assert.equal(diagnosis.terminal_event, "failed_done");
+          const { diagnoseObservationFailure } = await import("../runtime/failure-diagnosis.ts");
+          assert.deepEqual(
+            diagnoseObservationFailure(
+              terminal.data.run_record as import("../runtime/observation.ts").ObservationRunRecord
+            ),
+            terminal.data.failure_diagnosis
+          );
+          assert.equal(terminal.data.connector_error_message, "connector original cause");
+          assert.equal(facts.length, 3);
+          assert.ok(facts.every((fact) => fact.source === "connector"));
+        } else if (scenario === "violations") {
+          const defects = facts.filter((fact) => fact.source === "runtime");
+          assert.deepEqual(defects.map((fact) => asRecord(fact.attrs).reason).sort(), [
+            "duplicate_id",
+            "invalid",
+            "oversize",
+            "runtime_fact_type",
+          ]);
+          assert.equal(asRecord(defects.find((fact) => asRecord(fact.attrs).reason === "invalid")?.attrs).count, 3);
+          assert.equal(facts.filter((fact) => fact.source === "connector").length, 2);
+          assert.ok(!JSON.stringify(body).includes("private_provider_text"));
+          assert.ok(traceDir);
+          const traceFiles = readdirSync(traceDir);
+          assert.ok(traceFiles.length > 0);
+          for (const file of traceFiles) {
+            assert.ok(!readFileSync(join(traceDir, file), "utf8").includes("private_provider_text"));
+          }
+        } else if (scenario === "truncated") {
+          assert.equal(record.truncated, true);
+          assert.equal(facts.filter((fact) => fact.source === "connector").length, 64);
+          assert.equal(asRecord(facts.at(-1)?.attrs).reason, "count_exceeded");
+        } else if (scenario === "undeclared") {
+          assert.equal(facts.length, 1);
+          assert.deepEqual(facts[0]?.attrs, { class: "protocol_violation", count: 3, reason: "undeclared_capability" });
+        }
+      } finally {
+        if (priorTraceDir === undefined) {
+          delete process.env.PDPP_TRACE_DIR;
+        } else {
+          process.env.PDPP_TRACE_DIR = priorTraceDir;
+        }
+        if (traceDir) {
+          rmSync(traceDir, { force: true, recursive: true });
+        }
+        cleanup();
+        await closeServer(server);
+      }
+    });
+  }
+});
 
 test("Collection Profile conformance", async (t) => {
   t.after(async () => {
@@ -9214,7 +9576,9 @@ rl.on('line', (line) => {
         assert.equal(failedEvent.data.state_streams_staged, 1);
         assert.equal(failedEvent.data.state_streams_committed, 0);
         assert.equal(failedEvent.data.checkpoint_commit_status, "not_committed");
-        assert.equal(failedEvent.data.exit_code, undefined);
+        // DONE terminal evidence is written by the child-close handler, so
+        // this fixture's real exit code is 1 regardless of queue/close timing.
+        assert.equal(failedEvent.data.exit_code, 1);
         assert.equal(failedEvent.data.connector_error_message, "User denied follow-up verification");
         assert.equal(failedEvent.data.connector_error_retryable, false);
       } finally {
