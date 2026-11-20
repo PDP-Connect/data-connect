@@ -192,3 +192,17 @@ test("local-device batch identity agrees with every envelope", () => {
     /batch sourceInstanceId must match every record envelope/
   );
 });
+
+test("local-device builders keep a valid source identity byte-for-byte, including surrounding spaces", () => {
+  const spaced = " fixture-source ";
+  const envelope = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: spaced });
+  const plain = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
+  assert.deepEqual(envelope, { ...plain, source_instance_id: spaced });
+  const batch = buildLocalDeviceIngestBatchRequest({
+    ...envelopeFixture,
+    records: [envelope],
+    sourceInstanceId: spaced,
+  });
+  assert.equal(batch.source_instance_id, spaced);
+  assert.equal(batch.body_hash, hashCanonicalJson([{ ...plain, source_instance_id: spaced }]));
+});
