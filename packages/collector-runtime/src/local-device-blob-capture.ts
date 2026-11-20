@@ -103,6 +103,10 @@ export async function captureBlobArtifact(input: CaptureBlobArtifactInput): Prom
   return { outboxId, sha256: entry.sha256, sizeBytes: entry.sizeBytes };
 }
 
+// RFC 6901 JSON Pointer: empty, or `/`-separated tokens whose `~` is `~0` or `~1`.
+const JSON_POINTER_PATTERN = /^(?:\/(?:[^~/]|~[01])*)*$/;
+const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/i;
+
 export function isBlobUploadPayload(value: unknown): value is BlobUploadPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
@@ -110,10 +114,16 @@ export function isBlobUploadPayload(value: unknown): value is BlobUploadPayload 
   const payload = value as Record<string, unknown>;
   return (
     typeof payload.connectorId === "string" &&
+    (payload.connectorInstanceId === null || typeof payload.connectorInstanceId === "string") &&
+    (payload.jsonPath === undefined ||
+      (typeof payload.jsonPath === "string" && JSON_POINTER_PATTERN.test(payload.jsonPath))) &&
     typeof payload.mimeType === "string" &&
     typeof payload.recordKey === "string" &&
     typeof payload.sha256 === "string" &&
+    SHA256_HEX_PATTERN.test(payload.sha256) &&
     typeof payload.sizeBytes === "number" &&
+    Number.isSafeInteger(payload.sizeBytes) &&
+    payload.sizeBytes >= 0 &&
     typeof payload.sourceInstanceId === "string" &&
     typeof payload.stream === "string"
   );
