@@ -151,6 +151,18 @@ test("discarding the draft returns the lifecycle to inactive", realLibrary, asyn
   })
 })
 
+test("a review that loses a race with another preparer's discard answers draft_not_found, not an unclassified rejection", realLibrary, async () => {
+  await withService(async (service) => {
+    const { draft, revision } = await setUp(service, ORIGIN)
+    await service.commit(draft.draftId, revision)
+    // The review is mid-flight when the other preparer discards the last draft.
+    const review = service.review(draft.draftId, DURABLE)
+    await service.discard(draft.draftId)
+    await assert.rejects(review, (error: unknown) => error instanceof ReachabilityError && error.code === "draft_not_found")
+    assert.equal(service.state().lifecycle.phase, "inactive")
+  })
+})
+
 // The real verifier and the real gate behind a bare listener, so the Host the
 // verifier sees is the Host the request carries.
 async function withChallenge(service: ReachabilityService, run: (ask: (host: string) => Promise<number>) => Promise<void>) {

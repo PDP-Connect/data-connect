@@ -627,6 +627,10 @@ export class ReachabilityService {
     if (!(candidate && candidate.eligible && candidate.candidateToken)) {
       throw new ReachabilityError("setup_required");
     }
+    // Every await above can let another preparer discard this draft and end
+    // the lifecycle. A review for a draft that is gone must not register, and
+    // the owner chain reads draft_not_found as "the state moved: restart".
+    this.draft(id);
     const review = { candidate, draftId: id, id: randomUUID(), query };
     this.reviews.set(review.id, review);
     this.transition({ approvalIdentity: review.id, type: "review" });
