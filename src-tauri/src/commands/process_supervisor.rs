@@ -1278,6 +1278,12 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     // handler (install_parent_signal_handlers) and the process-group
     // SIGTERM/SIGKILL escalation on normal shutdown; they just lack this
     // specific kernel-level SIGKILL/OOM/segfault backstop.
+    //
+    // PDEATHSIG covers only this direct child: the kernel clears it across
+    // fork(), so a grandchild is not covered. A program that forks the real
+    // server (a launcher script) must exec it instead, as the staged
+    // `launch.mjs` files do on Linux (`process.execve`); otherwise the
+    // grandchild outlives a SIGKILLed app and keeps its port.
     #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
