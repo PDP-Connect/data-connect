@@ -943,47 +943,10 @@ const DIRTY_TIME_BOUNDS_REASON = "dirty record-time bounds could not be safely r
 function needsIndependentDatasetSummaryRebuild(metadata: ProjectionMetadata): boolean {
   // Before the marker was written, an unexplained stale error is not proof
   // that repairing time bounds also repaired counts or retained bytes.
-  return metadata.needs_full_rebuild ?? (
-    metadata.state === "stale" && metadata.last_error !== null && metadata.last_error !== DIRTY_TIME_BOUNDS_REASON
+  return (
+    metadata.needs_full_rebuild ??
+    (metadata.state === "stale" && metadata.last_error !== null && metadata.last_error !== DIRTY_TIME_BOUNDS_REASON)
   );
-}
-
-export function metadataAfterDatasetSummaryTimeReconcile(
-  current: ProjectionMetadata,
-  computedAt: IsoTimestamp,
-  stillDirty: boolean
-): ProjectionMetadata {
-  const failed = current.state === "failed";
-  if (!failed && needsIndependentDatasetSummaryRebuild(current)) {
-    // Repairing time bounds does not repair counts or bytes a dropped delta
-    // left behind; only a full rebuild may clear this state.
-    return {
-      ...current,
-      needs_full_rebuild: true,
-      stale_since: current.stale_since || computedAt,
-      state: "stale",
-    };
-  }
-  if (stillDirty) {
-    return {
-      computed_at: computedAt,
-      last_error: current.last_error || DIRTY_TIME_BOUNDS_REASON,
-      needs_full_rebuild: false,
-      rebuild_status: current.rebuild_status === "running" ? "running" : "idle",
-      source_high_watermark: `reconcile:${computedAt}`,
-      stale_since: current.stale_since || computedAt,
-      state: "stale",
-    };
-  }
-  return {
-    computed_at: computedAt,
-    last_error: failed ? current.last_error : null,
-    needs_full_rebuild: false,
-    rebuild_status: failed ? current.rebuild_status : "idle",
-    source_high_watermark: `reconcile:${computedAt}`,
-    stale_since: failed ? current.stale_since : null,
-    state: failed ? "failed" : "fresh",
-  };
 }
 
 function commitReconciledDatasetSummaryRows(
@@ -1005,7 +968,31 @@ function commitReconciledDatasetSummaryRows(
       retained_bytes: current.retained_bytes,
       top_connector_candidates: current.top_connector_candidates,
     };
-    const metadata = metadataAfterDatasetSummaryTimeReconcile(current.metadata, computedAt, stillDirty);
+    if (current.metadata.state !== "failed" && needsIndependentDatasetSummaryRebuild(current.metadata)) {
+      // Repaired time bounds do not repair the counts or bytes a dropped
+      // delta left behind; only a full rebuild may clear this state.
+      const staleSince = current.metadata.stale_since || computedAt;
+      writeDatasetSummaryProjection(summary, { ...current.metadata, stale_since: staleSince, state: "stale" }, computedAt);
+      return;
+    }
+    const metadata: ProjectionMetadata = stillDirty
+      ? {
+          computed_at: computedAt,
+          last_error: current.metadata.last_error || DIRTY_TIME_BOUNDS_REASON,
+          needs_full_rebuild: false,
+          rebuild_status: current.metadata.rebuild_status === "running" ? "running" : "idle",
+          source_high_watermark: `reconcile:${computedAt}`,
+          stale_since: current.metadata.stale_since || computedAt,
+          state: "stale",
+        }
+      : {
+          computed_at: computedAt,
+          last_error: current.metadata.state === "failed" ? current.metadata.last_error : null,
+          rebuild_status: current.metadata.state === "failed" ? current.metadata.rebuild_status : "idle",
+          source_high_watermark: `reconcile:${computedAt}`,
+          stale_since: current.metadata.state === "failed" ? current.metadata.stale_since : null,
+          state: current.metadata.state === "failed" ? "failed" : "fresh",
+        };
     writeDatasetSummaryProjection(summary, metadata, computedAt);
   })();
   return { deferred: deferred + updated.deferred, reconciled: updated.reconciled };
