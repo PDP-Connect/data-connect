@@ -77,7 +77,7 @@ Automate testing with the tauri MCP. Docs: https://hypothesi.github.io/mcp-serve
   - Personal server lifecycle: start/stop/restart with wallet credentials works
   - All 9 UI states render correctly (verified via debug panel)
 
-Personal server code is available at: /Users/kahtaf/Documents/workspace_vana/personal-server-ts -> use this to debug any issues related to personal server and to understand the source code.
+Personal server code is available at: <path-to-your-personal-server-ts-checkout> (a clone of the personal-server-ts repository) -> use this to debug any issues related to personal server and to understand the source code.
 
 ---
 

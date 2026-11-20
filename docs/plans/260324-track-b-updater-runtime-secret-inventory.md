@@ -194,7 +194,7 @@ Required in the local macOS keychain/tooling setup:
 Current source-of-truth inputs on `main`:
 
 - `.github/workflows/release.yml`
-- [docs/plans/260324-track-b-updater-runtime-handoff-spec.md](/Users/cflack/Repos/vana-com/data-connect/docs/plans/260324-track-b-updater-runtime-handoff-spec.md)
+- [docs/plans/260324-track-b-updater-runtime-handoff-spec.md](260324-track-b-updater-runtime-handoff-spec.md)
 
 This inventory intentionally avoids depending on branch-only helper scripts or proof notes.
 
@@ -234,6 +234,6 @@ If you switch to `main` and run a real GitHub release from the new branch:
 
 - the branch does not need "its own" copy of the secrets
 - GitHub Actions for that branch must still have access to the same repo/environment secrets listed above
-- the proof release may target that branch intentionally, but normal production releases still remain main-first per [docs/release-process.md](/Users/cflack/Repos/vana-com/data-connect/docs/release-process.md)
+- the proof release may target that branch intentionally, but normal production releases still remain main-first per [docs/release-process.md](../release-process.md)
 
 That is the entire secret dependency surface for this feature.

@@ -127,7 +127,7 @@ failure among them, so no test was skipped or relabelled to make the run green.
 Use this launch environment, in addition to the dedicated test URLs:
 
 ```sh
-PATH=/home/tnunamak/.local/share/mise/installs/node/22.23.1/bin:$PATH
+PATH=<node-22.23.1-bin-dir>:$PATH
 NODE_OPTIONS=--import=tsx
 PDPP_TEST_PROFILE=postgres
 PDPP_TEST_CONCURRENCY=2
@@ -194,8 +194,8 @@ $ git diff --check
 ```
 
 The interrupted-run event log is retained at
-`/home/tnunamak/.tmp/pg-profile-51/full-profile.log`; clean-main comparison
-logs are retained under `/home/tnunamak/.tmp/pg-profile-51/`.
+`<scratch>/pg-profile-51/full-profile.log`;
+clean-main comparison logs are retained in the same directory.
 
 ## 2026-09-03 independent corrected-oracle rerun
 
@@ -211,7 +211,7 @@ the required `127.0.0.1:55447` port. It reported server `16.15`; its own
 run. The launch used exactly:
 
 ```text
-PATH=/home/tnunamak/.local/share/mise/installs/node/22.23.1/bin:$PATH
+PATH=<node-22.23.1-bin-dir>:$PATH
 NODE_OPTIONS=--import=tsx
 PDPP_TEST_PROFILE=postgres
 PDPP_TEST_CONCURRENCY=2

@@ -279,7 +279,7 @@ Release proof:
 
 This is a special proof flow, not the default production release flow.
 
-- normal releases still follow [docs/release-process.md](/Users/cflack/Repos/vana-com/data-connect/docs/release-process.md) from `main`
+- normal releases still follow [docs/release-process.md](../release-process.md) from `main`
 - this proof may intentionally run from the implementation branch by passing `--target <branch>`
 
 Suggested proof command shape:
@@ -326,7 +326,7 @@ npm run typecheck
 If Rust lockfiles need refreshing:
 
 ```bash
-cd /Users/cflack/Repos/vana-com/data-connect/src-tauri
+cd src-tauri
 cargo generate-lockfile
 ```
 
