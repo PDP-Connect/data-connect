@@ -2251,15 +2251,6 @@
       "nogo": false
     },
     {
-      "file": "server/schema-coercion.ts",
-      "loc": 116,
-      "churn": 3,
-      "cog": 1,
-      "coupling": 2,
-      "score": 7,
-      "nogo": false
-    },
-    {
       "file": "server/search-fanout.ts",
       "loc": 53,
       "churn": 3,
@@ -2346,15 +2337,6 @@
       "churn": 4,
       "cog": 0,
       "coupling": 6,
-      "score": 6,
-      "nogo": false
-    },
-    {
-      "file": "server/comparable-sort.ts",
-      "loc": 125,
-      "churn": 3,
-      "cog": 1,
-      "coupling": 0,
       "score": 6,
       "nogo": false
     },
@@ -2674,15 +2656,6 @@
       "nogo": false
     },
     {
-      "file": "server/aggregate-time-buckets.ts",
-      "loc": 129,
-      "churn": 3,
-      "cog": 0,
-      "coupling": 4,
-      "score": 4,
-      "nogo": false
-    },
-    {
       "file": "server/attention-urgency.ts",
       "loc": 45,
       "churn": 2,
@@ -2697,15 +2670,6 @@
       "churn": 4,
       "cog": 0,
       "coupling": 1,
-      "score": 4,
-      "nogo": false
-    },
-    {
-      "file": "server/db-sqlite-busy-retry.ts",
-      "loc": 161,
-      "churn": 1,
-      "cog": 3,
-      "coupling": 0,
       "score": 4,
       "nogo": false
     },

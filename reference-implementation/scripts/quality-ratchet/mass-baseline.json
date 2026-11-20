@@ -49,7 +49,6 @@
     "server/cimd.ts": 11,
     "server/client-event-delivery-worker.ts": 35,
     "server/collector-protocol.ts": 1,
-    "server/comparable-sort.ts": 2,
     "server/concurrency.ts": 1,
     "server/connection-activation-schedules.ts": 2,
     "server/connection-id-request.ts": 9,
@@ -70,7 +69,6 @@
     "server/contract-validation.ts": 4,
     "server/core-source-authorization.ts": 32,
     "server/dataset-summary-read-model.ts": 56,
-    "server/db-sqlite-busy-retry.ts": 31,
     "server/db.ts": 112,
     "server/dcr-configuration.ts": 16,
     "server/deployment-diagnostics.ts": 70,
@@ -157,7 +155,6 @@
     "server/runtime-collection-facts.ts": 4,
     "server/scheduler-manager-factory.ts": 78,
     "server/schema-capabilities.ts": 19,
-    "server/schema-coercion.ts": 10,
     "server/search-fanout.ts": 4,
     "server/search-hybrid.ts": 7,
     "server/search-semantic.ts": 246,
@@ -203,7 +200,7 @@
     "runtime/record-message-validator.ts": 1,
     "server/grant-package-lifecycle.ts": 100
   },
-  "total": 7186,
+  "total": 7143,
   "meta": {
     "biomeVersion": "2.5.6",
     "maxAllowedComplexity": 5

@@ -11,22 +11,22 @@
     "resolver": "ast-scope (TS compiler API), router v1"
   },
   "universe_tier_count": {
-    "T0": 1212,
-    "T1-seam": 492
+    "T0": 1210,
+    "T1-seam": 489
   },
   "universe_tier_mass": {
-    "T1-seam": 5055,
-    "T0": 3581
+    "T1-seam": 5015,
+    "T0": 3578
   },
   "by_subsystem": [
     {
       "subsystem": "server",
-      "files": 94,
-      "fns": 862,
-      "mass": 4339,
+      "files": 91,
+      "fns": 857,
+      "mass": 4296,
       "tiers": {
-        "T1-seam": 2575,
-        "T0": 1764
+        "T1-seam": 2535,
+        "T0": 1761
       }
     },
     {
@@ -1070,17 +1070,6 @@
       "attention": 160
     },
     {
-      "file": "server/db-sqlite-busy-retry.ts",
-      "churn": 1,
-      "fns": 3,
-      "mass": 31,
-      "tiers": {
-        "T1-seam": 30,
-        "T0": 1
-      },
-      "attention": 31
-    },
-    {
       "file": "runtime/recovery-decision.ts",
       "churn": 4,
       "fns": 7,
@@ -2006,16 +1995,6 @@
       "attention": 30
     },
     {
-      "file": "server/schema-coercion.ts",
-      "churn": 3,
-      "fns": 1,
-      "mass": 10,
-      "tiers": {
-        "T1-seam": 10
-      },
-      "attention": 30
-    },
-    {
       "file": "server/stores/browser-surface-lease-store.ts",
       "churn": 7,
       "fns": 3,
@@ -2769,16 +2748,6 @@
     },
     {
       "file": "runtime/ingest-failures.ts",
-      "churn": 3,
-      "fns": 1,
-      "mass": 2,
-      "tiers": {
-        "T0": 2
-      },
-      "attention": 6
-    },
-    {
-      "file": "server/comparable-sort.ts",
       "churn": 3,
       "fns": 1,
       "mass": 2,
@@ -14570,27 +14539,6 @@
       "why": "cc 6, no security/async-order/seam signal → eligible to ATTEMPT a certified mechanical transform (routing does NOT prove Tier-0)"
     },
     {
-      "file": "server/comparable-sort.ts",
-      "line": 28,
-      "cc": 7,
-      "excess": 2,
-      "fn": "@L28",
-      "is_anon": true,
-      "is_callback": false,
-      "callback_kind": null,
-      "enclosing_fn": null,
-      "captured_vars": null,
-      "captured_mutable_vars": null,
-      "module_refs": null,
-      "await_count": null,
-      "has_branch": null,
-      "sec": [],
-      "storage": [],
-      "public": [],
-      "tier": "T0",
-      "why": "cc 7, no security/async-order/seam signal → eligible to ATTEMPT a certified mechanical transform (routing does NOT prove Tier-0)"
-    },
-    {
       "file": "server/concurrency.ts",
       "line": 30,
       "cc": 6,
@@ -17802,69 +17750,6 @@
       "public": [],
       "tier": "T0",
       "why": "cc 9, no security/async-order/seam signal → eligible to ATTEMPT a certified mechanical transform (routing does NOT prove Tier-0)"
-    },
-    {
-      "file": "server/db-sqlite-busy-retry.ts",
-      "line": 45,
-      "cc": 6,
-      "excess": 1,
-      "fn": "@L45",
-      "is_anon": true,
-      "is_callback": false,
-      "callback_kind": null,
-      "enclosing_fn": null,
-      "captured_vars": null,
-      "captured_mutable_vars": null,
-      "module_refs": null,
-      "await_count": null,
-      "has_branch": null,
-      "sec": [],
-      "storage": [],
-      "public": [],
-      "tier": "T0",
-      "why": "cc 6, no security/async-order/seam signal → eligible to ATTEMPT a certified mechanical transform (routing does NOT prove Tier-0)"
-    },
-    {
-      "file": "server/db-sqlite-busy-retry.ts",
-      "line": 75,
-      "cc": 20,
-      "excess": 15,
-      "fn": "@L75",
-      "is_anon": true,
-      "is_callback": false,
-      "callback_kind": null,
-      "enclosing_fn": null,
-      "captured_vars": null,
-      "captured_mutable_vars": null,
-      "module_refs": null,
-      "await_count": null,
-      "has_branch": null,
-      "sec": [],
-      "storage": [],
-      "public": [],
-      "tier": "T1-seam",
-      "why": "cc 20 ≥ 12 → seam choice is judgment, execution mechanical"
-    },
-    {
-      "file": "server/db-sqlite-busy-retry.ts",
-      "line": 122,
-      "cc": 20,
-      "excess": 15,
-      "fn": "@L122",
-      "is_anon": true,
-      "is_callback": false,
-      "callback_kind": null,
-      "enclosing_fn": null,
-      "captured_vars": null,
-      "captured_mutable_vars": null,
-      "module_refs": null,
-      "await_count": null,
-      "has_branch": null,
-      "sec": [],
-      "storage": [],
-      "public": [],
-      "tier": "T1-seam",
-      "why": "cc 20 ≥ 12 → seam choice is judgment, execution mechanical"
     },
     {
       "file": "server/db.ts",
@@ -32775,27 +32660,6 @@
       "public": [],
       "tier": "T0",
       "why": "cc 7, no security/async-order/seam signal → eligible to ATTEMPT a certified mechanical transform (routing does NOT prove Tier-0)"
-    },
-    {
-      "file": "server/schema-coercion.ts",
-      "line": 69,
-      "cc": 15,
-      "excess": 10,
-      "fn": "@L69",
-      "is_anon": true,
-      "is_callback": false,
-      "callback_kind": null,
-      "enclosing_fn": null,
-      "captured_vars": null,
-      "captured_mutable_vars": null,
-      "module_refs": null,
-      "await_count": null,
-      "has_branch": null,
-      "sec": [],
-      "storage": [],
-      "public": [],
-      "tier": "T1-seam",
-      "why": "cc 15 ≥ 12 → seam choice is judgment, execution mechanical"
     },
     {
       "file": "server/search-fanout.ts",
