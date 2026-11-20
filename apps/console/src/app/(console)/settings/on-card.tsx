@@ -5,6 +5,7 @@ import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
 import { plain } from "./plain-text.ts";
+import { publicHttpsAddress, qrSvg } from "./qr-code.ts";
 import { expiryLine, expiryTime, proofLine, type RouteDisplayInput } from "./route-display.ts";
 
 /** Copies text and says so. The clipboard may be missing; then nothing changes. */
@@ -29,6 +30,24 @@ export function CopyButton({
     >
       {copied ? "Copied" : label}
     </Button>
+  );
+}
+
+/** The address as a QR code, drawn as one inline SVG path. */
+function AddressQr({ address }: { address: string }) {
+  const { size, path } = qrSvg(address);
+  return (
+    <svg
+      aria-label="QR code for your address"
+      className="size-28 flex-none rounded-lg bg-white"
+      data-qr=""
+      role="img"
+      shapeRendering="crispEdges"
+      viewBox={`0 0 ${size} ${size}`}
+    >
+      <rect fill="#fff" height={size} width={size} />
+      <path d={path} fill="#000" />
+    </svg>
   );
 }
 
@@ -112,6 +131,7 @@ export function OnCard({
   const ends = expiryLine(route);
   const cost = shortCost(facts);
   const readers = trafficReaders(facts);
+  const qrAddress = publicHttpsAddress(route.origin, route.verification.vantage);
   const through = way ? `Through ${way.title} (${way.provider})${cost ? ` · ${cost}` : ""}` : null;
   return (
     <section aria-label="On" className="overflow-hidden rounded-xl border">
@@ -127,12 +147,16 @@ export function OnCard({
           </p>
         ) : null}
         {route.origin ? (
-          <div className="grid gap-2">
-            <span className="pdpp-label uppercase tracking-wide">Your address</span>
-            <p className="rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-sm break-all">{route.origin}</p>
-            <div className="flex flex-wrap items-center gap-3">
-              <CopyButton label="Copy address" text={route.origin} variant="default" />
+          <div className="flex flex-wrap items-start gap-4">
+            <div className="grid min-w-0 flex-1 basis-64 gap-2">
+              <span className="pdpp-label uppercase tracking-wide">Your address</span>
+              <p className="rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-sm break-all">{route.origin}</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <CopyButton label="Copy address" text={route.origin} variant="default" />
+                {qrAddress ? <span className="pdpp-caption">or scan it with your phone →</span> : null}
+              </div>
             </div>
+            {qrAddress ? <AddressQr address={qrAddress} /> : null}
           </div>
         ) : (
           <p className="pdpp-caption">Your address: Not available yet</p>
@@ -147,7 +171,7 @@ export function OnCard({
             <span className="text-sm font-medium">Next: connect ChatGPT or Claude</span>
             <span className="pdpp-caption">Connect apps uses this address and asks you to approve each app.</span>
           </div>
-          <a className="text-sm font-medium underline-offset-4 hover:underline" href={dashboardRoutes.section.connect}>
+          <a className="text-sm font-medium underline underline-offset-4" href={dashboardRoutes.section.connect}>
             Connect apps ›
           </a>
         </div>

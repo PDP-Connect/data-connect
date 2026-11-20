@@ -13,6 +13,7 @@ import ts from "typescript";
 import { formatLocalTime } from "./plain-text.ts";
 import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
+import { qrSvg } from "./qr-code.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -244,6 +245,49 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(footer.querySelector("summary")?.textContent ?? "", /›$/);
     assert.doesNotMatch(visible, /connected to|is connected|QR/i);
     assert.doesNotMatch(visible, /\b1 hour\b|15 minutes/);
+  }, t);
+});
+
+test("a public https address shows a QR code that encodes it, with the scan hint beside Copy", async (t) => {
+  await withScreen(host({ "/state": onState(routeAt({ origin: "https://abc123.example.invalid" })) }), async ({ container, text }) => {
+    const svg = container.querySelector('section[aria-label="On"] svg[data-qr]');
+    assert.ok(svg, "the On card shows the QR code");
+    assert.ok(text().includes("or scan it with your phone →"), text());
+    const { size, path } = qrSvg("https://abc123.example.invalid");
+    assert.equal(svg.getAttribute("viewBox"), `0 0 ${size} ${size}`);
+    assert.equal(svg.querySelector("path")?.getAttribute("d"), path);
+    assert.equal(container.querySelectorAll("canvas").length, 0);
+  }, t);
+});
+
+test("a route with no public https address shows no QR code and no scan hint", async (t) => {
+  const http = routeAt({ origin: "http://abc123.example.invalid" });
+  const privateVantage = { ...routeAt(), verification: { ...routeAt().verification, vantage: "this-device" } };
+  for (const route of [http, privateVantage, { ...routeAt(), origin: null }]) {
+    await withScreen(host({ "/state": onState(route as ReturnType<typeof routeAt>) }), async ({ container, text }) => {
+      assert.ok(container.querySelector('section[aria-label="On"]'), "the On card is mounted");
+      assert.equal(container.querySelector("svg[data-qr]"), null);
+      assert.doesNotMatch(text(), /scan it with your phone/);
+    }, t);
+  }
+});
+
+test("a route through localhost.run names the service without the library's plan word", async (t) => {
+  const trial = { ...provider, providerId: "localhost-run", label: "localhost.run trial" };
+  const route = routeAt({ providerId: "localhost-run" });
+  await withScreen(host({ "/catalog": ok({ ...catalog, providers: [trial] }), "/state": onState(route) }), async ({ container }) => {
+    const line = [...container.querySelectorAll('section[aria-label="On"] li')].map((node) => node.textContent ?? "").find((value) => value.includes("Through"));
+    assert.ok(line?.includes("Through Temporary address (localhost.run)"), line ?? "no way line");
+    assert.doesNotMatch(container.querySelector('section[aria-label="On"]')?.textContent ?? "", /trial/);
+  }, t);
+});
+
+test("the Connect apps link is a link, and the Details footer has no marker of its own above it", async (t) => {
+  await withScreen(host({ "/state": onState() }), async ({ container }) => {
+    const link = [...container.querySelectorAll("a")].find((node) => node.textContent === "Connect apps ›");
+    assert.match(link?.getAttribute("class") ?? "", /\bunderline\b/);
+    const summary = container.querySelector('section[aria-label="On"] [data-diagnostics] summary');
+    assert.match(summary?.getAttribute("class") ?? "", /\blist-none\b/);
   }, t);
 });
 

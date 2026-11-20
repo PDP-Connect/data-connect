@@ -15,6 +15,7 @@ import type {
 } from "pdpp-reference-implementation/reachability-projection";
 import type { requestReachability } from "./reachability-client.ts";
 import { publicError, ReachabilityFailure } from "./reachability-errors.ts";
+import { serviceName } from "./service-name.ts";
 import type { ServiceEntry } from "./setup-services.ts";
 
 type Request = typeof requestReachability;
@@ -386,7 +387,7 @@ export function formatDisclosures(candidate: Candidate): { lines: FactLine[]; re
     https: "",
     tls: "",
   }, "traffic");
-  const service = candidate.display.label;
+  const service = serviceName(candidate.providerId, candidate.display.label);
   let payloadReading = `We can't tell whether ${service} can read what passes through.`;
   section("traffic", (traffic) => {
     const reads = take(traffic, "providerCanReadPayload", (v): v is boolean | null => v === null || isBoolean(v));
