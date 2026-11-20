@@ -7,6 +7,12 @@ import { buttonVariants } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
 import { useEffect, useReducer, useState } from "react";
 import type { WebPushConfig, WebPushSubscriptionSummary } from "../lib/ref-client.ts";
+import {
+  describeWebPushUnavailable,
+  type WebPushCapabilities,
+  type WebPushUnavailableCause,
+  webPushUnavailableCause,
+} from "../lib/web-push-availability.ts";
 
 type SwState = "registered" | "absent" | "unknown" | "unsupported";
 
@@ -20,7 +26,7 @@ interface DeviceState {
   permission: NotificationPermission | "unknown";
   status: string;
   swState: SwState;
-  unavailable: string | null;
+  unavailable: WebPushUnavailableCause | null;
 }
 
 type DeviceAction =
@@ -28,7 +34,7 @@ type DeviceAction =
       type: "supportDetected";
       permission: NotificationPermission | "unknown";
       status: string;
-      unavailable: string | null;
+      unavailable: WebPushUnavailableCause | null;
     }
   | { type: "swState"; swState: SwState; status?: string }
   | { type: "subscribed"; endpoint: string; status: string }
@@ -95,26 +101,15 @@ interface SetupStep {
   state: DiagnosticState;
 }
 
-function detectSupport(config: WebPushConfig) {
-  if (!window.isSecureContext) {
-    return "Web Push needs HTTPS or localhost.";
-  }
-  if (!("serviceWorker" in navigator)) {
-    return "This browser does not support service workers.";
-  }
-  if (!("PushManager" in window)) {
-    return "This browser does not support the Push API.";
-  }
-  if (!("Notification" in window)) {
-    return "This browser does not support browser notifications.";
-  }
-  if (!(config.enabled && config.public_key)) {
-    return config.unavailable_reason || "Server VAPID keys are not configured.";
-  }
-  if (Notification.permission === "denied") {
-    return "Notifications are denied. Change browser or OS notification settings to opt in.";
-  }
-  return null;
+function observeWebPushCapabilities(config: WebPushConfig): WebPushCapabilities {
+  return {
+    hasNotificationApi: "Notification" in window,
+    hasPushManager: "PushManager" in window,
+    hasServiceWorker: "serviceWorker" in navigator,
+    isSecureContext: window.isSecureContext,
+    permission: "Notification" in window ? Notification.permission : "unknown",
+    serverEnabled: Boolean(config.enabled && config.public_key),
+  };
 }
 
 /**
@@ -323,28 +318,19 @@ function deviceStatus({
   matchesThisBrowser,
   swState,
 }: {
-  unavailable: string | null;
+  unavailable: WebPushUnavailableCause | null;
   permission: NotificationPermission | "unknown";
   endpoint: string | null;
   matchesThisBrowser: boolean;
   swState: "registered" | "absent" | "unknown" | "unsupported";
 }): DeviceStatus {
   if (unavailable) {
-    return {
-      detail: unavailable,
-      title: "This browser cannot receive DataConnect notifications.",
-    };
+    return describeWebPushUnavailable(unavailable);
   }
   if (permission === "unknown" && swState === "unknown") {
     return {
       detail: "Inspecting browser permission and subscription state.",
       title: "Checking this device…",
-    };
-  }
-  if (permission === "denied") {
-    return {
-      detail: "Change browser or OS notification settings, then return here and enable this device.",
-      title: "Notifications are blocked for this browser.",
     };
   }
   if (matchesThisBrowser) {
@@ -378,7 +364,7 @@ function buildSetupSteps({
   matchesThisBrowser,
   testStatus,
 }: {
-  unavailable: string | null;
+  unavailable: WebPushUnavailableCause | null;
   permission: NotificationPermission | "unknown";
   endpoint: string | null;
   matchesThisBrowser: boolean;
@@ -414,7 +400,7 @@ function buildSetupSteps({
 
 function setupPermissionState(
   permission: NotificationPermission | "unknown",
-  unavailable: string | null
+  unavailable: WebPushUnavailableCause | null
 ): DiagnosticState {
   if (permission === "granted") {
     return "ok";
@@ -440,7 +426,7 @@ function setupSubscriptionState({
   unavailable,
 }: {
   matchesThisBrowser: boolean;
-  unavailable: string | null;
+  unavailable: WebPushUnavailableCause | null;
 }): DiagnosticState {
   if (matchesThisBrowser) {
     return "ok";
@@ -540,47 +526,75 @@ function buildDiagnostics({
   ];
 }
 
-// Collapsible per-precondition checklist. Presentational: the parent owns the
-// device state and re-inspection, this only renders the rows and the toggle.
-function DiagnosticsDisclosure({
-  diagnostics,
-  expanded,
-  onToggle,
-}: {
-  diagnostics: DiagnosticRow[];
-  expanded: boolean;
-  onToggle: () => void;
-}) {
+// Per-precondition checklist for support and bug reports. Collapsed by default
+// so the owner-facing card stays short; "Copy debug info" puts the same rows on
+// the clipboard as plain text. Opening it re-inspects this browser.
+function TechnicalDetails({ diagnostics, onOpen }: { diagnostics: DiagnosticRow[]; onOpen: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+
+  async function copyDebugInfo() {
+    const text = diagnostics.map((row) => `${diagnosticMarker(row.state)} ${row.label}: ${row.detail}`).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyStatus("Copied.");
+    } catch {
+      setCopyStatus("Could not copy.");
+    }
+  }
+
   return (
-    <div className="mt-4 border-border/60 border-t pt-3">
-      <button
-        aria-controls="web-push-diagnostics"
-        aria-expanded={expanded}
-        className="pdpp-caption text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-        onClick={onToggle}
-        type="button"
-      >
-        {expanded ? "Hide diagnostics" : "Show diagnostics"}
-      </button>
+    <details
+      className="mt-4 border-border/60 border-t pt-3"
+      onToggle={(event) => {
+        const nowExpanded = event.currentTarget.open;
+        setExpanded(nowExpanded);
+        if (nowExpanded) {
+          onOpen();
+        }
+      }}
+    >
+      <summary className="pdpp-caption cursor-pointer text-muted-foreground underline-offset-2 hover:text-foreground hover:underline">
+        Technical details
+      </summary>
+      {/* Rows render only once expanded. They read this browser's APIs, which the
+          server does not have, so rendering them while closed causes a hydration
+          mismatch. */}
       {expanded ? (
-        <ul aria-label="Web Push diagnostics" className="mt-3 space-y-1.5" id="web-push-diagnostics">
-          {diagnostics.map((row) => (
-            <li className="pdpp-caption flex items-start gap-2" key={row.label}>
-              <span
-                aria-hidden="true"
-                className={`inline-block w-10 shrink-0 font-mono ${diagnosticToneClass(row.state)}`}
-              >
-                {diagnosticMarker(row.state)}
+        <>
+          <ul aria-label="Web Push diagnostics" className="mt-3 space-y-1.5">
+            {diagnostics.map((row) => (
+              <li className="pdpp-caption flex items-start gap-2" key={row.label}>
+                <span
+                  aria-hidden="true"
+                  className={`inline-block w-10 shrink-0 font-mono ${diagnosticToneClass(row.state)}`}
+                >
+                  {diagnosticMarker(row.state)}
+                </span>
+                <span className="min-w-0">
+                  <span className="font-medium text-foreground">{row.label}</span>
+                  <span className="ml-2 text-muted-foreground">{row.detail}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3 flex items-center gap-3">
+            <button
+              className="pdpp-caption text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+              onClick={copyDebugInfo}
+              type="button"
+            >
+              Copy debug info
+            </button>
+            {copyStatus ? (
+              <span aria-live="polite" className="pdpp-caption text-muted-foreground" role="status">
+                {copyStatus}
               </span>
-              <span className="min-w-0">
-                <span className="font-medium text-foreground">{row.label}</span>
-                <span className="ml-2 text-muted-foreground">{row.detail}</span>
-              </span>
-            </li>
-          ))}
-        </ul>
+            ) : null}
+          </div>
+        </>
       ) : null}
-    </div>
+    </details>
   );
 }
 
@@ -592,10 +606,13 @@ export function WebPushSettings({
   subscriptions: WebPushSubscriptionSummary[];
 }) {
   const [device, dispatch] = useReducer(deviceReducer, INITIAL_DEVICE_STATE);
-  const { status, endpoint, unavailable, permission, swState } = device;
+  const { status, endpoint, permission, swState } = device;
+  // The owner can answer the browser prompt with "block" after mount, so a
+  // denial that arrives later is the same cause as one found at mount.
+  const unavailable = device.unavailable ?? (permission === "denied" ? "permission-denied" : null);
   const [busy, setBusy] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
-  const [showDetails, setShowDetails] = useState(false);
+  const [enableError, setEnableError] = useState<string | null>(null);
   const [showSetup, setShowSetup] = useState(false);
 
   async function refreshSubscriptionState() {
@@ -615,14 +632,14 @@ export function WebPushSettings({
   }
 
   useEffect(() => {
-    const reason = detectSupport(config);
+    const cause = webPushUnavailableCause(observeWebPushCapabilities(config));
     dispatch({
       permission: "Notification" in window ? Notification.permission : "unknown",
-      status: reason ? "Unavailable in this browser" : `Permission: ${Notification.permission}`,
+      status: cause ? "Unavailable in this browser" : `Permission: ${Notification.permission}`,
       type: "supportDetected",
-      unavailable: reason,
+      unavailable: cause,
     });
-    if (reason) {
+    if (cause) {
       return;
     }
     let cancelled = false;
@@ -638,19 +655,19 @@ export function WebPushSettings({
     }
     setBusy(true);
     setTestStatus(null);
+    setEnableError(null);
     try {
       const registration = await navigator.serviceWorker.register("/pdpp-dashboard-sw.js");
       dispatch({ swState: "registered", type: "swState" });
       const result = await Notification.requestPermission();
       dispatch({ permission: result, type: "permission" });
       if (result !== "granted") {
-        dispatch({
-          status:
-            result === "denied"
-              ? "Permission denied. Enable notifications in browser settings."
-              : "Permission was not granted.",
-          type: "status",
-        });
+        const message =
+          result === "denied"
+            ? "Permission denied. Enable notifications in browser settings."
+            : "Permission was not granted.";
+        dispatch({ status: message, type: "status" });
+        setEnableError(message);
         return;
       }
       const subscription =
@@ -678,7 +695,9 @@ export function WebPushSettings({
         type: "subscribed",
       });
     } catch (err) {
-      dispatch({ status: err instanceof Error ? err.message : "Failed to enable Web Push.", type: "status" });
+      const message = err instanceof Error ? err.message : "Failed to enable Web Push.";
+      dispatch({ status: message, type: "status" });
+      setEnableError(message);
     } finally {
       setBusy(false);
     }
@@ -767,6 +786,11 @@ export function WebPushSettings({
     swState,
   });
 
+  // A failed Enable is announced beside its button while the setup panel is
+  // closed. The open panel shows the same status itself, and any later action
+  // replaces the status, so the notice shows only while it is still the latest.
+  const enableNotice = !(showSetup || unavailable) && enableError === status ? enableError : null;
+
   // Whether this browser is set up and healthy, so the demoted summary line can
   // wear a calm "enabled" tone and skip pushing a setup CTA.
   const enabled = matchesThisBrowser && !unavailable;
@@ -784,10 +808,11 @@ export function WebPushSettings({
     >
       <div className="rounded-md border border-border bg-card px-4 py-3">
         {/* Demoted-by-default summary: one quiet status line + a single
-            affordance. The full multi-step setup grid and diagnostics live
-            behind the "Set up notifications" / "Manage" disclosure so this reads
-            as a calm secondary utility rather than the loudest block on the
-            overview. */}
+            affordance. The setup grid lives behind the "Set up notifications" /
+            "Manage" disclosure, and the checklist under "Technical details", so
+            this reads as a calm secondary utility rather than the loudest block
+            on the overview. When this device cannot be set up, the summary is
+            the explanation and no setup control is offered. */}
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
           <p aria-atomic="true" aria-live="polite" className="pdpp-body flex min-w-0 items-center gap-2" role="status">
             <span
@@ -796,7 +821,7 @@ export function WebPushSettings({
             />
             <span className="min-w-0 font-medium text-foreground">{currentDeviceStatus.title}</span>
           </p>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {enabled || unavailable ? null : (
               <button
                 className={buttonVariants({ size: "sm", variant: "default" })}
@@ -807,59 +832,61 @@ export function WebPushSettings({
                 Enable this device
               </button>
             )}
-            <button
-              aria-controls="web-push-setup"
-              aria-expanded={showSetup}
-              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted/40"
-              onClick={() => setShowSetup((open) => !open)}
-              type="button"
-            >
-              {setupToggleLabel}
-            </button>
+            {unavailable ? null : (
+              <button
+                aria-controls="web-push-setup"
+                aria-expanded={showSetup}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted/40"
+                onClick={() => setShowSetup((open) => !open)}
+                type="button"
+              >
+                {setupToggleLabel}
+              </button>
+            )}
           </div>
         </div>
 
-        {showSetup ? (
+        {enableNotice ? (
+          <p className="pdpp-caption mt-2 max-w-3xl text-destructive" role="alert">
+            {enableNotice}
+          </p>
+        ) : null}
+
+        {unavailable ? (
+          <p className="pdpp-caption mt-2 max-w-3xl text-muted-foreground">{currentDeviceStatus.detail}</p>
+        ) : null}
+
+        {showSetup && !unavailable ? (
           <WebPushSetupDetails
             busy={busy}
             caveat={caveat}
             detail={currentDeviceStatus.detail}
-            diagnostics={diagnostics}
             endpoint={endpoint}
             lastSubscription={lastSubscription}
             onDisable={disable}
             onEnable={enable}
             onTest={sendTest}
-            onToggleDetails={async () => {
-              const next = !showDetails;
-              setShowDetails(next);
-              if (next) {
-                await refreshSubscriptionState();
-              }
-            }}
             setupSteps={setupSteps}
-            showDetails={showDetails}
             status={status}
             subscriptionsCount={subscriptions.length}
             testStatus={testStatus}
-            unavailable={unavailable}
           />
         ) : null}
+
+        <TechnicalDetails diagnostics={diagnostics} onOpen={refreshSubscriptionState} />
       </div>
     </Section>
   );
 }
 
 // The full, on-demand setup surface for a single browser/device: the buttons,
-// the four-step checklist, the live status lines, and the diagnostics
-// disclosure. Kept presentational (the parent owns device state, the async
-// flows, and the disclosure toggles) so WebPushSettings stays a lean
+// the four-step checklist, and the live status lines. Kept presentational (the
+// parent owns device state and the async flows) so WebPushSettings stays a lean
 // orchestrator and this dense block only mounts when the owner opens it.
 function WebPushSetupDetails({
   detail,
   caveat,
   busy,
-  unavailable,
   endpoint,
   onEnable,
   onDisable,
@@ -869,14 +896,10 @@ function WebPushSetupDetails({
   testStatus,
   subscriptionsCount,
   lastSubscription,
-  diagnostics,
-  showDetails,
-  onToggleDetails,
 }: {
   detail: string;
   caveat: string;
   busy: boolean;
-  unavailable: string | null;
   endpoint: string | null;
   onEnable: () => void;
   onDisable: () => void;
@@ -886,9 +909,6 @@ function WebPushSetupDetails({
   testStatus: string | null;
   subscriptionsCount: number;
   lastSubscription: WebPushSubscriptionSummary | undefined;
-  diagnostics: DiagnosticRow[];
-  showDetails: boolean;
-  onToggleDetails: () => void;
 }) {
   return (
     <div className="mt-4 border-border/60 border-t pt-4" id="web-push-setup">
@@ -897,7 +917,7 @@ function WebPushSetupDetails({
       <div className="mt-3 flex flex-wrap gap-2">
         <button
           className={buttonVariants({ size: "sm", variant: "default" })}
-          disabled={busy || Boolean(unavailable)}
+          disabled={busy}
           onClick={onEnable}
           type="button"
         >
@@ -913,7 +933,7 @@ function WebPushSetupDetails({
         </button>
         <button
           className="rounded-md border border-border px-3 py-1.5 text-sm disabled:opacity-50"
-          disabled={busy || !endpoint || Boolean(unavailable)}
+          disabled={busy || !endpoint}
           onClick={onTest}
           type="button"
         >
@@ -943,8 +963,6 @@ function WebPushSetupDetails({
           {lastSubscription?.last_failure_reason || lastSubscription?.last_success_at || "not used yet"}.
         </p>
       ) : null}
-
-      <DiagnosticsDisclosure diagnostics={diagnostics} expanded={showDetails} onToggle={onToggleDetails} />
     </div>
   );
 }

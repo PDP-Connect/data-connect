@@ -37,8 +37,9 @@ const PUSH_EXISTING_SUBSCRIPTION_PATTERN = /registration\.pushManager\.getSubscr
 const WEB_PUSH_POST_PATTERN = /fetch\("\/_ref\/web-push\/subscriptions"/;
 const WEB_PUSH_DELETE_PATTERN = /method:\s*"DELETE"/;
 const FIRST_SAVED_ENDPOINT_PATTERN = /subscriptions\[0\]\?\.endpoint/;
-const DIAGNOSTICS_TOGGLE_SHOW_PATTERN = /Show diagnostics/;
-const DIAGNOSTICS_TOGGLE_HIDE_PATTERN = /Hide diagnostics/;
+const TECHNICAL_DETAILS_PATTERN = /Technical details/;
+const COPY_DEBUG_INFO_PATTERN = /Copy debug info/;
+const DIAGNOSTICS_SHOW_OR_HIDE_CONTROL_PATTERN = /(Show|Hide) diagnostics/;
 const DIAGNOSTICS_ARIA_LABEL_PATTERN = /aria-label="Web Push diagnostics"/;
 const DIAGNOSTICS_PWA_INSTALL_PATTERN = /installing the PWA alone does not subscribe/;
 const DIAGNOSTICS_PER_DEVICE_ENABLE_PATTERN = /Each phone, tablet, and browser profile must be enabled separately/;
@@ -55,7 +56,7 @@ const DIAGNOSTICS_DISABLE_DEVICE_BUTTON_PATTERN = />\s*Disable this device\s*</;
 const DIAGNOSTICS_TEST_PUSH_PATTERN = /fetch\("\/_ref\/web-push\/test"/;
 const DIAGNOSTICS_TEST_PUSH_METHOD_PATTERN = /method:\s*"POST"/;
 const DIAGNOSTICS_SEND_TEST_BUTTON_PATTERN = />\s*Send test notification\s*</;
-const DIAGNOSTICS_SEND_DISABLED_PATTERN = /disabled=\{busy \|\| !endpoint \|\| Boolean\(unavailable\)\}/;
+const DIAGNOSTICS_SEND_DISABLED_PATTERN = /disabled=\{busy \|\| !endpoint\}\s+onClick=\{onTest\}/;
 const DIAGNOSTICS_NO_SUBSCRIPTIONS_PATTERN = /No active subscriptions for this owner/;
 const WEB_PUSH_RESPONSE_ERROR_HELPER_PATTERN =
   /async function webPushResponseError\(response: Response, fallbackAction: string\)/;
@@ -85,15 +86,16 @@ const WEB_PUSH_SUMMARY_LIVE_REGION_PATTERN =
 const WEB_PUSH_DETAIL_LIVE_REGION_PATTERN =
   /<div aria-atomic="true" aria-live="polite" role="status">[\s\S]*?Last check: \{status\}[\s\S]*?\{testStatus \? <p/;
 
-test("WebPushSettings renders unsupported, denied-permission, insecure-context, VAPID, and iOS/PWA caveat states", async () => {
+// The unavailable-state copy, one message per cause, is unit-tested in
+// lib/web-push-availability.test.ts. This keeps the capability probes and the
+// install caveats that still render with the setup panel.
+test("WebPushSettings probes browser capabilities and keeps the install and per-device caveats", async () => {
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
   for (const expected of [
     "window.isSecureContext",
     "serviceWorker",
     "PushManager",
     "Notification",
-    'Notification.permission === "denied"',
-    "Server VAPID keys are not configured",
     "Mobile browsers may require opening the installed DataConnect app before notifications can arrive",
     "Installing the PWA only adds the app icon",
   ]) {
@@ -194,8 +196,8 @@ test("dashboard Web Push setup explains install, permission, subscription, and t
 
 test("dashboard exposes diagnostic checklist covering every web push precondition", async () => {
   const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
-  assert.match(src, DIAGNOSTICS_TOGGLE_SHOW_PATTERN);
-  assert.match(src, DIAGNOSTICS_TOGGLE_HIDE_PATTERN);
+  assert.match(src, TECHNICAL_DETAILS_PATTERN);
+  assert.match(src, COPY_DEBUG_INFO_PATTERN);
   assert.match(src, DIAGNOSTICS_ARIA_LABEL_PATTERN);
   for (const label of [
     "Secure context (HTTPS/localhost)",
@@ -227,4 +229,11 @@ test("diagnostics feature probes are SSR-safe and called via typed helpers", asy
   assert.match(src, SSR_SAFE_DIAGNOSTIC_PUSHMANAGER_PATTERN);
   assert.match(src, SSR_SAFE_DIAGNOSTIC_NOTIFICATION_PATTERN);
   assert.match(src, SSR_SAFE_DIAGNOSTIC_SERVICE_WORKER_PATTERN);
+});
+
+// Walkthrough item A10: "Show diagnostics" is a developer control on a consumer
+// page. The checklist stays reachable under "Technical details".
+test("source: notifications card has no Show diagnostics or Hide diagnostics control", async () => {
+  const src = await readFile(join(HERE, "web-push-settings.tsx"), "utf8");
+  assert.doesNotMatch(src, DIAGNOSTICS_SHOW_OR_HIDE_CONTROL_PATTERN);
 });
