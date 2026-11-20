@@ -43,7 +43,7 @@ const fact = (id: string, value: string | null, known = true) => ({
   asOf: null,
 });
 
-type RouteOver = { providerId?: string | null; approvedConsentFactsDigest?: string | null; id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string };
+type RouteOver = { providerId?: string | null; approvedConsentFactsDigest?: string | null; id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string; properties?: unknown };
 function routeAt(over: RouteOver = {}) {
   const observedAt = over.observedAt ?? T0;
   const validUntil = over.validUntil === undefined ? observedAt + 30_000 : over.validUntil;
@@ -58,6 +58,7 @@ function routeAt(over: RouteOver = {}) {
     cleanup: { state: "none", nextAction: null },
     expiresAt: expiresAt === null ? { known: false, reason: "not-observed" } : { known: true, value: iso(expiresAt) },
     facts: over.facts ?? [],
+    ...(over.properties === undefined ? {} : { properties: over.properties }),
     hostConfiguration: { target: { known: true, value: "127.0.0.1:37807" } },
     published: "https://one.example.invalid",
     routeState: "verified",
@@ -204,10 +205,7 @@ const checks = (calls: Call[]) => calls.filter((call) => call.url === "/routes/r
 test("On shows the address, Copy, the check age, the server's end time, the way it runs through, and a link on", async (t) => {
   const route = routeAt({
     expiresAt: T0 + 5 * 60_000 + 3_600_000,
-    facts: [
-      fact("Cost", "free"),
-      { ...fact("payload-readers", "The tunnel relay can read the traffic."), group: "privacy" },
-    ],
+    properties: { cost: { kind: "free" }, needsAccount: false, traffic: { providerCanReadPayload: true } },
     providerId: "p-tunnel",
   });
   await withScreen(host({ "/state": onState(route) }), async ({ container, text }) => {
@@ -233,7 +231,7 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(factLines[1] ?? "", /↔/);
     assert.ok((factLines[1] ?? "").includes("Through Tunnel service (Tunnel service) · Free"), factLines[1] ?? "no way line");
     assert.match(factLines[2] ?? "", /👁/);
-    assert.ok((factLines[2] ?? "").includes("The tunnel relay can read the traffic."), factLines[2] ?? "no readers line");
+    assert.ok((factLines[2] ?? "").includes("Tunnel service can see what passes through."), factLines[2] ?? "no readers line");
     // The next step names the apps; the link to them sits on its right.
     assert.ok(visible.includes("Next: connect ChatGPT or Claude"), visible);
     const link = [...container.querySelectorAll("a")].find((node) => node.textContent === "Connect apps ›");
@@ -245,6 +243,40 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(footer.querySelector("summary")?.textContent ?? "", /›$/);
     assert.doesNotMatch(visible, /connected to|is connected|QR/i);
     assert.doesNotMatch(visible, /\b1 hour\b|15 minutes/);
+  }, t);
+});
+
+const onLines = (container: Element) => [...container.querySelectorAll('section[aria-label="On"] li')].map((node) => node.textContent ?? "");
+
+test("the On card states cost and readers from the route's structured fields, not from prose facts", async (t) => {
+  // Prose facts that say the opposite must change nothing.
+  const prose = [
+    { ...fact("payload-readers", "The tunnel relay cannot read the traffic."), group: "privacy" },
+    fact("cost-detail", "free"),
+  ];
+  const cases: [unknown, RegExp | null, string][] = [
+    [{ cost: { kind: "paid" }, needsAccount: null, traffic: { providerCanReadPayload: false } }, null, "Tunnel service can't read what passes through."],
+    [{ cost: { kind: "unknown" }, needsAccount: null, traffic: { providerCanReadPayload: null } }, null, "We can't tell whether Tunnel service can read what passes through."],
+    [{ cost: { kind: "free" }, needsAccount: false, traffic: { providerCanReadPayload: true } }, /Through Tunnel service \(Tunnel service\) · Free$/, "Tunnel service can see what passes through."],
+  ];
+  for (const [properties, free, readers] of cases) {
+    const route = routeAt({ facts: prose, properties, providerId: "p-tunnel" });
+    await withScreen(host({ "/state": onState(route) }), async ({ container }) => {
+      const lines = onLines(container);
+      const through = lines.find((line) => line.includes("Through")) ?? "";
+      if (free) assert.match(through, free);
+      else assert.doesNotMatch(through, /Free/);
+      assert.ok(lines.some((line) => line.includes(readers)), `${readers} in ${lines.join("|")}`);
+    }, t);
+  }
+});
+
+test("a route that carries no structured properties makes no cost or reader claim", async (t) => {
+  const route = routeAt({ facts: [{ ...fact("payload-readers", "The tunnel relay can read the traffic."), group: "privacy" }, fact("Cost", "free")], providerId: "p-tunnel" });
+  await withScreen(host({ "/state": onState(route) }), async ({ container }) => {
+    const lines = onLines(container);
+    assert.equal(lines.length, 2, lines.join("|"));
+    assert.doesNotMatch(lines.join("|"), /Free|passes through|read the traffic/);
   }, t);
 });
 

@@ -332,6 +332,13 @@ const oneOf = (...choices: string[]) => (value: unknown): value is string =>
 const listOf = (item: (value: unknown) => boolean) => (value: unknown): value is unknown[] =>
   Array.isArray(value) && value.every(item);
 
+/** The sentence for the library's `providerCanReadPayload`: true, false, or null when it is not known. */
+export function payloadReadingLine(service: string, providerCanReadPayload: boolean | null): string {
+  if (providerCanReadPayload === true) return `${service} can see what passes through.`;
+  if (providerCanReadPayload === false) return `${service} can't read what passes through.`;
+  return `We can't tell whether ${service} can read what passes through.`;
+}
+
 /**
  * Classify the route schema once. Consume fields only after their shape is checked and they are worded
  * or identified as metadata. The unclassified remainder is still available to the generic text walker.
@@ -388,11 +395,10 @@ export function formatDisclosures(candidate: Candidate): { lines: FactLine[]; re
     tls: "",
   }, "traffic");
   const service = serviceName(candidate.providerId, candidate.display.label);
-  let payloadReading = `We can't tell whether ${service} can read what passes through.`;
+  let payloadReading = payloadReadingLine(service, null);
   section("traffic", (traffic) => {
     const reads = take(traffic, "providerCanReadPayload", (v): v is boolean | null => v === null || isBoolean(v));
-    if (reads === true) payloadReading = `${service} can see what passes through.`;
-    if (reads === false) payloadReading = `${service} can't read what passes through.`;
+    if (reads !== undefined) payloadReading = payloadReadingLine(service, reads);
     wordEnum(traffic, "tlsTermination", {
       // Encryption that ends at your device is the expected default and needs no words.
       endpoint: "",
@@ -412,7 +418,8 @@ export function formatDisclosures(candidate: Candidate): { lines: FactLine[]; re
   let price = "We can't tell what this costs.";
   section("cost", (cost) => {
     const kind = take(cost, "kind", oneOf("free", "paid", "unknown"));
-    if (kind === "free") price = "Free.";
+    // "No account" only when the library says the way needs none; unknown says nothing.
+    if (kind === "free") price = candidate.properties?.needsAccount === false ? "Free, no account." : "Free.";
     if (kind === "paid") {
       const amount = take(cost, "amount", isNumber);
       const currency = take(cost, "currency", isText);
