@@ -150,6 +150,18 @@ async function boot(root: string, journal = "reachability-setups") {
 
 const choice = { providerId: "localhost-run", usage: "session" };
 
+test("a declined owner discard preserves the draft journal entry", async (t) => {
+  const root = await scratch();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { request, service, setups } = await boot(root);
+  const draftId = "held-draft";
+  await setups.recordDraft({ providerId: choice.providerId, providerLabel: "Localhost", draftId, usage: "session" });
+  service.discard = async () => ({ discarded: false });
+  const response = await request(`/drafts/${draftId}/discard`, {});
+  assert.deepEqual(response, { ok: true, data: { discarded: false } });
+  assert.equal((await setups.list()).find((entry) => entry.providerId === choice.providerId)?.draftId, draftId);
+});
+
 test("a first Turn on on an empty profile reaches the review", async (t) => {
   const root = await scratch();
   t.after(() => rm(root, { force: true, recursive: true }));

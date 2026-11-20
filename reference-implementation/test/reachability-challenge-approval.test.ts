@@ -288,3 +288,28 @@ test("a recovered unverified view grants no challenge authority", async () => {
   await service.reconcileKnownHandle(route.handle, false)
   assert.equal(service.approvesChallengeAuthority(new URL(route.origin!).host), false)
 })
+
+test("an own-address route: after a restart its origin is still approved and recovery leaves the route alone", realLibrary, async () => {
+  await withFixture(async (fixture) => {
+    const before = await fixture.newService("boot-1")
+    fixture.use(before)
+    const shown = await review(before)
+    const applying = before.apply("operation-1", shown.id, consent(shown))
+    await fixture.gate.reached
+    fixture.gate.release()
+    const started = await applying
+    assert.equal(started.published, ORIGIN)
+
+    const after = await fixture.newService("boot-2")
+    fixture.use(after)
+    assert.equal(await fixture.ask("fixture.invalid"), 404)
+    assert.deepEqual(await after.recoverFromLibrary(), { closed: 0, failed: 0, reproved: 0 })
+    assert.equal(await fixture.ask("fixture.invalid"), 200)
+    assert.equal(await fixture.ask("other.invalid"), 404)
+    // The service approves the origin but does not own the route: it holds nothing
+    // to list, stop or clean up, and shutting it down leaves the route published.
+    assert.equal(after.state().routes.length, 0)
+    await after.shutdown(100, { requestStop: async () => {}, recordRecovered: async () => {}, recordCleanupUnconfirmed: async () => {} } as never)
+    assert.equal(await fixture.ask("fixture.invalid"), 200)
+  })
+})

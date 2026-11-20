@@ -17,10 +17,11 @@ import type {
   RouteView as Route,
   Candidate as RouteCandidate,
 } from "@tnunamak/gozar";
+import type { EarlierSetup } from "./configuration-compatibility.ts";
 import type { HostSettingsBridge } from "./host-settings.ts";
 import type { LifecycleEvent } from "./lifecycle.ts";
 import { initialLifecycle, reduceLifecycle } from "./lifecycle.ts";
-import { hostCapability } from "./presentation.ts";
+import { hostCapability, routePresentation } from "./presentation.ts";
 
 type EmbeddingApi = ReturnType<typeof import("@tnunamak/gozar").createGozar>;
 type RuntimeConsentReview = Awaited<ReturnType<typeof import("@tnunamak/gozar").reviewRouteConsent>>;
@@ -96,20 +97,61 @@ export type HostPolicy = {
   identity: import("@tnunamak/gozar").HostIdentity;
   hostCapabilities: import("@tnunamak/gozar").HostCapabilities;
   hostSettings?: HostSettingsBridge;
+  recoverAtBoot?: boolean;
+  recoveryRetry?: Partial<RecoveryRetry>;
+  readEarlierSetup?: (scopes: string[]) => Promise<EarlierSetup>;
   currentTarget?: () => Promise<string>;
   evidenceSource?: "synthetic";
   prepare: (input: { usage: Query["usage"]; reach: string; transport: string }) => Promise<void>;
   acknowledgeDisconnect: (acknowledged: boolean) => Promise<void>;
 };
 
+export type RecoveryRetry = {
+  timeoutMs: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  random: () => number;
+};
+const DEFAULT_RECOVERY_RETRY: RecoveryRetry = {
+  baseDelayMs: 500,
+  maxDelayMs: 10_000,
+  random: Math.random,
+  timeoutMs: 60_000,
+};
+
+// Attached and session routes live and die with the controller this process
+// owns; a durable route outlives it.
+const endsWithThisProcess = (handle: Handle): boolean => handle.kind === "attached" || handle.kind === "session";
+
+const PROOF_REFRESH_MS = 5_000;
+
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    timer.unref?.();
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 // The host process owns this instance, its API and attached leases. HTTP handlers
 // receive only this service; they never construct a factory or keep a lease.
 export class ReachabilityService {
   private readonly api: EmbeddingApi;
   private readonly host: HostPolicy;
+  private earlierSetup: EarlierSetup = null;
   private readonly drafts = new Map<string, SavedDraft>();
   private readonly reviews = new Map<string, Review>();
   private readonly routes = new Map<string, Route>();
+  private recoveryPending: boolean;
+  private recoveryTimedOut = false;
+  private recoveryRun: Promise<{ closed: number; reproved: number; failed: number }> | null = null;
+  private readonly unsettled = new Set<string>();
+  private readonly externalOrigins = new Set<string>();
   private readonly runtimeReviews = new Map<string, RuntimeConsentReview>();
   private readonly watchers = new Map<string, AbortController>();
   private readonly reasons = new Map<string, string>();
@@ -150,6 +192,12 @@ export class ReachabilityService {
   constructor(api: EmbeddingApi, host: HostPolicy) {
     this.api = api;
     this.host = host;
+    this.recoveryPending = host.recoverAtBoot === true;
+  }
+  private assertRecovered(): void {
+    if (this.recoveryPending) {
+      throw new ReachabilityError("recovery_in_progress");
+    }
   }
   private ref(providerId: string, draftId: string) {
     return { draftId, home: this.host.query.home, owner: this.host.query.owner, providerId };
@@ -188,6 +236,7 @@ export class ReachabilityService {
       }
     }
     return {
+      earlierSetup: this.earlierSetup,
       evidenceSource: this.host.evidenceSource ?? null,
       lifecycle: {
         handle: this.lifecycle.handle ? { id: this.lifecycle.handle.id, generation: this.lifecycle.handle.generation, kind: this.lifecycle.handle.kind } : null,
@@ -199,6 +248,12 @@ export class ReachabilityService {
         phase: this.lifecycle.phase,
         reason: this.lifecycle.reason,
         stopRequested: this.lifecycle.stopTombstone,
+      },
+      recovery: {
+        actions: this.recoveryTimedOut ? ["check"] as const : [],
+        blockedBy: this.recoveryTimedOut ? "recovery_timed_out" : this.unsettled.size ? "routes_unsettled" : null,
+        pending: this.recoveryPending,
+        unsettled: [...this.unsettled],
       },
       reasons: Object.fromEntries(this.reasons),
       journalScan: this.journalScan,
@@ -233,6 +288,7 @@ export class ReachabilityService {
       : { known: false as const, reason: "host-supervisor-unavailable" };
   }
   async applyHostSettings(input: Parameters<HostSettingsBridge["apply"]>[0], acknowledged: boolean) {
+    this.assertRecovered();
     if (!this.host.hostSettings) {
       throw new ReachabilityError("host_supervisor_unavailable");
     }
@@ -269,9 +325,12 @@ export class ReachabilityService {
     return observed;
   }
   async inventory(refresh = false) {
-    return this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner, ...(refresh ? { refresh: true } : {}) });
+    const inventory = await this.api.listProviders({ home: this.host.query.home, owner: this.host.query.owner, ...(refresh ? { refresh: true } : {}) });
+    this.earlierSetup = await this.host.readEarlierSetup?.(inventory.providers.map(provider => provider.configuration.scopeId)) ?? null;
+    return { ...inventory, earlierSetup: this.earlierSetup };
   }
   async begin(providerId: string, expectedConfigurationRevision: string): Promise<Draft> {
+    this.assertRecovered();
     const draft = await this.api.beginConfigurationDraft({
       expectedConfigurationRevision,
       refresh: true,
@@ -481,14 +540,25 @@ export class ReachabilityService {
   async discard(id: string): Promise<{ discarded: boolean }> {
     const saved = this.draft(id);
     const result = await this.api.discardConfigurationDraft(this.ref(saved.providerId, id));
+    if (result.discarded !== true) return result;
     // The library discards only draft-owned, unreferenced staged bytes.
     // Promoted/live bindings remain under its authorization checks.
     this.drafts.delete(id);
     this.reviews.clear();
+    // The last draft is gone, so no setup or review remains. A route that
+    // is live or being stopped keeps its phase: the reducer ignores it.
+    if (this.drafts.size === 0) {
+      const next = reduceLifecycle(this.lifecycle, { type: "discard" });
+      if (next.accepted) {
+        this.lifecycle = next.state;
+      }
+    }
+
     return result;
   }
   async commit(id: string, expectedRevision: string): Promise<ProviderConfiguration> {
-    if (this.starting || [...this.routes.values()].some((route) => route.cleanup.state !== "confirmed")) {
+    this.assertRecovered();
+    if (this.configurationBusy()) {
       throw new ReachabilityError("configuration_in_use");
     }
     const saved = this.draft(id);
@@ -504,6 +574,7 @@ export class ReachabilityService {
     return config;
   }
   async review(id: string, usage: Query["usage"]): Promise<Review> {
+    this.assertRecovered();
     const saved = this.draft(id);
     // Host preparation observes the final listener/password/port before catalog.
     const inventory = await this.inventory(true);
@@ -512,6 +583,7 @@ export class ReachabilityService {
       throw new ReachabilityError("ambiguous_selection");
     }
     const selected = variants[0];
+    if (selected.reach === "unknown") throw new ReachabilityError("unsupported", undefined, undefined, "reach_unknown");
     if (selected.availability[usage.kind]?.state !== "available") {
       throw new ReachabilityError("setup_required");
     }
@@ -521,7 +593,7 @@ export class ReachabilityService {
         ["http", "https", "tcp", "tls"].includes(selected.transport)
       )
     ) {
-      throw new ReachabilityError("unsupported");
+      throw new ReachabilityError("unsupported", undefined, undefined, "provider_properties_unsupported");
     }
     await this.host.prepare({ reach: selected.reach, transport: selected.transport, usage });
     let query: Query = {
@@ -589,6 +661,7 @@ export class ReachabilityService {
       ...[...this.proofCalls.values()].map(call => call.acknowledgment?.origin),
       ...[...this.reviews.values()].map(reviewedOrigin),
       ...this.ownerOrigins.values(),
+      ...this.externalOrigins,
     ];
     return origins.some((origin) => {
       if (!origin) return false;
@@ -676,6 +749,7 @@ export class ReachabilityService {
       const route = await this.api.routeStatus({ handle, home: this.host.query.home });
       this.routes.set(handle.id, route);
       this.transition({ observed: "present", type: "reconcile" });
+      this.watch(handle);
       return this.check(handle.id, handle.generation);
     } catch (error) {
       const failed = reduceLifecycle(this.lifecycle, { observed: "failed", type: "reconcile" });
@@ -684,6 +758,108 @@ export class ReachabilityService {
       }
       throw error;
     }
+  }
+  private configurationBusy(): boolean {
+    return (
+      this.starting ||
+      this.recoveryTimedOut ||
+      this.unsettled.size > 0 ||
+      [...this.routes.values()].some((route) => route.cleanup.state !== "confirmed")
+    );
+  }
+  // After a restart `routes` is empty while the library still holds what the
+  // last process left. Seed from the library, then settle each owned route:
+  // attached and session routes died with their controller, so close them;
+  // durable routes outlive it, so prove them again under this boot's identity.
+  // Old proof is never trusted. A route that stays unsettled blocks new starts
+  // (see `unsettled`), as does unconfirmed cleanup, through configurationBusy().
+  // Retry listRoutes with capped exponential backoff and full jitter until it
+  // answers or the deadline passes. A call that hangs is abandoned at the
+  // deadline too. On expiry the state is "unknown, possibly live", not off.
+  private async listWithRetry(): Promise<Awaited<ReturnType<EmbeddingApi["listRoutes"]>>> {
+    const policy = { ...DEFAULT_RECOVERY_RETRY, ...this.host.recoveryRetry };
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), policy.timeoutMs);
+    const expired = new Promise<never>((_, reject) =>
+      deadline.signal.addEventListener("abort", () => reject(new ReachabilityError("recovery_timed_out")), { once: true })
+    );
+    expired.catch(() => undefined);
+    try {
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await Promise.race([
+            this.api.listRoutes({ home: this.host.query.home, owner: this.host.query.owner }),
+            expired,
+          ]);
+        } catch (error) {
+          if (deadline.signal.aborted) throw error;
+          const ceiling = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** attempt);
+          await pause(policy.random() * ceiling, deadline.signal);
+          if (deadline.signal.aborted) throw new ReachabilityError("recovery_timed_out");
+        }
+      }
+    } catch (error) {
+      if (error instanceof ReachabilityError && error.code === "recovery_timed_out") {
+        this.recoveryTimedOut = true;
+        const unknown = reduceLifecycle(this.lifecycle, { type: "recovery-timeout" });
+        if (unknown.accepted) this.lifecycle = unknown.state;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  recoverFromLibrary(): Promise<{ closed: number; reproved: number; failed: number }> {
+    if (!this.recoveryRun) {
+      this.recoveryPending = true;
+      this.recoveryRun = this.runLibraryRecovery().finally(() => { this.recoveryRun = null; });
+    }
+    return this.recoveryRun;
+  }
+  private async runLibraryRecovery(): Promise<{ closed: number; reproved: number; failed: number }> {
+    const result = { closed: 0, failed: 0, reproved: 0 };
+    this.recoveryPending = true;
+    try {
+      const listed = await this.listWithRetry();
+      if (this.recoveryTimedOut) {
+        this.recoveryTimedOut = false;
+        const cleared = reduceLifecycle(this.lifecycle, { type: "recovery-cleared" });
+        if (cleared.accepted) this.lifecycle = cleared.state;
+      }
+      this.externalOrigins.clear();
+      for (const route of listed.routes) {
+        if (route.ownership === "external-owned" && route.origin && route.cleanup.state !== "confirmed") this.externalOrigins.add(route.origin);
+      }
+      const owned = listed.routes.filter((route: Route) => route.ownership === "gozar-owned");
+      for (const route of owned) {
+        this.routes.set(route.handle.id, route);
+      }
+      for (const route of owned.filter((item: Route) => item.cleanup.state !== "confirmed")) {
+        const closeOnBoot = endsWithThisProcess(route.handle);
+        try {
+          await this.reconcileKnownHandle(route.handle, closeOnBoot);
+          result[closeOnBoot ? "closed" : "reproved"]++;
+        } catch {
+          result.failed++;
+          this.unsettled.add(route.handle.id);
+        }
+      }
+      return result;
+    } finally {
+      this.recoveryPending = false;
+    }
+  }
+  presentation(route: Route) {
+    const current = route.origin
+      ? {
+          bootId: this.host.identity.bootId,
+          handleGeneration: route.handle.generation,
+          instanceId: this.host.identity.instanceId,
+          origin: route.origin,
+          target: this.host.query.target,
+        }
+      : null;
+    return routePresentation(route, current, Date.now(), this.reasons.get(route.handle.id));
   }
   observeHostConfinement(confinement: import("@tnunamak/gozar").Observation<boolean>): void {
     this.transition({ confinement, type: "host-confinement" });
@@ -722,6 +898,7 @@ export class ReachabilityService {
     acknowledged: boolean,
     stopTombstone = false
   ): Promise<Route> {
+    this.assertRecovered();
     const { operationId } = record;
     if (stopTombstone || action === "stop") {
       ++this.epoch;
@@ -760,6 +937,7 @@ export class ReachabilityService {
     }
     this.transition({ handle: route.handle, operationId, type: "restore-intent" });
     this.transition({ observed: "present", type: "reconcile" });
+    this.watch(route.handle);
     return action === "stop"
       ? this.stop(route.handle.id, route.handle.generation, acknowledged)
       : this.check(route.handle.id, route.handle.generation);
@@ -789,6 +967,8 @@ export class ReachabilityService {
     if (this.shutdownRun) {
       throw new ReachabilityError("host_supervisor_unavailable");
     }
+    this.assertRecovered();
+    if (this.recoveryTimedOut || this.unsettled.size > 0) throw new ReachabilityError("configuration_in_use");
     if (this.restartPending) {
       throw new ReachabilityError("operation_in_progress");
     }
@@ -920,40 +1100,75 @@ export class ReachabilityService {
       settled();
     }
   }
+  // One watcher per route, for every route this process holds: one started here,
+  // one found at boot, one recovered from an operation.
   private watch(handle: Handle): void {
+    const live = this.watchers.get(handle.id);
+    if (live && !live.signal.aborted) {
+      return;
+    }
+    live?.abort();
     const abort = new AbortController();
-    this.watchers.get(handle.id)?.abort();
     this.watchers.set(handle.id, abort);
-    void (async () => {
-      try {
-        for await (const event of this.api.watchRoutes({ handle, home: this.host.query.home, signal: abort.signal })) {
-          if (
-            !abort.signal.aborted &&
-            event.route.handle.id === handle.id &&
-            event.route.handle.generation === handle.generation
-          ) {
-            this.routes.set(handle.id, event.route);
-            if (event.route.cleanup.state === "confirmed") this.ownerOrigins.delete(handleKey(handle));
-            if (event.route.state === "lost") {
-              this.transition({ type: "agent-exit" });
-              await this.stop(handle.id, handle.generation, true);
-            } else if (event.type === "consent_changed") {
-              this.transition({ type: "approval-changed" });
-            } else if (
-              this.lifecycle.phase === "verified" &&
-              (!event.route.published || event.route.verification.status !== "verified")
-            ) {
-              this.transition({ type: "proof-expired" });
-            }
+    void this.observeChanges(handle, abort.signal);
+    void this.refreshProof(handle, abort.signal);
+  }
+  private noteProof(route: Route): void {
+    if (this.lifecycle.phase === "verified" && (!route.published || route.verification.status !== "verified")) {
+      this.transition({ type: "proof-expired" });
+    }
+  }
+  private async observeChanges(handle: Handle, signal: AbortSignal): Promise<void> {
+    try {
+      for await (const event of this.api.watchRoutes({ handle, home: this.host.query.home, signal })) {
+        if (
+          !signal.aborted &&
+          event.route.handle.id === handle.id &&
+          event.route.handle.generation === handle.generation
+        ) {
+          this.routes.set(handle.id, event.route);
+          if (event.route.cleanup.state === "confirmed") this.ownerOrigins.delete(handleKey(handle));
+          if (event.type === "terminal") {
+            this.unsettled.delete(handle.id);
+            this.watchers.get(handle.id)?.abort();
+            this.watchers.delete(handle.id);
+          }
+          if (event.route.state === "lost") {
+            this.transition({ type: "agent-exit" });
+            await this.stop(handle.id, handle.generation, true);
+          } else if (event.type === "consent_changed") {
+            this.transition({ type: "approval-changed" });
+          } else {
+            this.noteProof(event.route);
           }
         }
-      } catch {
-        if (!abort.signal.aborted) {
-          this.reasons.set(handle.id, "route_observation_unavailable");
-          if (this.lifecycle.phase === "verified") this.transition({ type: "proof-expired" });
-        }
       }
-    })();
+    } catch {
+      if (!signal.aborted) {
+        this.reasons.set(handle.id, "route_observation_unavailable");
+        if (this.lifecycle.phase === "verified") this.transition({ type: "proof-expired" });
+      }
+    }
+  }
+  // The library's watcher reports changes, not polls, and a proof timestamp is
+  // not a change: left alone, a healthy route would keep its first proof and
+  // read as expired once that lapsed.
+  private async refreshProof(handle: Handle, signal: AbortSignal): Promise<void> {
+    while (!signal.aborted) {
+      await pause(PROOF_REFRESH_MS, signal);
+      if (signal.aborted) {
+        return;
+      }
+      try {
+        const current = await this.check(handle.id, handle.generation);
+        if (!signal.aborted && current.handle.generation === handle.generation) {
+          this.routes.set(handle.id, current);
+          this.noteProof(current);
+        }
+      } catch {
+        // The change watcher reports a route it cannot observe; try again next round.
+      }
+    }
   }
   async check(id: string, generation: number): Promise<Route> {
     const route = this.route(id, generation);
@@ -967,12 +1182,14 @@ export class ReachabilityService {
         return this.route(id, generation);
       }
       this.routes.set(id, current);
+      this.unsettled.delete(id);
       this.transition({
         epoch: this.lifecycle.epoch,
         type: current.verification.status === "verified" && current.published ? "proof-passed" : "proof-failed",
       });
       return current;
     } catch (error) {
+      if ((error as { code?: string }).code === "route_not_found") this.unsettled.delete(id);
       if ((error as { code?: string }).code === "proof_refresh_unsupported") {
         this.reasons.set(id, "proof_refresh_unsupported");
         this.transition({ type: "proof-refresh-unsupported" });
@@ -997,6 +1214,8 @@ export class ReachabilityService {
     const route = this.route(id, generation);
     await this.host.acknowledgeDisconnect(acknowledged);
     if (route.cleanup.state === "confirmed") {
+      this.watchers.get(id)?.abort();
+      this.watchers.delete(id);
       const closed = await this.closeShared(route.handle);
       this.routes.set(id, closed);
       return closed;
@@ -1009,7 +1228,10 @@ export class ReachabilityService {
     this.routes.set(id, { ...route, published: null });
     const closed = await this.closeShared(route.handle);
     this.routes.set(id, closed);
-    if (closed.cleanup.state === "confirmed") this.unreconciled.delete(handleKey(route.handle));
+    if (closed.cleanup.state === "confirmed") {
+      this.unreconciled.delete(handleKey(route.handle));
+      this.unsettled.delete(id);
+    }
     this.transition({ type: closed.cleanup.state === "confirmed" ? "cleanup-confirmed" : "cleanup-unconfirmed" });
     return closed;
   }

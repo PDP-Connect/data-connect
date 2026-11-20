@@ -162,6 +162,24 @@ test("a second draft request for a service resumes its draft", async () => {
   }
 });
 
+test("the draft GET reports a disappeared draft as not found, not a conflict", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "svc-journal-"));
+  try {
+    const { call, service } = await harness(dir);
+    const read = (id: string) => call("GET", "/drafts/:id", undefined, { id }, { providerId: "svc" });
+    const missing = await read("lost");
+    assert.equal(missing.status, 404);
+    assert.equal(missing.payload.error.code, "draft_not_found");
+    assert.equal((await read("d1")).status, 200);
+    service.reload = async () => { throw new ReachabilityError("draft_read_unavailable"); };
+    const unavailable = await read("d1");
+    assert.equal(unavailable.status, 409);
+    assert.equal(unavailable.payload.error.code, "draft_read_unavailable");
+  } finally {
+    await rm(dir, { recursive: true });
+  }
+});
+
 test("a draft the host lost is replaced, still one per service", async () => {
   const dir = await mkdtemp(join(tmpdir(), "svc-journal-"));
   try {

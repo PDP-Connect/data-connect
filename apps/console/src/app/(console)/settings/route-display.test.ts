@@ -202,3 +202,20 @@ test("turning on and off twice lists one Off entry, the latest stop", () => {
   const died = { state: "released", cleanup: { state: "confirmed" }, stopRequested: false, handle: { id: "died" } };
   assert.deepEqual(listedRoutes([died, off("first")], ["first"]).map((route) => route.handle.id), ["died", "first"], "an end the owner did not ask for stays");
 });
+
+test("settled temporary route history shows one quiet session even without an owner stop", () => {
+  const endedRoute = (id: string) => ({ state: "released", cleanup: { state: "confirmed" }, stopRequested: false, handle: { id, kind: "session" }, providerId: "tunnel" });
+  const old = endedRoute("old");
+  const latest = endedRoute("latest");
+  const cleanup = { ...endedRoute("cleanup"), cleanup: { state: "unconfirmed" }, handle: { id: "cleanup", kind: "external" } };
+  const routeIds = (routes: readonly typeof old[]) => routes.map((route) => route.handle.id);
+  assert.deepEqual(routeIds(listedRoutes([old, latest], [])), ["latest"]);
+  assert.deepEqual(routeIds(listedRoutes([old, latest, cleanup], [], (route) => route.handle.id === "old")), ["old", "cleanup"]);
+});
+
+test("server presentation controls On even when the raw route and lifecycle say verified", () => {
+  const route: RouteDisplayInput = { ...staleRoute, presentation: { label: "Unpublished", actions: [], reason: null } };
+  assert.equal(routeHeadline(route, "verified", false), "Needs your action");
+  assert.match(proofLine(route, Date.now()), /Not confirmed yet/);
+  assert.equal(routeHeadline({ ...route, presentation: { label: "Verified", actions: [], reason: null } }, "verified", false), "On");
+});

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Usage } from "@tnunamak/gozar";
-import { ReachabilityError } from "../reachability/approvals.ts";
+import { ReachabilityError, type UnsupportedReason } from "../reachability/approvals.ts";
 import { projectHostSettings, validateHostSettingsInput } from "../reachability/host-settings.ts";
 import { type OperationRecord, type ReachabilityOperations, sameHandle } from "../reachability/operations.ts";
 import type { ReachabilitySetups } from "../reachability/setups.ts";
@@ -61,6 +61,8 @@ const safeCodes = new Set([
   "internal_error",
   "ambiguous_selection",
   "operation_in_progress",
+  "recovery_in_progress",
+  "recovery_timed_out",
   "operation_conflict",
   "operation_recovery_unauthorized",
   "operation_not_found",
@@ -103,17 +105,24 @@ const safeCodes = new Set([
   "operation_superseded",
   "unsafe_state_path",
 ]);
+const unsupportedReasonText: Record<UnsupportedReason, string> = {
+  provider_properties_unsupported: "This provider reports a reach or connection type that this host does not support.",
+  reach_unknown:
+    "Where this route can be reached from is not known yet. Set its address, commit the setup, then review it again.",
+};
 export function publicReachabilityError(error: unknown): { code: string; message: string } {
-  const candidate =
-    unsafeStatePathCause(error) ? "unsafe_state_path" : error && typeof error === "object" && "code" in error ? error.code : null;
+  const candidate = unsafeStatePathCause(error) ? "unsafe_state_path" : error && typeof error === "object" && "code" in error ? error.code : null;
   const code = typeof candidate === "string" && safeCodes.has(candidate) ? candidate : "reachability_unavailable";
+  const reason = error instanceof ReachabilityError && code === "unsupported" ? error.reason : null;
   // Never echo raw messages, causes or arbitrary error properties.
   return {
     code,
     message:
       code === "proof_refresh_unsupported"
         ? "This route cannot safely refresh its proof. It remains unpublished. Stop it before starting a new route."
-        : "The reachability operation could not complete. Review its current state before retrying.",
+        : reason
+          ? unsupportedReasonText[reason]
+          : "The reachability operation could not complete. Review its current state before retrying.",
   };
 }
 function body(request: Request): Record<string, unknown> {
@@ -192,20 +201,20 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       // attribution and stop intent stay unknown rather than await a journal
       // read a degraded /state must not depend on.
     }
-    return { ...projectRoute(route, journaled), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
+    return { ...projectRoute(route, journaled, service().presentation(route)), ...(stopped === undefined ? {} : { stopRequested: stopped }) };
   }
   function projectRoutes(routes: Route[], known?: OperationRecord[], readMissing = true) {
     const records: Records = new Map((known ?? []).map((record) => [record.operationId, Promise.resolve(record)]));
     return Promise.all(routes.map((route) => projectOwnedRoute(route, records, ownerStopped(route, known), readMissing)));
   }
   const guarded = [ctx.requireToken, ctx.requireOwner];
-  function get(path: string, run: (request: Request) => Promise<unknown>) {
-    app.get(`/v1/owner/reachability${path}`, ...guarded, wrap(run));
+  function get(path: string, run: (request: Request) => Promise<unknown>, notFoundCode?: string) {
+    app.get(`/v1/owner/reachability${path}`, ...guarded, wrap(run, notFoundCode));
   }
   function post(path: string, run: (request: Request) => Promise<unknown>) {
     app.post(`/v1/owner/reachability${path}`, ...guarded, ctx.requireCsrf, wrap(run));
   }
-  function wrap(run: (request: Request) => Promise<unknown>): Handler {
+  function wrap(run: (request: Request) => Promise<unknown>, notFoundCode?: string): Handler {
     return async (request, response) => {
       response.setHeader("Cache-Control", "no-store");
       try {
@@ -215,7 +224,8 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         }
         return response.json({ data });
       } catch (error) {
-        return response.status(409).json({ error: publicReachabilityError(error) });
+        const projected = publicReachabilityError(error);
+        return response.status(projected.code === notFoundCode ? 404 : 409).json({ error: projected });
       }
     };
   }
@@ -422,6 +432,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       ? { known: true, value: projectHostSettings(observation.value) }
       : { known: false, reason: observation.reason };
   });
+  post("/recovery/check", async () => service().recoverFromLibrary());
   post("/host-settings", async (request) => {
     const input = body(request);
     return projectHostSettings(
@@ -435,8 +446,10 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   get("/events", async () => {
     const state = service().state();
     return {
+      earlierSetup: state.earlierSetup,
       evidenceSource: state.evidenceSource,
       lifecycle: state.lifecycle,
+      recovery: state.recovery,
       reasons: state.reasons,
       routes: await projectRoutes(state.routes),
       type: "snapshot",
@@ -474,10 +487,12 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
         stage: record.stage,
       }));
     return {
+      earlierSetup: state.earlierSetup,
       evidenceSource: state.evidenceSource,
       journalScan: listed === null ? ("unavailable" as const) : state.journalScan,
       journalUnreadable: state.journalUnreadable,
       lifecycle: state.lifecycle,
+      recovery: state.recovery,
       // False: the journal could not be read in time, so `operations` is unknown, not empty.
       operationsAvailable: listed !== null,
       operations,
@@ -491,8 +506,11 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
       starting: state.starting,
     };
   });
-  get("/drafts/:id", async (request) =>
-    projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id), request.query?.refresh === "true"))
+  get(
+    "/drafts/:id",
+    async (request) =>
+      projectDraft(await service().reload(text(request.query?.providerId), text(request.params.id), request.query?.refresh === "true")),
+    "draft_not_found"
   );
   // Per-router single flight includes the journal read, host effect and durable record.
   // Once settled, a later request follows the normal resume path below.
@@ -562,8 +580,9 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
     );
   });
   post("/drafts/:id/discard", async (request) => {
-    const result = await service().discard(text(request.params.id));
-    await ctx.setups.dropDraft(text(request.params.id));
+    const id = text(request.params.id);
+    const result = await service().discard(id);
+    if (result.discarded === true) await ctx.setups.dropDraft(id);
     return result;
   });
   post("/drafts/:id/commit", async (request) => {
