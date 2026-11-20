@@ -477,10 +477,27 @@ test("owner recovery and boot share an in-flight close", async () => {
   try {
     const call = await ownerApi(f);
     const id = f.operationIds.get("route-1")!;
+    let bootEntered!: () => void, ownerJoined!: () => void;
+    const entered = new Promise<void>(resolve => { bootEntered = resolve; });
+    const joined = new Promise<void>(resolve => { ownerJoined = resolve; });
+    const service = f.service as unknown as { closeShared: (handle: Handle) => Promise<Route> };
+    const closeShared = service.closeShared.bind(service);
+    let inFlight: Promise<Route> | undefined;
+    service.closeShared = handle => {
+      const pending = closeShared(handle);
+      if (!inFlight) {
+        inFlight = pending;
+        bootEntered();
+      } else {
+        assert.equal(pending, inFlight, "the owner joins the boot close promise");
+        ownerJoined();
+      }
+      return pending;
+    };
     const boot = f.service.reconcileAfterRestart(5000, f.operations);
-    await until(() => f.closes.length === 1);
+    await entered;
     const owner = call("POST", `/operations/${id}/reconcile`, { acknowledgeDisconnect: true, action: "stop" }, { id });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await joined;
     release(await confirm(route1));
     const [outcome, answer] = await Promise.all([boot, owner]);
     assert.equal(f.closes.length, 1, "one close for the handle");

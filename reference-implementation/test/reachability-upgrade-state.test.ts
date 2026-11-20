@@ -1,14 +1,15 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 // Turn on against a state folder that earlier builds already wrote, with the
-// real gozar library and the real routes. Only the host (listener, password)
-// is stubbed.
+// real gozar library and routes, a generic fixture provider, and a stubbed
+// host (listener, password).
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fakeRegistry } from "@tnunamak/gozar/testing";
 import { createReachabilityService } from "../server/reachability/factory.ts";
 import { createHostSecretBackend, createSealedSecretBackend } from "../server/reachability/secret-backend.ts";
 import { ReachabilitySetups } from "../server/reachability/setups.ts";
@@ -40,8 +41,18 @@ async function boot(root: string, journal = "reachability-setups") {
   process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY ??= randomBytes(32).toString("hex");
   const home = join(root, "reachability");
   await mkdir(home, { mode: 0o700, recursive: true });
+  const registry = await fakeRegistry({
+    id: "generic-fixture", kinds: ["session", "attached"], reach: "this-device", dir: join(root, "registry"),
+  });
+  // This fixture's setup is already complete. The real library still persists
+  // its setup operation, so committed-leftover and restart paths keep that state.
+  const providerModule = join(registry.root, "providers", "generic-fixture", "index.mjs");
+  const source = (await readFile(providerModule, "utf8")).replace("export default {", "const provider = {");
+  await writeFile(providerModule, source + '\nprovider.observeSetup = async () => ({ state: "complete", nextAction: null });\nexport default provider;\n');
   const service = await createReachabilityService(
     {
+      manifest: registry.manifest,
+      root: registry.root,
       hostCapabilities: {
         "installer.execute": { known: true, value: false },
         "privilege.elevate": { known: true, value: false },
@@ -149,7 +160,7 @@ async function boot(root: string, journal = "reachability-setups") {
   return { request, service, setups };
 }
 
-const choice = { providerId: "localhost-run", usage: "session" };
+const choice = { providerId: "generic-fixture", usage: "session" };
 
 test("a declined owner discard preserves the draft journal entry", async (t) => {
   const root = await scratch();
@@ -246,6 +257,7 @@ test("three preparers on one profile all end at a review, never at a stale dead 
   const results = await Promise.allSettled([prepareTurnOn(request, choice), prepareTurnOn(request, choice), prepareTurnOn(request, choice)]);
   for (const result of results) {
     assert.equal(result.status, "fulfilled", result.status === "rejected" ? String(result.reason?.detail?.code ?? result.reason) : "");
+    if (result.status === "fulfilled") assert.equal(result.value.kind, "ready");
   }
   // A later click after the race still works.
   assert.equal((await prepareTurnOn(request, choice)).kind, "ready");
