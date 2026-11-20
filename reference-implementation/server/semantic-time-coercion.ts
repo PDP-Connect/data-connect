@@ -108,7 +108,10 @@ export function coerceSemanticTimeValue(value: unknown): string | null {
       return coerceSemanticTimeValue(Number(trimmed));
     }
     const parsed = Date.parse(trimmed);
-    return Number.isNaN(parsed) || !isEpochSentinel(parsed) ? trimmed : null;
+    if (Number.isNaN(parsed) || isEpochSentinel(parsed)) {
+      return null;
+    }
+    return trimmed;
   }
   if (typeof value === "number" && Number.isFinite(value) && value > 0) {
     const ms = value >= SEMANTIC_TIME_EPOCH_MS_THRESHOLD ? value : value * 1000;
