@@ -8,6 +8,7 @@ import {
   rmSync,
   writeFileSync,
   existsSync,
+  readFileSync,
 } from "node:fs"
 import { join } from "node:path"
 import { afterEach, test } from "node:test"
@@ -127,4 +128,24 @@ test("local admission rejects unsupported runtime bindings", async () => {
     () => store.add(fixture({ key: "bad-binding", binding: "usb" })),
     /unsupported runtime binding/
   )
+})
+
+test("re-adding a root whose manifest changed connector key is rejected and keeps the selection", async () => {
+  const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
+  temporaryRoots.push(dataDir)
+  const sourcePath = fixture({ key: "first-key" })
+  const store = createFileLocalConnectorSourceStore(dataDir)
+  const source = await store.add(sourcePath)
+  await store.select(source.connectorKey, source.sourceId)
+
+  const other = fixture({ key: "second-key" })
+  writeFileSync(
+    join(sourcePath, "profile", "collection-profile.json"),
+    readFileSync(join(other, "profile", "collection-profile.json"))
+  )
+  await assert.rejects(() => store.add(sourcePath), /changed connector identity/)
+
+  const [stored] = await store.list()
+  assert.equal(stored?.connectorKey, "first-key")
+  assert.equal(stored?.selected, true)
 })

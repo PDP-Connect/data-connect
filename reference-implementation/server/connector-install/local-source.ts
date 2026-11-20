@@ -356,6 +356,11 @@ export function createFileLocalConnectorSourceStore(
         root,
         state.selectedByConnectorKey[existing?.connectorKey ?? ""] === sourceId
       )
+      if (existing && record.connectorKey !== existing.connectorKey) {
+        throw new Error(
+          "Added Collection Profile changed connector identity."
+        )
+      }
       write({
         selectedByConnectorKey: { ...state.selectedByConnectorKey },
         sources: { ...state.sources, [sourceId]: record },
