@@ -27,3 +27,9 @@ test("blocklist: there are no composition rules, so any unlisted 15+ character v
     assert.equal(isBlockedOwnerPassword(value), false, value);
   }
 });
+
+test("blocklist: whitespace padding does not make a listed password acceptable", () => {
+  assert.equal(isBlockedOwnerPassword("password123456 "), true);
+  assert.equal(isBlockedOwnerPassword(" password123456"), true);
+  assert.equal(isBlockedOwnerPassword("\tpassword\n"), true);
+});

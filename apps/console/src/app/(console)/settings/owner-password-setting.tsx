@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { requestOwnerPasswordWindowAction } from "./owner-password-first-setup-actions.ts"
 import {
   changeOwnerPasswordAction,
@@ -38,8 +38,13 @@ export function OwnerPasswordSetting({
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
+  // Enter in a password field submits even while the button is disabled, and
+  // two Enters in one tick both read busy as false. A ref closes both.
+  const submitting = useRef(false)
+
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (submitting.current) return
     setMessage(null)
     if (Array.from(newPassword).length < 15) {
       setMessage("Use at least 15 characters for the new password.")
@@ -50,6 +55,7 @@ export function OwnerPasswordSetting({
       return
     }
 
+    submitting.current = true
     setBusy(true)
     try {
       const result = await changeOwnerPasswordAction(
@@ -74,6 +80,7 @@ export function OwnerPasswordSetting({
           : "Could not change the owner password."
       )
     } finally {
+      submitting.current = false
       setBusy(false)
     }
   }
