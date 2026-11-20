@@ -70,8 +70,8 @@ Runtime boundaries:
 
 ## Routing + deep links
 
-- Deep links use `vana://connect?sessionId={id}&secret={secret}` via Tauri deep-link plugin.
-- `useDeepLink` normalizes the URL then redirects to `/connect` using `replace`.
+- The app registers no custom URL scheme. Grant entry is by route query params.
+- `useDeepLink` normalizes those params then redirects to `/connect` using `replace`.
 - Grant flow parameters are canonical in the URL (`sessionId`, `secret`, `scopes`).
 - PDPP grant links also carry `authorizationDetails` and
   `authorizationDetailsSig`. The latter is an EIP-191 builder signature over the
