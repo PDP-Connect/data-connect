@@ -80,7 +80,7 @@ export interface BucketSeries {
 /** A single per-stream aggregate group list (the server `group_by_time` groups). */
 export interface AggregateGroup {
   count: number;
-  /** ISO bucket-start key (`YYYY-MM-DD` for day/week/month, `…THH:MM` for hour), or null. */
+  /** ISO bucket-start key (`YYYY-MM-DD` for day/week/month, `…THH:MM:SS±HH:MM` for hour), or null. */
   key: string | null;
 }
 
