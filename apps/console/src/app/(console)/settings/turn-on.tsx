@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input.tsx";
 import { ApprovalDisclosure, ConsentDisclosures, ConsentFacts, PlainDisclosure, readDisclosure, splitFacts, UnknownFactsCount } from "./reachability-consent.tsx";
 import { type Action, type Draft, type FactKind, formatDisclosures, effectLines, type Review, shortFactLines } from "./prepare-remote-access.ts";
 import { plain } from "./plain-text.ts";
+import { serviceName } from "./service-name.ts";
 
 // The icon each short fact line carries, as in the approved mockups: who must
 // sign in, who can read traffic, and what it costs or how long it lasts.
@@ -81,7 +82,7 @@ export function TurnOnCard({
   const details = complete ? (
     <details className="grid gap-2" open={detailsOpen}>
       <summary className="cursor-pointer text-sm text-muted-foreground">
-        Details · everything {plain(candidate.display.label)} tells us about this connection
+        Details · everything {plain(serviceName(candidate.providerId, candidate.display.label))} tells us about this connection
       </summary>
       <div className="grid gap-3">
         <p className="pdpp-caption break-words">Connects to: {consent.scope?.query.target}</p>
@@ -98,7 +99,7 @@ export function TurnOnCard({
         <PlainDisclosure value={bound} except={lines} providerId={candidate.providerId} />
         <ConsentDisclosures value={consent.disclosures} providerId={candidate.providerId} />
         <ConsentFacts facts={shown} providerId={candidate.providerId} />
-        <UnknownFactsCount count={unknown} service={candidate.display.label} />
+        <UnknownFactsCount count={unknown} service={serviceName(candidate.providerId, candidate.display.label)} />
         {steps.map((step) => (
           <div className="grid gap-2" key={step.id}>
             <h4 className="pdpp-label">{plain(step.label)}</h4>

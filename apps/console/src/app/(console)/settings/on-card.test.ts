@@ -13,6 +13,7 @@ import ts from "typescript";
 import { formatLocalTime } from "./plain-text.ts";
 import type { requestReachability } from "./reachability-client.ts";
 import { publicError } from "./reachability-errors.ts";
+import { qrSvg } from "./qr-code.ts";
 
 mock.module(new URL("./owner-password-first-setup-actions.ts", import.meta.url).href, {
   namedExports: { requestOwnerPasswordWindowAction: async () => ({ ok: true }) },
@@ -42,7 +43,7 @@ const fact = (id: string, value: string | null, known = true) => ({
   asOf: null,
 });
 
-type RouteOver = { providerId?: string | null; approvedConsentFactsDigest?: string | null; id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string };
+type RouteOver = { providerId?: string | null; approvedConsentFactsDigest?: string | null; id?: string; origin?: string; observedAt?: number; validUntil?: number | null; expiresAt?: number | null; facts?: unknown[]; state?: string; properties?: unknown };
 function routeAt(over: RouteOver = {}) {
   const observedAt = over.observedAt ?? T0;
   const validUntil = over.validUntil === undefined ? observedAt + 30_000 : over.validUntil;
@@ -57,6 +58,7 @@ function routeAt(over: RouteOver = {}) {
     cleanup: { state: "none", nextAction: null },
     expiresAt: expiresAt === null ? { known: false, reason: "not-observed" } : { known: true, value: iso(expiresAt) },
     facts: over.facts ?? [],
+    ...(over.properties === undefined ? {} : { properties: over.properties }),
     hostConfiguration: { target: { known: true, value: "127.0.0.1:37807" } },
     published: "https://one.example.invalid",
     routeState: "verified",
@@ -203,10 +205,7 @@ const checks = (calls: Call[]) => calls.filter((call) => call.url === "/routes/r
 test("On shows the address, Copy, the check age, the server's end time, the way it runs through, and a link on", async (t) => {
   const route = routeAt({
     expiresAt: T0 + 5 * 60_000 + 3_600_000,
-    facts: [
-      fact("Cost", "free"),
-      { ...fact("payload-readers", "The tunnel relay can read the traffic."), group: "privacy" },
-    ],
+    properties: { cost: { kind: "free" }, needsAccount: false, traffic: { providerCanReadPayload: true } },
     providerId: "p-tunnel",
   });
   await withScreen(host({ "/state": onState(route) }), async ({ container, text }) => {
@@ -232,7 +231,7 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(factLines[1] ?? "", /↔/);
     assert.ok((factLines[1] ?? "").includes("Through Tunnel service (Tunnel service) · Free"), factLines[1] ?? "no way line");
     assert.match(factLines[2] ?? "", /👁/);
-    assert.ok((factLines[2] ?? "").includes("The tunnel relay can read the traffic."), factLines[2] ?? "no readers line");
+    assert.ok((factLines[2] ?? "").includes("Tunnel service can see what passes through."), factLines[2] ?? "no readers line");
     // The next step names the apps; the link to them sits on its right.
     assert.ok(visible.includes("Next: connect ChatGPT or Claude"), visible);
     const link = [...container.querySelectorAll("a")].find((node) => node.textContent === "Connect apps ›");
@@ -244,6 +243,83 @@ test("On shows the address, Copy, the check age, the server's end time, the way 
     assert.match(footer.querySelector("summary")?.textContent ?? "", /›$/);
     assert.doesNotMatch(visible, /connected to|is connected|QR/i);
     assert.doesNotMatch(visible, /\b1 hour\b|15 minutes/);
+  }, t);
+});
+
+const onLines = (container: Element) => [...container.querySelectorAll('section[aria-label="On"] li')].map((node) => node.textContent ?? "");
+
+test("the On card states cost and readers from the route's structured fields, not from prose facts", async (t) => {
+  // Prose facts that say the opposite must change nothing.
+  const prose = [
+    { ...fact("payload-readers", "The tunnel relay cannot read the traffic."), group: "privacy" },
+    fact("cost-detail", "free"),
+  ];
+  const cases: [unknown, RegExp | null, string][] = [
+    [{ cost: { kind: "paid" }, needsAccount: null, traffic: { providerCanReadPayload: false } }, null, "Tunnel service can't read what passes through."],
+    [{ cost: { kind: "unknown" }, needsAccount: null, traffic: { providerCanReadPayload: null } }, null, "We can't tell whether Tunnel service can read what passes through."],
+    [{ cost: { kind: "free" }, needsAccount: false, traffic: { providerCanReadPayload: true } }, /Through Tunnel service \(Tunnel service\) · Free$/, "Tunnel service can see what passes through."],
+  ];
+  for (const [properties, free, readers] of cases) {
+    const route = routeAt({ facts: prose, properties, providerId: "p-tunnel" });
+    await withScreen(host({ "/state": onState(route) }), async ({ container }) => {
+      const lines = onLines(container);
+      const through = lines.find((line) => line.includes("Through")) ?? "";
+      if (free) assert.match(through, free);
+      else assert.doesNotMatch(through, /Free/);
+      assert.ok(lines.some((line) => line.includes(readers)), `${readers} in ${lines.join("|")}`);
+    }, t);
+  }
+});
+
+test("a route that carries no structured properties makes no cost or reader claim", async (t) => {
+  const route = routeAt({ facts: [{ ...fact("payload-readers", "The tunnel relay can read the traffic."), group: "privacy" }, fact("Cost", "free")], providerId: "p-tunnel" });
+  await withScreen(host({ "/state": onState(route) }), async ({ container }) => {
+    const lines = onLines(container);
+    assert.equal(lines.length, 2, lines.join("|"));
+    assert.doesNotMatch(lines.join("|"), /Free|passes through|read the traffic/);
+  }, t);
+});
+
+test("a public https address shows a QR code that encodes it, with the scan hint beside Copy", async (t) => {
+  await withScreen(host({ "/state": onState(routeAt({ origin: "https://abc123.example.invalid" })) }), async ({ container, text }) => {
+    const svg = container.querySelector('section[aria-label="On"] svg[data-qr]');
+    assert.ok(svg, "the On card shows the QR code");
+    assert.ok(text().includes("or scan it with your phone →"), text());
+    const { size, path } = qrSvg("https://abc123.example.invalid");
+    assert.equal(svg.getAttribute("viewBox"), `0 0 ${size} ${size}`);
+    assert.equal(svg.querySelector("path")?.getAttribute("d"), path);
+    assert.equal(container.querySelectorAll("canvas").length, 0);
+  }, t);
+});
+
+test("a route with no public https address shows no QR code and no scan hint", async (t) => {
+  const http = routeAt({ origin: "http://abc123.example.invalid" });
+  const privateVantage = { ...routeAt(), verification: { ...routeAt().verification, vantage: "this-device" } };
+  for (const route of [http, privateVantage, { ...routeAt(), origin: null }]) {
+    await withScreen(host({ "/state": onState(route as ReturnType<typeof routeAt>) }), async ({ container, text }) => {
+      assert.ok(container.querySelector('section[aria-label="On"]'), "the On card is mounted");
+      assert.equal(container.querySelector("svg[data-qr]"), null);
+      assert.doesNotMatch(text(), /scan it with your phone/);
+    }, t);
+  }
+});
+
+test("a route through localhost.run names the service without the library's plan word", async (t) => {
+  const trial = { ...provider, providerId: "localhost-run", label: "localhost.run trial" };
+  const route = routeAt({ providerId: "localhost-run" });
+  await withScreen(host({ "/catalog": ok({ ...catalog, providers: [trial] }), "/state": onState(route) }), async ({ container }) => {
+    const line = [...container.querySelectorAll('section[aria-label="On"] li')].map((node) => node.textContent ?? "").find((value) => value.includes("Through"));
+    assert.ok(line?.includes("Through Temporary address (localhost.run)"), line ?? "no way line");
+    assert.doesNotMatch(container.querySelector('section[aria-label="On"]')?.textContent ?? "", /trial/);
+  }, t);
+});
+
+test("the Connect apps link is a link, and the Details footer has no marker of its own above it", async (t) => {
+  await withScreen(host({ "/state": onState() }), async ({ container }) => {
+    const link = [...container.querySelectorAll("a")].find((node) => node.textContent === "Connect apps ›");
+    assert.match(link?.getAttribute("class") ?? "", /\bunderline\b/);
+    const summary = container.querySelector('section[aria-label="On"] [data-diagnostics] summary');
+    assert.match(summary?.getAttribute("class") ?? "", /\blist-none\b/);
   }, t);
 });
 

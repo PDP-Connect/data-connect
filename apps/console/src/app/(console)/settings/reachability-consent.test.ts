@@ -105,6 +105,13 @@ test("setup card shows all typed disclosure groups from the action snapshot", ()
   }
 });
 
+// The library states these for every route; a candidate built without them is not a real one.
+const fixtureProperties = {
+  cost: { kind: "unknown", summary: "" },
+  needsAccount: null,
+  traffic: { providerCanReadPayload: null, readers: [], metadataVisibleTo: [], evidenceRef: null, tlsTermination: "unknown" },
+};
+
 const timeStatingConditions = ["Logs retained for 30 days", "Free for 7 days, then costs $10", "the plan limits a session to 15 minutes"];
 
 test("setup approval shows time-stating conditions from facts alone", () => {
@@ -131,7 +138,7 @@ test("turn on card Details show time-stating conditions from disclosures alone",
     consentFactsDigest: "fixture-route",
     consent: { scope: routeScope, consentFactsDigest: "fixture-route", facts: [], disclosures: { ownership: "external-owned" } },
     disclosure: base.disclosure,
-    display: { label: "Fixture", description: "", needs: "" },
+    display: { label: "Fixture", description: "", needs: "" }, properties: fixtureProperties,
     eligible: true, expiresAt: null, facts: [],
     providerId: "fixture", ownership: "external-owned",
   } as unknown as Parameters<typeof projectCandidate>[0]);
@@ -147,7 +154,7 @@ test("turn on card Details show time-stating conditions from disclosures alone",
 test("turn on card rejects a digest alias mismatch without showing unrelated catalog facts", () => {
   const candidate = {
     providerId: base.consent!.scope.providerId,
-    display: { label: "Fixture", description: "", needs: "" },
+    display: { label: "Fixture", description: "", needs: "" }, properties: fixtureProperties,
     eligible: true,
     consentFactsDigest: "alias-one",
     expiresAt: null,
@@ -174,7 +181,7 @@ test("turn on card shows the exact address and target covered by approval", () =
       disclosures: { ownership: "external-owned" },
     },
     disclosure: base.disclosure,
-    display: { label: "Fixture", description: "", needs: "" },
+    display: { label: "Fixture", description: "", needs: "" }, properties: fixtureProperties,
     eligible: true, expiresAt: null, facts: [],
     providerId: "fixture", ownership: "external-owned",
   } as unknown as Parameters<typeof projectCandidate>[0]);
@@ -197,7 +204,7 @@ test("canary private fields are absent from projected setup and route snapshots"
   const setup = projectAction(action);
   const route = projectCandidate({
     providerId: base.consent!.scope.providerId,
-    display: { label: "Fixture", description: "", needs: "" },
+    display: { label: "Fixture", description: "", needs: "" }, properties: fixtureProperties,
     eligible: true,
     consentFactsDigest: "alias-one",
     expiresAt: null,

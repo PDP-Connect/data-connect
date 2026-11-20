@@ -4,7 +4,8 @@
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { type ReactNode, useState } from "react";
 import { Button } from "@/components/ui/button.tsx";
-import { plain } from "./plain-text.ts";
+import { payloadReadingLine } from "./prepare-remote-access.ts";
+import { publicHttpsAddress, qrSvg } from "./qr-code.ts";
 import { expiryLine, expiryTime, proofLine, type RouteDisplayInput } from "./route-display.ts";
 
 /** Copies text and says so. The clipboard may be missing; then nothing changes. */
@@ -32,6 +33,24 @@ export function CopyButton({
   );
 }
 
+/** The address as a QR code, drawn as one inline SVG path. */
+function AddressQr({ address }: { address: string }) {
+  const { size, path } = qrSvg(address);
+  return (
+    <svg
+      aria-label="QR code for your address"
+      className="size-28 flex-none rounded-lg bg-white"
+      data-qr=""
+      role="img"
+      shapeRendering="crispEdges"
+      viewBox={`0 0 ${size} ${size}`}
+    >
+      <rect fill="#fff" height={size} width={size} />
+      <path d={path} fill="#000" />
+    </svg>
+  );
+}
+
 /** One fact line under the address: an icon, then the sentence. */
 function FactLine({ icon, children }: { icon: string; children: ReactNode }) {
   return (
@@ -44,38 +63,15 @@ function FactLine({ icon, children }: { icon: string; children: ReactNode }) {
   );
 }
 
-// The library's route fact that names who can read the traffic ("payload-readers"
-// in every tunnel provider's definition). Its value is the eye line, verbatim.
-type OnRouteFact = { id: string; group: string; known: boolean; value: unknown };
-function trafficReaders(facts: OnRouteFact[]): string | null {
-  for (const fact of facts) {
-    if (fact.id === "payload-readers" && fact.known && typeof fact.value === "string" && fact.value.trim() !== "") {
-      return plain(fact.value);
-    }
-  }
-  return null;
-}
-
-// A cost the route states in a word or two; the definitions' prose cost summaries stay in Details.
-function shortCost(facts: OnRouteFact[]): string | null {
-  for (const fact of facts) {
-    if (
-      fact.group === "cost" &&
-      fact.known &&
-      typeof fact.value === "string" &&
-      fact.value.trim() !== "" &&
-      !fact.value.includes(";") &&
-      fact.value.length <= 24
-    ) {
-      const value = plain(fact.value);
-      return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
-    }
-  }
-  return null;
-}
-
 /** The way a live route runs through, from the route's own provider. */
 export type OnWay = { title: string; provider: string };
+
+/** What the library states about the route: its cost kind, who can read the traffic, whether it needs an account. */
+export type OnRouteProperties = {
+  cost: { kind: string };
+  needsAccount: boolean | null;
+  traffic: { providerCanReadPayload: boolean | null };
+};
 
 /**
  * The card for a route that is on: a status band, the address with Copy, the
@@ -95,7 +91,7 @@ export function OnCard({
   way,
   children,
 }: {
-  route: RouteDisplayInput & { origin: string | null; facts?: OnRouteFact[] };
+  route: RouteDisplayInput & { origin: string | null; properties?: OnRouteProperties };
   now: number;
   synthetic: boolean;
   /** True when the displayed address replaced one the owner saw on this page. */
@@ -107,12 +103,12 @@ export function OnCard({
   /** Details, under the card's footer divider. */
   children?: ReactNode;
 }) {
-  const facts = route.facts ?? [];
   const end = expiryTime(route);
   const ends = expiryLine(route);
-  const cost = shortCost(facts);
-  const readers = trafficReaders(facts);
-  const through = way ? `Through ${way.title} (${way.provider})${cost ? ` · ${cost}` : ""}` : null;
+  const { properties } = route;
+  const readers = properties ? payloadReadingLine(way?.provider ?? "The service", properties.traffic.providerCanReadPayload) : null;
+  const qrAddress = publicHttpsAddress(route.origin, route.verification.vantage);
+  const through = way ? `Through ${way.title} (${way.provider})${properties?.cost.kind === "free" ? " · Free" : ""}` : null;
   return (
     <section aria-label="On" className="overflow-hidden rounded-xl border">
       <p className="border-b bg-emerald-500/5 px-4 py-3 text-sm font-medium" role="status">
@@ -127,12 +123,16 @@ export function OnCard({
           </p>
         ) : null}
         {route.origin ? (
-          <div className="grid gap-2">
-            <span className="pdpp-label uppercase tracking-wide">Your address</span>
-            <p className="rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-sm break-all">{route.origin}</p>
-            <div className="flex flex-wrap items-center gap-3">
-              <CopyButton label="Copy address" text={route.origin} variant="default" />
+          <div className="flex flex-wrap items-start gap-4">
+            <div className="grid min-w-0 flex-1 basis-64 gap-2">
+              <span className="pdpp-label uppercase tracking-wide">Your address</span>
+              <p className="rounded-lg border bg-muted/40 px-3 py-2.5 font-mono text-sm break-all">{route.origin}</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <CopyButton label="Copy address" text={route.origin} variant="default" />
+                {qrAddress ? <span className="pdpp-caption">or scan it with your phone →</span> : null}
+              </div>
             </div>
+            {qrAddress ? <AddressQr address={qrAddress} /> : null}
           </div>
         ) : (
           <p className="pdpp-caption">Your address: Not available yet</p>
@@ -147,7 +147,7 @@ export function OnCard({
             <span className="text-sm font-medium">Next: connect ChatGPT or Claude</span>
             <span className="pdpp-caption">Connect apps uses this address and asks you to approve each app.</span>
           </div>
-          <a className="text-sm font-medium underline-offset-4 hover:underline" href={dashboardRoutes.section.connect}>
+          <a className="text-sm font-medium underline underline-offset-4" href={dashboardRoutes.section.connect}>
             Connect apps ›
           </a>
         </div>

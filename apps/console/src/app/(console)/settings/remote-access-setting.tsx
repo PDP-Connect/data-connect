@@ -16,6 +16,7 @@ import { ProviderSetup } from "./provider-setup.tsx";
 import { type ServiceEntry, setupCards } from "./setup-services.ts";
 import { requestReachability } from "./reachability-client.ts";
 import { OnCard } from "./on-card.tsx";
+import { serviceName } from "./service-name.ts";
 import { type CheckOutcome, createRecheckLoop } from "./recheck-loop.ts";
 import { type Attention, attentionSentence, journalUnreadableWarning, listedRoutes, recheckDelay, routeAttention, routeCardProofLine, routeHeadline, routeSentence } from "./route-display.ts";
 import {
@@ -435,7 +436,7 @@ export function RemoteAccessSetting({
   const way = pinnedWay && !wayUnusable(pinnedWay, capabilities, blocks) ? pinnedWay : recommended;
   const wayUsage = way ? pickUsage(way, capabilities) : null;
   const wayId = way?.providerId ?? null;
-  const wayLabel = way ? plain(way.label) : undefined;
+  const wayLabel = way ? plain(serviceName(way.providerId, way.label)) : undefined;
   // The selected way's card title, as the Turn on card's caption reads it.
   const wayTitle = way ? plain(wayRow(way, capabilities, blocks).title) : null;
   // Read by a sign-in step already under way: it must not show or open for a way the owner has left.
@@ -1288,7 +1289,7 @@ export function RemoteAccessSetting({
             // the catalog happens to select now.
             const routeProvider = route.providerId != null ? inventory?.providers.find((item) => item.providerId === route.providerId) : undefined;
             const onWay = routeProvider
-              ? { title: plain(wayRow(routeProvider, capabilities, blocks).title), provider: plain(routeProvider.label) }
+              ? { title: plain(wayRow(routeProvider, capabilities, blocks).title), provider: plain(serviceName(routeProvider.providerId, routeProvider.label)) }
               : null;
             return (
               <OnCard
@@ -1302,7 +1303,7 @@ export function RemoteAccessSetting({
                 way={onWay}
               >
                 {extras}
-                <Diagnostics label="Details" note={`What we checked, and everything ${routeProvider ? plain(routeProvider.label) : serviceLabel} reports`}>
+                <Diagnostics label="Details" note={`What we checked, and everything ${routeProvider ? plain(serviceName(routeProvider.providerId, routeProvider.label)) : serviceLabel} reports`}>
                   {detailsBody}
                 </Diagnostics>
               </OnCard>

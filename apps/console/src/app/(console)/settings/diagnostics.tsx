@@ -73,7 +73,12 @@ export function diagnosticsText(error: DisplayError, appVersion?: string): strin
 export function Diagnostics({ children, label = "Details", note }: { children: ReactNode; label?: string; note?: string }) {
   return (
     <details className="grid gap-2" data-diagnostics="">
-      <summary className="cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline">
+      <summary
+        className={`cursor-pointer text-sm text-muted-foreground underline-offset-4 hover:underline${
+          // The footer row carries its own "Details ›" arrow, so the browser's marker would sit alone on the line above it.
+          note ? " list-none [&::-webkit-details-marker]:hidden" : ""
+        }`}
+      >
         {note ? (
           <span className="flex flex-wrap items-center justify-between gap-3">
             <span className="pdpp-caption">{note}</span>
