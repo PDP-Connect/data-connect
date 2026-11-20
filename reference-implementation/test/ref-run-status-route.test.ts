@@ -31,7 +31,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { emitSpineEvent, getRunStartedEvent, getRunTerminalEvent, listSpineEventsPage } from "../lib/spine.ts";
 import { closeDb, initDb } from "../server/db.ts";
-import type { MountRefRunStatusContext, RunStatusBody } from "../server/routes/ref-run-status.ts";
+import type { MountRefRunStatusContext } from "../server/routes/ref-run-status.ts";
+import type { RunStatusBody } from "../server/run-status-read-model.ts";
 import { mountRefRunStatus } from "../server/routes/ref-run-status.ts";
 import { makeTemporaryDbPath } from "./helpers/temp-dir.ts";
 
