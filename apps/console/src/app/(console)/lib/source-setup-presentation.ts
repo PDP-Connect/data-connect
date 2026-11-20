@@ -596,7 +596,18 @@ export function sourceSetupCardModel(
   catalogTransientlyUnavailable: boolean
 ): SourceSetupCardModel {
   // No setup path means no reason to install: the package could never be used.
-  const noSetupPath = sourceSetupRowIsUnavailable(entry);
+  //
+  // One exception. A local collector's proof is a claim in its installed
+  // manifest. An entry that is not registered yet is built from the package
+  // listing alone, which carries no claim, so its disposition reads "unproven"
+  // only because nothing has been installed to prove it. Hiding the install
+  // action for it would leave no way to ever register it. Install stays
+  // offered, and the claim is judged from the manifest once it is registered.
+  const proofJudgedAfterInstall =
+    entry.disposition === "local_collector_unproven" &&
+    entry.registrationStatus !== "registered" &&
+    Boolean(lifecycle?.catalog || lifecycle?.installed);
+  const noSetupPath = sourceSetupRowIsUnavailable(entry) && !proofJudgedAfterInstall;
   const installModel = lifecycle && !noSetupPath ? connectorInstallRowModel(entry, lifecycle) : null;
   const packageAvailabilityUnknown = catalogTransientlyUnavailable && !lifecycle?.installed && !noSetupPath;
   const setupAction = entry.isKnownScaffold

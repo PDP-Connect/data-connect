@@ -380,10 +380,10 @@ test("non-browser static-secret connectors keep the existing single capture path
   const catalog = buildConnectorCatalog([
     {
       // No public_listing declared -> defaults to Development (the same
-      // fixture shape this test always used). "gmail" is a real,
-      // live-proven connector key (STATIC_SECRET_LIVE_PROVEN_KEYS), so the
-      // shared planner resolves static_secret_connect purely from the
-      // connector key regardless of this synthetic manifest's declared tier.
+      // fixture shape this test always used). The manifest claims a live
+      // static-secret proof, so the shared planner resolves
+      // static_secret_connect regardless of the declared tier.
+      capabilities: { proven: { static_secret_live: { proven: true } } },
       connector_id: "https://registry.pdpp.dev/connectors/gmail",
       display_name: "Gmail",
       runtime_requirements: { bindings: { network: { required: true } } },

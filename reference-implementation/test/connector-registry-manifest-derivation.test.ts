@@ -73,7 +73,6 @@ import type { ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import {
   buildConnectionSetupPlan,
   classifyConnectorSetupModality,
-  PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS,
 } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey, isConnectorKey } from "../server/connector-key.ts";
 import {
@@ -82,8 +81,6 @@ import {
   LEGACY_LOCAL_ALIASES,
   LOCAL_COLLECTOR_PROVEN_KEYS,
   NATIVE_CONNECTOR_KEYS,
-  PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS,
-  STATIC_SECRET_LIVE_PROVEN_KEYS,
 } from "../server/generated/connector-registry.generated.ts";
 
 const trackedRegistry = {
@@ -92,8 +89,6 @@ const trackedRegistry = {
   LEGACY_LOCAL_ALIASES,
   LOCAL_COLLECTOR_PROVEN_KEYS,
   NATIVE_CONNECTOR_KEYS,
-  PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS,
-  STATIC_SECRET_LIVE_PROVEN_KEYS,
 };
 
 const riRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -185,24 +180,6 @@ test("every generated registry entry is a real, non-empty connector key with no 
   }
 });
 
-test("PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS is exactly the generated manifest-derived set plus the synthetic test_provider literal", () => {
-  // test_provider is a synthetic connector constructed only by
-  // test/provider-auth-lifecycle.test.ts fixtures; it has no manifest file,
-  // so it is a deliberate non-generated literal addition in
-  // connection-setup-plan.ts, not manifest-derived. This proves it is the
-  // ONLY non-generated entry — a future hand-edit adding a second literal
-  // key would fail here instead of silently reopening the connector-id
-  // allowlist this generator closed.
-  const nonGenerated = PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS.filter(
-    (key) => !PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS.includes(key)
-  );
-  assert.deepEqual(nonGenerated, ["test_provider"]);
-  assert.deepEqual(
-    [...PROVIDER_AUTH_LIFECYCLE_PROVEN_CONNECTOR_KEYS].sort(),
-    [...new Set(["test_provider", ...PROVIDER_AUTH_LIFECYCLE_PROVEN_KEYS])].sort()
-  );
-});
-
 function customManifest(
   connectorId: string,
   bindings: Readonly<Record<string, unknown>>,
@@ -258,7 +235,7 @@ test("counterweight: a custom third-party connector_id, unknown to every generat
   // A third-party static-secret connector with a real credential_capture
   // block reaches the same generic experimental path a first-party
   // connector without a live-proof entry would — proving the classifier
-  // reads setup.credential_capture, not STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS
+  // reads setup.credential_capture, not capabilities.proven.static_secret_live
   // membership.
   const staticSecret = buildConnectionSetupPlan({
     connectorKey: thirdPartyId,

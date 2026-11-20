@@ -11,7 +11,7 @@ import {
   buildConnectionSetupPlan,
   classifyConnectorIntentModality,
   classifyConnectorSetupModality,
-  STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS,
+  isStaticSecretLiveProven,
 } from "../server/connection-setup-plan.ts";
 
 function manifest(
@@ -36,11 +36,20 @@ function readShippedPolyfillManifest(file: string): any {
   return entry.manifest;
 }
 
-function staticSecretManifest(connectorId: string, credentialKind = "api_key"): ConnectorManifestLike {
+const PROVEN_LOCAL_COLLECTOR: Partial<ConnectorManifestLike> = {
+  capabilities: { proven: { local_collector: true } },
+};
+
+function staticSecretManifest(
+  connectorId: string,
+  credentialKind = "api_key",
+  liveProven = false
+): ConnectorManifestLike {
   return manifest(
     connectorId,
     { network: { required: true } },
     {
+      ...(liveProven ? { capabilities: { proven: { static_secret_live: { proven: true } } } } : {}),
       setup: {
         credential_capture: {
           fields: [
@@ -65,7 +74,7 @@ function staticSecretManifest(connectorId: string, credentialKind = "api_key"): 
 test("setup planner supports proven local collectors without creating active connections", () => {
   const plan = buildConnectionSetupPlan({
     connectorKey: "codex",
-    manifest: manifest("codex", { filesystem: { required: true } }),
+    manifest: manifest("codex", { filesystem: { required: true } }, PROVEN_LOCAL_COLLECTOR),
   });
   assert.equal(plan.connectorModality, "local_collector");
   assert.equal(plan.setupModality, "local_collector");
@@ -81,7 +90,7 @@ test("setup planner supports proven local collectors without creating active con
 test("setup planner supports URL-shaped local collector identifiers", () => {
   const plan = buildConnectionSetupPlan({
     connectorKey: "https://registry.pdpp.dev/connectors/claude-code",
-    manifest: manifest("claude-code", { filesystem: { required: true } }),
+    manifest: manifest("claude-code", { filesystem: { required: true } }, PROVEN_LOCAL_COLLECTOR),
   });
   assert.equal(plan.connectorKey, "claude-code");
   assert.equal(plan.supportState, "supported");
@@ -202,7 +211,7 @@ test("setup planner offers browser setup by browserEnrollmentSupport, not by pro
 });
 
 test("setup planner marks unproven static-secret connectors with a real credential_capture as experimental, not hidden", () => {
-  // 'mailbox' is synthetic and absent from STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS,
+  // 'mailbox' is synthetic and its manifest declares no live proof,
   // but its manifest declares a real credential_capture block — the same shape
   // Steam/Jellyfin/Apple Contacts declare — so the generic capture form is
   // reachable today. This must surface as an explicit opt-in, not "supported"
@@ -261,10 +270,15 @@ test("setup planner marks live-proven static-secret connectors as supported", ()
   //   gmail  run_1781131328336 succeeded
   //   github run_1781131195649 succeeded + run_1781131489458 scheduled/unattended succeeded
   //   slack  run_1781131204868 succeeded
-  for (const connectorKey of STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS) {
+  const liveProvenKeys = readPolyfillManifests()
+    .map((entry) => entry.manifest as ConnectorManifestLike)
+    .filter((candidate) => isStaticSecretLiveProven(candidate))
+    .map((candidate) => candidate.connector_key ?? candidate.connector_id ?? "");
+  assert.ok(liveProvenKeys.includes("gmail"), "the shipped manifests declare gmail live-proven");
+  for (const connectorKey of liveProvenKeys) {
     const plan = buildConnectionSetupPlan({
       connectorKey,
-      manifest: staticSecretManifest(connectorKey, "app_password"),
+      manifest: staticSecretManifest(connectorKey, "app_password", true),
     });
     assert.equal(plan.connectorModality, "api_network", `${connectorKey}: connectorModality`);
     assert.equal(plan.setupModality, "static_secret", `${connectorKey}: setupModality`);
@@ -283,12 +297,61 @@ test("setup planner marks live-proven static-secret connectors as supported", ()
   }
 });
 
+test("proof claims come from the manifest, so a connector outside any build-time list gets the same plan", () => {
+  const key = "catalog-only-source";
+  const localCollector = buildConnectionSetupPlan({
+    connectorKey: key,
+    manifest: manifest(key, { filesystem: { required: true } }, PROVEN_LOCAL_COLLECTOR),
+  });
+  assert.equal(localCollector.catalogDisposition, "local_collector_enroll");
+  assert.equal(localCollector.supportState, "supported");
+
+  const staticSecret = buildConnectionSetupPlan({
+    connectorKey: key,
+    manifest: staticSecretManifest(key, "api_key", true),
+  });
+  assert.equal(staticSecret.catalogDisposition, "static_secret_connect");
+  assert.equal(staticSecret.supportState, "supported");
+  assert.equal(staticSecret.proofGate, null);
+
+  const unproven = buildConnectionSetupPlan({ connectorKey: key, manifest: staticSecretManifest(key) });
+  assert.equal(unproven.catalogDisposition, "static_secret_experimental");
+  assert.equal(unproven.proofGate, "static_secret_live_proof_missing");
+});
+
+test("a proof claim on a different connector's manifest does not leak by key", () => {
+  // The claim is read from the manifest passed in, not looked up by key: the
+  // same key with an unproven manifest stays proof-gated.
+  const plan = buildConnectionSetupPlan({
+    connectorKey: "codex",
+    manifest: manifest("codex", { filesystem: { required: true } }),
+  });
+  assert.equal(plan.catalogDisposition, "local_collector_unproven");
+});
+
+test("a provider-authorization connector outside any build-time list is lifecycle-proven by its manifest", () => {
+  const providerManifest = {
+    ...manifest("fitness-oauth", { network: { required: true } }),
+    capabilities: {
+      auth: { deployment_config: ["FITNESS_OAUTH_CLIENT_ID"], kind: "oauth" },
+      proven: { provider_auth_lifecycle: true },
+    },
+  };
+  const plan = buildConnectionSetupPlan({
+    connectorKey: "fitness-oauth",
+    deploymentEnv: { FITNESS_OAUTH_CLIENT_ID: "test-client-id" },
+    manifest: providerManifest,
+  });
+  assert.equal(plan.catalogDisposition, "provider_auth_connect");
+  assert.equal(plan.nextStepKind, "open_provider_auth");
+});
+
 test("YNAB static-secret setup supports owner-session capture route", () => {
   // YNAB regression: static-secret capture form was unreachable from the
   // catalog picker when YNAB was not in the live-proven roster. Verify the fix.
   const plan = buildConnectionSetupPlan({
     connectorKey: "ynab",
-    manifest: staticSecretManifest("ynab", "personal_access_token"),
+    manifest: staticSecretManifest("ynab", "personal_access_token", true),
   });
   assert.equal(plan.connectorModality, "api_network");
   assert.equal(plan.setupModality, "static_secret");
@@ -305,7 +368,7 @@ test("setup planner treats hybrid filesystem static-secret connectors as credent
   const plan = buildConnectionSetupPlan({
     connectorKey: "slack",
     manifest: {
-      ...staticSecretManifest("slack", "sealed_bundle"),
+      ...staticSecretManifest("slack", "sealed_bundle", true),
       runtime_requirements: { bindings: { filesystem: { required: true }, network: { required: true } } },
     },
   });
@@ -537,12 +600,12 @@ test("wave-0807 GroupMe manifest is a static-secret experimental connector, not 
   // for the experimental static-secret path — a deliberate change from the
   // earlier manual_action/no-credential_capture shape this test used to
   // assert against. Counterweight: GroupMe is not (and must not silently
-  // become) a member of STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS, so it must
+  // become) a connector whose manifest declares live proof, so it must
   // land on the unproven "experimental" branch, never the fully-supported
   // "static_secret_connect"/supported branch that live-proven connectors get.
   const groupmeManifest = readShippedPolyfillManifest("groupme.json");
   assert.equal(
-    STATIC_SECRET_LIVE_PROVEN_CONNECTOR_KEYS.includes("groupme" as never),
+    isStaticSecretLiveProven(groupmeManifest),
     false,
     "GroupMe must not be added to the live-proven roster without a real dated live env-free run"
   );
@@ -585,10 +648,27 @@ test("wave-0807 Google Calendar/Contacts keep the deployment-app vs owner-accoun
       manifest: shippedManifest,
     });
     assert.equal(configured.deploymentReadiness.state, "ready", `${connectorId}: deployment app configured`);
-    // Per-owner authorization is still unproven independent of deployment
-    // config — the two facts stay distinct, exactly as designed.
-    assert.equal(configured.supportState, "proof_gated", `${connectorId}: owner authorization still unproven`);
-    assert.equal(configured.catalogDisposition, "provider_auth_proof_gated", `${connectorId}: catalogDisposition`);
+    // The shipped manifest claims the provider-authorization lifecycle is
+    // proven, so a configured deployment is connectable.
+    assert.equal(configured.supportState, "supported", `${connectorId}: manifest claims lifecycle proof`);
+    assert.equal(configured.catalogDisposition, "provider_auth_connect", `${connectorId}: catalogDisposition`);
+
+    // The proof is the manifest's claim, independent of deployment config:
+    // without the claim the same deployment stays proof-gated.
+    const withoutClaim = buildConnectionSetupPlan({
+      configuredProviderAuthConnectorKeys: [connectorId],
+      connectorKey: connectorId,
+      deploymentEnv: {
+        GOOGLE_OAUTH_CLIENT_ID: "test-client-id",
+        GOOGLE_OAUTH_CLIENT_SECRET: "test-client-secret",
+      },
+      manifest: {
+        ...shippedManifest,
+        capabilities: { ...shippedManifest.capabilities, proven: {} },
+      },
+    });
+    assert.equal(withoutClaim.supportState, "proof_gated", `${connectorId}: no claim, owner authorization unproven`);
+    assert.equal(withoutClaim.catalogDisposition, "provider_auth_proof_gated", `${connectorId}: catalogDisposition`);
   }
 });
 

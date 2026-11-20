@@ -40,7 +40,7 @@ const DEV_JARGON_RE = /pnpm --dir|packages\/|monorepo|env var|connector_instance
  */
 function staticSecretManifest(connectorId: string): CatalogManifestLike {
   return {
-    capabilities: SUPPORTED_LISTING,
+    capabilities: { ...SUPPORTED_LISTING, proven: { static_secret_live: { proven: true } } },
     connector_id: connectorId,
     display_name: connectorId,
     runtime_requirements: { bindings: { network: {} } },
@@ -74,7 +74,7 @@ function browserCollectorManifest(connectorId: string): CatalogManifestLike {
 /** A local-collector connector manifest (filesystem-class). */
 function localCollectorManifest(connectorId: string): CatalogManifestLike {
   return {
-    capabilities: SUPPORTED_LISTING,
+    capabilities: { ...SUPPORTED_LISTING, proven: { local_collector: true } },
     connector_id: connectorId,
     display_name: connectorId,
     runtime_requirements: { bindings: { filesystem: {} } },
@@ -136,7 +136,7 @@ test("proven static-secret source supports self-service add-another-account with
 });
 
 test("supported local collector supports self-service add and routes to enrollment", () => {
-  // claude_code is in the proven local-collector set.
+  // The manifest claims a proven local collector.
   const map = buildSourceAddSupport([localCollectorManifest("claude_code")]);
   const support = resolveSourceAddSupport(map, "claude_code");
   assert.ok(support);
