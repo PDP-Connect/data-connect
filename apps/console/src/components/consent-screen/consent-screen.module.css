@@ -264,7 +264,7 @@
 }
 
 /* Truncates rather than pushing the data-type count out of its own column.
-   A long handle (tim@gmail.com at 390px) otherwise collides with the count,
+   A long handle (jane@example.com at 390px) otherwise collides with the count,
    and an account name is identifying-at-a-glance rather than
    read-in-full — the source name beside it is the load-bearing label. */
 .sourceAccount {
