@@ -495,6 +495,52 @@ test("dirty record-time bounds reconcile from durable records for one stream", a
     assert.equal(getStreamDirtyFlag("gmail", "messages"), 0);
   }));
 
+test("repairing dirty record-time bounds keeps a projection stale while a dropped delta still needs a full rebuild", async () =>
+  withTempDb(async () => {
+    await rebuildEmptyProjection();
+    for (const [key, createdAt] of [
+      ["m1", "2025-01-01T00:00:00.000Z"],
+      ["m2", "2025-02-01T00:00:00.000Z"],
+    ]) {
+      await ingestRecord("gmail", {
+        data: { created_at: createdAt, id: key },
+        emitted_at: "2026-01-01T00:00:00.000Z",
+        key,
+        stream: "messages",
+      });
+    }
+    registerConnectorManifest("gmail", {
+      connector_id: "gmail",
+      streams: [{ consent_time_field: "created_at", name: "messages" }],
+    });
+    await rebuildFromCurrentDb();
+
+    assert.equal(await deleteRecord("gmail", "messages", "m1"), 1);
+    markDatasetSummaryProjectionStale("record delta arrived during projection rebuild");
+
+    const result = await reconcileDirtyDatasetSummaryRecordTimeBounds({
+      getStreamRecordTimeBounds: getDatasetSummaryStreamRecordTimeBounds,
+    });
+    const repaired = getDatasetSummaryProjection();
+
+    assert.deepEqual(result, { deferred: 0, reconciled: 1, residual: 0 });
+    assert.equal(getStreamDirtyFlag("gmail", "messages"), 0);
+    assert.equal(repaired.metadata.state, "stale");
+    assert.equal(repaired.metadata.needs_full_rebuild, true);
+    assert.ok(repaired.metadata.last_error);
+
+    await rebuildFromCurrentDb();
+    const rebuilt = getDatasetSummaryProjection();
+    assert.equal(rebuilt.metadata.state, "fresh");
+    assert.equal(rebuilt.counts.record_count, 1);
+
+    await deleteRecord("gmail", "messages", "m2");
+    await reconcileDirtyDatasetSummaryRecordTimeBounds({
+      getStreamRecordTimeBounds: getDatasetSummaryStreamRecordTimeBounds,
+    });
+    assert.equal(getDatasetSummaryProjection().metadata.state, "fresh", "a full rebuild clears the marker");
+  }));
+
 test("dirty record-time reconciliation defers unsafe rows instead of clearing stale state", async () =>
   withTempDb(async () => {
     await rebuildEmptyProjection();
