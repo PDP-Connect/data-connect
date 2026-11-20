@@ -62,6 +62,7 @@ function LocalSourceRow({
         </span>
         <span className="flex min-w-0 items-center gap-2 pdpp-caption font-medium text-foreground">
           <ConnectorMark
+            connectorId={source.connector_id}
             icon={connectorIcons[source.connector_id] ?? connectorIcons[source.connector_key]}
             name={source.display_name}
           />

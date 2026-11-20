@@ -7,7 +7,7 @@
  * The consent screen — the page an owner uses to decide what an app may read.
  *
  * Built from the REAL `@pdpp/brand-react` components (IcButton, IcInput,
- * ConnectorIcon, Endorse) so there is zero drift by construction: this renders
+ * Endorse) so there is zero drift by construction: this renders
  * the actual component modules the console's `/sources` and `/explore` pages
  * render, not a transcription of their output. `consent-screen.module.css`
  * supplies ONLY the structural rules those components have no equivalent for
@@ -21,10 +21,9 @@
  * is true — what the client said its purpose was, whether it made a retention
  * promise — the statement itself arrives in the model and is rendered as-is.
  *
- * Connector icons come from each source's own manifest declaration, passed
- * straight to `ConnectorIcon`, which falls back to its Monogram for a
- * connector that declares none. There is no connector-id -> icon map here or
- * anywhere else.
+ * Connector marks use the resolved connector identity and optional icon from
+ * the server. Source IDs and opaque grant-selection values remain separate.
+ * Older servers without display identity retain their explicit-icon fallback.
  *
  * Preserves the owner feedback items from rounds 1-4 of the design task
  * (/home/tnunamak/code/pdpp/local/CONSENT-OWNER-FEEDBACK-0902.md): arbitrary
@@ -35,7 +34,6 @@
  */
 
 import {
-  ConnectorIcon,
   Endorse,
   IcButton,
   IcInput,
@@ -48,6 +46,7 @@ import {
   IcTooltipTrigger,
 } from "@pdpp/brand-react";
 import { useEffect, useMemo, useState } from "react";
+import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { PdppLogo } from "@/components/pdpp-logo.tsx";
 import { ThemeToggle } from "@/components/theme/theme-toggle.tsx";
 import styles from "./consent-screen.module.css";
@@ -434,7 +433,7 @@ function SourceRow({
     >
       <summary className={styles.sourceHead}>
         <span className={styles.sourceIcon}>
-          <ConnectorIcon icon={source.icon ?? null} name={source.name} />
+          <ConnectorMark connectorId={source.connectorId ?? ""} icon={source.icon ?? null} name={source.name} />
         </span>
         <span className={styles.sourceText}>
           {/* Layout in CSS, not inline: the account handle can only truncate

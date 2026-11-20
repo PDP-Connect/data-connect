@@ -126,13 +126,13 @@ export default async function ManualUploadConnectPage({
         breadcrumbs={[{ href: "/sources", label: "Sources" }, { label: `Import ${setup.display_name}` }]}
         description={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-5 shrink-0" icon={connectorIcon} name={setup.display_name} />
+            <ConnectorMark connectorId={setup.connector_id} icon={connectorIcon} name={setup.display_name} />
             <span>Pick a supported export file. DataConnect validates it, imports it, and gives you a coverage receipt you can revisit.</span>
           </span>
         }
         title={
           <span className="inline-flex items-center gap-2">
-            <ConnectorMark className="size-6 shrink-0" icon={connectorIcon} name={setup.display_name} />
+            <ConnectorMark connectorId={setup.connector_id} icon={connectorIcon} name={setup.display_name} />
             {targetConnectionId ? `Import another ${setup.display_name} file` : `Import ${setup.display_name}`}
           </span>
         }
