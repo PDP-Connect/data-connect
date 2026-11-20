@@ -1,6 +1,6 @@
 {
   "connector_key": "imessage",
-  "version": "0.1.0",
-  "digest": "sha256:ace3798a8e222e73fa1555a39ba52b245e2566d31d84bb60fdec61c9ae1a9ca6",
-  "profile_sha256": "sha256:654eb8abb9625554c19edcf7e1ef6416fca556929456454ba29277751cde8efb"
+  "version": "0.1.25",
+  "digest": "sha256:920246f08102aea9c7958d6b3a0bf89eb07e3b776a921333f6d7ae93f99394b0",
+  "profile_sha256": "sha256:399958b7d89e1263b5f61e6b09de4c7f5d6a81c1084ff887e75a504278820ef4"
 }

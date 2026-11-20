@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -293,6 +294,33 @@ test("a required stream reading unknown drags the connection coverage axis off c
   // never manufacture a false red.
   assert.notEqual(override, "terminal_gap");
   assert.notEqual(override, "partial");
+});
+
+test("the pinned claude-code profile: a collector that never reports its required usage stream leaves coverage unknown", () => {
+  // The pinned profile requires `usage`. A connector emits a stream only when
+  // it is requested, so a collector that does not list `usage` among its
+  // default streams reports every other stream complete and still cannot reach
+  // `complete`. The collector's definition lists `usage`; this keeps the server
+  // side of that contract visible.
+  const profile = JSON.parse(
+    readFileSync(new URL("../server/local-collector-profiles/claude-code.json", import.meta.url), "utf8")
+  ) as { streams: ManifestStreamFixture[] };
+  const requiredNames = profile.streams.filter((stream) => stream.required !== false).map((stream) => stream.name);
+  assert.ok(requiredNames.includes("usage"));
+  const reportFor = (reported: string[]) =>
+    buildCollectionReport({
+      attentionOpen: false,
+      collectionFacts: {
+        streams: reported.map((stream) => fact({ considered: 1, covered: 1, stream })),
+      },
+      freshness: "fresh",
+      manifestStreams: profile.streams,
+      refresh: null,
+    });
+  const withoutUsage = reportFor(requiredNames.filter((name) => name !== "usage"));
+  assert.equal(rollupCollectionReportCoverageOverride("complete", withoutUsage, profile.streams), "unknown");
+  const withUsage = reportFor(requiredNames);
+  assert.notEqual(rollupCollectionReportCoverageOverride("complete", withUsage, profile.streams), "unknown");
 });
 
 test("unreliable projection withholds required complete coverage but preserves optional policy outcomes", () => {
