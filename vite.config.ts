@@ -78,6 +78,7 @@ export default defineConfig(({ mode }) => ({
       "scripts/package-macos-node-helper.test.mjs",
       "scripts/ensure-reference-stack.test.js",
       "scripts/ensure-console-stack.test.js",
+      "scripts/launcher-parent-death.test.js",
       "scripts/stage-generations.test.js",
       "scripts/resolve-connectors.test.mjs",
       "scripts/verify-release-ref.test.mjs",

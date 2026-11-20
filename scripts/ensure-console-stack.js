@@ -260,7 +260,7 @@ function hashFile(filePath) {
   return `sha256:${createHash("sha256").update(readFileSync(filePath)).digest("hex")}`
 }
 
-function writeLauncher(stageDirectory, serverRelativePath) {
+export function writeLauncher(stageDirectory, serverRelativePath) {
   const launcher = `#!/usr/bin/env node
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
@@ -271,9 +271,25 @@ import { fileURLToPath } from "node:url"
 
 const stageDirectory = dirname(fileURLToPath(import.meta.url))
 const serverPath = resolve(stageDirectory, ${JSON.stringify(serverRelativePath)})
+const serverEnv = { ...process.env, NODE_ENV: "production" }
+
+// On Linux the desktop app arms PR_SET_PDEATHSIG on this launcher only, and
+// the kernel does not carry that signal to a forked grandchild. Replace this
+// process with the server instead of forking it: the pid, the process group
+// and the armed signal all stay with the server. Without execve (older Node,
+// macOS, Windows) fall back to the forwarding parent below.
+if (process.platform === "linux" && typeof process.execve === "function") {
+  try {
+    process.chdir(dirname(serverPath))
+    process.execve(process.execPath, [process.execPath, serverPath], serverEnv)
+  } catch (error) {
+    console.error("[console] execve failed, forking instead:", error)
+  }
+}
+
 const child = spawn(process.execPath, [serverPath], {
   cwd: dirname(serverPath),
-  env: { ...process.env, NODE_ENV: "production" },
+  env: serverEnv,
   stdio: "inherit",
 })
 

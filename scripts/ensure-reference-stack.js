@@ -603,23 +603,40 @@ const root = dirname(fileURLToPath(import.meta.url))
 const dataDir = resolve(process.env.PDPP_DATA_DIR || process.env.PDPP_REFERENCE_DATA_DIR || join(root, "data"))
 const dbPath = resolve(process.env.PDPP_DB_PATH || join(dataDir, "pdpp.sqlite"))
 mkdirSync(dataDir, { recursive: true })
-const child = spawn(process.execPath, [
+const serverArgs = [
   "--import",
   "tsx",
   "reference-implementation/server/index.ts",
-], {
+]
+const serverEnv = {
+  ...process.env,
+  NODE_ENV: "production",
+  AS_PORT: process.env.AS_PORT || "0",
+  RS_PORT: process.env.RS_PORT || "0",
+  PDPP_DB_PATH: dbPath,
+  PDPP_BIND_HOST: process.env.PDPP_BIND_HOST || "127.0.0.1",
+  PDPP_EMBEDDING_DOWNLOAD_ALLOWED: process.env.PDPP_EMBEDDING_DOWNLOAD_ALLOWED || "0",
+  PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+}
+
+// On Linux the desktop app arms PR_SET_PDEATHSIG on this launcher only, and
+// the kernel does not carry that signal to a forked grandchild. Replace this
+// process with the server instead of forking it: the pid, the process group
+// and the armed signal all stay with the server. Without execve (older Node,
+// macOS, Windows) fall back to the forwarding parent below.
+if (process.platform === "linux" && typeof process.execve === "function") {
+  try {
+    process.chdir(root)
+    process.execve(process.execPath, [process.execPath, ...serverArgs], serverEnv)
+  } catch (error) {
+    console.error("[reference-implementation] execve failed, forking instead:", error)
+  }
+}
+
+const child = spawn(process.execPath, serverArgs, {
   cwd: root,
-  env: {
-    ...process.env,
-    NODE_ENV: "production",
-    AS_PORT: process.env.AS_PORT || "0",
-    RS_PORT: process.env.RS_PORT || "0",
-    PDPP_DB_PATH: dbPath,
-    PDPP_BIND_HOST: process.env.PDPP_BIND_HOST || "127.0.0.1",
-    PDPP_EMBEDDING_DOWNLOAD_ALLOWED: process.env.PDPP_EMBEDDING_DOWNLOAD_ALLOWED || "0",
-    PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
-  },
+  env: serverEnv,
   stdio: "inherit",
 })
 
