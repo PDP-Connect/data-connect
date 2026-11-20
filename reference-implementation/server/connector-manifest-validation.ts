@@ -17,7 +17,12 @@ import {
   StaticSecretCredentialCaptureError,
   type StaticSecretCredentialCaptureLike,
 } from "./polyfill-connectors-runtime.ts";
-import { canonicalConnectorKey, canonicalConnectorKeyFromManifest, isConnectorKey } from "./connector-key.ts";
+import {
+  canonicalConnectorKey,
+  canonicalConnectorKeyFromManifest,
+  isConnectorKey,
+  isRegistryUrlConnectorId,
+} from "./connector-key.ts";
 import { publicListingTierError } from "./public-listing-tier.ts";
 import { refreshPolicyContradictions } from "./refresh-policy-consistency.ts";
 
@@ -2185,6 +2190,18 @@ function validateManifestStream({
   });
 }
 
+function registryIdMatchesDeclaredKey(connectorId: string, connectorKey: string): boolean {
+  if (!isRegistryUrlConnectorId(connectorId)) {
+    return false;
+  }
+  const segments = connectorId.split("/");
+  if (segments.at(-1) === "") {
+    segments.pop();
+  }
+  // The key is declared, not inferred; nothing is silently promoted.
+  return segments.length === 5 && segments[4] === connectorKey;
+}
+
 export function validateConnectorManifest(
   manifest: Record<string, unknown> = {},
   code = "invalid_request",
@@ -2205,7 +2222,11 @@ export function validateConnectorManifest(
     if (canonicalFromConnectorId && canonicalFromConnectorId !== connectorKey) {
       throw invalidConnectorManifest("connector_key must match the canonical key for connector_id", code);
     }
-    if (!canonicalFromConnectorId && connectorId !== connectorKey) {
+    if (
+      !canonicalFromConnectorId &&
+      connectorId !== connectorKey &&
+      !registryIdMatchesDeclaredKey(connectorId, connectorKey)
+    ) {
       throw invalidConnectorManifest(
         "connector_id must match connector_key; use manifest_uri for registry or document provenance",
         code

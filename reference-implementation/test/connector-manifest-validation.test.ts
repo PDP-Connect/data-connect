@@ -96,6 +96,59 @@ function manifestWithStream(stream = {}) {
   };
 }
 
+// A first-party catalog connector published after the server's generated
+// allowlist was built declares both ids. The registry URL tail equals the
+// declared connector_key, so the pair is consistent without the allowlist.
+const UNLISTED_REGISTRY_ID = "https://registry.pdpp.dev/connectors/unlisted-catalog-connector";
+
+test("a registry connector_id whose tail equals the declared connector_key validates without an allowlist entry", () => {
+  assert.doesNotThrow(() =>
+    validateConnectorManifest({
+      ...manifestWithStream(),
+      connector_id: UNLISTED_REGISTRY_ID,
+      connector_key: "unlisted-catalog-connector",
+    })
+  );
+});
+
+test("a registry connector_id whose tail differs from connector_key still rejects", () => {
+  assert.throws(
+    () =>
+      validateConnectorManifest({
+        ...manifestWithStream(),
+        connector_id: UNLISTED_REGISTRY_ID,
+        connector_key: "another-connector",
+      }),
+    /connector_id must match connector_key/
+  );
+});
+
+test("a non-registry URL connector_id with a different connector_key still rejects", () => {
+  assert.throws(
+    () =>
+      validateConnectorManifest({
+        ...manifestWithStream(),
+        connector_id: "https://example.invalid/connectors/unlisted-catalog-connector",
+        connector_key: "unlisted-catalog-connector",
+      }),
+    /connector_id must match connector_key/
+  );
+});
+
+test("a registry connector_id with extra path segments or a query does not match connector_key", () => {
+  for (const suffix of ["/extra", "?v=1", "#frag"]) {
+    assert.throws(
+      () =>
+        validateConnectorManifest({
+          ...manifestWithStream(),
+          connector_id: `${UNLISTED_REGISTRY_ID}${suffix}`,
+          connector_key: "unlisted-catalog-connector",
+        }),
+      /connector_id must match connector_key/
+    );
+  }
+});
+
 test("isTopLevelSearchableStringField accepts plain and nullable string, rejects others", () => {
   assert.equal(isTopLevelSearchableStringField({ type: "string" }), true);
   assert.equal(isTopLevelSearchableStringField({ type: ["string", "null"] }), true);
