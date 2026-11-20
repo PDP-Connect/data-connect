@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto"
 import {
   chmodSync,
+  copyFileSync,
   cpSync,
   existsSync,
   lstatSync,
@@ -31,6 +32,7 @@ import {
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const PROJECT_ROOT = dirname(ROOT)
+const PARENT_LIFELINE_SOURCE = join(ROOT, "parent-lifeline.mjs")
 const DEFAULT_PROFILE = "release"
 const STAGE_DIRECTORY = ["src-tauri", "target", "reference-stack", "console"]
 // Last segment of STAGE_DIRECTORY, reused to name this build's immutable
@@ -271,6 +273,11 @@ import { fileURLToPath } from "node:url"
 
 const stageDirectory = dirname(fileURLToPath(import.meta.url))
 const serverPath = resolve(stageDirectory, ${JSON.stringify(serverRelativePath)})
+const serverArgs = [
+  "--import",
+  new URL("./parent-lifeline.mjs", import.meta.url).href,
+  serverPath,
+]
 const serverEnv = { ...process.env, NODE_ENV: "production" }
 
 // On Linux the desktop app arms PR_SET_PDEATHSIG on this launcher only, and
@@ -281,13 +288,13 @@ const serverEnv = { ...process.env, NODE_ENV: "production" }
 if (process.platform === "linux" && typeof process.execve === "function") {
   try {
     process.chdir(dirname(serverPath))
-    process.execve(process.execPath, [process.execPath, serverPath], serverEnv)
+    process.execve(process.execPath, [process.execPath, ...serverArgs], serverEnv)
   } catch (error) {
     console.error("[console] execve failed, forking instead:", error)
   }
 }
 
-const child = spawn(process.execPath, [serverPath], {
+const child = spawn(process.execPath, serverArgs, {
   cwd: dirname(serverPath),
   env: serverEnv,
   stdio: "inherit",
@@ -308,6 +315,7 @@ child.once("exit", (code, signal) => {
   const launcherPath = join(stageDirectory, "launch.mjs")
   writeFileSync(launcherPath, launcher, { mode: 0o755 })
   chmodSync(launcherPath, 0o755)
+  copyFileSync(PARENT_LIFELINE_SOURCE, join(stageDirectory, "parent-lifeline.mjs"))
 }
 
 function writeManifest(stageDirectory, profile, serverRelativePath) {

@@ -21,7 +21,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { writeLauncher } from "./ensure-console-stack.js"
-import { launchScript } from "./ensure-reference-stack.js"
+import { writeLaunchScript } from "./ensure-reference-stack.js"
 
 const SERVER_SOURCE = `
 require("node:fs").writeFileSync(process.env.TEST_PID_FILE, String(process.pid))
@@ -69,7 +69,7 @@ function stageReferenceLauncher(root) {
     JSON.stringify({ name: "tsx", version: "0.0.0", main: "index.js" })
   )
   writeFileSync(join(root, "node_modules", "tsx", "index.js"), "")
-  writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+  writeLaunchScript(root)
 }
 
 function stageConsoleLauncher(root) {

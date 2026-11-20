@@ -28,6 +28,7 @@ import {
 } from "./stage-generations.js"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
+const PARENT_LIFELINE_SOURCE = join(SCRIPT_DIR, "parent-lifeline.mjs")
 const DEFAULT_PROJECT_ROOT = resolve(SCRIPT_DIR, "..")
 const DEFAULT_PROFILE = "release"
 const LOCAL_PACKAGES = [
@@ -171,6 +172,7 @@ function sourceInputFiles(projectRoot) {
     // invalidate any cache built under the old recipe.
     join(projectRoot, "scripts", "ensure-reference-stack.js"),
     join(projectRoot, "scripts", "is-main-module.js"),
+    join(projectRoot, "scripts", "parent-lifeline.mjs"),
     join(projectRoot, "scripts", "stage-generations.js"),
     ...roots.flatMap(root =>
       existsSync(root)
@@ -605,6 +607,8 @@ const dbPath = resolve(process.env.PDPP_DB_PATH || join(dataDir, "pdpp.sqlite"))
 mkdirSync(dataDir, { recursive: true })
 const serverArgs = [
   "--import",
+  new URL("./parent-lifeline.mjs", import.meta.url).href,
+  "--import",
   "tsx",
   "reference-implementation/server/index.ts",
 ]
@@ -655,9 +659,10 @@ child.on("exit", (code, signal) => {
 `
 }
 
-function writeLaunchScript(stageRoot) {
+export function writeLaunchScript(stageRoot) {
   const launcherPath = join(stageRoot, "launch.mjs")
   writeFileSync(launcherPath, launchScript(), { mode: 0o755 })
+  copyFileSync(PARENT_LIFELINE_SOURCE, join(stageRoot, "parent-lifeline.mjs"))
 }
 
 function assertNativeFiles(stageRoot) {
@@ -719,6 +724,7 @@ export function buildManifest({
 export function verifyReferenceStackRoot(stageRoot) {
   const requiredPaths = [
     "launch.mjs",
+    "parent-lifeline.mjs",
     "manifest.json",
     "reference-implementation/scripts/is-main-module.js",
     "reference-implementation/connector-dependency-loader.mjs",
