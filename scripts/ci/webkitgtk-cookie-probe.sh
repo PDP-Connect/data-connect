@@ -115,4 +115,3 @@ if ! grep -q '^test result: ok\. 1 passed;' "$log"; then
   echo 'probe: cookie test pass result missing'
   exit 1
 fi
-echo 'probe: cookie test RAN and passed'

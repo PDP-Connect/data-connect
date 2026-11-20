@@ -58,6 +58,12 @@ run_case() {
   bash "$probe" "$scratch/$1" >"$scratch/summary" 2>&1 || code=$?
   [[ "$code" == "$2" ]] || { echo "fixture: unexpected exit for $1 ($code)"; exit 1; }
   assert_output
+  [[ "$code" == 0 ]] || assert_no_success
+}
+assert_no_success() {
+  if grep -qxF 'probe: cookie test RAN and passed' "$scratch/summary"; then
+    echo 'fixture: success reported for a failed run'; exit 1
+  fi
 }
 assert_descendant_absent() {
   local child
@@ -68,7 +74,9 @@ assert_descendant_absent() {
   rm -f -- "$scratch/descendant"
 }
 run_case normal 0
-grep -qxF 'probe: cookie test RAN and passed' "$scratch/summary"
+if [[ "$(grep -cxF 'probe: cookie test RAN and passed' "$scratch/summary")" != 1 ]]; then
+  echo 'fixture: success not reported exactly once'; exit 1
+fi
 assert_descendant_absent
 run_case nonzero 42
 run_case missing 1
@@ -87,5 +95,6 @@ wait "$runner" || code=$?
 runner=''
 [[ "$code" == 124 ]] || { echo "fixture: unexpected timeout cancellation exit ($code)"; exit 1; }
 assert_output
+assert_no_success
 assert_descendant_absent
 echo 'fixture: probe summary and ownership checks passed'
