@@ -10,7 +10,7 @@ PDPP_BROWSER_SURFACE_HOST_ENDPOINT=http://127.0.0.1:<port>
 PDPP_BROWSER_SURFACE_HOST_TOKEN=<shared-secret>
 ```
 
-`PDPP_BROWSER_HEADLESS=1` sets `headless: true`; any other value sets `false`. If `PDPP_NEKO_MANAGED_CONNECTORS` is set, it remains the managed connector list. Otherwise host mode manages the generated browser-bound connector set. The surface cap defaults to the smallest value that preserves the retained-connector reserve and can be overridden with `PDPP_NEKO_SURFACE_CAP`.
+`PDPP_BROWSER_HEADLESS=1` sets `headless: true`; any other value sets `false`. If `PDPP_NEKO_MANAGED_CONNECTORS` is set, it remains the managed connector list. Otherwise host mode manages the generated browser-bound connector set. The surface cap defaults to 2 and can be overridden with `PDPP_NEKO_SURFACE_CAP`.
 
 ### Acquire
 
@@ -38,14 +38,14 @@ The agent returns HTTP 2xx with:
 
 ### Lifetime and release
 
-The returned lease belongs to one `run_id`. RI keeps the agent's `surface_id` as opaque host state. On run cleanup, readiness failure, or capacity reclaim, RI sends:
+The returned lease belongs to one `run_id`. RI keeps the agent's `surface_id` as opaque host state. On run cleanup, readiness failure, capacity reclaim, or when an unleased surface passes the idle TTL (`PDPP_NEKO_IDLE_TTL_MS`), RI sends:
 
 ```http
 DELETE <endpoint>/browser-surface/leases/<surface_id>
 Authorization: Bearer <shared-secret>
 ```
 
-The host agent owns the browser process and is responsible for killing it when this DELETE succeeds. RI owns only its run lease and never kills the browser directly. The DELETE should be idempotent so cleanup can safely retry.
+The host agent owns the browser process and is responsible for killing it when this DELETE succeeds. RI owns only its run lease and never kills the browser directly. The DELETE should be idempotent so cleanup can safely retry. RI treats `404` as already released.
 
 ### Profile reset
 

@@ -587,10 +587,8 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Unified mode does not build the legacy window, which is the only consumer
-/// of `vana://` links. Record each one received so a dropped link shows in
-/// the log instead of vanishing. Whether unified mode should serve these
-/// links is an open product decision; this boundary only reports.
+/// No URL scheme is registered, so the OS should not deliver links. Record any
+/// that arrive so a dropped link shows in the log instead of vanishing.
 fn report_unhandled_deep_links(app: &tauri::App) {
     use tauri_plugin_deep_link::DeepLinkExt;
     if let Ok(Some(urls)) = app.deep_link().get_current() {
@@ -4452,7 +4450,7 @@ mod navigation_log_redaction_tests {
 
     #[test]
     fn all_navigation_notices_omit_credentials() {
-        for scheme in ["https", "http", "vana"] {
+        for scheme in ["https", "http"] {
             let url = tauri::Url::parse(&format!(
                 "{scheme}://USER_SENTINEL:PASSWORD_SENTINEL@example.test/consent?code=QUERY_SENTINEL#FRAGMENT_SENTINEL"
             )).unwrap();
@@ -4788,11 +4786,11 @@ mod tests {
 
     #[test]
     fn unhandled_deep_link_notice_omits_the_grant_secret() {
-        let url: tauri::Url = "vana://connect?sessionId=s-1&secret=hunter2&scopes=a"
+        let url: tauri::Url = "example://connect?sessionId=s-1&secret=hunter2&scopes=a"
             .parse()
             .expect("url");
         let notice = unhandled_deep_link_notice(&url);
-        assert!(notice.contains("vana://connect"), "{notice}");
+        assert!(notice.contains("example://connect"), "{notice}");
         assert!(!notice.contains("hunter2") && !notice.contains("s-1"), "{notice}");
     }
 

@@ -779,10 +779,14 @@ export async function acquireIsolatedBrowser({
     args: baseArgs,
   };
 
-  const explicitChannel = configuredBrowserChannel();
   // Default to Patchright's pinned bundled Chromium so local and n.eko runs
   // share the same browser-family posture. Operators can still opt into a
-  // branded channel explicitly with PDPP_BROWSER_CHANNEL=chrome.
+  // branded channel explicitly with PDPP_BROWSER_CHANNEL=chrome. The default
+  // is the explicit "chromium" channel, not no channel: without one, a
+  // headless launch runs Chrome Headless Shell, a separate build that ignores
+  // managed policy such as the image's CA distrust list
+  // (docker/chrome-policy/README.md).
+  const channel = configuredBrowserChannel() ?? "chromium";
   // Cleanup-then-launch is gated by an in-process mutex keyed on the
   // user-data-dir. The mutex is the load-bearing primitive: it guarantees
   // PDPP never has two of its own processes launching against the same
@@ -792,13 +796,7 @@ export async function acquireIsolatedBrowser({
   // for the design rationale and source references.
   const context: BrowserContext = await withProfileLockMutex(isolatedDir, async () => {
     await removeChromiumSingletonResidue(isolatedDir);
-    if (explicitChannel) {
-      return localChromium.launchPersistentContext(isolatedDir, {
-        ...baseLaunchOptions,
-        channel: explicitChannel,
-      });
-    }
-    return localChromium.launchPersistentContext(isolatedDir, baseLaunchOptions);
+    return localChromium.launchPersistentContext(isolatedDir, { ...baseLaunchOptions, channel });
   });
 
   // Publish the CDP host:port to env so the browser-binding-local handoff
