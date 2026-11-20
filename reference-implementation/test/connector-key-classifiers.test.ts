@@ -20,7 +20,7 @@
  *   - isProviderAuthLifecycleProven / isStaticSecretLiveProven: the claim in
  *     the connector's own manifest (`capabilities.proven`), never a key list.
  *   - isLocalCollectorProven: the manifest's `capabilities.proven.local_collector`.
- *   - browserEnrollmentSupport: browser-bound from the manifest's bindings.
+ *   - classifyConnectorIntentModality: browser-bound from the manifest's bindings.
  *
  * Pure classification over shipped connector capability data — no DB, no
  * server, no fixtures.
@@ -30,8 +30,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  browserEnrollmentSupport,
   canonicalConnectorKey,
+  classifyConnectorIntentModality,
   connectorKeyFromManifest,
   displayNameForConnector,
   enrollmentKeyForCanonicalKey,
@@ -126,15 +126,15 @@ test("isLocalCollectorProven: reads capabilities.proven.local_collector, strictl
   assert.equal(isLocalCollectorProven(null), false, "no manifest");
 });
 
-// --- browserEnrollmentSupport -----------------------------------------------
+// --- classifyConnectorIntentModality ----------------------------------------
 
-test("browserEnrollmentSupport: browser-bound comes from the manifest's own bindings, not the key", () => {
+test("classifyConnectorIntentModality: browser-bound comes from the manifest's own bindings", () => {
   const browserManifest = { runtime_requirements: { bindings: { browser: { required: true } } } };
-  assert.equal(browserEnrollmentSupport("catalog-only-shop", browserManifest).browserBound, true);
-  assert.equal(
-    browserEnrollmentSupport("amazon", { runtime_requirements: { bindings: { network: {} } } }).browserBound,
-    false,
-    "a listed browser connector whose manifest declares no browser binding is not browser-bound"
+  assert.equal(classifyConnectorIntentModality(browserManifest), "browser_bound");
+  assert.notEqual(
+    classifyConnectorIntentModality({ runtime_requirements: { bindings: { network: {} } } }),
+    "browser_bound",
+    "a manifest that declares no browser binding is not browser-bound"
   );
-  assert.equal(browserEnrollmentSupport("amazon", null).browserBound, false, "no manifest");
+  assert.equal(classifyConnectorIntentModality(null), "unknown", "no manifest");
 });
