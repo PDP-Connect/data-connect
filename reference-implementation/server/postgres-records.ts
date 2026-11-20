@@ -2352,26 +2352,9 @@ async function queryPostgresChangesSince({
     const sessionMax = maxResult.rows[0] ? Number(maxResult.rows[0].max_version) : 0;
     const changesFloor = maxResult.rows[0] ? Number(maxResult.rows[0].changes_floor) : 0;
     await postgresChangesSinceReadHook?.("after-floor-read", { connectorInstanceId, stream });
-    const minChangeResult = await client.query(
-      `SELECT MIN(version)::bigint AS min_version
-         FROM record_changes
-        WHERE connector_instance_id = $1 AND stream = $2`,
-      [connectorInstanceId, stream]
-    );
-    const minVersion =
-      minChangeResult.rows[0]?.min_version === null || minChangeResult.rows[0]?.min_version === undefined
-        ? null
-        : Number(minChangeResult.rows[0].min_version);
-    if (decodedVersion > 0 && minVersion !== null && decodedVersion < minVersion - 1) {
-      const err: PgQueryError = new Error("changes_since cursor is too old; full re-sync required");
-      err.code = "cursor_expired";
-      throw err;
-    }
-    // The minimum above is only a lower bound: pruning keeps a sparse anchor per
-    // live key, so it stays at a cold key's first version while other keys'
-    // history below the retention horizon is gone. `changes_floor` is that
-    // horizon: a cursor below it would get its deletions silently suppressed.
-    // `beginning` needs no predecessor.
+    // `changes_floor` is the horizon below which history was pruned or compacted:
+    // a cursor below it would get its deletions silently suppressed. `beginning`
+    // needs no predecessor.
     if (decodedVersion > 0 && decodedVersion < changesFloor) {
       const err: PgQueryError = new Error("changes_since cursor predates pruned change history; full re-sync required");
       err.code = "cursor_expired";

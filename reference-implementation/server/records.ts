@@ -425,9 +425,6 @@ interface VersionCounterRow {
   changes_floor: number;
   max_version: number;
 }
-interface MinVersionRow {
-  min_version: number | null;
-}
 interface AggregateRecordRow {
   record_json: string;
   record_key: string;
@@ -1539,24 +1536,6 @@ export function __setAdmissionPreCheckPhaseHookForTest(hook: unknown): void {
 
 async function maybeAfterAdmissionPreCheckPhase(point: string, context: HookContext): Promise<void> {
   await admissionPreCheckPhaseHook?.(point, context);
-}
-
-let sqliteChangesSinceReadHook: FaultHook | null = null;
-
-/**
- * Test-only seam between the statements of one SQLite changes-feed read, so a
- * test can commit a write from a second connection at exactly that point.
- * Fires with `{ connectorInstanceId, stream }` at point `"after-floor-read"`
- * (epoch, counter, floor and minimum version read and checked) and at point
- * `"after-change-groups"` (a batch of change groups listed, their predecessor
- * and current snapshots not yet read). The hook is synchronous: the read is.
- */
-export function __setSqliteChangesSinceReadHookForTest(hook: unknown): void {
-  sqliteChangesSinceReadHook = isFaultHook(hook) ? hook : null;
-}
-
-function maybeChangesSinceReadHook(point: string, context: HookContext): void {
-  sqliteChangesSinceReadHook?.(point, context);
 }
 
 async function maybeSqliteRecordSortBackfillPhaseForTest(point: string, context: HookContext): Promise<void> {
@@ -5212,32 +5191,19 @@ function validateChangesSinceVersions(
     throw codedError(CHANGES_SINCE_MALFORMED_MESSAGE, "invalid_cursor");
   }
 
-  const minChangeRow = getOne<MinVersionRow>(referenceQueries.recordsSnapshotsGetMinRecordChangeVersion, [
-    connectorInstanceId,
-    stream,
-  ]);
-  const minVersion = minChangeRow?.min_version ?? null;
-  // `beginning` holds no consumer state, so it needs no history below it and
-  // must stay usable as the recovery request after a 410.
-  if (sinceVersion > 0 && minVersion !== null && sinceVersion < minVersion - 1) {
-    throw codedError("changes_since cursor is too old; full re-sync required", "cursor_expired");
-  }
-  // The minimum above is only a lower bound: pruning keeps a sparse anchor per
-  // live key, so it stays at a cold key's first version while other keys'
-  // history below the retention horizon is gone. `changes_floor` is that
-  // horizon: a cursor at or above it can resolve every key's snapshot, one
-  // below it would get its deletions silently suppressed. A `beginning` request
-  // needs no predecessor and stays valid. A continued page of a session is
-  // read at `session_max_version`; once pruning moves the horizon past that
-  // snapshot, unseen keys' rows at it may be gone, so the session expires
-  // rather than serve an incomplete page.
+  // `changes_floor` is the horizon below which history was pruned or compacted:
+  // a cursor at or above it can resolve every key's snapshot, one below it would
+  // get its deletions silently suppressed. (MIN(version) cannot say so: a cold
+  // key's anchor pins it near 1.) `beginning` needs no predecessor and stays
+  // valid as the recovery request. A continued page is read at
+  // `session_max_version`; once the horizon passes that snapshot the session
+  // expires rather than serve an incomplete page.
   const changesFloor = vcRow?.changes_floor ?? 0;
   const belowFloor = sinceVersion > 0 && sinceVersion < changesFloor;
   const sessionSnapshotPruned = changesSince === null && effectiveSessionMaxVersion < changesFloor;
   if (belowFloor || sessionSnapshotPruned) {
     throw codedError("changes_since cursor predates pruned change history; full re-sync required", "cursor_expired");
   }
-  maybeChangesSinceReadHook("after-floor-read", { connectorInstanceId, stream });
 
   return { effectiveSessionMaxVersion, epoch, verifiedAfterVersion: afterVersion, verifiedSinceVersion: sinceVersion };
 }
@@ -5287,7 +5253,6 @@ function collectVisibleChanges(
       effectiveSessionMaxVersion,
       batchSize
     );
-    maybeChangesSinceReadHook("after-change-groups", { connectorInstanceId, stream });
 
     if (!changeGroups.length) {
       break;
@@ -5390,20 +5355,7 @@ interface QueryRecordsChangesSinceArgs {
   stream: string;
 }
 
-/**
- * Answer one changes request from a single SQLite read snapshot.
- *
- * The request reads the reset epoch, the counter and floor, the change groups
- * and, per group, a predecessor and a current snapshot, each as its own
- * statement. Synchronous JavaScript keeps this connection's own writers out
- * between them, but another connection or process can commit in between: a
- * prune that raises `changes_floor` and removes a key's baseline would leave the
- * reader a tombstone with no visible predecessor. It would drop the deletion yet
- * return a token at the new floor, which stays valid, so the deletion is lost
- * for good. A deferred transaction takes its WAL snapshot at the first read and
- * holds it to the end, so every statement sees the state the floor check saw.
- * Throwing (`cursor_expired`) rolls the read-only transaction back unchanged.
- */
+/** One deferred transaction pins one read snapshot for the epoch, floor, groups and snapshot lookups. */
 function queryRecordsChangesSince(args: QueryRecordsChangesSinceArgs): ListResponse {
   return transaction(() => readChangesSinceSnapshot(args));
 }
