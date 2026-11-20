@@ -718,12 +718,13 @@ test("counterweight: a custom third-party connector_id, unknown to every shipped
   // A third-party browser-bound connector: classification must come from
   // runtime_requirements.bindings.browser, not from a connector list.
   const browserBound = buildConnectionSetupPlan({
+    browserEnrollmentRunnable: true,
     connectorKey: thirdPartyId,
     manifest: customManifest(thirdPartyId, { browser: { required: true } }),
   });
   assert.equal(browserBound.connectorModality, "browser_bound");
-  // Not a known scaffold, so the shared browserEnrollmentSupport rule offers
-  // browser setup exactly as it would for a bundled connector.
+  // The server's readiness verdict, not the key, offers browser setup; given
+  // the same verdict it offers it exactly as it would for a bundled connector.
   assert.equal(browserBound.catalogDisposition, "browser_collector_manual");
 
   // A third-party static-secret connector with a real credential_capture
