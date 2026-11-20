@@ -3,9 +3,15 @@
 //! A small, policy-driven supervisor for local sidecar processes.
 //!
 //! The `process_group` option is implemented with POSIX process groups on Unix.
-//! Windows has no POSIX process-group equivalent in `std::process`; until a
-//! Job Object implementation is added, graceful group signalling is not
-//! available there and the option stops only the leader after escalation.
+//! Windows has no POSIX process-group equivalent in `std::process`; graceful
+//! group signalling is not available there and the option stops only the
+//! leader after escalation. (Each Windows sidecar is in a kill-on-close Job
+//! Object, but only to clean up after the app dies, not for graceful stops.)
+//!
+//! A sidecar must not outlive the app. Every sidecar gets a stdin pipe the
+//! supervisor never writes to (`PARENT_LIFELINE_ENV`): the kernel closes it
+//! when the app dies, on every OS, and the sidecar exits on EOF. Linux
+//! (`PR_SET_PDEATHSIG`) and Windows (Job Object) add a kernel-level kill.
 
 use serde::Serialize;
 #[cfg(unix)]
@@ -16,7 +22,7 @@ use std::fmt;
 use std::io::{self, BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::sync::OnceLock;
@@ -24,6 +30,9 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+
+#[cfg(windows)]
+mod windows_job;
 
 const SUPERVISOR_EVENT: &str = "process-supervisor";
 pub(crate) const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -855,7 +864,21 @@ struct SpawnedProcess {
     output: CapturedOutput,
     #[cfg(unix)]
     process_group_id: Option<libc::pid_t>,
+    /// Write end of the child's stdin pipe. Never written to; held open for as
+    /// long as this value lives, so the child sees EOF only when the app
+    /// closes it or dies. See `PARENT_LIFELINE_ENV`.
+    #[allow(dead_code)] // held for its Drop, not read
+    lifeline: Option<ChildStdin>,
+    /// Windows: the kernel kills the child's process tree when this closes.
+    #[cfg(windows)]
+    #[allow(dead_code)] // held for its Drop, not read
+    job: Option<windows_job::KillOnCloseJob>,
 }
+
+/// Set on every sidecar to arm its parent lifeline: the sidecar exits when its
+/// stdin reaches EOF. `scripts/parent-lifeline.mjs` reads it.
+const PARENT_LIFELINE_ENV: &str = "PDPP_PARENT_LIFELINE";
+const PARENT_LIFELINE_STDIN: &str = "stdin";
 
 const OUTPUT_TAIL_LINES: usize = 40;
 const OUTPUT_LINE_MAX_BYTES: usize = 8 * 1024;
@@ -1219,7 +1242,10 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
-        .stdin(Stdio::null())
+        // A pipe the supervisor never writes to: the lifeline. The kernel
+        // closes our end when the app dies however it dies, which is the one
+        // parent-death signal that exists on every OS.
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = &spec.cwd {
@@ -1242,6 +1268,9 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     for (key, value) in &environment {
         command.env(key, render_port(value, port));
     }
+    // After the loop, so it is set whether or not the environment is cleared
+    // and cannot be overridden by the spec.
+    command.env(PARENT_LIFELINE_ENV, PARENT_LIFELINE_STDIN);
 
     #[cfg(unix)]
     if spec.process_group {
@@ -1277,7 +1306,9 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     // uses. macOS/Windows still get the userspace SIGTERM/SIGINT/SIGHUP
     // handler (install_parent_signal_handlers) and the process-group
     // SIGTERM/SIGKILL escalation on normal shutdown; they just lack this
-    // specific kernel-level SIGKILL/OOM/segfault backstop.
+    // specific kernel-level SIGKILL/OOM/segfault backstop. They rely on the
+    // stdin lifeline above instead (PARENT_LIFELINE_ENV), which the sidecar
+    // acts on while it is running.
     //
     // PDEATHSIG covers only this direct child: the kernel clears it across
     // fork(), so a grandchild is not covered. A program that forks the real
@@ -1317,6 +1348,21 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     }
 
     let mut child = command.spawn()?;
+    let lifeline = child.stdin.take();
+    // Kernel backstop on Windows: the sidecar and everything it starts die
+    // when the app's last handle to the job closes. A failure here leaves the
+    // stdin lifeline as the only cover, so log it and keep going.
+    #[cfg(windows)]
+    let job = match windows_job::KillOnCloseJob::adopt(&child) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            log::warn!(
+                "[{}] could not place the sidecar in a kill-on-close job: {error}",
+                spec.label
+            );
+            None
+        }
+    };
     #[cfg(unix)]
     let process_group_id = if spec.process_group {
         match register_process_group(child.id()) {
@@ -1419,6 +1465,9 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
         output,
         #[cfg(unix)]
         process_group_id,
+        lifeline,
+        #[cfg(windows)]
+        job,
     })
 }
 
@@ -2238,6 +2287,101 @@ mod tests {
         assert!(message.contains("exit_code=Some(23)"), "{message}");
         assert!(message.contains("fast stdout tail"), "{message}");
         assert!(message.contains("fast stderr tail"), "{message}");
+    }
+
+    /// Waits for `child` to exit, killing it after `timeout` so a failing test
+    /// does not leak a process.
+    fn exited_within(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The parent lifeline: the child gets a stdin pipe the supervisor holds
+    /// open, plus the flag that arms the child. Dropping the pipe is what the
+    /// kernel does to it when the app dies.
+    #[test]
+    fn closing_the_lifeline_ends_a_child_that_watches_its_stdin() {
+        let script = node_script(
+            r#"process.stdout.write('lifeline=' + process.env.PDPP_PARENT_LIFELINE + '\n');
+process.stdin.on('end', () => process.exit(0));
+process.stdin.resume();"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "lifeline=".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        // The spec cannot turn the lifeline off.
+        spec.env.vars.insert(
+            OsString::from(PARENT_LIFELINE_ENV),
+            OsString::from("disabled"),
+        );
+        let mut spawned = spawn_process(&spec, 0).unwrap();
+
+        let first_line = spawned
+            .stdout_lines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child output");
+        assert_eq!(first_line, "lifeline=stdin");
+
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            spawned.child.try_wait().unwrap().is_none(),
+            "child must stay up while the supervisor holds the lifeline"
+        );
+
+        drop(spawned.lifeline.take());
+        let status = exited_within(&mut spawned.child, Duration::from_secs(10))
+            .expect("child must exit once the lifeline closes");
+        assert!(status.success(), "{status:?}");
+    }
+
+    /// Windows kernel backstop: the job kills a child that ignores stdin.
+    #[cfg(windows)]
+    #[test]
+    fn closing_the_job_kills_a_child_that_ignores_its_stdin() {
+        let script = node_script(
+            r#"process.stdout.write('up\n'); setInterval(() => {}, 1000);"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "up".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let mut spawned = spawn_process(&spec, 0).unwrap();
+        spawned
+            .stdout_lines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child output");
+        assert!(spawned.job.is_some(), "child was not placed in a job");
+
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            spawned.child.try_wait().unwrap().is_none(),
+            "child must stay up while the supervisor holds the job"
+        );
+
+        drop(spawned.job.take());
+        assert!(
+            exited_within(&mut spawned.child, Duration::from_secs(10)).is_some(),
+            "child must be killed when the job handle closes"
+        );
     }
 
     #[test]
@@ -3291,7 +3435,7 @@ setInterval(() => {}, 1000);
         let object = environment.as_object().unwrap();
         for key in object.keys() {
             assert!(
-                ["ALLOWED", "PORT", "REPORT_PATH"].contains(&key.as_str())
+                ["ALLOWED", "PORT", "REPORT_PATH", PARENT_LIFELINE_ENV].contains(&key.as_str())
                     || is_windows_runtime_environment_key(OsStr::new(key)),
                 "unexpected child environment variable: {key}"
             );
