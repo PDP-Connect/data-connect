@@ -110,3 +110,23 @@ test("reference browser origin uses the browser-visible request origin before co
     "http://localhost:3012"
   );
 });
+
+test("an unsupported explicit reference mode fails instead of being inferred away", () => {
+  for (const hints of [{}, { asPublicUrl: "https://reference.example.test" }]) {
+    assert.throws(
+      () => resolveReferenceMode({ env: {}, explicitMode: "compsoed", ...hints }),
+      /explicit reference mode/i
+    );
+  }
+  assert.equal(resolveReferenceMode({ env: {}, explicitMode: " DIRECT " }), REFERENCE_MODE_DIRECT);
+  assert.equal(resolveReferenceMode({ env: {}, explicitMode: "  " }), REFERENCE_MODE_DIRECT);
+});
+
+test("an unsupported PDPP_REFERENCE_MODE fails only when the ambient source is consulted", () => {
+  const env = { AS_PUBLIC_URL: "https://reference.example.test", PDPP_REFERENCE_MODE: "compsoed" };
+  assert.throws(() => resolveReferenceMode({ env }), /PDPP_REFERENCE_MODE/);
+  assert.equal(resolveReferenceMode({ env, ignoreAmbient: true }), REFERENCE_MODE_DIRECT);
+  assert.equal(resolveReferenceMode({ env, explicitMode: "direct" }), REFERENCE_MODE_DIRECT);
+  assert.equal(resolveReferenceMode({ env: { PDPP_REFERENCE_MODE: " CoMpOsEd " } }), REFERENCE_MODE_COMPOSED);
+  assert.equal(resolveReferenceMode({ env: { PDPP_REFERENCE_MODE: " " } }), REFERENCE_MODE_DIRECT);
+});

@@ -4,7 +4,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseCollectionRatePayload } from "../server/runtime-collection-facts.ts";
+import {
+  parseCollectionRatePayload,
+  readCollectionFactsFromTerminalData,
+  readRuntimeCollectionFact,
+} from "../server/runtime-collection-facts.ts";
 
 const baseRate = {
   ceiling_interval_ms: 60_000,
@@ -40,4 +44,18 @@ test("collection-rate reader preserves a complete backoff", () => {
   assert.ok(parsed);
   assert.equal(parsed.ceiling_interval_ms, 60_000);
   assert.deepEqual(parsed.last_backoff, { at_interval_ms: 1000, reason: "throttle" });
+});
+
+test("a present but invalid pending_detail_gaps count is unknown, never zero", () => {
+  for (const pending_detail_gaps of ["unknown", -1, 1.5, Number.NaN, null]) {
+    assert.equal(readRuntimeCollectionFact({ stream: "orders", pending_detail_gaps }), null);
+  }
+  assert.deepEqual(
+    readCollectionFactsFromTerminalData({
+      collection_facts: { streams: [{ stream: "orders", pending_detail_gaps: "unknown" }] },
+    })?.streams,
+    []
+  );
+  assert.equal(readRuntimeCollectionFact({ stream: "orders", pending_detail_gaps: 2 })?.pending_detail_gaps, 2);
+  assert.equal(readRuntimeCollectionFact({ stream: "orders" })?.pending_detail_gaps, 0);
 });

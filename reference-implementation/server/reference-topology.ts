@@ -81,6 +81,9 @@ export function resolveReferenceMode({
   if (normalizedExplicitMode === REFERENCE_MODE_COMPOSED) {
     return REFERENCE_MODE_COMPOSED;
   }
+  if (normalizedExplicitMode !== undefined) {
+    throw new Error("Unsupported explicit reference mode: expected direct or composed.");
+  }
 
   const normalizedAsPublicUrl = readTrimmedValue(asPublicUrl);
   const normalizedRsPublicUrl = readTrimmedValue(rsPublicUrl);
@@ -99,6 +102,9 @@ export function resolveReferenceMode({
   }
   if (ambientMode === REFERENCE_MODE_COMPOSED) {
     return REFERENCE_MODE_COMPOSED;
+  }
+  if (ambientMode !== undefined) {
+    throw new Error("Unsupported PDPP_REFERENCE_MODE: expected direct or composed.");
   }
 
   if (
