@@ -10,10 +10,14 @@
  */
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -22,7 +26,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import { crashPoint } from "../crash-point.ts";
 import { canonicalConnectorKey } from "../connector-key.ts";
 import {
   assertConnectorLifecycleAvailable,
@@ -31,12 +34,13 @@ import {
   withConnectorLifecycleLock,
 } from "../connector-lifecycle-lock.ts";
 import {
+  type ConnectorUninstallRootMove,
   deleteConnectorUninstallJournal,
   listConnectorUninstallJournalIds,
   reconcileConnectorUninstallJournal,
   writeConnectorUninstallJournal,
-  type ConnectorUninstallRootMove,
 } from "../connector-uninstall-journal.ts";
+import { crashPoint } from "../crash-point.ts";
 import { acquireDirectoryLock, type DirectoryLock } from "./directory-lock.ts";
 import {
   createFileLocalConnectorSourceStore,
@@ -122,22 +126,22 @@ export async function reconcileConnectorUninstalls(
   for (const connectorId of listConnectorUninstallJournalIds(dataDir)) {
     await withConnectorLifecycleLock(dataDir, connectorId, async () => {
       const result = await reconcileConnectorUninstallJournal(dataDir, connectorId, {
-        clearUninstalledMarker: (id) => clearConnectorLifecycleUninstalled(dataDir, id),
         cleanupActivation: async (id) => {
           await store.deactivate(id);
           await removeActivation(id);
         },
+        clearUninstalledMarker: (id) => clearConnectorLifecycleUninstalled(dataDir, id),
         getActive: (id) => store.getActive(id),
         restoreActive: (record) => store.activate(record),
       });
       if (result.status === "cleaned") {
         return;
       }
-      if (!(await store.getActive(connectorId))) {
+      if (await store.getActive(connectorId)) {
+        clearConnectorLifecycleUninstalled(dataDir, connectorId);
+      } else {
         await store.deactivate(connectorId);
         await removeActivation(connectorId);
-      } else {
-        clearConnectorLifecycleUninstalled(dataDir, connectorId);
       }
     });
   }
@@ -467,10 +471,12 @@ function confinedFile(root: string, path: string): string | null {
   try {
     const realRoot = realpathSync(root);
     const candidate = resolve(realRoot, path);
-    if (candidate !== realRoot && !candidate.startsWith(`${realRoot}/`)) {
-      if (sep === "/" || !candidate.startsWith(`${realRoot}${sep}`)) {
-        throw new Error("Path escapes its root.");
-      }
+    if (
+      candidate !== realRoot &&
+      !candidate.startsWith(`${realRoot}/`) &&
+      (sep === "/" || !candidate.startsWith(`${realRoot}${sep}`))
+    ) {
+      throw new Error("Path escapes its root.");
     }
     let current = realRoot;
     for (const part of path.split("/")) {
@@ -662,29 +668,103 @@ function readVerifiedRecord(root: string, entry: ConnectorCatalogEntry): Connect
   };
 }
 
+/**
+ * Verified records of digests that were activated, kept outside the connector
+ * directory (uninstall only accepts directories there). A root that was never
+ * activated has none, so nothing it contains can vouch for itself. A record is
+ * valid for any later use of its digest: the same digest names the same bytes.
+ */
+function retainedRecordPath(dataDir: string, connectorId: string, digest: string): string {
+  return join(dataDir, "connectors", ".retained", `${connectorId}-${digest.replace(":", "-")}.json`);
+}
+
+function writeRetainedRecord(dataDir: string, record: ConnectorInstallRecord): void {
+  // Best effort: a missing record only means the root is reinstalled next time.
+  try {
+    const path = retainedRecordPath(dataDir, record.connectorId, record.digest);
+    assertNoSymlinkComponents(dirname(path));
+    mkdirSync(dirname(path), { recursive: true });
+    assertNoSymlinkComponents(dirname(path));
+    const temp = `${path}.${process.pid}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+    renameSync(temp, path);
+  } catch {
+    // Reinstall covers it.
+  }
+}
+
+/**
+ * Trust boundary: a regular retained record written by this process is trusted, the
+ * same as the active record. A symlinked record or `.retained` directory is not,
+ * because whoever planted it chose the hashes; it reads as absent and the digest is
+ * reinstalled from the verified artifact.
+ */
+function readRetainedRecord(dataDir: string, connectorId: string, digest: string): ConnectorInstallRecord | null {
+  try {
+    const path = retainedRecordPath(dataDir, connectorId, digest);
+    if (!lstatSync(dirname(path)).isDirectory()) {
+      return null;
+    }
+    assertNoSymlinkComponents(dirname(path));
+    const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    try {
+      if (!fstatSync(fd).isFile()) {
+        return null;
+      }
+      return JSON.parse(readFileSync(fd, "utf8")) as ConnectorInstallRecord;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function verifiedRetainedRecord(
+  root: string,
+  entry: ConnectorCatalogEntry,
+  dataDir: string,
+  connectorId: string
+): ConnectorInstallRecord | null {
+  const retained = readRetainedRecord(dataDir, connectorId, entry.digest);
+  if (
+    !retained ||
+    retained.digest !== entry.digest ||
+    (entry.config_digest !== undefined && retained.configDigest !== entry.config_digest)
+  ) {
+    return null;
+  }
+  try {
+    return verifyStoredRecord(root, { ...retained, root }, dataDir);
+  } catch {
+    return null;
+  }
+}
+
 async function reuseExistingInstall(
   root: string,
   entry: ConnectorCatalogEntry,
-  existing: ConnectorInstallRecord | null,
+  existing: ConnectorInstallRecord,
   previousActive: ConnectorInstallRecord | null,
   dataDir: string,
   registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>,
   store: ConnectorInstallStore,
   signal: AbortSignal
 ): Promise<ConnectorInstallRecord> {
-  if (existing) {
-    if (
-      existing.digest !== entry.digest ||
-      (entry.config_digest !== undefined && existing.configDigest !== entry.config_digest) ||
-      resolve(existing.root) !== resolve(root)
-    ) {
-      throw new Error("Connector digest root already exists without a matching active record.");
-    }
+  // Only a recorded install is reused: its stored hashes are the retained
+  // verification. A root with no matching record is never adopted from its own bytes.
+  if (
+    existing.digest !== entry.digest ||
+    (entry.config_digest !== undefined && existing.configDigest !== entry.config_digest) ||
+    resolve(existing.root) !== resolve(root)
+  ) {
+    throw new Error("Connector digest root already exists without a matching active record.");
   }
-  const reusable = existing ?? { ...readVerifiedRecord(root, entry), root };
+  const reusable = existing;
   const verified = verifyStoredRecord(root, reusable, dataDir);
   signal.throwIfAborted();
   await store.activate(verified);
+  writeRetainedRecord(dataDir, verified);
   crashPoint("connector-install:after-activate");
   try {
     // Last abort point. registerManifest commits the registry manifest on its
@@ -719,12 +799,21 @@ async function installStagedEntry(options: {
   readonly installArtifact: InstallArtifact;
   readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
   readonly root: string;
+  /**
+   * True when `root` holds the recorded install being repaired. It is set aside
+   * only after the replacement is staged and verified, and put back on failure.
+   */
+  readonly replaceRoot?: boolean;
   readonly signal: AbortSignal;
   readonly store: ConnectorInstallStore;
 }): Promise<ConnectorInstallRecord> {
   const transaction = mkdtempSync(join(dirname(options.root), `.${options.entry.digest.replace(":", "-")}-install-`));
   const staged = join(transaction, "next");
+  const setAside = join(transaction, "previous");
   let published = false;
+  let movedAside = false;
+  // True once the recorded root cannot be put back: the transaction holds the only copy.
+  let keepTransaction = false;
   try {
     const discoveredConfigDigest = await options.installArtifact(staged, options.entry, options.signal);
     options.signal.throwIfAborted();
@@ -733,11 +822,30 @@ async function installStagedEntry(options: {
       : options.entry;
     assertCatalogEntry(verifiedEntry, options.connectorId, options.entry.digest);
     const record = readVerifiedRecord(staged, verifiedEntry);
+    if (options.replaceRoot) {
+      assertNoSymlinkComponents(options.root);
+      renameSync(options.root, setAside);
+      movedAside = true;
+    }
     renameSync(staged, options.root);
     published = true;
+    crashPoint("connector-install:after-publish");
     const active = { ...record, root: options.root };
     const verifiedActive = verifyStoredRecord(options.root, active, options.dataDir);
     await options.store.activate(verifiedActive);
+    writeRetainedRecord(options.dataDir, verifiedActive);
+    if (options.existing && options.existing.digest !== verifiedActive.digest) {
+      // The replaced install stays on disk as a retained root. Record its
+      // verification now, from the record the store holds, if it still verifies.
+      try {
+        writeRetainedRecord(
+          options.dataDir,
+          verifyStoredRecord(options.existing.root, options.existing, options.dataDir)
+        );
+      } catch {
+        // An install that no longer verifies is reinstalled if it is selected again.
+      }
+    }
     crashPoint("connector-install:after-activate");
     // Last abort point: see reuseExistingInstall.
     options.signal.throwIfAborted();
@@ -746,31 +854,90 @@ async function installStagedEntry(options: {
     return verifiedActive;
   } catch (error) {
     if (published) {
+      if (movedAside) {
+        // Same-root repair: put the recorded root back first, so no pointer
+        // ever names a directory that does not exist.
+        removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.entry.digest);
+        keepTransaction = true;
+        restorePreviousRoot(setAside, options.root, transaction, error);
+        keepTransaction = false;
+      }
       if (options.existing) {
         await options.store.activate(options.existing);
       } else {
         await options.store.deactivate(options.connectorId);
       }
-      removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.entry.digest);
+      if (!movedAside) {
+        removePublishedRootSafely(options.root, options.dataDir, options.connectorId, options.entry.digest);
+      }
+    } else if (movedAside) {
+      keepTransaction = true;
+      restorePreviousRoot(setAside, options.root, transaction, error);
+      keepTransaction = false;
     }
     throw error;
   } finally {
-    rmSync(transaction, { force: true, recursive: true });
+    if (!keepTransaction) {
+      rmSync(transaction, { force: true, recursive: true });
+    }
+  }
+}
+
+function restorePreviousRoot(setAside: string, root: string, transaction: string, cause: unknown): void {
+  try {
+    renameSync(setAside, root);
+  } catch (restoreError) {
+    throw new Error(
+      `Connector repair failed and the previous root could not be restored; it is kept in ${transaction}: ${
+        restoreError instanceof Error ? restoreError.message : String(restoreError)
+      }`,
+      { cause }
+    );
+  }
+}
+
+/**
+ * A kill between moving the recorded root aside and publishing its replacement leaves
+ * the active record naming a missing root while the old root sits in an install
+ * transaction. Put it back before anything else uses the record.
+ */
+function restoreAbandonedPreviousRoot(existing: ConnectorInstallRecord | null, dataDir: string): void {
+  if (!existing || existsSync(existing.root)) {
+    return;
+  }
+  const root = resolve(existing.root);
+  if (root !== resolve(dataDir, "connectors", existing.connectorId, existing.digest)) {
+    return;
+  }
+  const prefix = `.${existing.digest.replace(":", "-")}-install-`;
+  try {
+    assertNoSymlinkComponents(dirname(root));
+    for (const name of readdirSync(dirname(root))) {
+      const previous = join(dirname(root), name, "previous");
+      if (name.startsWith(prefix) && existsSync(previous)) {
+        assertNoSymlinkComponents(previous);
+        renameSync(previous, root);
+        rmSync(join(dirname(root), name), { force: true, recursive: true });
+        return;
+      }
+    }
+  } catch {
+    // The install below runs as it would without a transaction to restore.
   }
 }
 
 export interface ConnectorInstallService {
+  addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   catalog: () => Promise<readonly ConnectorCatalogEntry[]>;
   install: (connectorId: string, digest: string) => Promise<ConnectorInstallRecord>;
-  resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
-  addLocalSource?: (sourcePath: string) => Promise<LocalConnectorSourceRecord>;
   listLocalSources?: () => Promise<readonly LocalConnectorSourceRecord[]>;
   reloadLocalSource?: (sourceId: string) => Promise<LocalConnectorSourceRecord>;
   removeLocalSource?: (sourceId: string) => Promise<void>;
+  resolveManifestFromCatalog?: (connectorId: string) => Promise<Record<string, unknown> | null>;
   selectLocalSource?: (connectorKey: string, sourceId: string | null) => Promise<void>;
   status: () => Promise<readonly ConnectorInstallRecord[]>;
-  update: (connectorId: string) => Promise<ConnectorInstallRecord>;
   uninstall: (connectorKey: string) => Promise<void>;
+  update: (connectorId: string) => Promise<ConnectorInstallRecord>;
 }
 
 export function createConnectorInstallService(options: {
@@ -861,12 +1028,14 @@ export function createConnectorInstallService(options: {
     entry: ConnectorCatalogEntry,
     signal: AbortSignal
   ): Promise<ConnectorInstallRecord> => {
-      const root = join(dataDir, "connectors", connectorId, entry.digest);
-      const existing = await store.getActive(connectorId);
-      if (existsSync(root)) {
-        if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
-          const inspected = await inspectActiveConnector(store, connectorId);
-          if (inspected.status === "active") {
+    const root = join(dataDir, "connectors", connectorId, entry.digest);
+    const existing = await store.getActive(connectorId);
+    restoreAbandonedPreviousRoot(existing, dataDir);
+    let replaceRoot = false;
+    if (existsSync(root)) {
+      if (existing && existing.digest === entry.digest && resolve(existing.root) === resolve(root)) {
+        const inspected = await inspectActiveConnector(store, connectorId);
+        if (inspected.status === "active") {
           return await reuseExistingInstall(
             root,
             entry,
@@ -877,62 +1046,62 @@ export function createConnectorInstallService(options: {
             store,
             signal
           );
-          }
-          removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
-          if (existsSync(root)) {
-            throw new Error("Connector digest root already exists without a matching active record.");
-          }
-        } else if (existing) {
+        }
+        // The recorded root no longer verifies. It is replaced only once the
+        // verified artifact is staged, so a failed repair leaves it in place.
+        try {
+          assertNoSymlinkComponents(root);
+        } catch (error) {
+          throw new Error("Connector digest root already exists without a matching active record.", { cause: error });
+        }
+        replaceRoot = true;
+      } else {
+        // No active record covers this root. If this digest was activated before,
+        // its retained record is the verification and the root is reused without a
+        // download. Otherwise a crash left it between rename and the active-record
+        // commit (first install, or an update while another digest stays active):
+        // hashing the bytes found here into a record would make whatever is on
+        // disk the verified bytes. Nothing that fails verification survives; the
+        // install below takes the bytes from the verified artifact again.
+        const retained = verifiedRetainedRecord(root, entry, dataDir, connectorId);
+        if (retained) {
           return await reuseExistingInstall(
             root,
             entry,
-            null,
+            retained,
             existing,
             dataDir,
             options.registerManifest,
             store,
             signal
           );
-        } else {
-          // A crash can leave the published directory between rename and the
-          // active-record commit. Do not delete a valid retained root only
-          // because its active record is missing.
-          try {
-            readVerifiedRecord(root, entry);
-            throw new Error("Connector digest root already exists without a matching active record.");
-          } catch (error) {
-            if (
-              error instanceof Error &&
-              error.message === "Connector digest root already exists without a matching active record."
-            ) {
-              throw error;
-            }
-          }
-          removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
-          if (existsSync(root)) {
-            throw new Error("Connector digest root already exists without a matching active record.");
-          }
+        }
+        removePublishedRootSafely(root, dataDir, connectorId, entry.digest);
+        if (existsSync(root)) {
+          throw new Error("Connector digest root already exists without a matching active record.");
         }
       }
-      assertNoSymlinkComponents(dataDir);
-      const connectorsDir = join(dataDir, "connectors");
-      assertNoSymlinkComponents(connectorsDir);
-      mkdirSync(connectorsDir, { recursive: true });
-      const connectorDir = join(connectorsDir, connectorId);
-      assertNoSymlinkComponents(connectorDir);
-      mkdirSync(connectorDir, { recursive: true });
-      assertNoSymlinkComponents(connectorDir);
-      return await installStagedEntry({
-        connectorId,
-        dataDir,
-        entry,
-        existing,
-        installArtifact: options.installArtifact ?? installPinnedArtifact,
-        registerManifest: options.registerManifest,
-        root,
-        signal,
-        store,
-      });
+    }
+    assertNoSymlinkComponents(dataDir);
+    const connectorsDir = join(dataDir, "connectors");
+    assertNoSymlinkComponents(connectorsDir);
+    mkdirSync(connectorsDir, { recursive: true });
+    const connectorDir = join(connectorsDir, connectorId);
+    assertNoSymlinkComponents(connectorDir);
+    mkdirSync(connectorDir, { recursive: true });
+    assertNoSymlinkComponents(connectorDir);
+    return await installStagedEntry({
+      connectorId,
+      dataDir,
+      entry,
+      existing,
+      installArtifact: options.installArtifact ?? installPinnedArtifact,
+      registerManifest: options.registerManifest,
+      replaceRoot,
+      root,
+      signal,
+      store,
+    });
   };
   const installTimeoutMs = options.installTimeoutMs ?? connectorInstallTimeoutMs();
   const derivedRepairs = new Map<string, Promise<void>>();
@@ -953,7 +1122,9 @@ export function createConnectorInstallService(options: {
       );
     derivedRepairs.set(record.connectorId, next);
     void next.finally(() => {
-      if (derivedRepairs.get(record.connectorId) === next) derivedRepairs.delete(record.connectorId);
+      if (derivedRepairs.get(record.connectorId) === next) {
+        derivedRepairs.delete(record.connectorId);
+      }
     });
   };
   const installEntry = async (connectorId: string, entry: ConnectorCatalogEntry): Promise<ConnectorInstallRecord> => {
@@ -1000,8 +1171,10 @@ export function createConnectorInstallService(options: {
     return await installEntry(connectorId, entry);
   };
   const uninstall = async (connectorKey: string): Promise<void> => {
-    if (!CONNECTOR_ID.test(connectorKey)) throw new Error("Connector key is invalid.");
-    if (!options.assertUninstallAllowed || !options.removeActivation) {
+    if (!CONNECTOR_ID.test(connectorKey)) {
+      throw new Error("Connector key is invalid.");
+    }
+    if (!(options.assertUninstallAllowed && options.removeActivation)) {
       throw new Error("Connector uninstall is unavailable.");
     }
     const assertUninstallAllowed = options.assertUninstallAllowed;
@@ -1012,7 +1185,9 @@ export function createConnectorInstallService(options: {
         (candidate) =>
           candidate.connectorId === connectorKey || canonicalManifestKey(candidate.manifest) === connectorKey
       );
-      if (!record) throw new Error("Connector is not installed.");
+      if (!record) {
+        throw new Error("Connector is not installed.");
+      }
       const connectorId = record.connectorId;
       await withConnectorLifecycleLock(dataDir, connectorId, async () => {
         await assertUninstallAllowed(connectorId);
@@ -1054,7 +1229,9 @@ export function createConnectorInstallService(options: {
           crashPoint("connector-uninstall:after-active-removed");
         } catch (error) {
           for (const item of [...staged].reverse()) {
-            if (existsSync(item.moved)) renameSync(item.moved, item.original);
+            if (existsSync(item.moved)) {
+              renameSync(item.moved, item.original);
+            }
           }
           if (restoreActiveRecord) {
             try {
@@ -1150,10 +1327,10 @@ export function createConnectorInstallService(options: {
     addLocalSource: (sourcePath) => localSourceStore.add(sourcePath),
     catalog,
     install,
-    resolveManifestFromCatalog,
     listLocalSources: () => localSourceStore.list(),
     reloadLocalSource: (sourceId) => localSourceStore.reload(sourceId),
     removeLocalSource: (sourceId) => localSourceStore.remove(sourceId),
+    resolveManifestFromCatalog,
     selectLocalSource: (connectorKey, sourceId) => localSourceStore.select(connectorKey, sourceId),
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
@@ -1391,11 +1568,7 @@ export function createConfigLimitedFetch(
   return { configDigest: () => discoveredConfigDigest, fetchImpl };
 }
 
-async function installPinnedArtifact(
-  root: string,
-  entry: ConnectorCatalogEntry,
-  signal: AbortSignal
-): Promise<string> {
+async function installPinnedArtifact(root: string, entry: ConnectorCatalogEntry, signal: AbortSignal): Promise<string> {
   const core = await loadPinnedCore();
   const abortableFetch: FetchLike = (input, init) =>
     fetch(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
