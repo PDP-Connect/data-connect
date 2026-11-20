@@ -844,11 +844,12 @@ fn watch_stream<R: std::io::Read>(reader: BufReader<R>, connected: mpsc::Sender<
         let lower = line.to_ascii_lowercase();
         if lower.contains("registered tunnel connection") {
             let _ = connected.send(Ok(()));
-        } else if lower.contains("failed to parse token")
-            || lower.contains("invalid tunnel token")
-            || lower.contains("unauthorized")
-        {
-            let _ = connected.send(Err(line));
+        } else if lower.contains("failed to parse token") {
+            let _ = connected.send(Err("tunnel token could not be parsed".to_string()));
+        } else if lower.contains("invalid tunnel token") {
+            let _ = connected.send(Err("invalid tunnel token".to_string()));
+        } else if lower.contains("unauthorized") {
+            let _ = connected.send(Err("tunnel authorization was denied".to_string()));
         }
     }
 }
@@ -1112,11 +1113,17 @@ mod tests {
     }
 
     #[test]
-    fn watch_stream_reports_failure_on_an_invalid_token_line() {
-        let sample = b"2026-09-20T00:00:00Z ERR Failed to parse token: invalid tunnel token\n";
-        let (tx, rx) = mpsc::channel();
-        watch_stream(BufReader::new(&sample[..]), tx);
-        assert!(matches!(rx.recv(), Ok(Err(reason)) if reason.to_ascii_lowercase().contains("token")));
+    fn watch_stream_reports_only_fixed_failure_reasons() {
+        for (sample, expected) in [
+            ("ERR Failed to parse token", "tunnel token could not be parsed"),
+            ("ERR INVALID TUNNEL TOKEN", "invalid tunnel token"),
+            ("ERR Unauthorized", "tunnel authorization was denied"),
+        ] {
+            let sample = format!("{sample}: opaque-marker\n");
+            let (tx, rx) = mpsc::channel();
+            watch_stream(BufReader::new(sample.as_bytes()), tx);
+            assert_eq!(rx.recv().unwrap(), Err(expected.to_string()));
+        }
     }
 
     #[test]
