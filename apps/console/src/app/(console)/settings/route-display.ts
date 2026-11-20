@@ -9,6 +9,7 @@ type TimeOptions = { locale?: string; timeZone?: string; now?: number };
 type Known<T> = { known: true; value: T } | { known: false; reason: string };
 
 export type RouteDisplayInput = {
+  presentation?: ReturnType<typeof import("pdpp-reference-implementation/reachability-projection").projectRoute>["presentation"];
   state: string;
   routeState: string;
   cleanup: { state: string };
@@ -49,6 +50,7 @@ export function routeHeadline(
 ): string {
   if (proofRefreshUnsupported || attention) return "Needs your action";
   if (route.state === "released" && route.cleanup.state === "confirmed") return "Off";
+  if (route.presentation) return route.presentation.label === "Verified" ? "On" : "Needs your action";
   return phaseStatus[lifecyclePhase ?? route.routeState] ?? "Needs your action";
 }
 
@@ -125,7 +127,8 @@ export function proofLine(
   const age = relativeAge(observedAt, now);
   const when = age ? `checked ${age}` : "check time unknown";
   const where = vantage === "public" ? "Works from the internet" : "Works on this computer";
-  const base = status === "verified" ? `${where} · ${when}` : `Not confirmed yet · ${when}`;
+  const verified = route.presentation ? route.presentation.label === "Verified" : status === "verified";
+  const base = verified ? `${where} · ${when}` : `Not confirmed yet · ${when}`;
   return `${options.synthetic ? "Test data: " : ""}${base}`;
 }
 

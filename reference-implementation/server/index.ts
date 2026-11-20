@@ -9624,6 +9624,9 @@ export async function startServer(opts: ServerOpts = {}) {
   runtimeContext.selfCallRsUrl = `http://${selfCallUrlHost}:${rsPort}`;
   await controller.promoteBrowserSurfaceLeasesAfterBoot();
   logger.info({ port: rsPort, url: `http://${bindUrlHost}:${rsPort}` }, "resource server listening");
+  if (!opts.reachability) {
+    void reachability?.service?.recoverFromLibrary().catch(() => logger.warn("reachability library recovery remains unknown"));
+  }
   warnIfLoopbackOriginPortDisagreesWithBoundPort("configured RS public origin", configuredRsPublicUrl, rsPort);
 
   // HNSW is a derived acceleration structure. Its durable builder is bounded,

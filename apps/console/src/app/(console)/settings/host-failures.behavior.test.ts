@@ -363,3 +363,36 @@ test("the real host's unsafe-folder error becomes the permissions card with its 
     assert.ok(buttons().includes("Fix permissions"));
   });
 });
+
+test("boot listing timeout shows possibly live and offers a recovery check", async () => {
+  let checked = false;
+  await withScreen(host({
+    "/state": () => ok({ ...idleState, recovery: { pending: false, blockedBy: checked ? null : "recovery_timed_out", actions: checked ? [] : ["check"] } }),
+    "/recovery/check": () => { checked = true; return ok({ closed: 0, failed: 0, reproved: 0 }); },
+  }), async ({ mainText, press, calls }) => {
+    assert.match(mainText(), /Unknown, possibly live/);
+    assert.doesNotMatch(mainText(), /Only this computer can open/);
+    await press(/^Check earlier addresses$/);
+    assert.ok(calls.some(call => call.url === "/recovery/check" && call.body));
+    assert.doesNotMatch(mainText(), /Unknown, possibly live/);
+  });
+});
+
+
+test("earlier setup is a non-blocking notice that clears after reentry", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"], now: 1_800_000_000_000 });
+  let reentered = false;
+  await withScreen(host({
+    "/catalog": () => ok({ ...catalog, earlierSetup: reentered ? null : "needs_reentry" }),
+  }), async ({ mainText, alerts, buttons, settle }) => {
+    assert.match(mainText(), /earlier setup.*older version.*Enter it again/i);
+    assert.equal(alerts(), 0);
+    assert.ok(buttons().some(label => /Turn on remote access/.test(label)));
+    const turnOn = [...document.querySelectorAll<HTMLButtonElement>("button")].find(button => /Turn on remote access/.test(button.textContent ?? ""));
+    assert.ok(turnOn && !turnOn.disabled, "fresh setup remains available");
+    reentered = true;
+    await act(async () => { t.mock.timers.tick(3_000); });
+    await settle();
+    assert.doesNotMatch(mainText(), /earlier setup.*older version/i);
+  });
+});
