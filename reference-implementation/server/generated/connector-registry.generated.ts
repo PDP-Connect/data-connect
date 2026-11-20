@@ -15,17 +15,3 @@
 /** Every first-party manifest's canonical connector_key. */
 export const FIRST_PARTY_CONNECTOR_KEYS: readonly string[] = Object.freeze(["amazon", "anthropic", "apple-contacts", "apple-health", "apple-photos", "chase", "chatgpt", "claude-code", "codex", "doordash", "github", "gmail", "google-calendar", "google-contacts", "google-maps", "google-maps-data-portability", "google-messages", "google-takeout", "groupme", "heb", "ical", "imessage", "jellyfin", "linkedin", "loom", "meta", "netflix-export", "notion", "oura", "pocket", "reddit", "shopify", "signal", "slack", "spotify", "steam", "strava", "twitter-archive", "uber", "usaa", "venmo", "whatsapp", "wholefoods", "whoop", "ynab"]);
 
-/**
- * Legacy snake_case local-collector bundle id -> canonical manifest
- * connector_key, wherever the two differ. Derived by cross-referencing
- * LOCAL_COLLECTOR_DEFINITIONS (the bundle's own directory-name ids) against
- * each connector's manifest-declared connector_key.
- */
-export const LEGACY_LOCAL_ALIASES: Readonly<Record<string, string>> = Object.freeze({
-  "apple_photos": "apple-photos",
-  "claude_code": "claude-code",
-  "codex": "codex",
-  "google_messages": "google-messages",
-  "google_takeout": "google-takeout",
-  "imessage": "imessage",
-});

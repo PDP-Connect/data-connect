@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { enrollmentKeyForCanonicalKey, isBrowserSessionBoundConnection } from "./connection-modality.ts";
+import { isBrowserSessionBoundConnection } from "./connection-modality.ts";
 
 test("isBrowserSessionBoundConnection classifies a connection by its source-binding kind, not the connector", () => {
   // Browser-session bindings repair by session repair, NOT static-secret capture,
@@ -22,11 +22,4 @@ test("isBrowserSessionBoundConnection classifies a connection by its source-bind
   assert.equal(isBrowserSessionBoundConnection("default_account"), false);
   assert.equal(isBrowserSessionBoundConnection(null), false);
   assert.equal(isBrowserSessionBoundConnection(undefined), false);
-});
-
-test("enrollmentKeyForCanonicalKey maps the two hyphenated slugs to their underscore enrollment keys", () => {
-  assert.equal(enrollmentKeyForCanonicalKey("claude-code"), "claude_code");
-  assert.equal(enrollmentKeyForCanonicalKey("google-takeout"), "google_takeout");
-  assert.equal(enrollmentKeyForCanonicalKey("codex"), "codex");
-  assert.equal(enrollmentKeyForCanonicalKey("https://registry.pdpp.dev/connectors/codex"), "codex");
 });

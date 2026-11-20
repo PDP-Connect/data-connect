@@ -1015,15 +1015,14 @@ test("a supported owner action has an invariant actionable provider projection",
   assert.equal(entry.displayName, "test-provider");
 });
 
-test("claude-code manifest slug maps to the claude_code enrollment key", async () => {
-  // The manifest slug is `claude-code` (hyphen); the proven enrollment path and
-  // the form's COLLECTOR_RUN_CONNECTORS literal use `claude_code` (underscore).
-  // The deep-link key must be the form's value or the prefill is rejected.
+test("claude-code enrollment key is its manifest key", async () => {
+  // The deep-link key the catalog mints is the canonical connector key, which
+  // is the id the enrollment form and the server accept.
   const catalog = buildConnectorCatalog(await loadCommittedManifests());
   const claudeCode = catalog.find((e) => e.connectorKey === "claude-code");
   assert.ok(claudeCode, "claude-code must be in the catalog");
   assert.equal(claudeCode.disposition, "local_collector_enroll");
-  assert.equal(claudeCode.enrollmentKey, "claude_code");
+  assert.equal(claudeCode.enrollmentKey, "claude-code");
 });
 
 test("amazon defaults to source-scoped credential capture, not manual browser enrollment", async () => {
@@ -1055,7 +1054,7 @@ test("the grouping helpers partition the catalog without overlap or loss", async
   // At least one of each supported path class that still has committed entries.
   assert.ok(
     localCollectorEntries(catalog).length >= 6,
-    "claude_code + codex + google_takeout + imessage + apple_photos + google_messages"
+    "claude-code + codex + google-takeout + imessage + apple-photos + google-messages"
   );
   assert.deepEqual(
     browserCollectorEntries(catalog),

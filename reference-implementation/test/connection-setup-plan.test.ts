@@ -94,7 +94,7 @@ test("setup planner supports URL-shaped local collector identifiers", () => {
   assert.equal(plan.connectorKey, "claude-code");
   assert.equal(plan.supportState, "supported");
   assert.equal(plan.catalogDisposition, "local_collector_enroll");
-  assert.equal(plan.enrollmentKey, "claude_code");
+  assert.equal(plan.enrollmentKey, "claude-code", "the enrollment key is the connector key itself");
 });
 
 test("setup planner proof-gates filesystem connectors outside the proven enrollment set", () => {

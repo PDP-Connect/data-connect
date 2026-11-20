@@ -25,6 +25,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
+import { migrateRenamedConnectorIdsSqlite } from "./connector-id-rename-migration.ts";
 import {
   makeConnectorInstanceId as canonicalConnectorInstanceId,
   makeConnectorInstanceSourceBindingKey as canonicalSourceBindingKey,
@@ -6620,6 +6621,9 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
     addColumnIfMissing(raw, "semantic_search_rowid", "input_identity", "TEXT");
   });
   runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
+  // Rename ids that older collectors spelled with underscores before any
+  // migration below derives identity from a connector id.
+  runWithSqliteBusyRetrySync(() => migrateRenamedConnectorIdsSqlite(raw));
   runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));
   raw.exec(`

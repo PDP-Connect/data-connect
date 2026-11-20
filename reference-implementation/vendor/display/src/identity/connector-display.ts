@@ -6,13 +6,10 @@ const LOCAL_DEVICE_PREFIX = "local-device:";
 const CONNECTOR_KEY_ALIASES = new Map<string, string>([
   ["amazon", "Amazon"],
   ["chatgpt", "ChatGPT"],
-  ["claude_code", "claude-code"],
   ["claude-code", "claude-code"],
   ["gmail", "Gmail"],
   ["google-maps", "Google Maps"],
-  ["google_maps", "Google Maps"],
   ["google-maps-data-portability", "Google Maps (Data Portability)"],
-  ["google_maps_data_portability", "Google Maps (Data Portability)"],
 ]);
 
 export interface ConnectorDisplayInput {

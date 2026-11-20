@@ -120,7 +120,7 @@ test("source actionability treats device-local owner recovery as owner-required 
       reason_code: "local_exporter_dead_letter_backlog",
       state: "degraded",
     }),
-    connector_id: "claude_code",
+    connector_id: "claude-code",
     rendered_verdict: verdict({
       forward_statement: "The local collector has saved records on its host that did not upload to this server.",
       required_actions: [

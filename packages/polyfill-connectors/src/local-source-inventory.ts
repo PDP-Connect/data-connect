@@ -30,7 +30,7 @@ export interface LocalCoverageStoreDescriptor {
  * path/reason metadata, so a partial durable diagnostic set is detectable.
  */
 export const LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR = {
-  claude_code: [
+  "claude-code": [
     { store: "projects", stream: "sessions" },
     { store: "derived_messages", stream: "messages" },
     { store: "derived_attachments", stream: "attachments" },
@@ -62,14 +62,14 @@ export const LOCAL_COVERAGE_STORE_DESCRIPTORS_BY_CONNECTOR = {
     { store: "cache", stream: "cache_inventory" },
     { store: "auth", stream: null },
   ],
-  google_takeout: [
+  "google-takeout": [
     { store: "location_history", stream: "location_history" },
     { store: "youtube_watch_history", stream: "youtube_watch_history" },
     { store: "search_history", stream: "search_history" },
     { store: "photos", stream: "photos" },
   ],
-  apple_photos: [{ store: "export_dir", stream: "photos" }],
-  google_messages: [{ store: "gmcli_archive", stream: "messages" }],
+  "apple-photos": [{ store: "export_dir", stream: "photos" }],
+  "google-messages": [{ store: "gmcli_archive", stream: "messages" }],
 } as const;
 
 type LocalCoverageStoreNamesByConnector = {
@@ -88,7 +88,7 @@ export type LocalCoverageConnector = keyof typeof LOCAL_COVERAGE_STORE_DESCRIPTO
 
 function normalizeLocalCoverageConnector(connectorId: string): string {
   if (connectorId === "claude-code" || connectorId.endsWith("/claude-code")) {
-    return "claude_code";
+    return "claude-code";
   }
   if (connectorId === "codex" || connectorId.endsWith("/codex")) {
     return "codex";

@@ -118,7 +118,7 @@ test(
 
       const entry = managed[0];
       assert.ok(entry, "one connector should have been installed");
-      assert.equal(entry.definition.connector_id, "https://registry.pdpp.dev/connectors/oura");
+      assert.equal(entry.definition.connector_id, "oura");
 
       // The claim worth making: the bytes that came out of the registry are
       // not merely well-formed, they load. A signature says where code came

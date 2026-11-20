@@ -179,7 +179,7 @@ data:
 npx -y @pdpp/local-collector setup \
   --base-url https://<reference-host> \
   --code <one-time-code> \
-  --connector claude_code \
+  --connector claude-code \
   --device-label "<host label>" \
   --sample 20
 ```
@@ -194,8 +194,8 @@ raw device token. `--sample 20` runs a bounded 20-record proof pass
 immediately after enrolling, so you get real evidence the pairing works
 before deciding to collect the full source; omit it to only enroll and save
 credentials. Add `--json` for machine-readable output. Connector ids are
-case-insensitive and hyphens normalize to underscores (`claude-code` ==
-`claude_code`).
+case-insensitive, and underscores normalize to hyphens (`claude_code` ==
+`claude-code`).
 
 Once `setup` has written a profile, `run --connection-id <id>` resolves
 device id/device token/connector from it automatically — see "Run" below.
@@ -249,7 +249,7 @@ PDPP_LOCAL_DEVICE_TOKEN=<device_token> \
 PDPP_CONNECTION_ID=<source_instance_id> \
 npx -y @pdpp/local-collector run \
   --base-url https://<reference-host> \
-  --connector claude_code
+  --connector claude-code
 ```
 
 Codex uses the same shape:
@@ -282,7 +282,7 @@ credential is revoked (or was already revoked); a network/server failure
 leaves local credentials in place so you can retry:
 
 ```bash
-npx -y @pdpp/local-collector logout --connector claude_code
+npx -y @pdpp/local-collector logout --connector claude-code
 ```
 
 If the server is unreachable or decommissioned, `--local-only` skips the
@@ -290,7 +290,7 @@ server call and deletes local credentials unconditionally — the device token
 then stays valid server-side until revoked some other way:
 
 ```bash
-npx -y @pdpp/local-collector logout --connector claude_code --local-only
+npx -y @pdpp/local-collector logout --connector claude-code --local-only
 ```
 
 ## Recover A Stalled Collector
@@ -328,7 +328,7 @@ PDPP_LOCAL_DEVICE_TOKEN=<device_token> \
 PDPP_CONNECTION_ID=<source_instance_id> \
 pdpp-local-collector run \
   --base-url https://<reference-host> \
-  --connector claude_code
+  --connector claude-code
 ```
 
 The `@pdpp/cli` shim remains available for operators who have both packages
@@ -336,7 +336,7 @@ installed:
 
 ```bash
 # @pdpp/cli package, pdpp binary lazily resolves the installed @pdpp/local-collector package
-pdpp collector run --base-url https://<reference-host> --connector claude_code
+pdpp collector run --base-url https://<reference-host> --connector claude-code
 ```
 
 Prefer the direct `@pdpp/local-collector` command in onboarding because it
@@ -401,7 +401,7 @@ state/cache dir rather than a raw `/tmp` file:
 # Capture a run summary on a disk-backed path (not /tmp on a tmpfs host).
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pdpp"
 mkdir -p "$STATE_DIR"
-pdpp-local-collector run --connector claude_code > "$STATE_DIR/last-run.json"
+pdpp-local-collector run --connector claude-code > "$STATE_DIR/last-run.json"
 ```
 
 The optional connector-protocol debug dump
@@ -604,8 +604,8 @@ Commands for the installed service:
 
 ```bash
 # systemd, running the globally installed @pdpp/local-collector binary
-systemctl enable --now pdpp-local-collector@claude_code.timer
-systemctl status pdpp-local-collector@claude_code.service
+systemctl enable --now pdpp-local-collector@claude-code.timer
+systemctl status pdpp-local-collector@claude-code.service
 ```
 
 #### Optional: surface a failed run on the host with `OnFailure=`
@@ -675,7 +675,7 @@ Example LaunchAgent:
   <key>ProgramArguments</key>
   <array>
     <string>/Users/<you>/.local/bin/pdpp-local-collector-run</string>
-    <string>claude_code</string>
+    <string>claude-code</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

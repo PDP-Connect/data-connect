@@ -80,7 +80,7 @@ test("pins follow definition order and name only defined connectors", () => {
     definitionOrder.filter((id) => pinned.includes(id))
   );
   for (const pin of COLLECTION_PROFILE_PINS) {
-    assert.equal(pin.connectorKey, pin.connectorId.replaceAll("_", "-"));
+    assert.equal(pin.connectorKey, pin.connectorId);
   }
 });
 
@@ -318,10 +318,10 @@ test("prepareConnectorSpec installs nothing for a custom --command", async () =>
 });
 
 test(
-  "live: the claude_code pin installs from GHCR through the real installer core",
+  "live: the claude-code pin installs from GHCR through the real installer core",
   { skip: process.env.PDPP_TEST_LIVE_COLLECTION_PROFILES === "1" ? false : "set PDPP_TEST_LIVE_COLLECTION_PROFILES=1" },
   async () => {
-    const pin = COLLECTION_PROFILE_PINS.find((candidate) => candidate.connectorId === "claude_code");
+    const pin = COLLECTION_PROFILE_PINS.find((candidate) => candidate.connectorId === "claude-code");
     assert.ok(pin);
     const { installRoot, durableRoot } = roots("live");
     const release = await ensureCollectionProfileInstalled({ pin, installRoot, durableRoot });

@@ -28,7 +28,6 @@ const MAX_LEGACY_ENTRIES_PER_ROOT = 64;
 const LEGACY_SQLITE_FILE_PATTERN = /(?:\.sqlite|\.db|\.json)$/;
 const LEGACY_MIGRATION_FILE_PATTERN = /\.migration-[^/]+\.tmp$/;
 const DEFAULT_QUEUE_FILE_NAME = "collector-runner-queue.sqlite";
-
 export interface CollectorStatePathInput {
   /** Test hook that simulates a legacy collector write after canonical installation. */
   afterMigrationInstall?: (() => void) | undefined;
@@ -113,6 +112,77 @@ export function canonicalCollectorQueuePath(input: {
   return join(directory, fileName);
 }
 
+/** SQLite sidecar suffixes that travel with a database file. */
+const QUEUE_SIDECAR_SUFFIXES = ["-wal", "-shm", "-journal"] as const;
+
+/**
+ * Fold a queue's write-ahead log into the main database file so the main file
+ * alone holds every committed row. Returns false when that cannot be proven:
+ * the file is not a readable database, another process holds it (a running
+ * collector), or a sidecar still has content afterwards. Callers then leave
+ * the file where it is.
+ */
+function foldQueueIntoMainFile(path: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path);
+    const row = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as { busy?: number } | undefined;
+    if (row?.busy) {
+      return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+  return QUEUE_SIDECAR_SUFFIXES.every((suffix) => {
+    const sidecar = `${path}${suffix}`;
+    return !existsSync(sidecar) || statSync(sidecar).size === 0;
+  });
+}
+
+/**
+ * One-time migration of a queue file named before connector ids were manifest
+ * keys. An older collector named the queue with the underscore spelling
+ * (`claude_code.<source>.sqlite`); the same queue is now
+ * `claude-code.<source>.sqlite`. When only the underscore-named file exists, its
+ * write-ahead log is first folded into the main file, so the main file is
+ * complete on its own, and then the main file is renamed. Empty sidecars left
+ * behind are removed. If the fold cannot be proven (the file is held by a
+ * running collector, or unreadable), nothing is renamed and no row is lost.
+ * When the hyphen-named file exists it is authoritative and the
+ * underscore-named file is left untouched. A second run finds nothing to do,
+ * and nothing reads the old spelling anywhere else.
+ */
+function migrateUnderscoreSpelledQueue(
+  canonicalPath: string,
+  connectorId: string | null | undefined,
+  sourceInstanceId: string,
+  stateRoot: string
+): void {
+  const trimmed = connectorId?.trim();
+  if (!trimmed?.includes("-")) {
+    return;
+  }
+  const legacyPath = canonicalCollectorQueuePath({
+    connectorId: trimmed.replaceAll("-", "_"),
+    sourceInstanceId,
+    stateRoot,
+  });
+  if (legacyPath === canonicalPath || existsSync(canonicalPath) || !existsSync(legacyPath)) {
+    return;
+  }
+  if (!foldQueueIntoMainFile(legacyPath)) {
+    return;
+  }
+  for (const suffix of QUEUE_SIDECAR_SUFFIXES) {
+    if (existsSync(`${legacyPath}${suffix}`)) {
+      rmSync(`${legacyPath}${suffix}`);
+    }
+  }
+  renameSync(legacyPath, canonicalPath);
+}
+
 /**
  * Resolve the local collector's durable outbox path.
  *
@@ -122,7 +192,8 @@ export function canonicalCollectorQueuePath(input: {
  * is used in place; a package-local legacy store is reconciled into a
  * consistent SQLite snapshot, retires the migrated source in the old
  * database, and installs the snapshot at the canonical path. Old pathnames
- * are never removed.
+ * are never removed, except that an underscore-spelled queue file is renamed
+ * once to its hyphen name (see {@link migrateUnderscoreSpelledQueue}).
  */
 export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): string {
   const { configuredPath, configuredPathIsExplicit } = input;
@@ -146,6 +217,8 @@ export function resolveCollectorQueuePath(input: CollectorStatePathInput = {}): 
   if (!sourceInstanceId) {
     return canonicalPath;
   }
+
+  migrateUnderscoreSpelledQueue(canonicalPath, input.connectorId, sourceInstanceId, stateRoot);
 
   if (existsSync(canonicalPath)) {
     // A fully installed canonical copy is authoritative. If it is an empty

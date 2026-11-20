@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Proves google_messages emits an honest coverage_diagnostics row for its
+ * Proves google-messages emits an honest coverage_diagnostics row for its
  * one known local store (gmcli_archive) on every run — including when
  * gmcli is missing, not paired, or query-fails — so the connection-health
  * rollup never gets stuck at coverage_unknown for a genuinely-drained local
- * collector. Mirrors apple_photos/coverage-diagnostics.test.ts.
+ * collector. Mirrors apple-photos/coverage-diagnostics.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -19,13 +19,13 @@ const PACKAGE_ROOT = join(import.meta.dirname, "..", "..");
 const ENTRYPOINT = join(
 	PACKAGE_ROOT,
 	"connectors",
-	"google_messages",
+	"google-messages",
 	"index.ts",
 );
 const FAKE_GMCLI = join(
 	PACKAGE_ROOT,
 	"connectors",
-	"google_messages",
+	"google-messages",
 	"fixtures",
 	"fake-gmcli.mjs",
 );
@@ -66,7 +66,7 @@ test("coverage_diagnostics reports status=missing when gmcli is not installed", 
 		GMCLI_BIN: join(
 			PACKAGE_ROOT,
 			"connectors",
-			"google_messages",
+			"google-messages",
 			"does-not-exist-gmcli",
 		),
 	});

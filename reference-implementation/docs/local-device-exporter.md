@@ -24,10 +24,10 @@ npx -y @pdpp/local-collector enroll \
 PDPP_LOCAL_DEVICE_ID=<device_id> \
 PDPP_LOCAL_DEVICE_TOKEN=<device_token> \
 PDPP_CONNECTION_ID=<connection_id> \
-  npx -y @pdpp/local-collector run --base-url http://127.0.0.1:7662 --connector claude_code
+  npx -y @pdpp/local-collector run --base-url http://127.0.0.1:7662 --connector claude-code
 ```
 
-Swap `--connector claude_code` for `codex` (or any other in-runtime-profile connector) to run a different lane. Re-running is safe: prior STATE replays into the next `START` envelope and emitted STATE is only persisted after records are durably accepted.
+Swap `--connector claude-code` for `codex` (or any other in-runtime-profile connector) to run a different lane. Re-running is safe: prior STATE replays into the next `START` envelope and emitted STATE is only persisted after records are durably accepted.
 
 ### Legacy lane (no STATE sync)
 

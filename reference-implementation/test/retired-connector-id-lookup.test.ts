@@ -14,7 +14,7 @@ const CLAUDE_CANONICAL_ID = "https://registry.pdpp.dev/connectors/claude-code";
 
 function withTmpDb(fn: () => Promise<void>): () => Promise<void> {
   return async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pdpp-legacy-local-manifest-"));
+    const dir = mkdtempSync(join(tmpdir(), "pdpp-retired-id-lookup-"));
     initDb(join(dir, "pdpp.sqlite"));
     try {
       await fn();
@@ -54,7 +54,7 @@ function validManifest(connectorId: string) {
   };
 }
 
-function insertStaleLegacyManifest(connectorId: string): void {
+function insertStaleManifest(connectorId: string): void {
   getDb()
     .prepare("INSERT INTO connectors(connector_id, manifest, created_at) VALUES (?, ?, ?)")
     .run(
@@ -68,29 +68,55 @@ function insertStaleLegacyManifest(connectorId: string): void {
     );
 }
 
+const RETIRED_TO_CURRENT = [
+  ["apple_photos", "apple-photos"],
+  ["claude_code", "claude-code"],
+  ["google_messages", "google-messages"],
+  ["google_takeout", "google-takeout"],
+] as const;
+
+// The server no longer rewrites a retired underscore id to its manifest key.
+// A one-time data migration renames stored rows (retired-connector-id-migration
+// tests); after it, lookup by the old id finds nothing.
+for (const [retiredId, currentId] of RETIRED_TO_CURRENT) {
+  test(
+    `retired id ${retiredId} no longer resolves a manifest; ${currentId} does`,
+    withTmpDb(async () => {
+      await registerConnector(validManifest(`https://registry.pdpp.dev/connectors/${currentId}`));
+
+      assert.equal(await getConnectorManifest(retiredId), null, `${retiredId} must not read ${currentId}'s manifest`);
+
+      const manifest = await getConnectorManifest(currentId);
+      assert.ok(manifest, `${currentId} manifest exists`);
+      assert.equal(manifest.connector_id, currentId);
+      assert.deepEqual(
+        (manifest.streams ?? []).map((stream) => stream.name),
+        ["messages"]
+      );
+    })
+  );
+}
+
 test(
-  "legacy local connector ids read through canonical manifest schemas",
+  "a stale row stored under a retired id does not borrow the current key's manifest",
   withTmpDb(async () => {
     await registerConnector(validManifest(CLAUDE_CANONICAL_ID));
-    insertStaleLegacyManifest("claude_code");
+    insertStaleManifest("claude_code");
 
-    const manifest = await getConnectorManifest("claude_code");
-
-    assert.ok(manifest, "canonical manifest exists");
-    assert.equal(manifest.connector_id, "claude-code");
-    assert.equal(manifest.display_name, "Claude Code");
-    assert.ok(Array.isArray(manifest.streams), "canonical manifest streams exist");
-    assert.deepEqual(
-      manifest.streams.map((stream) => stream.name),
-      ["messages"]
+    await assert.rejects(
+      () => getConnectorManifest("claude_code"),
+      // biome-ignore lint/performance/useTopLevelRegex: test assertion patterns remain colocated with the assertion they explain.
+      /Connector manifest for claude_code is malformed or no longer valid/
     );
+    const manifest = await getConnectorManifest("claude-code");
+    assert.equal(manifest?.display_name, "Claude Code");
   })
 );
 
 test(
-  "non-aliased malformed connector manifests still fail closed",
+  "malformed connector manifests fail closed",
   withTmpDb(async () => {
-    insertStaleLegacyManifest("unknown_legacy_local");
+    insertStaleManifest("unknown_legacy_local");
 
     await assert.rejects(
       () => getConnectorManifest("unknown_legacy_local"),
@@ -99,28 +125,3 @@ test(
     );
   })
 );
-
-// google_takeout/apple_photos/google_messages previously had NO coverage here
-// (only claude_code was pinned) and their alias entries had silently dropped
-// out of auth.ts's own, independently-hand-maintained alias table — see
-// docs/inbox/report-connector-knowledge-clusters-bc.md. auth.ts now derives
-// its table from connector-key.ts's legacyLocalAliasMap(), and this pins that
-// every legacy alias it declares actually resolves through getConnectorManifest.
-for (const [legacyId, canonicalId] of [
-  ["google_takeout", "google-takeout"],
-  ["apple_photos", "apple-photos"],
-  ["google_messages", "google-messages"],
-] as const) {
-  test(
-    `legacy local connector id ${legacyId} reads through its canonical manifest (${canonicalId})`,
-    withTmpDb(async () => {
-      await registerConnector(validManifest(`https://registry.pdpp.dev/connectors/${canonicalId}`));
-      insertStaleLegacyManifest(legacyId);
-
-      const manifest = await getConnectorManifest(legacyId);
-
-      assert.ok(manifest, `canonical manifest exists for ${legacyId}`);
-      assert.equal(manifest.connector_id, canonicalId);
-    })
-  );
-}

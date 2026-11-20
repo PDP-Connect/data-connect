@@ -1809,7 +1809,7 @@ test("derivePrimaryRowAction keeps Sync now for an owner-syncable connector", ()
 });
 
 test("derivePrimaryRowAction never returns sync for a push-mode local-collector row", () => {
-  const action = derivePrimaryRowAction({ connectorId: "claude_code", hasLocalDeviceProgress: true });
+  const action = derivePrimaryRowAction({ connectorId: "claude-code", hasLocalDeviceProgress: true });
   assert.equal(action.kind, "device_wait");
   assert.notEqual(action.kind, "sync");
   if (action.kind === "device_wait") {

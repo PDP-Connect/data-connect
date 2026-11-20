@@ -21,7 +21,7 @@
  * separate operator-installed prerequisite, documented in the manifest's
  * `runtime_requirements.external_tools` entry and surfaced by the guided
  * setup flow. Default streams include `coverage_diagnostics` (mirroring
- * claude_code/codex/apple_photos's mechanism) so a drained local-collector
+ * claude-code/codex/apple-photos's mechanism) so a drained local-collector
  * run always leaves durable coverage evidence even when gmcli/pairing is
  * unavailable.
  */
@@ -40,8 +40,8 @@ export const GOOGLE_MESSAGES_DEFAULT_STREAMS = [
 export const GOOGLE_MESSAGES_TIME_SCOPABLE_STREAMS = ["messages"] as const;
 
 export const googleMessagesCollectorDefinition: LocalCollectorDefinition = {
-	connector_id: "google_messages",
-	entry: "google_messages",
+	connector_id: "google-messages",
+	entry: "google-messages",
 	bindings: { filesystem: { required: true } },
 	// Declared explicitly (not omitted): this definition targets the
 	// connector-protocol 0.0.2 capability-declaration contract, which

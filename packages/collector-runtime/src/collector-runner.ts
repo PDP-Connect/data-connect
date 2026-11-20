@@ -50,6 +50,7 @@ import {
   hashCanonicalJson,
   type LocalDeviceRecordEnvelope,
 } from "./local-device-envelope.ts";
+import { migrateLegacyConnectorIdSpelling } from "./local-device-legacy-connector-id.ts";
 import {
   buildLocalDeviceOutboxId,
   LocalDeviceOutbox,
@@ -919,6 +920,12 @@ export async function runCollectorConnector(config: CollectorRunConfig): Promise
   // scan's coverage proof with a new child-failure barrier.
   let scanStarted = false;
   try {
+    // Work queued before connector ids were manifest keys carries the old
+    // spelling; the drain sends what is stored, so fix it before anything drains.
+    migrateLegacyConnectorIdSpelling(outbox, {
+      connectorId: config.connector.connector_id,
+      sourceInstanceId: config.sourceInstanceId,
+    });
     const initialSummary = outbox.summary({
       sourceInstanceId: config.sourceInstanceId,
     });

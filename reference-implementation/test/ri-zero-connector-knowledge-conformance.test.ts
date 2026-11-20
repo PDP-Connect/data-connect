@@ -100,6 +100,36 @@ test("falsifiability: the scanner detects a synthetic hardcoded-identity violati
   }
 });
 
+test("falsifiability: the rename-migration exemption covers one file and one rule", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
+  try {
+    const file = join(dir, "synthetic-migration.ts");
+    const source = [
+      'export const OLD_IDS = { gmail: "slack" };',
+      'export const URL_FOR_OLD_IDS_IDS = "https://oauth2.example-provider.com/token";',
+      "",
+    ].join("\n");
+    writeFileSync(file, source);
+    const keys = new Set(["gmail", "slack"]);
+    const elsewhere = scanFile(file, "reference-implementation/server/not-the-rename-migration.ts", keys, repoRoot);
+    assert.ok(
+      elsewhere.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      "an identity literal in any other file must still be flagged"
+    );
+    const exempt = scanFile(file, "reference-implementation/server/connector-id-rename-migration.ts", keys, repoRoot);
+    assert.ok(
+      !exempt.some((v) => v.rule === "hardcoded-connector-identity-literal"),
+      "the rename migration is exempt from the identity-literal rule"
+    );
+    assert.ok(
+      exempt.some((v) => v.rule === "hardcoded-provider-endpoint-url"),
+      "the exemption must not silence any other rule in that file"
+    );
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("falsifiability: the scanner detects a synthetic provider-endpoint violation", () => {
   const dir = mkdtempSync(join(tmpdir(), "ri-zero-knowledge-falsifiability-"));
   try {
