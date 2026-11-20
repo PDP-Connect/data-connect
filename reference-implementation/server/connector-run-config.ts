@@ -23,12 +23,9 @@
  * but "an unconfirmed collection boundary silently widened what a run
  * collected."
  *
- * Fail-closed, concretely: any error reading the store yields `null`, i.e. NO
- * connector options, i.e. the connector falls back to its own manifest
- * defaults via `readOptions`. It never yields a partially-read or
- * last-known-good config. A store that cannot be read has not proven the owner
- * confirmed anything, and "cannot prove" must collapse to "did not confirm" --
- * never to "assume the previous answer still holds."
+ * Fail-closed: invalid or unavailable authority rejects the resolver. Only a
+ * successful lookup with no active revision selects manifest defaults. Neither
+ * a lookup failure nor an invalid active configuration proves absence.
  *
  * Delivery: the resolved config becomes `START.connector_options`, the field
  * `packages/polyfill-connectors/src/connector-options.ts` has always read
@@ -50,7 +47,7 @@ export interface ResolveRunConnectorOptionsInput {
   readonly connectorInstanceId: string | null | undefined;
   /**
    * Reported when a revision is refused or a read fails, so an operator can
-   * see WHY a run collected against defaults instead of guessing. Never
+   * see WHY a run was blocked or collected against defaults instead of guessing. Never
    * receives config values -- only the decision and its reason.
    */
   readonly onDecision?: (decision: RunConfigDecision) => void;
@@ -67,8 +64,24 @@ export interface RunConfigDecision {
   readonly revision?: number;
 }
 
+export type RunConfigBlockedReason = "missing_instance_identity" | "store_unreadable" | "invalid_active_config";
+
+export class RunConfigBlockedError extends Error {
+  readonly code = "connector_run_config_blocked";
+
+  readonly reason: RunConfigBlockedReason;
+
+  constructor(reason: RunConfigBlockedReason) {
+    super("Connector run configuration could not be confirmed.");
+    this.name = "RunConfigBlockedError";
+    this.reason = reason;
+  }
+}
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  if (typeof value !== "object" || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 /**
@@ -85,20 +98,17 @@ export async function resolveRunConnectorOptions(
 ): Promise<Record<string, unknown> | null> {
   const { connectorInstanceId, onDecision } = input;
   if (typeof connectorInstanceId !== "string" || connectorInstanceId.trim().length === 0) {
-    return null;
+    throw new RunConfigBlockedError("missing_instance_identity");
   }
-  const store = input.store ?? getDefaultConnectorInstanceConfigStore();
   let active: ConfigRevision | null;
   try {
+    const store = input.store ?? getDefaultConnectorInstanceConfigStore();
     active = await store.getActiveRevision(connectorInstanceId);
   } catch {
-    // Fail closed. An unreadable store proves nothing about owner
-    // confirmation, so the run gets manifest defaults rather than a
-    // stale or partially-read boundary.
     onDecision?.({ connectorInstanceId, reason: "store_unreadable" });
-    return null;
+    throw new RunConfigBlockedError("store_unreadable");
   }
-  if (!active) {
+  if (active === null) {
     // Covers both "never configured" and "the only revision is still
     // proposed" -- getActiveRevision returns null for any non-active status.
     onDecision?.({ connectorInstanceId, reason: "no_active_revision" });
@@ -108,7 +118,7 @@ export async function resolveRunConnectorOptions(
     // A revision whose persisted config is not an object cannot be handed to
     // readOptions. Refuse it rather than coercing it into something shaped.
     onDecision?.({ connectorInstanceId, reason: "store_unreadable" });
-    return null;
+    throw new RunConfigBlockedError("invalid_active_config");
   }
   onDecision?.({
     connectorInstanceId,

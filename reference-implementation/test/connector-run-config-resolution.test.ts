@@ -215,32 +215,50 @@ test(
   })
 );
 
-test("a missing connector instance id resolves to null without touching the store", async () => {
+test("a missing connector instance id blocks the run without touching the store", async () => {
   let touched = false;
-  const resolved = await resolveRunConnectorOptions({
-    connectorInstanceId: null,
-    store: {
-      getActiveRevision: () => {
-        touched = true;
-        return Promise.resolve(null);
+  await assert.rejects(
+    resolveRunConnectorOptions({
+      connectorInstanceId: null,
+      store: {
+        getActiveRevision: () => {
+          touched = true;
+          return Promise.resolve(null);
+        },
       },
-    },
-  });
-  assert.equal(resolved, null);
+    }),
+    { code: "connector_run_config_blocked", reason: "missing_instance_identity" }
+  );
   assert.equal(touched, false, "no instance id means there is nothing to look up");
 });
 
-test("an unreadable store FAILS CLOSED to null rather than to a last-known-good config", async () => {
+test("an unreadable store BLOCKS the run rather than substituting manifest defaults", async () => {
   const decisions: RunConfigDecision[] = [];
-  const resolved = await resolveRunConnectorOptions({
-    connectorInstanceId: "cin_slack_1",
-    onDecision: (decision) => decisions.push(decision),
-    store: {
-      getActiveRevision: () => Promise.reject(new Error("database is locked")),
-    },
-  });
-  assert.equal(resolved, null, "a store that cannot be read has not proven the owner confirmed anything");
+  await assert.rejects(
+    resolveRunConnectorOptions({
+      connectorInstanceId: "cin_slack_1",
+      onDecision: (decision) => decisions.push(decision),
+      store: {
+        getActiveRevision: () => Promise.reject(new Error("database is locked")),
+      },
+    }),
+    { code: "connector_run_config_blocked", reason: "store_unreadable" }
+  );
+  // Manifest defaults can be WIDER than the boundary the owner confirmed, so a
+  // store that cannot be read has not proven the defaults are safe to run.
   assert.deepEqual(decisions, [{ connectorInstanceId: "cin_slack_1", reason: "store_unreadable" }]);
+});
+
+test("a malformed active config BLOCKS the run rather than substituting manifest defaults", async () => {
+  await assert.rejects(
+    resolveRunConnectorOptions({
+      connectorInstanceId: "cin_slack_1",
+      store: {
+        getActiveRevision: () => Promise.resolve({ config: ["not-an-object"] } as never),
+      },
+    }),
+    { code: "connector_run_config_blocked", reason: "invalid_active_config" }
+  );
 });
 
 test("a confirmed EMPTY config is distinguishable from having no configuration at all", async () => {
