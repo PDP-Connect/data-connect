@@ -28,6 +28,8 @@
  */
 
 const TRANSIENT_LOCK_CODES = new Set(["SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_BUSY_SNAPSHOT"]);
+const DEFAULT_MAX_ATTEMPTS = 5;
+const MAX_ATTEMPTS = 10;
 
 interface SqliteError {
   code?: string;
@@ -42,13 +44,21 @@ interface RetryOptions {
   sleepSync?: (milliseconds: number) => void;
 }
 
+function resolveMaxAttempts(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_ATTEMPTS;
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_ATTEMPTS) {
+    throw new RangeError(`maxAttempts must be a safe integer from 1 to ${MAX_ATTEMPTS}`);
+  }
+  return value;
+}
+
 export function isTransientSqliteLockError(err: unknown): boolean {
   if (!err) {
     return false;
   }
   const sqliteError = typeof err === "object" ? (err as SqliteError) : null;
-  if (sqliteError?.code && TRANSIENT_LOCK_CODES.has(sqliteError.code)) {
-    return true;
+  if (sqliteError && "code" in sqliteError) {
+    return typeof sqliteError.code === "string" && TRANSIENT_LOCK_CODES.has(sqliteError.code);
   }
   const message = typeof sqliteError?.message === "string" ? sqliteError.message : "";
   return message.includes("database is locked") || message.includes("database table is locked");
@@ -73,8 +83,7 @@ export function isTransientSqliteLockError(err: unknown): boolean {
  * ~5s of boot delay before we surface the original error.
  */
 export function runWithSqliteBusyRetrySync<T>(fn: () => T, opts: RetryOptions = {}): T {
-  const maxAttempts =
-    typeof opts.maxAttempts === "number" && Number.isFinite(opts.maxAttempts) ? Math.max(1, opts.maxAttempts) : 5;
+  const maxAttempts = resolveMaxAttempts(opts.maxAttempts);
   const initialDelayMs =
     typeof opts.initialDelayMs === "number" && Number.isFinite(opts.initialDelayMs)
       ? Math.max(0, opts.initialDelayMs)
@@ -120,8 +129,7 @@ export function runWithSqliteBusyRetrySync<T>(fn: () => T, opts: RetryOptions = 
 }
 
 export async function runWithSqliteBusyRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}): Promise<T> {
-  const maxAttempts =
-    typeof opts.maxAttempts === "number" && Number.isFinite(opts.maxAttempts) ? Math.max(1, opts.maxAttempts) : 5;
+  const maxAttempts = resolveMaxAttempts(opts.maxAttempts);
   const initialDelayMs =
     typeof opts.initialDelayMs === "number" && Number.isFinite(opts.initialDelayMs)
       ? Math.max(0, opts.initialDelayMs)
