@@ -140,3 +140,55 @@ test("canonicalTerminalRunCommitEnvelope has a stable cross-runtime golden hash 
   );
   assert.equal(hashCanonicalJson(canonical), "147b0baeb81e66a5dfb3f0862596d50aeb87fe8a6723306740e9446dddb72648");
 });
+
+const envelopeFixture = {
+  batchId: "fixture-batch",
+  batchSeq: 1,
+  connectorId: "fixture-connector",
+  deviceId: "fixture-device",
+  record: {
+    data: { id: "fixture-record" },
+    emitted_at: "2026-04-30T12:00:00.000Z",
+    key: "fixture-record",
+    stream: "fixture-stream",
+    type: "RECORD" as const,
+  },
+};
+const fixtureSource = "fixture-source";
+
+test("local-device builders require a nonblank source instance identity", () => {
+  const envelope = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
+  const batchFixture = { ...envelopeFixture, records: [envelope] };
+  for (const candidate of [{}, { sourceInstanceId: "" }, { sourceInstanceId: " \t " }, { sourceInstanceId: 42 }]) {
+    assert.throws(
+      () =>
+        buildLocalDeviceRecordEnvelope({ ...envelopeFixture, ...candidate } as Parameters<
+          typeof buildLocalDeviceRecordEnvelope
+        >[0]),
+      /sourceInstanceId must be a non-blank string/
+    );
+    assert.throws(
+      () =>
+        buildLocalDeviceIngestBatchRequest({ ...batchFixture, ...candidate } as Parameters<
+          typeof buildLocalDeviceIngestBatchRequest
+        >[0]),
+      /sourceInstanceId must be a non-blank string/
+    );
+  }
+});
+
+test("local-device batch identity agrees with every envelope", () => {
+  const first = buildLocalDeviceRecordEnvelope({ ...envelopeFixture, sourceInstanceId: fixtureSource });
+  const batch = { ...envelopeFixture, records: [first], sourceInstanceId: fixtureSource };
+  const valid = buildLocalDeviceIngestBatchRequest(batch);
+  assert.equal(valid.source_instance_id, fixtureSource);
+  assert.equal(valid.body_hash, hashCanonicalJson([first]));
+  assert.throws(
+    () =>
+      buildLocalDeviceIngestBatchRequest({
+        ...batch,
+        records: [first, { ...first, source_instance_id: "fixture-other-source" }],
+      }),
+    /batch sourceInstanceId must match every record envelope/
+  );
+});
