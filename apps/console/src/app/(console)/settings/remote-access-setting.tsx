@@ -927,7 +927,7 @@ export function RemoteAccessSetting({
   // A route turned off and replaced is history: the newest one is the card.
   // One the owner turned off shows its Off card once, right after the stop, and
   // a reload shows the start card. A route that ended with no owner stop stays.
-  const visibleRoutes = listedRoutes(state.routes, [...acknowledged]);
+  const visibleRoutes = listedRoutes(state.routes, [...acknowledged], (route) => headlineOf(route) !== "Off");
   const onOrigin =
     visibleRoutes.find(
       (route) => route.origin !== null && headlineOf(route) === "On" && route.cleanup.state !== "confirmed"

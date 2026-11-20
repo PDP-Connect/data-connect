@@ -65,7 +65,7 @@ export function routeSentence(route: RouteDisplayInput, headline: string, option
   return null;
 }
 
-type ListedRoute = { state: string; cleanup: { state: string }; stopRequested?: boolean; handle: { id: string } };
+type ListedRoute = { state: string; cleanup: { state: string }; stopRequested?: boolean; handle: { id: string; kind?: string } };
 
 /**
  * The routes the card lists. A route that is off and cleaned up is history once
@@ -73,17 +73,21 @@ type ListedRoute = { state: string; cleanup: { state: string }; stopRequested?: 
  * the stop (`stopsSeen`, oldest first), and of those only the latest stop shows,
  * so turning on and off again does not add another Off entry each time.
  */
-export function listedRoutes<R extends ListedRoute>(routes: readonly R[], stopsSeen: readonly string[]): R[] {
-  const settledOff = (route: R) => route.state === "released" && route.cleanup.state === "confirmed";
+export function listedRoutes<R extends ListedRoute>(routes: readonly R[], stopsSeen: readonly string[], needsAttention: (route: R) => boolean = () => false): R[] {
+  const settledOff = (route: R) => route.state === "released" && route.cleanup.state === "confirmed" && !needsAttention(route);
   const listed = routes.filter(
     (route) =>
       !(settledOff(route) && routes.some((other) => other !== route && !settledOff(other))) &&
       !(settledOff(route) && route.stopRequested === true && !stopsSeen.includes(route.handle.id))
   );
   const latestStop = [...stopsSeen].reverse().find((id) => listed.some((route) => route.handle.id === id && settledOff(route) && route.stopRequested === true));
+  const latestSession =
+    listed.find((route) => route.handle.id === latestStop && settledOff(route) && route.handle.kind === "session") ??
+    [...listed].reverse().find((route) => settledOff(route) && route.handle.kind === "session" && route.stopRequested !== true);
+  const visible = listed.filter((route) => !settledOff(route) || route.handle.kind !== "session" || route === latestSession);
   return latestStop === undefined
-    ? listed
-    : listed.filter((route) => !(settledOff(route) && route.stopRequested === true) || route.handle.id === latestStop);
+    ? visible
+    : visible.filter((route) => !(settledOff(route) && route.stopRequested === true) || route.handle.id === latestStop);
 }
 
 /** The route's end time in ms, only when the server reports one. */
