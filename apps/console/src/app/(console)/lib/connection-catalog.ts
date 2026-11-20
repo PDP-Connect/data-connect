@@ -26,12 +26,12 @@ import {
   classifyConnectorIntentModality,
   connectorKeyFromManifest,
   enrollmentKeyForCanonicalKey,
-  isKnownScaffoldConnector,
   manualUploadSetupFromManifest,
   type StaticSecretSetupFieldLike,
   staticSecretCredentialCaptureFromManifest,
 } from "pdpp-reference-implementation/connection-setup-plan";
 import type { ConnectorInstallCatalogEntry } from "./connector-install-contract.ts";
+import { type ConnectorReadiness, parseConnectorReadiness } from "./connector-readiness-contract.ts";
 
 /**
  * Minimal manifest shape the catalog reads. The real `ConnectorManifest`
@@ -176,12 +176,12 @@ export interface OwnerConnectorTemplateLike {
     svg?: string | null;
   } | null;
   /**
-   * Server-owned fact, meaningful only for Development-tier entries: true when
-   * the connector-conformance roster names this connector a KNOWN scaffold
-   * (unconditional `SKIP_RESULT`, no real collection). A scaffold must never
-   * render an add action, even inside a Development disclosure.
+   * Server-owned browser-setup verdict (`connector-readiness.ts`): whether the
+   * owner can connect now, or the specific reason not. Null or absent for a
+   * template that is not browser-bound. Parsed at the catalog boundary; never
+   * derived from the key, the tier or a roster.
    */
-  is_known_scaffold?: boolean | null;
+  connector_readiness?: unknown;
   public_listing?: {
     /** Owner-facing reason this connector is not offered as a runnable card yet, when declared. */
     proof_gate?: string | null;
@@ -293,12 +293,12 @@ export interface ConnectorCatalogEntry {
   /** Optional manifest-declared brand glyph; absent renders the Monogram fallback (see ConnectorIcon). */
   icon?: OwnerConnectorTemplateLike["icon"];
   /**
-   * Meaningful only for Development-tier entries: true when the connector is
-   * a KNOWN scaffold (unconditional `SKIP_RESULT`, no real collection) rather
-   * than real-but-unproven. Drives whether a Development disclosure card may
-   * ever render an add action for this entry.
+   * The server's browser-setup verdict for this connector, or null when the
+   * server gave none (not browser-bound, or the entry was built without the
+   * server's templates). Null permits no setup action beyond what the planner's
+   * disposition already grants.
    */
-  isKnownScaffold: boolean;
+  readiness: ConnectorReadiness | null;
   /**
    * Manifest-authored explanation for the current lifecycle tier
    * (`public_listing.rationale` or `public_listing.proof_gate`, in that
@@ -442,12 +442,12 @@ export function buildConnectorCatalog(
       disposition: plan.catalogDisposition,
       externalDocs: externalDocsFromManifest(manifest),
       icon: manifest.icon ?? null,
-      isKnownScaffold: isKnownScaffoldConnector(connectorKey),
       listingNote: listingNoteFromPublicListing(manifest.capabilities?.public_listing),
       modality: plan.connectorModality,
       nextStepKind: plan.nextStepKind,
       proofGate: plan.proofGate,
       publicTier: manifest.capabilities?.public_listing?.tier ?? "development",
+      readiness: null,
       refreshPolicyRationale: cleanManifestText(manifest.capabilities?.refresh_policy?.rationale),
       runbookPath: plan.runbookPath,
       setupDescription: setupCopy.description,
@@ -658,10 +658,6 @@ export function buildOwnerConnectorCatalog(
       disposition,
       externalDocs: externalDocsFromManifest(manifestForCopy),
       icon: template.icon ?? localManifest?.icon ?? null,
-      isKnownScaffold:
-        typeof template.is_known_scaffold === "boolean"
-          ? template.is_known_scaffold
-          : isKnownScaffoldConnector(connectorKey),
       listingNote: listingNoteFromPublicListing(template.public_listing),
       modality: connectorModality,
       nextStepKind,
@@ -670,6 +666,7 @@ export function buildOwnerConnectorCatalog(
       ownerActionUrl: capability.url,
       proofGate,
       publicTier: template.public_listing?.tier ?? "development",
+      readiness: parseConnectorReadiness(template.connector_readiness),
       refreshPolicyRationale: cleanManifestText(localManifest?.capabilities?.refresh_policy?.rationale),
       registrationStatus: template.registration_status,
       runbookPath: cleanManifestText(setupPlan.runbook_path),
