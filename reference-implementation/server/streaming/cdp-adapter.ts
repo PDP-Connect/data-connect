@@ -1,17 +1,18 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
-// biome-ignore-all lint/correctness/noUnresolvedImports: remote-surface 1.5.1 is installed in the reference implementation workspace; the repository-root checker does not resolve that local package.
+// biome-ignore-all lint/correctness/noUnresolvedImports: remote-surface is installed in the reference implementation workspace; the repository-root checker does not resolve that local package.
 import {
   type CdpBackendLifecycle,
   type CdpCommandParams,
   type CdpCommandTransport,
   createCdpServerBackend,
 } from "@opendatalabs/remote-surface/backends/cdp";
-import type {
-  RemoteSurfaceClipboardPayload,
-  RemoteSurfaceInputPayload,
-  RemoteSurfaceViewportPayload,
+import {
+  parseRemoteSurfaceInputPayload,
+  type RemoteSurfaceClipboardPayload,
+  type RemoteSurfaceInputPayload,
+  type RemoteSurfaceViewportPayload,
 } from "@opendatalabs/remote-surface/protocol";
 /**
  * Real CDP companion adapter.
@@ -29,7 +30,7 @@ import type {
  * entry points (`PDPP_RUN_INTERACTION_CDP_WS_URL`,
  * `PDPP_RUN_INTERACTION_CDP_HTTP_URL`) remain removed.
  *
- * Surface mechanics are delegated to Remote Surface 1.5.1's assembled CDP
+ * Surface mechanics are delegated to Remote Surface's assembled CDP
  * backend. The small adapter below only translates that backend's lifecycle
  * messages to the existing PDPP companion wire and preserves the target
  * router's URL/popup events.
@@ -340,8 +341,8 @@ function hostPageTargetResolver(cdpHttpUrl: string, resolveExactTarget: ResolveT
  * DOM event the way real touchscreen hardware does through the compositor's
  * gesture recognizer — verified live against a Reddit reCAPTCHA checkbox: a
  * touch tap at the checkbox's exact coordinates left it unchecked, while a
- * mouse click at the same coordinates advanced the challenge. remote-surface
- * 1.5.2's neko backend already works around this for its own transport
+ * mouse click at the same coordinates advanced the challenge. remote-surface's
+ * neko backend already works around this for its own transport
  * (`NekoPointerController`, "canonical tap-to-click pattern": buttonDown +
  * buttonUp instead of native touch), but `dispatchCdpPointerInput` in
  * `@opendatalabs/remote-surface/backends/cdp` still branches on
@@ -1330,10 +1331,21 @@ export function createCdpCompanion({
     });
   }
 
-  async function start(viewport?: Viewport): Promise<void> {
+  // Concurrent callers share one in-flight start: a second one must not build
+  // another backend and orphan the first lifecycle (screencast, subscription).
+  let starting: Promise<void> | null = null;
+
+  function start(viewport?: Viewport): Promise<void> {
     if (started) {
-      return;
+      return Promise.resolve();
     }
+    starting ??= startBackend(viewport).finally(() => {
+      starting = null;
+    });
+    return starting;
+  }
+
+  async function startBackend(viewport?: Viewport): Promise<void> {
     await ensureOpen();
     await setTargetDiscovery(true, "cdp_target_discovery_failed");
     serverBackend = createServerBackend(viewport);
@@ -1427,9 +1439,22 @@ export function createCdpCompanion({
         if (!backendLifecycle) {
           throw codedError("Streaming companion is not started", "companion_not_started");
         }
+        // The reference schema above bounds lengths and coordinates; the
+        // library's own parser then proves the event is a well-formed
+        // RemoteSurfaceInputPayload before its CDP backend sees it.
+        try {
+          parseRemoteSurfaceInputPayload(event);
+        } catch {
+          throw codedError("Input event is malformed or exceeds supported limits", "invalid_input");
+        }
         const normalized = event.type === "pointer" ? normalizeTouchPointerInputForCdp(event) : event;
         await backendLifecycle.input(normalized as unknown as RemoteSurfaceInputPayload);
         return;
+      }
+      // A remote-copy request is the neko viewer's. A CDP session reads the
+      // selection through readRemoteSelection(); this channel cannot return it.
+      if (event.type === "copy") {
+        throw codedError("Remote copy is not supported on this streaming backend", "clipboard_unsupported");
       }
       if (event.type === "clipboard" && event.action === "local_to_remote") {
         if (!backendLifecycle) {

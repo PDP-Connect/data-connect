@@ -258,7 +258,7 @@ async function startAndDrainNoViewport(peer: FakeSocketPeer): Promise<void> {
   await answerInOrder(peer, "Runtime.evaluate");
 }
 
-test("cdp adapter delegates viewport, frames, and focus setup to Remote Surface 1.5.1", async () => {
+test("cdp adapter delegates viewport, frames, and focus setup to Remote Surface", async () => {
   const { FakeSocket, sockets } = makeFakeSocketCtor();
   const companion = createCdpCompanion({
     browser_session_id: "bs_test_1",
@@ -304,6 +304,41 @@ test("cdp adapter delegates viewport, frames, and focus setup to Remote Surface 
   assert.equal(screencast.params.maxHeight, 600);
 
   await stopAndDrain(companion, sock.peer);
+});
+
+test("cdp adapter start() called concurrently builds one backend", async () => {
+  const { FakeSocket, sockets } = makeFakeSocketCtor();
+  const companion = createCdpCompanion({
+    browser_session_id: "bs_concurrent_start",
+    commandTimeoutMs: 100,
+    WebSocketCtor: FakeSocket,
+    wsUrl: "ws://fake/page-concurrent-start",
+  });
+  const viewport = { deviceScaleFactor: 2, height: 600, width: 800 };
+  const first = companion.start(viewport);
+  const second = companion.start(viewport);
+  // A second backend would leave its own commands unanswered and time out.
+  second.catch(() => undefined);
+  await flush();
+  const sock = findSocket(sockets, "ws://fake/page-concurrent-start");
+  assert.ok(sock, "adapter opened a socket");
+  await startAndDrainViewport(sock.peer);
+  await first;
+  await second;
+  for (const method of ["Target.setDiscoverTargets", "Page.startScreencast"]) {
+    assert.equal(sock.peer.messages.filter((m) => m.method === method).length, 1, `${method} sent once`);
+  }
+  await stopAndDrain(companion, sock.peer);
+});
+
+test("cdp adapter rejects a remote-copy request as unsupported", async () => {
+  const { FakeSocket } = makeFakeSocketCtor();
+  const companion = createCdpCompanion({
+    browser_session_id: "bs_copy",
+    WebSocketCtor: FakeSocket,
+    wsUrl: "ws://fake/page-copy",
+  });
+  await assert.rejects(companion.dispatch({ type: "copy" }), { code: "clipboard_unsupported" });
 });
 
 test("cdp adapter forwards server-side editable focus events through the existing event wire", async () => {

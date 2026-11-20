@@ -17,18 +17,22 @@
  *     metadata: { device_width, device_height, offset_top, page_scale_factor,
  *                 timestamp, scroll_offset_x, scroll_offset_y } }
  *
- * Wire shape — input (viewer → server, JSON):
+ * Wire shape — input (viewer → server, JSON). `mapInputEventToCdp` below maps
+ * only the events listed here to raw CDP commands:
  *
  *   { type: 'mouse',     action: 'mousemove'|'click'|'mousedown'|'mouseup'|'dblclick',
  *     x: number, y: number, button?: 0|1|2 }
- *   { type: 'keyboard',  action: 'keydown'|'keyup',
- *     key: string, code?: string, modifiers?: number }
  *   { type: 'touch',     action: 'touchstart'|'touchmove'|'touchend',
  *     x: number, y: number, id?: number }
  *   { type: 'scroll',    x: number, y: number, deltaX: number, deltaY: number }
  *   { type: 'paste',     text: string }
  *   { type: 'viewport',  width: number, height: number, deviceScaleFactor?: number,
  *     mobile?: boolean }
+ *
+ * The Remote Surface input events (`pointer`, `keyboard`, `text`) are not
+ * mapped here: a real CDP session hands them to the assembled Remote Surface
+ * backend (see `cdp-adapter.ts`), and their closed shape is the schema in
+ * `protocol-wire.ts`. The mock companion below therefore does not accept them.
  *
  * Patterns ported and trimmed from `remote-browser-sandbox/server/src/input.ts`
  * and `remote-browser-service/sprite-server/src/{streamer,input-handler}.ts`.
@@ -54,23 +58,6 @@ const TOUCH_TYPE_MAP: Record<string, string> = {
   touchend: "touchEnd",
   touchmove: "touchMove",
   touchstart: "touchStart",
-};
-
-// Browser-event vk codes we use for keys whose `key` is a name (Backspace, etc.)
-const VIRTUAL_KEY_CODES: Record<string, number> = {
-  ArrowDown: 40,
-  ArrowLeft: 37,
-  ArrowRight: 39,
-  ArrowUp: 38,
-  Backspace: 8,
-  Delete: 46,
-  End: 35,
-  Enter: 13,
-  Escape: 27,
-  Home: 36,
-  PageDown: 34,
-  PageUp: 33,
-  Tab: 9,
 };
 
 // biome-ignore lint/suspicious/noExplicitAny: This external runtime boundary has no stable static type.
@@ -128,42 +115,6 @@ function mapMouseEventToCdp(event: WireInput): CdpCommand[] {
   return buildCommands({ button, x, y });
 }
 
-/**
- * Map a `keyboard` wire event to a CDP key command. Callers pass the already
- * shape-validated event; this focuses purely on the action dispatch.
- */
-function virtualKeyCodeParams(vk: number | undefined) {
-  return vk ? { nativeVirtualKeyCode: vk, windowsVirtualKeyCode: vk } : {};
-}
-
-function keyboardType(action: unknown, isPrintable: boolean): string {
-  if (action === "keydown") {
-    return isPrintable ? "keyDown" : "rawKeyDown";
-  }
-  if (action === "keyup") {
-    return "keyUp";
-  }
-  throw invalidInput(`unknown keyboard action: ${action}`);
-}
-
-function mapKeyboardEventToCdp(event: WireInput): CdpCommand[] {
-  if (typeof event.key !== "string" || event.key.length === 0) {
-    throw invalidInput("keyboard.key is required");
-  }
-  const vk = VIRTUAL_KEY_CODES[event.key];
-  const modifiers = Number.isFinite(event.modifiers) ? Number(event.modifiers) : 0;
-  const code = typeof event.code === "string" ? event.code : undefined;
-  const isPrintable = event.key.length === 1;
-  const type = keyboardType(event.action, isPrintable);
-  const text = type === "keyDown" ? { text: event.key } : {};
-  return [
-    {
-      method: "Input.dispatchKeyEvent",
-      params: { code, key: event.key, modifiers, type, ...text, ...virtualKeyCodeParams(vk) },
-    },
-  ];
-}
-
 function mapTouchEventToCdp(event: WireInput): CdpCommand[] {
   const x = ensureNumber(event.x, "x");
   const y = ensureNumber(event.y, "y");
@@ -204,7 +155,6 @@ function mapViewportEventToCdp(event: WireInput): CdpCommand[] {
 }
 
 const INPUT_EVENT_MAPPERS: Record<string, (event: WireInput) => CdpCommand[]> = {
-  keyboard: mapKeyboardEventToCdp,
   mouse: mapMouseEventToCdp,
   paste: mapPasteEventToCdp,
   scroll: mapScrollEventToCdp,

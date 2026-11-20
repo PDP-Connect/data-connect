@@ -21,13 +21,25 @@ const MAX_INPUT_TEXT_LENGTH = 16_384;
 const MAX_INPUT_COORDINATE = 32_768;
 const MAX_INPUT_STRING_LENGTH = 512;
 const MAX_WIRE_SEQ = Number.MAX_SAFE_INTEGER;
+const MAX_DEVICE_SCALE_FACTOR = 8;
+// X11 keysyms are 29-bit values (Unicode keysyms are 0x01000000 + code point).
+const MAX_KEYSYM = 0x1f_ff_ff_ff;
 
-type FieldKind = "string" | "number" | "boolean";
+// "string-list" is a bounded array of enum strings; it is the only non-scalar
+// kind, and its items are checked like a "string" field with `enum`.
+type FieldKind = "string" | "number" | "boolean" | "string-list";
 
 interface FieldSpec {
   readonly kind: FieldKind;
   readonly enum?: ReadonlySet<string>;
+  // A "number" field is an integer unless it is declared `float`: only
+  // measurements (coordinates, deltas, pressure, tilt, contact size, the
+  // timestamp and the scale factor) may be fractional. A fractional value in
+  // an integer field (a button index, a keysym, a pointer id) is malformed,
+  // and the CDP layer would otherwise coerce it to some other value.
+  readonly float?: boolean;
   readonly max?: number;
+  readonly maxItems?: number;
   readonly maxLength?: number;
   readonly min?: number;
 }
@@ -35,6 +47,8 @@ interface FieldSpec {
 interface TypeSpec {
   // Fields every event of this type must include.
   readonly required: ReadonlySet<string>;
+  // At least one of these fields must be present.
+  readonly requiredAnyOf?: readonly string[];
   // Validator for each allowed field (required or optional). A key absent
   // from this map is not an allowed field.
   readonly fields: Readonly<Record<string, FieldSpec>>;
@@ -48,8 +62,21 @@ const COMMON_FIELDS: Readonly<Record<string, FieldSpec>> = {
   wireSeq: { kind: "number", max: MAX_WIRE_SEQ, min: 0 },
 };
 
-const COORDINATE: FieldSpec = { kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
-const DELTA: FieldSpec = { kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
+const COORDINATE: FieldSpec = { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
+const DELTA: FieldSpec = { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: -MAX_INPUT_COORDINATE };
+
+// The pointer, keyboard, and text shapes below are the Remote Surface input
+// protocol (`RemoteSurfaceInputPayload`) that the console viewer sends
+// unchanged; cdp-adapter.ts also checks them with that library's own parser.
+// Modifiers are a list of key names, not a CDP bitmask: the library's CDP
+// backend builds the mask itself.
+const MODIFIERS: FieldSpec = {
+  enum: new Set(["Alt", "Control", "Meta", "Shift"]),
+  kind: "string-list",
+  maxItems: 4,
+};
+// A DOMHighResTimeStamp is a legal source, so the timestamp may be fractional.
+const TIMESTAMP: FieldSpec = { float: true, kind: "number", max: MAX_WIRE_SEQ, min: 0 };
 
 // Closed, type-specific schemas. Each event type dispatched to a CDP command
 // (directly or via the Remote Surface backend) is validated against its own
@@ -64,17 +91,27 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
     },
     required: new Set(["action"]),
   },
+  // The neko viewer's remote-copy fallback posts a bare `{ type: "copy" }`.
+  copy: {
+    fields: { ...COMMON_FIELDS },
+    required: new Set(),
+  },
   keyboard: {
     fields: {
       ...COMMON_FIELDS,
-      action: { enum: new Set(["keydown", "keyup"]), kind: "string" },
+      action: { enum: new Set(["keydown", "keypress", "keyup"]), kind: "string" },
       code: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
       key: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
+      // The soft-keyboard bridge sends special keys (Backspace, Enter) as X11
+      // keysyms with no `key`.
+      keysym: { kind: "number", max: MAX_KEYSYM, min: 0 },
       location: { kind: "number", max: 3, min: 0 },
-      modifiers: { kind: "number", max: 0b1111, min: 0 },
+      modifiers: MODIFIERS,
       repeat: { kind: "boolean" },
+      timestamp: TIMESTAMP,
     },
-    required: new Set(["action", "key"]),
+    required: new Set(["action"]),
+    requiredAnyOf: ["key", "code", "keysym"],
   },
   mouse: {
     fields: {
@@ -103,14 +140,16 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
       deltaX: DELTA,
       deltaY: DELTA,
       gestureBoundary: { kind: "boolean" },
-      height: { kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
+      height: { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
+      modifiers: MODIFIERS,
       pointerId: { kind: "number", max: MAX_WIRE_SEQ, min: 0 },
       pointerType: { enum: new Set(["mouse", "pen", "touch"]), kind: "string" },
-      pressure: { kind: "number", max: 1, min: 0 },
+      pressure: { float: true, kind: "number", max: 1, min: 0 },
       source: { kind: "string", maxLength: MAX_INPUT_STRING_LENGTH },
-      tiltX: { kind: "number", max: 90, min: -90 },
-      tiltY: { kind: "number", max: 90, min: -90 },
-      width: { kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
+      tiltX: { float: true, kind: "number", max: 90, min: -90 },
+      tiltY: { float: true, kind: "number", max: 90, min: -90 },
+      timestamp: TIMESTAMP,
+      width: { float: true, kind: "number", max: MAX_INPUT_COORDINATE, min: 0 },
       x: COORDINATE,
       y: COORDINATE,
     },
@@ -130,7 +169,9 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
     fields: {
       ...COMMON_FIELDS,
       action: { enum: new Set(["commit", "start", "update"]), kind: "string" },
+      composition: { enum: new Set(["cancel", "commit", "start", "update"]), kind: "string" },
       text: { kind: "string", maxLength: MAX_INPUT_TEXT_LENGTH },
+      timestamp: TIMESTAMP,
     },
     required: new Set(["text"]),
   },
@@ -147,7 +188,7 @@ const TYPE_SPECS: Record<string, TypeSpec> = {
   viewport: {
     fields: {
       ...COMMON_FIELDS,
-      deviceScaleFactor: { kind: "number", max: 8, min: 0 },
+      deviceScaleFactor: { float: true, kind: "number", max: MAX_DEVICE_SCALE_FACTOR, min: 0 },
       hasTouch: { kind: "boolean" },
       height: { kind: "number", max: MAX_INPUT_COORDINATE, min: 1 },
       mobile: { kind: "boolean" },
@@ -166,7 +207,21 @@ function invalidInput(): Error & { code: string } {
   return error;
 }
 
-function validateField(key: string, value: unknown, spec: FieldSpec): void {
+function validateField(value: unknown, spec: FieldSpec): void {
+  if (spec.kind === "string-list") {
+    if (!Array.isArray(value) || value.length > (spec.maxItems ?? 0)) {
+      throw invalidInput();
+    }
+    for (const item of value) {
+      validateField(item, { kind: "string", ...(spec.enum ? { enum: spec.enum } : {}) });
+    }
+    // A repeated name is rejected: the CDP backend adds modifier bits instead
+    // of OR-ing them, so ["Control","Control"] would dispatch Meta (4).
+    if (new Set(value).size !== value.length) {
+      throw invalidInput();
+    }
+    return;
+  }
   if (spec.kind === "boolean") {
     if (typeof value !== "boolean") {
       throw invalidInput();
@@ -189,13 +244,15 @@ function validateField(key: string, value: unknown, spec: FieldSpec): void {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw invalidInput();
   }
+  if (!(spec.float || Number.isInteger(value))) {
+    throw invalidInput();
+  }
   if (spec.min !== undefined && value < spec.min) {
     throw invalidInput();
   }
   if (spec.max !== undefined && value > spec.max) {
     throw invalidInput();
   }
-  void key;
 }
 
 export function parseReferenceWireInputPayload(value: unknown): Record<string, unknown> {
@@ -212,15 +269,19 @@ export function parseReferenceWireInputPayload(value: unknown): Record<string, u
     if (!fieldSpec) {
       throw invalidInput();
     }
-    // Every allowed field must be a primitive matching its declared kind;
-    // nested objects/arrays (e.g. `{ x: { nested: "x" } }`) are rejected
-    // before dispatch rather than silently passed through.
-    validateField(key, input[key], fieldSpec);
+    // Every allowed field must match its declared kind: a primitive, or for
+    // "string-list" a bounded array of enum strings. Other nested objects or
+    // arrays (e.g. `{ x: { nested: "x" } }`) are rejected before dispatch
+    // rather than silently passed through.
+    validateField(input[key], fieldSpec);
   }
   for (const key of spec.required) {
     if (!(key in input)) {
       throw invalidInput();
     }
+  }
+  if (spec.requiredAnyOf && !spec.requiredAnyOf.some((key) => key in input)) {
+    throw invalidInput();
   }
   return input;
 }
@@ -235,21 +296,25 @@ export function normalizeReferenceWireViewportPayload(value: unknown): Reference
   if (!(Number.isFinite(width) && Number.isFinite(height)) || width <= 0 || height <= 0) {
     return null;
   }
+  // The same bounds as the `viewport` input schema above.
+  if (width > MAX_INPUT_COORDINATE || height > MAX_INPUT_COORDINATE) {
+    return null;
+  }
 
   const viewport: ReferenceWireViewportPayload = {
     height,
     width,
   };
   const deviceScaleFactor = Number(input.deviceScaleFactor);
-  if (Number.isFinite(deviceScaleFactor) && deviceScaleFactor > 0) {
+  if (Number.isFinite(deviceScaleFactor) && deviceScaleFactor > 0 && deviceScaleFactor <= MAX_DEVICE_SCALE_FACTOR) {
     viewport.deviceScaleFactor = deviceScaleFactor;
   }
   const screenWidth = Number(input.screenWidth);
-  if (Number.isFinite(screenWidth) && screenWidth > 0) {
+  if (Number.isFinite(screenWidth) && screenWidth > 0 && screenWidth <= MAX_INPUT_COORDINATE) {
     viewport.screenWidth = Math.max(viewport.width, Math.floor(screenWidth));
   }
   const screenHeight = Number(input.screenHeight);
-  if (Number.isFinite(screenHeight) && screenHeight > 0) {
+  if (Number.isFinite(screenHeight) && screenHeight > 0 && screenHeight <= MAX_INPUT_COORDINATE) {
     viewport.screenHeight = Math.max(viewport.height, Math.floor(screenHeight));
   }
   if (typeof input.hasTouch === "boolean") {

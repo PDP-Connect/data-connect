@@ -62,23 +62,6 @@ test("mouse dblclick emits two press/release pairs with clickCount progression",
   assert.equal(paramsOf(commandAt(cmds, 3)).clickCount, 2);
 });
 
-test("keyboard printable key sets text and keyDown", () => {
-  const cmds = mapInputEventToCdp({ action: "keydown", code: "KeyA", key: "a", type: "keyboard" });
-  const cmd = commandAt(cmds, 0);
-  assert.equal(cmd.method, "Input.dispatchKeyEvent");
-  const params = paramsOf(cmd);
-  assert.equal(params.type, "keyDown");
-  assert.equal(params.text, "a");
-});
-
-test("keyboard named key uses rawKeyDown and a virtual key code", () => {
-  const cmds = mapInputEventToCdp({ action: "keydown", code: "Enter", key: "Enter", type: "keyboard" });
-  const params = paramsOf(commandAt(cmds, 0));
-  assert.equal(params.type, "rawKeyDown");
-  assert.equal(params.windowsVirtualKeyCode, 13);
-  assert.equal(params.text, undefined);
-});
-
 test("touch start translates to Input.dispatchTouchEvent with one touch point", () => {
   const cmds = mapInputEventToCdp({ action: "touchstart", id: 1, type: "touch", x: 10, y: 20 });
   const cmd = commandAt(cmds, 0);
