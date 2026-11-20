@@ -2,8 +2,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { LocalDeviceRecordEnvelope } from "./local-device-envelope.ts";
+
+// One mutation chain per normalized absolute path in this process.
+const queueWrites = new Map<string, Promise<void>>();
+
+async function serializeQueueWrite<T>(path: string, write: () => Promise<T>): Promise<T> {
+  const pending = (queueWrites.get(path) ?? Promise.resolve()).then(write);
+  // A failed operation must not prevent later callers from using the queue.
+  const drained = pending.then(() => {}, () => {});
+  queueWrites.set(path, drained);
+  try {
+    return await pending;
+  } finally {
+    if (queueWrites.get(path) === drained) queueWrites.delete(path);
+  }
+}
 
 export type LocalDeviceQueueStatus = "pending" | "in_flight" | "sent" | "permanent_failure";
 
@@ -22,18 +37,25 @@ export interface LocalDeviceQueueItem {
 
 export interface LocalDeviceQueueOptions {
   clock?: () => Date;
+  /** Unacknowledged sends become eligible for at-least-once delivery after this lease. */
+  inFlightLeaseMs?: number;
   path: string;
   retryBackoffMs?: (retryCount: number) => number;
 }
 
 export class LocalDeviceQueue {
   readonly #clock: () => Date;
+  readonly #inFlightLeaseMs: number;
   readonly #path: string;
   readonly #retryBackoffMs: (retryCount: number) => number;
 
   constructor(options: LocalDeviceQueueOptions) {
     this.#clock = options.clock ?? (() => new Date());
-    this.#path = options.path;
+    this.#inFlightLeaseMs = options.inFlightLeaseMs ?? 5 * 60_000;
+    if (!Number.isSafeInteger(this.#inFlightLeaseMs) || this.#inFlightLeaseMs <= 0) {
+      throw new Error("in-flight lease must be a positive integer in milliseconds");
+    }
+    this.#path = resolve(options.path);
     this.#retryBackoffMs = options.retryBackoffMs ?? defaultRetryBackoffMs;
   }
 
@@ -46,41 +68,47 @@ export class LocalDeviceQueue {
     if (input.records.length === 0) {
       throw new Error("cannot enqueue an empty local device batch");
     }
-    const items = await this.#readItems();
-    if (items.some((existing) => existing.batch_id === input.batchId)) {
-      throw new Error(`local device batch already queued: ${input.batchId}`);
-    }
-    const now = this.#clock().toISOString();
-    const item: LocalDeviceQueueItem = {
-      available_at: now,
-      batch_id: input.batchId,
-      batch_seq: input.batchSeq,
-      created_at: now,
-      records: input.records,
-      retry_count: 0,
-      source_instance_id: input.sourceInstanceId,
-      status: "pending",
-      updated_at: now,
-    };
-    await this.#writeItems([...items, item]);
-    return item;
+    return await serializeQueueWrite(this.#path, async () => {
+      const items = await this.#readItems();
+      if (items.some((existing) => existing.batch_id === input.batchId)) {
+        throw new Error(`local device batch already queued: ${input.batchId}`);
+      }
+      const now = this.#clock().toISOString();
+      const item: LocalDeviceQueueItem = {
+        available_at: now,
+        batch_id: input.batchId,
+        batch_seq: input.batchSeq,
+        created_at: now,
+        records: input.records,
+        retry_count: 0,
+        source_instance_id: input.sourceInstanceId,
+        status: "pending",
+        updated_at: now,
+      };
+      await this.#writeItems([...items, item]);
+      return item;
+    });
   }
 
   async dequeueReady(): Promise<LocalDeviceQueueItem | null> {
-    const now = this.#clock().toISOString();
-    const items = await this.#readItems();
-    const index = items.findIndex((candidate) => isReadyHeadOfSource(candidate, items, now));
-    if (index < 0) {
-      return null;
-    }
-    const item = items[index];
-    if (!item) {
-      return null;
-    }
-    const updated = { ...item, status: "in_flight" as const, updated_at: now };
-    items[index] = updated;
-    await this.#writeItems(items);
-    return updated;
+    return await serializeQueueWrite(this.#path, async () => {
+      const now = this.#clock().toISOString();
+      const items = await this.#readItems();
+      const index = items.findIndex((candidate) =>
+        isReadyHeadOfSource(candidate, items, now, this.#inFlightLeaseMs)
+      );
+      if (index < 0) {
+        return null;
+      }
+      const item = items[index];
+      if (!item) {
+        return null;
+      }
+      const updated = { ...item, status: "in_flight" as const, updated_at: now };
+      items[index] = updated;
+      await this.#writeItems(items);
+      return updated;
+    });
   }
 
   async markSent(batchId: string): Promise<void> {
@@ -93,10 +121,11 @@ export class LocalDeviceQueue {
 
   async markRetry(batchId: string, error: string): Promise<void> {
     await this.#updateItem(batchId, (item, now) => {
+      if (item.status !== "in_flight") return item;
       const retryCount = item.retry_count + 1;
       return {
         ...item,
-        available_at: new Date(this.#clock().getTime() + this.#retryBackoffMs(retryCount)).toISOString(),
+        available_at: new Date(Date.parse(now) + this.#retryBackoffMs(retryCount)).toISOString(),
         last_error: error,
         retry_count: retryCount,
         status: "pending",
@@ -122,14 +151,19 @@ export class LocalDeviceQueue {
     batchId: string,
     update: (item: LocalDeviceQueueItem, now: string) => LocalDeviceQueueItem
   ): Promise<void> {
-    const items = await this.#readItems();
-    const index = items.findIndex((candidate) => candidate.batch_id === batchId);
-    const item = items[index];
-    if (!item) {
-      throw new Error(`local device batch not found: ${batchId}`);
-    }
-    items[index] = update(item, this.#clock().toISOString());
-    await this.#writeItems(items);
+    await serializeQueueWrite(this.#path, async () => {
+      const items = await this.#readItems();
+      const index = items.findIndex((candidate) => candidate.batch_id === batchId);
+      const item = items[index];
+      if (!item) {
+        throw new Error(`local device batch not found: ${batchId}`);
+      }
+      if (item.status === "sent") return;
+      const updated = update(item, this.#clock().toISOString());
+      if (updated === item) return;
+      items[index] = updated;
+      await this.#writeItems(items);
+    });
   }
 
   async #readItems(): Promise<LocalDeviceQueueItem[]> {
@@ -165,8 +199,17 @@ function compareQueueItems(a: LocalDeviceQueueItem, b: LocalDeviceQueueItem): nu
   return a.batch_seq - b.batch_seq;
 }
 
-function isReadyHeadOfSource(item: LocalDeviceQueueItem, items: LocalDeviceQueueItem[], now: string): boolean {
-  if (item.status !== "pending" || item.available_at > now) {
+function isReadyHeadOfSource(
+  item: LocalDeviceQueueItem,
+  items: LocalDeviceQueueItem[],
+  now: string,
+  inFlightLeaseMs: number
+): boolean {
+  const eligible =
+    item.status === "pending"
+      ? item.available_at <= now
+      : item.status === "in_flight" && Date.parse(now) - Date.parse(item.updated_at) >= inFlightLeaseMs;
+  if (!eligible) {
     return false;
   }
   return !items.some(

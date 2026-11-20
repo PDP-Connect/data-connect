@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -96,6 +96,75 @@ test("LocalDeviceQueue records permanent failures and excludes them from dequeue
   assert.equal(item?.status, "permanent_failure");
   assert.equal(item?.last_error, "validation failed");
 });
+
+test("LocalDeviceQueue retains competing enqueues from two instances", async () => {
+  const path = await tempQueuePath();
+  const first = new LocalDeviceQueue({ path });
+  const second = new LocalDeviceQueue({ path });
+  await Promise.all([enqueueFixture(first, 1), enqueueFixture(second, 2)]);
+  assert.deepEqual((await first.list()).map((item) => item.batch_id), ["fixture-1", "fixture-2"]);
+});
+
+test("LocalDeviceQueue ignores stale retry and completion after a batch is sent", async () => {
+  let nowMs = 0;
+  const path = await tempQueuePath();
+  const options = { clock: () => new Date(nowMs), path };
+  const queue = new LocalDeviceQueue(options);
+  const delayed = new LocalDeviceQueue(options);
+  await enqueueFixture(queue, 1);
+  await queue.dequeueReady();
+  await queue.markSent("fixture-1");
+  const sent = await readFile(path, "utf8");
+  nowMs += 1000;
+  await delayed.markRetry("fixture-1", "delayed retry");
+  assert.equal(await readFile(path, "utf8"), sent);
+  await delayed.markPermanentFailure("fixture-1", "delayed failure");
+  await delayed.markSent("fixture-1");
+  assert.equal(await readFile(path, "utf8"), sent);
+});
+
+test("LocalDeviceQueue grants only one fresh lease across concurrent dequeues", async () => {
+  const path = await tempQueuePath();
+  const first = new LocalDeviceQueue({ path });
+  const second = new LocalDeviceQueue({ path });
+  await enqueueFixture(first, 1);
+  const grants = await Promise.all([first.dequeueReady(), second.dequeueReady()]);
+  assert.deepEqual(grants.flatMap((batch) => batch ? [batch.batch_id] : []), ["fixture-1"]);
+});
+
+test("LocalDeviceQueue keeps a fresh lease and recovers the same source head at expiry", async () => {
+  let nowMs = 0;
+  const inFlightLeaseMs = 5000;
+  const options = { clock: () => new Date(nowMs), inFlightLeaseMs, path: await tempQueuePath() };
+  const queue = new LocalDeviceQueue(options);
+  await enqueueFixture(queue, 1);
+  await enqueueFixture(queue, 2);
+  await queue.dequeueReady();
+  await queue.markRetry("fixture-1", "synthetic retry");
+  nowMs += 1000;
+  const original = await queue.dequeueReady();
+  assert.ok(original);
+  assert.equal(original.batch_id, "fixture-1");
+  assert.equal(original.retry_count, 1);
+
+  const reopened = new LocalDeviceQueue(options);
+  nowMs += inFlightLeaseMs - 1;
+  assert.equal(await reopened.dequeueReady(), null);
+  nowMs += 1;
+  assert.deepEqual(await reopened.dequeueReady(), { ...original, updated_at: new Date(nowMs).toISOString() });
+  assert.equal(await reopened.dequeueReady(), null);
+  await reopened.markSent("fixture-1");
+  assert.equal((await reopened.dequeueReady())?.batch_id, "fixture-2");
+});
+
+function enqueueFixture(queue: LocalDeviceQueue, batchSeq: number) {
+  return queue.enqueue({
+    batchId: `fixture-${batchSeq}`,
+    batchSeq,
+    records: [record("fixture", batchSeq)],
+    sourceInstanceId: "fixture",
+  });
+}
 
 async function tempQueuePath(): Promise<string> {
   return join(await mkdtemp(join(tmpdir(), "pdpp-local-device-queue-")), "queue.json");
