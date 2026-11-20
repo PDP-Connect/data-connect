@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Pure-logic oracle for the aggregate time-bucketing math
-// (server/record-aggregation.js) that underpins the MCP `aggregate` read-model
+// (server/records.ts) that underpins the MCP `aggregate` read-model
 // contract. bucketStartForGranularity and resolveAggregateTimeZone are pure but
 // have ZERO by-name coverage — the existing aggregate tests exercise them only
 // through the DB-backed aggregateRecords path and never assert the calendar-
@@ -12,13 +12,13 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bucketStartForGranularity, resolveAggregateTimeZone } from "../server/record-aggregation.ts";
+import { bucketStartForGranularity, resolveAggregateTimeZone } from "../server/records.ts";
 
 const T = "2026-07-02T15:37:42Z"; // a Thursday, mid-afternoon UTC
 
 test("bucketStartForGranularity truncates to minute/hour/day in UTC", () => {
-  assert.equal(bucketStartForGranularity(T, "minute", "UTC"), "2026-07-02T15:37");
-  assert.equal(bucketStartForGranularity(T, "hour", "UTC"), "2026-07-02T15:00");
+  assert.equal(bucketStartForGranularity(T, "minute", "UTC"), "2026-07-02T15:37:00+00:00");
+  assert.equal(bucketStartForGranularity(T, "hour", "UTC"), "2026-07-02T15:00:00+00:00");
   assert.equal(bucketStartForGranularity(T, "day", "UTC"), "2026-07-02");
 });
 
@@ -41,6 +41,28 @@ test("bucketStartForGranularity truncates month/quarter/year to their first day"
 test("bucketStartForGranularity buckets by the zone wall-clock, not UTC", () => {
   // 2026-07-02T02:00Z is 2026-07-01 22:00 in America/New_York -> the prior day.
   assert.equal(bucketStartForGranularity("2026-07-02T02:00:00Z", "day", "America/New_York"), "2026-07-01");
+});
+
+test("bucketStartForGranularity qualifies hour/minute keys with the zone's UTC offset", () => {
+  // 2026-07-02T15:37Z is 11:37 EDT (-04:00); the same wall-clock key in winter is -05:00.
+  assert.equal(bucketStartForGranularity(T, "hour", "America/New_York"), "2026-07-02T11:00:00-04:00");
+  assert.equal(
+    bucketStartForGranularity("2026-01-02T15:37:42Z", "minute", "America/New_York"),
+    "2026-01-02T10:37:00-05:00"
+  );
+  // Half-hour offsets keep their minutes.
+  assert.equal(bucketStartForGranularity(T, "hour", "Asia/Kolkata"), "2026-07-02T21:00:00+05:30");
+  // A DST fall-back repeats 01:00-01:59 local; the offset keeps the two hours apart.
+  assert.equal(
+    bucketStartForGranularity("2024-11-03T05:30:00Z", "hour", "America/New_York"),
+    "2024-11-03T01:00:00-04:00"
+  );
+  assert.equal(
+    bucketStartForGranularity("2024-11-03T06:30:00Z", "hour", "America/New_York"),
+    "2024-11-03T01:00:00-05:00"
+  );
+  // Day keys stay date-only: a 25-hour day is one bucket.
+  assert.equal(bucketStartForGranularity("2024-11-03T06:30:00Z", "day", "America/New_York"), "2024-11-03");
 });
 
 test("bucketStartForGranularity returns null for null, unparseable, and unknown granularity", () => {

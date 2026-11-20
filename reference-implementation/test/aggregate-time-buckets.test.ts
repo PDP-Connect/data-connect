@@ -285,6 +285,86 @@ test("group_by_time honors an explicit IANA time_zone for bucket boundaries", as
   });
 });
 
+async function countByTime(granularity: string, timeZone: string) {
+  return await aggregateRecords(
+    target(),
+    STREAM,
+    grant,
+    { granularity, group_by_time: "occurred_at", metric: "count", time_zone: timeZone },
+    manifestWith(FULL_AGGREGATIONS)
+  );
+}
+
+test("group_by_time hour buckets stay distinct across a DST fall-back (America/New_York)", async () => {
+  // 2024-11-03: clocks fall back 02:00 EDT -> 01:00 EST, so local 01:00-01:59 occurs twice.
+  const records = [
+    { id: "d1", occurred_at: "2024-11-03T05:30:00Z", sender: "x" }, // 01:30 EDT (-04:00)
+    { id: "d2", occurred_at: "2024-11-03T06:30:00Z", sender: "x" }, // 01:30 EST (-05:00)
+    { id: "d3", occurred_at: "2024-11-03T06:45:00Z", sender: "x" }, // 01:45 EST (-05:00)
+  ];
+  await withSeeded(records, async () => {
+    const res = await countByTime("hour", "America/New_York");
+    assert.deepEqual(res.groups, [
+      { count: 1, key: "2024-11-03T01:00:00-04:00" },
+      { count: 2, key: "2024-11-03T01:00:00-05:00" },
+    ]);
+    const minute = await countByTime("minute", "America/New_York");
+    assert.deepEqual(minute.groups, [
+      { count: 1, key: "2024-11-03T01:30:00-04:00" },
+      { count: 1, key: "2024-11-03T01:30:00-05:00" },
+      { count: 1, key: "2024-11-03T01:45:00-05:00" },
+    ]);
+  });
+});
+
+test("group_by_time hour buckets order chronologically across a fall-back east of UTC (Europe/Berlin)", async () => {
+  // 2024-10-27: 03:00 CEST -> 02:00 CET. The first 02:xx is +02:00, the second is +01:00,
+  // so a plain string sort would put the later hour first.
+  const records = [
+    { id: "b1", occurred_at: "2024-10-27T00:30:00Z", sender: "x" }, // 02:30 CEST (+02:00)
+    { id: "b2", occurred_at: "2024-10-27T01:30:00Z", sender: "x" }, // 02:30 CET (+01:00)
+  ];
+  await withSeeded(records, async () => {
+    const res = await countByTime("hour", "Europe/Berlin");
+    assert.deepEqual(res.groups, [
+      { count: 1, key: "2024-10-27T02:00:00+02:00" },
+      { count: 1, key: "2024-10-27T02:00:00+01:00" },
+    ]);
+  });
+});
+
+test("group_by_time hour keys carry a +00:00 offset in UTC and skip the spring-forward hour", async () => {
+  const utc = [{ id: "u1", occurred_at: "2024-11-03T05:30:00Z", sender: "x" }];
+  await withSeeded(utc, async () => {
+    const res = await countByTime("hour", "UTC");
+    assert.deepEqual(res.groups, [{ count: 1, key: "2024-11-03T05:00:00+00:00" }]);
+  });
+  // 2024-03-10: 02:00 EST -> 03:00 EDT, so local 02:xx never exists.
+  const spring = [
+    { id: "s1", occurred_at: "2024-03-10T06:30:00Z", sender: "x" }, // 01:30 EST
+    { id: "s2", occurred_at: "2024-03-10T07:30:00Z", sender: "x" }, // 03:30 EDT
+  ];
+  await withSeeded(spring, async () => {
+    const res = await countByTime("hour", "America/New_York");
+    assert.deepEqual(res.groups, [
+      { count: 1, key: "2024-03-10T01:00:00-05:00" },
+      { count: 1, key: "2024-03-10T03:00:00-04:00" },
+    ]);
+  });
+});
+
+test("group_by_time day bucket sums a 25-hour DST day into one date-only bucket", async () => {
+  const records = [
+    { id: "n1", occurred_at: "2024-11-03T04:00:00Z", sender: "x" }, // 00:00 EDT, first instant of the day
+    { id: "n2", occurred_at: "2024-11-03T06:30:00Z", sender: "x" }, // 01:30 EST
+    { id: "n3", occurred_at: "2024-11-04T04:59:00Z", sender: "x" }, // 23:59 EST, last minute of the day
+  ];
+  await withSeeded(records, async () => {
+    const res = await countByTime("day", "America/New_York");
+    assert.deepEqual(res.groups, [{ count: 3, key: "2024-11-03" }]);
+  });
+});
+
 test("group_by_time month/week/year buckets are calendar-correct", async () => {
   const records = [
     { id: "m1", occurred_at: "2026-01-05T00:00:00Z", sender: "x" }, // Mon week of Jan 5
