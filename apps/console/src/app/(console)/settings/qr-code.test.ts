@@ -4,7 +4,7 @@
 // encoder produces for the address, and it shows only for a public https address.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { qrcodegen } from "../../../vendor/qrcodegen.ts";
+import { encode } from "uqr";
 import { publicHttpsAddress, qrModules, qrSvg } from "./qr-code.ts";
 
 const ADDRESS = "https://5211b6141a2ef1.app.example.invalid";
@@ -12,7 +12,7 @@ const ADDRESS = "https://5211b6141a2ef1.app.example.invalid";
 /** Reads the dark modules back out of the SVG path, undoing the quiet-zone shift. */
 function modulesFromSvg(address: string): boolean[][] {
   const { size, path } = qrSvg(address);
-  const quiet = (size - qrcodegen.QrCode.encodeText(address, qrcodegen.QrCode.Ecc.MEDIUM).size) / 2;
+  const quiet = (size - encode(address, { ecc: "M", border: 0 }).size) / 2;
   const grid = Array.from({ length: size - quiet * 2 }, () => Array.from({ length: size - quiet * 2 }, () => false));
   for (const match of path.matchAll(/M(\d+),(\d+)h1v1h-1z/g)) {
     const row = grid[Number(match[2]) - quiet];
@@ -22,9 +22,8 @@ function modulesFromSvg(address: string): boolean[][] {
   return grid;
 }
 
-test("the SVG module matrix equals the matrix qrcodegen produces for the address", () => {
-  const code = qrcodegen.QrCode.encodeText(ADDRESS, qrcodegen.QrCode.Ecc.MEDIUM);
-  const expected = Array.from({ length: code.size }, (_, y) => Array.from({ length: code.size }, (_, x) => code.getModule(x, y)));
+test("the SVG module matrix equals the matrix uqr produces for the address", () => {
+  const expected = encode(ADDRESS, { ecc: "M", border: 0 }).data;
   assert.deepEqual(qrModules(ADDRESS), expected);
   assert.deepEqual(modulesFromSvg(ADDRESS), expected);
 });

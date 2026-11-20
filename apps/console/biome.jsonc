@@ -167,15 +167,6 @@
           }
         }
       }
-    },
-    {
-      // Vendored third-party source (Nayuki's QR Code generator, MIT). Kept
-      // byte-identical to upstream apart from the export keywords; not ours to
-      // reformat or lint.
-      "includes": ["**/vendor/qrcodegen.ts"],
-      "formatter": { "enabled": false },
-      "assist": { "actions": { "source": { "organizeImports": "off" } } },
-      "linter": { "enabled": false }
     }
   ]
 }
