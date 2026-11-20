@@ -131,6 +131,8 @@ test("a mutable ancestor blocks all repairs and is listed first", async (t) => {
   assert.equal(within(base, report.paths)[0]?.path, base);
   assert.ok(report.paths.every((p) => !p.fixable));
   assert.ok(report.command?.includes("'" + base + "'"));
+  assert.equal(report.command?.includes("'" + data + "'"), false);
+  assert.equal(report.command?.includes("'" + home + "'"), false);
   assert.equal(await mode(data), 0o775);
   assert.equal(await mode(home), 0o777);
 });
