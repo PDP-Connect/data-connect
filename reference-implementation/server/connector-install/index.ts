@@ -805,7 +805,9 @@ export function createConnectorInstallService(options: {
   // Local sources are owner state, read by the run path from PDPP_DATA_DIR, not
   // preloaded install state: do not follow PDPP_CONNECTOR_PRELOAD_DIR here.
   const localSourceStore = options.localSourceStore || createFileLocalConnectorSourceStore(options.dataDir);
+  let verifiedCatalog: { entries: readonly ConnectorCatalogEntry[]; refreshAt: number } | undefined;
   let catalogRefresh: Promise<readonly ConnectorCatalogEntry[]> | undefined;
+  const catalogTtlMs = connectorCatalogTtlMs();
   const loadCatalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
     const release = acquireCatalogStateLock(dataDir);
     try {
@@ -845,15 +847,47 @@ export function createConnectorInstallService(options: {
       release();
     }
   };
-  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
-    const refresh = catalogRefresh ?? loadCatalog();
-    catalogRefresh = refresh;
-    try {
-      return await refresh;
-    } finally {
-      if (catalogRefresh === refresh) {
+  const refreshCatalog = (): Promise<readonly ConnectorCatalogEntry[]> => {
+    // Concurrent callers share one fetch. Only verified output reaches
+    // verifiedCatalog (refreshAt: epoch ms when catalog() fetches again). A
+    // failure throws, so install and update never act on an older copy; it is
+    // logged and moves refreshAt once, whoever started the fetch.
+    catalogRefresh ??= loadCatalog()
+      .then(
+        (entries) => {
+          verifiedCatalog = { entries, refreshAt: Date.now() + catalogTtlMs };
+          return entries;
+        },
+        (error: unknown) => {
+          if (verifiedCatalog) {
+            verifiedCatalog = { entries: verifiedCatalog.entries, refreshAt: Date.now() + catalogTtlMs };
+            console.error(
+              "[connector-install] Connector catalog refresh failed; serving the last verified copy.",
+              error
+            );
+          }
+          throw error;
+        }
+      )
+      .finally(() => {
         catalogRefresh = undefined;
+      });
+    return catalogRefresh;
+  };
+  const catalog = async (): Promise<readonly ConnectorCatalogEntry[]> => {
+    // Read path for GET /v1/owner/connector-install/catalog, which the console
+    // requests on every render of Add a source. If a refresh fails, the last
+    // verified copy keeps being served. The failure is logged once, in refreshCatalog.
+    if (verifiedCatalog && Date.now() < verifiedCatalog.refreshAt) {
+      return verifiedCatalog.entries;
+    }
+    try {
+      return await refreshCatalog();
+    } catch (error) {
+      if (!verifiedCatalog) {
+        throw error;
       }
+      return verifiedCatalog.entries;
     }
   };
   const installEntryCore = async (
@@ -990,7 +1024,7 @@ export function createConnectorInstallService(options: {
     });
   };
   const install = async (connectorId: string, digest: string): Promise<ConnectorInstallRecord> => {
-    const entry = (await catalog()).find(
+    const entry = (await refreshCatalog()).find(
       (candidate) => candidate.connector_id === connectorId && candidate.digest === digest
     );
     if (!entry) {
@@ -1102,7 +1136,7 @@ export function createConnectorInstallService(options: {
     }
   };
   const resolveManifestFromCatalog = async (connectorId: string): Promise<Record<string, unknown> | null> => {
-    const entry = (await catalog()).find(
+    const entry = (await refreshCatalog()).find(
       (candidate) => candidate.connector_id === connectorId && candidate.latest === true
     );
     if (!entry) {
@@ -1158,7 +1192,7 @@ export function createConnectorInstallService(options: {
     status: async () => (await listVerifiedActiveConnectors(store)).verified,
     uninstall,
     async update(connectorId) {
-      const entries = await catalog();
+      const entries = await refreshCatalog();
       const candidates = entries.filter((entry) => entry.connector_id === connectorId);
       const candidate = candidates.find((entry) => entry.latest === true);
       if (!candidate) {
@@ -1175,6 +1209,13 @@ const DEFAULT_CONNECTOR_INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
 function connectorInstallTimeoutMs(): number {
   const configured = Number(process.env.PDPP_CONNECTOR_INSTALL_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_CONNECTOR_INSTALL_TIMEOUT_MS;
+}
+
+const DEFAULT_CONNECTOR_CATALOG_TTL_MS = 5 * 60 * 1000;
+
+function connectorCatalogTtlMs(): number {
+  const configured = Number(process.env.PDPP_CONNECTOR_CATALOG_TTL_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_CONNECTOR_CATALOG_TTL_MS;
 }
 
 export class ConnectorInstallTimeoutError extends Error {
