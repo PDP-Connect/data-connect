@@ -30,7 +30,8 @@ const COMMON_PASSWORDS: ReadonlySet<string> = new Set(
 export const OWNER_PASSWORD_TOO_COMMON_MESSAGE = "That password is too common. Choose a longer or less predictable one.";
 
 export function isBlockedOwnerPassword(password: string): boolean {
-  const candidate = password.normalize("NFKC").toLowerCase();
+  // Padding with whitespace must not turn a listed password into an unlisted one.
+  const candidate = password.normalize("NFKC").trim().toLowerCase();
   if (COMMON_PASSWORDS.has(candidate)) return true;
   const withoutDigitSuffix = candidate.replace(/\d+$/u, "");
   if (withoutDigitSuffix !== candidate && COMMON_PASSWORDS.has(withoutDigitSuffix)) return true;
