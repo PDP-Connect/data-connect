@@ -41,7 +41,6 @@ import {
   summarizeStreakDots,
   syncActionIdleLabel,
 } from "../../lib/connection-evidence.ts";
-import { browserConnectSupport } from "../../lib/browser-connect-support.ts";
 import { isBrowserSessionBoundConnection } from "../../lib/connection-modality.ts";
 import { connectorInstallKey, isConnectorNotInstalled } from "../../lib/connector-implementation.ts";
 import { connectorRunSummaryId, isActiveConnectorRunSummaryStatus } from "../../lib/connector-run-summary-status.ts";
@@ -764,9 +763,7 @@ function ConnectorPageView({
   const repairConnectionId = connectorInstanceId ?? connectionId;
   const storedCredentialUpdateHref =
     staticSecretCapture === null ? null : updateCredentialHref(connectorId, repairConnectionId);
-  const manifestBrowserBound = browserConnectSupport(connectorId, [
-    { bindings: manifest?.runtime_requirements?.bindings, connector_id: connectorId },
-  ]).browserBound;
+  const manifestBrowserBound = Object.hasOwn(manifest?.runtime_requirements?.bindings ?? {}, "browser");
   const browserSessionRepairHref =
     sessionBound || manifestBrowserBound
       ? browserSessionReconnectHref(connectorId, repairConnectionId)
