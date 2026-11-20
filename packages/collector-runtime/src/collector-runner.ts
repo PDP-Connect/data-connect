@@ -57,7 +57,6 @@ import {
   type LocalDeviceOutboxItem,
   type LocalDeviceOutboxSummary,
 } from "./local-device-outbox.ts";
-import type { LocalDeviceQueue, LocalDeviceQueueItem } from "./local-device-queue.ts";
 import { resolveConnectorCommand } from "./resolve-tsx-binary.ts";
 import {
   assertPlacementOrThrow,
@@ -3408,29 +3407,6 @@ function nextOutboxBatchSeq(outbox: LocalDeviceOutbox, sourceInstanceId: string)
   return outbox.maxRecordBatchSeq({ sourceInstanceId }) + 1;
 }
 
-export async function drainCollectorQueue(input: {
-  abortSignal?: AbortSignal;
-  client: Pick<LocalDeviceClient, "ingestBatch">;
-  queue: LocalDeviceQueue;
-}): Promise<number> {
-  let sent = 0;
-  for (;;) {
-    throwIfAborted(input.abortSignal);
-    const item = await input.queue.dequeueReady();
-    if (!item) {
-      return sent;
-    }
-    try {
-      await sendQueueItem(input.client, item);
-      await input.queue.markSent(item.batch_id);
-      sent += 1;
-    } catch (error) {
-      await input.queue.markRetry(item.batch_id, error instanceof Error ? error.message : String(error));
-      return sent;
-    }
-  }
-}
-
 /**
  * Drain-before-scan helper for the durable outbox path.
  *
@@ -3457,26 +3433,6 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
   }
-}
-
-async function sendQueueItem(
-  client: Pick<LocalDeviceClient, "ingestBatch">,
-  item: LocalDeviceQueueItem
-): Promise<void> {
-  const [firstRecord] = item.records;
-  if (!firstRecord) {
-    throw new Error(`collector batch has no records: ${item.batch_id}`);
-  }
-  await client.ingestBatch(
-    buildLocalDeviceIngestBatchRequest({
-      batchId: item.batch_id,
-      batchSeq: item.batch_seq,
-      connectorId: firstRecord.connector_id,
-      deviceId: firstRecord.device_id,
-      records: item.records,
-      sourceInstanceId: item.source_instance_id,
-    })
-  );
 }
 
 /**

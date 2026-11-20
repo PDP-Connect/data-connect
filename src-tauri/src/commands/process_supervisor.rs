@@ -1894,17 +1894,70 @@ fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
             Err(error) if proc_stat_error_skips_entry(&error) => continue,
             Err(error) => return Err(error),
         };
-        // comm may contain spaces, parentheses, or non-UTF8 bytes.
-        let end = stat.iter().rposition(|byte| *byte == b')')
-            .ok_or_else(|| io::Error::other("malformed proc stat"))?;
-        let pgrp = stat[end + 1..].split(|byte| byte.is_ascii_whitespace())
-            .filter(|field| !field.is_empty()).nth(2)
-            .and_then(|field| std::str::from_utf8(field).ok())
-            .and_then(|field| field.parse::<u32>().ok())
-            .ok_or_else(|| io::Error::other("missing proc stat pgrp"))?;
-        if pgrp == process_group { return Ok(true); }
+        if proc_stat_pgrp_is_member(parse_proc_stat_pgrp(&stat)?, process_group) {
+            return Ok(true);
+        }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat_pgrp(stat: &[u8]) -> io::Result<i32> {
+    // comm may contain spaces, parentheses, or non-UTF8 bytes.
+    let end = stat.iter().rposition(|byte| *byte == b')')
+        .ok_or_else(|| io::Error::other("malformed proc stat"))?;
+    stat[end + 1..].split(|byte| byte.is_ascii_whitespace())
+        .filter(|field| !field.is_empty()).nth(2)
+        .and_then(|field| std::str::from_utf8(field).ok())
+        .and_then(|field| field.parse::<i32>().ok())
+        .ok_or_else(|| io::Error::other("missing proc stat pgrp"))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_pgrp_is_member(pgrp: i32, process_group: u32) -> bool {
+    // The kernel can emit -1 when the task is exiting.
+    pgrp > 0 && pgrp as u32 == process_group
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod proc_stat_pgrp_tests {
+    use super::{parse_proc_stat_pgrp, proc_stat_pgrp_is_member};
+
+    #[test]
+    fn parses_signed_pgrps_and_matches_only_positive_owned_groups() {
+        let cases: &[(&[u8], i32, bool)] = &[
+            (b"4242 (node) X 0 -1\n", -1, false),
+            (b"4242 (node) S 1 77\n", 77, true),
+            (b"4242 (node) S 1 78\n", 78, false),
+            (b"4242 (node) Z 1 77\n", 77, true),
+            (b"4242 (a)b)) S 1 77\n", 77, true),
+            (b"4242 (\xff) S 1 77\n", 77, true),
+            (b"4242 (node) S 1 0\n", 0, false),
+        ];
+        for &(stat, expected_pgrp, expected_member) in cases {
+            let pgrp = parse_proc_stat_pgrp(stat).unwrap();
+            assert_eq!(pgrp, expected_pgrp);
+            assert_eq!(proc_stat_pgrp_is_member(pgrp, 77), expected_member);
+        }
+        let mut full = b"4242 (node) X 0 -1".to_vec();
+        full.extend_from_slice(&b" 0".repeat(47));
+        full.push(b'\n');
+        let pgrp = parse_proc_stat_pgrp(&full).unwrap();
+        assert_eq!(pgrp, -1);
+        assert!(!proc_stat_pgrp_is_member(pgrp, 77));
+    }
+
+    #[test]
+    fn malformed_records_remain_errors() {
+        let cases: &[&[u8]] = &[
+            b"4242 (node) S 1\n",
+            b"4242 (node) S 1 invalid\n",
+            b"4242 (node S 1 77\n",
+        ];
+        for &stat in cases {
+            assert!(parse_proc_stat_pgrp(stat).is_err());
+        }
+    }
 }
 
 // A vanished process is not a member. An entry we may not read (hidepid,

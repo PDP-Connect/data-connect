@@ -118,7 +118,12 @@ operator bootstrap), `dataconnect-console` (the console's owner bearer) and
 console and the connector runtime hold one owner bearer per subject: an owner
 device approval for either client returns the live bearer that client already
 has while it has at least half its lifetime left, and the runtime keeps that
-bearer in memory between runs. The pre-registered set
+bearer in memory between runs. The
+runtime keeps the bearer in its own process: connector child processes never
+receive it. Each admitted run gets a random run-scoped credential
+(`PDPP_BLOB_UPLOAD_TOKEN`) that is valid only for `POST /v1/blobs`, only for
+that run's connector and connection, and only until the run ends. Connectors
+built before that name read the same credential as `PDPP_OWNER_TOKEN`. The pre-registered set
 is reference-local convenience; production deployments should supply their
 own `preRegisteredPublicClients` option.
 
