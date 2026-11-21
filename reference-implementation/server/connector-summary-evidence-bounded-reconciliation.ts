@@ -124,12 +124,13 @@ function recordRepairOutcome<TFailure>(
   id: string,
   result: { readonly failed: boolean; readonly persisted: boolean; readonly row: TFailure }
 ): void {
-  state.repaired += 1;
-  if (result.failed) {
-    state.failed += 1;
-    if (!result.persisted) {
-      state.failedRows.set(id, result.row);
-    }
+  if (!result.failed) {
+    state.repaired += 1;
+    return;
+  }
+  state.failed += 1;
+  if (!result.persisted) {
+    state.failedRows.set(id, result.row);
   }
 }
 
@@ -242,7 +243,7 @@ export async function processBoundedReconciliationPage<TInstance, TReason extend
       failed: repairs.failed,
       failedRows: repairs.failedRows,
       repaired: candidateRepairs,
-      skipped: selection.all.length - repairs.repaired,
+      skipped: selection.all.length - repairs.repaired - repairs.failed,
     },
   };
 }
@@ -336,7 +337,7 @@ export async function runScopedConnectorReconciliation<TInstance, TReason extend
     failed: repairs.failed,
     failedRows: repairs.failedRows,
     repaired,
-    skipped: selection.all.length - repairs.repaired,
+    skipped: selection.all.length - repairs.repaired - repairs.failed,
   };
 }
 
