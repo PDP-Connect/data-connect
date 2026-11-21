@@ -404,6 +404,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
     registerRunCancellation,
     resolveStaticSecretRunEnv = null,
     runManagedConnectorViaController = null,
+    blobUploadCredentialHooks = null,
   } = opts;
 
   const schedulerMaxRunWallClockMs = resolveMaxRunWallClockMs(
@@ -501,6 +502,7 @@ export function createScheduler(opts: SchedulerOptions): Scheduler {
 
   const runExecutor = createRunExecutor({
     admitRunConnection,
+    blobUploadCredentialHooks,
     ...(approvedEnvironmentBindings ? { approvedEnvironmentBindings } : {}),
     ...(approvedProxyConnectorIds ? { approvedProxyConnectorIds } : {}),
     getState,

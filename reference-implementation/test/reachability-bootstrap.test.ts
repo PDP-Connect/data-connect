@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
 import type { ReachabilityService } from "../server/reachability/service.ts"
+import { closeTestServer } from "./helpers/close-test-server.ts"
 import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts"
 
 test("server startup forwards the trusted reachability service to authenticated owner routes", async () => {
@@ -16,6 +17,7 @@ test("server startup forwards the trusted reachability service to authenticated 
   const expected = { "fixture.authority": { known: true, value: false } }
   let reads = 0
   const service = {
+    reconcileAfterRestart: async () => ({ confirmed: [], unconfirmed: [] }),
     capabilities: () => {
       reads++
       return expected
@@ -65,12 +67,7 @@ test("server startup forwards the trusted reachability service to authenticated 
     assert.deepEqual(await result.json(), { data: expected })
     assert.equal(reads, 1)
   } finally {
-    server.asServer.closeAllConnections()
-    server.rsServer.closeAllConnections()
-    await Promise.all([
-      new Promise(resolve => server.asServer.close(resolve)),
-      new Promise(resolve => server.rsServer.close(resolve)),
-    ])
+    await closeTestServer(server)
     if (before === undefined) delete process.env.PDPP_DATA_DIR
     else process.env.PDPP_DATA_DIR = before
     await rm(root, { recursive: true, force: true })

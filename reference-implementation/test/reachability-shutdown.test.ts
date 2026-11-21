@@ -1,0 +1,557 @@
+// Copyright The PDP-Connect Contributors
+// SPDX-License-Identifier: Apache-2.0
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { mock } from "node:test";
+import type { Handle, RouteView as Route } from "@tnunamak/gozar";
+import { fakeRouteScenarios } from "@tnunamak/gozar/testing";
+import { initialLifecycle } from "../server/reachability/lifecycle.ts";
+import { ReachabilityOperations } from "../server/reachability/operations.ts";
+import { ReachabilityService, restartCandidates } from "../server/reachability/service.ts";
+
+const seed = fakeRouteScenarios().find((route) => route.handle.kind === "attached" && route.published)!;
+
+type CloseCall = { handle: Handle; mode: string };
+
+// A service that already holds routes, plus the real journal on disk. The fake
+// api records every close; `close` decides how each one settles.
+async function fixture(
+  routes: { kind: Handle["kind"]; ownership: Route["ownership"] }[],
+  close: (call: CloseCall, route: Route) => Promise<Route>
+) {
+  const root = await mkdtemp(join(tmpdir(), "reachability-shutdown-"));
+  const operations = new ReachabilityOperations(root, true);
+  const calls: CloseCall[] = [];
+  const held: Route[] = [];
+  for (const [index, spec] of routes.entries()) {
+    await operations.start("start", null, async (operationId) => {
+      const route: Route = {
+        ...seed,
+        handle: { id: `route-${index}`, generation: 1, kind: spec.kind },
+        operationId,
+        ownership: spec.ownership,
+      };
+      held.push(route);
+      return route;
+    });
+  }
+  const settle = async () => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if ((await operations.list()).every((record) => record.stage === "settled")) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("journal did not settle");
+  };
+  await settle();
+  const service = new ReachabilityService(
+    {
+      closeRoute: async (input: { handle: Handle; mode: string }) => {
+        const call = { handle: input.handle, mode: input.mode };
+        calls.push(call);
+        const route = held.find((item) => item.handle.id === input.handle.id)!;
+        return close(call, route);
+      },
+      expose: async () => {
+        throw new Error("expose must not run during shutdown");
+      },
+      watchRoutes: async function* () {},
+    } as never,
+    {
+      acknowledgeDisconnect: async () => undefined,
+      identity: { bootId: "b", instanceId: "i" },
+      query: { home: "fixture-home" },
+    } as never
+  );
+  const inner = service as unknown as { routes: Map<string, Route>; lifecycle: unknown };
+  for (const route of held) inner.routes.set(route.handle.id, route);
+  const first = held[0];
+  if (first) inner.lifecycle = { ...initialLifecycle(), cleanup: "none", handle: first.handle, phase: "verified" };
+  return {
+    calls,
+    held,
+    inner,
+    operations,
+    root,
+    service,
+    cleanup: () => rm(root, { force: true, recursive: true }),
+  };
+}
+
+const confirmed = (_call: CloseCall, route: Route): Promise<Route> =>
+  Promise.resolve({ ...route, cleanup: { nextAction: null, state: "confirmed" }, published: null });
+
+test("shutdown closes the owned attached route once, journals a stop tombstone, and confirms cleanup", async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], confirmed);
+  try {
+    const outcome = await f.service.shutdown(2000, f.operations);
+    assert.deepEqual(f.calls, [{ handle: f.held[0]!.handle, mode: "remove" }]);
+    assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
+    const record = await f.operations.read(f.held[0]!.operationId!);
+    assert.equal(record.stopTombstone, true);
+    assert.equal(record.stage, "settled");
+    assert.equal(record.recovery, null);
+    assert.equal(f.inner.routes.get("route-0")!.cleanup.state, "confirmed");
+    assert.equal(f.inner.routes.get("route-0")!.published, null);
+    assert.equal(f.service.state().lifecycle.cleanup, "confirmed");
+    // Idempotent: a second call neither closes again nor changes the outcome.
+    assert.deepEqual(await f.service.shutdown(2000, f.operations), outcome);
+    assert.equal(f.calls.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a close that never settles ends at the deadline, keeps the tombstone, and does not claim cleanup", async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], () => new Promise<Route>(() => {}));
+  try {
+    const started = Date.now();
+    const outcome = await f.service.shutdown(100, f.operations);
+    assert.ok(Date.now() - started < 1500, "returns near the deadline, not after the hung close");
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: ["route-0"] });
+    const record = await f.operations.read(f.held[0]!.operationId!);
+    assert.equal(record.stopTombstone, true);
+    assert.equal(record.stage, "unknown-possibly-live");
+    assert.equal(record.recovery?.available, true);
+    assert.notEqual(f.inner.routes.get("route-0")!.cleanup.state, "confirmed");
+    assert.notEqual(f.service.state().lifecycle.cleanup, "confirmed");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a close that returns unconfirmed is reported unconfirmed", async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], (_call, route) =>
+    Promise.resolve({ ...route, cleanup: { nextAction: null, state: "unconfirmed" } })
+  );
+  try {
+    const outcome = await f.service.shutdown(2000, f.operations);
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: ["route-0"] });
+    assert.equal((await f.operations.read(f.held[0]!.operationId!)).stage, "unknown-possibly-live");
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a start requested after shutdown began is refused and reaches no provider", async () => {
+  const f = await fixture([], confirmed);
+  try {
+    await f.service.shutdown(100, f.operations);
+    const review = {
+      candidate: {
+        candidateToken: "tok",
+        configuration: { revision: "r1", values: {} },
+        consent: { consentFactsDigest: "d", disclosures: {}, facts: [], scope: { kind: "route" } },
+        consentFactsDigest: "d",
+        disclosure: { revision: "1" },
+        expiresAt: "2999-01-01T00:00:00.000Z",
+        providerId: "svc",
+      },
+      draftId: "d1",
+      id: "rev-1",
+      query: { target: "127.0.0.1:1", usage: { kind: "attached" } },
+    };
+    (f.inner as unknown as { reviews: Map<string, unknown> }).reviews = new Map([["rev-1", review]]);
+    const input = { acknowledgeDisconnect: true, consentFactsDigest: "d", kind: "route" };
+    await assert.rejects(f.service.precheckApply("rev-1", input), { code: "host_supervisor_unavailable" });
+    await assert.rejects(f.service.apply("op-1", "rev-1", input), { code: "host_supervisor_unavailable" });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("routes the host does not own are left alone", async () => {
+  const f = await fixture(
+    [
+      { kind: "external", ownership: "external-owned" },
+      { kind: "durable", ownership: "gozar-owned" },
+      { kind: "attached", ownership: "external-owned" },
+    ],
+    confirmed
+  );
+  try {
+    const outcome = await f.service.shutdown(2000, f.operations);
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: [] });
+    for (const route of f.held) {
+      assert.equal((await f.operations.read(route.operationId!)).stopTombstone, false);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("shutdown closes a library-owned session route by its exact handle, because its daemon outlives the host", async () => {
+  const f = await fixture(
+    [
+      { kind: "session", ownership: "gozar-owned" },
+      { kind: "durable", ownership: "gozar-owned" },
+      { kind: "external", ownership: "external-owned" },
+    ],
+    confirmed
+  );
+  try {
+    const outcome = await f.service.shutdown(2000, f.operations);
+    assert.deepEqual(f.calls, [{ handle: f.held[0]!.handle, mode: "remove" }]);
+    assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
+    const record = await f.operations.read(f.held[0]!.operationId!);
+    assert.equal(record.stopTombstone, true);
+    assert.equal(record.stage, "settled");
+    assert.equal(record.cleanupConfirmed, true);
+    for (const other of f.held.slice(1)) {
+      assert.equal((await f.operations.read(other.operationId!)).stopTombstone, false);
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+const hangingJournal = {
+  recordCleanupUnconfirmed: () => new Promise<void>(() => {}),
+  recordRecovered: () => new Promise<void>(() => {}),
+  requestStop: () => new Promise<void>(() => {}),
+};
+
+// Both hung-journal tests await shutdown directly: its own deadline plus the
+// capped journal grace bound the run, and the per-test timeout catches a true
+// hang without parking a real timer in test code.
+test("a stalled journal does not hold shutdown past its budget, and the close was still dispatched", { timeout: 2000 }, async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], () => new Promise<Route>(() => {}));
+  try {
+    const started = Date.now();
+    const outcome = await f.service.shutdown(80, hangingJournal);
+    assert.ok(Date.now() - started < 1000, "shutdown returns within the deadline plus the journal grace");
+    assert.deepEqual(outcome, { confirmed: [], unconfirmed: ["route-0"] });
+    assert.equal(f.calls.length, 1, "the provider close was dispatched");
+    // The writes never landed: the record is still a restart candidate, not confirmed.
+    assert.notEqual((await f.operations.read(f.held[0]!.operationId!)).cleanupConfirmed, true);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a hung tombstone write does not keep the provider close from starting", { timeout: 2000 }, async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], confirmed);
+  try {
+    const outcome = await f.service.shutdown(80, hangingJournal);
+    assert.equal(f.calls.length, 1, "the close starts without waiting for the tombstone");
+    assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a start that never settles does not delay the close of an already-known owned route", { timeout: 2000 }, async () => {
+  const f = await fixture([{ kind: "attached", ownership: "gozar-owned" }], confirmed);
+  try {
+    // An embedded provider start that never returns: its settlement promise is the
+    // only thing shutdown must not wait for before closing known routes. The
+    // per-test timeout catches a true hang; the deadline bounds this run.
+    (f.inner as unknown as { startSettled: Promise<void> | null }).startSettled = new Promise<void>(() => {});
+    const started = Date.now();
+    const outcome = await f.service.shutdown(80, f.operations);
+    assert.ok(Date.now() - started < 1000, "shutdown stays within its deadline plus journal grace");
+    assert.equal(f.calls.length, 1, "the already-known route's close was dispatched without waiting for the start");
+    assert.deepEqual(outcome, { confirmed: ["route-0"], unconfirmed: [] });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// A start superseded by shutdown: its provider call is held across shutdown's debt snapshot, then
+// returns an allocation whose close `close` decides. Resolves once the start's record settles.
+async function lateAllocation(
+  kind: Handle["kind"],
+  close: (handle: Handle, route: Route) => Promise<Route>
+) {
+  const root = await mkdtemp(join(tmpdir(), "reachability-shutdown-late-"));
+  const operations = new ReachabilityOperations(root, true);
+  let release!: (route: Route) => void;
+  const allocation = new Promise<Route>((resolve) => {
+    release = resolve;
+  });
+  let exposed!: () => void;
+  const exposeCalled = new Promise<void>((resolve) => {
+    exposed = resolve;
+  });
+  const closes: Handle[] = [];
+  const held: { route: Route | null } = { route: null };
+  const service = new ReachabilityService(
+    {
+      closeRoute: async (input: { handle: Handle }) => {
+        closes.push(input.handle);
+        return close(input.handle, held.route!);
+      },
+      expose: async () => {
+        exposed();
+        return allocation;
+      },
+      watchRoutes: async function* () {},
+    } as never,
+    {
+      acknowledgeDisconnect: async () => undefined,
+      identity: { bootId: "b", instanceId: "i" },
+      query: { home: "fixture-home" },
+    } as never
+  );
+  const inner = service as unknown as { reviews: Map<string, unknown>; lifecycle: unknown };
+  inner.reviews.set("rev-1", {
+    candidate: {
+      candidateToken: "tok",
+      configuration: { revision: "r1", values: {} },
+      consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
+      consentFactsDigest: "consent-v1:abc",
+      disclosure: { revision: "1" },
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      ownership: "gozar-owned",
+      providerId: "svc",
+    },
+    draftId: "d1",
+    id: "rev-1",
+    query: { target: "127.0.0.1:1", usage: { kind } },
+  });
+  inner.lifecycle = { ...initialLifecycle(), approvalIdentity: "rev-1", phase: "review" };
+  const input = { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" };
+  const intent = {
+    bootId: "b",
+    configurationRevision: "r1",
+    consentFactsDigest: "consent-v1:abc",
+    expectedOrigin: null,
+    instanceId: "i",
+    ownership: "gozar-owned",
+    providerId: "svc",
+    target: "127.0.0.1:1",
+    usage: { kind },
+  } as never;
+  const { operationId } = await operations.start("start", null, (id) => service.apply(id, "rev-1", input), intent);
+  await exposeCalled;
+  // The start is still inside the provider call, so the debt snapshot has nothing to record.
+  const outcome = await service.shutdown(20, operations);
+  assert.deepEqual(outcome, { confirmed: [], unconfirmed: [] });
+  assert.equal(closes.length, 0, "no handle existed to close at the deadline");
+  const handle: Handle = { generation: 3, id: "late-route", kind };
+  held.route = { ...seed, handle, operationId, ownership: "gozar-owned" };
+  release(held.route);
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if ((await operations.read(operationId)).stage !== "applying") break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return {
+    closes,
+    handle,
+    operationId,
+    operations,
+    record: await operations.read(operationId),
+    cleanup: () => rm(root, { force: true, recursive: true }),
+  };
+}
+
+const unconfirmedClose = (_handle: Handle, route: Route): Promise<Route> =>
+  Promise.resolve({ ...route, cleanup: { nextAction: null, state: "unconfirmed" }, published: null });
+
+for (const kind of ["attached", "session"] as const) {
+  test(`the ${kind} route of a start allocated after the shutdown debt snapshot keeps its exact handle when both closes stay unconfirmed`, { timeout: 5000 }, async () => {
+    const f = await lateAllocation(kind, unconfirmedClose);
+    try {
+      const { record, handle, operationId, closes } = f;
+      assert.equal(record.stage, "unknown-possibly-live");
+      assert.deepEqual(record.handle, handle, "the record keeps the exact allocated handle");
+      assert.notEqual(record.cleanupConfirmed, true);
+      assert.ok(closes.length >= 1);
+      assert.ok(closes.every((closed) => closed.id === handle.id && closed.generation === 3 && closed.kind === kind));
+      assert.deepEqual(restartCandidates(await f.operations.list()), [{ handle, operationId }]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+}
+
+// A close that throws has an unknown outcome. Whatever it throws, the start's record keeps the
+// exact allocated handle, and nothing about the thrown value is trusted or mutated.
+const wrongHandle: Handle = { generation: 9, id: "someone-else", kind: "attached" };
+const thrownCases: { name: string; thrown: (route: Route) => unknown }[] = [
+  { name: "a frozen rejection", thrown: () => Object.freeze(new Error("close failed")) },
+  { name: "a primitive rejection", thrown: () => "close failed" },
+  { name: "a rejection already carrying another handle's route", thrown: (route) => Object.assign(new Error("close failed"), { route: { ...route, handle: wrongHandle } }) },
+  { name: "a rejection carrying an undefined route", thrown: () => Object.assign(new Error("close failed"), { route: undefined }) },
+];
+for (const { name, thrown } of thrownCases) {
+  test(`a late start whose close throws ${name} keeps the exact allocated handle as a restart candidate`, { timeout: 5000 }, async () => {
+    const f = await lateAllocation("attached", (_handle, route) => Promise.reject(thrown(route)));
+    try {
+      assert.equal(f.record.stage, "unknown-possibly-live");
+      assert.deepEqual(f.record.handle, f.handle);
+      assert.notEqual(f.record.cleanupConfirmed, true);
+      assert.deepEqual(restartCandidates(await f.operations.list()), [{ handle: f.handle, operationId: f.operationId }]);
+    } finally {
+      await f.cleanup();
+    }
+  });
+}
+
+// Drives apply alone: the provider call bumps the epoch, as a shutdown or a stop would, so the
+// allocation it returns is superseded and closed by apply itself.
+async function supersededApply(close: (route: Route) => Promise<Route>) {
+  const handle: Handle = { generation: 3, id: "late-route", kind: "attached" };
+  const route: Route = { ...seed, handle, ownership: "gozar-owned" };
+  assert.ok(route.published, "the fixture allocation is published");
+  const service = new ReachabilityService(
+    {
+      closeRoute: async () => close(route),
+      expose: async () => {
+        (service as unknown as { epoch: number }).epoch += 1;
+        return route;
+      },
+      watchRoutes: async function* () {},
+    } as never,
+    {
+      acknowledgeDisconnect: async () => undefined,
+      identity: { bootId: "b", instanceId: "i" },
+      query: { home: "fixture-home" },
+    } as never
+  );
+  const inner = service as unknown as { reviews: Map<string, unknown>; lifecycle: unknown; routes: Map<string, Route> };
+  inner.reviews.set("rev-1", {
+    candidate: {
+      candidateToken: "tok",
+      configuration: { revision: "r1", values: {} },
+      consent: { consentFactsDigest: "consent-v1:abc", disclosures: {}, facts: [], scope: { kind: "route" } },
+      consentFactsDigest: "consent-v1:abc",
+      disclosure: { revision: "1" },
+      expiresAt: "2999-01-01T00:00:00.000Z",
+      ownership: "gozar-owned",
+      providerId: "svc",
+    },
+    draftId: "d1",
+    id: "rev-1",
+    query: { target: "127.0.0.1:1", usage: { kind: "attached" } },
+  });
+  inner.lifecycle = { ...initialLifecycle(), approvalIdentity: "rev-1", phase: "review" };
+  const failure = await service
+    .apply("op-1", "rev-1", { acknowledgeDisconnect: true, consentFactsDigest: "consent-v1:abc", kind: "route" })
+    .then(
+      () => assert.fail("a superseded start must fail"),
+      (error: unknown) => error as { code: string; cause?: unknown; route?: Route }
+    );
+  return { failure, handle, inner };
+}
+
+test("a thrown close of a superseded start carries the withdrawn view of the exact allocation, never the published one", async () => {
+  const cause = new Error("close failed");
+  const { failure, handle, inner } = await supersededApply(() => Promise.reject(cause));
+  assert.equal(failure.code, "operation_superseded");
+  assert.equal(failure.cause, cause, "the cause is carried, not replaced");
+  assert.deepEqual(failure.route?.handle, handle);
+  assert.equal(failure.route?.published, null, "stop withdrew publication before the close");
+  assert.notEqual(failure.route?.cleanup.state, "confirmed", "a thrown close is an unknown outcome");
+  assert.equal(inner.routes.get(handle.id)?.published, null, "the service does not reinstate the published allocation");
+  assert.notEqual(inner.routes.get(handle.id)?.cleanup.state, "confirmed");
+});
+
+test("a thrown close never lets another handle's route, or a claim of confirmation, stand for the allocation", async () => {
+  const other = { ...seed, handle: wrongHandle };
+  const foreign = await supersededApply(() => Promise.reject(Object.assign(new Error("x"), { route: other })));
+  assert.deepEqual(foreign.failure.route?.handle, foreign.handle);
+  const claimed = await supersededApply((route) =>
+    Promise.reject(
+      Object.assign(new Error("x"), { route: { ...route, cleanup: { nextAction: null, state: "confirmed" } } })
+    )
+  );
+  assert.deepEqual(claimed.failure.route?.handle, claimed.handle);
+  assert.notEqual(claimed.failure.route?.cleanup.state, "confirmed");
+  assert.notEqual(claimed.inner.routes.get(claimed.handle.id)?.cleanup.state, "confirmed");
+});
+
+// A close reply that names another handle says nothing about the allocation, even if it claims
+// confirmation: it is installed nowhere, and the allocation stays owed.
+const foreignConfirmed = (): Promise<Route> =>
+  Promise.resolve({ ...seed, handle: wrongHandle, cleanup: { nextAction: null, state: "confirmed" }, published: null });
+
+test("a confirmed close reply for another handle leaves the late allocation an unconfirmed restart candidate", { timeout: 5000 }, async () => {
+  const f = await lateAllocation("attached", foreignConfirmed);
+  try {
+    assert.equal(f.record.stage, "unknown-possibly-live");
+    assert.deepEqual(f.record.handle, f.handle);
+    assert.notEqual(f.record.cleanupConfirmed, true);
+    assert.deepEqual(restartCandidates(await f.operations.list()), [{ handle: f.handle, operationId: f.operationId }]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a confirmed close reply for another handle is not installed as the allocation's view", async () => {
+  const { failure, handle, inner } = await supersededApply(foreignConfirmed);
+  assert.equal(failure.code, "operation_superseded");
+  assert.deepEqual(failure.route?.handle, handle, "the failure still carries the owed allocation");
+  assert.notEqual(failure.route?.cleanup.state, "confirmed");
+  const view = inner.routes.get(handle.id);
+  assert.deepEqual(view?.handle, handle, "the in-memory view was not replaced by the foreign reply");
+  assert.notEqual(view?.cleanup.state, "confirmed");
+  assert.equal(view?.published, null);
+});
+
+// Malformed evidence on a same-handle route must not make the failure itself throw.
+const malformedViews: { name: string; view: (route: Route) => unknown }[] = [
+  { name: "a throwing cleanup state", view: (route) => ({ handle: route.handle, cleanup: { get state(): string { throw new Error("boom"); } } }) },
+  { name: "a throwing cleanup", view: (route) => ({ handle: route.handle, get cleanup(): unknown { throw new Error("boom"); } }) },
+  { name: "a non-object cleanup", view: (route) => ({ handle: route.handle, cleanup: 7 }) },
+  { name: "a throwing handle", view: () => ({ get handle(): unknown { throw new Error("boom"); }, cleanup: { state: "unconfirmed" } }) },
+  {
+    name: "a handle that throws after its first read",
+    view: (route) => {
+      let reads = 0;
+      return {
+        get handle(): unknown {
+          if (++reads > 1) throw new Error("boom");
+          return route.handle;
+        },
+        cleanup: { state: "unconfirmed" },
+      };
+    },
+  },
+  {
+    name: "a cleanup that throws after its first read",
+    view: (route) => {
+      let reads = 0;
+      return {
+        handle: route.handle,
+        get cleanup(): unknown {
+          if (++reads > 1) throw new Error("boom");
+          return { state: "unconfirmed" };
+        },
+      };
+    },
+  },
+];
+for (const { name, view } of malformedViews) {
+  test(`a same-handle cause with ${name} still yields the fresh error with the exact handle`, async () => {
+    const { failure, handle } = await supersededApply((route) =>
+      Promise.reject(Object.assign(new Error("close failed"), { route: view(route) }))
+    );
+    assert.equal(failure.code, "operation_superseded");
+    assert.ok(failure.cause instanceof Error);
+    assert.deepEqual(failure.route?.handle, handle);
+    assert.equal(failure.route?.published, null);
+    assert.notEqual(failure.route?.cleanup.state, "confirmed");
+  });
+}
+
+test("the failure log carries a bounded summary of the close error's cause, never its message", { timeout: 5000 }, async () => {
+  const lines: string[] = [];
+  const spy = mock.method(console, "error", (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  });
+  let f: Awaited<ReturnType<typeof lateAllocation>> | undefined;
+  try {
+    f = await lateAllocation("attached", () =>
+      Promise.reject(Object.assign(new Error("secret provider detail"), { code: "provider_unavailable" }))
+    );
+  } finally {
+    spy.mock.restore();
+    await f?.cleanup();
+  }
+  const line = lines.find((entry) => entry.includes("failed: code=")) ?? "";
+  assert.match(line, /cause=Error cause_code=provider_unavailable/);
+  assert.ok(!line.includes("secret provider detail"), "the cause's message is not logged");
+});

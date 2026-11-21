@@ -9,7 +9,6 @@ import {
 	readdir,
 	readFile,
 	rm,
-	statfs,
 	writeFile,
 } from "node:fs/promises";
 import http from "node:http";
@@ -18,6 +17,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createGozar, createServiceVerifier } from "@tnunamak/gozar";
+import { requireDiskFloor } from "./disk-floor.mjs";
 import { FixtureSecretBackend } from "../../reference-implementation/test/fixtures/reachability/secret-backend.ts";
 import { createEffectFixtures } from "./effect-fixtures.ts";
 import {
@@ -44,11 +44,7 @@ const capabilities = Object.fromEntries(
 const safeError = (error) =>
 	typeof error?.code === "string" ? error.code : "unclassified_failure";
 async function requireBudget() {
-	const disk = await statfs(process.cwd());
-	if (disk.bavail * disk.bsize < 105_000_000_000)
-		throw Object.assign(new Error("NOT RUN (disk): need 105 GB free"), {
-			code: "disk_floor",
-		});
+	await requireDiskFloor();
 	assert.ok(output, "Set GOZAR_COVERAGE_MATRIX to an external evidence path");
 }
 async function persist() {

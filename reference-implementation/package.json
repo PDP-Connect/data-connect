@@ -36,6 +36,9 @@
     "./operations/rs-protected-resource-metadata": "./operations/rs-protected-resource-metadata/index.ts",
     "./operations/ref-dataset-summary": "./operations/ref-dataset-summary/index.ts",
     "./reachability-projection": "./server/reachability/projection.ts",
+    "./reachability-console-proof": "./server/reachability/console-proof.ts",
+    "./reachability-service-proof": "./server/reachability/service-proof.ts",
+    "./reachability-service-challenge": "./server/reachability/service-challenge.ts",
     "./reachability-host-settings": "./server/reachability/host-settings.ts"
   },
   "bin": {
@@ -73,6 +76,7 @@
   "dependencies": {
     "@fastify/formbody": "^9.0.1",
     "@huggingface/transformers": "^4.3.1",
+    "@ngrok/ngrok": "1.7.0",
     "@opendatalabs/data-connectors-tools": "github:PDP-Connect/data-connectors#06ed284e1b7ee92b2ebab6bc8ef25f0ae392f84a",
     "@pdpp/collector-runtime": "*",
     "@pdpp/connector-protocol": "*",
@@ -80,6 +84,7 @@
     "@pdpp/mcp-server": "*",
     "@pdpp/reference-contract": "file:./vendor/pdpp-reference-contract-0.1.0.tgz",
     "@streamparser/json": "^0.0.26",
+    "@tnunamak/gozar": "0.5.3",
     "@types/pg": "8.23.1",
     "ajv": "^8.20.0",
     "better-sqlite3": "^13.0.3",

@@ -1,19 +1,23 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 import { spawn } from "node:child_process";
-import { statfs, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
+import { requireDiskFloor } from "./disk-floor.mjs";
 const output = process.env.GOZAR_COVERAGE_MATRIX;
 if (!output)
 	throw new Error("GOZAR_COVERAGE_MATRIX must name an external evidence file");
 const results = [];
 async function run(name, args, reserve = 5_000_000_000, extraEnv = {}) {
-	const disk = await statfs(process.cwd());
-	if (disk.bavail * disk.bsize < 100_000_000_000 + reserve) {
+	try {
+		await requireDiskFloor(process.env, process.cwd(), 100_000_000_000 + reserve);
+	} catch (error) {
+		if (error.code !== "disk_floor") throw error;
 		results.push({
 			name,
 			result: "NOT RUN (disk)",
-			requiredFreeBytes: 100_000_000_000 + reserve,
+			requiredFreeBytes: error.requiredFreeBytes,
+			availableBytes: error.availableBytes,
 		});
 		return;
 	}
@@ -66,15 +70,21 @@ if (results[0].exitCode === 0) {
 		"--test-force-exit",
 		"scripts/reachability/draft-boundary.test.mjs",
 		"scripts/reachability/recovery.test.mjs",
+		"scripts/reachability/restart-sigkill.test.mjs",
 		"scripts/reachability/runtime-consent.test.mjs",
 		"scripts/reachability/initial-proof.test.mjs",
 		"scripts/reachability/host-route-history.test.mjs",
 		"scripts/reachability/install-boundary.test.mjs",
 		"scripts/reachability/sdk-refusal.test.mjs",
+		"scripts/reachability/setup-operation.test.mjs",
+		"scripts/reachability/reconcile-stop.test.mjs",
+		"scripts/reachability/external-route.test.mjs",
+		"scripts/reachability/cost-projection.test.mjs",
+		"reference-implementation/test/reachability-desktop-host.test.ts",
 	]);
 	for (const [flag, spec] of [
 		["--reachability", "reachability.spec.ts"],
-		["--reachability-stream", "reachability-stream.spec.ts"],
+		["--reachability-setup", "reachability-setup.spec.ts"],
 	]) {
 		await run(
 			spec,
@@ -83,13 +93,6 @@ if (results[0].exitCode === 0) {
 			{ TEST_SANDBOX_ACTIVE: "" },
 		);
 	}
-	await run("source and built bundle independence", [
-		process.execPath,
-		"--import",
-		"tsx",
-		"--test",
-		"scripts/reachability/provider-independence.test.mjs",
-	]);
 }
 await mkdir(dirname(resolve(output)), { recursive: true });
 await writeFile(

@@ -49,6 +49,7 @@ test("pending initial stream proof cannot publish through concurrent status or w
 		const inventory = await harness.gozar.listProviders({
 			home,
 			owner: "fixture-owner",
+			refresh: true,
 		});
 		const provider = inventory.providers.find(
 			(p) =>

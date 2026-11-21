@@ -12,7 +12,7 @@
 use crate::commands::process_supervisor::{
     allocate_loopback_port, loopback_port_range_is_free, EnvironmentSpec, EventSink,
     LifecycleState, ProcessLifecycleEvent, ProcessSpec, Readiness, RestartPolicy, StopPolicy,
-    Supervisor, SupervisorError, SupervisorHandle,
+    Supervisor, SupervisorError, SupervisorHandle, DESKTOP_PROCESS_GROUP_GRACE,
 };
 use crate::commands::{
     attach_reference_server, login_reference_server_with_password,
@@ -104,13 +104,6 @@ const OWNER_PASSWORD_SOURCE_ENV: &str = "PDPP_OWNER_PASSWORD_SOURCE";
 const OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED: &str = "desktop_generated";
 const OWNER_CREDENTIAL_REVEAL_PROOF_ENV: &str = "PDPP_OWNER_CREDENTIAL_REVEAL_PROOF";
 const OWNER_CREDENTIAL_REVEAL_COOKIE: &str = "pdpp_owner_credential_reveal";
-/// Set to "1" or "0" alongside `MANAGED_DESKTOP_HOST_ENV`, reporting whether
-/// `cloudflared` is on `PATH` at RS-spawn time -- see
-/// `remote_access_cloudflare::cloudflared_binary_is_installed`'s doc comment
-/// for why this must be knowable before the owner commits to the Cloudflare
-/// Tunnel option, not discovered only as a spawn failure after they submit a
-/// token.
-const CLOUDFLARED_BINARY_PRESENT_ENV: &str = "PDPP_CLOUDFLARED_BINARY_PRESENT";
 const UNIFIED_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -587,10 +580,8 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Unified mode does not build the legacy window, which is the only consumer
-/// of `vana://` links. Record each one received so a dropped link shows in
-/// the log instead of vanishing. Whether unified mode should serve these
-/// links is an open product decision; this boundary only reports.
+/// No URL scheme is registered, so the OS should not deliver links. Record any
+/// that arrive so a dropped link shows in the log instead of vanishing.
 fn report_unhandled_deep_links(app: &tauri::App) {
     use tauri_plugin_deep_link::DeepLinkExt;
     if let Ok(Some(urls)) = app.deep_link().get_current() {
@@ -840,7 +831,7 @@ fn ri_process_spec(
         },
         process_group: true,
         stop: StopPolicy {
-            grace: Duration::from_secs(5),
+            grace: DESKTOP_PROCESS_GROUP_GRACE,
             escalate: Duration::from_secs(3),
             total: Duration::from_secs(8),
         },
@@ -1012,22 +1003,11 @@ fn ri_environment(
         );
     }
     env.extend(managed_desktop_environment(data_dir, owner_password_source));
-    if remote_access_configuration_supported() {
-        // The owner needs to know whether `cloudflared` is already installed
-        // BEFORE they pick the Cloudflare Tunnel option and paste a token --
-        // see `cloudflared_binary_is_installed`'s doc comment. Checked here,
-        // at the same RS-spawn boundary `MANAGED_DESKTOP_HOST_ENV` already
-        // uses, so `inspectCloudflareTunnel` (the RS-side TypeScript mirror)
-        // can fold it into the same capability probe the console already
-        // polls before rendering the provider picker.
-        env.insert(
-            OsString::from(CLOUDFLARED_BINARY_PRESENT_ENV),
-            OsString::from(if crate::remote_access_cloudflare::cloudflared_binary_is_installed() {
-                "1"
-            } else {
-                "0"
-            }),
-        );
+    // Remote access providers find their programs (`cloudflared`, `ssh`,
+    // `tailscale`) on `PATH` from inside the RI, so a cleared environment
+    // without it reports every installed program as missing.
+    if let Some(path) = std::env::var_os("PATH") {
+        env.insert(OsString::from("PATH"), path);
     }
     env
 }
@@ -3326,6 +3306,10 @@ fn console_path_before_restart(app: &AppHandle) -> Option<String> {
         path_and_query.push('?');
         path_and_query.push_str(query);
     }
+    if let Some(fragment) = url.fragment() {
+        path_and_query.push('#');
+        path_and_query.push_str(fragment);
+    }
     match ConsolePathAndQuery::parse(&path_and_query) {
         Some(_) => Some(path_and_query),
         None => {
@@ -4452,7 +4436,7 @@ mod navigation_log_redaction_tests {
 
     #[test]
     fn all_navigation_notices_omit_credentials() {
-        for scheme in ["https", "http", "vana"] {
+        for scheme in ["https", "http"] {
             let url = tauri::Url::parse(&format!(
                 "{scheme}://USER_SENTINEL:PASSWORD_SENTINEL@example.test/consent?code=QUERY_SENTINEL#FRAGMENT_SENTINEL"
             )).unwrap();
@@ -4528,20 +4512,28 @@ fn console_url_preserving_path(
         return console_origin.clone();
     };
     let mut url = console_origin.clone();
+    // A fragment (for example `#remote-access`) is carried too, so a restart
+    // returns to the same place on the page. Like the query, it is split off
+    // first: `set_path` would percent-encode a literal `#` into the path.
+    let (path_and_query, fragment) = match path_and_query.0.split_once('#') {
+        Some((before, fragment)) => (before, Some(fragment)),
+        None => (path_and_query.0.as_str(), None),
+    };
     // `set_path` alone would percent-encode a literal `?` in the query
     // string into the path segment; splitting query off first keeps it in
     // `Url`'s own query slot, which is what `Url`'s output rendering and
     // every consumer of this URL (the webview, `is_console_origin`) expects.
-    match path_and_query.0.split_once('?') {
+    match path_and_query.split_once('?') {
         Some((path, query)) => {
             url.set_path(path);
             url.set_query(Some(query));
         }
         None => {
-            url.set_path(&path_and_query.0);
+            url.set_path(path_and_query);
             url.set_query(None);
         }
     }
+    url.set_fragment(fragment);
     url
 }
 
@@ -4788,11 +4780,11 @@ mod tests {
 
     #[test]
     fn unhandled_deep_link_notice_omits_the_grant_secret() {
-        let url: tauri::Url = "vana://connect?sessionId=s-1&secret=hunter2&scopes=a"
+        let url: tauri::Url = "example://connect?sessionId=s-1&secret=hunter2&scopes=a"
             .parse()
             .expect("url");
         let notice = unhandled_deep_link_notice(&url);
-        assert!(notice.contains("vana://connect"), "{notice}");
+        assert!(notice.contains("example://connect"), "{notice}");
         assert!(!notice.contains("hunter2") && !notice.contains("s-1"), "{notice}");
     }
 
@@ -6848,6 +6840,24 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
+    fn ri_environment_carries_the_desktop_path() {
+        let environment = ri_environment(
+            Path::new("/tmp/unified"),
+            "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test",
+            false,
+        );
+
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("PATH")),
+            std::env::var_os("PATH").as_ref()
+        );
+    }
+
+    #[test]
     fn only_the_recovery_startup_asks_the_ri_to_revoke_owner_sessions() {
         let environment = |revoke| {
             ri_environment(
@@ -7287,7 +7297,7 @@ setInterval(() => {}, 1000);
 
         let generated = "generated-owner-password-0928";
         let before = run_ri_driver(&ri_root, &data_dir, generated, "turn-on-remote-access", &[]);
-        assert_eq!(before["status"], 409, "{before}");
+        assert_eq!(before["status"], 200, "{before}");
         assert_eq!(before["code"], "owner_password_required", "{before}");
 
         // The console's "set a password first" step, then the native window.
@@ -7302,14 +7312,14 @@ setInterval(() => {}, 1000);
             serde_json::json!({ "password": chosen }),
         )
         .expect("the window saves the password");
-        // First-time setup does not restart now or revoke: the remote-access
-        // save that follows restarts the stack through the config watcher.
+        // First-time setup restarts now, so the server reads the new password
+        // at once, and revokes nothing: no remote device can be signed in.
         let restart: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(data_dir.join("owner-password-stack-restart-request.json"))
                 .expect("restart request"),
         )
         .expect("restart request is JSON");
-        assert!(restart["notBeforeUnixMs"].is_u64(), "{restart}");
+        assert_eq!(restart["notBeforeUnixMs"], serde_json::Value::Null, "{restart}");
         assert_eq!(restart["revokeSessions"], serde_json::Value::Null, "{restart}");
 
         // The next start reads the saved password, as `load_bootstrap_secrets`
@@ -7321,6 +7331,7 @@ setInterval(() => {}, 1000);
         assert_eq!(saved, chosen);
         let after = run_ri_driver(&ri_root, &data_dir, &saved, "turn-on-remote-access", &[]);
         assert_eq!(after["status"], 200, "{after}");
+        assert_eq!(after["code"], serde_json::Value::Null, "{after}");
         println!("REAL-RI REMOTE-ACCESS GATE TEST RAN");
     }
 
@@ -7459,7 +7470,7 @@ setInterval(() => {}, 1000);
         assert_eq!(
             restart["notBeforeUnixMs"],
             serde_json::Value::Null,
-            "a change restarts now, not after the first-setup delay: {restart}"
+            "a change restarts now: {restart}"
         );
         println!("REAL-RI PASSWORD CHANGE TEST RAN");
     }
@@ -8407,14 +8418,112 @@ setInterval(() => {}, 1000);
     fn the_console_webview_sends_the_session_and_reveal_cookies() {
         use gtk::prelude::*;
         use std::io::{BufRead, BufReader, Write};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use std::time::Instant;
         use wry::WebViewBuilderExtUnix;
+
+        // Diagnostic only: observe synchronous stalls without changing the GTK pump.
+        const PHASES: &[&str] = &[
+            "START",
+            "GTK_BEGIN",
+            "GTK_END",
+            "WINDOW_BEGIN",
+            "WINDOW_END",
+            "BUILD_BEGIN",
+            "BUILD_END",
+            "SHOW_BEGIN",
+            "SHOW_END",
+            "COOKIE_0_BEGIN",
+            "COOKIE_0_END",
+            "COOKIE_1_BEGIN",
+            "COOKIE_1_END",
+            "NAVIGATE_BEGIN",
+            "NAVIGATE_END",
+            "WAIT_ENTER",
+            "DRAIN_BEGIN",
+            "ITER_BEGIN",
+            "ITER_END",
+            "DRAIN_END",
+            "ASSERT_BEGIN",
+            "ASSERT_END",
+            "DROP_WEBVIEW_BEGIN",
+            "DROP_WEBVIEW_END",
+            "DROP_WINDOW_BEGIN",
+            "DROP_WINDOW_END",
+            "TEST_EXIT",
+        ];
+        fn log_phase(start: Instant, name: &str) {
+            let mut out = std::io::stderr().lock();
+            let _ = writeln!(
+                out,
+                "WEBKITGTK PHASE {} elapsed_ms={}",
+                name,
+                start.elapsed().as_millis()
+            );
+            let _ = out.flush();
+        }
+        struct Watchdog {
+            stop: std::sync::mpsc::Sender<()>,
+            thread: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for Watchdog {
+            fn drop(&mut self) {
+                let _ = self.stop.send(());
+                if let Some(thread) = self.thread.take() {
+                    let _ = thread.join();
+                }
+            }
+        }
+        let started = Instant::now();
+        let phase = Arc::new(AtomicUsize::new(0));
+        let iterations = Arc::new(AtomicUsize::new(0));
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let watched_phase = phase.clone();
+        let watched_iterations = iterations.clone();
+        let watchdog = Watchdog {
+            stop,
+            thread: Some(std::thread::spawn(move || {
+                while matches!(
+                    stopped.recv_timeout(Duration::from_secs(1)),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let mut out = std::io::stderr().lock();
+                    let _ = writeln!(
+                        out,
+                        "WEBKITGTK PROGRESS elapsed_ms={} phase={} completed_iterations={}",
+                        started.elapsed().as_millis(),
+                        PHASES[watched_phase.load(Ordering::SeqCst)],
+                        watched_iterations.load(Ordering::SeqCst)
+                    );
+                    let _ = out.flush();
+                }
+            })),
+        };
+        let mark = |id: usize| {
+            phase.store(id, Ordering::SeqCst);
+            log_phase(started, PHASES[id]);
+        };
+        mark(0);
+        eprintln!(
+            "WEBKITGTK PID pid={} thread={:?}",
+            std::process::id(),
+            std::thread::current().name()
+        );
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("local addr").port();
         let (seen, requests) = std::sync::mpsc::channel::<String>();
         std::thread::spawn(move || {
+            let mut logged = [false; 3];
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
+                if !logged[0] {
+                    log_phase(started, "SERVER_ACCEPT");
+                    logged[0] = true;
+                }
                 let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
                 let mut request_line = String::new();
                 let _ = reader.read_line(&mut request_line);
@@ -8434,7 +8543,15 @@ setInterval(() => {}, 1000);
                         }
                     }
                 }
+                if !logged[1] {
+                    log_phase(started, "SERVER_REQUEST_COMPLETE");
+                    logged[1] = true;
+                }
                 if request_line.starts_with("GET /settings ") {
+                    if !logged[2] {
+                        log_phase(started, "SERVER_SETTINGS_HEADER_OBSERVED");
+                        logged[2] = true;
+                    }
                     let _ = seen.send(cookie);
                 }
                 let body = "<html><body>console</body></html>";
@@ -8446,28 +8563,57 @@ setInterval(() => {}, 1000);
             }
         });
 
+        mark(1);
         gtk::init().expect("GTK needs a display: run under xvfb-run");
+        mark(2);
+        mark(3);
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        mark(4);
+        mark(5);
         let webview = wry::WebViewBuilder::new()
             .with_url("about:blank")
             .build_gtk(&window)
             .expect("build the webview");
+        mark(6);
+        mark(7);
         window.show_all();
+        mark(8);
         let url: tauri::Url = format!("http://127.0.0.1:{port}/").parse().expect("url");
-        for cookie in [
+        for (index, cookie) in [
             owner_session_cookie(&url, "session-value").expect("session cookie"),
             owner_credential_reveal_cookie(&url, "reveal-value").expect("reveal cookie"),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            mark(9 + index * 2);
             webview.set_cookie(&cookie).expect("set cookie");
+            mark(10 + index * 2);
         }
+        mark(13);
         webview
             .load_url(&format!("http://127.0.0.1:{port}/settings"))
             .expect("load the console");
+        mark(14);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        mark(15);
+        let mut first_drain = true;
         let cookie = loop {
+            phase.store(16, Ordering::SeqCst);
+            if first_drain {
+                log_phase(started, "DRAIN_BEGIN");
+            }
             while gtk::events_pending() {
+                phase.store(17, Ordering::SeqCst);
                 gtk::main_iteration_do(false);
+                iterations.fetch_add(1, Ordering::SeqCst);
+                phase.store(18, Ordering::SeqCst);
+            }
+            phase.store(19, Ordering::SeqCst);
+            if first_drain {
+                log_phase(started, "DRAIN_END");
+                first_drain = false;
             }
             if let Ok(cookie) = requests.try_recv() {
                 break cookie;
@@ -8478,7 +8624,7 @@ setInterval(() => {}, 1000);
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        println!("WEBKITGTK COOKIE HEADER: {cookie}");
+        mark(20);
         let pairs: Vec<&str> = cookie.split("; ").collect();
         assert!(
             pairs.contains(&"pdpp_owner_session=session-value"),
@@ -8488,7 +8634,17 @@ setInterval(() => {}, 1000);
             pairs.contains(&format!("{OWNER_CREDENTIAL_REVEAL_COOKIE}=reveal-value").as_str()),
             "the reveal cookie was not sent: {cookie:?}"
         );
+        mark(21);
+        mark(22);
+        drop(webview);
+        mark(23);
+        mark(24);
+        drop(window);
+        mark(25);
+        drop(watchdog);
+        mark(26);
         println!("WEBKITGTK COOKIE TEST RAN");
+        std::io::stdout().flush().expect("flush RAN marker");
     }
 
     #[test]
@@ -8558,6 +8714,22 @@ setInterval(() => {}, 1000);
         assert_eq!(result.host_str(), Some("127.0.0.1"));
         assert_eq!(result.port(), Some(9999));
         assert_eq!(result.path(), "/settings");
+    }
+
+    /// A fragment survives a restart too, so the password flow returns to
+    /// `/settings#remote-access` and not to the top of the page. It stays out
+    /// of the path segment.
+    #[test]
+    fn console_url_preserving_path_keeps_the_fragment() {
+        let new_origin: tauri::Url = "http://127.0.0.1:9999/".parse().expect("new origin");
+        let result = console_url_preserving_path(&new_origin, Some("/settings#remote-access"));
+        assert_eq!(result.host_str(), Some("127.0.0.1"));
+        assert_eq!(result.path(), "/settings");
+        assert_eq!(result.fragment(), Some("remote-access"));
+        let with_query = console_url_preserving_path(&new_origin, Some("/settings?a=1#remote-access"));
+        assert_eq!(with_query.path(), "/settings");
+        assert_eq!(with_query.query(), Some("a=1"));
+        assert_eq!(with_query.fragment(), Some("remote-access"));
     }
 
     /// Query strings survive too, and are kept out of the path segment

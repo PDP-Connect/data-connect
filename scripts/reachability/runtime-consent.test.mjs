@@ -6,6 +6,80 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { createPreparedFixture } from "./prepared-fixture.mjs";
 
+test("fresh owner review discloses the observed positive paid rate without starting a route", {
+	timeout: 30000,
+}, async () => {
+	const fixture = await createPreparedFixture(undefined, { runtimeObservations: true });
+	try {
+		const starts = await fixture.startCount();
+		await fixture.registry.setRuntimeCost("paid", 125);
+		const fresh = await fixture.api.call(`/drafts/${fixture.draftId}/review`, { usage: "attached" });
+		assert.deepEqual(fresh.candidate.consent.disclosures.cost, {
+			kind: "paid",
+			summary: "Fixture paid rate",
+			amount: 125,
+			currency: "USD",
+			period: "month",
+		});
+		assert.equal(await fixture.startCount(), starts, "Review must not start the synthetic route");
+	} finally {
+		await fixture.close();
+	}
+});
+
+test("a runtime cost that turns paid after a free review refuses the stale approval and starts the fresh paid review's route", {
+	timeout: 60000,
+}, async () => {
+	const fixture = await createPreparedFixture(undefined, { runtimeObservations: true });
+	const settle = async (operationId) => {
+		const deadline = Date.now() + 20000;
+		let state;
+		do {
+			state = await fixture.api.call(`/operations/${operationId}`);
+			if (state.stage !== "applying") return state;
+			await new Promise(resolve => setTimeout(resolve, 20));
+		} while (Date.now() < deadline);
+		return state;
+	};
+	try {
+		const free = await fixture.api.call(`/drafts/${fixture.draftId}/review`, { usage: "attached" });
+		assert.deepEqual(free.candidate.consent.disclosures.cost, { kind: "free", summary: "Fixture free rate" });
+		const starts = await fixture.startCount();
+		await fixture.registry.setRuntimeCost("paid", 125);
+		const stale = await fixture.api.call("/operations", {
+			reviewId: free.id,
+			kind: "route",
+			consentFactsDigest: free.candidate.consentFactsDigest,
+			acknowledgeDisconnect: true,
+		});
+		const refused = await settle(stale.operationId);
+		assert.equal(refused.failureCode, "consent_mismatch");
+		assert.equal(refused.stage, "settled");
+		assert.equal(refused.recovery, null, "A refusal that created nothing owes no stop");
+		assert.equal(await fixture.startCount(), starts, "An approval from the free review must not start a route");
+		const fresh = await fixture.api.call(`/drafts/${fixture.draftId}/review`, { usage: "attached" });
+		assert.deepEqual(fresh.candidate.consent.disclosures.cost, {
+			kind: "paid",
+			summary: "Fixture paid rate",
+			amount: 125,
+			currency: "USD",
+			period: "month",
+		});
+		const paid = await fixture.api.call("/operations", {
+			reviewId: fresh.id,
+			kind: "route",
+			consentFactsDigest: fresh.candidate.consentFactsDigest,
+			acknowledgeDisconnect: true,
+		});
+		const settled = await settle(paid.operationId);
+		assert.equal(settled.stage, "settled");
+		assert.equal(settled.failureCode, null);
+		assert.equal(await fixture.startCount(), starts + 1, "The fresh paid review must start exactly one route");
+	} finally {
+		await fixture.close();
+	}
+});
+
 test("runtime consent drift withdraws publication, and initial-only proof offers only stop", {
 	timeout: 60000,
 }, async () => {

@@ -3,6 +3,7 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createOwnerLoginRateLimiter, type OwnerLoginRateLimitRequest } from "./owner-login-rate-limit.ts";
+import { isBlockedOwnerPassword, OWNER_PASSWORD_TOO_COMMON_MESSAGE } from "./owner-password-blocklist.ts";
 import { createOwnerPasswordVerifier } from "./owner-password-verifier.ts";
 import type { OwnerPasswordVerifierStore } from "./stores/owner-password-verifier-store.ts";
 
@@ -77,6 +78,11 @@ export function mountOwnerSetupRoutes(
     }
     if (Array.from(password).length < 15) {
       res.status(400).send("Password must contain at least 15 characters.");
+      return;
+    }
+
+    if (isBlockedOwnerPassword(password)) {
+      res.status(400).send(OWNER_PASSWORD_TOO_COMMON_MESSAGE);
       return;
     }
 

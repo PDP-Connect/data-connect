@@ -24,6 +24,8 @@ const required = [
 	"discardSecret",
 	"catalogRoutes",
 	"runSetupAction",
+	"readSetupOperation",
+	"cancelSetupOperation",
 	"expose",
 	"ensureRoute",
 	"routeStatus",

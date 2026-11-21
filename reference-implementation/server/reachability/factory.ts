@@ -4,6 +4,7 @@ import type { GozarOptions as EmbeddingFactoryOptions } from "@tnunamak/gozar";
 
 type EmbeddingApi = ReturnType<typeof import("@tnunamak/gozar").createGozar>;
 
+import { bundledRuntimeModules } from "./runtime-modules.ts";
 import { ReachabilityError } from "./approvals.ts";
 import { type HostPolicy, ReachabilityService } from "./service.ts";
 
@@ -11,13 +12,19 @@ import { type HostPolicy, ReachabilityService } from "./service.ts";
 // Do not call this with a cached app/factory boot ID after controller replacement.
 export async function createReachabilityService(
   options: EmbeddingFactoryOptions,
-  host: HostPolicy
+  host: Omit<HostPolicy, "identity" | "hostCapabilities">
 ): Promise<ReachabilityService> {
   const { createGozar } = await import("@tnunamak/gozar");
   if (!(options.identity && options.secretBackend && options.hostCapabilities)) {
     throw new ReachabilityError("host_configuration_required");
   }
-  const api = createGozar(options);
+  let service: ReachabilityService;
+  const api = createGozar({
+    ...options,
+    runtimeModules: { ...bundledRuntimeModules(), ...options.runtimeModules },
+    acknowledgeOrigin: async (request) => service.acknowledgeOrigin(request),
+    originAckTimeoutMs: 10_000,
+  });
   const methods: (keyof EmbeddingApi)[] = [
     "listRoutes",
     "listProviders",
@@ -29,6 +36,8 @@ export async function createReachabilityService(
     "storeSecret",
     "discardSecret",
     "runSetupAction",
+    "readSetupOperation",
+    "cancelSetupOperation",
     "reviewRouteConsent",
     "approveRouteConsent",
     "catalogRoutes",
@@ -41,9 +50,10 @@ export async function createReachabilityService(
   if (methods.some((method) => typeof api[method] !== "function")) {
     throw new ReachabilityError("embedding_contract_unavailable");
   }
-  return new ReachabilityService(api, {
+  service = new ReachabilityService(api, {
     ...host,
     hostCapabilities: options.hostCapabilities,
     identity: options.identity,
   });
+  return service;
 }

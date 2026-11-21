@@ -39,6 +39,8 @@ export function routePresentation(
   const proof = route.verification;
   const subject = proof.subject;
   const expiry = proof.validUntil;
+  // An owner-managed durable route has no expiry to observe. Unknown puts no bound on the route;
+  // proof freshness (validUntil) still guards it. A known expiry in the past blocks.
   const routeExpiry = route.expiresAt;
   const sameSubject =
     current &&
@@ -64,8 +66,7 @@ export function routePresentation(
     Date.parse(proof.checkedAt) <= now &&
     expiry.known &&
     Date.parse(expiry.value) > now &&
-    routeExpiry.known &&
-    Date.parse(routeExpiry.value) > now &&
+    (!routeExpiry.known || Date.parse(routeExpiry.value) > now) &&
     proof.results.every((result) => result.status === "passed") &&
     route.properties.proof.checks.every((check) =>
       proof.results.some((result) => result.check === check && result.status === "passed")
