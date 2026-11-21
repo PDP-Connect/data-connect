@@ -189,7 +189,10 @@ test("an unreadable config store BLOCKS the run: it rejects before any connector
         connectorPath,
         manifest: MINIMAL_MANIFEST as unknown as RuntimeRunConnectorOptions["manifest"],
         onInteraction: null,
-        onProgress: () => undefined,
+        // A diagnostic sink that throws must not replace the typed refusal.
+        onProgress: () => {
+          throw new Error("progress sink failed");
+        },
         ownerSubjectId: "owner-1",
         ownerToken: "test-token",
         persistState: false,

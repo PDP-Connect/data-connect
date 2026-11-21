@@ -261,6 +261,53 @@ test("a malformed active config BLOCKS the run rather than substituting manifest
   );
 });
 
+test("a throwing diagnostic cannot mask the typed refusal or the resolution", async () => {
+  const throwing = () => {
+    throw new Error("diagnostic sink failed");
+  };
+  await assert.rejects(
+    resolveRunConnectorOptions({
+      connectorInstanceId: "cin_slack_1",
+      onDecision: throwing,
+      store: { getActiveRevision: () => Promise.reject(new Error("database is locked")) },
+    }),
+    { code: "connector_run_config_blocked", reason: "store_unreadable" }
+  );
+  await assert.rejects(
+    resolveRunConnectorOptions({
+      connectorInstanceId: "cin_slack_1",
+      onDecision: throwing,
+      store: { getActiveRevision: () => Promise.resolve({ config: ["not-an-object"] } as never) },
+    }),
+    { code: "connector_run_config_blocked", reason: "invalid_active_config" }
+  );
+  assert.equal(
+    await resolveRunConnectorOptions({
+      connectorInstanceId: "cin_slack_1",
+      onDecision: throwing,
+      store: { getActiveRevision: () => Promise.resolve(null) },
+    }),
+    null
+  );
+});
+
+test("a malformed active config is reported as invalid_active_config without its options", async () => {
+  const decisions: RunConfigDecision[] = [];
+  await assert.rejects(
+    resolveRunConnectorOptions({
+      connectorInstanceId: "cin_slack_1",
+      onDecision: (decision) => decisions.push(decision),
+      store: {
+        getActiveRevision: () =>
+          Promise.resolve({ config: ["SECRET_CONFIG_VALUE"], optionKind: "collection_scope", revision: 4 } as never),
+      },
+    }),
+    { code: "connector_run_config_blocked", reason: "invalid_active_config" }
+  );
+  assert.deepEqual(decisions, [{ connectorInstanceId: "cin_slack_1", reason: "invalid_active_config" }]);
+  assert.ok(!JSON.stringify(decisions).includes("SECRET_CONFIG_VALUE"));
+});
+
 test("a confirmed EMPTY config is distinguishable from having no configuration at all", async () => {
   const resolved = await resolveRunConnectorOptions({
     connectorInstanceId: "cin_slack_1",
