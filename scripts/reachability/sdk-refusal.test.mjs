@@ -78,7 +78,7 @@ test(
       primaryFailure,
       cleanupDebtExpected = false
     try {
-      const inventory = await harness.gozar.listProviders({ home, owner })
+      const inventory = await harness.gozar.listProviders({ home, owner, refresh: true })
       const matching = inventory.providers.filter(
         provider =>
           provider.transport === "https" &&
