@@ -138,11 +138,16 @@ function buildRecordProjectionFromRetainedRows(input: {
   let latest: string | null = null;
   for (const row of input.rows) {
     const recordCount = Number(row.record_count || 0);
-    const lastUpdated = row.last_updated || null;
+    const previous = byStream.get(row.stream);
+    const rowUpdated = row.last_updated || null;
+    const previousUpdated = previous?.last_updated ?? null;
+    const lastUpdated = rowUpdated && (!previousUpdated || rowUpdated > previousUpdated)
+      ? rowUpdated
+      : previousUpdated;
     byStream.set(row.stream, {
       freshness: buildFreshness(lastUpdated),
       last_updated: lastUpdated,
-      record_count: recordCount,
+      record_count: (previous?.record_count ?? 0) + recordCount,
     });
     if (lastUpdated && (!latest || lastUpdated > latest)) {
       latest = lastUpdated;
