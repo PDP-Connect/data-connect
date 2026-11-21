@@ -34,6 +34,8 @@ function service(input: {
   status?: (route: RouteView) => RouteView | Promise<RouteView>
   identity?: { bootId: string; instanceId: string }
   recoverAtBoot?: boolean
+  // The desktop host starts with an empty query target and reads the served target from currentTarget.
+  desktopTarget?: boolean
   recoveryRetry?: { timeoutMs?: number; baseDelayMs?: number; maxDelayMs?: number; random?: () => number }
   // When it settles, the watcher reports the route released and ends.
   released?: Promise<RouteView>
@@ -76,6 +78,7 @@ function service(input: {
     hostCapabilities: {},
     identity,
     prepare: async () => undefined,
+    ...(input.desktopTarget ? { currentTarget: async () => TARGET } : {}),
     ...(input.recoverAtBoot ? { recoverAtBoot: true } : {}),
     // Small and deterministic: no test waits on a real backoff.
     recoveryRetry: { baseDelayMs: 1, maxDelayMs: 2, random: () => 1, timeoutMs: 40, ...input.recoveryRetry },
@@ -91,7 +94,7 @@ function service(input: {
         transport: "https" as const,
       },
       schemaVersion: 1 as const,
-      target: TARGET,
+      target: input.desktopTarget ? "" : TARGET,
     },
   }
   return { calls, service: new ReachabilityService(api as never, host as never), watching }
@@ -242,5 +245,49 @@ test("a consent change that lands while a check waits for status wins over that 
   const settled = await checking
   assert.equal(settled.handle.id, verified.handle.id)
   assert.equal(svc.state().lifecycle.phase, "review")
+  svc.closeObservers()
+})
+
+test("a proven route presents as Verified on a host that reads its served target from currentTarget", async () => {
+  const base = scenarios("durable").verified
+  const now = Date.now()
+  const proven: RouteView = {
+    ...base,
+    expiresAt: { known: true as const, value: iso(now + 600_000) },
+    verification: {
+      ...base.verification,
+      checkedAt: iso(now),
+      observedAt: iso(now),
+      validUntil: { known: true as const, value: iso(now + 15_000) },
+    },
+  }
+  // The packaged desktop host builds its query with target "" and answers the real target through currentTarget,
+  // so a label that compares the proof with query.target alone never reads Verified.
+  const { service: svc } = service({ desktopTarget: true, listed: () => [proven] })
+  svc.observeHostConfinement(confined)
+  await svc.reconcileKnownHandle(base.handle, false)
+  assert.equal(svc.state().lifecycle.phase, "verified")
+  assert.equal(svc.presentation(proven).label, "Verified")
+  svc.closeObservers()
+})
+
+test("the same route is not Verified when the host serves a different target", async () => {
+  const base = scenarios("durable").verified
+  const now = Date.now()
+  const proven: RouteView = {
+    ...base,
+    expiresAt: { known: true as const, value: iso(now + 600_000) },
+    verification: {
+      ...base.verification,
+      checkedAt: iso(now),
+      observedAt: iso(now),
+      validUntil: { known: true as const, value: iso(now + 15_000) },
+    },
+  }
+  const moved: RouteView = { ...proven, verification: { ...proven.verification, subject: { ...(proven.verification.subject as NonNullable<RouteView["verification"]["subject"]>), target: "127.0.0.1:9" } } }
+  const { service: svc } = service({ desktopTarget: true, listed: () => [moved] })
+  svc.observeHostConfinement(confined)
+  await svc.reconcileKnownHandle(base.handle, false)
+  assert.equal(svc.presentation(moved).label, "Unpublished")
   svc.closeObservers()
 })

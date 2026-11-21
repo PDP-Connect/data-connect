@@ -931,6 +931,17 @@ export class ReachabilityService {
       this.recoveryPending = false;
     }
   }
+  // The target this process serves now, as the host reports it. The desktop host builds its query with an
+  // empty target and moves it only on a settings apply, so a proof taken against the real target never equals
+  // query.target. A host with no currentTarget, or a read that failed, falls back to query.target (fail closed).
+  private servedTarget: string | null = null;
+  private async observeServedTarget(): Promise<void> {
+    try {
+      this.servedTarget = (await this.host.currentTarget?.()) ?? null;
+    } catch {
+      this.servedTarget = null;
+    }
+  }
   presentation(route: Route) {
     const current = route.origin
       ? {
@@ -938,7 +949,7 @@ export class ReachabilityService {
           handleGeneration: route.handle.generation,
           instanceId: this.host.identity.instanceId,
           origin: route.origin,
-          target: this.host.query.target,
+          target: this.servedTarget ?? this.host.query.target,
         }
       : null;
     return routePresentation(route, current, Date.now(), this.reasons.get(route.handle.id));
@@ -1264,6 +1275,7 @@ export class ReachabilityService {
     this.proofCalls.set(handleKey(route.handle), proofCall);
     try {
       const current = await this.api.routeStatus({ handle: route.handle, home: this.host.query.home });
+      await this.observeServedTarget();
       // A stop, a consent change or another check that settled while this one
       // waited has moved the lifecycle on, so this proof no longer applies.
       if (epoch !== this.lifecycle.epoch || this.lifecycle.stopTombstone || this.lifecycle.phase !== "checking") {
