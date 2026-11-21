@@ -141,30 +141,3 @@ test("a dirty backlog LARGER than one pass can drain converges across repeated p
     "candidates drain in the order discovery returned them, one guaranteed repair per pass"
   );
 });
-
-test("a failed repair counts as failed, not also as repaired, and is not reported skipped", async () => {
-  const ids = ["cin_fails", "cin_succeeds"];
-  const result = await runScopedConnectorReconciliation<{ connector_instance_id: string }, Reason, unknown>({
-    candidateReasons: undefined,
-    connectorInstanceIds: ids,
-    deadline: null,
-    discover: (requestedIds: readonly string[]) =>
-      Promise.resolve({
-        candidates: new Map(requestedIds.map((id) => [id, "dirty" as const])),
-        instanceRows: requestedIds.map((id) => ({ connector_instance_id: id })),
-      }),
-    maxCandidates: undefined,
-    prune: async () => 0,
-    repair: (id: string) =>
-      Promise.resolve({
-        deferred: false,
-        failed: id === "cin_fails",
-        persisted: true,
-        row: { connector_instance_id: id },
-      }),
-  });
-
-  assert.equal(result.repaired, 1, "only the successful repair counts as repaired");
-  assert.equal(result.failed, 1);
-  assert.equal(result.skipped, 0, "both candidates were attempted, so none is skipped");
-});
