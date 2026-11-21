@@ -250,6 +250,30 @@ async function repairSqliteConnector(repairs: readonly PendingRepair[]): Promise
   return recontended ? "recontended" : "completed";
 }
 
+
+async function hasPendingRecordDerivedRepairs(connectorId: string | undefined): Promise<boolean> {
+  const id = connectorId ?? null;
+  // Unlike the work snapshot, this presence query includes future backoff rows.
+  if (isPostgresStorageBackend()) {
+    const result = await postgresQuery<{ present: number }>(
+      "SELECT 1 AS present FROM record_derived_repair_pending WHERE ($1::text IS NULL OR connector_id = $1) LIMIT 1",
+      [id]
+    );
+    return result.rows.length > 0;
+  }
+  return Boolean(getDb()
+    .prepare("SELECT 1 AS present FROM record_derived_repair_pending WHERE (? IS NULL OR connector_id = ?) LIMIT 1")
+    .get<{ present: number }>(id, id));
+}
+
+export async function finishRecordDerivedRepairRound(
+  result: RecordDerivedRepairRoundResult,
+  connectorId: string | undefined,
+  hasPending: (connectorId: string | undefined) => Promise<boolean> = hasPendingRecordDerivedRepairs
+): Promise<RecordDerivedRepairRoundResult> {
+  return { ...result, incomplete: result.incomplete || (await hasPending(connectorId)) };
+}
+
 const repairsInFlight = new Set<string>();
 
 /**
@@ -314,5 +338,5 @@ export async function runRecordDerivedRepairRound(
       for (const key of keys) repairsInFlight.delete(key);
     }
   }
-  return { attempted, completed, failed, incomplete };
+  return finishRecordDerivedRepairRound({ attempted, completed, failed, incomplete }, options.connectorId);
 }
