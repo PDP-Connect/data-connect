@@ -1,13 +1,13 @@
 {
   "artifact_filename": "pdpp-collector-runtime-0.0.1.tgz",
-  "artifact_sha1": "43d0c0f7e5f793ace12e4d9d374ed6bf068a8ae5",
-  "artifact_sha256": "52bfcd1a9deda2a406323deb83218521d785677f35cbcbc145514b9c3cb14244",
-  "artifact_sha512": "63421939a3d2a74c2f60c573d7575f178a2776ccbd85ab0533246228f26bb597ee127bdc2f47bfac2118fa80c51625cbd94145f16e37e45e7f282e5c4012dceb",
-  "connector_protocol_declarations_sha256": "01606ac34df3bd026909b48e8c472e38bbff45e17ddcd58f5af07947c70c1c5c",
-  "connector_protocol_source_inputs_sha256": "f60610dac0ba85ae04a1fb7c8a9468ee44822d4d1e9b03e9a64be368de07a956",
-  "declarations_sha256": "2105cccee39bbe5e7664d39dba01bc81d21fa24a4449ae65477aa5e5a39056f7",
+  "artifact_sha1": "c72802f363e2bc16ba177dca4f92867b94dd3b7b",
+  "artifact_sha256": "c5b022cc348763a34751457dbb4090ffe4c81105261149c0e65df886b7533e15",
+  "artifact_sha512": "01665a7deaf54b444825ba8ede9e0a1fe376cee16f1e24cf3940af4bb7ef12ba3a394bf494e0026d0cfb9df75617924bc9b6726ed97560e1123714db2b751856",
+  "connector_protocol_declarations_sha256": "fba4a4b1b89e0e8770a1d6680e01d90f7ffc44a71fb6c2bde7ad41d7ad1bbcd5",
+  "connector_protocol_source_inputs_sha256": "b5039e6058cb54bb34cfe9f8c46de1d4cd5aa5823a664a08fef05f6254e82a1e",
+  "declarations_sha256": "0280b99d103df452d046165be9dbbdc159eaf3ec09959b44195144a00e81e6e3",
   "metadata_version": 1,
   "package_name": "@pdpp/collector-runtime",
   "package_version": "0.0.1",
-  "source_inputs_sha256": "c13428c49e02309a31ddaf39c7534988b38ac2655b2eaf3cb768baea0bc93c62"
+  "source_inputs_sha256": "0cfd63d21c052a16ba46fe6081a5ff3653d54510bc20388131f740d05f6bd2c6"
 }

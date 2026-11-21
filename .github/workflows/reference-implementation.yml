@@ -158,6 +158,11 @@ jobs:
       # npm's download cache is already restored above, yet `npm ci` still takes
       # about 70 s to rebuild node_modules. Restore the installed tree itself,
       # keyed on the lockfile, and install only on a miss.
+      #
+      # The jobs that use this cache run on ubuntu-24.04, not ubuntu-latest:
+      # Patchright ships no Chromium for Ubuntu 26.04, so an install there
+      # leaves no browser in this tree. The image name is in the key so a tree
+      # saved from a 26.04 run is never restored here.
       - name: Restore installed node_modules
         id: node-modules-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -168,7 +173,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v3-ubuntu24.04-${{ runner.os }}-${{ runner.arch }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-${{ runner.os }}-ubuntu24.04-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
@@ -238,7 +243,7 @@ jobs:
             packages/local-collector/node_modules
             apps/console/node_modules
             ~/.cache/ms-playwright
-          key: node-modules-v3-ubuntu24.04-${{ runner.os }}-${{ runner.arch }}-node24.22.1-${{ hashFiles('package-lock.json') }}
+          key: node-modules-v3-${{ runner.os }}-ubuntu24.04-node24.22.1-${{ hashFiles('package-lock.json') }}
 
       - name: Install dependencies
         if: steps.node-modules-cache.outputs.cache-hit != 'true'
