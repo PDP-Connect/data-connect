@@ -79,6 +79,9 @@ test("stale result cannot satisfy a new request and timeout leaves its command",
 test("failed native result is rejected for that command", async () => {
   await withTempDir(async dir => {
     const store = createAutostartStore(dir, () => undefined, { pollIntervalMs: 5, timeoutMs: 500 });
+    await writeFile(join(dir, "autostart-state.json"), JSON.stringify({
+      enabled: false, error: null, observedAt: new Date().toISOString(), revision: "one",
+    }));
     const request = store.requestChange(true);
     const path = join(dir, "autostart-commands");
     let commandId = "";
@@ -88,7 +91,9 @@ test("failed native result is rejected for that command", async () => {
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     assert.ok(commandId);
+    assert.equal((await store.load()).pending, true);
     await answer(dir, commandId, true, false, "permission denied");
     await assert.rejects(request, /permission denied/);
+    assert.equal((await store.load()).pending, false);
   });
 });
