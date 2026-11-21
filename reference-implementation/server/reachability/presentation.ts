@@ -20,6 +20,13 @@ export function observationText(observation: Observation<unknown>): string {
   return JSON.stringify(observation.value);
 }
 
+// The route's properties list every check the provider can run. Gozar runs the stream (sse) check only when
+// the request needs SSE, and this host requests no protocols, so a missing sse result is not a missing proof.
+// A check that ran and failed still blocks: the results must all have passed.
+function requiredChecks(route: Route): string[] {
+  return route.properties.proof.checks.filter((check) => check !== "sse");
+}
+
 export function routePresentation(
   route: Route,
   current: ProofSubject | null,
@@ -68,7 +75,7 @@ export function routePresentation(
     Date.parse(expiry.value) > now &&
     (!routeExpiry.known || Date.parse(routeExpiry.value) > now) &&
     proof.results.every((result) => result.status === "passed") &&
-    route.properties.proof.checks.every((check) =>
+    requiredChecks(route).every((check) =>
       proof.results.some((result) => result.check === check && result.status === "passed")
     );
   return { actions: route.actions, label: verified ? "Verified" : "Unpublished", reason: reason ?? null };
