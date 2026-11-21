@@ -212,7 +212,19 @@ where
 
     let state_path = root.join(AUTOSTART_STATE_FILE);
     let previous = load_observed_state(&state_path);
-    let mut error = previous.as_ref().and_then(|state| state.error.clone());
+    const READ_ERROR_PREFIX: &str = "Failed to observe autostart state: ";
+    let mut enabled = previous.as_ref().is_some_and(|state| state.enabled);
+    let mut error = previous
+        .as_ref()
+        .and_then(|state| state.error.clone())
+        .filter(|message| !message.starts_with(READ_ERROR_PREFIX));
+    let mut observe = || match missing_autostart_state_is_disabled(is_enabled()) {
+        Ok(observed) => {
+            enabled = observed;
+            (enabled, None)
+        }
+        Err(error) => (enabled, Some(format!("{READ_ERROR_PREFIX}{error}"))),
+    };
     for (_, command, result_path) in pending {
         let started_at = iso(chrono::Utc::now());
         let mutation_error = if command.desired_enabled {
@@ -221,23 +233,25 @@ where
             disable().err()
         };
         // Report OS truth from a fresh read, not the assumed outcome.
-        let enabled = is_enabled()?;
-        let succeeded = mutation_error.is_none() && enabled == command.desired_enabled;
+        let (enabled, read_error) = observe();
+        let command_error = read_error.or(mutation_error);
+        let succeeded = command_error.is_none() && enabled == command.desired_enabled;
         let result = AutostartResult {
             command_id: command.command_id,
             kind: AUTOSTART_COMMAND_KIND.to_string(),
             desired_enabled: command.desired_enabled,
             status: if succeeded { "succeeded" } else { "failed" }.to_string(),
             enabled,
-            error: mutation_error.clone(),
+            error: command_error.clone(),
             started_at,
             finished_at: iso(chrono::Utc::now()),
         };
         write_protocol_json(&result_path, &result, "Failed to write autostart result")?;
-        error = mutation_error;
+        error = command_error;
     }
 
-    let enabled = is_enabled()?;
+    let (enabled, read_error) = observe();
+    let error = read_error.or(error);
     let changed = previous
         .as_ref()
         .is_none_or(|state| state.enabled != enabled || state.error != error);
@@ -498,6 +512,64 @@ mod tests {
         assert_eq!(result["error"], "permission denied");
         let state = read_json(&dir.path().join("autostart-state.json"));
         assert_eq!(state["error"], "permission denied");
+    }
+
+    #[test]
+    fn failed_os_read_reports_error_and_still_answers_all_pending_commands() {
+        let dir = tempdir().expect("tempdir");
+        tick_autostart_protocol(dir.path(), now(), || Ok(true), || Ok(()), || Ok(())).expect("seed");
+        write_server_command(dir.path(), COMMAND_ID, true, now());
+        let second = "ast_BBBBBBBBBBBBBBBBBBBBBB";
+        write_server_command(dir.path(), second, false, now());
+        let denied = std::io::Error::from_raw_os_error(5).to_string();
+
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
+            || Err(denied.clone()),
+            || Ok(()),
+            || Ok(()),
+        )
+        .expect("read error is recorded, not returned");
+        for id in [COMMAND_ID, second] {
+            let result = read_json(&dir.path().join(format!("autostart-results/{id}.json")));
+            assert_eq!(result["status"], "failed");
+            assert_eq!(result["enabled"], true, "retain the last known state");
+            assert!(result["error"].as_str().expect("result error").contains(&denied));
+        }
+        let state_path = dir.path().join("autostart-state.json");
+        let state = read_json(&state_path);
+        assert_eq!(state["enabled"], true);
+        assert!(state["error"].as_str().expect("state error").contains(&denied));
+
+        tick_autostart_protocol(dir.path(), now(), || Ok(true), || Ok(()), || Ok(())).expect("recover");
+        assert_eq!(read_json(&state_path)["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn missing_os_state_is_disabled_and_answers_disable_command() {
+        let dir = tempdir().expect("tempdir");
+        write_server_command(dir.path(), COMMAND_ID, false, now());
+        let missing = std::io::Error::from_raw_os_error(2).to_string();
+
+        tick_autostart_protocol(
+            dir.path(),
+            now(),
+            || Err(missing.clone()),
+            || panic!("disable command must not enable autostart"),
+            || Ok(()),
+        )
+        .expect("missing registration is disabled");
+        let result = read_json(
+            &dir.path()
+                .join(format!("autostart-results/{COMMAND_ID}.json")),
+        );
+        assert_eq!(result["status"], "succeeded");
+        assert_eq!(result["enabled"], false);
+        assert_eq!(result["error"], serde_json::Value::Null);
+        let state = read_json(&dir.path().join("autostart-state.json"));
+        assert_eq!(state["enabled"], false);
+        assert_eq!(state["error"], serde_json::Value::Null);
     }
 
     #[test]
