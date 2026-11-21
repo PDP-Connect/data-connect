@@ -356,6 +356,11 @@ export function createFileLocalConnectorSourceStore(
         root,
         state.selectedByConnectorKey[existing?.connectorKey ?? ""] === sourceId
       )
+      if (existing && record.connectorKey !== existing.connectorKey) {
+        throw new Error(
+          "Added Collection Profile changed connector identity."
+        )
+      }
       write({
         selectedByConnectorKey: { ...state.selectedByConnectorKey },
         sources: { ...state.sources, [sourceId]: record },
@@ -365,7 +370,14 @@ export function createFileLocalConnectorSourceStore(
     async getSelectedForConnector(connectorId) {
       const state = read()
       const sourceId = selectedSourceId(state, connectorId)
-      return sourceId ? (state.sources[sourceId] ?? null) : null
+      const record = sourceId ? state.sources[sourceId] : undefined
+      if (!record || record.sourceId !== sourceId) return null
+      const requestedKey = canonicalConnectorKey(connectorId)
+      return record.connectorId === connectorId ||
+        record.connectorKey === connectorId ||
+        record.connectorKey === requestedKey
+        ? record
+        : null
     },
     async list() {
       return records(read())

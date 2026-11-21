@@ -113,6 +113,14 @@ test("reload refreshes hashes and drift blocks a selected local run until reload
   assert.equal(drifted.status, "invalid")
   const reloaded = await store.reload(source.sourceId)
   assert.notEqual(reloaded.entrypointSha256, source.entrypointSha256)
+  const addedAgain = await store.add(sourcePath)
+  assert.equal(addedAgain.sourceId, source.sourceId)
+  assert.equal(addedAgain.selected, true)
+  assert.equal(addedAgain.entrypointSha256, reloaded.entrypointSha256)
+  assert.equal(
+    (await store.getSelectedForConnector(source.connectorKey))?.sourceId,
+    source.sourceId
+  )
   assert.equal(
     (await inspectActiveLocalConnectorSource(store, source.connectorId)).status,
     "active"
