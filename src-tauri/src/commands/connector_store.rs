@@ -4,7 +4,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tempfile::NamedTempFile;
@@ -68,20 +68,67 @@ pub fn get_active_manifest_path() -> Option<PathBuf> {
     Some(get_dataconnect_dir()?.join("connectors-active.json"))
 }
 
-pub fn read_active_connector_manifest() -> Option<ActiveConnectorManifest> {
-    let manifest_path = get_active_manifest_path()?;
+#[derive(Debug)]
+enum ManifestReadError {
+    Io(io::Error),
+    Malformed(serde_json::Error),
+}
+
+fn manifest_read_message(path: &std::path::Path, error: ManifestReadError) -> String {
+    match error {
+        ManifestReadError::Io(error) => {
+            format!("Failed to read active connector manifest at {}: {error}", path.display())
+        }
+        ManifestReadError::Malformed(error) => {
+            format!("Malformed active connector manifest at {}: {error}", path.display())
+        }
+    }
+}
+
+pub fn read_active_connector_manifest() -> Result<Option<ActiveConnectorManifest>, String> {
+    let manifest_path =
+        get_active_manifest_path().ok_or("Could not determine active manifest path")?;
     read_active_connector_manifest_from(&manifest_path)
+        .map_err(|error| manifest_read_message(&manifest_path, error))
 }
 
 fn read_active_connector_manifest_from(
     manifest_path: &std::path::Path,
-) -> Option<ActiveConnectorManifest> {
-    if !manifest_path.exists() {
-        return None;
-    }
+) -> Result<Option<ActiveConnectorManifest>, ManifestReadError> {
+    decode_active_connector_manifest(fs::read(manifest_path))
+}
 
-    let content = fs::read_to_string(manifest_path).ok()?;
-    serde_json::from_str(&content).ok()
+fn decode_active_connector_manifest(
+    content: io::Result<Vec<u8>>,
+) -> Result<Option<ActiveConnectorManifest>, ManifestReadError> {
+    match content {
+        Ok(content) => serde_json::from_slice(&content)
+            .map(Some)
+            .map_err(ManifestReadError::Malformed),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ManifestReadError::Io(error)),
+    }
+}
+
+// Called only while holding the existing manifest writer lock.
+fn quarantine_active_connector_manifest(path: &std::path::Path) -> Result<PathBuf, String> {
+    let name = path.file_name().ok_or("Active connector manifest path has no filename")?;
+    let mut millis = chrono::Utc::now().timestamp_millis();
+    loop {
+        let mut quarantine_name = name.to_os_string();
+        quarantine_name.push(format!(".corrupt-{millis}"));
+        let quarantine_path = path.with_file_name(quarantine_name);
+        match fs::symlink_metadata(&quarantine_path) {
+            Ok(_) => millis += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::rename(path, &quarantine_path).map_err(|error| {
+                    format!("Failed to quarantine active connector manifest: {error}")
+                })?;
+                return Ok(quarantine_path);
+            }
+            Err(error) => return Err(format!("Failed to check manifest quarantine path: {error}")),
+        }
+    }
 }
 
 fn write_active_connector_manifest_to(
@@ -118,9 +165,11 @@ fn write_active_connector_manifest_to(
     Ok(())
 }
 
-pub fn get_active_connector_install(connector_id: &str) -> Option<ActiveConnectorInstall> {
-    let manifest = read_active_connector_manifest()?;
-    manifest.connectors.get(connector_id).cloned()
+pub fn get_active_connector_install(
+    connector_id: &str,
+) -> Result<Option<ActiveConnectorInstall>, String> {
+    Ok(read_active_connector_manifest()?
+        .and_then(|manifest| manifest.connectors.get(connector_id).cloned()))
 }
 
 fn update_active_connector_install(
@@ -161,12 +210,23 @@ fn update_active_connector_install_at(
     lock_file
         .lock_exclusive()
         .map_err(|e| format!("Failed to lock active connector manifest: {}", e))?;
-    let mut manifest =
-        read_active_connector_manifest_from(manifest_path).unwrap_or(ActiveConnectorManifest {
-            version: "1.0".to_string(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            connectors: HashMap::new(),
-        });
+    let mut manifest = match read_active_connector_manifest_from(manifest_path) {
+        Ok(manifest) => manifest,
+        Err(ManifestReadError::Malformed(error)) => {
+            let quarantined = quarantine_active_connector_manifest(manifest_path)?;
+            log::warn!(
+                "Quarantined malformed active connector manifest at {}: {error}",
+                quarantined.display()
+            );
+            None
+        }
+        Err(error) => return Err(manifest_read_message(manifest_path, error)),
+    }
+    .unwrap_or_else(|| ActiveConnectorManifest {
+        version: "1.0".to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        connectors: HashMap::new(),
+    });
     if let Some(existing) = manifest.connectors.get(&install.connector_id).cloned() {
         match policy {
             ConnectorInstallUpdatePolicy::ReplaceExisting => {}
@@ -251,8 +311,9 @@ pub fn activate_bundled_connector_install(install: ActiveConnectorInstall) -> Re
 #[cfg(test)]
 mod tests {
     use super::{
-        read_active_connector_manifest_from, update_active_connector_install_at,
-        ActiveConnectorInstall, ConnectorInstallUpdatePolicy,
+        decode_active_connector_manifest, read_active_connector_manifest_from,
+        update_active_connector_install_at, ActiveConnectorInstall, ConnectorInstallUpdatePolicy,
+        ManifestReadError,
     };
     use fs2::FileExt;
     use std::fs::OpenOptions;
@@ -283,11 +344,65 @@ mod tests {
 
     fn selected(manifest_path: &std::path::Path) -> ActiveConnectorInstall {
         read_active_connector_manifest_from(manifest_path)
+            .expect("read active connector manifest")
             .expect("active connector manifest")
             .connectors
             .get("github-pdpp")
             .expect("selection")
             .clone()
+    }
+
+    #[test]
+    fn manifest_reads_distinguish_missing_valid_corrupt_and_io_failure() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("active.json");
+        assert!(read_active_connector_manifest_from(&path).unwrap().is_none());
+        update_active_connector_install_at(
+            &path,
+            install("1.2.3", "/tmp/connector"),
+            ConnectorInstallUpdatePolicy::ReplaceExisting,
+        )
+        .unwrap();
+        assert_eq!(selected(&path).version, "1.2.3");
+        let bytes = b"{bad json";
+        std::fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            read_active_connector_manifest_from(&path),
+            Err(ManifestReadError::Malformed(_))
+        ));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            decode_active_connector_manifest(Err(denied)),
+            Err(ManifestReadError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert_eq!(std::fs::read(&path).unwrap().as_slice(), bytes);
+        assert!(!std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry.unwrap().file_name().to_string_lossy().contains(".corrupt-")
+        }));
+    }
+
+    #[test]
+    fn locked_write_quarantines_corrupt_bytes_and_rebuilds_manifest() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("active.json");
+        let bytes = b"{bad json";
+        std::fs::write(&path, bytes).unwrap();
+        update_active_connector_install_at(
+            &path,
+            install("2.0.0", "/tmp/connector"),
+            ConnectorInstallUpdatePolicy::ReplaceExisting,
+        )
+        .unwrap();
+        assert_eq!(selected(&path).version, "2.0.0");
+        let mut quarantine = std::fs::read_dir(dir.path()).unwrap().filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry.file_name().to_string_lossy()
+                .strip_prefix("active.json.corrupt-")
+                .and_then(|suffix| suffix.parse::<i64>().ok())
+                .map(|_| entry.path())
+        });
+        assert_eq!(std::fs::read(quarantine.next().unwrap()).unwrap().as_slice(), bytes);
+        assert!(quarantine.next().is_none());
     }
 
     #[test]
@@ -597,7 +712,9 @@ mod tests {
         FileExt::unlock(&lock_file).expect("release parent file lock");
         assert!(child.wait().expect("child completion").success());
         let manifest =
-            read_active_connector_manifest_from(&manifest_path).expect("active connector manifest");
+            read_active_connector_manifest_from(&manifest_path)
+                .expect("read active connector manifest")
+                .expect("active connector manifest");
         let selected = manifest.connectors.get("github-pdpp").expect("selection");
         assert_eq!(selected.version, "9.9.9");
         assert_eq!(selected.root_path, "/user/github-pdpp");

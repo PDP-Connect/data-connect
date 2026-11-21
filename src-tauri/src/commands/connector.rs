@@ -136,8 +136,8 @@ struct ActivePdppStream {
     name: String,
 }
 
-fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
-    let mut installs = read_active_connector_manifest()
+fn load_active_pdpp_platforms(app: &AppHandle) -> Result<Vec<Platform>, String> {
+    let mut installs = read_active_connector_manifest()?
         .map(|manifest| manifest.connectors.into_values().collect::<Vec<_>>())
         .unwrap_or_default();
     installs.extend(
@@ -147,7 +147,7 @@ fn load_active_pdpp_platforms(app: &AppHandle) -> Vec<Platform> {
             .map(|source| super::developer_connector_sources::as_active_install(&source)),
     );
     let resource_dir = app.path().resource_dir().ok();
-    load_pdpp_platforms_with_resource_dir(installs, resource_dir.as_deref())
+    Ok(load_pdpp_platforms_with_resource_dir(installs, resource_dir.as_deref()))
 }
 
 #[cfg(test)]
@@ -306,7 +306,7 @@ fn pdpp_streams_to_dataconnect_scopes(
 #[tauri::command]
 pub async fn get_platforms(app: AppHandle) -> Result<Vec<Platform>, String> {
     let mut platforms: Vec<Platform> = Vec::new();
-    for platform in load_active_pdpp_platforms(&app) {
+    for platform in load_active_pdpp_platforms(&app)? {
         if !platforms.iter().any(|existing| existing.id == platform.id) {
             platforms.push(platform);
         }
