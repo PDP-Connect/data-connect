@@ -162,6 +162,45 @@ test("host journal records intent before effects and marks a lost reply unknown,
   }
 });
 
+test("host journal settles a refused start whose library view confirms cleanup, and keeps owed starts as debt", async () => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { ReachabilityOperations } = await import("../server/reachability/operations.ts");
+  const root = await mkdtemp(join(tmpdir(), "reachability-refusal-"));
+  try {
+    const operations = new ReachabilityOperations(root, true);
+    const seed = fakeRouteScenarios()[0]!;
+    const refusal = (cleanup: Route["cleanup"]) =>
+      Object.assign(new Error("A retained session already owns this directory"), {
+        code: "route_conflict",
+        route: { ...seed, cleanup, published: null, state: "released" as const },
+      });
+    const settle = async (cleanup: Route["cleanup"]) => {
+      const { operationId } = await operations.start("start", null, async () => {
+        throw refusal(cleanup);
+      });
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const record = await operations.read(operationId);
+        if (record.stage !== "applying") return record;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      throw new Error("the journal never settled the start");
+    };
+    const refused = await settle({ nextAction: null, state: "confirmed" });
+    assert.equal(refused.stage, "settled");
+    assert.equal(refused.cleanupConfirmed, true);
+    assert.equal(refused.recovery, null);
+    assert.deepEqual(refused.handle, seed.handle);
+    // The same refusal without confirmed cleanup may have left a route: it stays owed.
+    const owed = await settle({ nextAction: null, state: "unconfirmed" });
+    assert.equal(owed.stage, "unknown-possibly-live");
+    assert.deepEqual(owed.recovery, { available: true, reason: "route_reconciliation_required" });
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("route projections retain required proof and cleanup keys, including unknown observations", () => {
   for (const route of fakeRouteScenarios()) {
     const projected = projectRoute(route)

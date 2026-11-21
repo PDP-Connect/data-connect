@@ -54,7 +54,8 @@ test("a runtime cost that turns paid after a free review refuses the stale appro
 		});
 		const refused = await settle(stale.operationId);
 		assert.equal(refused.failureCode, "consent_mismatch");
-		assert.notEqual(refused.stage, "settled");
+		assert.equal(refused.stage, "settled");
+		assert.equal(refused.recovery, null, "A refusal that created nothing owes no stop");
 		assert.equal(await fixture.startCount(), starts, "An approval from the free review must not start a route");
 		const fresh = await fixture.api.call(`/drafts/${fixture.draftId}/review`, { usage: "attached" });
 		assert.deepEqual(fresh.candidate.consent.disclosures.cost, {

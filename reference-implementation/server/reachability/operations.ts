@@ -298,7 +298,7 @@ export class ReachabilityOperations {
         })));
       } catch (error) {
         const partial = error && typeof error === "object" && "route" in error
-          ? (error as { route?: { handle?: Handle } | null }).route
+          ? (error as { route?: Pick<Route, "cleanup" | "handle"> | null }).route
           : null;
         const known = new Set([
           "host_policy_denied",
@@ -327,6 +327,21 @@ export class ReachabilityOperations {
           `name=${original?.name ?? typeof error} message=${(original?.message ?? "").slice(0, 300)} ` +
           causeSummary(error)
         );
+        // The library's own view of a refusal confirms cleanup when nothing was
+        // created, so nothing is owed: settle it rather than journal stop debt.
+        if (!allocated && partial?.handle && partial.cleanup?.state === "confirmed") {
+          const { handle } = partial;
+          await this.serialized(operationId, async () => this.write(await this.merged({
+            ...pending,
+            cleanupConfirmed: true,
+            failureCode,
+            handle,
+            recovery: null,
+            route: null,
+            stage: "settled",
+          })));
+          return;
+        }
         await this.serialized(operationId, async () => this.write(await this.merged({
           ...pending,
           handle: allocated ?? partial?.handle ?? pending.handle,
