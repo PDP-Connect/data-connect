@@ -1289,6 +1289,8 @@ export class ReachabilityService {
       });
       return current;
     } catch (error) {
+      // A check that failed could not re-observe the target, so the last one no longer vouches for the label.
+      this.servedTarget = null;
       if ((error as { code?: string }).code === "route_not_found") this.unsettled.delete(id);
       if ((error as { code?: string }).code === "proof_refresh_unsupported") {
         this.reasons.set(id, "proof_refresh_unsupported");

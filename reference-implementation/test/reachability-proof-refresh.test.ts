@@ -36,6 +36,8 @@ function service(input: {
   recoverAtBoot?: boolean
   // The desktop host starts with an empty query target and reads the served target from currentTarget.
   desktopTarget?: boolean
+  // Moves the target the desktop host serves after the route was proven.
+  servedTarget?: () => string
   recoveryRetry?: { timeoutMs?: number; baseDelayMs?: number; maxDelayMs?: number; random?: () => number }
   // When it settles, the watcher reports the route released and ends.
   released?: Promise<RouteView>
@@ -78,7 +80,7 @@ function service(input: {
     hostCapabilities: {},
     identity,
     prepare: async () => undefined,
-    ...(input.desktopTarget ? { currentTarget: async () => TARGET } : {}),
+    ...(input.desktopTarget ? { currentTarget: async () => (input.servedTarget ? input.servedTarget() : TARGET) } : {}),
     ...(input.recoverAtBoot ? { recoverAtBoot: true } : {}),
     // Small and deterministic: no test waits on a real backoff.
     recoveryRetry: { baseDelayMs: 1, maxDelayMs: 2, random: () => 1, timeoutMs: 40, ...input.recoveryRetry },
@@ -289,5 +291,40 @@ test("the same route is not Verified when the host serves a different target", a
   svc.observeHostConfinement(confined)
   await svc.reconcileKnownHandle(base.handle, false)
   assert.equal(svc.presentation(moved).label, "Unpublished")
+  svc.closeObservers()
+})
+
+test("a failed proof check withdraws the label instead of keeping the old served target", async () => {
+  const base = scenarios("durable").verified
+  const now = Date.now()
+  const proven: RouteView = {
+    ...base,
+    expiresAt: { known: true as const, value: iso(now + 600_000) },
+    verification: {
+      ...base.verification,
+      checkedAt: iso(now),
+      observedAt: iso(now),
+      validUntil: { known: true as const, value: iso(now + 60_000) },
+    },
+  }
+  let served = TARGET
+  let failing = false
+  const { service: svc } = service({
+    desktopTarget: true,
+    listed: () => [proven],
+    servedTarget: () => served,
+    status: (route) => {
+      if (failing) throw new Error("status unavailable")
+      return route
+    },
+  })
+  svc.observeHostConfinement(confined)
+  await svc.reconcileKnownHandle(base.handle, false)
+  assert.equal(svc.presentation(proven).label, "Verified")
+  // The console listener moves to another port, then the next proof check fails.
+  served = "127.0.0.1:9"
+  failing = true
+  await assert.rejects(svc.check(base.handle.id, base.handle.generation))
+  assert.equal(svc.presentation(proven).label, "Unpublished")
   svc.closeObservers()
 })
