@@ -65,8 +65,9 @@ interface CapabilityContext {
   semanticFields: Set<string>;
 }
 
-function hasObjectEntries(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0);
+function rangeOperatorsFor(rangeFilters: Record<string, string[]>, field: string): string[] | null {
+  const operators = rangeFilters[field];
+  return Array.isArray(operators) && operators.length > 0 ? operators : null;
 }
 
 function getNonNullSchemaTypes(schema: Schema | null | undefined): Set<string> {
@@ -165,7 +166,7 @@ function buildFieldCapabilityEntry(
 ): [string, Record<string, unknown>] {
   const { grantedFields, rangeFilters, fieldDeclarations, lexicalFields, semanticFields, aggregations } = ctx;
   const granted = !grantedFields || grantedFields.has(field);
-  const rangeOperators = Array.isArray(rangeFilters[field]) ? rangeFilters[field] : null;
+  const rangeOperators = rangeOperatorsFor(rangeFilters, field);
   // Optional declared presentation type, sourced either from the JSON
   // Schema extension (`schema.properties[field].x_pdpp_type`) or from a
   // sandbox-shaped field declaration (`fields[]` or `schema.fields[]`,
@@ -378,19 +379,26 @@ export function buildStreamDiscoveryCapabilities({
   stream: ManifestStream;
 }): Record<string, unknown> {
   const encodedStream = encodeURIComponent(stream.name);
-  const rangeFilters = stream.query?.range_filters;
-  const expand = stream.query?.expand;
-  const aggregations = stream.query?.aggregations;
-  const hasAggregations = hasObjectEntries(aggregations);
+  const fields = Object.keys(stream.schema?.properties ?? {});
+  const rangeFilters = stream.query?.range_filters ?? {};
+  const aggregations = stream.query?.aggregations ?? {};
+  // Count is stream-wide; the remaining operators must map to a detailed field capability.
+  const hasAggregations = aggregations.count === true || fields.some((field) =>
+    Object.values(buildFieldAggregationCapabilities(aggregations, field, true)).some(
+      (flag) => (flag as Record<string, unknown>).usable === true
+    )
+  );
+  const hasExpand = Array.isArray(stream.query?.expand) &&
+    buildExpandCapabilities(stream).some((entry) => entry.usable === true);
 
   return {
     aggregate: hasAggregations,
     aggregate_url: hasAggregations ? buildDiscoveryUrl(`/v1/streams/${encodedStream}/aggregate`, connectorId) : null,
     changes_since: true,
     exact_filters: true,
-    expand: Array.isArray(expand) && expand.length > 0,
+    expand: hasExpand,
     metadata_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}`, connectorId),
-    range_filters: hasObjectEntries(rangeFilters),
+    range_filters: fields.some((field) => rangeOperatorsFor(rangeFilters, field) !== null),
     records: true,
     records_url: buildDiscoveryUrl(`/v1/streams/${encodedStream}/records`, connectorId),
     stream_metadata: true,
