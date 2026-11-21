@@ -70,7 +70,8 @@ test("an approved logo is fetched once and served from cache after that", async 
   assert.ok(first);
   assert.equal(first.mediaType, "image/png");
   assert.deepEqual([...first.bytes], [...PNG_BYTES]);
-  assert.deepEqual(second, first);
+  assert.equal(second, first);
+  assert.equal(second?.sourceUri, LOGO_URI);
   assert.equal(fetches, 1, "a consent render must not refetch the logo every time");
 });
 
