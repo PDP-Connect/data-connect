@@ -278,7 +278,7 @@ const serverArgs = [
   new URL("./parent-lifeline.mjs", import.meta.url).href,
   serverPath,
 ]
-const serverEnv = { ...process.env, NODE_ENV: "production" }
+const serverEnv = { ...process.env, NODE_ENV: "production", PDPP_LAUNCHER_PID: String(process.pid) }
 
 // On Linux the desktop app arms PR_SET_PDEATHSIG on this launcher only, and
 // the kernel does not carry that signal to a forked grandchild. Replace this

@@ -10,7 +10,7 @@ import { createRemoteAccessConfigStore } from "../remote-access-store.ts";
 import { isCredentialEncryptionConfigured } from "../stores/credential-encryption.ts";
 import type { OwnerReachabilityContext } from "../routes/owner-reachability.ts";
 import { ReachabilityError } from "./approvals.ts";
-import { consoleChallengeHeader, consoleProof, consoleProofHeader, consoleProofPath } from "./console-proof.ts";
+import { consoleChallengeHeader, consoleProof, consoleProofHeader, consoleProofPath, launcherPid } from "./console-proof.ts";
 import { createReachabilityService } from "./factory.ts";
 import type { HostSettingsBridge } from "./host-settings.ts";
 import { fixStatePaths, inspectStatePaths } from "./state-paths.ts";
@@ -40,7 +40,7 @@ async function observedConsole(dataDir: string, proofKey: string): Promise<Lease
   ]);
   // Both leases name launcher processes. Each launcher is the direct
   // parent of the Node server it supervises.
-  if (reference.pid !== process.ppid || console.owner_pid !== reference.owner_pid ||
+  if (reference.pid !== launcherPid() || console.owner_pid !== reference.owner_pid ||
       console.owner_started_at_ticks !== reference.owner_started_at_ticks) {
     throw new ReachabilityError("host_supervisor_unavailable");
   }
@@ -83,7 +83,7 @@ export async function startDesktopReachability(input: {
   if (process.env.PDPP_MANAGED_DESKTOP_HOST !== "1" || input.bindHost !== "127.0.0.1" || !proofKey) return;
   const dataDir = await realpath(input.dataDir);
   const reference = await desktopLease(dataDir, "reference-implementation").catch(() => null);
-  if (reference?.pid !== process.ppid) return;
+  if (reference?.pid !== launcherPid()) return;
   const home = join(dataDir, "reachability");
   const passwordReady = async () => input.passwordConfigured && await ownerPasswordOwnerSet(dataDir);
   const observe = () => observedConsole(dataDir, proofKey).catch(() => null);
