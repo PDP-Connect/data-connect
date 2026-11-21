@@ -1260,7 +1260,9 @@ export class ReachabilityService {
     this.proofCalls.set(handleKey(route.handle), proofCall);
     try {
       const current = await this.api.routeStatus({ handle: route.handle, home: this.host.query.home });
-      if (epoch !== this.lifecycle.epoch || this.lifecycle.stopTombstone) {
+      // A stop, a consent change or another check that settled while this one
+      // waited has moved the lifecycle on, so this proof no longer applies.
+      if (epoch !== this.lifecycle.epoch || this.lifecycle.stopTombstone || this.lifecycle.phase !== "checking") {
         return this.route(id, generation);
       }
       this.routes.set(id, current);

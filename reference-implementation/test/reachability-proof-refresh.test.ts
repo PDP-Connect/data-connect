@@ -31,12 +31,14 @@ const confirmed = (route: RouteView): RouteView => ({
 function service(input: {
   listed: () => Promise<RouteView[]> | RouteView[]
   closed?: (route: RouteView) => RouteView
-  status?: (route: RouteView) => RouteView
+  status?: (route: RouteView) => RouteView | Promise<RouteView>
   identity?: { bootId: string; instanceId: string }
   recoverAtBoot?: boolean
   recoveryRetry?: { timeoutMs?: number; baseDelayMs?: number; maxDelayMs?: number; random?: () => number }
   // When it settles, the watcher reports the route released and ends.
   released?: Promise<RouteView>
+  // When it settles, the watcher reports a consent change for the route first.
+  consentChanged?: Promise<RouteView>
 }) {
   const calls: string[] = []
   const watching = new Map<string, { ended: boolean }>()
@@ -50,13 +52,17 @@ function service(input: {
     routeStatus: async ({ handle }: { handle: RouteView["handle"] }) => {
       calls.push(`status:${handle.id}`)
       const route = (await input.listed()).find((item) => item.handle.id === handle.id) as RouteView
-      return input.status ? input.status(route) : route
+      return input.status ? await input.status(route) : route
     },
     // The library's watcher emits nothing while a route stays healthy.
     watchRoutes: async function* ({ handle, signal }: { handle: RouteView["handle"]; signal: AbortSignal }) {
       const entry = { ended: false }
       watching.set(handle.id, entry)
       const aborted = new Promise<null>((resolve) => signal.addEventListener("abort", () => resolve(null), { once: true }))
+      const changed = signal.aborted || !input.consentChanged ? null : await Promise.race([aborted, input.consentChanged])
+      if (changed) {
+        yield { route: changed, schemaVersion: 1, sequence: 0, type: "consent_changed" as const }
+      }
       const released = signal.aborted ? null : await Promise.race([aborted, input.released ?? aborted])
       entry.ended = true
       if (released) {
@@ -204,4 +210,37 @@ test("the proof refresh stops once a route is released or closed", async (t) => 
     await settle()
   }
   assert.deepEqual(other.calls, [], "no status poll after the route was closed")
+})
+
+test("a consent change that lands while a check waits for status wins over that check's late proof", async () => {
+  const { verified } = scenarios("durable")
+  let held: Promise<void> | null = null
+  let answer!: () => void
+  let changeConsent!: (route: RouteView) => void
+  const consentChanged = new Promise<RouteView>((resolve) => {
+    changeConsent = resolve
+  })
+  const { service: svc } = service({
+    consentChanged,
+    listed: () => [verified],
+    status: async (route) => {
+      await held
+      return route
+    },
+  })
+  svc.observeHostConfinement(confined)
+  await svc.reconcileKnownHandle(verified.handle, false)
+  held = new Promise((resolve) => {
+    answer = resolve
+  })
+  const checking = svc.check(verified.handle.id, verified.handle.generation)
+  changeConsent(verified)
+  await settle()
+  assert.equal(svc.state().lifecycle.phase, "review")
+  answer()
+  // The late proof is superseded: the check settles and the route still needs review.
+  const settled = await checking
+  assert.equal(settled.handle.id, verified.handle.id)
+  assert.equal(svc.state().lifecycle.phase, "review")
+  svc.closeObservers()
 })
