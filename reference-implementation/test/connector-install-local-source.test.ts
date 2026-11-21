@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { strict as assert } from "node:assert"
+import { createHash } from "node:crypto"
+import fs from "node:fs"
+import { syncBuiltinESMExports } from "node:module"
 import {
   mkdirSync,
   mkdtempSync,
@@ -148,4 +151,40 @@ test("re-adding a root whose manifest changed connector key is rejected and keep
   const [stored] = await store.list()
   assert.equal(stored?.connectorKey, "first-key")
   assert.equal(stored?.selected, true)
+})
+
+test("the stored manifest hash describes the manifest bytes that were parsed", async t => {
+  const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
+  temporaryRoots.push(dataDir)
+  const root = fixture({ version: "0.1.0" })
+  const manifestPath = join(root, "profile", "collection-profile.json")
+  const parsedBytes = readFileSync(manifestPath)
+  const laterBytes = Buffer.from(
+    parsedBytes.toString("utf8").replace('"version":"0.1.0"', '"version":"0.2.0"')
+  )
+  assert.notDeepEqual(laterBytes, parsedBytes)
+
+  // The file changes right after its first read: every later read of the
+  // manifest sees the edited bytes.
+  let manifestReads = 0
+  const realReadFileSync = fs.readFileSync
+  t.mock.method(fs, "readFileSync", (path: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (typeof path === "string" && path.endsWith(join("profile", "collection-profile.json"))) {
+      manifestReads += 1
+      if (manifestReads > 1) {
+        return rest[0] ? laterBytes.toString("utf8") : laterBytes
+      }
+    }
+    return (realReadFileSync as (...args: unknown[]) => unknown)(path, ...rest)
+  })
+  syncBuiltinESMExports()
+  t.after(() => {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  })
+
+  const record = await createFileLocalConnectorSourceStore(dataDir).add(root)
+
+  assert.equal(record.version, "0.1.0")
+  assert.equal(record.manifestSha256, `sha256:${createHash("sha256").update(parsedBytes).digest("hex")}`)
 })
