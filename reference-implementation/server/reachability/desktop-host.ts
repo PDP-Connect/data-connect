@@ -149,6 +149,10 @@ export async function startDesktopReachability(input: {
       if (!acknowledged) throw new ReachabilityError("remote_disconnect_acknowledgment_required");
     },
   });
+  // startDesktopReachability returns early unless input.bindHost is
+  // "127.0.0.1" (the gate above), so the loopback confinement the server
+  // host observes at host.ts:154 holds here too.
+  service.observeHostConfinement({ known: true, value: true });
   return {
     service,
     statePaths: { inspect: () => inspectStatePaths(home, dataDir), fix: () => fixStatePaths(home, dataDir) },
