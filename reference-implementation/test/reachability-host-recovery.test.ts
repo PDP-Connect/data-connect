@@ -37,6 +37,8 @@ function service(input: {
   recoveryRetry?: { timeoutMs?: number; baseDelayMs?: number; maxDelayMs?: number; random?: () => number }
   // When it settles, the watcher reports the route released and ends.
   released?: Promise<RouteView>
+  // When it settles, the watcher reports a consent change for the route first.
+  consentChanged?: Promise<RouteView>
 }) {
   const calls: string[] = []
   const watching = new Map<string, { ended: boolean }>()
@@ -57,6 +59,10 @@ function service(input: {
       const entry = { ended: false }
       watching.set(handle.id, entry)
       const aborted = new Promise<null>((resolve) => signal.addEventListener("abort", () => resolve(null), { once: true }))
+      const changed = signal.aborted || !input.consentChanged ? null : await Promise.race([aborted, input.consentChanged])
+      if (changed) {
+        yield { route: changed, schemaVersion: 1, sequence: 0, type: "consent_changed" as const }
+      }
       const released = signal.aborted ? null : await Promise.race([aborted, input.released ?? aborted])
       entry.ended = true
       if (released) {
@@ -333,4 +339,24 @@ test("a listRoutes that hangs is abandoned when the deadline fires", async () =>
   assert.ok(Date.now() - started < 1_000)
   assert.equal(svc.state().lifecycle.reason, "unknown-possibly-live")
   assert.equal(svc.state().recovery.pending, false)
+})
+
+test("Stop recovers a route whose handle was lost while it waits for a consent review", async () => {
+  const route = { ...scenarios("durable").verified, operationId: "op-1" } as RouteView
+  let changeConsent!: (changed: RouteView) => void
+  const consentChanged = new Promise<RouteView>((resolve) => {
+    changeConsent = resolve
+  })
+  const { calls, service: svc } = service({ consentChanged, listed: () => [route] })
+  svc.observeHostConfinement(confined)
+  // The journal lost the handle: recovery finds the route by its operation.
+  const record = { handle: null, kind: "route", operationId: "op-1" } as never
+  await svc.recoverOperation(record, "check", false)
+  changeConsent(route)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(svc.state().lifecycle.phase, "review")
+  const stopped = await svc.recoverOperation(record, "stop", true)
+  assert.equal(stopped.cleanup.state, "confirmed")
+  assert.ok(calls.includes(`close:${route.handle.id}`))
+  svc.closeObservers()
 })

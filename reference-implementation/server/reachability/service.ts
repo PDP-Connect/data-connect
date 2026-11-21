@@ -984,7 +984,11 @@ export class ReachabilityService {
     const { operationId } = record;
     if (stopTombstone || action === "stop") {
       ++this.epoch;
-      if (!this.starting) this.transition({ operationId, type: "restore-intent" });
+      // A lifecycle that already holds this operation (in review after a consent
+      // change, say) has nothing to restore, and a Stop must not depend on it.
+      if (!this.starting && this.lifecycle.operationId !== operationId) {
+        this.transition({ operationId, type: "restore-intent" });
+      }
       this.transition({ type: "stop" });
     } else {
       if (this.starting) throw new ReachabilityError("operation_in_progress");
