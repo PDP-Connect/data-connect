@@ -34,7 +34,9 @@ export interface BoundedPageResult<TFailure> {
   readonly skipped: number;
 }
 
-export type BoundedReconciliationResult<TFailure> = BoundedPageResult<TFailure>;
+export type BoundedReconciliationResult<TFailure> = BoundedPageResult<TFailure> & {
+  readonly stopReason: "exhausted" | "deadline";
+};
 
 async function readPostgresKeysetPage(
   table: string,
@@ -124,12 +126,13 @@ function recordRepairOutcome<TFailure>(
   id: string,
   result: { readonly failed: boolean; readonly persisted: boolean; readonly row: TFailure }
 ): void {
-  state.repaired += 1;
   if (result.failed) {
     state.failed += 1;
     if (!result.persisted) {
       state.failedRows.set(id, result.row);
     }
+  } else {
+    state.repaired += 1;
   }
 }
 
@@ -242,7 +245,7 @@ export async function processBoundedReconciliationPage<TInstance, TReason extend
       failed: repairs.failed,
       failedRows: repairs.failedRows,
       repaired: candidateRepairs,
-      skipped: selection.all.length - repairs.repaired,
+      skipped: selection.all.length - repairs.repaired - repairs.failed,
     },
   };
 }
@@ -336,7 +339,7 @@ export async function runScopedConnectorReconciliation<TInstance, TReason extend
     failed: repairs.failed,
     failedRows: repairs.failedRows,
     repaired,
-    skipped: selection.all.length - repairs.repaired,
+    skipped: selection.all.length - repairs.repaired - repairs.failed,
   };
 }
 
@@ -364,33 +367,6 @@ function mergeBoundedPage<TFailure>(
   result.attemptedIds.push(...page.attemptedIds);
   for (const [id, row] of page.failedRows) {
     result.failedRows.set(id, row);
-  }
-}
-
-async function* iterateKeysetPages({
-  deadline,
-  pageSize,
-  readPage,
-}: {
-  readonly deadline: number | null;
-  readonly pageSize: number;
-  readonly readPage: (afterId: string | null, limit: number) => Promise<readonly string[]>;
-}): AsyncGenerator<readonly string[]> {
-  let afterId: string | null = null;
-  for (;;) {
-    if (deadline !== null && Date.now() >= deadline) {
-      break;
-    }
-    // biome-ignore lint/performance/noAwaitInLoops: Sequential pages preserve the stable keyset cursor.
-    const ids = await readPage(afterId, pageSize);
-    if (ids.length === 0) {
-      break;
-    }
-    yield ids;
-    afterId = ids.at(-1) ?? afterId;
-    if (ids.length < pageSize) {
-      break;
-    }
   }
 }
 
@@ -427,14 +403,23 @@ export async function runBoundedKeysetReconciliation<TFailure>({
     skipped: 0,
   };
 
-  for await (const ids of iterateKeysetPages({ deadline, pageSize, readPage })) {
+  const deadlineReached = () => deadline !== null && Date.now() >= deadline;
+  let afterId: string | null = null;
+  for (;;) {
+    if (deadlineReached()) return { ...result, stopReason: "deadline" };
+    // biome-ignore lint/performance/noAwaitInLoops: Sequential pages preserve the stable keyset cursor.
+    const ids = await readPage(afterId, pageSize);
+    if (ids.length === 0) break;
+    // biome-ignore lint/performance/noAwaitInLoops: Process each retrieved page before advancing.
     mergeBoundedPage(result, await processPage(ids, deadline));
+    afterId = ids.at(-1) ?? afterId;
+    if (ids.length < pageSize) break;
   }
 
-  if (deadline === null || Date.now() < deadline) {
-    result.repaired += await pruneComplete(deadline);
-  }
-  return result;
+  if (deadlineReached()) return { ...result, stopReason: "deadline" };
+  result.repaired += await pruneComplete(deadline);
+  // The prune is itself cooperative; an elapsed deadline cannot prove it exhausted.
+  return { ...result, stopReason: deadlineReached() ? "deadline" : "exhausted" };
 }
 
 import { isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
