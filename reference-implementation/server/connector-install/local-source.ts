@@ -82,8 +82,12 @@ export interface LocalRunSource {
   readonly source_kind: "developer_local"
 }
 
+function sha256Bytes(bytes: Buffer): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`
+}
+
 function sha256(path: string): string {
-  return `sha256:${createHash("sha256").update(readFileSync(path)).digest("hex")}`
+  return sha256Bytes(readFileSync(path))
 }
 
 function assertRecord(
@@ -135,6 +139,7 @@ function readManifest(root: string): {
   readonly connectorKey: string
   readonly displayName: string
   readonly manifest: Record<string, unknown>
+  readonly manifestSha256: string
   readonly version: string
 } {
   const manifestPath = confinedFile(
@@ -145,9 +150,12 @@ function readManifest(root: string): {
   if (lstatSync(manifestPath).size > MAX_PROFILE_BYTES) {
     throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
   }
+  // One read feeds both the parse and the hash, so the stored hash always
+  // describes the stored manifest even if the file changes meanwhile.
+  const bytes = readFileSync(manifestPath)
   let parsed: unknown
   try {
-    parsed = JSON.parse(readFileSync(manifestPath, "utf8"))
+    parsed = JSON.parse(bytes.toString("utf8"))
   } catch (error) {
     throw new Error(
       `Collection Profile manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -211,6 +219,7 @@ function readManifest(root: string): {
         ? parsed.display_name.trim()
         : connectorKey,
     manifest: parsed,
+    manifestSha256: sha256Bytes(bytes),
     version: version.trim(),
   }
 }
@@ -224,11 +233,6 @@ function buildRecord(
   selected: boolean
 ): LocalConnectorSourceRecord {
   const profile = readManifest(root)
-  const manifestFile = confinedFile(
-    root,
-    MANIFEST_PATH,
-    "Collection Profile manifest"
-  )
   const entrypointFile = confinedFile(
     root,
     ENTRYPOINT_PATH,
@@ -257,7 +261,7 @@ function buildRecord(
     entrypointSha256: sha256(entrypointFile),
     manifest: profile.manifest,
     manifestPath: MANIFEST_PATH,
-    manifestSha256: sha256(manifestFile),
+    manifestSha256: profile.manifestSha256,
     ...(provenancePath && provenanceSha256 ? { provenancePath, provenanceSha256 } : {}),
     root,
     selected,
@@ -356,6 +360,11 @@ export function createFileLocalConnectorSourceStore(
         root,
         state.selectedByConnectorKey[existing?.connectorKey ?? ""] === sourceId
       )
+      if (existing && record.connectorKey !== existing.connectorKey) {
+        throw new Error(
+          "Added Collection Profile changed connector identity."
+        )
+      }
       write({
         selectedByConnectorKey: { ...state.selectedByConnectorKey },
         sources: { ...state.sources, [sourceId]: record },

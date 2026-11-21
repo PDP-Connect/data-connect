@@ -265,7 +265,7 @@ const SANCTIONED_GENERIC_DATA_READ_CALL_SITES: ReadonlySet<string> = new Set([
   // caller-supplied, the filename component is an RI-owned generic literal,
   // and this feature is explicitly unsigned/unregistered developer tooling
   // (see this file's own module doc comment), not connector catalog data.
-  'reference-implementation/server/connector-install/local-source.ts::readManifest::readFileSync(manifestPath, "utf8")',
+  'reference-implementation/server/connector-install/local-source.ts::readManifest::readFileSync(manifestPath)',
   // readManifestJson(path) in polyfill-manifest-reconcile.ts: both call sites
   // pass join(<manifest-dir>, entryName), where the dir is
   // defaultReferenceFixturesDir() (resolve()'d off the sanctioned reference
