@@ -11,10 +11,13 @@
  */
 import { createHash } from "node:crypto"
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   writeFileSync,
@@ -135,6 +138,7 @@ function readManifest(root: string): {
   readonly connectorKey: string
   readonly displayName: string
   readonly manifest: Record<string, unknown>
+  readonly manifestSha256: string
   readonly version: string
 } {
   const manifestPath = confinedFile(
@@ -142,12 +146,25 @@ function readManifest(root: string): {
     MANIFEST_PATH,
     "Collection Profile manifest"
   )
-  if (lstatSync(manifestPath).size > MAX_PROFILE_BYTES) {
+  const buffer = Buffer.alloc(MAX_PROFILE_BYTES + 1)
+  const fd = openSync(manifestPath, "r")
+  let length = 0
+  try {
+    while (length < buffer.length) {
+      const n = readSync(fd, buffer, length, buffer.length - length, null)
+      if (n === 0) break
+      length += n
+    }
+  } finally {
+    closeSync(fd)
+  }
+  const bytes = buffer.subarray(0, length)
+  if (bytes.byteLength > MAX_PROFILE_BYTES) {
     throw new Error("Collection Profile manifest exceeds the 1 MiB limit.")
   }
   let parsed: unknown
   try {
-    parsed = JSON.parse(readFileSync(manifestPath, "utf8"))
+    parsed = JSON.parse(bytes.toString("utf8"))
   } catch (error) {
     throw new Error(
       `Collection Profile manifest is invalid: ${error instanceof Error ? error.message : String(error)}`,
@@ -211,6 +228,7 @@ function readManifest(root: string): {
         ? parsed.display_name.trim()
         : connectorKey,
     manifest: parsed,
+    manifestSha256: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
     version: version.trim(),
   }
 }
@@ -224,11 +242,6 @@ function buildRecord(
   selected: boolean
 ): LocalConnectorSourceRecord {
   const profile = readManifest(root)
-  const manifestFile = confinedFile(
-    root,
-    MANIFEST_PATH,
-    "Collection Profile manifest"
-  )
   const entrypointFile = confinedFile(
     root,
     ENTRYPOINT_PATH,
@@ -257,7 +270,7 @@ function buildRecord(
     entrypointSha256: sha256(entrypointFile),
     manifest: profile.manifest,
     manifestPath: MANIFEST_PATH,
-    manifestSha256: sha256(manifestFile),
+    manifestSha256: profile.manifestSha256,
     ...(provenancePath && provenanceSha256 ? { provenancePath, provenanceSha256 } : {}),
     root,
     selected,
