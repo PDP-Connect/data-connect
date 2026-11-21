@@ -32,7 +32,12 @@ export function readFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact | null {
+type UnknownField = "coverage_statuses" | "permanent_detail_gaps";
+type UnknownStream = { index: number; reason: "invalid_stream" | "pending_detail_gaps"; stream?: string };
+type RuntimeCollectionFactWithEvidence = RuntimeCollectionFact & { unknown_fields?: readonly UnknownField[] };
+type RuntimeCollectionFactsWithEvidence = RuntimeCollectionFacts & { unknown_streams?: readonly UnknownStream[] };
+
+export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFactWithEvidence | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return null;
   }
@@ -40,8 +45,25 @@ export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact |
   if (typeof entry.stream !== "string" || !entry.stream) {
     return null;
   }
+  const pending = Object.hasOwn(entry, "pending_detail_gaps")
+    ? readSafeNonNegativeInteger(entry.pending_detail_gaps)
+    : 0;
+  if (pending === null) {
+    // This required count has no numeric unknown representation.
+    return null;
+  }
+  const unknownFields: UnknownField[] = [];
+  if (Object.hasOwn(entry, "coverage_statuses") &&
+    (!Array.isArray(entry.coverage_statuses) ||
+      entry.coverage_statuses.some((status) => typeof status !== "string" || !status))) {
+    unknownFields.push("coverage_statuses");
+  }
+  if (Object.hasOwn(entry, "permanent_detail_gaps") &&
+    readSafeNonNegativeInteger(entry.permanent_detail_gaps) === null) {
+    unknownFields.push("permanent_detail_gaps");
+  }
   const coverageStatuses = readCoverageStatuses(entry.coverage_statuses);
-  const fact: RuntimeCollectionFact = {
+  const fact: RuntimeCollectionFactWithEvidence = {
     checkpoint: typeof entry.checkpoint === "string" ? entry.checkpoint : null,
     collected: readFiniteNumber(entry.collected, 0),
     // `considered` and `covered` are OMITTED upstream when unknown. Re-validate
@@ -49,7 +71,8 @@ export function readRuntimeCollectionFact(raw: unknown): RuntimeCollectionFact |
     // never as a fabricated denominator or numerator.
     considered: readSafeNonNegativeInteger(entry.considered),
     covered: readSafeNonNegativeInteger(entry.covered),
-    pending_detail_gaps: readFiniteNumber(entry.pending_detail_gaps, 0),
+    pending_detail_gaps: pending,
+    ...(unknownFields.length ? { unknown_fields: unknownFields } : {}),
     ...permanentDetailGapsField(entry.permanent_detail_gaps),
     ...(coverageStatuses ? { coverage_statuses: coverageStatuses } : {}),
     skipped: readRuntimeSkipFact(entry.skipped),
@@ -84,7 +107,7 @@ function readCoverageStatuses(value: unknown): readonly string[] | undefined {
  */
 export function readCollectionFactsFromTerminalData(
   data: Record<string, unknown> | null
-): RuntimeCollectionFacts | null {
+): RuntimeCollectionFactsWithEvidence | null {
   if (!data) {
     return null;
   }
@@ -97,14 +120,22 @@ export function readCollectionFactsFromTerminalData(
   if (!Array.isArray(streams)) {
     return null;
   }
-  const entries: RuntimeCollectionFact[] = [];
-  for (const raw of streams) {
+  const entries: RuntimeCollectionFactWithEvidence[] = [];
+  const unknown: UnknownStream[] = [];
+  for (const [index, raw] of streams.entries()) {
     const fact = readRuntimeCollectionFact(raw);
     if (fact) {
       entries.push(fact);
+    } else {
+      const stream = raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>).stream
+        : null;
+      unknown.push(typeof stream === "string" && stream
+        ? { index, stream, reason: "pending_detail_gaps" }
+        : { index, reason: "invalid_stream" });
     }
   }
-  return { streams: entries };
+  return { streams: entries, ...(unknown.length ? { unknown_streams: unknown } : {}) };
 }
 
 function readCollectionRateNumbers(entry: Record<string, unknown>): CollectionRateNumbers | null {
