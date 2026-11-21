@@ -364,6 +364,36 @@ test("a route with no observable expiry presents as Verified while its proof is 
   assert.equal(routePresentation(route, current, now).label, "Verified");
 });
 
+// Packaged walk 054 (Gozar 0.5.4, localhost.run session): the route was verified and published, yet the card
+// read "Needs your action / Not confirmed yet". The provider declares proof checks tls, nonce and sse; a request that
+// does not need SSE runs only tls and nonce, so the proof lists two passed results and no sse result.
+test("a session route whose request ran no SSE check is Verified when every check that ran passed", () => {
+  const now = Date.now();
+  const { route, current } = presentedRoute(now);
+  const session: Route = {
+    ...route,
+    properties: { ...route.properties, proof: { ...route.properties.proof, checks: ["tls", "nonce", "sse"] } },
+    verification: {
+      ...route.verification,
+      checks: ["tls", "nonce"],
+      results: [
+        { check: "tls", status: "passed" },
+        { check: "nonce", status: "passed" },
+      ],
+    },
+  };
+  assert.equal(routePresentation(session, current, now).label, "Verified");
+  // Control: a check that did run and failed still blocks.
+  const failed: Route = {
+    ...session,
+    verification: {
+      ...session.verification,
+      results: [...session.verification.results, { check: "sse" as const, status: "failed" as const }],
+    },
+  };
+  assert.equal(routePresentation(failed, current, now).label, "Unpublished");
+});
+
 test("an unknown route expiry never outlives the proof, and a known past expiry still blocks", () => {
   const now = Date.now();
   const { route, current } = presentedRoute(now);
