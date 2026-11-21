@@ -8,9 +8,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  __resetDatasetSummaryAutoHealThrottleForTest,
   __setDatasetSummaryProjectionFaultHookForTest,
   applyDatasetSummaryBlobDelta,
   applyDatasetSummaryRecordDelta,
+  ensureDatasetSummaryProjectionHealthy,
   getDatasetSummaryProjection,
   listStreamProjections,
   markDatasetSummaryProjectionStale,
@@ -103,6 +105,7 @@ async function withTempDb<T>(fn: () => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "pdpp-summary-projection-"));
   try {
     initDb(join(dir, "pdpp.sqlite"));
+    __resetDatasetSummaryAutoHealThrottleForTest();
     return await fn();
   } finally {
     closeDb();
@@ -542,6 +545,98 @@ test("repairing dirty record-time bounds keeps a projection stale while a droppe
       getStreamRecordTimeBounds: getDatasetSummaryStreamRecordTimeBounds,
     });
     assert.equal(getDatasetSummaryProjection().metadata.state, "fresh", "after a full rebuild, a time repair clears stale state again");
+  }));
+
+async function seedTwoRecordsAndRebuild() {
+  await rebuildEmptyProjection();
+  for (const [key, createdAt] of [
+    ["m1", "2025-01-01T00:00:00.000Z"],
+    ["m2", "2025-02-01T00:00:00.000Z"],
+  ]) {
+    await ingestRecord("gmail", {
+      data: { created_at: createdAt, id: key },
+      emitted_at: "2026-01-01T00:00:00.000Z",
+      key,
+      stream: "messages",
+    });
+  }
+  registerConnectorManifest("gmail", {
+    connector_id: "gmail",
+    streams: [{ consent_time_field: "created_at", name: "messages" }],
+  });
+  await rebuildFromCurrentDb();
+}
+
+function applyHarmlessDelta() {
+  applyDatasetSummaryRecordDelta({
+    connectorId: "gmail",
+    consentTimeField: "created_at",
+    dirtyRecordTimeBounds: false,
+    emittedAt: "2026-01-02T00:00:00.000Z",
+    recordChangesJsonBytesDelta: 0,
+    recordCountDelta: 0,
+    recordJsonBytesDelta: 0,
+    stream: "messages",
+  });
+}
+
+function countingRebuildDependencies() {
+  const dependencies = currentDbRebuildDependencies();
+  let rebuilds = 0;
+  return {
+    dependencies: {
+      ...dependencies,
+      getCounts: () => {
+        rebuilds += 1;
+        return dependencies.getCounts();
+      },
+    },
+    rebuilds: () => rebuilds,
+  };
+}
+
+test("a read heals a projection that is stale for a reason only a full rebuild clears", async () =>
+  withTempDb(async () => {
+    await seedTwoRecordsAndRebuild();
+    assert.equal(await deleteRecord("gmail", "messages", "m1"), 1);
+    markDatasetSummaryProjectionStale("record delta arrived during projection rebuild");
+    await reconcileDirtyDatasetSummaryRecordTimeBounds({
+      getStreamRecordTimeBounds: getDatasetSummaryStreamRecordTimeBounds,
+    });
+    applyHarmlessDelta();
+    const stuck = getDatasetSummaryProjection();
+    assert.equal(stuck.metadata.state, "stale");
+    assert.match(stuck.metadata.last_error ?? "", DROPPED_DELTA_ERROR);
+    assert.notEqual(stuck.metadata.computed_at, null, "the stuck shape has converged before, so only the stale reason can trigger a heal");
+
+    const counting = countingRebuildDependencies();
+    const healed = await ensureDatasetSummaryProjectionHealthy(counting.dependencies);
+
+    assert.equal(counting.rebuilds(), 1);
+    assert.equal(healed.metadata.state, "fresh");
+    assert.equal(healed.counts.record_count, 1);
+    assert.equal(getDatasetSummaryProjection().metadata.state, "fresh");
+
+    await ensureDatasetSummaryProjectionHealthy(counting.dependencies);
+    assert.equal(counting.rebuilds(), 1, "a fresh projection is not rebuilt again");
+  }));
+
+test("a read does not rebuild a projection that is stale only for dirty record-time bounds", async () =>
+  withTempDb(async () => {
+    await seedTwoRecordsAndRebuild();
+    assert.equal(await deleteRecord("gmail", "messages", "m1"), 1);
+    markDatasetSummaryProjectionStale("dirty record-time bounds could not be safely reconciled");
+    applyHarmlessDelta();
+    const before = getDatasetSummaryProjection();
+    assert.equal(before.metadata.state, "stale");
+    assert.match(before.metadata.last_error ?? "", DIRTY_BOUNDS_ERROR);
+
+    const counting = countingRebuildDependencies();
+    const result = await ensureDatasetSummaryProjectionHealthy(counting.dependencies);
+
+    assert.equal(counting.rebuilds(), 0);
+    assert.equal(result.metadata.state, "stale");
+    assert.match(result.metadata.last_error ?? "", DIRTY_BOUNDS_ERROR);
   }));
 
 test("dirty record-time reconciliation defers unsafe rows instead of clearing stale state", async () =>
@@ -1056,7 +1151,11 @@ async function rebuildEmptyProjection() {
 }
 
 async function rebuildFromCurrentDb() {
-  await rebuildDatasetSummaryProjection({
+  await rebuildDatasetSummaryProjection(currentDbRebuildDependencies());
+}
+
+function currentDbRebuildDependencies() {
+  return {
     getCounts: () => {
       const agg = getSqliteDatasetRecordsAggregate();
       return {
@@ -1083,7 +1182,7 @@ async function rebuildFromCurrentDb() {
     },
     listStreamProjectionSeeds: () => listDatasetSummaryStreamProjectionSeeds(),
     listTopConnectorCandidates: () => getSqliteDatasetTopConnectorCandidates(),
-  });
+  };
 }
 
 interface ConnectorManifestFixture {
