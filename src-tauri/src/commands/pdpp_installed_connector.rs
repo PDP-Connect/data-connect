@@ -842,11 +842,13 @@ fn resolve_active_installed_pdpp_connector(
     connector_id: &str,
     runtime_root: &Path,
 ) -> Result<ResolvedInstalledPdppConnector, String> {
-    let install = selected_source(connector_id)
-        .map_err(|error| format!("Failed to read developer connector source: {error}"))?
-        .map(|source| as_active_install(&source))
-        .or_else(|| get_active_connector_install(connector_id))
-        .ok_or_else(|| format!("PDPP connector {connector_id} is not installed"))?;
+    let source = selected_source(connector_id)
+        .map_err(|error| format!("Failed to read developer connector source: {error}"))?;
+    let install = match source {
+        Some(source) => as_active_install(&source),
+        None => get_active_connector_install(connector_id)?
+            .ok_or_else(|| format!("PDPP connector {connector_id} is not installed"))?,
+    };
     resolve_installed_pdpp_connector_with_runtime(&install, runtime_root)
 }
 

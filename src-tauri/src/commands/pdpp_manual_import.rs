@@ -46,7 +46,7 @@ pub async fn prepare_installed_pdpp_import(
     directory: bool,
 ) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
-        let install = get_active_connector_install(&connector_id)
+        let install = get_active_connector_install(&connector_id)?
             .ok_or("No active connector install for import")?;
         let root = canonical_import_root()?;
         reap_abandoned_imports_at(&root, SystemTime::now())?;

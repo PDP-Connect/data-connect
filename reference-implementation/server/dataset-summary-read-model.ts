@@ -780,15 +780,22 @@ function noteDatasetSummaryAutoHealSuccess(): void {
 }
 
 // A projection needs auto-heal when it has never converged (`computed_at`
-// null) or when a prior rebuild left it in the terminal `failed` state --
-// both are the "honestly unknown, and nothing is going to fix that on its
-// own" states the owner's stuck instance was in. `stale`/`refreshing` are
-// NOT included: those already carry a last-known-good value and either a
-// live rebuild lease (refreshing) or a delta-driven staleness that the
-// normal delta/reconcile paths already keep moving -- forcing a full
-// rebuild there would be exactly the "thrash" the task warns against.
+// null), when a prior rebuild left it in the terminal `failed` state, or
+// when it is stale for a reason only a full rebuild clears (`owesFullRebuild`,
+// e.g. a delta dropped during a rebuild). In each of those nothing else will
+// fix the projection: later deltas keep it stale and the time-bounds repair
+// deliberately leaves such a reason in place. Time-only staleness
+// (`DIRTY_TIME_BOUNDS_REASON`) is NOT included: the reconcile pass repairs it
+// cheaply, so a full rebuild there would be the "thrash" the task warns
+// against. `refreshing`/`rebuilding` are not included either; they hold a
+// live rebuild lease. The caller still applies the lease, cooldown and
+// exhaustion guards before any rebuild starts.
 function datasetSummaryProjectionNeedsHeal(projection: DatasetSummaryProjection): boolean {
-  return projection.metadata.computed_at === null || projection.metadata.state === "failed";
+  return (
+    projection.metadata.computed_at === null ||
+    projection.metadata.state === "failed" ||
+    owesFullRebuild(projection.metadata)
+  );
 }
 
 /**
