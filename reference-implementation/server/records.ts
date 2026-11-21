@@ -1398,6 +1398,7 @@ const PRUNE_ANCHOR_PRESERVE_CLAUSE = `
        AND r.stream = record_changes.stream
        AND r.record_key = record_changes.record_key
        AND r.version = record_changes.version
+       AND r.deleted = 0
   )`;
 
 function getPrunedRecordChangeJsonBytes(connectorInstanceId: string, stream: string, versionBefore: number): number {

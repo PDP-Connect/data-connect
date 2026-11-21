@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { closeDb, initDb } from "../server/db.ts";
 import { postgresIngestRecord } from "../server/postgres-records.ts";
@@ -80,5 +82,43 @@ test("PostgreSQL live history pruning retains the anchor for a cold current reco
 		if (previousLimit === undefined)
 			delete process.env.PDPP_CHANGE_HISTORY_LIMIT;
 		else process.env.PDPP_CHANGE_HISTORY_LIMIT = previousLimit;
+	}
+});
+
+test("SQLite pruning removes an expired tombstone but keeps a cold live anchor", () => {
+	const query = (file: string) =>
+		readFileSync(new URL(`../server/queries/records/ingest/${file}.sql`, import.meta.url), "utf8");
+	const db = new DatabaseSync(":memory:");
+	try {
+		db.exec(`
+			CREATE TABLE records (connector_instance_id TEXT, stream TEXT, record_key TEXT,
+				version INTEGER, deleted INTEGER, deleted_at TEXT);
+			CREATE TABLE record_changes (connector_instance_id TEXT, stream TEXT, record_key TEXT,
+				version INTEGER);
+			INSERT INTO records VALUES
+				('test', 'items', 'live', 1, 0, NULL),
+				('test', 'items', 'gone', 2, 0, NULL),
+				('test', 'items', 'hot', 6, 0, NULL);
+			INSERT INTO record_changes VALUES
+				('test', 'items', 'live', 1), ('test', 'items', 'gone', 2),
+				('test', 'items', 'gone', 3), ('test', 'items', 'hot', 4),
+				('test', 'items', 'hot', 5), ('test', 'items', 'hot', 6);
+		`);
+		db.prepare(query("mark-record-deleted")).run(
+			"2026-10-17T00:00:00.000Z", 3, "test", "items", "gone",
+		);
+		const tombstone = db.prepare("SELECT deleted, version FROM records WHERE record_key = 'gone'");
+		assert.equal(tombstone.get()?.version, 3);
+		assert.equal(tombstone.get()?.deleted, 1);
+
+		const result = db.prepare(query("prune-record-changes")).run("test", "items", 6 - 2);
+		const retained = db.prepare("SELECT record_key, version FROM record_changes ORDER BY version").all();
+		assert.deepEqual(retained.map((row) => [row.record_key, row.version]), [
+			["live", 1], ["hot", 5], ["hot", 6],
+		]);
+		assert.equal(result.changes, 3);
+		assert.equal(tombstone.get()?.deleted, 1);
+	} finally {
+		db.close();
 	}
 });

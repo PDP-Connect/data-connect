@@ -24,4 +24,5 @@ WHERE connector_instance_id = ?
        AND r.stream = record_changes.stream
        AND r.record_key = record_changes.record_key
        AND r.version = record_changes.version
+       AND r.deleted = 0
   )
