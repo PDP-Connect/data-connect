@@ -18,6 +18,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX } from "../operations/ref-connectors-list/pagination.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, isPostgresStorageBackend, postgresQuery } from "../server/postgres-storage.ts";
@@ -225,13 +226,36 @@ async function assertRouteSetScopeParity(asUrl: string): Promise<void> {
   assert.equal(revoked.status, "revoked");
   assert.ok(revoked.revoked_at);
 
-  // >100 distinct ids is a typed invalid request, over HTTP.
-  const oversized = Array.from({ length: 101 }, (_, i) => `connector-${i}`)
-    .map((id) => `connector_id=${encodeURIComponent(id)}`)
-    .join("&");
-  const oversizedResult = await getEnvelope(asUrl, `${oversized}&limit=100&profile=retained_count_summary`);
+  // A full set reaches the operation as a set. The query parser turns repeated
+  // values past its arrayLimit into a numeric-keyed object, which the
+  // operation rejects, so a parser limit below the set max breaks this case.
+  const scope = (count: number) =>
+    [CONNECTOR_A, CONNECTOR_B, CONNECTOR_C, ...Array.from({ length: count - 3 }, (_, i) => `connector-${i}`)]
+      .map((id) => `connector_id=${encodeURIComponent(id)}`)
+      .join("&");
+  const full = await getEnvelope(
+    asUrl,
+    `${scope(CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX)}&limit=100&profile=retained_count_summary`
+  );
+  assert.equal(full.status, 200, JSON.stringify(full.body));
+  assert.deepEqual((full.body.data ?? []).map((row) => row.connection_id).sort(), [
+    "cin_route_a1",
+    "cin_route_b1",
+    "cin_route_b2_revoked",
+  ]);
+
+  // One id past the set max is refused by the set-size rule, not by a
+  // parser-shape accident.
+  const oversizedResult = await getEnvelope(
+    asUrl,
+    `${scope(CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX + 1)}&limit=100&profile=retained_count_summary`
+  );
   assert.equal(oversizedResult.status, 400, JSON.stringify(oversizedResult.body));
   assert.equal(oversizedResult.body.error?.code, "invalid_request");
+  assert.match(
+    String(oversizedResult.body.error?.message),
+    new RegExp(`at most ${CONNECTOR_SUMMARY_PAGE_CONNECTOR_ID_SET_MAX} distinct canonical ids`)
+  );
 
   // connector_id SET mixed with `connection` is rejected (mutual exclusivity).
   const mixedResult = await getEnvelope(
