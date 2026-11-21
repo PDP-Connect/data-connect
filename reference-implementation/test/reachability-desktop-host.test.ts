@@ -198,7 +198,7 @@ test("desktop host accepts an exec'd launcher whose lease names the server's own
   await reference(process.pid);
   const host = await startDesktopReachability(input);
   assert.ok(host?.service, "service starts when the lease names the exec'd server's own pid");
-  t.after(() => host.service.closeObservers());
+  t.after(() => host.service?.closeObservers());
   assert.deepEqual(await host.service.hostSettings().then(value => value.known && value.value.target), {
     known: true, value: `127.0.0.1:${address.port}`,
   });
