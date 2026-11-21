@@ -833,22 +833,25 @@ fn spawn_output_watcher(
 }
 
 /// cloudflared logs a line containing "Registered tunnel connection" once
-/// the tunnel is live, and lines containing "connection error"/"failed to
-/// " on a fatal startup failure (for example an invalid token). Matched
-/// case-insensitively against both stdout and stderr, since cloudflared's
-/// log destination has varied across versions and this adapter does not pin
-/// one.
+/// the tunnel is live. A line with one of the phrases below maps to a fixed
+/// reason; the raw line is never passed on. The two token phrases are a best
+/// effort: cloudflared's source does not print them verbatim, and a bad token
+/// can instead end the process or never register. The exit and timeout paths
+/// refuse those cases. Matched case-insensitively against both stdout and
+/// stderr, since cloudflared's log destination has varied across versions and
+/// this adapter does not pin one.
 fn watch_stream<R: std::io::Read>(reader: BufReader<R>, connected: mpsc::Sender<Result<(), String>>) {
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let lower = line.to_ascii_lowercase();
         if lower.contains("registered tunnel connection") {
             let _ = connected.send(Ok(()));
-        } else if lower.contains("failed to parse token")
-            || lower.contains("invalid tunnel token")
-            || lower.contains("unauthorized")
-        {
-            let _ = connected.send(Err(line));
+        } else if lower.contains("failed to parse token") {
+            let _ = connected.send(Err("tunnel token could not be parsed".to_string()));
+        } else if lower.contains("invalid tunnel token") {
+            let _ = connected.send(Err("invalid tunnel token".to_string()));
+        } else if lower.contains("unauthorized") {
+            let _ = connected.send(Err("tunnel authorization was denied".to_string()));
         }
     }
 }
@@ -1112,11 +1115,17 @@ mod tests {
     }
 
     #[test]
-    fn watch_stream_reports_failure_on_an_invalid_token_line() {
-        let sample = b"2026-09-20T00:00:00Z ERR Failed to parse token: invalid tunnel token\n";
-        let (tx, rx) = mpsc::channel();
-        watch_stream(BufReader::new(&sample[..]), tx);
-        assert!(matches!(rx.recv(), Ok(Err(reason)) if reason.to_ascii_lowercase().contains("token")));
+    fn watch_stream_reports_only_fixed_failure_reasons() {
+        for (sample, expected) in [
+            ("ERR Failed to parse token", "tunnel token could not be parsed"),
+            ("ERR INVALID TUNNEL TOKEN", "invalid tunnel token"),
+            ("ERR Unauthorized", "tunnel authorization was denied"),
+        ] {
+            let sample = format!("{sample}: opaque-marker\n");
+            let (tx, rx) = mpsc::channel();
+            watch_stream(BufReader::new(sample.as_bytes()), tx);
+            assert_eq!(rx.recv().unwrap(), Err(expected.to_string()));
+        }
     }
 
     #[test]

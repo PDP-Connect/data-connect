@@ -39,6 +39,11 @@ const phaseStatus: Record<string, string> = {
   inactive: "Off",
 };
 
+function endedWithUnconfirmedCleanup(route: RouteDisplayInput, phase?: string | null): boolean {
+  return route.cleanup.state === "unconfirmed" &&
+    (route.state === "released" || phaseStatus[phase ?? route.routeState] === "Off");
+}
+
 // A released route with confirmed cleanup is settled. The lifecycle phase can
 // still read "unknown" then, because it also waits for local confinement, which
 // Details → Diagnostics reports.
@@ -50,13 +55,17 @@ export function routeHeadline(
 ): string {
   if (proofRefreshUnsupported || attention) return "Needs your action";
   if (route.state === "released" && route.cleanup.state === "confirmed") return "Off";
+  if (lifecyclePhase !== "stopping" && endedWithUnconfirmedCleanup(route, lifecyclePhase)) return "Needs your action";
   if (route.presentation) return route.presentation.label === "Verified" ? "On" : "Needs your action";
   return phaseStatus[lifecyclePhase ?? route.routeState] ?? "Needs your action";
 }
 
 // One sentence under the status, only where the status alone would not say it.
 export function routeSentence(route: RouteDisplayInput, headline: string, options: TimeOptions = {}): string | null {
-  if (headline === "Off" && route.state === "released") {
+  if (headline !== "Turning off" && endedWithUnconfirmedCleanup(route)) {
+    return "We couldn't confirm your address closed. It may still work.";
+  }
+  if (headline === "Off" && route.state === "released" && route.cleanup.state === "confirmed") {
     const end = expiryTime(route);
     return end !== null && end <= (options.now ?? Date.now())
       ? `Your address turned off at ${formatLocalTime(end, options)}.`

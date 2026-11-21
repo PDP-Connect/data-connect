@@ -122,7 +122,7 @@ const legacy = (operationId: string) => ({
   usage: "durable",
 })
 
-test("migration keeps what the server holds, drops stale entries, then clears the browser copy", async () => {
+test("migration keeps what the server holds, drops stale entries, and keeps rows it cannot read", async () => {
   const local = memoryStore({
     "reachability-setup-reservations-v1": JSON.stringify([
       legacy("op-live"),
@@ -145,9 +145,10 @@ test("migration keeps what the server holds, drops stale entries, then clears th
   }) as typeof requestReachability
   const result = await migrateLegacySetupReservations(request, { local, session })
   assert.deepEqual(asked, ["op-live", "op-stale"])
-  assert.deepEqual(result, { adopted: 1, dropped: 1, deferred: 0, cleanup: 0, draft: "none" })
-  assert.equal(local.items.size, 0)
-  assert.equal(session.items.size, 0)
+  assert.deepEqual(result, { adopted: 1, dropped: 1, deferred: 1, cleanup: 0, draft: "deferred" })
+  // A row or draft pointer the migration cannot read is kept as written, never deleted.
+  assert.equal(local.items.get("reachability-setup-reservations-v1"), '[{"operationId":"broken"}]')
+  assert.equal(session.items.get("reachability-draft"), "{}")
 })
 
 test("migration keeps a saved setup when the server cannot answer", async () => {
@@ -307,7 +308,7 @@ test("migration sends the saved draft to the host and keeps it until the host an
   assert.deepEqual(sent[0], { providerId: "svc", draftId: "draft-1", usage: "durable" })
 })
 
-test("migration drops a draft pointer that names nothing, and reports a leftover setup", async () => {
+test("migration keeps a draft pointer it cannot read, and reports a leftover setup", async () => {
   const session = memoryStore({ "reachability-draft": "{}" })
   const local = memoryStore({ "reachability-setup-reservations-v1": JSON.stringify([legacy("op-second")]) })
   const request = (async (path: string) => {
@@ -315,8 +316,8 @@ test("migration drops a draft pointer that names nothing, and reports a leftover
     return { ok: true, data: { adopted: false, reason: "needs_cleanup" } }
   }) as typeof requestReachability
   const result = await migrateLegacySetupReservations(request, { local, session })
-  assert.deepEqual(result, { adopted: 0, dropped: 0, deferred: 0, cleanup: 1, draft: "none" })
-  assert.equal(session.items.size, 0)
+  assert.deepEqual(result, { adopted: 0, dropped: 0, deferred: 0, cleanup: 1, draft: "deferred" })
+  assert.equal(session.items.get("reachability-draft"), "{}")
   assert.equal(local.items.size, 0)
 })
 

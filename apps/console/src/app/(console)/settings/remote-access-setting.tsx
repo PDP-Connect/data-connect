@@ -1236,7 +1236,7 @@ export function RemoteAccessSetting({
           const phase = phaseOf(route);
           const attention = attentionOf(route);
           const headline = headlineOf(route);
-          const sentence = routeSentence(route, headline);
+          const sentence = attention === "cleanup-unconfirmed" ? null : routeSentence(route, headline);
           const now = Date.now();
           const { shown: knownFacts, unknown: unknownFacts } = splitFacts(route.facts);
           const detailsBody = (

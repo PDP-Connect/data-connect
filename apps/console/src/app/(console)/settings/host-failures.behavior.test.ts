@@ -193,6 +193,46 @@ test("when the fix leaves a folder outside the data directory, the card shows it
   });
 });
 
+test("when every reported path is fixable, only the Fix action shows and no command", async () => {
+  const command = "chmod go-w -- '/data'";
+  const handler = host({
+    "/catalog": fail("unsafe_state_path"),
+    "/state-paths": ok({
+      paths: [{ path: "/data", reason: "writable-by-others", fixable: true }],
+      command,
+    }),
+  });
+  await withScreen(handler, async ({ mainText, buttons }) => {
+    assert.match(mainText(), UNSAFE_WORDS);
+    assert.ok(buttons().includes("Fix permissions"));
+    assert.ok(!buttons().includes("Copy command"));
+    assert.ok(!mainText().includes(command), "command is suppressed when all paths are fixable");
+    assert.doesNotMatch(mainText(), /Run this command|Others need a command/);
+  });
+});
+
+test("when some paths are not fixable, the command shows once with one sentence", async () => {
+  const command = "chmod go-w -- '/home/someone'";
+  const handler = host({
+    "/catalog": fail("unsafe_state_path"),
+    "/state-paths": ok({
+      paths: [
+        { path: "/data", reason: "writable-by-others", fixable: true },
+        { path: "/home/someone", reason: "writable-by-others", fixable: false },
+      ],
+      command,
+    }),
+  });
+  await withScreen(handler, async ({ mainText, buttons }) => {
+    assert.match(mainText(), UNSAFE_WORDS);
+    assert.ok(buttons().includes("Fix permissions"));
+    assert.ok(buttons().includes("Copy command"));
+    assert.ok(mainText().includes(command));
+    assert.match(mainText(), /Run this command, then try again:/);
+    assert.doesNotMatch(mainText(), /Others need a command/);
+  });
+});
+
 // ---------- the background service ----------
 
 test("a background service that is down says so, copies diagnostics, and shows no code outside Details", async () => {
