@@ -201,3 +201,59 @@ test("desktop host repairs group- and other-writable state folders inside the da
   const report = await host.statePaths.inspect();
   assert.deepEqual(report.paths, []);
 });
+
+// The Linux launchers execve into the server, so the pid a lease names is the
+// server's own pid and its parent is the app, not the launcher. The launcher
+// records its pid in PDPP_LAUNCHER_PID before it execs; both servers key their
+// identity checks on it instead of assuming the launcher is their parent.
+test("desktop host accepts an exec'd launcher whose lease names the server's own pid", async (t) => {
+  const root = await scratch();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, "unified");
+  const env = {
+    PDPP_DATA_DIR: dataDir,
+    PDPP_MANAGED_DESKTOP_HOST: "1",
+    PDPP_OWNER_CREDENTIAL_REVEAL_PROOF: randomBytes(32).toString("hex"),
+    PDPP_LAUNCHER_PID: String(process.pid),
+    HOSTNAME: "127.0.0.1",
+    PORT: "",
+    PDPP_OWNER_PASSWORD: randomBytes(32).toString("hex"),
+    PDPP_CREDENTIAL_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
+  };
+  const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  const console = createServer((request, response) => {
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(request.headers)) if (typeof value === "string") headers.set(key, value);
+    const answer = respondToConsoleProof(new Request("http://127.0.0.1", { headers }));
+    response.writeHead(answer.status, Object.fromEntries(answer.headers)).end();
+  }).listen(0, "127.0.0.1");
+  await once(console, "listening");
+  t.after(() => console[Symbol.asyncDispose]());
+  const address = console.address();
+  assert.ok(address && typeof address === "object");
+  process.env.PORT = String(address.port);
+  const leases = join(root, "run");
+  await Promise.all([mkdir(dataDir), mkdir(leases)]);
+  const lease = { pid: process.pid, owner_pid: process.ppid, owner_started_at_ticks: 123, port: address.port };
+  await writeFile(join(leases, "console.json"), JSON.stringify({ ...lease, label: "console" }));
+  const reference = (pid: number) => writeFile(join(leases, "reference-implementation.json"), JSON.stringify({
+    ...lease, pid, label: "reference-implementation",
+  }));
+  const input = { dataDir, bindHost: "127.0.0.1", owner: "owned-fixture", passwordConfigured: true };
+  await reference(process.pid + 1);
+  assert.equal(await startDesktopReachability(input), undefined);
+  await reference(process.pid);
+  const host = await startDesktopReachability(input);
+  assert.ok(host?.service, "service starts when the lease names the exec'd server's own pid");
+  t.after(() => host.service.closeObservers());
+  assert.deepEqual(await host.service.hostSettings().then(value => value.known && value.value.target), {
+    known: true, value: `127.0.0.1:${address.port}`,
+  });
+});

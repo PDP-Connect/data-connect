@@ -615,6 +615,7 @@ const serverArgs = [
 ]
 const serverEnv = {
   ...process.env,
+  PDPP_LAUNCHER_PID: String(process.pid),
   NODE_ENV: "production",
   AS_PORT: process.env.AS_PORT || "0",
   RS_PORT: process.env.RS_PORT || "0",
