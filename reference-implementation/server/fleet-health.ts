@@ -375,8 +375,10 @@ function reconcileFleetScope(
       setupPending.push(ref);
       continue;
     }
-    const summary = summariesByConnectionId.get(connection.connectorInstanceId);
-    if (scope !== "operational" || !summary) {
+    const summary = summariesByConnectionId.get(ref.connection_id);
+    if (scope !== "operational" || !summary ||
+      summary.connector_instance_id !== ref.connector_instance_id ||
+      summary.connector_id !== ref.connector_id) {
       unassessed.push(ref);
       continue;
     }
