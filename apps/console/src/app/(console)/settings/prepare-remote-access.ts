@@ -555,19 +555,22 @@ const beforeAnyEffect = new Set([
 ]);
 
 /**
- * "did-not-turn-on" only when the host says it failed before any effect.
- * Anything else that failed may have left something live, so it needs the owner.
+ * "did-not-turn-on" only when the host says it failed before any effect: no
+ * handle, or a refusal it settled with its cleanup confirmed. Anything else
+ * that failed may have left something live, so it needs the owner.
  */
 export function operationOutcome(operation: {
   stage: string;
   failureCode?: string | null;
   handle?: unknown;
   recovery?: unknown;
+  cleanupConfirmed?: boolean;
 }): "turning-on" | "done" | "did-not-turn-on" | "needs-action" {
   if (operation.stage === "applying") return "turning-on";
   if (operation.stage === "unknown-possibly-live" || operation.recovery) return "needs-action";
   if (operation.failureCode) {
-    return !operation.handle && beforeAnyEffect.has(operation.failureCode) ? "did-not-turn-on" : "needs-action";
+    const nothingLive = !operation.handle || (operation.stage === "settled" && operation.cleanupConfirmed === true);
+    return nothingLive && beforeAnyEffect.has(operation.failureCode) ? "did-not-turn-on" : "needs-action";
   }
   return "done";
 }

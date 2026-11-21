@@ -61,6 +61,7 @@ import { AllowCard, TurnOnCard, TurningOnChecklist, checklistStep } from "./turn
 type Inventory = ReturnType<typeof projectInventory>;
 type Route = ReturnType<typeof projectRoute> & { stopRequested?: boolean };
 type Operation = {
+  cleanupConfirmed?: boolean;
   failureCode?: string | null;
   handle?: unknown;
   kind?: "start" | "stop" | "check";

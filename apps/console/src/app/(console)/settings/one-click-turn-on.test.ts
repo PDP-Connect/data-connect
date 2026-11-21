@@ -337,6 +337,9 @@ test("restarts are bounded: a host that always answers stale ends in the failure
 test("a finished operation reads as Off only when it failed before any effect", () => {
   assert.equal(operationOutcome({ stage: "settled", failureCode: "provider_unavailable", handle: null }), "did-not-turn-on");
   assert.equal(operationOutcome({ stage: "settled", failureCode: "provider_unavailable", handle: { id: "r" } }), "needs-action");
+  // A refusal the host settled with its cleanup confirmed left nothing live.
+  assert.equal(operationOutcome({ stage: "settled", failureCode: "consent_mismatch", handle: { id: "r" }, cleanupConfirmed: true }), "did-not-turn-on");
+  assert.equal(operationOutcome({ stage: "settled", failureCode: "route_conflict", handle: { id: "r" }, cleanupConfirmed: true }), "needs-action");
   assert.equal(operationOutcome({ stage: "settled", failureCode: "verification_failed", handle: null }), "needs-action");
   assert.equal(operationOutcome({ stage: "settled", failureCode: "reachability_unavailable", handle: null }), "needs-action");
   assert.equal(operationOutcome({ stage: "unknown-possibly-live" }), "needs-action");
@@ -698,6 +701,27 @@ test("a failure after an effect, or an uncertain one, is Needs your action and n
       assert.match(text(), operation === uncertain ? /Turn off/ : /Check and turn off/);
     });
   }
+});
+
+test("a refused start whose cleanup the host confirmed says it did not turn on, not that the address was lost", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let answered = false;
+  const refused = { ...applying(), stage: "settled", failureCode: "consent_mismatch", handle: { id: "r" }, cleanupConfirmed: true };
+  const handler = host({
+    "/state": () => (answered ? ok(idleState) : turningOn()),
+    "/operations/op-1": () => {
+      answered = true;
+      return ok(refused);
+    },
+  });
+  await withScreen(handler, async ({ settle, text }) => {
+    assert.match(text(), /Turning on/);
+    await act(async () => t.mock.timers.tick(1000));
+    await settle();
+    assert.ok(answered);
+    assert.match(text(), /Remote access did not turn on/);
+    assert.doesNotMatch(text(), /Needs your action|We lost track of the address/);
+  });
 });
 
 // ---------- no positive action without a password ----------

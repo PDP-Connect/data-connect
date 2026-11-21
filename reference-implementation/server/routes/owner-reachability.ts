@@ -232,6 +232,7 @@ export function mountOwnerReachability(app: App, ctx: OwnerReachabilityContext):
   get("/operations/:id", async (request) => {
     const record = await ctx.operations.read(text(request.params.id));
     return {
+      cleanupConfirmed: record.cleanupConfirmed === true,
       failureCode: record.failureCode,
       handle: record.handle
         ? { id: record.handle.id, kind: record.handle.kind, generation: record.handle.generation }
