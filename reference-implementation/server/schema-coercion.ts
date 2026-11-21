@@ -66,6 +66,23 @@ export function parseDateValue(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+// Match the wire syntax before parsing. Validate the local date separately so
+// an offset or a permissive parser cannot normalize an impossible day.
+const STRICT_DATE = /^\d{4}-\d{2}-\d{2}(?![\s\S])/;
+const STRICT_DATE_TIME = /^\d{4}-\d{2}-\d{2}[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)(?![\s\S])/;
+
+function parseStrictDateValue(value: unknown, format: string): number | null {
+  if (typeof value !== "string" || !(format === "date" ? STRICT_DATE : STRICT_DATE_TIME).test(value)) {
+    return null;
+  }
+  const day = value.slice(0, 10);
+  const midnight = Date.parse(day + "T00:00:00Z");
+  if (!Number.isFinite(midnight) || new Date(midnight).toISOString().slice(0, 10) !== day) {
+    return null;
+  }
+  return parseDateValue(value);
+}
+
 export function coerceComparableValue(
   value: unknown,
   fieldSchema: FieldSchema | null | undefined,
@@ -104,7 +121,7 @@ export function coerceComparableValue(
     typeof fieldSchema?.format === "string" &&
     (["date", "date-time"] as string[]).includes(fieldSchema.format)
   ) {
-    const parsed = parseDateValue(value);
+    const parsed = strict ? parseStrictDateValue(value, fieldSchema.format) : parseDateValue(value);
     if (parsed === null && strict) {
       throw invalidQueryError(`Invalid date value for '${String(value)}'`);
     }
