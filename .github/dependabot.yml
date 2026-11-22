@@ -33,9 +33,9 @@ updates:
     schedule:
       interval: weekly
     ignore:
-      # Keep soup3 on the webkit2gtk-compatible 0.5 line; see src-tauri/Cargo.toml:127-129.
+      # Keep soup3 on the webkit2gtk-compatible 0.5 line; see the soup3 comment in src-tauri/Cargo.toml.
       - dependency-name: soup3
-        versions: [">= 0.6.0"]
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       cargo:
         applies-to: version-updates
