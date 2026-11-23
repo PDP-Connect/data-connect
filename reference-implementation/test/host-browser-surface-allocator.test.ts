@@ -218,6 +218,51 @@ test("lease DELETE answered 500 still fails and keeps the lease for a later retr
 	assert.equal(calls.filter((call) => call.method === "DELETE").length, 2);
 });
 
+test("lease POST outlasts the short request budget while the host starts a cold browser; DELETE keeps the short budget", async () => {
+	const slowFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+		await new Promise<void>((resolve, reject) => {
+			const timer = setTimeout(resolve, 60);
+			init?.signal?.addEventListener("abort", () => {
+				clearTimeout(timer);
+				reject(new Error("aborted"));
+			});
+		});
+		if (init?.method === "POST") {
+			return {
+				json: async () => ({
+					cdp_url: "http://127.0.0.1:9222/host-cdp",
+					surface_id: "host-surface-slow",
+				}),
+				ok: true,
+				status: 200,
+			} as Response;
+		}
+		return { json: async () => ({}), ok: true, status: 204 } as Response;
+	}) as typeof fetch;
+	const allocator = createHostBrowserSurfaceAllocator({
+		endpoint: "http://127.0.0.1:9916/agent",
+		fetchImpl: slowFetch,
+		headless: false,
+		leaseStartTimeoutMs: 1_000,
+		requestTimeoutMs: 20,
+		token: "shared-secret",
+	});
+	allocator.bindRunToSurface({ runId: "run-slow", surfaceId: "surface_1" });
+
+	const surface = await allocator.ensureSurface({
+		connectorId: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
+		surfaceId: "surface_1",
+	});
+
+	assert.equal(surface.cdp_url, "http://127.0.0.1:9222/host-cdp");
+	await assert.rejects(
+		allocator.stopSurface({ reason: "operator", surfaceId: "surface_1" }),
+		/timed out after 20ms/,
+	);
+});
+
 test("release after a lost acquire response targets the stable run id", async () => {
 	const calls: MockRequest[] = [];
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {

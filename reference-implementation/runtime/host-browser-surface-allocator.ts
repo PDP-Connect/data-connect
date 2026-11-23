@@ -10,6 +10,11 @@ import type {
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 
 const DEFAULT_HOST_REQUEST_TIMEOUT_MS = 5_000;
+// A lease POST returns only after the host has started the browser, and the
+// desktop host allows a cold browser start up to 10 seconds. A shorter budget
+// abandons a start the host still completes: that browser then holds the
+// connection's profile and refuses the retry with browser_profile_in_use.
+const DEFAULT_HOST_LEASE_START_TIMEOUT_MS = 30_000;
 
 export interface HostBrowserSurfaceLeaseBinding {
 	/**
@@ -26,6 +31,8 @@ export interface HostBrowserSurfaceAllocatorOptions {
 	readonly fetchImpl?: typeof fetch;
 	readonly headless: boolean;
 	readonly now?: () => Date;
+	/** Budget for the lease POST, which waits for the host to start a browser. */
+	readonly leaseStartTimeoutMs?: number;
 	readonly requestTimeoutMs?: number;
 	readonly token: string;
 }
@@ -113,6 +120,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #fetch: FetchImpl;
 	readonly #headless: boolean;
 	readonly #now: () => Date;
+	readonly #leaseStartTimeoutMs: number;
 	readonly #requestTimeoutMs: number;
 	readonly #token: string;
 	readonly #leasesBySurfaceId = new Map<string, HostLeaseRecord>();
@@ -129,6 +137,8 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		this.#fetch = (options.fetchImpl ?? fetch) as FetchImpl;
 		this.#headless = options.headless;
 		this.#now = options.now ?? (() => new Date());
+		this.#leaseStartTimeoutMs =
+			options.leaseStartTimeoutMs ?? DEFAULT_HOST_LEASE_START_TIMEOUT_MS;
 		this.#requestTimeoutMs =
 			options.requestTimeoutMs ?? DEFAULT_HOST_REQUEST_TIMEOUT_MS;
 		this.#token = options.token.trim();
@@ -284,7 +294,9 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		url: string,
 		body: Record<string, unknown>,
 	): Promise<unknown> {
-		const response = await this.#request(method, url, JSON.stringify(body));
+		const response = await this.#request(method, url, JSON.stringify(body), {
+			timeoutMs: this.#leaseStartTimeoutMs,
+		});
 		try {
 			return await response.json();
 		} catch (error) {
@@ -307,13 +319,13 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		method: "DELETE" | "POST",
 		url: string,
 		body?: string,
-		{ notFoundIsSuccess = false }: { notFoundIsSuccess?: boolean } = {},
+		{
+			notFoundIsSuccess = false,
+			timeoutMs = this.#requestTimeoutMs,
+		}: { notFoundIsSuccess?: boolean; timeoutMs?: number } = {},
 	): Promise<FetchResponseLike> {
 		const controller = new AbortController();
-		const timeout = setTimeout(
-			() => controller.abort(),
-			this.#requestTimeoutMs,
-		);
+		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await this.#fetch(url, {
 				headers: {
@@ -335,7 +347,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			if (controller.signal.aborted) {
 				throw new HostBrowserSurfaceAllocatorError(
 					"host_browser_surface_timeout",
-					`host browser surface ${method} ${url} timed out after ${this.#requestTimeoutMs}ms`,
+					`host browser surface ${method} ${url} timed out after ${timeoutMs}ms`,
 					{ cause: error },
 				);
 			}
