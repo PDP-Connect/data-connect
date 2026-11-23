@@ -31,6 +31,9 @@ pub mod winclose_repro;
 pub mod pdeathsig_port_repro;
 #[cfg(desktop)]
 mod sealed_credential;
+// The attach resolver is wired in a follow-up change.
+#[allow(dead_code)]
+mod attach_target;
 mod spawn_retry;
 #[cfg(test)]
 mod test_executable;
