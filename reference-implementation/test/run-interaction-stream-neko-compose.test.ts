@@ -202,6 +202,20 @@ test("static and dynamic n.eko paths expose DPR-1 portrait and landscape phone m
   }
 });
 
+test("n.eko serves and captures the same configured desktop display", async () => {
+  const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
+  const display = '"${DISPLAY_NAME}"';
+  assert.ok(source.includes('DISPLAY_NAME="${NEKO_DESKTOP_DISPLAY:-${DISPLAY:-:99.0}}"'));
+  assert.ok(source.includes(`--desktop.display ${display}`));
+  assert.ok(source.includes(`--capture.video.display ${display}`));
+});
+
+test("the image installs the n.eko wrapper and Supervisor actually uses it", async () => {
+  const source = await readFile(NEKO_DOCKERFILE, "utf8");
+  assert.ok(source.includes("COPY docker/neko/start-neko.sh /usr/local/bin/start-neko.sh"));
+  assert.ok(source.includes("#command=/usr/local/bin/start-neko.sh#' /etc/neko/supervisord.conf"));
+});
+
 test("Chromium defaults its launch size to the active n.eko screen", async () => {
   const startScript = await readFile(NEKO_CHROMIUM_START, "utf8");
 
