@@ -57,7 +57,8 @@ async function render(
   installCatalogTransientlyUnavailable: boolean,
   entry: ConnectorCatalogEntry = reddit,
   lifecycle?: ConnectorInstallLifecycle,
-  installSkippedEntries = 0
+  installSkippedEntries = 0,
+  query = ""
 ): Promise<string> {
   const { SourceSetupCatalog } = await catalogModule;
   return renderToStaticMarkup(
@@ -68,7 +69,7 @@ async function render(
       installSkippedEntries,
       // The page builds this from the empty catalog a busy snapshot returns.
       installLifecycleByConnector: lifecycle ? { [entry.connectorKey]: lifecycle } : {},
-      query: "",
+      query,
     })
   );
 }
@@ -78,7 +79,11 @@ test("a busy package catalog does not hide an unregistered connector", async () 
 });
 
 test("a known-empty package catalog hides an unregistered connector with no package", async () => {
-  assert.doesNotMatch(await render(false), />Reddit</);
+  const empty = await render(false);
+  assert.doesNotMatch(empty, />Reddit</);
+  assert.match(empty, /No connectors are available to add\./);
+  assert.doesNotMatch(empty, /No connector matched/);
+  assert.match(await render(false, reddit, undefined, 0, "calendar"), /No connector matched .*calendar.*Try the source name or connector key/);
 });
 
 const INSTALL_BUTTON = />Install<\/button>/;
