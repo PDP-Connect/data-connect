@@ -743,6 +743,9 @@ fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations)
     expect(install.packageJson.dependencies["portable-archive"]).toBe("file:reference-implementation/vendor/portable.tgz")
     expect(install.packageJson.dependencies["existing-archive"]).toBe("file:reference-implementation/vendor/existing.tgz")
     expect(install.packageJson.dependencies["@ngrok/ngrok"]).toBe("1.7.0")
+    expect(install.packageJson.dependencies["@pdpp/polyfill-connectors"]).toBe(
+      "file:reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz"
+    )
     expect(install.args).not.toContain("--omit=optional")
     expect(install.args).toContain("--allow-git=all")
     expect(install.args).not.toContain("--no-package-lock")

@@ -377,6 +377,11 @@ function createStagedPackageJson(projectRoot, stageRoot) {
     const archive = /^file:(?:\.\/)?(vendor\/.*)$/.exec(specifier)?.[1]
     if (archive) dependencies[name] = `file:reference-implementation/${archive}`
   }
+  // A dev dependency of the reference implementation that the runtime still
+  // loads: connector manifests and the conformance roster that lets the owner
+  // add a browser-bound account.
+  dependencies["@pdpp/polyfill-connectors"] =
+    "file:reference-implementation/vendor/pdpp-polyfill-connectors-0.0.1.tgz"
   for (const [packageName] of LOCAL_PACKAGES) {
     dependencies[packageName] = localPackageSpecifier(packageName)
   }
