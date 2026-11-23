@@ -15,11 +15,24 @@ import { describe, expect, it } from "vitest"
 import {
   copyBrowserDirectory,
   getBrowserDirectoryName,
+  getPlaywrightBrowserPath,
   parseBuildOptions,
   supportsBrowserProvisioning,
 } from "./build.js"
 
 describe("playwright-runner build options", () => {
+  it("resolves the hermetic browser selector relative to Playwright's own core dependency", () => {
+    const coreRoot = join("fixture", "nested", "node_modules", "playwright-core")
+    expect(getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: "0" },
+      resolveCoreManifest: () => join(coreRoot, "package.json"),
+    })).toBe(join(coreRoot, ".local-browsers"))
+    expect(getPlaywrightBrowserPath({
+      env: { PLAYWRIGHT_BROWSERS_PATH: "fixture-custom-cache" },
+      resolveCoreManifest: () => { throw new Error("unexpected package lookup") },
+    })).toBe("fixture-custom-cache")
+  })
+
   it("does not download a browser during npm install", () => {
     const packageDocument = JSON.parse(
       readFileSync(resolve("playwright-runner/package.json"), "utf8")
