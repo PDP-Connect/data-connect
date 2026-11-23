@@ -68,6 +68,8 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/connector-observation-store.test.ts",
   // Registration identity boundary: Postgres is a fixture for the connectors row and its persist guard.
   "test/connector-source-identity-boundary.test.ts",
+  // Source identity move: Postgres is a fixture for the connectors, grants and handles rows it rewrites.
+  "test/connector-source-identity-move.test.ts",
   "test/connector-summary-dirty-hooks.test.ts",
   "test/connector-summary-evidence-canonical-count-cancel-isolation.test.ts",
   "test/connector-summary-evidence-direct-write-source-revision-detection.test.ts",
