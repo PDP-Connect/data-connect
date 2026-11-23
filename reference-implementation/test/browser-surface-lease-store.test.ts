@@ -223,6 +223,33 @@ async function assertNoPriorityBootstrapLocks(admin: Pool) {
   assert.equal(locks.rows[0].count, 0, "public bootstrap leaves no advisory locks behind");
 }
 
+test("a host surface carries its transport without inventing a stream URL", async () => {
+  const { browserSurfaceLeaseEnv } = await import("../runtime/browser-surface-leases.ts");
+  const projected = browserSurfaceLeaseEnv(
+    lease({ lease_id: "synthetic-lease", profile_key: "synthetic-profile" }),
+    surface({ surface_id: "synthetic-surface", cdp_url: "https://transport.invalid", stream_base_url: "" }),
+  );
+  assert.deepEqual(projected, {
+    PDPP_BROWSER_SURFACE_ID: "synthetic-surface",
+    PDPP_BROWSER_SURFACE_LEASE_ID: "synthetic-lease",
+    PDPP_BROWSER_SURFACE_PROFILE_KEY: "synthetic-profile",
+    PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: "https://transport.invalid",
+    PDPP_BROWSER_SURFACE_REQUIRED: "host",
+    PDPP_BROWSER_SURFACE_STREAM_BASE_URL: "",
+  });
+});
+
+test("a streamed surface projects distinct transport and owner-interaction URLs", async () => {
+  const { browserSurfaceLeaseEnv } = await import("../runtime/browser-surface-leases.ts");
+  const projected = browserSurfaceLeaseEnv(
+    lease(),
+    surface({ cdp_url: "https://transport.invalid", stream_base_url: "https://stream.invalid" }),
+  );
+  assert.equal(projected.PDPP_BROWSER_SURFACE_REQUIRED, "neko");
+  assert.equal(projected.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL, "https://transport.invalid");
+  assert.equal(projected.PDPP_BROWSER_SURFACE_STREAM_BASE_URL, "https://stream.invalid");
+});
+
 test("SQLite surface persistence does not require the obsolete retained column", async () => {
   const store = setup();
   try {
