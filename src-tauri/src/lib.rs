@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+mod build_receipt;
 mod commands;
 mod webview_cookies;
 #[cfg(desktop)]
@@ -183,6 +184,14 @@ pub fn run() {
 
             let version = app.config().version.clone().unwrap_or_default();
             log::info!("DataConnect v{} starting", version);
+            log::info!(
+                "{}",
+                build_receipt::format_build_receipt(
+                    &version,
+                    option_env!("DATACONNECT_BUILD_SHA"),
+                    None,
+                )
+            );
 
             #[cfg(desktop)]
             if main_thread_watchdog::is_enabled() {

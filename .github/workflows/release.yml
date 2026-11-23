@@ -251,6 +251,7 @@ jobs:
       - name: Build unsigned Tauri app
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
+          DATACONNECT_BUILD_SHA: ${{ inputs.build_sha || github.sha }}
           ARCH: ${{ matrix.os_family == 'linux' && 'x86_64' || '' }}
         with:
           args: --target ${{ matrix.target }}${{ matrix.os_family == 'macos' && ' --bundles app' || '' }}

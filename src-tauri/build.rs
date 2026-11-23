@@ -1,6 +1,11 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 fn main() {
+    println!("cargo:rerun-if-env-changed=DATACONNECT_BUILD_SHA");
+    let sha = std::env::var("DATACONNECT_BUILD_SHA").unwrap_or_default();
+    // Cargo treats newlines as separate build instructions.
+    let sha = if sha.contains(['\r', '\n']) { "" } else { &sha };
+    println!("cargo:rustc-env=DATACONNECT_BUILD_SHA={sha}");
     stage_development_node_sidecar();
     tauri_build::build()
 }
