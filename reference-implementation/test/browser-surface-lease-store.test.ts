@@ -107,6 +107,25 @@ function identityKeyForRow(row: {
   });
 }
 
+test("connection identity keys keep connector namespaces separate", () => {
+  const first = {
+    connector_id: "sample-reader",
+    profile_key: "sample-profile",
+    surface_subject_id: "sample-subject",
+  };
+  const second = { ...first, connector_id: "sample-writer" };
+
+  assert.notEqual(browserSurfaceConnectionIdentityKey(first), browserSurfaceConnectionIdentityKey(second));
+  assert.equal(
+    browserSurfaceConnectionIdentityKey(first),
+    browserSurfaceConnectionIdentityKey({
+      surface_subject_id: "sample-subject",
+      profile_key: "sample-profile",
+      connector_id: "sample-reader",
+    })
+  );
+});
+
 function typedDb(): Database.Database {
   return getDb() as object as Database.Database;
 }
