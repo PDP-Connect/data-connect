@@ -7,6 +7,7 @@
  */
 
 import { execSync } from "child_process"
+import { createRequire } from "node:module"
 import {
   existsSync,
   mkdirSync,
@@ -39,9 +40,22 @@ function exec(cmd, opts = {}) {
 }
 
 // Get Playwright browser path
-function getPlaywrightBrowserPath() {
-  if (process.env.PLAYWRIGHT_BROWSERS_PATH) {
-    return process.env.PLAYWRIGHT_BROWSERS_PATH
+export function getPlaywrightBrowserPath({
+  env = process.env,
+  resolveCoreManifest = () =>
+    createRequire(createRequire(import.meta.url).resolve("playwright")).resolve(
+      "playwright-core/package.json"
+    ),
+} = {}) {
+  const configuredPath = env.PLAYWRIGHT_BROWSERS_PATH
+  if (configuredPath === "0") {
+    return join(
+      dirname(resolveCoreManifest()),
+      ".local-browsers"
+    )
+  }
+  if (configuredPath) {
+    return configuredPath
   }
   // Playwright stores browsers in different locations depending on OS:
   // - macOS: ~/Library/Caches/ms-playwright
@@ -50,7 +64,7 @@ function getPlaywrightBrowserPath() {
   if (PLATFORM === "darwin") {
     return join(homedir(), "Library", "Caches", "ms-playwright")
   } else if (PLATFORM === "win32") {
-    return join(process.env.LOCALAPPDATA || "", "ms-playwright")
+    return join(env.LOCALAPPDATA || "", "ms-playwright")
   }
   return join(homedir(), ".cache", "ms-playwright")
 }
