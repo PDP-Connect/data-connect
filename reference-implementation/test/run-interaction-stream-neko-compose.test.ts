@@ -216,6 +216,22 @@ test("the image installs the n.eko wrapper and Supervisor actually uses it", asy
   assert.ok(source.includes("#command=/usr/local/bin/start-neko.sh#' /etc/neko/supervisord.conf"));
 });
 
+test("the n.eko image installs the executable named by the proxy supervisor", async () => {
+  const [dockerfile, supervisor] = await Promise.all([
+    readFile(NEKO_DOCKERFILE, "utf8"),
+    readFile(`${REPO_ROOT}docker/neko/cdp-proxy.conf`, "utf8"),
+  ]);
+  const command = supervisor
+    .split("\n")
+    .find((line) => line.startsWith("command="))
+    ?.slice("command=".length);
+  assert.ok(command, "the supervisor names an executable");
+  const copy = "COPY docker/neko/cdp-proxy.py ";
+  const lines = dockerfile.split("\n");
+  assert.equal(lines.find((line) => line.startsWith(copy))?.slice(copy.length), command);
+  assert.ok(lines.some((line) => line.startsWith("RUN chmod +x ") && line.split(" ").includes(command)));
+});
+
 test("Chromium defaults its launch size to the active n.eko screen", async () => {
   const startScript = await readFile(NEKO_CHROMIUM_START, "utf8");
 
