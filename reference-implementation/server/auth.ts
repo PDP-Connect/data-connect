@@ -5718,6 +5718,7 @@ async function retainedStorageContextForConnector(connectorId: unknown): Promise
 
 /** A retained source identity that a registration moves to the identity its verified declaration names. */
 export interface SourceIdentityMove {
+  readonly connectorId: string;
   readonly from: string;
   readonly to: string;
 }
@@ -5738,6 +5739,7 @@ function manifestRecordOf(manifest: unknown): Record<string, unknown> | undefine
  * that implementation acquires, so the retained identity moves to it.
  */
 function legacyProjectionMove(
+  connectorId: string,
   previousManifest: unknown,
   incomingManifestJson: string,
   verifiedSourceDeclaration: boolean
@@ -5771,7 +5773,7 @@ function legacyProjectionMove(
   ) {
     return null;
   }
-  return { from, to };
+  return { connectorId, from, to };
 }
 
 /**
@@ -5792,7 +5794,12 @@ export function retainedSourceIdentityChange(
   if (incoming === retained) {
     return null;
   }
-  const move = legacyProjectionMove(previousManifest, incomingManifestJson, options.verifiedSourceDeclaration === true);
+  const move = legacyProjectionMove(
+    connectorId,
+    previousManifest,
+    incomingManifestJson,
+    options.verifiedSourceDeclaration === true
+  );
   if (move) {
     return move;
   }
@@ -5804,7 +5811,19 @@ export function retainedSourceIdentityChange(
 // Rows that name a connector source by id. Grants and grant package members keep the source a
 // consent was given for; pairwise instance handles keep the source a handle was issued under (the
 // handle value does not depend on it). They move with the retained identity in the same transaction.
+// The rows carry no connector key, so the move is refused when another connector retains the old id.
+// A handle already issued under the new id for the same instance is refused rather than overwritten.
 export async function moveSourceIdentityPostgres(client: PostgresTransactionClient, move: SourceIdentityMove) {
+  const sharing = await client.query<{ connector_id: string }>(
+    `SELECT connector_id FROM connectors
+      WHERE connector_id <> $1 AND manifest->'source_declaration'->'source'->>'id' = $2 LIMIT 1`,
+    [move.connectorId, move.from]
+  );
+  const collision = await client.query(`${HANDLE_COLLISION_SQL} WHERE a.source_id = $1 AND b.source_id = $2 LIMIT 1`, [
+    move.from,
+    move.to,
+  ]);
+  assertSourceIdentityMovable(move, sharing.rows[0]?.connector_id, collision.rows.length > 0);
   await client.query(
     `UPDATE grants SET grant_json = jsonb_set(grant_json, '{source,id}', to_jsonb($2::text))
       WHERE grant_json->'source'->>'id' = $1 AND grant_json->'source'->>'kind' = 'connector'`,
@@ -5820,6 +5839,16 @@ export async function moveSourceIdentityPostgres(client: PostgresTransactionClie
 
 export function moveSourceIdentitySqlite(move: SourceIdentityMove) {
   const db = getDb();
+  const sharing = db
+    .prepare(
+      `SELECT connector_id FROM connectors
+        WHERE connector_id <> ? AND json_extract(manifest, '$.source_declaration.source.id') = ? LIMIT 1`
+    )
+    .get<{ connector_id: string }>(move.connectorId, move.from);
+  const collision = db
+    .prepare(`${HANDLE_COLLISION_SQL} WHERE a.source_id = ? AND b.source_id = ? LIMIT 1`)
+    .get(move.from, move.to);
+  assertSourceIdentityMovable(move, sharing?.connector_id, collision !== undefined);
   db.prepare(
     `UPDATE grants SET grant_json = json_set(grant_json, '$.source.id', ?)
       WHERE json_extract(grant_json, '$.source.id') = ? AND json_extract(grant_json, '$.source.kind') = 'connector'`
@@ -5829,6 +5858,27 @@ export function moveSourceIdentitySqlite(move: SourceIdentityMove) {
       WHERE json_extract(source_json, '$.id') = ? AND json_extract(source_json, '$.kind') = 'connector'`
   ).run(move.to, move.from);
   db.prepare("UPDATE pairwise_identity_handles SET source_id = ? WHERE source_id = ?").run(move.to, move.from);
+}
+
+const HANDLE_COLLISION_SQL = `SELECT 1 FROM pairwise_identity_handles a JOIN pairwise_identity_handles b
+  ON b.issuer = a.issuer AND b.subject_id = a.subject_id AND b.client_id = a.client_id AND b.kind = a.kind
+  AND b.internal_id = a.internal_id AND b.scheme = a.scheme`;
+
+function assertSourceIdentityMovable(
+  move: SourceIdentityMove,
+  sharedWith: string | undefined,
+  handleCollision: boolean
+) {
+  if (sharedWith !== undefined) {
+    throw invalidConnectorManifest(
+      `Connector ${move.connectorId} cannot move source ${move.from} to ${move.to}: connector ${sharedWith} also retains ${move.from}, so the grants and handles that name it cannot be attributed to one connector.`
+    );
+  }
+  if (handleCollision) {
+    throw invalidConnectorManifest(
+      `Connector ${move.connectorId} cannot move source ${move.from} to ${move.to}: a pairwise handle is already issued under ${move.to} for an instance that also has one under ${move.from}.`
+    );
+  }
 }
 
 /** Validate an explicit declaration through the Core boundary before it is retained. */

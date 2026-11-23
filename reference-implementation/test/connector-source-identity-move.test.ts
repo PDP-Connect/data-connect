@@ -40,6 +40,8 @@ const UNRELATED_SOURCE = "https://registry.pdpp.dev/connectors/github";
 const LEGACY_PUBLISHER = "https://pdpp.dev/reference-implementation";
 const CONFIG_DIGEST = `sha256:${"e".repeat(64)}`;
 const ALREADY_BOUND = /already bound to source/;
+const SHARED = /also retains/;
+const HANDLE_TAKEN = /pairwise handle is already issued/;
 
 type Backend = "sqlite" | "postgres";
 
@@ -256,6 +258,14 @@ async function seedLegacyConnector(backend: Backend): Promise<void> {
   await seedReferences(backend);
 }
 
+async function execute(backend: Backend, postgresSql: string, sqliteSql: string, params: string[]): Promise<void> {
+  if (backend === "postgres") {
+    await postgresQuery(postgresSql, params);
+    return;
+  }
+  getDb().prepare(sqliteSql).run(...params);
+}
+
 async function withDataDir(run: (dataDir: string) => Promise<void>): Promise<void> {
   const dataDir = mkdtempSync(join(tmpdir(), "pdpp-identity-move-"));
   try {
@@ -319,6 +329,44 @@ const SCENARIOS: Array<{ name: string; run: (backend: Backend) => Promise<void> 
       assert.deepEqual(await retained(), { id: LEGACY_SOURCE, publisher: LEGACY_PUBLISHER });
       assert.deepEqual(await readReferences(backend), UNMOVED);
     },
+  },
+  {
+    name: "a legacy id that another connector also retains does not move",
+    run: (backend) =>
+      withDataDir(async (dataDir) => {
+        await seedLegacyConnector(backend);
+        await execute(
+          backend,
+          "INSERT INTO connectors(connector_id, manifest) SELECT 'chatgpt-copy', manifest FROM connectors WHERE connector_id = $1",
+          "INSERT INTO connectors(connector_id, manifest) SELECT 'chatgpt-copy', manifest FROM connectors WHERE connector_id = ?",
+          [KEY]
+        );
+        const declared = versionWith("1.0.0", DECLARED_SOURCE);
+        const { service } = serviceFor(dataDir, [declared]);
+        await assert.rejects(() => service.install(KEY, declared.entry.digest), SHARED);
+        assert.deepEqual(await retained(), { id: LEGACY_SOURCE, publisher: LEGACY_PUBLISHER });
+        assert.deepEqual(await readReferences(backend), UNMOVED);
+      }),
+  },
+  {
+    name: "a handle already issued under the declared id for the same instance stops the move",
+    run: (backend) =>
+      withDataDir(async (dataDir) => {
+        await seedLegacyConnector(backend);
+        await execute(
+          backend,
+          `INSERT INTO pairwise_identity_handles(issuer, subject_id, client_id, kind, source_id, internal_id, handle)
+           VALUES('issuer-move', 'owner', 'client-move', 'grantor', $1, 'internal-move', 'handle-move-declared')`,
+          `INSERT INTO pairwise_identity_handles(issuer, subject_id, client_id, kind, source_id, internal_id, handle)
+           VALUES('issuer-move', 'owner', 'client-move', 'grantor', ?, 'internal-move', 'handle-move-declared')`,
+          [DECLARED_SOURCE]
+        );
+        const declared = versionWith("1.0.0", DECLARED_SOURCE);
+        const { service } = serviceFor(dataDir, [declared]);
+        await assert.rejects(() => service.install(KEY, declared.entry.digest), HANDLE_TAKEN);
+        assert.deepEqual(await retained(), { id: LEGACY_SOURCE, publisher: LEGACY_PUBLISHER });
+        assert.deepEqual(await readReferences(backend), UNMOVED);
+      }),
   },
 ];
 
