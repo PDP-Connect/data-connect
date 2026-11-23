@@ -300,6 +300,26 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
   }
 });
 
+async function startupDisplay(env: NodeJS.ProcessEnv): Promise<string> {
+  const source = await readFile(`${REPO_ROOT}docker/neko/start-neko.sh`, "utf8");
+  const assignment = source.split("\n").find((line) => line.startsWith("DISPLAY_NAME="));
+  assert.ok(assignment, "n.eko defines its desktop display before launching");
+  const result = spawnSync("/bin/sh", ["-eu", "-c", `${assignment}\nprintf '%s\\n' "$DISPLAY_NAME"`],
+    { env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+test("n.eko startup falls back to the container display when both display variables are absent", async () => {
+  assert.equal(await startupDisplay({}), ":99.0");
+  assert.equal(await startupDisplay({ NEKO_DESKTOP_DISPLAY: "", DISPLAY: "" }), ":99.0");
+});
+
+test("n.eko startup uses DISPLAY only when the dedicated desktop display is absent", async () => {
+  assert.equal(await startupDisplay({ DISPLAY: ":7" }), ":7");
+  assert.equal(await startupDisplay({ DISPLAY: ":7", NEKO_DESKTOP_DISPLAY: ":12" }), ":12");
+});
+
 test("ChatGPT large-history guardrails are wired into Docker runtime config", async () => {
   const [compose, envExample] = await Promise.all([readFile(COMPOSE_FILE, "utf8"), readFile(ENV_EXAMPLE_FILE, "utf8")]);
 
