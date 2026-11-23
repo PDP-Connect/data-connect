@@ -4,6 +4,7 @@
 import { normalizeConnectorManifestForStorage, registerConnector } from "../auth.ts";
 import { runRecordDerivedRepairRound } from "../record-derived-repair.ts";
 import { reconcileConnectorSearchIndexScopes } from "../search-index-reconcile.ts";
+import type { InstalledManifestProvenance } from "./index.ts";
 
 /**
  * Manifest registration for the OCI installer, split at the lock boundary.
@@ -19,8 +20,13 @@ import { reconcileConnectorSearchIndexScopes } from "../search-index-reconcile.t
  * queue keeps the rest and the maintenance sweep resumes it.
  */
 export const installedConnectorManifestRegistration = {
-  registerManifest: (manifest: Record<string, unknown>): Promise<string> =>
-    registerConnector(manifest, { queueDerivedRepair: true, replaceAcceptedDigest: true, skipDerivedRepair: true }),
+  registerManifest: (manifest: Record<string, unknown>, provenance?: InstalledManifestProvenance): Promise<string> =>
+    registerConnector(manifest, {
+      queueDerivedRepair: true,
+      replaceAcceptedDigest: true,
+      skipDerivedRepair: true,
+      verifiedSourceDeclaration: provenance?.sourceDeclarationVerified === true,
+    }),
   repairManifestDerivedState: async (manifest: Record<string, unknown>): Promise<string> => {
     const { connectorId } = normalizeConnectorManifestForStorage(manifest);
     const columns = await runRecordDerivedRepairRound({ connectorId });

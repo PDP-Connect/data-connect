@@ -3508,9 +3508,10 @@ function derivedRepairPlan(
 async function persistManifestAndAdvanceGenerations(
   connectorId: string,
   manifestJson: string,
-  options: { queueDerivedRepair?: boolean; replaceAcceptedDigest?: boolean } = {}
+  options: { queueDerivedRepair?: boolean; replaceAcceptedDigest?: boolean; verifiedSourceDeclaration?: boolean } = {}
 ): Promise<boolean> {
   const markedAt = new Date().toISOString();
+  const identityOptions = { verifiedSourceDeclaration: options.verifiedSourceDeclaration === true };
   if (isPostgresStorageBackend()) {
     return await withPostgresTransaction(async (client) => {
       await lockConnectorManifestPublication(client, connectorId);
@@ -3526,7 +3527,10 @@ async function persistManifestAndAdvanceGenerations(
           connectorId,
         ])
       ).rows[0]?.manifest;
-      assertRetainedSourceIdentity(connectorId, previous, manifestJson);
+      const identityMove = retainedSourceIdentityChange(connectorId, previous, manifestJson, identityOptions);
+      if (identityMove) {
+        await moveSourceIdentityPostgres(client, identityMove);
+      }
       // A manifest stored before digests were retained is the only record of
       // its version's accepted content: keep it before it is replaced.
       const previousDigest = previous ? declarationDigestOf(previous) : null;
@@ -3598,7 +3602,10 @@ async function persistManifestAndAdvanceGenerations(
     const existing = db
       .prepare("SELECT manifest FROM connectors WHERE connector_id = ?")
       .get<{ manifest?: string }>(connectorId);
-    assertRetainedSourceIdentity(connectorId, existing?.manifest, manifestJson);
+    const identityMove = retainedSourceIdentityChange(connectorId, existing?.manifest, manifestJson, identityOptions);
+    if (identityMove) {
+      moveSourceIdentitySqlite(identityMove);
+    }
     if (options.queueDerivedRepair) {
       const plan = derivedRepairPlan(existing?.manifest ?? null, manifestJson);
       const instances = db
@@ -5551,6 +5558,11 @@ export async function registerConnector(
     replaceAcceptedDigest?: boolean;
     skipDerivedRepair?: boolean;
     skipManifestPersistence?: boolean;
+    /**
+     * The installer verified the manifest's `source_declaration` against the package it installed.
+     * Only such a declaration may move a legacy projected source identity (retainedSourceIdentityChange).
+     */
+    verifiedSourceDeclaration?: boolean;
   } = {}
 ): Promise<string> {
   validateConnectorManifest(manifest);
@@ -5563,6 +5575,7 @@ export async function registerConnector(
     await persistManifestAndAdvanceGenerations(connectorId, JSON.stringify(storedManifest), {
       queueDerivedRepair: options.queueDerivedRepair === true,
       replaceAcceptedDigest: options.replaceAcceptedDigest === true,
+      verifiedSourceDeclaration: options.verifiedSourceDeclaration === true,
     });
   }
   await maybeRegisterConnectorPhaseForTest("after-manifest-persisted", { connectorId, manifest: storedManifest });
@@ -5703,19 +5716,119 @@ async function retainedStorageContextForConnector(connectorId: unknown): Promise
   return retainedStorageContext(row?.manifest);
 }
 
-/** Core Section 5: a retained source identity is never replaced by a registration that names another one. */
-export function assertRetainedSourceIdentity(connectorId: string, previousManifest: unknown, incomingManifestJson: string) {
+/** A retained source identity that a registration moves to the identity its verified declaration names. */
+export interface SourceIdentityMove {
+  readonly from: string;
+  readonly to: string;
+}
+
+function manifestRecordOf(manifest: unknown): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = typeof manifest === "string" ? JSON.parse(manifest) : manifest;
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The one identity change Core Section 5 allows here. A connector registered before source declarations
+ * retains a legacy projection whose `source.id` is its own provenance URI. A package for the same
+ * implementation (same `manifest_uri`) whose source declaration the installer verified names the source
+ * that implementation acquires, so the retained identity moves to it.
+ */
+function legacyProjectionMove(
+  previousManifest: unknown,
+  incomingManifestJson: string,
+  verifiedSourceDeclaration: boolean
+): SourceIdentityMove | null {
+  if (!verifiedSourceDeclaration) {
+    return null;
+  }
+  const previous = manifestRecordOf(previousManifest);
+  const incoming = manifestRecordOf(incomingManifestJson);
+  const retained = sourceDeclarationOf(previous);
+  const declared = sourceDeclarationOf(incoming);
+  const from = sourceIdOfDeclaration(retained);
+  const to = sourceIdOfDeclaration(declared);
+  const isLegacyProjection =
+    isRecord(retained?.publisher) &&
+    retained.publisher.id === LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
+    isRecord(retained.source) &&
+    retained.source.kind === "connector" &&
+    previous?.manifest_uri === from;
+  const isPublishedDeclaration =
+    isRecord(declared?.publisher) &&
+    declared.publisher.id !== LEGACY_CONNECTOR_PROJECTION_PUBLISHER_ID &&
+    isRecord(declared.source) &&
+    declared.source.kind === "connector";
+  if (
+    from === undefined ||
+    to === undefined ||
+    !isLegacyProjection ||
+    !isPublishedDeclaration ||
+    incoming?.manifest_uri !== from
+  ) {
+    return null;
+  }
+  return { from, to };
+}
+
+/**
+ * Core Section 5: a retained source identity is never replaced by a registration that names another one,
+ * except by `legacyProjectionMove`. Returns that move, or null when the identity is unchanged.
+ */
+export function retainedSourceIdentityChange(
+  connectorId: string,
+  previousManifest: unknown,
+  incomingManifestJson: string,
+  options: { verifiedSourceDeclaration?: boolean } = {}
+): SourceIdentityMove | null {
   const retained = sourceIdOfDeclaration(sourceDeclarationOf(previousManifest));
   if (retained === undefined) {
-    return;
+    return null;
   }
   const incoming = sourceIdOfDeclaration(sourceDeclarationOf(incomingManifestJson));
   if (incoming === retained) {
-    return;
+    return null;
+  }
+  const move = legacyProjectionMove(previousManifest, incomingManifestJson, options.verifiedSourceDeclaration === true);
+  if (move) {
+    return move;
   }
   throw invalidConnectorManifest(
     `Connector ${connectorId} is already bound to source ${retained}; this registration names ${incoming ?? "no source"}. A source identity change needs an explicit identity-change path.`
   );
+}
+
+// Rows that name a connector source by id. Grants and grant package members keep the source a
+// consent was given for; pairwise instance handles keep the source a handle was issued under (the
+// handle value does not depend on it). They move with the retained identity in the same transaction.
+export async function moveSourceIdentityPostgres(client: PostgresTransactionClient, move: SourceIdentityMove) {
+  await client.query(
+    `UPDATE grants SET grant_json = jsonb_set(grant_json, '{source,id}', to_jsonb($2::text))
+      WHERE grant_json->'source'->>'id' = $1 AND grant_json->'source'->>'kind' = 'connector'`,
+    [move.from, move.to]
+  );
+  await client.query(
+    `UPDATE grant_package_members SET source_json = jsonb_set(source_json, '{id}', to_jsonb($2::text))
+      WHERE source_json->>'id' = $1 AND source_json->>'kind' = 'connector'`,
+    [move.from, move.to]
+  );
+  await client.query("UPDATE pairwise_identity_handles SET source_id = $2 WHERE source_id = $1", [move.from, move.to]);
+}
+
+export function moveSourceIdentitySqlite(move: SourceIdentityMove) {
+  const db = getDb();
+  db.prepare(
+    `UPDATE grants SET grant_json = json_set(grant_json, '$.source.id', ?)
+      WHERE json_extract(grant_json, '$.source.id') = ? AND json_extract(grant_json, '$.source.kind') = 'connector'`
+  ).run(move.to, move.from);
+  db.prepare(
+    `UPDATE grant_package_members SET source_json = json_set(source_json, '$.id', ?)
+      WHERE json_extract(source_json, '$.id') = ? AND json_extract(source_json, '$.kind') = 'connector'`
+  ).run(move.to, move.from);
+  db.prepare("UPDATE pairwise_identity_handles SET source_id = ? WHERE source_id = ?").run(move.to, move.from);
 }
 
 /** Validate an explicit declaration through the Core boundary before it is retained. */

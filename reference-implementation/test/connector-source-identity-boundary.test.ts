@@ -8,7 +8,8 @@
  * the runtime retains for its connector key. Resolution order, on both write
  * paths (`registerConnector` and the installer's `publishConnectorActivation`):
  *
- *   1. a retained declaration keeps its `source.id`; provenance cannot change it;
+ *   1. a retained declaration keeps its `source.id`; provenance cannot change it (the one exception,
+ *      a verified package moving a legacy projection, is in connector-source-identity-move.test.ts);
  *   2. otherwise an explicit declaration is validated and used;
  *   3. otherwise a first-party key takes the reviewed legacy source identity from
  *      the runtime-owned map (connector-legacy-source-map.ts), independent of the

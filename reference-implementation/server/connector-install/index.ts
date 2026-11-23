@@ -771,13 +771,28 @@ function readVerifiedRecord(
   };
 }
 
+/** What registration may trust about an installed manifest. */
+export interface InstalledManifestProvenance {
+  /** The manifest's `source_declaration` is the sidecar the pinned installer core verified. */
+  readonly sourceDeclarationVerified: boolean;
+}
+
+export type RegisterInstalledManifest = (
+  manifest: Record<string, unknown>,
+  provenance: InstalledManifestProvenance
+) => Promise<unknown>;
+
+function installedManifestProvenance(record: ConnectorInstallRecord): InstalledManifestProvenance {
+  return { sourceDeclarationVerified: record.sourceDeclarationSha256 !== undefined };
+}
+
 async function reuseExistingInstall(
   root: string,
   entry: ConnectorCatalogEntry,
   existing: ConnectorInstallRecord | null,
   previousActive: ConnectorInstallRecord | null,
   dataDir: string,
-  registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>,
+  registerManifest: RegisterInstalledManifest,
   store: ConnectorInstallStore,
   signal: AbortSignal
 ): Promise<ConnectorInstallRecord> {
@@ -800,7 +815,7 @@ async function reuseExistingInstall(
     // own connection; rolling back the activation after that would leave the
     // two disagreeing, so a deadline during or after it lets the install finish.
     signal.throwIfAborted();
-    await registerManifest(verified.manifest);
+    await registerManifest(verified.manifest, installedManifestProvenance(verified));
     crashPoint("connector-install:after-register");
   } catch (error) {
     if (previousActive) {
@@ -851,7 +866,7 @@ async function installStagedEntry(options: {
   readonly entry: ConnectorCatalogEntry;
   readonly existing: ConnectorInstallRecord | null;
   readonly installArtifact: InstallArtifact;
-  readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly registerManifest: RegisterInstalledManifest;
   readonly root: string;
   readonly signal: AbortSignal;
   readonly store: ConnectorInstallStore;
@@ -875,7 +890,7 @@ async function installStagedEntry(options: {
     crashPoint("connector-install:after-activate");
     // Last abort point: see reuseExistingInstall.
     options.signal.throwIfAborted();
-    await options.registerManifest(verifiedActive.manifest);
+    await options.registerManifest(verifiedActive.manifest, installedManifestProvenance(verifiedActive));
     crashPoint("connector-install:after-register");
     return verifiedActive;
   } catch (error) {
@@ -915,7 +930,7 @@ export function createConnectorInstallService(options: {
   readonly installArtifact?: InstallArtifact;
   readonly localSourceStore?: LocalConnectorSourceStore;
   /** Runs inside the install locks, so it must be bounded: persist the manifest, nothing O(records). */
-  readonly registerManifest: (manifest: Record<string, unknown>) => Promise<unknown>;
+  readonly registerManifest: RegisterInstalledManifest;
   /**
    * Repairs state derived from the connector's existing records. It is
    * O(records), so it runs after the install locks are released and the
