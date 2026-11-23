@@ -235,6 +235,8 @@ test("Chromium resize watcher only grows undersized visible windows", async (t) 
     },
     { name: "malformed geometry", root: [1440, 900], geometries: ["not-a-size"], resized: [] },
     { name: "missing geometry", root: [1440, 900], geometries: [""], resized: [] },
+    { name: "missing root-screen width", root: ["", 900], geometries: ["200x200"], resized: [] },
+    { name: "unreadable root-screen height", root: [1440, "unknown"], geometries: ["200x200"], resized: [] },
   ];
 
   for (const scenario of cases) {
