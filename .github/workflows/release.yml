@@ -232,6 +232,10 @@ jobs:
           rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle/appimage"
           rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle/appimage_deb"
 
+      - name: Record build commit
+        shell: bash
+        run: echo "DATACONNECT_BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       # On macOS the shipped DMG is not the one Tauri builds. "Finalize platform bundles"
       # below deletes every Tauri-produced .dmg and rebuilds it with
       # scripts/create-macos-dmg.mjs, which retries and detaches stale devices on hdiutil
@@ -248,10 +252,6 @@ jobs:
       # before it signs. The entitlement files that its hardened-runtime
       # signature needs are personal-server/entitlements.plist and
       # playwright-runner/entitlements.plist.
-      - name: Record build commit
-        shell: bash
-        run: echo "DATACONNECT_BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
       - name: Build unsigned Tauri app
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
