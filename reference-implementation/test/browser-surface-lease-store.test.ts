@@ -441,6 +441,44 @@ test("Postgres scoped browser-surface reads use two bounded identity queries and
   });
 });
 
+test("repeated identical connection requests share one query binding even above the raw list cap", async () => {
+  const identity = { connector_id: "synthetic_connector", profile_key: "synthetic_profile", surface_subject_id: null };
+  const queryParams: unknown[][] = [];
+  const store = createPostgresBrowserSurfaceLeaseStore({
+    // biome-ignore lint/suspicious/useAwait: this is an inert Promise-returning database boundary.
+    async query(_sql: string, params: unknown[] = []) {
+      queryParams.push(params);
+      return { rows: [] };
+    },
+  });
+
+  const batch = await store.readForConnectionIdentities(Array.from({ length: 26 }, () => ({ ...identity })));
+  assert.equal(batch.size, 1);
+  assert.deepEqual(queryParams, [
+    [identity.connector_id, identity.profile_key, identity.surface_subject_id],
+    [identity.connector_id, identity.profile_key, identity.surface_subject_id],
+  ]);
+});
+
+test("an empty store still returns an explicit empty result for each requested connection", async () => {
+  const identities = [
+    { connector_id: "synthetic_connector", profile_key: "profile_b", surface_subject_id: "subject_b" },
+    { connector_id: "synthetic_connector", profile_key: "profile_a", surface_subject_id: "subject_a" },
+  ];
+  const store = createPostgresBrowserSurfaceLeaseStore({
+    // biome-ignore lint/suspicious/useAwait: this is an inert Promise-returning database boundary.
+    async query() {
+      return { rows: [] };
+    },
+  });
+
+  const batch = await store.readForConnectionIdentities(identities);
+  assert.deepEqual([...batch.keys()], identities.map(browserSurfaceConnectionIdentityKey));
+  assert.deepEqual([...batch.values()], identities.map((identity) => ({
+    identity, leases: [], non_terminal_leases: [], surfaces: [],
+  })));
+});
+
 interface PostgresScopedFixtureIdentity {
   readonly connector_id: string;
   readonly profile_key: string;
