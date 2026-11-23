@@ -43,6 +43,67 @@ function readWorkflowStep(workflow: string, name: string) {
   return workflow.slice(start, end)
 }
 
+const BUILD_RECEIPT_STEP = "Record build commit"
+const BUILD_UNSIGNED_STEP = "Build unsigned Tauri app"
+const CLEAR_STAGING_STEP = "Clear cached AppImage staging output"
+const workflowStepMarker = (name: string) => `      - name: ${name}\n`
+
+function writesCheckoutBuildReceipt(workflow: string) {
+  const step = readWorkflowStep(workflow, BUILD_RECEIPT_STEP)
+  return ["git rev-parse HEAD", '>> "$GITHUB_ENV"', "DATACONNECT_BUILD_SHA="]
+    .every((fragment) => step.includes(fragment))
+}
+
+function buildReceiptPrecedesBuild(workflow: string) {
+  const clear = workflow.indexOf(workflowStepMarker(CLEAR_STAGING_STEP))
+  const receipt = workflow.indexOf(workflowStepMarker(BUILD_RECEIPT_STEP))
+  const build = workflow.indexOf(workflowStepMarker(BUILD_UNSIGNED_STEP))
+  return clear >= 0 && clear < receipt && receipt < build
+}
+
+function inheritsCheckoutBuildReceipt(workflow: string) {
+  return !readWorkflowStep(workflow, BUILD_UNSIGNED_STEP).includes("DATACONNECT_BUILD_SHA")
+}
+
+function hasSingleBuildReceiptAssignment(workflow: string) {
+  return (workflow.match(/DATACONNECT_BUILD_SHA=/g) ?? []).length === 1
+}
+
+describe("build receipt wiring", () => {
+  it("records the checked-out commit through GITHUB_ENV", () => {
+    const workflow = readReleaseWorkflow()
+    expect(writesCheckoutBuildReceipt(workflow)).toBe(true)
+    for (const fragment of ["git rev-parse HEAD", '>> "$GITHUB_ENV"', "DATACONNECT_BUILD_SHA="]) {
+      expect(writesCheckoutBuildReceipt(workflow.replace(fragment, "<removed>"))).toBe(false)
+    }
+  })
+
+  it("records the commit between clearing staging output and building", () => {
+    const workflow = readReleaseWorkflow()
+    expect(buildReceiptPrecedesBuild(workflow)).toBe(true)
+    const receipt = readWorkflowStep(workflow, BUILD_RECEIPT_STEP)
+    const build = readWorkflowStep(workflow, BUILD_UNSIGNED_STEP)
+    const swapped = workflow.replace(receipt, "<receipt-placeholder>")
+      .replace(build, receipt).replace("<receipt-placeholder>", build)
+    expect(buildReceiptPrecedesBuild(swapped)).toBe(false)
+  })
+
+  it("does not override the checkout commit in the build step", () => {
+    const workflow = readReleaseWorkflow()
+    expect(inheritsCheckoutBuildReceipt(workflow)).toBe(true)
+    const build = readWorkflowStep(workflow, BUILD_UNSIGNED_STEP)
+    const overridden = build.replace("        env:\n", "        env:\n          DATACONNECT_BUILD_SHA: event-sha-fixture\n")
+    expect(overridden).not.toBe(build)
+    expect(inheritsCheckoutBuildReceipt(workflow.replace(build, overridden))).toBe(false)
+  })
+
+  it("has exactly one build receipt assignment", () => {
+    const workflow = readReleaseWorkflow()
+    expect(hasSingleBuildReceiptAssignment(workflow)).toBe(true)
+    expect(hasSingleBuildReceiptAssignment(workflow + "\nDATACONNECT_BUILD_SHA=duplicate-fixture")).toBe(false)
+  })
+})
+
 type ScannedPublish = {
   job: string
   build: string
