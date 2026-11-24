@@ -125,8 +125,9 @@ release path once npm trusted publishing is verified.
 
 ## Read selectors, completeness, and errors
 
-Every `pdpp read` command accepts `--connector-id <id>` and
-`--connection-id <id>`. These selectors pass through to the server and narrow
+Every `pdpp read` command accepts `--connection-id <id>`, and every command
+except `search` accepts `--connector-id <id>` (the search endpoints select
+sources by connection only). These selectors pass through to the server and narrow
 the read. The CLI does not guess a connection or retry an ambiguous read;
 errors preserve the server's `available_connections` choices.
 Unknown flags fail before a request and list the valid flags for that command.

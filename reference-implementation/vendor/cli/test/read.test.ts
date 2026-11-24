@@ -488,10 +488,14 @@ for (const [command, args, flags] of [
   ["search", ["query"], {}], ["aggregate", ["messages"], { metric: "count" }],
 ]) {
   test(`${command} forwards explicit source selectors and rejects unknown flags`, () => {
-    const selectors = { "connector-id": "chat", "connection-id": "cin_two" };
+    const selectors = command === "search" ? { "connection-id": "cin_two" } : { "connector-id": "chat", "connection-id": "cin_two" };
     const url = new URL(buildReadRequest(command, args, { ...flags, ...selectors }, PROVIDER).url);
-    assert.equal(url.searchParams.get("connector_id"), "chat");
+    assert.equal(url.searchParams.get("connector_id"), command === "search" ? null : "chat");
     assert.equal(url.searchParams.get("connection_id"), "cin_two");
+    if (command === "search") {
+      assert.throws(() => buildReadRequest(command, args, { "connector-id": "chat" }, PROVIDER),
+        (error) => error.details.param === "connector-id");
+    }
     assert.throws(() => buildReadRequest(command, args, { ...flags, typo: "ignored" }, PROVIDER),
       (error) => error.details.param === "typo" && error.message.includes("Valid flags:"));
   });

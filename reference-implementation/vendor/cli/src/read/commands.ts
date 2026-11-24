@@ -7,16 +7,17 @@ import type { CommandIo } from "../ref/commands/call.ts";
 import { PdppCliError, PdppHttpError, PdppUsageError } from "../ref/errors.ts";
 import { extractEnvelopeWarnings, resolveFormat, writeData, writeEnvelopeWarnings } from "../ref/output.ts";
 
+// Search endpoints select sources by connection only; they reject connector_id.
 const SOURCE_FLAGS = ["connector-id", "connection-id"];
-const COMMON_FLAGS = [...SOURCE_FLAGS, "cache-root", "format", "data", "allow-partial"];
+const COMMON_FLAGS = ["connection-id", "cache-root", "format", "data", "allow-partial"];
 const COMMAND_FLAGS: Record<string, string[]> = {
-  schema: ["stream", "view"],
-  streams: ["connector-instance-id"],
-  "query-records": ["connector-instance-id", "cursor", "limit", "order", "sort", "count", "changes-since", "fields", "filter", "filter-json"],
-  fetch: ["connector-instance-id", "fields"],
-  "field-window": ["field", "cursor", "offset-chars", "limit-chars", "q", "before-chars", "after-chars"],
+  schema: ["connector-id", "stream", "view"],
+  streams: ["connector-id", "connector-instance-id"],
+  "query-records": ["connector-id", "connector-instance-id", "cursor", "limit", "order", "sort", "count", "changes-since", "fields", "filter", "filter-json"],
+  fetch: ["connector-id", "connector-instance-id", "fields"],
+  "field-window": ["connector-id", "field", "cursor", "offset-chars", "limit-chars", "q", "before-chars", "after-chars"],
   search: ["connector-instance-id", "cursor", "limit", "streams", "mode"],
-  aggregate: ["connector-instance-id", "field", "granularity", "limit", "metric", "time-zone", "group-by", "group-by-time"],
+  aggregate: ["connector-id", "connector-instance-id", "field", "granularity", "limit", "metric", "time-zone", "group-by", "group-by-time"],
 };
 const SEARCH_MODE_PATHS: Record<string, string> = {
   semantic: "/v1/search/semantic",
@@ -25,7 +26,7 @@ const SEARCH_MODE_PATHS: Record<string, string> = {
 
 export function readHelp(binName = "pdpp"): string {
   return `Grant-scoped reads (uses pdpp connect/token cache, never owner credentials):
-  All commands accept --connector-id <id>, --connection-id <cin>, and --allow-partial.
+  All commands accept --connection-id <cin> and --allow-partial; all but search accept --connector-id <id>.
   ${binName} read schema <provider-url> [--view compact] [--stream <name>] [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
   ${binName} read streams <provider-url> [--connection-id <cin>] [--cache-root <dir>] [--format json|table]
   ${binName} read query-records <provider-url> <stream> [--connection-id <cin>] [--limit <n>] [--cursor <cursor>] [--fields a,b] [--sort <spec>] [--count none|estimated|exact] [--filter-json <json>] [--format json|jsonl|table]
@@ -235,7 +236,7 @@ export function buildReadRequest(
     const path = SEARCH_MODE_PATHS[mode ?? ""] ?? "/v1/search";
     const query: QueryRecord = {
       q: queryText,
-      ...pickQuery(flags, [...SOURCE_FLAGS, "connector-instance-id", "cursor", "limit"]),
+      ...pickQuery(flags, ["connection-id", "connector-instance-id", "cursor", "limit"]),
       ...csvQuery(flags, "streams"),
     };
     return { method: "GET", url: buildUrl(origin, path, query) };
