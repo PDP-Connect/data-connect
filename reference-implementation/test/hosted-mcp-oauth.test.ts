@@ -1052,9 +1052,10 @@ test("hosted MCP OAuth code flow issues a scoped client token usable at /mcp", a
     const initializeServerInfo = resultOf(initialize).serverInfo as Record<string, unknown>;
     assert.equal(initializeServerInfo.name, "pdpp-reference-mcp");
     assert.deepEqual(initializeServerInfo.icons, [
-      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon.svg` },
+      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon` },
+      { mimeType: "image/png", sizes: ["180x180"], src: `${rsUrl}/apple-icon` },
     ]);
-    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
 
     const tools = await postMcpJson(rsUrl, accessToken, {
       id: 2,
@@ -1927,7 +1928,7 @@ test("/mcp rejects missing and owner bearers", async () => {
   try {
     const missing = await fetchJson(`${rsUrl}/mcp`, { method: "POST" });
     assert.equal(missing.status, 401);
-    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
     assert.equal(errorOf(missing).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
 
     const mcpMetadata = await fetchProtectedResourceMetadata(stringField(errorOf(missing), "resource_metadata"));
