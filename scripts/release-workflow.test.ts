@@ -12,7 +12,8 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, join, matchesGlob, resolve } from "node:path"
+import { load } from "js-yaml"
 import { describe, expect, it } from "vitest"
 
 const releaseWorkflowPath = resolve(
@@ -22,6 +23,43 @@ const releaseWorkflowPath = resolve(
 
 function readReleaseWorkflow() {
   return readFileSync(releaseWorkflowPath, "utf8")
+}
+
+type ReleaseWorkflow = {
+  on: { pull_request: { paths: string[] } }
+  jobs: { build: { steps: { run?: string; "working-directory"?: string }[] } }
+}
+
+// Repository files a pull-request installer build executes: every script a
+// build step runs with node or bash (resolved against the step's
+// working-directory), the scripts in Tauri's beforeBuildCommand, and their
+// relative imports, followed transitively. A missing file throws, naming it.
+function filesRunByInstallerBuild() {
+  const workflow = load(readReleaseWorkflow()) as ReleaseWorkflow
+  const tauriConfig = JSON.parse(
+    readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf8")
+  ) as { build: { beforeBuildCommand: string } }
+  const commands = workflow.jobs.build.steps.flatMap(step =>
+    step.run ? [{ dir: step["working-directory"] ?? ".", text: step.run }] : []
+  )
+  commands.push({ dir: ".", text: tauriConfig.build.beforeBuildCommand })
+  const pending = commands.flatMap(({ dir, text }) =>
+    [...text.matchAll(/\b(?:node|bash)\s+(scripts\/[\w./-]+)/g)].map(match =>
+      join(dir, match[1])
+    )
+  )
+  const seen = new Set<string>()
+  for (let file = pending.pop(); file; file = pending.pop()) {
+    if (seen.has(file)) continue
+    seen.add(file)
+    const source = readFileSync(resolve(process.cwd(), file), "utf8")
+    for (const match of source.matchAll(
+      /\b(?:from|import|require)\s*\(?\s*["'](\.{1,2}\/[^"']+)["']/g
+    )) {
+      pending.push(join(dirname(file), match[1]))
+    }
+  }
+  return [...seen].sort()
 }
 
 function readWorkflowStep(workflow: string, name: string) {
@@ -277,6 +315,26 @@ describe("release workflow", () => {
     }
     expect(scripts[0].script).toContain("gh release download")
     expect(scripts[3].script).toContain("pwsh -NoProfile")
+  })
+
+  it("builds installers on a pull request whenever it changes a script the build runs", () => {
+    const { paths } = (load(readReleaseWorkflow()) as ReleaseWorkflow).on
+      .pull_request
+    const files = filesRunByInstallerBuild()
+
+    expect(files).toContain("scripts/ensure-reference-stack.js")
+    expect(files).toContain("scripts/is-main-module.js")
+    expect(files).toContain(
+      "personal-server/scripts/verify-artifact-relocatable.js"
+    )
+    expect(
+      files.filter(file => !paths.some(pattern => matchesGlob(file, pattern)))
+    ).toEqual([])
+    // A filter that names a file the build no longer runs is stale.
+    const staleScripts = paths.filter(
+      pattern => pattern.startsWith("scripts/") && !files.includes(pattern)
+    )
+    expect(staleScripts).toEqual([])
   })
 
   it("builds manual-install artifacts on demand without an updater", () => {
