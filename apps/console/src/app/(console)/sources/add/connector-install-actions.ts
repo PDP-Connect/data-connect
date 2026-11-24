@@ -7,6 +7,7 @@ import { revalidatePath } from "next/cache";
 import {
   addConnectorLocalSource,
   installConnector,
+  listConnectorInstallCatalog,
   reloadConnectorLocalSource,
   removeConnectorLocalSource,
   selectConnectorLocalSource,
@@ -35,6 +36,32 @@ export async function installConnectorAction(
     };
   }
   try {
+    // The rendered digest can be older than the catalog by the time the owner
+    // clicks. The server accepts any verified catalog digest, so refuse one
+    // that is no longer the latest rather than install a superseded package.
+    //
+    // This is a check-then-act: the catalog can change between this read and
+    // the install request below, and the install route does not accept an
+    // expected-latest condition. A window of one round trip remains in which a
+    // superseded digest can still be installed; closing it needs the install
+    // route to take that condition, which is outside this change.
+    const latest = (await listConnectorInstallCatalog()).find(
+      (entry) => entry.connector_id === normalizedConnectorId && entry.latest
+    );
+    if (!latest) {
+      revalidatePath("/sources/add");
+      return {
+        message: "This package is no longer listed in the catalog. Reload the catalog and try again.",
+        ok: false,
+      };
+    }
+    if (latest.digest !== normalizedDigest) {
+      revalidatePath("/sources/add");
+      return {
+        message: "A newer package version is available. Reload the catalog and try again.",
+        ok: false,
+      };
+    }
     await installConnector({
       connectorId: normalizedConnectorId,
       digest: normalizedDigest,

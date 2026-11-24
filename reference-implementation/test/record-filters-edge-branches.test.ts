@@ -381,3 +381,23 @@ test("passesGrantRecordConstraints combines resource and time-range gates", () =
   // In resource set but at/after until -> rejected by time gate.
   assert.equal(passesGrantRecordConstraints({ received_at: "2026-02-01T00:00:00Z" }, "k1", grant, stream), false);
 });
+
+test("coerceComparableValue strict refuses a calendar day that does not exist instead of rolling it over", () => {
+  // Date.parse turns 2023-02-29 into 1 March; a range filter must not silently move.
+  for (const value of ["2023-02-29", " 2023-02-29", "2024-04-31", "2024-13-01", "2024-02-30T23:30:00-05:00"]) {
+    assert.throws(
+      () => coerceComparableValue(value, DATE_TIME_SCHEMA, { strict: true }),
+      (err: unknown) => isQueryError(err) && TOP_LEVEL_REGEX_6.test(err.message),
+      value
+    );
+    const lenient = Date.parse(value);
+    assert.equal(
+      coerceComparableValue(value, DATE_TIME_SCHEMA),
+      Number.isNaN(lenient) ? null : lenient,
+      `${value} non-strict is unchanged`
+    );
+  }
+  for (const value of ["2024-02-29", "2024-04-01", "2024-02-29T23:30:00.125-05:00", " 2024-03-01", "Mar 1 2024"]) {
+    assert.equal(coerceComparableValue(value, DATE_TIME_SCHEMA, { strict: true }), Date.parse(value), value);
+  }
+});

@@ -18,7 +18,7 @@
   `getGrantParamsFromSearchParams` → resolve platform
 - For real grant sessions, background prefetch claims the session and verifies the
   builder before the user reaches `/grant`
-- `startImport` → Tauri `start_connector_run` → run status in Redux → navigate to
+- `startImport` → Tauri `start_installed_pdpp_connector_run` → run status in Redux → navigate to
   `/grant` with canonical query params, plus pre-fetched session/builder data in
   `location.state` as an optimization
 
@@ -42,8 +42,6 @@
 - Localhost (dev): hit `/connect` directly with query params.
   - Example: `http://localhost:5173/connect?sessionId=ext-123&secret=test-secret&scopes=chatgpt.conversations`
   - JSON `scopes` also works: `scopes=["read:chatgpt-conversations"]`
-- Production: use deep linking with the same params.
-  - Example: `vana://connect?sessionId=ext-123&secret=test-secret&scopes=chatgpt.conversations`
 
 ## Notes
 
