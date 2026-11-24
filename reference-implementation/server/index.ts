@@ -528,6 +528,7 @@ import {
   mountRsRoot,
 } from "./routes/root-and-discovery.ts";
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
+import { createRunBlobUploadCredentialRegistry } from "./run-blob-upload-credentials.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
 import { mountRefRunCancel } from "./routes/run-cancel.ts";
@@ -944,6 +945,12 @@ interface ServerOpts {
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
   runTargetRegistry?: import("./streaming/run-target-registry.ts").RunTargetRegistry | null;
+  /**
+   * Run-scoped blob upload credentials shared with the controller. The blob
+   * upload route accepts these as an alternative to the owner bearer; no other
+   * route consults them. Standalone RS apps without it accept only owner tokens.
+   */
+  blobUploadCredentials?: import("./run-blob-upload-credentials.ts").RunBlobUploadCredentialRegistry | null;
   schedulerStore?: SchedulerStore;
   semanticRetrievalBackend?: unknown;
   semanticRetrievalCapability?: unknown;
@@ -5358,6 +5365,16 @@ export function buildAsApp(opts: ServerOpts = {}) {
     pdppError,
   });
 
+  // One resolver for the AS issuer: the metadata `issuer` and the RFC 9207
+  // `iss` on authorization responses both come from here, so they cannot drift.
+  const resolveExplicitAsIssuer = () =>
+    opts.asIssuer ||
+    opts.asPublicUrl ||
+    (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
+    null;
+  const resolveAsIssuer = (req: unknown) =>
+    resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], resolveExplicitAsIssuer());
+
   // AS `/.well-known/oauth-authorization-server` is mounted via
   // `server/routes/root-and-discovery.ts` per OpenSpec change
   // `split-reference-server-by-route-family`. Behaviour-preserving
@@ -5374,11 +5391,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     rejectUntrustedMetadataHost: rejectUntrustedMetadataHost as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
     >[1]["rejectUntrustedMetadataHost"],
-    resolveExplicitIssuer: () =>
-      opts.asIssuer ||
-      opts.asPublicUrl ||
-      (opts.ignoreAmbientPublicUrls ? null : process.env.AS_ISSUER || process.env.AS_PUBLIC_URL) ||
-      null,
+    resolveExplicitIssuer: resolveExplicitAsIssuer,
     resolvePreRegisteredPublicClients: () => resolvePreRegisteredPublicClients(opts) as unknown[],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<
       typeof mountAsAuthorizationServerMetadata
@@ -5521,6 +5534,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
           >,
         }
       : {}),
+    resolveIssuer: resolveAsIssuer as unknown as Parameters<typeof mountAsAuthorize>[1]["resolveIssuer"],
     resolvePublicUrl: resolvePublicUrl as unknown as Parameters<typeof mountAsAuthorize>[1]["resolvePublicUrl"],
     selectionParsers: {
       parseHostedMcpSelections: parseHostedMcpSelections as unknown as Parameters<
@@ -7289,6 +7303,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
     providerName,
     resolveBaseUrl: (req: unknown) =>
       resolvePublicUrl(req as Parameters<typeof resolvePublicUrl>[0], explicitAsBaseUrl),
+    resolveIssuer: resolveAsIssuer,
     setReferenceTraceId,
   } as unknown as Parameters<typeof mountAsConsent>[1]);
 
@@ -7512,6 +7527,38 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
     requireTokenWithIntrospection(req, res, next, introspectToken);
+  // POST /v1/blobs auth: a live run-scoped upload credential, bound to one
+  // connector instance, or else the ordinary owner bearer. The credential is
+  // recognised only here; every other route authenticates through
+  // `requireToken`, where it is an unknown bearer and gets 401.
+  const requireBlobUploadAuth = (req: ReqLike, res: ResLike, next: () => void) => {
+    const auth = req.headers?.authorization;
+    const presented = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    const binding = presented ? (opts.blobUploadCredentials?.verify(presented) ?? null) : null;
+    if (!binding) {
+      return requireToken(req, res, () => requireOwner(req, res, next));
+    }
+    const requestedConnectorId = resolveSingleConnectorIdQueryValue(req.query?.connector_id);
+    const requestedInstanceId = resolveSingleConnectorIdQueryValue(req.query?.connector_instance_id);
+    const connectorMatches =
+      requestedConnectorId !== null &&
+      (canonicalConnectorKey(requestedConnectorId) ?? requestedConnectorId) ===
+        (canonicalConnectorKey(binding.connectorId) ?? binding.connectorId);
+    if (!(connectorMatches && requestedInstanceId === binding.connectorInstanceId)) {
+      return pdppError(
+        res,
+        403,
+        "permission_error",
+        "Run upload credential is bound to a different connector instance"
+      );
+    }
+    req.tokenInfo = {
+      active: true,
+      pdpp_token_kind: "run_blob_upload",
+      subject_id: binding.ownerSubjectId,
+    };
+    next();
+  };
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },
@@ -7676,6 +7723,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     rejectState,
     requireClient,
     requireCoreEndpointToken,
+    requireBlobUploadAuth,
     requireOwner,
     requireToken,
     resolveGrantScopedStateGrant,
@@ -9062,6 +9110,7 @@ export async function startServer(opts: ServerOpts = {}) {
       ? {}
       : { browserSurfaceReadinessProbe: opts.browserSurfaceReadinessProbe }),
   };
+  const blobUploadCredentials = opts.blobUploadCredentials ?? createRunBlobUploadCredentialRegistry();
   const runTargetRegistry = createRunTargetRegistry({
     ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }),
     isNekoDescriptorApproved: (descriptor, context) =>
@@ -9139,6 +9188,7 @@ export async function startServer(opts: ServerOpts = {}) {
     resolveStaticSecretRunEnv:
       connectionScopedRunEnvResolver as import("../runtime/controller.ts").StaticSecretRunEnvResolver,
     runtimeContext,
+    blobUploadCredentialHooks: blobUploadCredentials,
     streamingTargetNonceHooks: {
       clearNonce: (args) => runTargetRegistry.clearNonce(args),
       registerNonce: (args) => runTargetRegistry.registerNonce(args),
@@ -9508,6 +9558,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,
     asPublicUrl,
+    blobUploadCredentials,
     configuredProviderAuthConnectorKeys,
     controller,
     ownerLive: resolveOwnerLive(opts),
@@ -10448,6 +10499,7 @@ function createReferenceSchedulerManager({
         }) as RunManagedFn)
       : null;
     scheduler = createScheduler({
+      ...(controller?.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       connectors,
       ...(connectorEnvironmentPolicy?.approvedBindings.length
         ? {

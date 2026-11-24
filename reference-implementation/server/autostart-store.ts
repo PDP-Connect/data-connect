@@ -41,6 +41,12 @@ export function autostartStatePath(dataDir: string): string {
   return join(dataDir, "autostart-state.json")
 }
 
+/** True for a published command file ("<id>.json"), false for the store's
+ * in-flight "<id>.json.<uuid>.tmp" staging file and anything else. */
+export function isCommandFileName(name: string): boolean {
+  return /^ast_[A-Za-z0-9_-]{22}\.json$/.test(name)
+}
+
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 async function readJson(path: string): Promise<unknown | null> {
@@ -87,7 +93,7 @@ export function createAutostartStore(dataDir: string, onWrite: () => void = () =
     })
     let latest = 0
     for (const name of names) {
-      if (!/^ast_[A-Za-z0-9_-]{22}\.json$/.test(name)) continue
+      if (!isCommandFileName(name)) continue
       const command = await readJson(join(directory, name)) as { createdAt?: unknown } | null
       if (typeof command?.createdAt !== "string") continue
       const createdAt = Date.parse(command.createdAt)
@@ -103,7 +109,7 @@ export function createAutostartStore(dataDir: string, onWrite: () => void = () =
       throw error
     })
     for (const name of names) {
-      if (!/^ast_[A-Za-z0-9_-]{22}\.json$/.test(name)) continue
+      if (!isCommandFileName(name)) continue
       const command = await readJson(join(directory, name)) as { createdAt?: string } | null
       if (!command?.createdAt || Date.now() - Date.parse(command.createdAt) >= 600_000) continue
       if (!await readJson(join(dataDir, "autostart-results", name))) return true
