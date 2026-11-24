@@ -13,7 +13,6 @@ import { isOwnerSessionRequiredBody } from "./auth-errors.ts";
 import { describeErrorText } from "./describe-error.ts";
 import { redirectToOwnerLogin } from "./login-redirect.ts";
 import { getAsInternalUrl, ReferenceServerUnreachableError, withOwnerSessionCookie } from "./owner-token.ts";
-import { type RejectedRecordReceipt, receiptsForRun } from "./run-rejections.ts";
 import { isCredentialRefusal, refErrorCode } from "./static-secret-refusal.ts";
 import { verifyDashboardSession } from "./verify-session.ts";
 
@@ -83,6 +82,13 @@ export type RunHandleStatus =
   | "surface_failed"
   | "waiting_for_browser_surface";
 
+export interface RunRecordOutcomes {
+  /** Records the store rejected for good in the whole run; null when the server could not compute it. */
+  permanently_rejected: number | null;
+  /** Records the connector could not account for, by stream; streams with none are absent. */
+  unaccounted_by_stream: Record<string, number>;
+}
+
 export interface RunStatusEnvelope {
   completed_at: string | null;
   connector_id: string | null;
@@ -105,12 +111,8 @@ export interface RunStatusEnvelope {
   known_gaps_summary?: unknown;
   links: { timeline: string };
   object: "run_status";
-  /**
-   * The run's total of records the store rejected for good, off the
-   * window-independent terminal event. `null` while the run has no terminal
-   * event, or when the server predates the field.
-   */
-  records_permanently_rejected: number | null;
+  /** Whole-run record totals, computed by the server over every event of the run. */
+  record_outcomes: RunRecordOutcomes;
   run_id?: string | null;
   started_at: string | null;
   status: RunHandleStatus;
@@ -214,6 +216,28 @@ function normalizeRunLinks(value: unknown): RunStatusEnvelope["links"] {
   return { timeline: String((value as Record<string, unknown>).timeline ?? "") };
 }
 
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function normalizeRecordOutcomes(raw: unknown): RunRecordOutcomes {
+  const r = (raw || {}) as { permanently_rejected?: unknown; unaccounted_by_stream?: unknown };
+  const byStream =
+    r.unaccounted_by_stream && typeof r.unaccounted_by_stream === "object"
+      ? (r.unaccounted_by_stream as Record<string, unknown>)
+      : {};
+  const unaccounted: Record<string, number> = {};
+  for (const [stream, count] of Object.entries(byStream)) {
+    if (isCount(count)) {
+      unaccounted[stream] = count;
+    }
+  }
+  return {
+    permanently_rejected: isCount(r.permanently_rejected) ? r.permanently_rejected : null,
+    unaccounted_by_stream: unaccounted,
+  };
+}
+
 function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
   const r = (raw || {}) as {
     completed_at?: unknown;
@@ -224,7 +248,7 @@ function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
     known_gaps_summary?: unknown;
     links?: unknown;
     object?: unknown;
-    records_permanently_rejected?: unknown;
+    record_outcomes?: unknown;
     run_id?: unknown;
     started_at?: unknown;
     status?: unknown;
@@ -241,12 +265,7 @@ function normalizeRunStatus(raw: unknown): RunStatusEnvelope {
     known_gaps_summary: r.known_gaps_summary,
     links: normalizeRunLinks(r.links),
     object: "run_status",
-    records_permanently_rejected:
-      typeof r.records_permanently_rejected === "number" &&
-      Number.isInteger(r.records_permanently_rejected) &&
-      r.records_permanently_rejected >= 0
-        ? r.records_permanently_rejected
-        : null,
+    record_outcomes: normalizeRecordOutcomes(r.record_outcomes),
     run_id: typeof r.run_id === "string" ? r.run_id : "",
     started_at: typeof r.started_at === "string" ? r.started_at : null,
     status,
@@ -2654,33 +2673,46 @@ export interface ConnectionSetupStatus {
 
 export type StaticSecretSetupStatus = ConnectionSetupStatus;
 
-// A connection's record-rejection receipts are listed oldest first with no run
-// filter, so one run's receipts can sit behind other runs' pages. The page cap
-// bounds the read; `truncated` is true when the cap stopped the read with more
-// pages left, so the caller can say the list is partial.
-const RECORD_REJECTION_RECEIPT_MAX_PAGES = 10;
-
-export interface RunRecordRejectionReceipts {
-  receipts: RejectedRecordReceipt[];
-  truncated: boolean;
+export interface RejectedRecordReceipt {
+  firstInputIndex: number | null;
+  payloadBytes: number | null;
+  reasonCode: string;
+  receiptId: string;
+  stream: string;
 }
 
+export interface RecordRejectionReceiptPage {
+  nextCursor: string | null;
+  receipts: RejectedRecordReceipt[];
+}
+
+const RUN_RECEIPT_PAGE_SIZE = 25;
+
+/** One page of a run's record-rejection receipts; the server filters by run and pages by cursor. */
 export async function listRunRecordRejectionReceipts(
   connectionId: string,
-  runId: string
-): Promise<RunRecordRejectionReceipts> {
+  runId: string,
+  cursor: string | null
+): Promise<RecordRejectionReceiptPage> {
+  const body = (await refFetch(`/_ref/connections/${encodeURIComponent(connectionId)}/record-rejections`, {
+    cursor: cursor ?? undefined,
+    limit: RUN_RECEIPT_PAGE_SIZE,
+    run_id: runId,
+  })) as { data?: unknown; next_cursor?: unknown } | null;
   const receipts: RejectedRecordReceipt[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < RECORD_REJECTION_RECEIPT_MAX_PAGES; page += 1) {
-    const body = await refFetch(`/_ref/connections/${encodeURIComponent(connectionId)}/record-rejections`, { cursor });
-    const result = receiptsForRun(body, runId);
-    receipts.push(...result.receipts);
-    if (!result.nextCursor) {
-      return { receipts, truncated: false };
+  for (const item of (Array.isArray(body?.data) ? body.data : []) as Record<string, unknown>[]) {
+    if (typeof item.receipt_id !== "string" || typeof item.stream !== "string") {
+      continue;
     }
-    cursor = result.nextCursor;
+    receipts.push({
+      firstInputIndex: isCount(item.first_input_index) ? item.first_input_index : null,
+      payloadBytes: isCount(item.payload_bytes) ? item.payload_bytes : null,
+      reasonCode: typeof item.reason_code === "string" ? item.reason_code : "unknown",
+      receiptId: item.receipt_id,
+      stream: item.stream,
+    });
   }
-  return { receipts, truncated: true };
+  return { nextCursor: typeof body?.next_cursor === "string" ? body.next_cursor : null, receipts };
 }
 
 export async function getConnectionSetupStatus(

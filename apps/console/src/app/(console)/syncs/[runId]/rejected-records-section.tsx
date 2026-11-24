@@ -1,44 +1,33 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
 
+import type { RecordRejectionReceiptPage, RunRecordOutcomes } from "../../lib/ref-client.ts";
 import { formatGapReason } from "../../lib/run-gaps.ts";
-import type { RunRecordRejectionReceipts } from "../../lib/ref-client.ts";
-import type { RunRejectionSummary } from "../../lib/run-rejections.ts";
 
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-function rejectedSentence(rejected: RunRejectionSummary["rejected"]): string {
-  switch (rejected.kind) {
-    case "final":
-      return `The server permanently rejected ${plural(rejected.count, "record")} in this run.`;
-    case "so_far":
-      return `The server has permanently rejected ${plural(rejected.count, "record")} so far. This run is still in progress.`;
-    case "at_least":
-      return `The server permanently rejected at least ${plural(rejected.count, "record")} in this run. The count covers only the events loaded on this page.`;
-    default:
-      return "This run's rejected-record count is not available here: the events that carry it are not on this page, or the server did not report it.";
-  }
-}
-
 /**
- * Records the server rejected for good, and evidence the connector could not
- * account for. A zero is stated only when it is known: a count that cannot be
- * read renders as unavailable, never as nothing. `receipts` is null when the
- * receipt list could not be read.
+ * Records the server rejected for good, and records the connector could not
+ * account for. It shows the server's whole-run totals and one page of the run's
+ * receipts; it computes nothing. `receipts` is null when the list was not read
+ * or the read failed. A total the server did not report is not shown as zero.
  */
 export function RejectedRecordsSection({
+  moreReceiptsHref,
+  outcomes,
   receipts,
-  summary,
 }: {
-  receipts: RunRecordRejectionReceipts | null;
-  summary: RunRejectionSummary;
+  moreReceiptsHref: string | null;
+  outcomes: RunRecordOutcomes | null;
+  receipts: RecordRejectionReceiptPage | null;
 }) {
-  const { rejected } = summary;
-  const showRejected = rejected.kind === "unknown" || rejected.count > 0;
-  const showUnaccounted = summary.unaccounted.length > 0 || !summary.unaccountedComplete;
-  if (!(showRejected || showUnaccounted)) {
+  const rejected = outcomes?.permanently_rejected ?? null;
+  const unaccounted = Object.entries(outcomes?.unaccounted_by_stream ?? {});
+  const listedReceipts = receipts?.receipts ?? [];
+  const showRejected = (rejected ?? 0) > 0 || listedReceipts.length > 0;
+  if (!(showRejected || unaccounted.length > 0)) {
     return null;
   }
   return (
@@ -46,13 +35,17 @@ export function RejectedRecordsSection({
       {showRejected ? (
         <div>
           <h3 className="pdpp-eyebrow">Rejected records</h3>
-          <p className="pdpp-caption text-muted-foreground">{rejectedSentence(rejected)}</p>
-          {rejected.kind !== "unknown" && receipts === null ? (
+          {rejected === null ? null : (
+            <p className="pdpp-caption text-muted-foreground">
+              The server permanently rejected {plural(rejected, "record")} in this run.
+            </p>
+          )}
+          {receipts === null ? (
             <p className="pdpp-caption mt-2 text-muted-foreground">The receipt list is unavailable.</p>
           ) : null}
-          {receipts && receipts.receipts.length > 0 ? (
+          {listedReceipts.length > 0 ? (
             <ul className="mt-2 space-y-2">
-              {receipts.receipts.map((receipt) => (
+              {listedReceipts.map((receipt) => (
                 <li className="rounded-md border border-border/70 bg-background/70 px-3 py-2" key={receipt.receiptId}>
                   <div className="pdpp-caption flex flex-wrap items-baseline gap-x-2 gap-y-1">
                     <span className="text-muted-foreground">stream</span>
@@ -76,37 +69,33 @@ export function RejectedRecordsSection({
               ))}
             </ul>
           ) : null}
-          {receipts?.truncated ? (
-            <p className="pdpp-caption mt-2 text-muted-foreground">
-              The receipt list is partial: {plural(receipts.receipts.length, "receipt")} found, and more may exist.
+          {moreReceiptsHref ? (
+            <p className="pdpp-caption mt-2">
+              <a className="text-muted-foreground underline underline-offset-2" href={moreReceiptsHref}>
+                show more receipts →
+              </a>
             </p>
           ) : null}
         </div>
       ) : null}
-      {showUnaccounted ? (
+      {unaccounted.length > 0 ? (
         <div className={showRejected ? "mt-4" : undefined}>
           <h3 className="pdpp-eyebrow">Unaccounted records</h3>
           <p className="pdpp-caption text-muted-foreground">
-            {summary.unaccounted.length > 0
-              ? "The connector reported records it could not account for. It reports counts only, so which records is not known."
-              : "No unaccounted records are listed."}
-            {summary.unaccountedComplete
-              ? ""
-              : " Only part of this run's timeline is loaded, so streams reported on other pages are not listed."}
+            The connector reported records it could not account for. It reports counts only, so which records is not
+            known.
           </p>
-          {summary.unaccounted.length > 0 ? (
-            <ul className="mt-2 space-y-2">
-              {summary.unaccounted.map((entry) => (
-                <li className="rounded-md border border-border/70 bg-background/70 px-3 py-2" key={entry.stream}>
-                  <div className="pdpp-caption flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                    <span className="text-muted-foreground">stream</span>
-                    <code>{entry.stream}</code>
-                    <span className="text-foreground">{plural(entry.unaccounted, "unaccounted record")}</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          <ul className="mt-2 space-y-2">
+            {unaccounted.map(([stream, count]) => (
+              <li className="rounded-md border border-border/70 bg-background/70 px-3 py-2" key={stream}>
+                <div className="pdpp-caption flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="text-muted-foreground">stream</span>
+                  <code>{stream}</code>
+                  <span className="text-foreground">{plural(count, "unaccounted record")}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
     </section>
