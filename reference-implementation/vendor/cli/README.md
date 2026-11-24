@@ -122,3 +122,35 @@ package creation or recover from an emergency publishing incident. It is not the
 steady-state release credential. If used, it must be granular,
 automation-scoped, time-limited, rotated after use, and removed from the normal
 release path once npm trusted publishing is verified.
+
+## Read selectors, completeness, and errors
+
+Every `pdpp read` command accepts `--connector-id <id>` and
+`--connection-id <id>`. These selectors pass through to the server and narrow
+the read. The CLI does not guess a connection or retry an ambiguous read;
+errors preserve the server's `available_connections` choices.
+Unknown flags fail before a request and list the valid flags for that command.
+
+Reads write returned rows to stdout even when results are incomplete.
+A `partial_results` warning, or `has_more: true` without `next_cursor`, returns
+`incomplete_results` and exits 7 in JSON, JSONL, and table formats.
+Use `--allow-partial` to accept those rows with exit 0 and a stderr warning.
+A page with `has_more` and `next_cursor` succeeds; use the cursor for the next
+request. There is no automatic cross-connection paging.
+
+In JSON mode (the default), read failures write a JSON object to stderr with
+`code`, `message`, `status`, `param`, `request_id`, and `retryable`. Unavailable
+values are null. Connection choices are included when supplied by the server.
+JSONL and table modes write concise one-line errors to stderr.
+The following exit codes apply to `pdpp read`:
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Success, including explicitly accepted partial results |
+| 1 | Other HTTP failure |
+| 2 | Invalid arguments or unavailable cached credentials |
+| 3 | Authentication failure (HTTP 401) |
+| 4 | Insufficient scope (HTTP 403) |
+| 5 | Not found (HTTP 404) |
+| 6 | Network failure |
+| 7 | Incomplete results |

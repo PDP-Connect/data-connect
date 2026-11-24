@@ -28,7 +28,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
-    const [rawKey, inlineValue] = arg.slice(2).split("=", 2);
+    const separator = arg.indexOf("=", 2);
+    const rawKey = separator === -1 ? arg.slice(2) : arg.slice(2, separator);
+    const inlineValue = separator === -1 ? undefined : arg.slice(separator + 1);
     if (!rawKey) {
       throw new PdppUsageError("Invalid empty flag");
     }
