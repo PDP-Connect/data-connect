@@ -83,7 +83,8 @@ test("failed native result is rejected for that command", async () => {
     const path = join(dir, "autostart-commands");
     let commandId = "";
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      const files = await readdir(path).catch(() => []);
+      // The store writes <id>.json.<uuid>.tmp and renames it; only a committed command file names the id.
+      const files = (await readdir(path).catch(() => [])).filter(name => name.endsWith(".json"));
       if (files.length) { commandId = files[0]!.replace(".json", ""); break; }
       await new Promise(resolve => setTimeout(resolve, 5));
     }

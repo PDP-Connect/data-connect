@@ -27,8 +27,8 @@ test("SEMANTIC_TIME_EPOCH_MS_THRESHOLD is 1e12", () => {
 
 test("coerceSemanticTimeValue passes through a trimmed ISO string", () => {
   assert.equal(coerceSemanticTimeValue("  2026-01-01T00:00:00Z  "), "2026-01-01T00:00:00Z");
-  // Any non-empty string is returned as-is (not re-parsed).
-  assert.equal(coerceSemanticTimeValue("whenever"), "whenever");
+  // A string that is not a date is unknown, not a timestamp.
+  assert.equal(coerceSemanticTimeValue("whenever"), null);
   assert.equal(coerceSemanticTimeValue("   "), null);
 });
 
