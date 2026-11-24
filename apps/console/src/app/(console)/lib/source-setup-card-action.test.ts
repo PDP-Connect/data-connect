@@ -73,7 +73,17 @@ test("a registered connector keeps its Add account link without a package", () =
     label: "Add account",
   });
   assert.equal(sourceSetupCardAction(entry({}), null, false)?.href, "/connect/static-secret/slack");
-  assert.equal(sourceSetupCardAction(entry({}), "active", false)?.href, "/connect/static-secret/slack");
+  assert.equal(
+    sourceSetupCardAction(entry({ registrationStatus: "registered" }), "active", false)?.href,
+    "/connect/static-secret/slack"
+  );
+});
+
+test("an installed package that the reference has not registered yet gets no setup link", () => {
+  // Install finishes before registration; until then the setup page answers 404.
+  const unregistered = entry({});
+  assert.equal(sourceSetupCardAction(unregistered, "active", false), null);
+  assert.equal(sourceSetupCardAction(unregistered, "update_available", false), null);
 });
 
 test("a package that must be installed first, or whose state is unknown, gets no setup link", () => {

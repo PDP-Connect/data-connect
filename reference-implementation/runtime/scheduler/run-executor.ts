@@ -23,7 +23,7 @@
  * guard → preRunGate → launchRun), pre-run gate, or dispatch governor.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   BROWSER_SURFACE_LEASE_STATUSES,
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
@@ -87,6 +87,9 @@ export interface RunExecutorDeps {
     | null;
   approvedEnvironmentBindings?: readonly ConnectorEnvironmentBinding[];
   approvedProxyConnectorIds?: readonly string[];
+  blobUploadCredentialHooks?: import("../scheduler-domain-types.ts").SchedulerOptions["blobUploadCredentialHooks"];
+  /** Optional launch seam for bounded executor tests; production uses the runtime. */
+  runConnectorImpl?: typeof invokeRunConnector;
   getState: GetStateHandler;
   handleGrantFailureDisable: (reason: string | null | undefined, connectorInstanceId: string) => void;
   isManagedConnector: IsManagedConnectorHandler;
@@ -292,6 +295,7 @@ interface RunConnectorCall {
   approvedEnvironmentBindings?: readonly ConnectorEnvironmentBinding[];
   approvedProxyConnectorIds?: readonly string[];
   automationMode?: RunAutomationMode;
+  blobUploadToken?: string | null;
   cancelSignal?: AbortSignal | null;
   collectionMode: "full_refresh" | "incremental";
   connectorId: string;
@@ -383,6 +387,15 @@ function isBoundedWallClock(maxRunWallClockMs: number): boolean {
   return Number.isFinite(maxRunWallClockMs) && maxRunWallClockMs > 0;
 }
 
+// `setTimeout` cannot delay past 2^31 - 1 ms: Node fires it almost at once.
+// `budget * 4` can also overflow to Infinity, which reads as "unbounded", so a
+// huge finite budget would silently lose its ceiling.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
+function clampTimerDelay(ms: number): number {
+  return Math.min(ms, MAX_TIMER_DELAY_MS);
+}
+
 export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdog {
   const cancellation = new AbortController();
   let timedOut = false;
@@ -391,7 +404,9 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
   // watchdog. Keep the exemption bounded: four primary budgets is long enough
   // for the existing local materialization path while still guaranteeing that
   // a connector that stops making progress cannot survive until restart.
-  const localOnlyPhaseMaxRunWallClockMs = maxRunWallClockMs * 4;
+  const localOnlyPhaseMaxRunWallClockMs = isBoundedWallClock(maxRunWallClockMs)
+    ? clampTimerDelay(maxRunWallClockMs * 4)
+    : maxRunWallClockMs;
   // Set once a connector reports `phase_boundary: "local_only_phase_started"`
   // and never cleared for the rest of this attempt. `maxRunWallClockMs` is
   // sized for provider-rate-limited walks (external API pagination); once a
@@ -414,9 +429,15 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     timer = setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
-    }, maxRunWallClockMs);
+    }, clampTimerDelay(maxRunWallClockMs));
     timer.unref?.();
   };
+
+  // Suppression is only real while a primary timer could still fire: with an
+  // opt-out budget, after the watchdog fired, or after an owner cancel there is
+  // nothing to suppress, and the caller must not record that it did.
+  const canSuppressPrimaryBudget = () =>
+    isBoundedWallClock(maxRunWallClockMs) && !timedOut && !cancellation.signal.aborted;
 
   const armLocalOnlyPhaseCeiling = () => {
     if (
@@ -432,7 +453,7 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
     timer = setTimeout(() => {
       timedOut = true;
       cancellation.abort("run_timed_out");
-    }, localOnlyPhaseMaxRunWallClockMs);
+    }, clampTimerDelay(localOnlyPhaseMaxRunWallClockMs));
     timer.unref?.();
   };
 
@@ -453,7 +474,7 @@ export function createAttemptWatchdog(maxRunWallClockMs: number): AttemptWatchdo
       }
     },
     markProgress(extra) {
-      if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase) {
+      if (extra?.phase_boundary === "local_only_phase_started" && !localOnlyPhase && canSuppressPrimaryBudget()) {
         localOnlyPhase = true;
         if (timer) {
           clearTimeout(timer);
@@ -753,7 +774,9 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     admitRunConnection,
     approvedEnvironmentBindings,
     approvedProxyConnectorIds,
+    blobUploadCredentialHooks,
     getState,
+    runConnectorImpl = invokeRunConnector,
     handleGrantFailureDisable,
     isManagedConnector,
     logger: baseLogger = NOOP_RUN_BASE_LOGGER,
@@ -1028,6 +1051,42 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     });
   }
 
+  // Per-attempt blob upload credential for runs this scheduler launches through
+  // `runConnector` directly. Controller-routed runs mint their own.
+  function mintAttemptBlobUploadToken(schedule: ConnectorSchedule, call: RunConnectorCall, runId: string): string | null {
+    if (!blobUploadCredentialHooks) {
+      return null;
+    }
+    const token = randomBytes(32).toString("hex");
+    try {
+      blobUploadCredentialHooks.register({
+        connectorId: schedule.connectorId,
+        connectorInstanceId: schedule.connectorInstanceId ?? schedule.connectorId,
+        ownerSubjectId: call.ownerSubjectId,
+        runId,
+        token,
+      });
+    } catch {
+      // Do not expose arbitrary hook errors or continue without upload authority.
+      throw Object.assign(new Error("blob_upload_credential_unavailable"), {
+        failure_reason: "permission_error",
+        terminal_reason: "permission_error" as const,
+        run_id: runId,
+        trace_id: call.traceContext?.trace_id ?? null,
+      });
+    }
+    return token;
+  }
+
+  function revokeAttemptBlobUploadToken(runId: string): void {
+    try {
+      blobUploadCredentialHooks?.revoke({ runId });
+    } catch {
+      // Cleanup remains best-effort, but a failed revoke must be observable.
+      console.error(`[scheduler] blob upload credential revoke failed for ${runId}`);
+    }
+  }
+
   // The durable active-run lease + wall-clock watchdog for one attempt. Wraps the
   // caller's RunConnectorCall so `onStarted` persists an active-run row and
   // `onProgress` feeds the watchdog; `clear()` (run in runSingleAttempt's finally)
@@ -1068,6 +1127,7 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
 
     const leasedCall: RunConnectorCall = {
       ...call,
+      blobUploadToken: null,
       cancelSignal: watchdog.signal,
       onProgress: (msg) => {
         const suppressedWallClock = watchdog.markProgress(extractPhaseBoundary(msg));
@@ -1099,9 +1159,16 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
     };
 
     const clear = async (): Promise<void> => {
-      unregisterCancellationBox.value?.();
-      unregisterCancellationBox.value = null;
-      watchdog.clear();
+      try {
+        unregisterCancellationBox.value?.();
+      } catch {
+        console.error(`[scheduler] cancellation unregister failed for ${runId}`);
+      } finally {
+        unregisterCancellationBox.value = null;
+        watchdog.clear();
+        // Also revoke if register partly mutated its registry before throwing.
+        revokeAttemptBlobUploadToken(runId);
+      }
       if (admitted && activeRunStore) {
         await Promise.resolve(activeRunStore.deleteActiveRun(connectorInstanceId, runId)).catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -1136,7 +1203,8 @@ export function createRunExecutor(deps: RunExecutorDeps): RunExecutor {
           ),
         };
       }
-      const result = await invokeRunConnector(lease.call);
+      lease.call.blobUploadToken = mintAttemptBlobUploadToken(schedule, lease.call, lease.call.runId!);
+      const result = await runConnectorImpl(lease.call);
       if (watchdog.timedOut()) {
         return { error: runTimedOutError(result, maxRunWallClockMs), kind: "give-up" };
       }
