@@ -56,7 +56,12 @@ The committed golden contract was generated from
 [PR #450](https://github.com/PDP-Connect/data-connect/pull/450)
 (`827f8281cfa54d31a3d4c64f7e336200ea4902f7`) changed an ungranted stream denial
 from 401 to Core's 403 `grant_stream_not_allowed`; `pdppError` adds those fields
-only to 401 responses. The generator refuses to run from another revision.
+only to 401 responses.
+A second narrow exception removes `emitted_at` from the client and `mcp_package`
+output shapes and from the stored record URI text. Core "Response records" forbids
+`emitted_at` in non-owner responses at the locked protocol revision; owner-token
+shapes are unchanged.
+The generator refuses to run from another revision.
 To refresh deliberately, first check out the gate revision so
 the generator and helper exist, then apply the gate to a detached worktree at
 the exact integration base and run the copied generator there:
