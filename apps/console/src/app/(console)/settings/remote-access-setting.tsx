@@ -155,7 +155,7 @@ const postureRows: Array<{
   },
   {
     posture: "my_devices_only",
-    label: "My devices only",
+    label: "Local network (LAN)",
     description:
       "Reachable from other devices on this network. No third party is involved -- the owner password is the only gate.",
   },
@@ -336,7 +336,7 @@ export function RemoteAccessSetting({
   const cloudflareTunnelUnavailable =
     !stateIsKnown || cloudflareTunnelInspection?.availability === "unavailable"
   // Distinct from `cloudflareTunnelUnavailable`: that flag means "no Tauri
-  // "My devices only" needs a detected LAN network interface -- unavailable
+  // "Local network (LAN)" needs a detected LAN network interface -- unavailable
   // (e.g. no network connection) is a real, distinct state from every other
   // row's `desktopUnavailable`, so it gets its own inspection the same way
   // ngrok/Cloudflare Tunnel do.

@@ -33,6 +33,7 @@
   },
   "bundle": {
     "active": true,
+    "category": "Utility",
     "createUpdaterArtifacts": false,
     "externalBin": ["binaries/pdpp-node"],
     "targets": ["dmg", "app", "nsis", "appimage", "deb"],
