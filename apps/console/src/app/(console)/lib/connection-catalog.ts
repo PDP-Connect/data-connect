@@ -60,7 +60,8 @@ export interface CatalogManifestLike {
       proof_gate?: string | null;
       /** Manifest-authored explanation for the current lifecycle tier. */
       rationale?: string | null;
-      tier?: "supported" | "preview" | "development" | null;
+      /** "unknown" is set only for an install-catalog entry that declared no tier. */
+      tier?: "supported" | "preview" | "development" | "unknown" | null;
     } | null;
   } | null;
   connector_id: string;
@@ -110,7 +111,7 @@ function catalogManifestFromInstallEntry(entry: ConnectorInstallCatalogEntry): C
   const connectorId = entry.catalog_connector_id ?? entry.connector_id;
   return {
     capabilities: {
-      public_listing: { tier: entry.tier ?? "development" },
+      public_listing: { tier: entry.tier ?? "unknown" },
     },
     connector_id: connectorId,
     connector_key: entry.connector_key,
@@ -218,6 +219,13 @@ export type CatalogModality = ConnectorIntentModality;
 export type PublicConnectorTier = "supported" | "preview" | "development";
 
 /**
+ * The tier a catalog entry carries. "unknown" means no source declared one
+ * (an install-catalog entry published without `tier`); it is not a claim that
+ * the connector is in development.
+ */
+export type CatalogPublicTier = PublicConnectorTier | "unknown";
+
+/**
  * What the console can honestly do with this connector today:
  *
  * - `local_collector_enroll` — a proven one-click enrollment deep-link.
@@ -312,7 +320,7 @@ export interface ConnectorCatalogEntry {
   /** Proof gate blocking support, if any. */
   proofGate: string | null;
   /** Server-owned public-listing state. */
-  publicTier: PublicConnectorTier;
+  publicTier: CatalogPublicTier;
   /** Existing capability rationale used for owner context where no setup copy exists. */
   refreshPolicyRationale: string | null;
   /** Server-owned registration state. */
