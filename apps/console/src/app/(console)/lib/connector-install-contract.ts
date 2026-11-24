@@ -5,8 +5,16 @@
  * Wire types and boundary parsing for the owner connector-install API.
  *
  * The API's `bindings` values are intentionally retained as unknown records:
- * the snapshot defines the field but not its nested availability shape. The
- * presentation layer only treats an explicit `available: false` as a block.
+ * the routes pass through the manifest's `runtime_requirements.bindings`
+ * (`{ required: boolean }` per binding, spec-collection-profile.md), which
+ * claims nothing about availability. The presentation layer blocks Install only
+ * on an explicit availability claim (`false`, or an `available` field that is
+ * not `true`).
+ *
+ * Optional cosmetic strings (`display_name`, `published_at`, ...) of the wrong
+ * type are dropped without dropping the entry: skipping an entry hides a whole
+ * connector, which is worse than a missing label. Identity, digest and tier
+ * fields stay strict.
  */
 
 export type ConnectorInstallTier = "supported" | "preview" | "development";
@@ -58,17 +66,23 @@ export interface ConnectorLocalSource {
 export interface ConnectorInstallCatalogResponse {
   readonly data: readonly ConnectorInstallCatalogEntry[];
   readonly object: "connector_install_catalog";
+  /** Entries dropped because they failed validation; the rest are still usable. */
+  readonly skipped: number;
 }
 
 export interface ConnectorInstallStatusResponse {
   readonly data: readonly ConnectorInstallStatus[];
   readonly object: "connector_install_status";
+  /** Entries dropped because they failed validation; the rest are still usable. */
+  readonly skipped: number;
 }
 
 export interface ConnectorInstallSnapshot {
   readonly catalog: readonly ConnectorInstallCatalogEntry[];
   readonly catalogUnavailableReason?: "transient_busy";
   readonly localSources?: readonly ConnectorLocalSource[];
+  /** Catalog and status entries that failed validation and were left out. */
+  readonly skippedEntries?: number;
   readonly status: readonly ConnectorInstallStatus[];
 }
 
@@ -226,14 +240,38 @@ function readData(payload: unknown, objectName: string): readonly unknown[] {
   return record.data;
 }
 
+/**
+ * Parse each entry on its own so one malformed entry cannot hide every other
+ * connector's package facts. A bad entry is skipped and counted; a bad
+ * envelope (wrong object, non-array data) still throws.
+ */
+function readEntries<T>(
+  rows: readonly unknown[],
+  read: (value: unknown, index: number) => T
+): { entries: T[]; skipped: number } {
+  const entries: T[] = [];
+  let skipped = 0;
+  rows.forEach((row, index) => {
+    try {
+      entries.push(read(row, index));
+    } catch (err) {
+      if (!(err instanceof ConnectorInstallContractError)) {
+        throw err;
+      }
+      skipped += 1;
+    }
+  });
+  return { entries, skipped };
+}
+
 export function parseConnectorInstallCatalogResponse(payload: unknown): ConnectorInstallCatalogResponse {
-  const data = readData(payload, "connector_install_catalog").map(readCatalogEntry);
-  return { data, object: "connector_install_catalog" };
+  const { entries, skipped } = readEntries(readData(payload, "connector_install_catalog"), readCatalogEntry);
+  return { data: entries, object: "connector_install_catalog", skipped };
 }
 
 export function parseConnectorInstallStatusResponse(payload: unknown): ConnectorInstallStatusResponse {
-  const data = readData(payload, "connector_install_status").map(readStatus);
-  return { data, object: "connector_install_status" };
+  const { entries, skipped } = readEntries(readData(payload, "connector_install_status"), readStatus);
+  return { data: entries, object: "connector_install_status", skipped };
 }
 
 export function parseConnectorInstallResponse(payload: unknown): ConnectorInstallStatus {
