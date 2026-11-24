@@ -10,6 +10,7 @@ import { extractEnvelopeWarnings, resolveFormat, writeData, writeEnvelopeWarning
 // Search endpoints select sources by connection only; they reject connector_id.
 const SOURCE_FLAGS = ["connector-id", "connection-id"];
 const COMMON_FLAGS = ["connection-id", "cache-root", "format", "data", "allow-partial"];
+const BOOLEAN_FLAGS = ["data", "allow-partial"];
 const COMMAND_FLAGS: Record<string, string[]> = {
   schema: ["connector-id", "stream", "view"],
   streams: ["connector-id", "connector-instance-id"],
@@ -52,7 +53,7 @@ export async function runRead(
 
   let flags: ParsedFlags = {};
   try {
-    const parsedArgs = parseArgs(rest);
+    const parsedArgs = parseArgs(rest, { booleanFlags: BOOLEAN_FLAGS });
     flags = parsedArgs.flags;
     if (!Object.hasOwn(COMMAND_FLAGS, command)) {
       throw new PdppUsageError(`Unknown read command: ${command}`);
@@ -84,16 +85,17 @@ export async function runRead(
     const request = buildReadRequest(command, positionals.slice(1), flags, normalizedProviderUrl);
     const { body, requestId, status } = await fetchReadJson(request, credential.access_token, fetchImpl);
     writeData(projectOutput(body, flags), format, out);
-    const envelope = body as { has_more?: boolean; next_cursor?: string } | null;
+    const envelope = body as { has_more?: unknown; next_cursor?: unknown } | null;
+    const usableCursor = typeof envelope?.next_cursor === "string" && envelope.next_cursor.trim() !== "";
     const partialWarning = extractEnvelopeWarnings(body).some((warning) => warning.code === "partial_results");
-    const incomplete = partialWarning || (envelope?.has_more === true && !envelope.next_cursor);
+    const incomplete = partialWarning || (envelope?.has_more === true && !usableCursor);
     if (incomplete && flags["allow-partial"] !== true && flags["allow-partial"] !== "true") {
       throw new PdppCliError("Returned rows are incomplete. Select a connection or use --allow-partial to accept them.", 7,
         { code: "incomplete_results", request_id: requestId, status });
     }
     writeEnvelopeWarnings(body, err);
     if (incomplete && !partialWarning) {
-      err.write("warning: incomplete_results: has_more without next_cursor\n");
+      err.write("warning: incomplete_results: has_more without a usable next_cursor\n");
     }
     return 0;
   } catch (error) {
@@ -128,10 +130,10 @@ function validateFlags(command: string, flags: ParsedFlags): void {
       throw new PdppUsageError(`Unknown flag: --${flag}. Valid flags: ${valid.map((name) => `--${name}`).join(", ")}`,
         { param: flag });
     }
-    if (["data", "allow-partial"].includes(flag) && ![true, "true", "false"].includes(flags[flag])) {
+    if (BOOLEAN_FLAGS.includes(flag) && ![true, "true", "false"].includes(flags[flag])) {
       throw new PdppUsageError(`--${flag} accepts only true or false`, { param: flag });
     }
-    if (flags[flag] === true && !["data", "allow-partial"].includes(flag)) {
+    if (flags[flag] === true && !BOOLEAN_FLAGS.includes(flag)) {
       throw new PdppUsageError(`Missing value for --${flag}`, { param: flag });
     }
   }

@@ -468,13 +468,14 @@ for (const format of ["json", "jsonl", "table"]) {
 
 for (const format of ["json", "jsonl", "table"]) {
   for (const allowPartial of [false, true]) {
-    for (const nextCursor of [undefined, "next-page"]) {
-      test(`has_more in ${format}, allow-partial=${allowPartial}, cursor=${nextCursor}`, async () => {
+    for (const nextCursor of [undefined, "next-page", 123, "  "]) {
+      const usable = nextCursor === "next-page";
+      test(`has_more in ${format}, allow-partial=${allowPartial}, cursor=${JSON.stringify(nextCursor)}`, async () => {
         await withReadResponse({ data: [{ id: "returned-row" }], has_more: true, next_cursor: nextCursor },
           ["--format", format, ...(allowPartial ? ["--allow-partial"] : [])], (code, captured) => {
-            assert.equal(code, nextCursor || allowPartial ? 0 : 7);
+            assert.equal(code, usable || allowPartial ? 0 : 7);
             assert.ok(captured.stdout().includes("returned-row"));
-            if (nextCursor) assert.ok(captured.stdout().includes(nextCursor));
+            if (usable) assert.ok(captured.stdout().includes(nextCursor));
             else assert.ok(captured.stderr().includes("incomplete_results"));
           });
       });
@@ -572,7 +573,15 @@ test("read response-body network failures have the network exit code", async () 
   }
 });
 
-async function withReadResponse(body, flags, check, status = 200) {
+test("bare --allow-partial before the positionals does not swallow the provider URL", async () => {
+  await withReadResponse({ data: [{ id: "returned-row" }], has_more: true }, [], (code, captured, url) => {
+    assert.equal(code, 0);
+    assert.equal(url.pathname, "/v1/streams/messages/records");
+    assert.ok(captured.stdout().includes("returned-row"));
+  }, 200, ["--allow-partial"]);
+});
+
+async function withReadResponse(body, flags, check, status = 200, beforePositionals = []) {
   const cacheRoot = await makeCredentialCache("fixture-token");
   const originalFetch = globalThis.fetch;
   let requestedUrl;
@@ -583,7 +592,10 @@ async function withReadResponse(body, flags, check, status = 200) {
   };
   try {
     const captured = captureIo();
-    const code = await runCli(["read", "query-records", PROVIDER, "messages", "--cache-root", cacheRoot, ...flags], captured.io);
+    const code = await runCli(
+      ["read", "query-records", ...beforePositionals, PROVIDER, "messages", "--cache-root", cacheRoot, ...flags],
+      captured.io
+    );
     check(code, captured, requestedUrl);
   } finally {
     globalThis.fetch = originalFetch;

@@ -10,7 +10,14 @@ export interface ParsedArgs {
   positionals: string[];
 }
 
-export function parseArgs(argv: string[]): ParsedArgs {
+export interface ParseArgsOptions {
+  // Flags that never take a value: a bare occurrence is `true`, and only a
+  // literal `true`/`false` after it is consumed, so a following positional is
+  // never swallowed.
+  booleanFlags?: readonly string[];
+}
+
+export function parseArgs(argv: string[], options: ParseArgsOptions = {}): ParsedArgs {
   const flags: ParsedFlags = {};
   const positionals: string[] = [];
 
@@ -41,6 +48,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
 
     const next = argv[i + 1];
+    if (options.booleanFlags?.includes(rawKey)) {
+      const explicit = next === "true" || next === "false";
+      flags[rawKey] = explicit ? next : true;
+      i += explicit ? 1 : 0;
+      continue;
+    }
     if (next && !next.startsWith("--")) {
       flags[rawKey] = next;
       i += 1;
