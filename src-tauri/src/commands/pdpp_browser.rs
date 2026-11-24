@@ -451,6 +451,13 @@ pub(crate) fn browser_command_with_args(
             "--remote-debugging-port=0",
             "--no-first-run",
             "--no-default-browser-check",
+            // The profile belongs to DataConnect, not to the user's everyday
+            // browser. Keep its keys out of the OS wallet: on Linux the Secret
+            // portal or KWallet can block cookie reads waiting for an unlock
+            // prompt, and on macOS the Keychain can prompt. Playwright,
+            // Puppeteer and ChromeDriver launch Chrome with the same pair.
+            "--password-store=basic",
+            "--use-mock-keychain",
         ])
         .args(additional_args);
     if headless {
@@ -724,6 +731,24 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::process::Command;
+
+    #[test]
+    fn browser_command_keeps_profile_keys_out_of_the_os_wallet() {
+        let command = browser_command(Path::new("chrome"), Path::new("profile"), true);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|arg| arg == "--password-store=basic"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--use-mock-keychain"),
+            "{args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("about:blank"));
+    }
 
     const LOCK_HOLDER_ROOT: &str = "PDPP_BROWSER_LOCK_HOLDER_ROOT";
     const LOCK_EXPECT_BLOCKED_ROOT: &str = "PDPP_BROWSER_LOCK_EXPECT_BLOCKED_ROOT";
