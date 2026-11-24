@@ -6,6 +6,16 @@ export interface BrowserSessionRunStartResult {
     readonly browser_surface_status?: string | null;
     readonly browser_surface_wait_reason?: string | null;
   } | null;
+  /**
+   * The host browser-surface allocator's own error code/message when the run
+   * ended surface_failed because the host's lease POST returned a structured
+   * error body (e.g. browser_sandbox_unavailable). Absent for dynamic/local
+   * allocator mode or an unstructured host failure.
+   */
+  readonly browser_surface_failure?: {
+    readonly code?: string | null;
+    readonly message?: string | null;
+  } | null;
   readonly run_id?: string | null;
   readonly status?: string | null;
 }
@@ -34,6 +44,10 @@ function messageForNotStartedRun(result: BrowserSessionRunStartResult): string {
   }
 
   if (status === "surface_failed" || status === "browser_surface_probe_failed" || status === "browser_surface_lost") {
+    const hostMessage = result.browser_surface_failure?.message?.trim();
+    if (hostMessage) {
+      return `PDPP could not get the secure browser ready: ${hostMessage}`;
+    }
     return (
       "PDPP could not get the secure browser ready. " +
       "Try again; if it keeps failing, open Syncs to inspect the latest browser-start attempt."

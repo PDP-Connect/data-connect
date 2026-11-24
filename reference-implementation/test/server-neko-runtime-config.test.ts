@@ -7,7 +7,6 @@ import type { BrowserSurfaceReadinessWebSocketLike } from "../runtime/browser-su
 import { resolveNekoBrowserSurfaceControllerOptions as resolveNekoBrowserSurfaceControllerOptionsUntyped } from "../server/index.ts";
 
 const REGEXP_1 = /PDPP_NEKO_ALLOCATOR_URL is required in dynamic n\.eko surface mode/;
-const REGEXP_2 = /must exceed the number of retained credential-boundary managed connectors/;
 
 // `server/index.js` is plain JS: `resolveNekoBrowserSurfaceControllerOptions`'s
 // destructured-default params (getBrowserSurfaceLeaseStore/createBrowserSurfaceAllocator)
@@ -159,6 +158,66 @@ test("host runtime config builds allocator and run-lifecycle wiring", async () =
   assert.equal(typeof options.beforeBrowserSurfaceLeaseRelease, "function");
 });
 
+type ListenerType = "open" | "message" | "error" | "close";
+// Standard WebSocket readyState constants, both as static members (for the
+// constructor-type check against the real `typeof WebSocket`) and as
+// instance members (per the WebSocket interface) -- the readiness probe
+// itself never reads readyState, but the real constructor type requires
+// both.
+class FakeWebSocket implements BrowserSurfaceReadinessWebSocketLike {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  readonly CONNECTING = 0;
+  readonly OPEN = 1;
+  readonly CLOSING = 2;
+  readonly CLOSED = 3;
+  readonly #listeners: Record<ListenerType, Array<(event: { readonly data?: unknown }) => void>> = {
+    close: [],
+    error: [],
+    message: [],
+    open: [],
+  };
+  constructor() {
+    queueMicrotask(() => this.#emit("open", {}));
+  }
+  addEventListener(type: ListenerType, listener: (event: { readonly data?: unknown }) => void): void {
+    this.#listeners[type].push(listener);
+  }
+  close(): void {
+    /* intentionally empty */
+  }
+  send(raw: string): void {
+    const request = JSON.parse(raw);
+    setTimeout(
+      () =>
+        this.#emit("message", {
+          data: JSON.stringify({ id: request.id, result: { frameTree: { frame: { id: "root" } } } }),
+        }),
+      12
+    );
+  }
+  #emit(type: ListenerType, event: { readonly data?: unknown }): void {
+    for (const listener of this.#listeners[type]) {
+      listener(event);
+    }
+  }
+}
+// The real DOM `WebSocket` type carries dozens of members
+// (binaryType/bufferedAmount/onopen/...) FakeWebSocket does not implement
+// and never needs to -- the readiness probe only calls
+// addEventListener/close/send (BrowserSurfaceReadinessWebSocketLike,
+// implemented above). The two constructor types don't overlap enough for
+// a direct cast, so this substitutes through a same-shape function type
+// (the constructor signature actually invoked: `new (url) => the
+// structural instance shape`) rather than assigning through a bare
+// `unknown` variable, mirroring the two-hop pattern this repo already
+// uses for genuinely disjoint types (records-instance-namespace.test.ts's
+// buildSemanticSearchPlanForGrant).
+type WebSocketConstructorLike = new (url: string) => BrowserSurfaceReadinessWebSocketLike;
+const fakeWebSocketCtor: WebSocketConstructorLike = FakeWebSocket;
+
 interface FakeFetchResponse {
   json: () => Promise<unknown>;
   ok: boolean;
@@ -208,65 +267,6 @@ test("dynamic readiness budget governs the semantic CDP preflight, not the five-
   };
   globalThis.fetch = fakeFetch as typeof fetch;
 
-  type ListenerType = "open" | "message" | "error" | "close";
-  // Standard WebSocket readyState constants, both as static members (for the
-  // constructor-type check against the real `typeof WebSocket`) and as
-  // instance members (per the WebSocket interface) -- the readiness probe
-  // itself never reads readyState, but the real constructor type requires
-  // both.
-  class FakeWebSocket implements BrowserSurfaceReadinessWebSocketLike {
-    static readonly CONNECTING = 0;
-    static readonly OPEN = 1;
-    static readonly CLOSING = 2;
-    static readonly CLOSED = 3;
-    readonly CONNECTING = 0;
-    readonly OPEN = 1;
-    readonly CLOSING = 2;
-    readonly CLOSED = 3;
-    readonly #listeners: Record<ListenerType, Array<(event: { readonly data?: unknown }) => void>> = {
-      close: [],
-      error: [],
-      message: [],
-      open: [],
-    };
-    constructor() {
-      queueMicrotask(() => this.#emit("open", {}));
-    }
-    addEventListener(type: ListenerType, listener: (event: { readonly data?: unknown }) => void): void {
-      this.#listeners[type].push(listener);
-    }
-    close(): void {
-      /* intentionally empty */
-    }
-    send(raw: string): void {
-      const request = JSON.parse(raw);
-      setTimeout(
-        () =>
-          this.#emit("message", {
-            data: JSON.stringify({ id: request.id, result: { frameTree: { frame: { id: "root" } } } }),
-          }),
-        12
-      );
-    }
-    #emit(type: ListenerType, event: { readonly data?: unknown }): void {
-      for (const listener of this.#listeners[type]) {
-        listener(event);
-      }
-    }
-  }
-  // The real DOM `WebSocket` type carries dozens of members
-  // (binaryType/bufferedAmount/onopen/...) FakeWebSocket does not implement
-  // and never needs to -- the readiness probe only calls
-  // addEventListener/close/send (BrowserSurfaceReadinessWebSocketLike,
-  // implemented above). The two constructor types don't overlap enough for
-  // a direct cast, so this substitutes through a same-shape function type
-  // (the constructor signature actually invoked: `new (url) => the
-  // structural instance shape`) rather than assigning through a bare
-  // `unknown` variable, mirroring the two-hop pattern this repo already
-  // uses for genuinely disjoint types (records-instance-namespace.test.ts's
-  // buildSemanticSearchPlanForGrant).
-  type WebSocketConstructorLike = new (url: string) => BrowserSurfaceReadinessWebSocketLike;
-  const fakeWebSocketCtor: WebSocketConstructorLike = FakeWebSocket;
   globalThis.WebSocket = fakeWebSocketCtor as typeof WebSocket;
 
   const options = await resolveNekoBrowserSurfaceControllerOptions({
@@ -290,6 +290,76 @@ test("dynamic readiness budget governs the semantic CDP preflight, not the five-
     surface_id: "surface-1",
   });
   assert.equal(result.ok, true, "a 12ms semantic CDP response must use the configured 25ms dynamic budget");
+});
+
+test("host mode readiness accepts a plain DevTools server; n.eko mode still requires window-settle", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  // Models a browser's own DevTools HTTP server: it serves /json/* and
+  // answers 404 for the n.eko proxy's /pdpp/window-settle route.
+  const requestedPaths: string[] = [];
+  // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
+  const fakeFetch = async (url: string | Request | URL): Promise<FakeFetchResponse> => {
+    const { pathname } = new URL(String(url));
+    requestedPaths.push(pathname);
+    if (pathname === "/json/version") {
+      return {
+        json: async () => ({ Browser: "Chrome/test", webSocketDebuggerUrl: "ws://127.0.0.1:9333/browser" }),
+        ok: true,
+        status: 200,
+      };
+    }
+    if (pathname === "/json/list") {
+      return {
+        json: async () => [
+          { id: "page-1", type: "page", url: "about:blank", webSocketDebuggerUrl: "ws://127.0.0.1:9333/page-1" },
+        ],
+        ok: true,
+        status: 200,
+      };
+    }
+    return { json: async () => ({}), ok: false, status: 404 };
+  };
+  globalThis.fetch = fakeFetch as typeof fetch;
+  globalThis.WebSocket = fakeWebSocketCtor as typeof WebSocket;
+  const surface = { cdp_url: "http://127.0.0.1:9333", health: "ready", surface_id: "surface-1" };
+
+  const hostOptions = await resolveNekoBrowserSurfaceControllerOptions({
+    env: {
+      PDPP_BROWSER_SURFACE_HOST_ENDPOINT: "http://host-agent.test/api",
+      PDPP_BROWSER_SURFACE_HOST_TOKEN: "shared-secret",
+      PDPP_BROWSER_SURFACE_MODE: "host",
+      PDPP_NEKO_MANAGED_CONNECTORS: "connector-a",
+      PDPP_NEKO_SURFACE_CAP: "1",
+    },
+    getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
+  });
+  assert.ok(hostOptions.browserSurfaceReadinessProbe, "host mode must produce a readiness probe");
+  const hostResult = await hostOptions.browserSurfaceReadinessProbe.probe(surface);
+  assert.equal(hostResult.ok, true, "a live host browser is ready without the n.eko window-settle route");
+  assert.deepEqual(requestedPaths, ["/json/version", "/json/list"]);
+
+  const nekoOptions = await resolveNekoBrowserSurfaceControllerOptions({
+    createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
+    env: {
+      PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
+      PDPP_NEKO_MANAGED_CONNECTORS: "connector-a",
+      PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
+      PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
+      PDPP_NEKO_SURFACE_CAP: "2",
+      PDPP_NEKO_SURFACE_MODE: "dynamic",
+    },
+    getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
+  });
+  assert.ok(nekoOptions.browserSurfaceReadinessProbe, "dynamic mode must produce a readiness probe");
+  const nekoResult = await nekoOptions.browserSurfaceReadinessProbe.probe(surface);
+  assert.equal(nekoResult.ok, false);
+  assert.equal((nekoResult as { code?: string }).code, "browser_surface_window_settle_unavailable");
 });
 
 test("n.eko runtime config treats canonical connector URLs as matching short connector ids", async () => {
@@ -333,123 +403,6 @@ test("n.eko explicit dynamic runtime config fails fast without allocator setting
     REGEXP_1
   );
 });
-
-test("fair-slot invariant: a retained connector (ChatGPT) with cap=1 fails config closed", async () => {
-  await assert.rejects(
-    resolveNekoBrowserSurfaceControllerOptions({
-      createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
-      env: {
-        PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
-        PDPP_NEKO_MANAGED_CONNECTORS: "https://registry.pdpp.dev/connectors/chatgpt",
-        PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
-        PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
-        PDPP_NEKO_SURFACE_CAP: "1",
-        PDPP_NEKO_SURFACE_MODE: "dynamic",
-      },
-      getBrowserSurfaceLeaseStore: () => createEmptyLeaseStore(),
-    }),
-    REGEXP_2
-  );
-});
-
-test("fair-slot invariant: cap=3 with ChatGPT + four other connectors passes (one fair transient slot)", async () => {
-  const store = createEmptyLeaseStore();
-  const options = await resolveNekoBrowserSurfaceControllerOptions({
-    createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
-    env: {
-      PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
-      PDPP_NEKO_MANAGED_CONNECTORS:
-        "https://registry.pdpp.dev/connectors/chatgpt,https://registry.pdpp.dev/connectors/chase,https://registry.pdpp.dev/connectors/usaa,https://registry.pdpp.dev/connectors/amazon,https://registry.pdpp.dev/connectors/reddit",
-      PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
-      PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
-      PDPP_NEKO_SURFACE_CAP: "3",
-      PDPP_NEKO_SURFACE_MODE: "dynamic",
-    },
-    getBrowserSurfaceLeaseStore: () => store,
-  });
-  assert.ok(options.browserSurfaceLeaseManager);
-});
-
-test("boot re-derives retained on a rehydrated NONTERMINAL LEASE that has no surface yet, not only on surfaces", async () => {
-  // Regression: a queued (waiting_for_browser_surface) ChatGPT lease that was
-  // persisted before a restart has no surface row for rederiveRetainedSurfaces
-  // to mark. Before this fix, only listSurfaces() was re-derived, so this
-  // lease would rehydrate non-retained; once it later materializes a surface
-  // (queue promotion), that surface would be created WITHOUT the retained
-  // flag and become evictable by routine idle-TTL / capacity-pressure reap —
-  // reproducing the exact steady-state auth-loss bug this whole change fixes.
-  const persistedLease = {
-    connector_id: "https://registry.pdpp.dev/connectors/chatgpt",
-    expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-    fencing_token: 1,
-    lease_id: "lease_queued_chatgpt",
-    priority_class: "background",
-    profile_key: "chatgpt:acct-a",
-    requested_at: new Date().toISOString(),
-    run_id: "run_queued",
-    status: "waiting_for_browser_surface",
-    surface_subject_id: "acct-a",
-    wait_reason: "capacity_full",
-    // No `retained` field persisted — this is the pre-fix rehydrated shape.
-  };
-  const store = {
-    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
-    async listNonTerminalLeases() {
-      return [persistedLease];
-    },
-    // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.
-    async listSurfaces() {
-      return [];
-    },
-    async repairStaleSurfaceActiveLeases() {
-      /* intentionally empty */
-    },
-  };
-
-  const options = await resolveNekoBrowserSurfaceControllerOptions({
-    createBrowserSurfaceAllocator: () => ({ ensureSurface: async () => undefined }),
-    env: {
-      PDPP_NEKO_ALLOCATOR_URL: "http://allocator.test/api",
-      PDPP_NEKO_MANAGED_CONNECTORS: "https://registry.pdpp.dev/connectors/chatgpt",
-      PDPP_NEKO_PROFILE_STORAGE_POLICY: "persistent",
-      PDPP_NEKO_PROFILE_STORAGE_ROOT: "/var/lib/pdpp/neko-profiles",
-      PDPP_NEKO_SURFACE_CAP: "3",
-      PDPP_NEKO_SURFACE_MODE: "dynamic",
-    },
-    getBrowserSurfaceLeaseStore: () => store,
-  });
-
-  const manager = options.browserSurfaceLeaseManager;
-  assert.ok(manager);
-  assert.equal(
-    manager.getLease("lease_queued_chatgpt")?.retained,
-    true,
-    "rehydrated queued lease must be re-derived retained"
-  );
-
-  // Prove it stays retained through materialization: promote the queued lease
-  // into a surface and confirm that surface is created retained too.
-  const promoted = manager.pumpQueuedLeases();
-  assert.equal(promoted.length, 1);
-  assert.equal(promoted[0]?.lease_id, "lease_queued_chatgpt");
-  assert.equal(promoted[0]?.status, "starting_surface");
-  const surfaceId = promoted[0]?.surface_id;
-  assert.ok(surfaceId);
-  assert.equal(
-    manager.getSurface(surfaceId)?.retained,
-    true,
-    "surface materialized from a rehydrated queued retained lease must be retained"
-  );
-});
-
-// Note: the PER-CONNECTION fair-slot invariant (two retained ChatGPT surfaces +
-// cap=3 = one transient slot; a third retained connection is refused) is enforced
-// at retained-surface CREATION time in the lease manager, not by counting observed
-// surfaces at boot. See `browser-surface-leases.test.ts` →
-// "creating a retained surface that would consume the fair-slot reserve is
-// terminally deferred". Counting rehydrated surfaces here would be fail-open: a
-// configured retained connection that never acquired a surface is absent from the
-// store, so it must be caught when its demand materializes, not at boot.
 
 function createEmptyLeaseStore() {
   return {

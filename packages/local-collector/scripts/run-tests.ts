@@ -38,8 +38,9 @@ if (tests.length === 0) {
 }
 
 await new Promise<void>((resolve, reject) => {
-  const concurrencyArgs = process.env.CI ? [] : ["--test-concurrency=2"];
-  const child = spawn(process.execPath, ["--test", ...concurrencyArgs, "--import", "tsx", ...tests], {
+  // The same two-worker budget everywhere: CI=1 is also set by agents and
+  // scripts on shared hosts, so it is not a signal that the host is dedicated.
+  const child = spawn(process.execPath, ["--test", "--test-concurrency=2", "--import", "tsx", ...tests], {
     cwd: packageRoot,
     stdio: "inherit",
   });

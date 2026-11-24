@@ -12,6 +12,8 @@ set -euo pipefail
 REPOSITORY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 EXPECTED_REVISION="${PDPP_BOOTSTRAP_EXPECTED_REVISION:-$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)}"
 IMAGE="${PDPP_BOOTSTRAP_IMAGE:-pdpp-core-bootstrap-oracle:${EXPECTED_REVISION}}"
+# Docker json-file log rotation (10 MiB x 5 files); this script reads container logs.
+LOG_BOUND=(--log-driver json-file --log-opt max-size=10m --log-opt max-file=5)
 POSTGRES_IMAGE="${PDPP_POSTGRES_IMAGE:-pgvector/pgvector:pg16}"
 DEADLINE_SECONDS="${PDPP_BOOTSTRAP_DEADLINE_SECONDS:-900}"
 LOCK_HOLD_SECONDS="${PDPP_BOOTSTRAP_LOCK_HOLD_SECONDS:-40}"
@@ -164,7 +166,7 @@ docker build \
   "$REPOSITORY_ROOT"
 
 docker network create "$NETWORK" >/dev/null
-docker run --detach --name "$POSTGRES_CONTAINER" --network "$NETWORK" --network-alias pg \
+docker run --detach --name "$POSTGRES_CONTAINER" "${LOG_BOUND[@]}" --network "$NETWORK" --network-alias pg \
   --env POSTGRES_USER=pdpp --env "POSTGRES_PASSWORD=$PG_PASSWORD" --env POSTGRES_DB=pdpp \
   "$POSTGRES_IMAGE" >/dev/null
 wait_for_postgres
@@ -173,7 +175,7 @@ wait_for_postgres
 # schema, then add enough harmless synthetic records to exercise the populated
 # database budget. No production tables or rows
 # are read or written by this path.
-docker run --detach --name "$PREP_CONTAINER" --network "$NETWORK" "${core_env[@]}" "$IMAGE" >/dev/null
+docker run --detach --name "$PREP_CONTAINER" "${LOG_BOUND[@]}" --network "$NETWORK" "${core_env[@]}" "$IMAGE" >/dev/null
 prep_deadline=$(( $(date +%s) + DEADLINE_SECONDS ))
 while ! docker exec "$PREP_CONTAINER" curl --fail --silent http://127.0.0.1:7662/.well-known/oauth-authorization-server >/dev/null 2>&1; do
   (( $(date +%s) < prep_deadline )) || { echo "docker-bootstrap-readiness-oracle: schema preparation exceeded deadline" >&2; exit 1; }
@@ -203,7 +205,7 @@ docker exec -d "$POSTGRES_CONTAINER" env PGPASSWORD="$PG_PASSWORD" psql -U pdpp 
 sleep 2
 
 START_MS="$(now_ms)"
-docker run --detach --name "$ORACLE_CONTAINER" --network "$NETWORK" \
+docker run --detach --name "$ORACLE_CONTAINER" "${LOG_BOUND[@]}" --network "$NETWORK" \
   --publish "127.0.0.1:${AS_PORT}:7662" --publish "127.0.0.1:${RS_PORT}:7663" \
   --restart=no "${core_env[@]}" "$IMAGE" >/dev/null
 

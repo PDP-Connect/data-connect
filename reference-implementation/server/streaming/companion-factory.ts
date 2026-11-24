@@ -178,6 +178,39 @@ function resolveStreamingTarget(target: unknown, fallback: ResolveTargetForInter
   return () => target;
 }
 
+function hostPageTargetResolver(
+  cdpHttpUrl: string,
+  resolveExactTarget: ResolveTargetForInteraction
+): ResolveTargetForInteraction {
+  return async (runId, interactionId) => {
+    const exactTarget = await Promise.resolve(resolveExactTarget(runId, interactionId));
+    const wsUrl = normalizeCdpTarget(exactTarget);
+    if (!wsUrl) {
+      throw createMissingTargetError("host CDP page");
+    }
+
+    let endpoint: URL;
+    let page: URL;
+    try {
+      endpoint = new URL(cdpHttpUrl);
+      page = new URL(wsUrl);
+    } catch {
+      throw createMissingTargetError("host CDP page");
+    }
+    const endpointPort = endpoint.port || (endpoint.protocol === "https:" ? "443" : "80");
+    const pagePort = page.port || (page.protocol === "wss:" ? "443" : "80");
+    const compatibleProtocols =
+      (endpoint.protocol === "http:" && page.protocol === "ws:") ||
+      (endpoint.protocol === "https:" && page.protocol === "wss:");
+    if (!compatibleProtocols || endpoint.hostname !== page.hostname || endpointPort !== pagePort) {
+      const error: CodedError = new Error("Registered page does not belong to the leased host browser");
+      error.code = "host_cdp_target_mismatch";
+      throw error;
+    }
+    return wsUrl;
+  };
+}
+
 function normalizeCdpTarget(target: unknown): string | null {
   if (typeof target === "string" && target.length > 0) {
     return target;
@@ -488,6 +521,14 @@ export function createDefaultStreamingCompanionFactory({
     if (!hasCompanionIds(input)) {
       return null;
     }
+    const targetResolver =
+      recordOrNull(input.target)?.backend === "cdp" &&
+      typeof recordOrNull(input.target)?.cdp_http_url === "string"
+        ? hostPageTargetResolver(
+            String(recordOrNull(input.target)?.cdp_http_url),
+            resolveTargetForInteraction
+          )
+        : resolveStreamingTarget(input.target, resolveTargetForInteraction);
     return createResolvedCompanion({
       browser_session_id: input.browser_session_id,
       commandTimeoutMs,
@@ -531,7 +572,7 @@ export function createDefaultStreamingCompanionFactory({
           : {}),
       },
       openTimeoutMs,
-      resolveTargetForInteraction: resolveStreamingTarget(input.target, resolveTargetForInteraction),
+      resolveTargetForInteraction: targetResolver,
       run_id: input.run_id,
       WebSocketCtor,
     });

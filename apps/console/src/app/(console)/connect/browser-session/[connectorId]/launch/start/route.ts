@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { NextResponse } from "next/server";
-import { isBrowserBoundConnector } from "../../../../../lib/connection-modality.ts";
+import { loadBrowserConnectSupport } from "../../../../../lib/load-browser-connect-support.ts";
 import { requireDashboardAccess } from "../../../../../lib/dashboard-access.ts";
 import { runConnectionNow } from "../../../../../lib/operator-runs.ts";
 import { abandonBrowserEnrollmentShell } from "../../../../../lib/ref-client.ts";
@@ -49,7 +49,8 @@ export async function POST(request: Request, { params }: { params: Promise<Route
     return NextResponse.json({ message: "Forbidden" }, { status: 403 });
   }
 
-  if (!isBrowserBoundConnector(connectorId)) {
+  const browserConnect = await loadBrowserConnectSupport(connectorId);
+  if (!browserConnect.browserBound) {
     return NextResponse.json({ message: "This source does not use browser setup." }, { status: 400 });
   }
 

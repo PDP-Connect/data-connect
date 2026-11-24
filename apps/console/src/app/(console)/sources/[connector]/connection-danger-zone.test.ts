@@ -17,9 +17,11 @@
  *   - revoke copy says sources/grants are retained and only future collection
  *     stops, and does NOT claim records are erased;
  *   - delete copy says this connection's records are permanently erased and
- *     cannot be recovered, distinguishes itself from revoke (and points a
- *     default-account owner at revoke), and names the active-run /
- *     default-account refusals;
+ *     cannot be recovered, says plainly that granted apps stay authorized and
+ *     stop receiving this source's data, and no longer claims a default-account
+ *     refusal (default-account connections are deletable);
+ *   - when a run blocks the delete, the same confirmed form cancels that run
+ *     (`cancel_run_id`) and the action retries the delete;
  *   - delete requires reproducing the connection id before the destructive
  *     submit enables (client gating) AND the server action enforces the same
  *     (`confirm_delete === connection_id`), revoke enforces `confirm_revoke`;
@@ -52,6 +54,8 @@ const DZ_NULL_GUIDANCE_RE = /nothing to revoke or delete/i;
 const DZ_REVOKE_RETAINED_RE = /retained/i;
 const DZ_REVOKE_FUTURE_RE = /future collection/i;
 const DZ_REVOKE_NO_ERASE_RE = /does not erase anything/i;
+const DZ_REVOKE_SIGNS_OUT_RE = /Stops future collection and signs out the saved browser session/;
+const DZ_SIBLING_SESSION_RE = /Sibling connections of the same connector type, and their saved browser sessions, are untouched/;
 const DZ_DELETE_ERASES_RE = /[Ee]rases this connection's records/;
 /**
  * Delete must distinguish itself from revoke. The copy states this positively —
@@ -60,9 +64,12 @@ const DZ_DELETE_ERASES_RE = /[Ee]rases this connection's records/;
  */
 const DZ_DELETE_PERMANENCE_RE = /[Pp]ermanently erases/;
 const DZ_DELETE_CANNOT_UNDO_RE = /cannot be undone/i;
-const DZ_DELETE_POINTS_AT_REVOKE_RE = /revoke that instead/i;
-const DZ_DELETE_RUN_REFUSAL_RE = /run is in flight|run in flight|a run is in flight/i;
+const DZ_DELETE_GRANTS_STAY_RE = /Apps you granted access stay authorized/;
+const DZ_DELETE_GRANTS_STOP_RE = /stop receiving this source's data/;
+const DZ_DELETE_CANCEL_RUN_LABEL_RE = /"Cancel run and delete"/;
+const DZ_DELETE_CANCEL_RUN_FIELD_RE = /name="cancel_run_id"/;
 const DZ_DELETE_DEFAULT_ACCOUNT_RE = /default-account/i;
+const PAGE_PASSES_ACTIVE_RUN_RE = /activeRunId=\{dangerActiveRunId \?\? scheduleActiveRunId\}/;
 const DZ_DELETE_CONFIRMED_RE = /const confirmed = typed === connectionId/;
 const DZ_DELETE_DISABLED_RE = /disabled=\{!confirmed\}/;
 const DZ_DESTRUCTIVE_VARIANT_RE = /variant="destructive"/;
@@ -79,13 +86,26 @@ const ACT_CONFIRM_REVOKE_RE = /confirm_revoke/;
 const ACT_CONFIRM_REVOKE_GUARD_RE = /confirm !== "yes"/;
 const ACT_CONFIRM_DELETE_GUARD_RE = /confirm !== connectionId/;
 const ACT_CALLS_REVOKE_WRAPPER_RE = /await revokeConnection\(connectionId\)/;
-const ACT_CALLS_DELETE_WRAPPER_RE = /await deleteConnection\(connectionId\)/;
+const ACT_CALLS_DELETE_WRAPPER_RE =
+  /await deleteConnectionWithRunCancel\(connectionId, cancelRunId, \{ cancelRun, deleteConnection \}\)/;
+const ACT_READS_CANCEL_RUN_RE = /formData\.get\("cancel_run_id"\)/;
+const ACT_FORWARDS_BLOCKING_RUN_RE = /dangerZoneHref\(routeId, message, error, blockingRunId\)/;
 const ACT_REVALIDATE_RE = /revalidatePath\("\/sources"\)/;
 const ACT_RUN_ACTIVE_RE = /result\.status === "run_active"/;
 const ACT_DEFAULT_ACCOUNT_RE = /result\.status === "default_account"/;
-const ACT_DELETE_REDIRECT_LIST_RE = /redirect\(recordsListHref\(message \?\? "Connection deleted\."\)\)/;
+const ACT_DELETE_REDIRECT_LIST_RE =
+  /purgeFailed \? recordsListHref\(undefined, deletedMessage, connectionId\) : recordsListHref\(deletedMessage\)/;
 const ACT_REVOKE_REDIRECT_LIST_RE =
-  /redirect\(error \? dangerZoneHref\(routeId, message, error\) : recordsListHref\(message\)\)/;
+  /purgeFailed \? recordsListHref\(undefined, message, connectionId\) : recordsListHref\(message\)/;
+const ACT_PURGE_FAILED_RE = /purgeFailed = result\.profilePurge\?\.status === "failed";/g;
+const ACT_PURGE_SENTENCE_RE = /withPurgeSentence\(message, profilePurgeSentence\(result\.profilePurge\)\)/g;
+const ACT_PURGE_RETRY_FN_RE = /export async function purgeBrowserProfileAction/;
+const ACT_PURGE_RETRY_WRAPPER_RE = /await purgeConnectionBrowserProfile\(connectionId\)/;
+const SOURCES_PAGE_FILE = `${HERE}../page.tsx`;
+const LIST_RETRY_FORM_RE = /error && purgeRetryId \?/;
+const LIST_RETRY_ACTION_RE = /action=\{purgeBrowserProfileAction\}/;
+const LIST_RETRY_LABEL_RE = />\s*Remove saved browser session\s*</;
+const LIST_READS_RETRY_PARAM_RE = /purgeRetryId=\{params\.purge_retry\}/;
 const ACT_DANGER_ANCHOR_RE = /#danger-zone/;
 
 async function read(file: string): Promise<string> {
@@ -106,21 +126,44 @@ test("a connector with no addressable connection renders disabled guidance, not 
   assert.match(dz, DZ_NULL_GUIDANCE_RE);
 });
 
-test("revoke copy retains records and stops only future collection, never claims erasure", async () => {
+test("revoke copy retains records, stops future collection, and says it signs out the browser session", async () => {
   const dz = await read(DANGER_ZONE_FILE);
   assert.match(dz, DZ_REVOKE_RETAINED_RE);
   assert.match(dz, DZ_REVOKE_FUTURE_RE);
-  assert.match(dz, DZ_REVOKE_NO_ERASE_RE);
+  assert.match(dz, DZ_REVOKE_SIGNS_OUT_RE);
+  assert.doesNotMatch(dz, DZ_REVOKE_NO_ERASE_RE, "revoke now removes the saved browser session");
 });
 
-test("delete copy erases this connection, distinguishes from revoke, names the refusals", async () => {
+test("the danger zone says sibling connections keep their own browser sessions", async () => {
+  const dz = await read(DANGER_ZONE_FILE);
+  assert.match(dz, DZ_SIBLING_SESSION_RE);
+});
+
+test("delete and revoke surface a failed browser-session purge and offer the retry on the Sources list", async () => {
+  const actions = await read(ACTIONS_FILE);
+  assert.equal(actions.match(ACT_PURGE_FAILED_RE)?.length, 2, "both actions read profile_purge");
+  assert.equal(actions.match(ACT_PURGE_SENTENCE_RE)?.length, 2, "both actions add the purge sentence");
+  assert.match(actions, ACT_PURGE_RETRY_FN_RE);
+  assert.match(actions, ACT_PURGE_RETRY_WRAPPER_RE);
+  const list = await read(SOURCES_PAGE_FILE);
+  assert.match(list, LIST_RETRY_FORM_RE);
+  assert.match(list, LIST_RETRY_ACTION_RE);
+  assert.match(list, LIST_RETRY_LABEL_RE);
+  assert.match(list, LIST_READS_RETRY_PARAM_RE);
+});
+
+test("delete copy erases this connection, discloses grants, and offers cancel-run for an in-flight run", async () => {
   const dz = await read(DANGER_ZONE_FILE);
   assert.match(dz, DZ_DELETE_ERASES_RE);
   assert.match(dz, DZ_DELETE_PERMANENCE_RE);
   assert.match(dz, DZ_DELETE_CANNOT_UNDO_RE);
-  assert.match(dz, DZ_DELETE_POINTS_AT_REVOKE_RE);
-  assert.match(dz, DZ_DELETE_RUN_REFUSAL_RE);
-  assert.match(dz, DZ_DELETE_DEFAULT_ACCOUNT_RE);
+  assert.match(dz, DZ_DELETE_GRANTS_STAY_RE);
+  assert.match(dz, DZ_DELETE_GRANTS_STOP_RE);
+  assert.match(dz, DZ_DELETE_CANCEL_RUN_LABEL_RE);
+  assert.match(dz, DZ_DELETE_CANCEL_RUN_FIELD_RE);
+  assert.doesNotMatch(dz, DZ_DELETE_DEFAULT_ACCOUNT_RE, "default-account connections are deletable now");
+  const page = await read(PAGE_FILE);
+  assert.match(page, PAGE_PASSES_ACTIVE_RUN_RE);
 });
 
 test("delete requires reproducing the connection id before the destructive submit enables", async () => {
@@ -160,6 +203,8 @@ test("server actions re-verify access, enforce confirmation server-side, and cal
 test("the delete action surfaces each typed refusal in place rather than a generic boundary", async () => {
   const actions = await read(ACTIONS_FILE);
   assert.match(actions, ACT_RUN_ACTIVE_RE);
+  assert.match(actions, ACT_READS_CANCEL_RUN_RE);
+  assert.match(actions, ACT_FORWARDS_BLOCKING_RUN_RE);
   assert.match(actions, ACT_DEFAULT_ACCOUNT_RE);
   assert.match(actions, ACT_DELETE_REDIRECT_LIST_RE);
   assert.match(actions, ACT_DANGER_ANCHOR_RE);

@@ -22,7 +22,7 @@ if [ "${PDPP_CORE_ORACLE_SKIP_BUILD:-0}" != "1" ]; then
 fi
 docker volume create "$volume" >/dev/null
 
-docker run --rm --name "${container_prefix}-first" \
+docker run --rm --log-driver none --name "${container_prefix}-first" \
   --mount "type=volume,source=${volume},destination=/var/lib/pdpp" \
   -e PDPP_CORE_RUNTIME_ORACLE=1 \
   "$image"
@@ -32,7 +32,7 @@ if [ -n "$(docker ps -aq --filter "name=${container_prefix}-first")" ]; then
   exit 1
 fi
 
-docker run --rm --name "${container_prefix}-restart" \
+docker run --rm --log-driver none --name "${container_prefix}-restart" \
   --mount "type=volume,source=${volume},destination=/var/lib/pdpp" \
   -e PDPP_CORE_RUNTIME_ORACLE=1 \
   -e PDPP_CORE_RUNTIME_ORACLE_EXPECT_PERSISTED=1 \

@@ -50,6 +50,7 @@ import { startServer as startServerUntyped } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { admitOwnerRunConnection } from "../server/stores/connector-instance-store.ts";
 import {
+  runHydratedKeyCreditingScenario,
   runMultiParentScenario,
   runStaticParentEmitsCoverageScenario,
   runSubsetParentCoverageScenario,
@@ -98,7 +99,7 @@ async function fetchJson<T = unknown>(url: string, opts: RequestInit = {}): Prom
 }
 
 async function issueOwnerToken(asUrl: string, subjectId = "u1"): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: device } = await fetchJson<{ device_code: string; user_code: string }>(
     `${asUrl}/oauth/device_authorization`,
     {
@@ -562,6 +563,28 @@ test("SQLite/Postgres parity scenario (SQLite side): one detail stream independe
       rsUrl,
       runConnector,
     });
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("SQLite/Postgres parity scenario (SQLite side): only a DETAIL_COVERAGE_KEY_SETS connector needs a record behind a hydrated key", async () => {
+  const server = await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 });
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+  try {
+    for (const declaresKeySets of [false, true]) {
+      // biome-ignore lint/performance/noAwaitInLoops: one connector per declaration, run in turn on one server.
+      await runHydratedKeyCreditingScenario({
+        admitOwnerRunConnection,
+        asUrl,
+        connectorId: `checkpoint-profile-sqlite-hydrated-credit-${declaresKeySets ? "key-sets" : "legacy"}`,
+        createRequestConnectorInstanceStore,
+        declaresKeySets,
+        rsUrl,
+        runConnector,
+      });
+    }
   } finally {
     await closeServer(server);
   }

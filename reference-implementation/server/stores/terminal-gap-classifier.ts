@@ -278,6 +278,15 @@ interface DetailGapStore {
   markGapStatus: (gapId: string, status: string, options?: Record<string, unknown>) => Promise<Gap | null>;
 }
 
+interface QuarantineGapStore extends DetailGapStore {
+  markGapQuarantined: (
+    gapId: string,
+    expectedStatus: string,
+    expectedAttemptCount: number,
+    options?: Record<string, unknown>
+  ) => Promise<Gap | null>;
+}
+
 interface MaybeTerminateResult {
   readonly gap: Gap | null;
   readonly terminated: boolean;
@@ -385,12 +394,18 @@ interface MaybeQuarantineResult {
  * @returns {Promise<{ quarantined: boolean, gap: object|null }>}
  */
 export async function maybeQuarantineGap(
-  store: DetailGapStore,
+  store: QuarantineGapStore,
   gapId: string,
   evidence: Evidence | null | undefined,
   policy: QuarantinePolicy
 ): Promise<MaybeQuarantineResult> {
-  if (!policy || typeof policy.maxNoProgressAttempts !== "number" || policy.maxNoProgressAttempts <= 0) {
+  if (
+    !policy ||
+    typeof policy.maxNoProgressAttempts !== "number" ||
+    !Number.isFinite(policy.maxNoProgressAttempts) ||
+    !Number.isInteger(policy.maxNoProgressAttempts) ||
+    policy.maxNoProgressAttempts <= 0
+  ) {
     throw new Error(
       "maybeQuarantineGap requires policy.maxNoProgressAttempts as a positive integer; " +
         "a poison item must always have a finite no-progress budget (design.md D10)"
@@ -418,12 +433,12 @@ export async function maybeQuarantineGap(
   // carries the `quarantined` class the recovery-decision classifier routes to
   // `connector_defect`; the `last_error` carries the (sanitized) evidence trail.
   const quarantineError: Record<string, unknown> = {
-    class: "quarantined",
     ...(evidence && typeof evidence === "object" ? evidence : {}),
+    class: "quarantined",
     attempt_count: attemptCount,
     threshold: policy.maxNoProgressAttempts,
   };
-  const quarantined = await store.markGapStatus(gapId, "terminal", {
+  const quarantined = await store.markGapQuarantined(gapId, current.status ?? "pending", attemptCount, {
     lastError: quarantineError,
     reason: "quarantined",
   });

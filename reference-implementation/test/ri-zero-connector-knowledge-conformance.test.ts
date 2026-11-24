@@ -46,7 +46,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { isExemptDataLoadPath, scanFileDataLoads } from "./helpers/ri-zero-connector-knowledge-data-load-scan.ts";
+import {
+  isExemptDataLoadPath,
+  sanctionedCallSiteExactnessViolations,
+  scanFileDataLoads,
+} from "./helpers/ri-zero-connector-knowledge-data-load-scan.ts";
 import {
   formatViolationInventory,
   manifestDerivedConnectorKeys,
@@ -739,8 +743,7 @@ test("falsifiability: a genuinely unresolvable JSON.parse(readFileSync(...)) cal
 // --- Rule (5) fix: a path argument reached through a PROVEN validated-path
 // helper (safePath/safeLeasePath-shaped) is not "unresolvable" -----------
 //
-// test-accounting/packet.ts:267/580/637 and test-accounting/inventory.ts:719
-// all read through same-file helpers (safePath/safeLeasePath/
+// test-accounting/inventory.ts:719 (and the since-deleted packet.ts) read through same-file helpers (safePath/safeLeasePath/
 // authorityContained) that resolve a REAL root via realpathSync(root),
 // resolve() a candidate against it, and REJECT (fail()) any candidate not
 // prefixed by the real root. The scanner cannot know the ACTUAL file (root
@@ -1086,13 +1089,13 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
     }
   );
 
-  const readAtLine = (line: number, readCall: string, jsonFlow: string) =>
+  const readAtLine = (line: number, readCall: string, jsonFlow: string, owner = "readManifestJson") =>
     withSyntheticProductionFile(
       `synthetic-exact-generic-read-${line}.ts`,
       [
         'import { readFile } from "node:fs/promises";',
         ...Array.from({ length: line - 3 }, (_, index) => `// line ${index + 2}`),
-        "async function readManifestJson(path: string) {",
+        `async function ${owner}(path: string) {`,
         `  const raw = ${readCall};`,
         `  ${jsonFlow}`,
         "}",
@@ -1109,13 +1112,18 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
   assert.deepEqual(
     readAtLine(99, 'await readFile(path, "utf8")', "return JSON.parse(raw);"),
     [],
-    "the reviewed polyfill manifest call site must match its exact current line pin and call shape"
+    "the reviewed polyfill manifest call site must match its content key and call shape"
+  );
+  assert.deepEqual(
+    readAtLine(100, 'await readFile(path, "utf8")', "return JSON.parse(raw);"),
+    [],
+    "moving the identical call one line must keep the exemption: the key is content, not line"
   );
   assert.ok(
-    readAtLine(100, 'await readFile(path, "utf8")', "return JSON.parse(raw);").some(
+    readAtLine(99, 'await readFile(path, "utf8")', "return JSON.parse(raw);", "readOtherJson").some(
       (violation) => violation.rule === "unresolvable-data-resource-load"
     ),
-    "moving the identical call one line must invalidate the exemption and fail closed"
+    "the identical call in a differently named function must invalidate the exemption and fail closed"
   );
   for (const [mutation, readCall, jsonFlow] of [
     ["callee", 'await readFileSync(path, "utf8")', "return JSON.parse(raw);"],
@@ -1125,9 +1133,47 @@ test("falsifiability: a dynamic manifest-root selection (the legitimate 'pick a 
   ] as const) {
     assert.ok(
       readAtLine(99, readCall, jsonFlow).length > 0,
-      `${mutation} mutation at the approved line must fail closed`
+      `${mutation} mutation of the approved call must fail closed`
     );
   }
+});
+
+test("exactness: a sanctioned call copied inside the same function is reported, and an unmatched entry is a dead pin", () => {
+  const hits = new Map<string, number>();
+  withSyntheticProductionFile(
+    "synthetic-duplicated-sanctioned-read.ts",
+    [
+      'import { readFile } from "node:fs/promises";',
+      "async function readManifestJson(path: string) {",
+      '  const raw = await readFile(path, "utf8");',
+      '  const copy = await readFile(path, "utf8");',
+      "  return [JSON.parse(raw), JSON.parse(copy)];",
+      "}",
+      "",
+    ].join("\n"),
+    (relPath) =>
+      scanFileDataLoads(
+        join(repoRoot, relPath),
+        "reference-implementation/server/polyfill-manifest-reconcile.ts",
+        repoRoot,
+        new Set(),
+        new Set(),
+        hits
+      )
+  );
+  const violations = sanctionedCallSiteExactnessViolations(hits);
+  assert.ok(
+    violations.some(
+      (v) =>
+        v.rule === "sanctioned-call-site-matches-multiple-sites" &&
+        v.file === "reference-implementation/server/polyfill-manifest-reconcile.ts"
+    ),
+    `a second identical call in the same function must not be silently sanctioned, got: ${JSON.stringify(violations)}`
+  );
+  assert.ok(
+    violations.some((v) => v.rule === "sanctioned-call-site-matches-no-site"),
+    "entries that this one-file scan never reached must be reported as dead pins"
+  );
 });
 
 test("falsifiability (P3 fix): EXEMPT_DIR_SEGMENTS no longer exempts a nested directory sharing a name at any depth", () => {

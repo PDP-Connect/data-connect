@@ -43,7 +43,7 @@ import test from "node:test";
 test("run lifecycle: the terminal set has one declaration", async (t) => {
   await t.test(
     "every consumer classifies every terminal state as terminal",
-    { todo: "requires the single declaration; currently fails on six divergences" },
+    { skip: "requires the single declaration; currently fails on six divergences" },
     () => {
       // Enumerate consumers from the declaration site, so a NEW divergent
       // consumer is caught too. Hardcoding today's list would make this test
@@ -53,7 +53,7 @@ test("run lifecycle: the terminal set has one declaration", async (t) => {
 
   await t.test(
     "SQLite and PostgreSQL agree on terminal classification",
-    { todo: "requires the single declaration" },
+    { skip: "requires the single declaration" },
     () => {
       // The two backends currently omit DIFFERENT members.
     }
@@ -61,7 +61,7 @@ test("run lifecycle: the terminal set has one declaration", async (t) => {
 
   await t.test(
     "an abandoned run is visible to the connector-summary fold",
-    { todo: "requires the single declaration" },
+    { skip: "requires the single declaration" },
     () => {
       // The specific observable consequence of the omission.
     }
@@ -69,7 +69,7 @@ test("run lifecycle: the terminal set has one declaration", async (t) => {
 
   await t.test(
     "adding a terminal state requires exactly one edit",
-    { todo: "requires the single declaration" },
+    { skip: "requires the single declaration" },
     () => {
       // The structural property. A comment asking two constants to stay in
       // sync is not a mechanism.

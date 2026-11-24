@@ -62,7 +62,7 @@ async function fetchJson<T = unknown>(url: string, opts: RequestInit = {}): Prom
 // watchdog test would never reach `run_timed_out` at all. Mirrors
 // collection-report-projection-e2e.test.ts's issueOwnerToken.
 async function issueOwnerToken(asUrl: string, subjectId = "owner_local"): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: device } = await fetchJson<DeviceAuthorization>(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

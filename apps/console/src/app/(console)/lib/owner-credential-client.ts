@@ -9,6 +9,7 @@
  * session cookie, then call the resource server directly.
  */
 
+import { timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"
 import { describeErrorText } from "./describe-error.ts"
 import {
@@ -36,12 +37,21 @@ async function localRevealHeaders(): Promise<HeadersInit> {
   return ownerCredentialRevealHeadersForCookie(await ownerCredentialRevealProofCookie())
 }
 
-export async function hasLocalOwnerCredentialRevealProofCookie(): Promise<boolean> {
-  return (await ownerCredentialRevealProofCookie()) !== null
-}
-
-export async function canShowOwnerCredentialRevealSetting(): Promise<boolean> {
-  return process.env.PDPP_OWNER_PASSWORD_SOURCE === "desktop_generated" && (await hasLocalOwnerCredentialRevealProofCookie())
+/**
+ * True only when this request carries the proof the desktop set as a cookie
+ * in its own webview: the cookie value must equal
+ * `PDPP_OWNER_CREDENTIAL_REVEAL_PROOF`, which the desktop gives this console
+ * process. A browser that reaches the console over remote access never
+ * receives the cookie, and a value it makes up does not match. Without the
+ * variable (any non-desktop host) nothing matches.
+ */
+export async function hasValidLocalOwnerCredentialRevealProofCookie(): Promise<boolean> {
+  const expected = process.env.PDPP_OWNER_CREDENTIAL_REVEAL_PROOF ?? ""
+  const presented = (await ownerCredentialRevealProofCookie()) ?? ""
+  if (!expected) return false
+  const expectedBytes = Buffer.from(expected, "utf8")
+  const presentedBytes = Buffer.from(presented, "utf8")
+  return expectedBytes.length === presentedBytes.length && timingSafeEqual(expectedBytes, presentedBytes)
 }
 
 export async function revealOwnerCredential(): Promise<string> {

@@ -70,6 +70,16 @@ function findChromiumDir(basePath) {
   return null
 }
 
+// The macOS Chromium framework is built from relative symlinks
+// (Versions/Current, and Resources, Helpers, Libraries and the framework
+// binary at its root). By default cpSync rewrites each relative link to an
+// absolute path in the source tree, the Playwright cache on the build host.
+// Such a bundle is not valid on any other machine. verbatimSymlinks keeps
+// the link targets as they are.
+export function copyBrowserDirectory(source, destination) {
+  cpSync(source, destination, { recursive: true, verbatimSymlinks: true })
+}
+
 export function getBrowserDirectoryName(browserPath, platformName = PLATFORM) {
   return platformName === "win32"
     ? win32.basename(browserPath)
@@ -247,7 +257,7 @@ async function build(options) {
       const destPath = join(browserDest, chromiumDirName)
 
       log(`Copying Chromium from ${chromiumDir} to ${destPath}...`)
-      cpSync(chromiumDir, destPath, { recursive: true })
+      copyBrowserDirectory(chromiumDir, destPath)
 
       log("Browser copied successfully")
       if (requireBrowser) {

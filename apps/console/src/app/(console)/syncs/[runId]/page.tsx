@@ -14,6 +14,7 @@ import { getAsInternalUrl, ReferenceServerUnreachableError } from "../../lib/own
 import {
   getRunStatus,
   getRunTimeline,
+  getStaticSecretSetup,
   type RunStatusEnvelope,
   type SpineEvent,
   type TimelineEnvelope,
@@ -38,6 +39,7 @@ import {
 } from "../../lib/run-gaps.ts";
 import { CancelRunControl } from "./cancel-run-control.tsx";
 import { RunInteractionForm } from "./interaction-form.tsx";
+import { projectCredentialInteraction } from "./credential-interaction.ts";
 import {
   describeAssistanceOwnerAction,
   describeAssistanceProgressPosture,
@@ -46,6 +48,7 @@ import {
   describeInteractionStatLabel,
   describeProgressStatLabel,
   describeTerminalRunStatus,
+  resolveRunConnectionId,
 } from "./run-detail-labels.ts";
 import { RunDetailPoller } from "./run-detail-poller.tsx";
 import {
@@ -109,6 +112,8 @@ export default async function RunDetailPage({
   }
 
   const { events } = envelope;
+  const connectionId = resolveRunConnectionId(runStatus, events);
+  const sourceHref = connectionId ? `/sources/${encodeURIComponent(connectionId)}` : null;
   const connectorId = events.find((e) => e.actor_type === "runtime")?.actor_id ?? null;
   const connectorManifests = await listConnectorManifests().catch(() => []);
   const connectorManifest = connectorId ? findManifestForConnectorId(connectorManifests, connectorId) : null;
@@ -130,6 +135,10 @@ export default async function RunDetailPage({
   // the terminal event is not on this page.
   const inPageTerminalStatus = getTerminalRunStatus(events);
   const currentAssistance = active ? getCurrentRunAssistance(events) : null;
+  const credentialSetup =
+    currentAssistance?.kind === "credentials" && connectorId
+      ? await getStaticSecretSetup(connectorId).catch(() => null)
+      : null;
   const latestProgress = getLatestProgress(events);
   const failure = events.find((e) => e.event_type === "run.failed");
   const terminalKnownGaps = extractTerminalKnownGaps(events);
@@ -145,8 +154,16 @@ export default async function RunDetailPage({
       envelopeTerminal,
       inPageTerminalStatus,
     }) ?? mapRunHandleStatusToDisplay(runStatus?.status ?? null);
-  const stateTone = getRunStateTone({ active, currentAssistance, terminalStatus: displayTerminalStatus });
-  const stateValue = getRunStateValue({ active, currentAssistance, terminalStatus: displayTerminalStatus });
+  const stateTone = getRunStateTone({
+    active,
+    currentAssistance,
+    terminalStatus: displayTerminalStatus,
+  });
+  const stateValue = getRunStateValue({
+    active,
+    currentAssistance,
+    terminalStatus: displayTerminalStatus,
+  });
   const failureRows = summarizeFailure(failure, runStatus);
 
   // The before-timeline stack, header meta pills, and description are assigned
@@ -156,7 +173,12 @@ export default async function RunDetailPage({
   // the prop position.
   const beforeTimeline = (
     <>
-      <CurrentAssistanceSection active={active} currentAssistance={currentAssistance} runId={runId} />
+      <CurrentAssistanceSection
+        active={active}
+        credentialSetup={credentialSetup}
+        currentAssistance={currentAssistance}
+        runId={runId}
+      />
       {active ? <CancelRunControl runId={runId} /> : null}
       <LatestProgressSection active={active} latestProgress={latestProgress} terminalStatus={displayTerminalStatus} />
       <StatsGrid
@@ -168,10 +190,14 @@ export default async function RunDetailPage({
       />
       {runStatus?.failure?.recovery_hint?.action === "refresh_credentials" && connectorId ? (
         <p className="pdpp-caption mb-8 text-muted-foreground">
-          Reconnect this source to sync again: {" "}
-          <Link className="text-foreground underline" href={`/sources/${encodeURIComponent(connectorId)}`}>
-            {connectorName}
-          </Link>
+          Reconnect this source to sync again:{" "}
+          {sourceHref ? (
+            <Link className="text-foreground underline" href={sourceHref}>
+              {connectorName}
+            </Link>
+          ) : (
+            <span>{connectorName}</span>
+          )}
         </p>
       ) : null}
       <KnownGapsSection
@@ -183,23 +209,35 @@ export default async function RunDetailPage({
       />
       <ViolationDiagnosis failure={failure} />
       <ConnectorStderrTailSection failure={failure} />
+      <ConnectorDiagnosticLinesSection
+        event={events.find((e) => e.event_type === "run.connector_diagnostics_recorded")}
+      />
     </>
   );
-  // The connector name is the owner's route back to the thing this run belongs
-  // to. Rendered as inert text it was a dead end: from a run there was no way
-  // to reach its source at all — not via the breadcrumb, not here.
+  // A connector identifies the integration, not a specific source connection.
+  // Keep the label visible even when this timeline window has no connection id.
+  const connectorLabel = (
+    <>
+      <ConnectorMark
+        className="mr-2 inline-block size-5 align-[-0.2em]"
+        icon={connectorManifest?.icon}
+        name={connectorName}
+      />
+      {connectorId}
+    </>
+  );
   const description = (
     <>
       {connectorId ? (
         <>
           connector{" "}
-          <Link
-            className="font-mono text-foreground underline underline-offset-2"
-            href={`/sources/${encodeURIComponent(connectorId)}`}
-          >
-            <ConnectorMark className="mr-2 inline-block size-5 align-[-0.2em]" icon={connectorManifest?.icon} name={connectorName} />
-            {connectorId}
-          </Link>
+          {sourceHref ? (
+            <Link className="font-mono text-foreground underline underline-offset-2" href={sourceHref}>
+              {connectorLabel}
+            </Link>
+          ) : (
+            <span className="font-mono text-foreground">{connectorLabel}</span>
+          )}
           {" · "}
         </>
       ) : null}
@@ -221,10 +259,10 @@ export default async function RunDetailPage({
       <TimelineDetailView
         beforeTimelineContent={beforeTimeline}
         breadcrumbs={
-          connectorId
+          sourceHref
             ? [
                 { href: dashboardRoutes.section.runs, label: "Syncs" },
-                { href: `/sources/${encodeURIComponent(connectorId)}`, label: connectorId },
+                { href: sourceHref, label: connectorName },
                 { label: "Sync" },
               ]
             : [{ href: dashboardRoutes.section.runs, label: "Syncs" }, { label: "Sync" }]
@@ -245,16 +283,22 @@ export default async function RunDetailPage({
 
 function CurrentAssistanceSection({
   active,
+  credentialSetup,
   currentAssistance,
   runId,
 }: {
   active: boolean;
+  credentialSetup: Awaited<ReturnType<typeof getStaticSecretSetup>> | null;
   currentAssistance: CurrentRunAssistance | null;
   runId: string;
 }) {
   if (!currentAssistance) {
     return null;
   }
+  const credentialView =
+    currentAssistance.kind === "credentials"
+      ? projectCredentialInteraction(currentAssistance.fields, credentialSetup)
+      : null;
   const supportsStreaming =
     active &&
     requiresBrowserSurfaceAssistance(currentAssistance) &&
@@ -285,7 +329,7 @@ function CurrentAssistanceSection({
       ) : null}
       <dl className="pdpp-caption grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
         <dt className="text-muted-foreground">message</dt>
-        <dd>{currentAssistance.message}</dd>
+        <dd>{credentialView?.message ?? currentAssistance.message}</dd>
         <dt className="text-muted-foreground">state</dt>
         <dd>
           {describeAssistanceProgressPosture(currentAssistance.progressPosture)} ·{" "}
@@ -309,12 +353,13 @@ function CurrentAssistanceSection({
       </dl>
       {supportsSubmit ? (
         <RunInteractionForm
-          fields={currentAssistance.fields}
+          fields={credentialView?.fields ?? currentAssistance.fields}
           interactionId={currentAssistance.id}
           key={currentAssistance.id}
           kind={currentAssistance.kind}
-          message={currentAssistance.message}
+          message={credentialView?.message ?? currentAssistance.message}
           runId={runId}
+          submitLabel={credentialView?.submitLabel}
         />
       ) : null}
     </Callout>
@@ -345,7 +390,7 @@ function getAssistanceTitle(assistance: CurrentRunAssistance, active: boolean): 
 function getAssistanceDescription(
   assistance: CurrentRunAssistance,
   active: boolean,
-  supportsStreaming: boolean
+  supportsStreaming: boolean,
 ): string {
   if (!active) {
     return "This assistance request was still open when the run ended.";
@@ -566,8 +611,8 @@ function KnownGapsSection({
 
       {protocolViolationCount > 0 ? (
         <p className="pdpp-caption mt-3 text-muted-foreground">
-          {protocolViolationCount} protocol-violation gap{protocolViolationCount === 1 ? "" : "s"} omitted here; see
-          Failure diagnosis.
+          {protocolViolationCount} protocol-violation gap
+          {protocolViolationCount === 1 ? "" : "s"} omitted here; see Failure diagnosis.
         </p>
       ) : null}
       {/* Skips with no gap record are the ONLY thing this section has to say
@@ -631,8 +676,8 @@ function SkippedWithoutGapRecord({ skipped }: { skipped: SkippedStreamSummary })
       ) : null}
       {skipped.unexplainedCount > 0 ? (
         <p className="pdpp-caption mt-1.5 text-muted-foreground">
-          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing
-          for {skipped.unexplainedCount === 1 ? "it" : "them"}.
+          {skipped.unexplainedCount} of these recorded no reason, so DataConnect cannot tell you whether anything is missing for{" "}
+          {skipped.unexplainedCount === 1 ? "it" : "them"}.
         </p>
       ) : null}
     </div>
@@ -828,6 +873,66 @@ function extractStderrTail(failure: SpineEvent | undefined): StderrTailDiagnosti
     text,
     truncated: candidate.truncated === true,
   };
+}
+
+/**
+ * Connector diagnostic lines (`[<source>-diagnostic] <event> {...}`) the
+ * runtime kept for this run, whatever its outcome. Owner-local and
+ * connector-authored, so labelled as untrusted like the stderr tail.
+ */
+interface ConnectorDiagnosticLinesData {
+  lines: string[];
+  linesObserved: number;
+  redacted: boolean;
+  truncated: boolean;
+}
+
+function extractDiagnosticLines(event: SpineEvent | undefined): ConnectorDiagnosticLinesData | null {
+  const data = event?.data as Record<string, unknown> | undefined;
+  if (!(data && Array.isArray(data.lines))) {
+    return null;
+  }
+  const lines = data.lines.filter((line): line is string => typeof line === "string");
+  if (lines.length === 0) {
+    return null;
+  }
+  return {
+    lines,
+    linesObserved: typeof data.lines_observed === "number" ? data.lines_observed : lines.length,
+    redacted: data.redacted === true,
+    truncated: data.truncated === true,
+  };
+}
+
+function ConnectorDiagnosticLinesSection({ event }: { event: SpineEvent | undefined }) {
+  const diagnostics = extractDiagnosticLines(event);
+  if (!diagnostics) {
+    return null;
+  }
+  const notes = [`${diagnostics.lines.length.toLocaleString()} of ${diagnostics.linesObserved.toLocaleString()} lines`];
+  if (diagnostics.truncated) {
+    notes.push("truncated");
+  }
+  if (diagnostics.redacted) {
+    notes.push("redacted");
+  }
+  return (
+    <section className="mb-8 rounded-md border border-border/70 bg-muted/20 px-4 py-3">
+      <details>
+        <summary className="cursor-pointer list-none">
+          <span className="pdpp-eyebrow mr-3">Connector diagnostics</span>
+          <span className="pdpp-caption text-muted-foreground">{notes.join(" · ")} · click to expand</span>
+        </summary>
+        <p className="pdpp-caption mt-3 text-muted-foreground">
+          Technical detail the connector wrote during this run. It is connector-authored and kept on this deployment
+          only. Use it to debug the connector, not as a verified PDPP result.
+        </p>
+        <pre className="pdpp-caption mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border/60 bg-background/70 p-3 font-mono text-foreground/90">
+          {diagnostics.lines.join("\n")}
+        </pre>
+      </details>
+    </section>
+  );
 }
 
 function ConnectorStderrTailSection({ failure }: { failure: SpineEvent | undefined }) {

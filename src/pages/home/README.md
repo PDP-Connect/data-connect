@@ -25,7 +25,7 @@
 - Route: `/` (lazy from `App.tsx`).
 - Entry points: `TopNav` Home.
 - Tauri/IPC: `check_browser_available`, `download_browser`, `get_platforms`,
-  `check_connected_platforms`, `start_connector_run`, `check_connector_updates`,
+  `check_connected_platforms`, `start_installed_pdpp_connector_run`, `check_connector_updates`,
   `download_connector`.
 
 ## Behavior

@@ -4,7 +4,7 @@
 
 # Re-point the paired data-connectors #92 re-vendor after upstream merges.
 # Run with Node 24 on PATH: upstream's build and this repo's CI checks now share it.
-# Set REVENDOR_HOST_NODE_BIN to the Node 24.21.0 bin directory for host npm commands.
+# Set REVENDOR_HOST_NODE_BIN to the Node 24.22.1 bin directory for host npm commands.
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 2 || ! $1 =~ ^[0-9a-f]{40}$ ]]; then
@@ -80,13 +80,9 @@ lines[index] = `${digest}  ${basename(artifact)}`;
 writeFileSync(sums, `${lines.join("\n")}\n`);
 NODE
 
-# These are the connector sources and shared cursor changed by upstream #92.
-for connector in claude_code codex; do
-  for file in index.ts types.ts; do
-    source_path="packages/polyfill-connectors/connectors/$connector/$file"
-    git -C "$upstream_repo" show "$pin_sha:$source_path" > "$source_path"
-  done
-done
+# Connector code is consumed from signed Collection Profiles by local-collector.
+# Keep the reference-implementation tarball refresh above; do not restore retired
+# local-collector sources from data-connectors here.
 source_path="packages/polyfill-connectors/src/local-jsonl-cursor.ts"
 git -C "$upstream_repo" show "$pin_sha:$source_path" > "$source_path"
 
@@ -115,4 +111,4 @@ appendFileSync("reference-implementation/vendor/README.md",
   "before packing; host-provided dependencies and bundled local collector sources\n" +
   "are updated using the same post-pack procedure above.\n");
 NODE
-echo "Re-vendored $pin_sha. Run the RI typecheck and suite with CI's Node 24.21.0."
+echo "Re-vendored $pin_sha. Run the RI typecheck and suite with CI's Node 24.22.1."

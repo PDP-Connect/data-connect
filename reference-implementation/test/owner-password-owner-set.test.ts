@@ -99,9 +99,11 @@ test("window and restart requests advance durable request IDs", async () => {
     })
     assert.deepEqual(await requestOwnerPasswordStackRestart(dataDir), {
       requestId: 1,
+      revokeSessions: false,
     })
     assert.deepEqual(await requestOwnerPasswordStackRestart(dataDir), {
       requestId: 2,
+      revokeSessions: false,
     })
     assert.deepEqual(
       JSON.parse(
@@ -377,6 +379,39 @@ test("window allocation rejects a corrupt index without overwriting retained req
       retainedRequest
     )
   })
+})
+
+// The console asks for this restart after the owner's first chosen password.
+// With remote access off no remote device can be signed in; with it already
+// on (an install from before the password gate), a phone may be signed in
+// with the generated password and must be signed out.
+test("first-password restart revokes sessions only when remote access is not off", async () => {
+  for (const [posture, revoke] of [
+    [null, false],
+    ["off", false],
+    ["my_devices_only", true],
+    ["public_url", true],
+    ["{", true],
+  ] as const) {
+    await withTempDir(async dataDir => {
+      if (posture === "{") await writeFile(join(dataDir, "remote-access.json"), "{")
+      else if (posture)
+        await writeFile(join(dataDir, "remote-access.json"), JSON.stringify({ posture }))
+      assert.deepEqual(await requestOwnerPasswordStackRestart(dataDir), {
+        requestId: 1,
+        revokeSessions: revoke,
+      })
+      assert.deepEqual(
+        JSON.parse(
+          await readFile(join(dataDir, OWNER_PASSWORD_STACK_RESTART_REQUEST_FILE), "utf8")
+        ),
+        revoke
+          ? { requestId: 1, revokeReason: "password_change", revokeSessions: true }
+          : { requestId: 1 },
+        String(posture)
+      )
+    })
+  }
 })
 
 test("restart allocation rejects a corrupt index instead of resetting", async () => {

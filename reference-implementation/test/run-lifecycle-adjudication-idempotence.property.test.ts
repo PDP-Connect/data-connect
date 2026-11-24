@@ -45,7 +45,7 @@ import test from "node:test";
 test("run lifecycle: successor adjudication", async (t) => {
   await t.test(
     "repeated passes emit exactly one terminal event per orphan",
-    { todo: "requires adjudication expressed as an owner-module transition" },
+    { skip: "requires adjudication expressed as an owner-module transition" },
     () => {
       // Overlap the scopes of successive passes deliberately.
     }
@@ -53,7 +53,7 @@ test("run lifecycle: successor adjudication", async (t) => {
 
   await t.test(
     "a run in the newest boot epoch is never adjudicated",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // Live work. Adjudicating it reintroduces duplicate execution.
     }
@@ -61,7 +61,7 @@ test("run lifecycle: successor adjudication", async (t) => {
 
   await t.test(
     "eligibility never consults an age threshold",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // A very old run in the newest epoch stays untouched; a very recent run
       // in a retired epoch is adjudicated. Age must not be the discriminator.
@@ -70,7 +70,7 @@ test("run lifecycle: successor adjudication", async (t) => {
 
   await t.test(
     "an interruption while awaiting owner interaction keeps its distinct reason",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // Observable-behavior preservation.
     }
@@ -78,7 +78,7 @@ test("run lifecycle: successor adjudication", async (t) => {
 
   await t.test(
     "the terminal event and its durable projection commit together",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // Kill the transaction between the two writes and assert neither
       // landed. Today both adjudication paths bypass emitSpineEvent with raw
@@ -88,7 +88,7 @@ test("run lifecycle: successor adjudication", async (t) => {
 
   await t.test(
     "record counts are never revised by adjudication",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // An abandon must not rewrite records_emitted to zero.
     }

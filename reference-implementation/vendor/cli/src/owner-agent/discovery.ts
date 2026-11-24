@@ -3,7 +3,7 @@
 
 // Discovery for the trusted owner-agent onboarding profile.
 //
-// A trusted local owner agent (e.g. Daisy) starts from an entrypoint URL and
+// A trusted local owner agent starts from an entrypoint URL and
 // must learn, without route guessing, where to:
 //   - initiate browser-mediated owner approval (device authorization),
 //   - poll for the issued owner-agent credential (token endpoint),

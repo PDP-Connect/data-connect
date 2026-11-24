@@ -222,7 +222,7 @@ async function registerConnector(asUrl: string, name: string): Promise<void> {
 }
 
 async function issueOwnerToken(asUrl: string, subjectId = OWNER_SUBJECT_ID): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: deviceBody } = await fetchJson(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -460,7 +460,8 @@ test("static-secret setup descriptor is manifest-authored and readiness-gated", 
       assert.equal(body.validation, "synchronous");
       assert.ok(
         credentialCaptureOf(body).fields.some(
-          (field) => field.name === "account_email" && field.type === "email" && field.secret === false
+          (field) => field.name === "account_email" && field.type === "email" && field.secret === false &&
+            Array.isArray(field.env) && field.env.includes("GMAIL_ADDRESS")
         ),
         "Gmail manifest must declare the account email field"
       );

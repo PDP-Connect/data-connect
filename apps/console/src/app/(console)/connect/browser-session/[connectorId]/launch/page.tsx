@@ -8,7 +8,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
-import { isBrowserBoundConnector } from "../../../../lib/connection-modality.ts";
+import { loadBrowserConnectSupport } from "../../../../lib/load-browser-connect-support.ts";
 import { findManifestForConnectorId } from "../../../../sources/lib/relationships.ts";
 import { listConnectorManifests } from "../../../../lib/rs-client.ts";
 import { BrowserSessionLaunchPanel } from "./launch-panel.tsx";
@@ -33,7 +33,8 @@ export default async function BrowserSessionLaunchPage({
   const { connectorId: rawConnectorId } = await params;
   const connectorId = decodeURIComponent(rawConnectorId);
 
-  if (!isBrowserBoundConnector(connectorId)) {
+  const browserConnect = await loadBrowserConnectSupport(connectorId);
+  if (!browserConnect.browserBound) {
     notFound();
   }
 

@@ -18,6 +18,7 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const NOW = "2026-06-01T00:00:00.000Z";
@@ -80,6 +81,7 @@ async function withServer(
       : { configuredProviderAuthConnectorKeys: options.configuredProviderAuthConnectorKeys }),
     dbPath: ":memory:",
     ownerAuthPassword: "",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   });
@@ -365,6 +367,35 @@ test("owner-template projection separates browser owner-session setup from owner
     assert.equal(browserRunbookInitiate.status, "unsupported");
     assert.equal(browserRunbookInitiate.method, null);
     assert.equal(browserRunbookInitiate.url, null);
+  });
+});
+
+test("owner-template setup plan offers a catalog-installed browser connector by the shared rule", async () => {
+  await withServer(async ({ asUrl, rsUrl }) => {
+    // acme-shop: a catalog-installed browser connector no bundled key list names.
+    const acmeManifest = loadManifest("amazon");
+    acmeManifest.connector_id = "acme-shop";
+    acmeManifest.connector_key = "acme-shop";
+    acmeManifest.display_name = "Acme Shop";
+    acmeManifest.setup = undefined;
+    acmeManifest.capabilities = { ...asRecord(acmeManifest.capabilities), public_listing: { tier: "preview" } };
+    await registerConnector(asUrl, acmeManifest);
+
+    const ownerToken = await issueOwnerToken(asUrl);
+    const { status, body } = await fetchJson(`${rsUrl}/v1/owner/connector-templates`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    assert.equal(status, 200);
+
+    const acme = byConnector(body, "acme-shop");
+    assert.deepEqual(acme.public_listing, { tier: "preview" });
+    const acmeSetupPlan = asRecord(acme.setup_plan);
+    assert.equal(acmeSetupPlan.catalog_disposition, "browser_collector_manual");
+    assert.equal(acmeSetupPlan.next_step_kind, "enroll_browser_collector");
+    assert.equal(acmeSetupPlan.enrollment_key, "acme-shop");
+    assert.equal(acmeSetupPlan.owner_actionable, true);
+    const acmeInitiate = actionByFamily(acme, "initiate_connection");
+    assert.equal(acmeInitiate.status, "owner_mediated");
   });
 });
 

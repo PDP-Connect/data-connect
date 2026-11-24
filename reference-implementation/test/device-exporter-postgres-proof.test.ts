@@ -958,6 +958,7 @@ if (DEDICATED_POSTGRES_URL) {
             record_count: 2,
             status: "accepted",
           });
+          await drainConnectorInstanceIndexWorkForTests();
           const callsBeforeReplay = backend.calls();
           const replay = await postJson(
             `${asUrl}/_ref/device-exporters/${encodeURIComponent(device.device_id)}/ingest-batches`,

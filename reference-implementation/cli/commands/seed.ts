@@ -8,6 +8,7 @@ import { SUPPORTED_SEED_CONNECTOR_KEYS } from "../../connectors/seed/index.ts";
 import { canonicalConnectorKey } from "../../server/connector-key.ts";
 import { initDb } from "../../server/db.ts";
 import { initPostgresStorage, isPostgresStorageBackend, resolveStorageBackend } from "../../server/postgres-storage.ts";
+import { CONSOLE_OWNER_CLIENT_ID } from "../../server/reference-local-defaults.ts";
 import {
   admitOwnerRunConnection,
   createPostgresConnectorInstanceStore,
@@ -82,7 +83,6 @@ function readDefaultConnectors(): string[] {
 }
 
 const DEFAULT_CONNECTORS = readDefaultConnectors();
-const OWNER_BOOTSTRAP_CLIENT = "pdpp-polyfill-owner-bootstrap";
 
 // A connector manifest, loaded from manifests/<name>.json: only the fields
 // this command actually reads are typed; the manifest is otherwise passed
@@ -368,7 +368,13 @@ async function registerManifest(asUrl: string | true, manifest: SeedManifest): P
     method: "POST",
   });
   const text = await res.text();
-  // 409 on re-register is fine — manifest version unchanged.
+  // 409 on re-register is fine — manifest version unchanged. A 409
+  // declaration_equivocation is not: the content changed under the same version.
+  if (res.status === 409 && text.includes("declaration_equivocation")) {
+    throw new Error(
+      `register manifest rejected: the connector declares different content under an already-registered version. Bump \`version\` in the manifest and seed again. ${text}`
+    );
+  }
   if (res.status !== 201 && res.status !== 200 && res.status !== 409) {
     throw new Error(`register manifest failed ${res.status}: ${text}`);
   }
@@ -384,7 +390,7 @@ interface TokenResponseBody {
 }
 
 async function issueOwnerToken(asUrl: string | true, subjectId: CliFlags["subject"] | string): Promise<string> {
-  const clientId = OWNER_BOOTSTRAP_CLIENT;
+  const clientId = CONSOLE_OWNER_CLIENT_ID;
 
   const deviceRes = await fetch(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),

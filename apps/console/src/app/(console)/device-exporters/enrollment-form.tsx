@@ -8,17 +8,9 @@ import { CopyButton } from "@pdpp/operator-ui/components/copy-button";
 import { Callout, ToolbarField } from "@pdpp/operator-ui/components/primitives";
 import { useActionState, useState } from "react";
 import { pdppLocalCollectorEnrollCommand, pdppLocalCollectorRunCommand } from "@/lib/pdpp-cli-command.ts";
+import { SUPPORTED_LOCAL_COLLECTOR_CONNECTORS as COLLECTOR_RUN_CONNECTORS } from "../lib/connection-modality.ts";
 import { createEnrollmentCodeAction } from "./actions.ts";
 
-const COLLECTOR_RUN_CONNECTORS = [
-  "claude_code",
-  "codex",
-  "google_takeout",
-  "imessage",
-  "apple_photos",
-  "google_messages",
-  "signal",
-] as const;
 const MACOS_ONLY_LOCAL_COLLECTOR_CONNECTORS = ["imessage", "apple_photos"] as const;
 const EXTERNAL_TOOL_LOCAL_COLLECTOR_CONNECTORS = ["google_messages", "signal"] as const;
 

@@ -47,11 +47,16 @@ function SourceRowContent({
         className={cn(iconClassName)}
         fallbackLabel={fallbackLabel}
       />
-      <div className="flex items-baseline gap-2">
+      <div className="flex min-w-0 flex-col sm:flex-row sm:items-baseline sm:gap-2">
         {label}
 
         {meta ? (
-          <Text as="span" intent="small" color="mutedForeground">
+          <Text
+            as="span"
+            intent="small"
+            color="mutedForeground"
+            className="truncate"
+          >
             {meta}
           </Text>
         ) : null}

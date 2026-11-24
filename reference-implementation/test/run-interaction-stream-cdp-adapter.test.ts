@@ -56,6 +56,7 @@ interface CreateCdpCompanionOptions {
 
 interface CreateStreamingCompanionFactoryOptions {
   commandTimeoutMs?: number;
+  fetchImpl?: typeof fetch;
   logger?: unknown;
   openTimeoutMs?: number;
   resolveTargetForInteraction?: ((runId: string, interactionId: string) => string | null) | null;
@@ -66,6 +67,7 @@ type StreamingCompanionFactory = (args: {
   run_id?: string;
   interaction_id?: string;
   browser_session_id: string;
+  target?: { backend: string; cdp_http_url?: string } | null;
 }) => CdpCompanion | null;
 
 const createCdpCompanion = createCdpCompanionUntyped as unknown as (opts: CreateCdpCompanionOptions) => CdpCompanion;
@@ -580,6 +582,33 @@ test("cdp adapter dispatch() routes a touch tap through Input.dispatchMouseEvent
   await stopAndDrain(companion, sock.peer);
 });
 
+test("cdp adapter rejects oversized and malformed input before emitting CDP commands", async () => {
+  const { FakeSocket, sockets } = makeFakeSocketCtor();
+  const companion = createCdpCompanion({
+    browser_session_id: "bs_bounded_input",
+    WebSocketCtor: FakeSocket,
+    wsUrl: "ws://fake/page",
+  });
+  const startPromise = companion.start();
+  await flush();
+  const sock = findSocket(sockets, "ws://fake/page");
+  assert.ok(sock);
+  await startAndDrainNoViewport(sock.peer);
+  await startPromise;
+  const before = sock.peer.messages.filter((message) => message.method?.startsWith("Input.")).length;
+
+  await assert.rejects(
+    companion.dispatch({ type: "paste", text: "x".repeat(16_385) }),
+    (error: Error & { code?: string }) => error.code === "invalid_input"
+  );
+  await assert.rejects(
+    companion.dispatch({ action: "click", secret: "unexpected", type: "mouse", x: 3, y: 4 }),
+    (error: Error & { code?: string }) => error.code === "invalid_input"
+  );
+  assert.equal(sock.peer.messages.filter((message) => message.method?.startsWith("Input.")).length, before);
+  await stopAndDrain(companion, sock.peer);
+});
+
 test("cdp adapter surfaces CDP error responses via dispatch()", async () => {
   const { FakeSocket, sockets } = makeFakeSocketCtor();
   const companion = createCdpCompanion({
@@ -655,6 +684,68 @@ test("createDefaultStreamingCompanionFactory returns a factory when resolver is 
     WebSocketCtor: FakeSocket,
   });
   assert.equal(typeof factory, "function");
+});
+
+test("host CDP lease streams only the exact registered page and forwards owner input", async () => {
+  const { FakeSocket, sockets } = makeFakeSocketCtor();
+  const requestedUrls: string[] = [];
+  const factory = createDefaultStreamingCompanionFactory({
+    fetchImpl: async (input) => {
+      requestedUrls.push(String(input));
+      return {
+        json: async () => [
+          { targetId: "unrelated", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/unrelated" },
+          { targetId: "leased", type: "page", webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/leased-page" },
+        ],
+        ok: true,
+      } as Response;
+    },
+    resolveTargetForInteraction: () => "ws://127.0.0.1:9222/devtools/page/leased-page",
+    WebSocketCtor: FakeSocket as unknown as typeof WebSocket,
+  });
+  assert.ok(factory);
+  const companion = factory({
+    browser_session_id: "bs_host_cdp",
+    interaction_id: "int_host_cdp",
+    run_id: "run_host_cdp",
+    target: { backend: "cdp", cdp_http_url: "http://127.0.0.1:9222" },
+  });
+  assert.ok(companion);
+  const frames: { data: unknown; sessionId: unknown }[] = [];
+  companion.onFrame((frame) => frames.push(frame));
+  const startPromise = companion.start({ height: 480, width: 320 });
+  await flush();
+  assert.deepEqual(requestedUrls, []);
+  const sock = findSocket(sockets, "ws://127.0.0.1:9222/devtools/page/leased-page");
+  assert.ok(sock, "adapter connected to the exact registered page target");
+  await startAndDrainViewport(sock.peer);
+  await startPromise;
+
+  sock.peer.deliver({
+    method: "Page.screencastFrame",
+    params: {
+      data: "ZmFrZQ==",
+      metadata: { device_height: 480, device_width: 320 },
+      sessionId: 17,
+    },
+  });
+  const frameAck = await waitForMessage(sock.peer, "Page.screencastFrameAck");
+  frameAck.__answered = true;
+  sock.peer.deliver({ id: frameAck.id, result: {} });
+  await flush();
+  assert.deepEqual(frames, [
+    { data: "ZmFrZQ==", metadata: { device_height: 480, device_width: 320 }, sessionId: 17 },
+  ]);
+
+  const clickPromise = companion.dispatch({ action: "click", button: 0, type: "mouse", x: 8, y: 9 });
+  await answerInOrder(sock.peer, "Input.dispatchMouseEvent");
+  await answerInOrder(sock.peer, "Input.dispatchMouseEvent");
+  await clickPromise;
+  assert.deepEqual(
+    sock.peer.messages.filter((message) => message.method === "Input.dispatchMouseEvent").map((message) => message.params?.type),
+    ["mousePressed", "mouseReleased"]
+  );
+  await stopAndDrain(companion, sock.peer);
 });
 
 test("resolver-backed companion: returns null companion when run_id or interaction_id is missing", () => {

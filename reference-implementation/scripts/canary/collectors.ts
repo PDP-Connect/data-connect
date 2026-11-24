@@ -117,6 +117,9 @@ export function greppedCountInImage(image: string, path: string, pattern: string
   const result = run("docker", [
     "run",
     "--rm",
+    // Throwaway grep: nothing here needs its output kept on the host.
+    "--log-driver",
+    "none",
     "--entrypoint",
     "sh",
     image,

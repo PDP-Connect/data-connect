@@ -23,6 +23,10 @@ import {
   parseArgs,
   stageConsoleStack,
 } from "./ensure-console-stack.js"
+import {
+  writeConnectorPackageModules,
+  writeConsoleServerBundle,
+} from "./staged-console-bundle.fixture.mjs"
 
 function createConsoleBuildFixture() {
   const root = mkdtempSync(join(tmpdir(), "pdpp-console-stack-"))
@@ -59,10 +63,10 @@ function createConsoleBuildFixture() {
   )
   mkdirSync(manifestsDirectory, { recursive: true })
   writeFileSync(join(manifestsDirectory, "ynab.json"), "{}")
-  writeFileSync(
-    join(root, "node_modules", "@pdpp", "polyfill-connectors", "package.json"),
-    "{}\n"
+  writeConnectorPackageModules(
+    join(root, "node_modules", "@pdpp", "polyfill-connectors")
   )
+  writeConsoleServerBundle(standalone)
   return root
 }
 
@@ -145,6 +149,89 @@ describe("ensure console stack", () => {
       expect(
         readFileSync(join(stagedManifestsDirectory, "ynab.json"), "utf8")
       ).toBe("{}")
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("stages the connector package modules the bundled runtime requires", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      const result = stageConsoleStack({
+        build: false,
+        profile: "release",
+        projectRoot: root,
+      })
+      const stagedPackageDirectory = join(
+        result.stageDirectory,
+        "apps/console/node_modules/@pdpp/polyfill-connectors"
+      )
+      for (const modulePath of [
+        "src/connector-conformance-roster.js",
+        "src/static-secret-credential-capture.js",
+        "src/credential-probe.js",
+      ]) {
+        expect(existsSync(join(stagedPackageDirectory, modulePath))).toBe(true)
+      }
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("fails fast if a connector package module the console requires is not installed", () => {
+    const root = createConsoleBuildFixture()
+    try {
+      rmSync(
+        join(
+          root,
+          "node_modules/@pdpp/polyfill-connectors/src/credential-probe.js"
+        )
+      )
+      expect(() =>
+        stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      ).toThrow(/connector package module is missing/)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("accepts a bundle whose only roster predicate is isKnownScaffoldConnector", () => {
+    // Webpack drops exports the console does not use, so a build may keep
+    // either roster predicate.
+    const root = createConsoleBuildFixture()
+    try {
+      writeConsoleServerBundle(
+        join(root, "apps/console/.next/standalone/apps/console"),
+        { predicate: "scaffold" }
+      )
+      expect(() =>
+        stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      ).not.toThrow()
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
+
+  it("fails loudly when the staged console resolves the connector package only from the build checkout", () => {
+    // The shipped v0.7.59 bundle: webpack wrote the build machine's path into
+    // createRequire, so the package resolved on the build machine and nowhere
+    // else. The package is installed at the build path here too.
+    const root = createConsoleBuildFixture()
+    try {
+      writeConsoleServerBundle(
+        join(root, "apps/console/.next/standalone/apps/console"),
+        {
+          resolveFrom: join(
+            root,
+            "reference-implementation/server/polyfill-connectors-runtime.ts"
+          ),
+        }
+      )
+      expect(() =>
+        stageConsoleStack({ build: false, profile: "release", projectRoot: root })
+      ).toThrow(
+        /connector-conformance-roster does not resolve inside the stage.*no bundled roster predicate answers from the roster/
+      )
     } finally {
       rmSync(root, { force: true, recursive: true })
     }

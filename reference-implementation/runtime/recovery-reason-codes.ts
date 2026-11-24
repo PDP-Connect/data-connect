@@ -54,5 +54,7 @@ export const RUNTIME_GENERIC_REASON_CODES: ReadonlySet<string> = new Set([
   ...INFORMATIONAL_RECOVERY_REASONS,
   "retry_exhausted",
   "run_cap_deferred",
+  // Permanent source loss (DETAIL_GAP retryable:false). Not pressure, not recoverable.
+  "source_unrepresentable",
   "temporary_unavailable",
 ]);

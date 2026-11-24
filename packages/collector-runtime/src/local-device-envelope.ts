@@ -110,7 +110,14 @@ function canonicalRecordKey(key: string | readonly string[]): string {
   return typeof key === "string" ? key : JSON.stringify(key);
 }
 
+function validateSourceInstanceId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("sourceInstanceId must be a non-blank string");
+  }
+}
+
 export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnvelopeInput): LocalDeviceRecordEnvelope {
+  validateSourceInstanceId(input.sourceInstanceId);
   const body = {
     connector_id: input.connectorId,
     data: toNormalizedRecordData(input.record.data),
@@ -138,6 +145,10 @@ export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnve
 export function buildLocalDeviceIngestBatchRequest(
   input: BuildLocalDeviceIngestBatchRequestInput
 ): LocalDeviceIngestBatchRequest {
+  validateSourceInstanceId(input.sourceInstanceId);
+  if (input.records.some((record) => record.source_instance_id !== input.sourceInstanceId)) {
+    throw new Error("batch sourceInstanceId must match every record envelope");
+  }
   return {
     batch_id: input.batchId,
     batch_seq: input.batchSeq,
@@ -154,6 +165,14 @@ export function buildLocalDeviceIngestBatchRequest(
   };
 }
 
+/** Order strings by UTF-16 code unit, the order a bare sort() uses. */
+function compareCodeUnits(a: string, b: string): number {
+  if (a < b) {
+    return -1;
+  }
+  return a > b ? 1 : 0;
+}
+
 function toCanonicalValue(value: unknown): unknown {
   if (value === null || typeof value !== "object") {
     return value;
@@ -164,7 +183,8 @@ function toCanonicalValue(value: unknown): unknown {
   }
 
   const out: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) {
+  // Canonical JSON hashes depend on this key order; do not use localeCompare.
+  for (const key of Object.keys(value).sort(compareCodeUnits)) {
     const item = (value as Record<string, unknown>)[key];
     if (item !== undefined) {
       out[key] = toCanonicalValue(item);

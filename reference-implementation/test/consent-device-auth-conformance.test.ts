@@ -23,7 +23,18 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
+
+import {
+  exchangeGrantScopedDeviceCode,
+  exchangeOAuthAuthorizationCode,
+  getPendingConsentRowByApprovalId,
+  initiateGrant,
+  issueOAuthAuthorizationCodeForDeviceCode,
+  parsePendingConsentRequestUri,
+  stageOAuthAuthorizationCodeRequest,
+} from "../server/auth.ts";
 
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
@@ -194,4 +205,104 @@ runConsentDeviceAuthConformance({
     };
   },
   test,
+});
+
+test("grant-scoped device codes require server provenance and atomic redemption", async (t) => {
+  const driver = createSqliteConsentDeviceAuthDriver();
+  await driver.setup();
+  t.after(() => driver.teardown());
+  const connectorId = driver.getRegisteredConnectorId();
+  const now = new Date().toISOString();
+  await createSqliteConnectorInstanceStore().upsert({
+    connectorId: canonicalConnectorKey(connectorId) ?? connectorId,
+    connectorInstanceId: "cin_conformance_spotify",
+    createdAt: now,
+    displayName: "Spotify",
+    ownerSubjectId: "owner_local",
+    sourceBinding: { kind: "test_account", label: "consent-conformance-spotify" },
+    sourceBindingKey: "consent-conformance-spotify",
+    sourceKind: "account",
+    status: "active",
+    updatedAt: now,
+  });
+
+  const pending = await driver.startPendingConsent({});
+  assert.equal(typeof pending.request_uri, "string");
+  const requestUri = pending.request_uri as string;
+  const row = await getPendingConsentRowByApprovalId(pending.approval_id);
+  assert.ok(row);
+  const params = recordValue(JSON.parse(row.params_json));
+  const clientId = recordValue(params.client).client_id;
+  assert.equal(typeof clientId, "string");
+  const client = clientId as string;
+  const verifier = "v".repeat(43);
+  const redirectUri = "https://example.com/callback";
+  await stageOAuthAuthorizationCodeRequest({
+    clientId: client,
+    codeChallenge: createHash("sha256").update(verifier).digest("base64url"),
+    codeChallengeMethod: "S256",
+    deviceCode: row.device_code,
+    redirectUri,
+  });
+  const approved = approvalResult(await driver.approvePendingConsent(requestUri));
+  assert.ok(approved.grant);
+  assert.ok(approved.token);
+  const issued = await issueOAuthAuthorizationCodeForDeviceCode(row.device_code, {
+    grantId: approved.grant.grant_id,
+    token: approved.token,
+  });
+  assert.ok(issued);
+
+  await t.test("approved authorization-code consent cannot redeem as a device code", async () => {
+    await assert.rejects(
+      exchangeGrantScopedDeviceCode({ clientId: client, deviceCode: row.device_code }),
+      { code: "invalid_grant" }
+    );
+  });
+
+  await t.test("PKCE code exchange still requires the verifier and succeeds with it", async () => {
+    const input = { clientId: client, code: issued.code, redirectUri };
+    await assert.rejects(
+      exchangeOAuthAuthorizationCode({ ...input, codeVerifier: "x".repeat(43) }),
+      { code: "invalid_grant" }
+    );
+    const token = await exchangeOAuthAuthorizationCode({ ...input, codeVerifier: verifier });
+    assert.equal(token.access_token, approved.token);
+  });
+
+  await t.test("genuine device authorization redeems once, including concurrent exchanges", async () => {
+    const input = {
+      authorization_details: [{ ...recordValue(params.selection), source: params.source_binding }],
+      client_id: client,
+    };
+    // The provenance option is supplied by the server's device-authorization
+    // endpoint, not by authorization_details or any other client body field.
+    const deviceOptions = { baseUrl: "http://localhost", deviceAuthorization: true };
+    const device = await initiateGrant(input, deviceOptions);
+    assert.equal(typeof device.request_uri, "string");
+    const deviceUri = device.request_uri as string;
+    const deviceCode = parsePendingConsentRequestUri(deviceUri);
+    assert.ok(deviceCode);
+    await assert.rejects(exchangeGrantScopedDeviceCode({ clientId: client, deviceCode }), {
+      code: "authorization_pending",
+    });
+    const deviceApproved = approvalResult(await driver.approvePendingConsent(deviceUri));
+    assert.ok(deviceApproved.token);
+    const attempts = await Promise.allSettled([
+      exchangeGrantScopedDeviceCode({ clientId: client, deviceCode }),
+      exchangeGrantScopedDeviceCode({ clientId: client, deviceCode }),
+    ]);
+    const successes = attempts.filter((result) => result.status === "fulfilled");
+    const failures = attempts.filter((result) => result.status === "rejected");
+    assert.equal(successes.length, 1);
+    assert.equal(failures.length, 1);
+    assert.equal(successes[0]?.value.access_token, deviceApproved.token);
+    assert.equal(failures[0]?.reason.code, "invalid_grant");
+    await assert.rejects(exchangeGrantScopedDeviceCode({ clientId: client, deviceCode }), {
+      code: "invalid_grant",
+    });
+    await assert.rejects(initiateGrant({ ...input, device_authorization: "issued" }), {
+      code: "invalid_request",
+    });
+  });
 });

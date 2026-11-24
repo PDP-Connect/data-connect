@@ -27,10 +27,11 @@ export interface SqliteEncryptionDatabase {
     get: <T = Record<string, unknown>>(...params: unknown[]) => T | undefined
   }
   rekey: (key: Buffer) => number
+  serialize: () => Buffer
 }
 
 export interface SqliteEncryptionDatabaseConstructor {
-  new (filename: string, options: { timeout: number }): SqliteEncryptionDatabase
+  new (filename: string | Buffer, options: { timeout: number }): SqliteEncryptionDatabase
 }
 
 export type SqliteEncryptionMigrationStep =

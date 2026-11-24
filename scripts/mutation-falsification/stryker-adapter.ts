@@ -30,7 +30,7 @@
 // A contradiction between two observations of the same mutant is preserved as
 // `inconclusive`, never resolved by re-running until one answer wins.
 
-import { canonicalJSON, digestOf, type IntentPacket } from "./select-pr-files.ts"
+import { canonicalJSON, type Completeness, digestOf, type IntentPacket } from "./select-pr-files.ts"
 
 /** The statuses Stryker's JSON report can carry. Raw input, never a verdict. */
 export type StrykerStatus =
@@ -594,6 +594,12 @@ export interface AttemptReceipt {
      */
     readonly status: "evidence" | "no_evidence"
   }
+  /**
+   * Copied from the intent so the receipt says on its face whether it covers
+   * the revision's whole scope. A `partial` receipt's counts describe the
+   * sampled files only; the deferred files carry no evidence from this attempt.
+   */
+  readonly completeness: Completeness
   readonly observations: readonly MutantObservation[]
   readonly projections: readonly Projection[]
   readonly summary: ProjectionSummary
@@ -655,6 +661,7 @@ export function buildAttemptReceipt(input: {
         | "evidence"
         | "no_evidence",
     },
+    completeness: input.intent.completeness,
     observations: input.observations,
     projections,
     summary,

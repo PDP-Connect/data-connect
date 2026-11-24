@@ -32,6 +32,7 @@ export interface ReplacementObservingAllocatorOptions {
     readonly preferredSurfaceId: string;
   }) => Promise<ReplacementReceipt | null>;
   readonly ledger: BrowserSurfaceReplacementLedger;
+  readonly onObserverError?: (error: unknown) => void;
   readonly onPersistenceError?: (error: unknown) => void;
   readonly persist?: (receipt: ReplacementReceipt) => Promise<ReplacementReceipt>;
 }
@@ -59,10 +60,15 @@ async function ensureSurfaceWithObservation(
   options: ReplacementObservingAllocatorOptions,
   request: EnsureBrowserSurfaceRequest
 ): Promise<BrowserSurface> {
-  const observation = await prepareEnsureObservation(allocator, options, request);
-  const after = await performEnsureEffect(allocator, options, request, observation);
-  await recordEnsureSuccess(options, request, observation, after);
-  return after;
+  try {
+    const observation = await prepareEnsureObservation(allocator, options, request);
+    const after = await performEnsureEffect(allocator, options, request, observation);
+    await recordEnsureSuccess(options, request, observation, after);
+    return after;
+  } catch (error) {
+    options.onObserverError?.(error);
+    throw error;
+  }
 }
 
 async function prepareEnsureObservation(
@@ -225,6 +231,7 @@ async function recordTerminal(
   if (!started) {
     return;
   }
+  options.ledger.hydrate([started]);
   await record(
     options,
     options.ledger.terminate({

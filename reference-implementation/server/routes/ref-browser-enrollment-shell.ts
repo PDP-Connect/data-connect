@@ -28,15 +28,19 @@
 //   - No provider secret, browser session cookie, or credential accepted/returned.
 //   - Only browser-bound connectors accepted; static-secret/local-collector
 //     connectors are refused with a typed 409.
+//   - Browser-bound comes from the registered manifest's bindings
+//     (`browserEnrollmentSupport`, shared with the console). A known scaffold,
+//     or any connector when the conformance roster did not load, is refused
+//     with a typed 409.
 //   - Shells are invisible to every list/count/owner-console surface until enrollment
 //     captures source identity and flips the shell to `active`.
 
 import { randomBytes } from "node:crypto";
 
 import {
+  browserEnrollmentSupport,
   type ConnectorManifestLike,
   displayNameForConnector,
-  isBrowserBoundConnector,
 } from "../connection-setup-plan.ts";
 import type { CredentialStateChange } from "../stores/connector-instance-credential-store.ts";
 import type { MiddlewareHandler, PdppErrorFn, RouteArg } from "./_route-contract.ts";
@@ -272,7 +276,8 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
         // Reject unknown connector before doing anything else (404).
         const manifest = await ctx.resolveRegisteredConnectorManifest(connectorId);
 
-        if (!isBrowserBoundConnector(connectorId)) {
+        const support = browserEnrollmentSupport(connectorId, manifest);
+        if (!support.browserBound) {
           await emitShellAudit(ctx, req, res, {
             connectorId,
             error: { code: "connector_not_browser_bound" },
@@ -285,6 +290,22 @@ export function mountRefBrowserEnrollmentShell(app: AppLike, ctx: MountRefBrowse
             409,
             "connector_not_browser_bound",
             `Connector '${connectorId}' is not browser-bound. Browser enrollment shells are only created for browser-bound connectors.`
+          );
+          return;
+        }
+        if (!support.canAddAccount) {
+          await emitShellAudit(ctx, req, res, {
+            connectorId,
+            error: { code: "connector_browser_setup_unavailable" },
+            operation: "create",
+            outcome: "failed",
+            ownerSubjectId,
+          });
+          ctx.pdppError(
+            res,
+            409,
+            "connector_browser_setup_unavailable",
+            `Connector '${connectorId}' cannot add an account through browser setup: it is a known scaffold, or this server cannot load the connector conformance roster.`
           );
           return;
         }

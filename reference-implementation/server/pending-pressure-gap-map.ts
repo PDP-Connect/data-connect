@@ -27,5 +27,6 @@ export function mapPendingPressureGaps(gaps: readonly PendingDetailGapSummary[])
     lastPressureAt: readPendingGapLastPressureAt(gap),
     nextAttemptAfter: typeof gap.next_attempt_after === "string" ? gap.next_attempt_after : null,
     reason: typeof gap.reason === "string" ? gap.reason : null,
+    ...(typeof gap.retryable === "boolean" ? { retryable: gap.retryable } : {}),
   }));
 }

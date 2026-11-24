@@ -36,9 +36,32 @@ import { readFileSync } from "node:fs"
 // The fallback is a glob and not a bare `test/` directory: Node resolves a bare
 // directory argument as a module rather than expanding it, so `node --test
 // test/` fails with MODULE_NOT_FOUND and takes the whole baseline down with it.
-const WHOLE_COHORT_TESTS = ["test/**/*.test.ts"]
+// Exported: `run-intent.ts` counts this suite against the attempt bound when no
+// test is selected, since it is what every trial would then run.
+export const wholeCohortTests = ["test/**/*.test.ts"]
+
+// How much of the test command's output Stryker receives: a quarter of the
+// 1 MiB `exec` limit described at `commandRunner` below.
+const RETAINED_OUTPUT_BYTES = 256 * 1024
 
 function selectedTestArguments() {
+  // An empty list is ambiguous: no test changed, or every selected test was
+  // withheld. The second must never fall through to the whole cohort below,
+  // which would run the very tests that were withheld. The workflow does not
+  // start Stryker for it; this refusal covers a run that gets here anyway.
+  try {
+    const outcome = readFileSync("reports/mutation/reference-implementation/selection-outcome.txt", "utf8").trim()
+    if (outcome === "none_runnable") {
+      throw new Error(
+        "every test selected for this attempt was withheld from the mutation baseline; " +
+          "refusing to fall back to the cohort's whole suite"
+      )
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw error
+    }
+  }
   try {
     const listed = readFileSync("reports/mutation/reference-implementation/selected-tests.txt", "utf8")
       .split("\n")
@@ -50,7 +73,7 @@ function selectedTestArguments() {
   } catch {
     // Fall through to the whole-cohort selection below.
   }
-  return WHOLE_COHORT_TESTS
+  return wholeCohortTests
 }
 
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
@@ -62,12 +85,36 @@ export default {
     // runner can express it. `--test` on explicit paths keeps the selection
     // visible in the retained command string, so a reader of the receipt can
     // see exactly which tests a survivor survived.
-    command: `TSX_TSCONFIG_PATH=vendor/brand-react/tsconfig.json node --import tsx --import ./vendor/brand-react/css-stub-register.ts --test ${selectedTestArguments().join(" ")}`,
+    //
+    // The output is written to a file and only its tail reaches Stryker. The
+    // command runner starts the command with `child_process.exec`, whose
+    // default `maxBuffer` is 1 MiB, and when either stream passes that, Node
+    // kills the command with SIGTERM. Stryker records that as a failed baseline,
+    // or as a kill for a mutant, with no test having failed. The PR #141
+    // selection prints about 1.5 MiB on a clean pass, so every baseline was
+    // rejected. The tail holds the spec reporter's closing summary, which lists
+    // each failing test with its error, and the exit status is kept.
+    command:
+      `out="$(mktemp)"; ` +
+      `TSX_TSCONFIG_PATH=vendor/brand-react/tsconfig.json node --import tsx --import ./vendor/brand-react/css-stub-register.ts --test ${selectedTestArguments().join(" ")} >"$out" 2>&1; ` +
+      `status=$?; tail -c ${RETAINED_OUTPUT_BYTES} "$out"; rm -f "$out"; exit "$status"`,
   },
 
   // Populated from the pull request diff by the workflow; empty means this
   // revision touched no reference-implementation production source.
   mutate: [],
+
+  // One trial at a time. Each trial is itself parallel: `node --test` starts a
+  // process per test file, and tsx compiles in each, so one trial of the 7-file
+  // sample on PR #494 used about 12 CPU-seconds in 3.3 s of wall time and fills
+  // a 4-CPU runner on its own. Stryker's timeout is `1.5 * net dry-run time +
+  // 5 s`, and the dry run runs alone. With four Stryker workers each trial then
+  // competes with three others and takes about four times as long, so any
+  // selection whose solo run passes 2 s outlives that limit: every one of the 144
+  // mutants of PR #494 timed out and the attempt had no evidence. One worker
+  // makes a trial run under the conditions the limit was measured in. It is not
+  // slower: 18 mutants took 43 s with one worker and 52 s with four.
+  concurrency: 1,
 
   reporters: ["json", "html", "progress"],
   jsonReporter: { fileName: "reports/mutation/reference-implementation/mutation.json" },
@@ -75,6 +122,17 @@ export default {
 
   inPlace: false,
   checkers: [],
+
+  // No `// @ts-nocheck` rewriting. Nothing in this cohort type-checks: tsx
+  // strips types without checking them and `checkers` is empty, so the header
+  // protects nothing here. Its cost is real. Stryker's default pattern rewrites
+  // every JavaScript and TypeScript file under `test/`, `src/` and `lib/`, mutated
+  // or not, and a rewritten file is written fresh rather than copied, which
+  // drops its mode. `test/fixtures/legacy-profiles/slack/slackdump-stub.mjs` is
+  // executed directly as `SLACKDUMP_BIN`; without its executable bit both
+  // compiled-Slack tests failed in the PR #141 baseline. With this off, an
+  // unmutated file is copied byte-for-byte with its mode.
+  disableTypeChecks: false,
 
   // Stryker copies the working tree into the sandbox, so anything not needed to
   // run this cohort's tests is excluded. `node_modules` is deliberately absent
@@ -87,10 +145,13 @@ export default {
   // failed a hosted run of this cohort after 91 minutes came from the mutant
   // count, not the copied tree, and is addressed by scoping mutation to the
   // changed lines rather than by this list. Stated so the next reader does not
-  // over-credit it. `connectors` and `examples` are deliberately NOT excluded:
-  // tests read them. `docs` above is a pre-existing entry, and ~65 cohort files
+  // over-credit it. `connectors`, `examples` and `openapi` are deliberately NOT
+  // excluded: tests read them. `openapi` used to be listed, and
+  // `test/owner-connection-intent.test.ts` reads
+  // `openapi/reference-full.openapi.json`, so it failed with ENOENT in the
+  // PR #141 baseline. `docs` above is a pre-existing entry, and ~65 cohort files
   // do reference `docs/` -- worth revisiting separately, not changed here.
-  ignorePatterns: ["reports", "fixtures/large", "vendor/*/dist", "docs", "openapi", "quality"],
+  ignorePatterns: ["reports", "fixtures/large", "vendor/*/dist", "docs", "quality"],
 
   tempDirName: ".stryker-tmp/reference-implementation",
 }

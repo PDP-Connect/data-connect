@@ -18,7 +18,7 @@ ARG NEKO_BASE_IMAGE=ghcr.io/m1k1o/neko/chromium:3.0@sha256:13264ee217ecccda06b07
 # The exact Patchright version is read from the workspace manifest below, so
 # n.eko's binary stays in lockstep with the reference-side driver without a
 # second authoritative pin.
-FROM node:24.19.0-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03 AS patchright-chromium
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS patchright-chromium
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl unzip \
   && rm -rf /var/lib/apt/lists/* \
@@ -82,6 +82,15 @@ COPY docker/neko/policies.json /etc/chromium/policies/managed/policies.json
 RUN install -d /etc/opt/chrome/policies/managed \
   && cp /etc/chromium/policies/managed/policies.json \
         /etc/opt/chrome/policies/managed/policies.json
+# CA distrust policy, kept separate from policies.json so it applies to every
+# browser start-chromium.sh may launch. Each branding reads its own machine
+# policy directory: Chrome for Testing (the Patchright binary)
+# /etc/opt/chrome_for_testing, google-chrome-stable /etc/opt/chrome, system
+# Chromium /etc/chromium. See docker/chrome-policy/README.md.
+RUN --mount=type=bind,source=docker/chrome-policy/distrusted-cas.json,target=/tmp/pdpp-distrusted-cas.json \
+  for dir in /etc/opt/chrome_for_testing/policies/managed /etc/opt/chrome/policies/managed /etc/chromium/policies/managed; do \
+    install -D -o root -g root -m 0644 /tmp/pdpp-distrusted-cas.json "${dir}/pdpp-distrusted-cas.json" || exit 1; \
+  done
 COPY docker/neko/chromium.conf /etc/neko/supervisord/chromium.conf
 COPY docker/neko/cdp-proxy.conf /etc/neko/supervisord/cdp-proxy.conf
 COPY docker/neko/start-chromium.sh /usr/local/bin/start-chromium.sh

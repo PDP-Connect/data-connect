@@ -12,11 +12,14 @@ import { ConnectorMark } from "./connector-mark.tsx";
 import { OpenExternalLink } from "./open-external-link.tsx";
 import type { ConnectorAcquisitionPath, ConnectorCatalogEntry } from "../lib/connection-catalog.ts";
 import type { ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
-import { connectorInstallRowModel, connectorLookupKey } from "../lib/connector-install-presentation.ts";
+import {
+  connectorLookupKey,
+  isUninstallableCatalogEntry,
+} from "../lib/connector-install-presentation.ts";
 import type { RefCountState } from "../lib/ref-client.ts";
 import {
   browserBoundWithStoredCredentials,
-  sourceSetupAction,
+  sourceSetupCardModel,
   sourceSetupAvailability,
   sourceSetupContext,
   sourceSetupGuidance,
@@ -35,9 +38,6 @@ import {
 import { ConnectorInstallRow } from "../sources/add/connector-install-row.tsx";
 
 const TRANSIENT_CATALOG_RETRY_DELAY_MS = 5000;
-let transientCatalogRetryAttempted = false;
-let transientCatalogRefreshInFlight = false;
-let transientCatalogPendingSnapshotId: string | null = null;
 
 type ConnectorCatalogRecoveryState = "exhausted" | "refreshing" | "scheduled";
 
@@ -161,7 +161,7 @@ function sourceMethodLine(entry: ConnectorCatalogEntry, existingSourceCount: num
     return developmentMethodLine(entry);
   }
   if (browserBoundWithStoredCredentials(entry) && entry.disposition === "static_secret_connect") {
-    return "Connect in a secure browser; interactive sign-in is valid, with optional saved details for repair.";
+    return "Connect with this source's sign-in details and complete any required steps in the secure browser.";
   }
   if (sourceSetupAvailability(entry) === "not_available_here") {
     return "No proven setup path is available in this dashboard.";
@@ -322,10 +322,14 @@ function SourceSetupDetails({ entry }: { entry: ConnectorCatalogEntry }) {
   );
 }
 
-function resetTransientCatalogRetry(): void {
-  transientCatalogRetryAttempted = false;
-  transientCatalogRefreshInFlight = false;
-  transientCatalogPendingSnapshotId = null;
+interface TransientCatalogRetryState {
+  attempted: boolean;
+  inFlight: boolean;
+  pendingSnapshotId: string | null;
+}
+
+function freshTransientCatalogRetryState(): TransientCatalogRetryState {
+  return { attempted: false, inFlight: false, pendingSnapshotId: null };
 }
 
 function useConnectorCatalogRecovery(enabled: boolean, busySnapshotId: string | null): {
@@ -335,6 +339,9 @@ function useConnectorCatalogRecovery(enabled: boolean, busySnapshotId: string | 
   const router = useRouter();
   const [recoveryState, setRecoveryState] = useState<ConnectorCatalogRecoveryState>("exhausted");
   const retryTimerRef = useRef<number | null>(null);
+  // Retry bookkeeping belongs to this mounted catalog, not to the module, so a
+  // second catalog on the page keeps its own once-per-snapshot retry.
+  const retryStateRef = useRef<TransientCatalogRetryState>(freshTransientCatalogRetryState());
 
   const clearRetryTimer = useCallback(() => {
     if (retryTimerRef.current) {
@@ -344,51 +351,51 @@ function useConnectorCatalogRecovery(enabled: boolean, busySnapshotId: string | 
   }, []);
 
   const refreshCatalog = useCallback(() => {
-    if (transientCatalogRefreshInFlight || !busySnapshotId) {
+    if (retryStateRef.current.inFlight || !busySnapshotId) {
       return;
     }
-    transientCatalogRefreshInFlight = true;
-    transientCatalogPendingSnapshotId = busySnapshotId;
+    retryStateRef.current.inFlight = true;
+    retryStateRef.current.pendingSnapshotId = busySnapshotId;
     setRecoveryState("refreshing");
     try {
       router.refresh();
     } catch {
-      transientCatalogRefreshInFlight = false;
-      transientCatalogPendingSnapshotId = null;
+      retryStateRef.current.inFlight = false;
+      retryStateRef.current.pendingSnapshotId = null;
       setRecoveryState("exhausted");
     }
   }, [busySnapshotId, router]);
 
   const refreshManually = useCallback(() => {
-    transientCatalogRetryAttempted = true;
+    retryStateRef.current.attempted = true;
     clearRetryTimer();
     refreshCatalog();
   }, [clearRetryTimer, refreshCatalog]);
 
   useEffect(() => {
     if (!enabled) {
-      resetTransientCatalogRetry();
+      retryStateRef.current = freshTransientCatalogRetryState();
       clearRetryTimer();
       setRecoveryState("exhausted");
       return;
     }
-    if (transientCatalogRefreshInFlight && transientCatalogPendingSnapshotId !== busySnapshotId) {
-      transientCatalogRefreshInFlight = false;
-      transientCatalogPendingSnapshotId = null;
+    if (retryStateRef.current.inFlight && retryStateRef.current.pendingSnapshotId !== busySnapshotId) {
+      retryStateRef.current.inFlight = false;
+      retryStateRef.current.pendingSnapshotId = null;
       setRecoveryState("exhausted");
       return;
     }
-    if (transientCatalogRefreshInFlight) {
+    if (retryStateRef.current.inFlight) {
       setRecoveryState("refreshing");
       return;
     }
-    if (transientCatalogRetryAttempted) {
+    if (retryStateRef.current.attempted) {
       setRecoveryState("exhausted");
       return clearRetryTimer;
     }
     setRecoveryState("scheduled");
     retryTimerRef.current = window.setTimeout(() => {
-      transientCatalogRetryAttempted = true;
+      retryStateRef.current.attempted = true;
       retryTimerRef.current = null;
       refreshCatalog();
     }, TRANSIENT_CATALOG_RETRY_DELAY_MS);
@@ -435,6 +442,16 @@ function ConnectorCatalogRecoveryNotice({
   );
 }
 
+function installLifecycleFor(
+  entry: ConnectorCatalogEntry,
+  installLifecycleByConnector: Readonly<Record<string, ConnectorInstallLifecycle>> | null | undefined
+): ConnectorInstallLifecycle | null {
+  if (installLifecycleByConnector === null) {
+    return null;
+  }
+  return installLifecycleByConnector?.[connectorLookupKey(entry.connectorKey)] ?? { catalog: null, installed: null };
+}
+
 function SourceSetupCard({
   entry,
   existingSources,
@@ -449,17 +466,15 @@ function SourceSetupCard({
   installLifecycle: ConnectorInstallLifecycle | null;
 }) {
   const status = sourceSetupStatus(entry);
-  // A row with no click target at all must never offer an install control
-  // either: an OCI package can exist for a connector this dashboard cannot
-  // otherwise use (a known scaffold, a proof-gated or unsupported
-  // disposition), and offering Install there is exactly the dead control the
-  // owner rejected -- a package state fact is still shown, just without a
-  // button that can never do anything.
-  const isUnavailable = sourceSetupRowIsUnavailable(entry);
-  const installModel = installLifecycle ? connectorInstallRowModel(entry, installLifecycle) : null;
-  const packageAvailabilityUnknown = installCatalogTransientlyUnavailable && !installLifecycle?.installed;
-  const packageNeedsInstall = !isUnavailable && installModel?.activationState === "not_installed";
-  const action = packageNeedsInstall || packageAvailabilityUnknown || isUnavailable ? null : sourceSetupAction(entry);
+  const {
+    installModel,
+    noSetupPath,
+    packageAvailabilityUnknown,
+    packageNeedsInstall,
+    registrationPending,
+    setupAction: action,
+    unavailable: isUnavailable,
+  } = sourceSetupCardModel(entry, installLifecycle, installCatalogTransientlyUnavailable);
   const secondaryAction = sourceSetupSecondaryAction(entry);
   return (
     <li
@@ -494,7 +509,11 @@ function SourceSetupCard({
       </div>
       <div className="border-t border-border/60 pt-3 sm:border-t-0 sm:border-l sm:pl-4" data-testid="source-setup-install">
         <p className="pdpp-eyebrow mb-2 text-muted-foreground">Package</p>
-        {isUnavailable ? (
+        {entry.isKnownScaffold ? (
+          <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
+            This connector's collection code is not built yet.
+          </span>
+        ) : noSetupPath ? (
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-disabled">
             Not installable: no setup path is available here.
           </span>
@@ -527,6 +546,10 @@ function SourceSetupCard({
         {packageNeedsInstall && installModel?.action ? (
           <span className="pdpp-caption text-muted-foreground" data-testid="connector-install-next-step">
             Install package first
+          </span>
+        ) : registrationPending ? (
+          <span className="pdpp-caption text-muted-foreground" data-testid="connector-registration-pending">
+            Registration pending. Account setup appears once the server registers this connector.
           </span>
         ) : action ? (
           <>
@@ -568,14 +591,7 @@ function SourceSetupCardList({
           existingSources={existingSourcesByConnector?.[entry.connectorKey] ?? []}
           installCatalogRecoveryState={installCatalogRecoveryState}
           installCatalogTransientlyUnavailable={installCatalogTransientlyUnavailable}
-          installLifecycle={
-            installLifecycleByConnector === null
-              ? null
-              : (installLifecycleByConnector?.[connectorLookupKey(entry.connectorKey)] ?? {
-                  catalog: null,
-                  installed: null,
-                })
-          }
+          installLifecycle={installLifecycleFor(entry, installLifecycleByConnector)}
           key={entry.connectorKey}
         />
       ))}
@@ -590,6 +606,7 @@ export function SourceSetupCatalog({
   installCatalogBusySnapshotId = null,
   installCatalogTransientlyUnavailable = false,
   installLifecycleByConnector = null,
+  installSkippedEntries = 0,
   query,
 }: {
   action: string;
@@ -606,6 +623,8 @@ export function SourceSetupCatalog({
   installCatalogTransientlyUnavailable?: boolean;
   /** Null means the install route is not available on this server. */
   installLifecycleByConnector?: Readonly<Record<string, ConnectorInstallLifecycle>> | null;
+  /** Package offers the console could not read; they are missing from the list. */
+  installSkippedEntries?: number;
   query: string;
 }) {
   const developerMode = useSyncExternalStore(
@@ -621,22 +640,32 @@ export function SourceSetupCatalog({
   // visibility; this surface never grows a second toggle for the same
   // concept. When it's off, the hidden count stays discoverable via the
   // quiet line below instead of a silently shrinking list.
-  const visibleCatalog = filterCatalogForDevelopmentVisibility(catalog, developerMode);
-  const hiddenDevelopmentCount = catalog.length - visibleCatalog.length;
+  // A connector with no package, no installed package, and no registration
+  // has nothing the owner can install or set up here, so it is not listed.
+  // While the package catalog is busy every lifecycle reads as "no package",
+  // so nothing is hidden until the catalog answers.
+  const installableCatalog = installCatalogTransientlyUnavailable
+    ? catalog
+    : catalog.filter(
+        (entry) => !isUninstallableCatalogEntry(entry, installLifecycleFor(entry, installLifecycleByConnector))
+      );
+  const visibleCatalog = filterCatalogForDevelopmentVisibility(installableCatalog, developerMode);
+  const hiddenDevelopmentCount = installableCatalog.length - visibleCatalog.length;
   const filtered = filterSourceCatalog(visibleCatalog, query);
   // Every visible connector is one row. Tier, lifecycle exceptions, and
   // package activation are row properties, so Preview and In development do
   // not create nested containers or disappear from the scan path.
-  //
-  // The one exception: a row with no click target at all (known scaffold,
-  // proof-gated, unsupported, unknown -- see `sourceSetupRowIsUnavailable`)
-  // carries no scannable information a working row doesn't already imply, so
-  // it never sits in the middle of the actionable list. `sourceSetupRank`
-  // already sorts these last; splitting them out here keeps that guarantee
-  // even if a future rank changes, and lets the count stay visible without
-  // N dead rows in the primary scan path.
-  const scannableEntries = filtered.filter((entry) => !sourceSetupRowIsUnavailable(entry));
-  const unavailableEntries = filtered.filter((entry) => sourceSetupRowIsUnavailable(entry));
+  // Keep installable packages visible even before their account setup exists.
+  const scannableEntries: ConnectorCatalogEntry[] = [];
+  const unavailableEntries: ConnectorCatalogEntry[] = [];
+  for (const entry of filtered) {
+    const { unavailable } = sourceSetupCardModel(
+      entry,
+      installLifecycleFor(entry, installLifecycleByConnector),
+      installCatalogTransientlyUnavailable
+    );
+    (unavailable ? unavailableEntries : scannableEntries).push(entry);
+  }
   const anyMatch = filtered.length > 0;
   return (
     <Section
@@ -650,6 +679,12 @@ export function SourceSetupCatalog({
             Developer mode
           </Link>
           .
+        </p>
+      ) : null}
+      {installSkippedEntries > 0 ? (
+        <p className="pdpp-caption mb-4 text-muted-foreground" data-testid="install-skipped-notice">
+          {installSkippedEntries} package {installSkippedEntries === 1 ? "offer" : "offers"} could not be read and{" "}
+          {installSkippedEntries === 1 ? "is" : "are"} not listed. Check the service logs.
         </p>
       ) : null}
       <ConnectorCatalogRecoveryNotice
@@ -684,7 +719,7 @@ export function SourceSetupCatalog({
             <details className="group" data-testid="unavailable-connectors-disclosure">
               <summary className="pdpp-caption cursor-pointer list-none text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground">
                 {unavailableEntries.length}{" "}
-                {unavailableEntries.length === 1 ? "connector is" : "connectors are"} not available on this platform
+                {unavailableEntries.length === 1 ? "connector cannot" : "connectors cannot"} be added here
               </summary>
               <div className="mt-3">
                 <SourceSetupCardList

@@ -72,7 +72,8 @@ Notes:
   never returns provider secrets.
   Revocation uses the owner-session-gated dashboard/RFC 7592 path; run
   "pdpp ref login <authorization-server>" first if no owner session is cached.
-  Daisy's first supported target: ~/applications/daisy/.pi/agent/pdpp-owner-agent.json`;
+  By default, credentials are stored under ~/.pdpp/owner-agents/<host>.json. Use
+  --credential-file to choose another location.`;
 
 export interface OwnerAgentIo {
   stderr?: NodeJS.WritableStream;

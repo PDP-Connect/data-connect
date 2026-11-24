@@ -41,6 +41,7 @@ import { readPolyfillManifests } from "@pdpp/polyfill-connectors/manifests";
 
 import { initiateOwnerDeviceAuthorization } from "../server/auth.ts";
 import { startServer } from "../server/index.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const TEST_PASSWORD = "explore-vs-records-list-parity-owner-password";
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "pdpp-reference-test-initial-access-token";
@@ -377,6 +378,7 @@ test("rs.explore.timeline membership matches rs.records.list membership for the 
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
     ownerAuthPassword: TEST_PASSWORD,
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as unknown as TestServer;

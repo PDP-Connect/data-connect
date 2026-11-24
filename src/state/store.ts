@@ -174,10 +174,12 @@ const appSlice = createSlice({
         exportData?: ExportedData;
         phase?: ProgressPhase;
         itemCount?: number;
+        accountLabel?: string;
       }>
     ) {
       const run = state.runs.find((r) => r.id === action.payload.runId);
       if (run) {
+        if (action.payload.accountLabel) run.accountLabel = action.payload.accountLabel;
         if (action.payload.statusMessage) {
           run.statusMessage = action.payload.statusMessage;
         }

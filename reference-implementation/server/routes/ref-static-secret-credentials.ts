@@ -1040,15 +1040,33 @@ async function isPausedHistoricalArchiveTarget(
   );
 }
 
+// The run id the auto-resume step started (or found already active) for this
+// connection, or null when it handed back no real run handle.
+function autoResumeRunId(autoResume: AutoResumeResult | null): string | null {
+  if (autoResume?.status !== "started" && autoResume?.status !== "active_run_exists") {
+    return null;
+  }
+  const runId = (autoResume.confirming_run as { run_id?: unknown } | null)?.run_id;
+  return typeof runId === "string" && runId.length > 0 ? runId : null;
+}
+
 // Runs the resume+first-sync chain and folds its outcome into the response
 // honestly: `failed` never gets papered over as `resumed_and_synced`.
+// When auto-resume already holds a run for this connection, that run IS the
+// first sync: `resumePausedConnectionAfterCredentialCapture` already resumed
+// the row, and calling the hook would only make `runNow` refuse a second run.
 async function resumeArchiveConnectionAfterCapture(
   ctx: MountRefStaticSecretCredentialsContext,
   namespace: ConnectorNamespace,
-  ownerSubjectId: string
+  ownerSubjectId: string,
+  autoResume: AutoResumeResult | null
 ): Promise<ArchiveResumeAndSyncResult> {
   if (typeof ctx.resumeHistoricalArchiveConnectionAndRunFirstSync !== "function") {
     return { kind: "skipped" };
+  }
+  const adoptedRunId = autoResumeRunId(autoResume);
+  if (adoptedRunId) {
+    return { kind: "resumed_and_synced", runId: adoptedRunId };
   }
   try {
     return await ctx.resumeHistoricalArchiveConnectionAndRunFirstSync({
@@ -1140,7 +1158,7 @@ async function storeAndRespond(
   const rotated = Boolean(previous);
   const autoResume = await autoResumeAfterCredentialCapture(ctx, args.namespace, metadata, args.ownerSubjectId);
   const archiveResume: ArchiveResumeAndSyncResult = wasPausedHistoricalArchive
-    ? await resumeArchiveConnectionAfterCapture(ctx, args.namespace, args.ownerSubjectId)
+    ? await resumeArchiveConnectionAfterCapture(ctx, args.namespace, args.ownerSubjectId, autoResume)
     : { kind: "skipped" };
   await emitCaptureAudit(ctx, req, res, {
     connectionId: args.namespace.connectorInstanceId,

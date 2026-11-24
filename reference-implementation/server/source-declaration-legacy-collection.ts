@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
+import { COLLECTION_PROFILE_VERSIONS } from "@pdpp/connector-protocol";
 import type { SourceDeclaration, SourceDeclarationStream } from "@pdpp/reference-contract/public/source";
 import {
   InvalidSourceDeclarationError,
@@ -11,6 +12,8 @@ import {
 
 export const COLLECTION_PROFILE_URI = "https://pdpp.dev/profile/collection";
 export const LEGACY_CONNECTOR_PROJECTION_VERSION_PREFIX = "reference.legacy-connector-projection.v1";
+/** Core SourceDeclaration schema version; Core Section 5 requires exactly this value. */
+const SOURCE_DECLARATION_PROTOCOL_VERSION = "0.1.0";
 
 export interface LegacyConnectorDeclarationAttribution {
   connectorImplementationId?: string;
@@ -143,9 +146,15 @@ export function sourceDeclarationFromLegacyConnectorManifest(
     "connectorImplementationId"
   );
   const streams = requireLegacyStreams(manifest);
-  const protocolVersion = requireNonEmptyString(manifest.protocol_version, "manifest.protocol_version");
-  if (protocolVersion !== "0.1.0") {
-    throw new InvalidSourceDeclarationError(`manifest.protocol_version must be 0.1.0, received ${protocolVersion}`);
+  // The manifest names a Collection Profile version; the declaration names the
+  // Core schema version. They are independent (Collection Profile Section 8).
+  // Registration checks the version against the declared capabilities; this
+  // projection also runs on stored manifests, so it checks the version only.
+  const profileVersion = requireNonEmptyString(manifest.protocol_version, "manifest.protocol_version");
+  if (!(COLLECTION_PROFILE_VERSIONS as readonly string[]).includes(profileVersion)) {
+    throw new InvalidSourceDeclarationError(
+      `manifest.protocol_version must be one of ${COLLECTION_PROFILE_VERSIONS.join(", ")}, received ${profileVersion}`
+    );
   }
   const declaration: SourceDeclaration = {
     declaration_version: declarationVersion,
@@ -158,7 +167,7 @@ export function sourceDeclarationFromLegacyConnectorManifest(
         connectorVersion
       ),
     },
-    protocol_version: protocolVersion,
+    protocol_version: SOURCE_DECLARATION_PROTOCOL_VERSION,
     publisher: { id: publisherId },
     source: { id: sourceId, kind: "connector" },
     streams: streams.map(sourceStreamFromLegacy),

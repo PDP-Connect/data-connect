@@ -6,26 +6,38 @@ import { EventEmitter } from "node:events"
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
+  readFileSync,
   rmSync,
+  symlinkSync,
   truncateSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, join, relative } from "node:path"
 import { PassThrough } from "node:stream"
 import { describe, expect, it } from "vitest"
+import { MACOS_NODE_HELPER } from "./package-macos-node-helper.mjs"
 import {
   assertBinaryArchitecture,
+  assertMacNodeHelperInfo,
+  assertMacFrameworkLayout,
   assertPackagedBrowser,
   assertPackagedNode,
   assertPackagedReferenceStacks,
   assertPackagedRuntime,
+  attachDmg,
   collectRelevantWindowsInstallerEntries,
+  detachDmg,
   listDebEntries,
   parseArgs,
   readMacBundleExecutable,
   selectMacAppExecutables,
 } from "./verify-bundled-personal-server.mjs"
+import {
+  writeConnectorPackageModules,
+  writeConsoleServerBundle,
+} from "./staged-console-bundle.fixture.mjs"
 
 const runtimeEntries = [
   "usr/bin/pdpp-node",
@@ -77,6 +89,38 @@ function hashFile(contents, prefixed = true) {
   return prefixed ? `sha256:${digest}` : digest
 }
 
+function listFiles(directory) {
+  return readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => join(entry.parentPath, entry.name))
+}
+
+// A packaged console stack: launcher, server bundle, staged connector
+// package, and a manifest.json hashing all of them, as ensure-console-stack.js
+// writes it.
+function writePackagedConsoleStack(consoleRoot, bundleOptions) {
+  const runtimeDirectory = join(consoleRoot, "apps", "console")
+  mkdirSync(runtimeDirectory, { recursive: true })
+  writeFileSync(join(consoleRoot, "launch.mjs"), "#!/usr/bin/env node\n")
+  writeFileSync(join(runtimeDirectory, "server.js"), "operator console")
+  writeConsoleServerBundle(runtimeDirectory, bundleOptions)
+  writeConnectorPackageModules(
+    join(runtimeDirectory, "node_modules", "@pdpp", "polyfill-connectors")
+  )
+  const hashes = Object.fromEntries(
+    listFiles(consoleRoot)
+      .map(path => [
+        relative(consoleRoot, path).split("\\").join("/"),
+        hashFile(readFileSync(path)),
+      ])
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+  )
+  writeFileSync(
+    join(consoleRoot, "manifest.json"),
+    JSON.stringify({ server: "apps/console/server.js", hashes })
+  )
+}
+
 describe("bundled personal-server verifier", () => {
   it("requires both packaged reference stacks and verifies their manifests", () => {
     const root = mkdtempSync(join(tmpdir(), "bundled-reference-stacks-"))
@@ -122,19 +166,7 @@ describe("bundled personal-server verifier", () => {
         })
       )
 
-      const consoleLaunch = "#!/usr/bin/env node\n"
-      const consolePayload = "operator console"
-      writeFileSync(join(consoleRoot, "launch.mjs"), consoleLaunch)
-      writeFileSync(join(consoleRoot, "payload.txt"), consolePayload)
-      writeFileSync(
-        join(consoleRoot, "manifest.json"),
-        JSON.stringify({
-          hashes: {
-            "launch.mjs": hashFile(consoleLaunch),
-            "payload.txt": hashFile(consolePayload),
-          },
-        })
-      )
+      writePackagedConsoleStack(consoleRoot)
 
       expect(() =>
         assertPackagedReferenceStacks(root, "DataConnect.deb")
@@ -144,6 +176,45 @@ describe("bundled personal-server verifier", () => {
       expect(() =>
         assertPackagedReferenceStacks(root, "DataConnect.deb")
       ).toThrow("reference-stack/ri manifest hashes do not match")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("rejects a packaged console that resolves the connector package only from the build checkout", () => {
+    const root = mkdtempSync(join(tmpdir(), "bundled-reference-stacks-"))
+    try {
+      const stacksRoot = join(
+        root,
+        "usr",
+        "lib",
+        "DataConnect",
+        "reference-stack"
+      )
+      const riRoot = join(stacksRoot, "ri")
+      mkdirSync(riRoot, { recursive: true })
+      writeFileSync(
+        join(riRoot, "manifest.json"),
+        JSON.stringify({ files: [] })
+      )
+      // The build checkout still has the package; the shipped bundle points
+      // its createRequire there instead of at the staged copy.
+      const buildCheckout = join(root, "build-checkout")
+      writeConnectorPackageModules(
+        join(buildCheckout, "node_modules", "@pdpp", "polyfill-connectors")
+      )
+      writePackagedConsoleStack(join(stacksRoot, "console"), {
+        resolveFrom: join(
+          buildCheckout,
+          "reference-implementation/server/polyfill-connectors-runtime.ts"
+        ),
+      })
+
+      expect(() =>
+        assertPackagedReferenceStacks(root, "DataConnect.deb")
+      ).toThrow(
+        "DataConnect.deb reference-stack/console cannot load @pdpp/polyfill-connectors"
+      )
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -268,11 +339,7 @@ describe("bundled personal-server verifier", () => {
       assertPackagedNode(["pdpp-node.exe"], "DataConnect.exe", "windows")
     ).not.toThrow()
     expect(() =>
-      assertPackagedNode(
-        ["Contents/MacOS/pdpp-node"],
-        "DataConnect.dmg",
-        "macos"
-      )
+      assertPackagedNode([MACOS_NODE_HELPER], "DataConnect.dmg", "macos")
     ).not.toThrow()
     expect(() =>
       assertPackagedNode(runtimeEntries, "DataConnect.exe", "windows")
@@ -370,13 +437,13 @@ describe("bundled personal-server verifier", () => {
     ).toThrow("empty CFBundleExecutable")
     expect(
       selectMacAppExecutables(
-        ["DataConnect", "pdpp-node"],
+        ["DataConnect", MACOS_NODE_HELPER],
         "DataConnect",
         "DataConnect.app"
       )
     ).toEqual({
       appExecutable: "DataConnect",
-      nodeSidecar: "pdpp-node",
+      nodeSidecar: MACOS_NODE_HELPER,
     })
   })
 
@@ -386,19 +453,23 @@ describe("bundled personal-server verifier", () => {
     ).toThrow("must identify exactly one app executable")
     expect(() =>
       selectMacAppExecutables(
-        ["DataConnect", "DataConnect", "pdpp-node"],
+        ["DataConnect", "DataConnect", MACOS_NODE_HELPER],
         "DataConnect",
         "DataConnect.app"
       )
     ).toThrow("must identify exactly one app executable")
   })
 
-  it("requires a distinct, exact Node sidecar beside the macOS app executable", () => {
+  it("requires a distinct Node helper inside its own macOS bundle", () => {
     expect(() =>
       selectMacAppExecutables(["DataConnect"], "DataConnect", "DataConnect.app")
-    ).toThrow("exactly one pdpp-node sidecar")
+    ).toThrow("exactly one background Node helper")
     expect(() =>
-      selectMacAppExecutables(["pdpp-node"], "pdpp-node", "DataConnect.app")
+      selectMacAppExecutables(
+        ["pdpp-node", MACOS_NODE_HELPER],
+        "pdpp-node",
+        "DataConnect.app"
+      )
     ).toThrow("must be distinct from pdpp-node")
     expect(() =>
       assertBinaryArchitecture(
@@ -407,6 +478,35 @@ describe("bundled personal-server verifier", () => {
         "pdpp-node"
       )
     ).not.toThrow()
+  })
+
+  it("rejects the old foreground Node path and invalid helper identities", () => {
+    expect(() =>
+      assertPackagedNode(
+        ["Contents/MacOS/pdpp-node"],
+        "DataConnect.dmg",
+        "macos"
+      )
+    ).toThrow("packaged Node.js sidecar")
+    const info = {
+      CFBundleExecutable: "DataConnect",
+      CFBundleIdentifier: "dev.dataconnect.node",
+      CFBundleName: "DataConnect",
+      CFBundleDisplayName: "DataConnect",
+      CFBundlePackageType: "APPL",
+      LSBackgroundOnly: true,
+    }
+    expect(() => assertMacNodeHelperInfo(info, "DataConnect.app")).not.toThrow()
+    for (const [key, value] of [
+      ["LSBackgroundOnly", false],
+      ["LSBackgroundOnly", "true"],
+      ["CFBundleIdentifier", "dev.dataconnect"],
+      ["CFBundleExecutable", "pdpp-node"],
+    ]) {
+      expect(() =>
+        assertMacNodeHelperInfo({ ...info, [key]: value }, "DataConnect.app")
+      ).toThrow(key)
+    }
   })
 
   it("enables strict signature checks only when explicitly requested", () => {
@@ -504,7 +604,7 @@ describe("bundled personal-server verifier", () => {
   it.runIf(hasDpkgDeb)(
     "lists a package with a large payload without buffering its archive",
     () => {
-      const temporaryRoot = mkdtempSync(join(process.cwd(), ".verify-deb-"))
+      const temporaryRoot = mkdtempSync(join(tmpdir(), "verify-deb-"))
       try {
         const packageRoot = join(temporaryRoot, "package")
         const resources = join(packageRoot, "usr", "lib", "DataConnect")
@@ -536,4 +636,193 @@ describe("bundled personal-server verifier", () => {
     },
     30_000
   )
+})
+
+describe("assertMacFrameworkLayout", () => {
+  const frameworkName = "Google Chrome for Testing Framework"
+  const version = "153.0.8010.12"
+
+  // The layout of the upstream Playwright chrome-mac-arm64 zip for
+  // chromium-1243: five relative symlinks around one version directory.
+  function writeBrowsers(root, { links = true } = {}) {
+    const browsers = join(root, "browsers")
+    const framework = join(
+      browsers,
+      "chromium-1243",
+      "chrome-mac-arm64",
+      "Google Chrome for Testing.app",
+      "Contents",
+      "Frameworks",
+      `${frameworkName}.framework`
+    )
+    const versionDirectory = join(framework, "Versions", version)
+    for (const directory of ["Resources", "Helpers", "Libraries"]) {
+      mkdirSync(join(versionDirectory, directory), { recursive: true })
+    }
+    writeFileSync(join(versionDirectory, frameworkName), "binary")
+    if (links) {
+      symlinkSync(version, join(framework, "Versions", "Current"))
+      for (const entry of [
+        frameworkName,
+        "Resources",
+        "Helpers",
+        "Libraries",
+      ]) {
+        symlinkSync(`Versions/Current/${entry}`, join(framework, entry))
+      }
+    }
+    return { browsers, framework }
+  }
+
+  function withBrowsers(options, check) {
+    const root = mkdtempSync(join(tmpdir(), "framework-layout-"))
+    try {
+      check(writeBrowsers(root, options))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it("accepts the upstream Chromium framework layout", () => {
+    withBrowsers({}, ({ browsers }) => {
+      expect(() => assertMacFrameworkLayout(browsers, "app")).not.toThrow()
+    })
+  })
+
+  it("rejects the v0.7.59 layout: links dropped, binary copied", () => {
+    withBrowsers({ links: false }, ({ browsers, framework }) => {
+      writeFileSync(join(framework, frameworkName), "binary")
+      expect(() => assertMacFrameworkLayout(browsers, "app")).toThrow(
+        /is missing Versions\/Current/
+      )
+    })
+  })
+
+  it("rejects a real file at the framework root", () => {
+    withBrowsers({}, ({ browsers, framework }) => {
+      rmSync(join(framework, frameworkName))
+      writeFileSync(join(framework, frameworkName), "binary")
+      expect(() => assertMacFrameworkLayout(browsers, "app")).toThrow(
+        `${frameworkName} must be a symlink, found a real file`
+      )
+    })
+  })
+
+  it("rejects an absolute link into the build host's cache", () => {
+    withBrowsers({}, ({ browsers, framework }) => {
+      const current = join(framework, "Versions", "Current")
+      rmSync(current)
+      symlinkSync(join(framework, "Versions", version), current)
+      expect(() => assertMacFrameworkLayout(browsers, "app")).toThrow(
+        /Versions\/Current -> .* must stay inside the framework/
+      )
+    })
+  })
+
+  it("rejects a bundle without a Chromium framework", () => {
+    const root = mkdtempSync(join(tmpdir(), "framework-layout-"))
+    try {
+      expect(() => assertMacFrameworkLayout(root, "app")).toThrow(
+        "app carries no Chromium framework"
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("hdiutil mount retries", () => {
+  const mountRoot = "/mnt/dataconnect-dmg"
+  const dmg = "DataConnect.dmg"
+  const attachArgs = [
+    "attach",
+    "-readonly",
+    "-nobrowse",
+    "-mountpoint",
+    mountRoot,
+    dmg,
+  ]
+  const detachArgs = ["detach", mountRoot]
+  const forceDetachArgs = ["detach", "-force", mountRoot]
+
+  // Fails the first `failures` calls with `message(attempt)`, worded like the
+  // verifier's own `run` errors, then succeeds. Records each call and pause.
+  function fakeHdiutil(failures, message) {
+    const calls = []
+    const pauses = []
+    const runCommand = (command, args) => {
+      calls.push([command, args])
+      if (calls.length > failures) return ""
+      throw new Error(
+        `${command} ${args.join(" ")} failed: ${message(calls.length)}`
+      )
+    }
+    return { calls, pauses, runCommand, pause: ms => pauses.push(ms) }
+  }
+
+  function errorFrom(action) {
+    try {
+      action()
+    } catch (error) {
+      return error
+    }
+    throw new Error("expected the action to throw")
+  }
+
+  it("attaches once two transient failures clear", () => {
+    const fake = fakeHdiutil(2, attempt => `attach stderr ${attempt}`)
+
+    expect(() =>
+      attachDmg(dmg, mountRoot, fake.runCommand, fake.pause)
+    ).not.toThrow()
+    expect(fake.calls).toEqual([
+      ["hdiutil", attachArgs],
+      ["hdiutil", attachArgs],
+      ["hdiutil", attachArgs],
+    ])
+  })
+
+  it("names hdiutil and lists every attempt when attach never succeeds", () => {
+    const fake = fakeHdiutil(Infinity, attempt => `attach stderr ${attempt}`)
+
+    const error = errorFrom(() =>
+      attachDmg(dmg, mountRoot, fake.runCommand, fake.pause)
+    )
+    expect(error.message).toContain("hdiutil attach")
+    for (const attempt of [1, 2, 3]) {
+      expect(error.message).toContain(`attach stderr ${attempt}`)
+    }
+    expect(fake.calls).toHaveLength(3)
+    expect(fake.pauses).toHaveLength(2)
+    expect(fake.pauses[1]).toBeGreaterThan(fake.pauses[0])
+  })
+
+  it("detaches once two Resource busy failures clear", () => {
+    const fake = fakeHdiutil(2, () => `couldn't eject "disk9" - Resource busy`)
+
+    expect(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause)
+    ).not.toThrow()
+    expect(fake.calls.map(([, args]) => args)).toEqual([
+      detachArgs,
+      detachArgs,
+      forceDetachArgs,
+    ])
+  })
+
+  it("tries detach -force last and lists every attempt if the volume stays busy", () => {
+    const fake = fakeHdiutil(Infinity, attempt => `detach stderr ${attempt}`)
+
+    const error = errorFrom(() =>
+      detachDmg(mountRoot, fake.runCommand, fake.pause)
+    )
+    expect(fake.calls.map(([, args]) => args)).toEqual([
+      detachArgs,
+      detachArgs,
+      forceDetachArgs,
+    ])
+    for (const attempt of [1, 2, 3]) {
+      expect(error.message).toContain(`detach stderr ${attempt}`)
+    }
+  })
 })

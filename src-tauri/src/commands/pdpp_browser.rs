@@ -76,7 +76,9 @@ impl PdppBrowserLease {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let child = match command.spawn() {
+        // The browser may be a Chromium that `download_chromium_rust` just
+        // extracted.
+        let child = match crate::spawn_retry::spawn_retrying_while_busy(&mut command) {
             Ok(child) => child,
             Err(error) => {
                 release_profile_lease(Some(lease_lock));
@@ -198,6 +200,14 @@ impl PdppBrowserLease {
     pub fn profile_exists(connector_id: &str, owner_id: &str) -> Result<bool, String> {
         validate_owner_id(owner_id)?;
         Ok(profile_dir(&profile_root()?, connector_id, owner_id).is_dir())
+    }
+
+    pub(super) fn profile_exists_at(root: &Path, connector_id: &str, owner_id: &str) -> bool {
+        profile_dir(root, connector_id, owner_id).is_dir()
+    }
+
+    pub(super) fn profile_path_at(root: &Path, connector_id: &str, owner_id: &str) -> PathBuf {
+        profile_dir(root, connector_id, owner_id)
     }
 }
 
@@ -330,10 +340,10 @@ fn wait_for_devtools_endpoint(
     let deadline = Instant::now() + BROWSER_START_TIMEOUT;
     let active_port = profile_dir.join("DevToolsActivePort");
     while Instant::now() < deadline {
-        if let Ok(Some(status)) = child.try_wait() {
+        if browser_child_exited(&mut child) {
             return Err(BrowserLaunchFailure {
-                message: format!("PDPP browser exited before becoming ready: {status}"),
-                terminated: true,
+                message: "PDPP browser exited before becoming ready".into(),
+                terminated: terminate_browser(&mut child),
             });
         }
         if let Ok(contents) = fs::read_to_string(&active_port) {
@@ -361,21 +371,15 @@ struct BrowserLaunchFailure {
 pub(crate) fn terminate_browser(child: &mut Child) -> bool {
     #[cfg(unix)]
     {
-        let process_group = child.id();
-        signal_process_group(process_group, libc::SIGTERM);
-        let leader_exited = wait_for_child_exit(child, BROWSER_STOP_WAIT);
-        if leader_exited && wait_for_process_group_exit(process_group, BROWSER_STOP_WAIT) {
-            return true;
-        }
-        signal_process_group(process_group, libc::SIGKILL);
-        let _ = wait_for_child_exit(child, BROWSER_STOP_WAIT);
-        return wait_for_process_group_exit(process_group, BROWSER_STOP_WAIT);
+        return terminate_unix_browser(child, signal_process_group);
     }
 
     #[cfg(not(unix))]
     {
         #[cfg(windows)]
         {
+            // `child` retains the process handle through both tree-kill attempts,
+            // which keeps this PID bound to the launched process object.
             run_windows_taskkill(child.id(), BROWSER_STOP_WAIT);
         }
         #[cfg(not(windows))]
@@ -397,7 +401,48 @@ pub(crate) fn terminate_browser(child: &mut Child) -> bool {
     }
 }
 
+#[cfg(unix)]
+fn terminate_unix_browser(
+    child: &mut Child,
+    mut signal_group: impl FnMut(u32, libc::c_int),
+) -> bool {
+    // WNOWAIT keeps the leader's PID reserved while numeric PGID signals are possible.
+    if child_exited_without_reaping(child).is_err() {
+        return false;
+    }
+    let process_group = child.id();
+    // Reap the leader only after every other group member has exited.
+    // Reaping it as soon as it exits reports success while a descendant
+    // still runs.
+    signal_group(process_group, libc::SIGTERM);
+    if wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT)
+        && wait_for_process_group_members_exit(process_group, child.id(), BROWSER_STOP_WAIT)
+    {
+        return child.wait().is_ok();
+    }
+    // Do not signal if the child identity was lost while waiting.
+    if child_exited_without_reaping(child).is_err() {
+        return false;
+    }
+    signal_group(process_group, libc::SIGKILL);
+    if !wait_for_child_exit_without_reaping(child, BROWSER_STOP_WAIT)
+        || !wait_for_process_group_members_exit(process_group, child.id(), BROWSER_STOP_WAIT)
+    {
+        return false;
+    }
+    child.wait().is_ok()
+}
+
 pub(crate) fn browser_command(browser: &Path, profile_dir: &Path, headless: bool) -> Command {
+    browser_command_with_args(browser, profile_dir, headless, &[])
+}
+
+pub(crate) fn browser_command_with_args(
+    browser: &Path,
+    profile_dir: &Path,
+    headless: bool,
+    additional_args: &[&str],
+) -> Command {
     let mut command = Command::new(browser);
     command
         .arg(format!("--user-data-dir={}", profile_dir.display()))
@@ -406,17 +451,64 @@ pub(crate) fn browser_command(browser: &Path, profile_dir: &Path, headless: bool
             "--remote-debugging-port=0",
             "--no-first-run",
             "--no-default-browser-check",
-        ]);
+            // The profile belongs to DataConnect, not to the user's everyday
+            // browser. Keep its keys out of the OS wallet: on Linux the Secret
+            // portal or KWallet can block cookie reads waiting for an unlock
+            // prompt, and on macOS the Keychain can prompt. Playwright,
+            // Puppeteer and ChromeDriver launch Chrome with the same pair.
+            "--password-store=basic",
+            "--use-mock-keychain",
+        ])
+        .args(additional_args);
     if headless {
         command.arg("--headless=new");
     }
     command.arg("about:blank");
+    #[cfg(target_os = "linux")]
+    if let Some(appdir) = appimage_dir() {
+        remove_appimage_paths(&mut command, std::env::vars_os(), &appdir);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
     command
+}
+
+/// The mount directory of the running AppImage, if the app runs from one.
+#[cfg(target_os = "linux")]
+fn appimage_dir() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE")?;
+    let appdir = PathBuf::from(std::env::var_os("APPDIR")?);
+    appdir.is_absolute().then_some(appdir)
+}
+
+/// The AppImage runtime points LD_LIBRARY_PATH, PATH, the GTK module paths and
+/// similar lists at its bundled libraries. The browser is a host program: the
+/// system Chrome launcher is a shell script, and host coreutils fail to load
+/// against the bundled libsystemd. Drop every list entry inside the AppImage,
+/// and the variable when no entry is left.
+#[cfg(target_os = "linux")]
+fn remove_appimage_paths(
+    command: &mut Command,
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    appdir: &Path,
+) {
+    for (key, value) in vars {
+        let entries: Vec<PathBuf> = std::env::split_paths(&value).collect();
+        let host: Vec<&PathBuf> = entries
+            .iter()
+            .filter(|entry| !entry.starts_with(appdir))
+            .collect();
+        if host.len() == entries.len() {
+            continue;
+        }
+        match std::env::join_paths(host) {
+            Ok(joined) if !joined.is_empty() => command.env(key, joined),
+            _ => command.env_remove(key),
+        };
+    }
 }
 
 #[cfg(unix)]
@@ -426,27 +518,143 @@ fn signal_process_group(process_group: u32, signal: libc::c_int) {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn process_group_has_other_members(process_group: u32, leader_pid: u32) -> io::Result<bool> {
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == leader_pid {
+            continue;
+        }
+        let stat = match fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace();
+        let Some(state) = fields.next() else { continue };
+        let Some(_) = fields.next() else { continue };
+        let Some(pgrp) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pgrp == process_group && state != "Z" && state != "X" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_has_other_members(process_group: u32, leader_pid: u32) -> io::Result<bool> {
+    const PROC_PGRP_ONLY: u32 = 2;
+    let mut pids = vec![0 as libc::pid_t; 4096];
+    loop {
+        let size = std::mem::size_of_val(pids.as_slice());
+        let bytes = unsafe {
+            libc::proc_listpids(
+                PROC_PGRP_ONLY,
+                process_group,
+                pids.as_mut_ptr().cast(),
+                size as libc::c_int,
+            )
+        };
+        if bytes < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if bytes as usize >= size {
+            pids.resize(pids.len() * 2, 0);
+            continue;
+        }
+        for pid in pids
+            .iter()
+            .copied()
+            .take(bytes as usize / std::mem::size_of::<libc::pid_t>())
+        {
+            if pid <= 0 || pid as u32 == leader_pid {
+                continue;
+            }
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let read = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    (&mut info as *mut libc::proc_bsdinfo).cast(),
+                    std::mem::size_of_val(&info) as libc::c_int,
+                )
+            };
+            if read == std::mem::size_of_val(&info) as libc::c_int {
+                if info.pbi_pgid == process_group && info.pbi_status != libc::SZOMB {
+                    return Ok(true);
+                }
+            } else if read < 0 {
+                return Err(io::Error::last_os_error());
+            } else if read == 0 {
+                let result = unsafe { libc::kill(pid, 0) };
+                if result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                    continue;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "could not inspect a process group member",
+                ));
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "short process group member record",
+                ));
+            }
+        }
+        return Ok(false);
+    }
+}
+
 #[cfg(unix)]
-fn wait_for_process_group_exit(process_group: u32, timeout: Duration) -> bool {
+fn wait_for_process_group_members_exit(
+    process_group: u32,
+    leader_pid: u32,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut saw_empty_group = false;
+    loop {
+        match process_group_has_other_members(process_group, leader_pid) {
+            Ok(false) if saw_empty_group => return true,
+            Ok(false) if Instant::now() < deadline => {
+                saw_empty_group = true;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(true) if Instant::now() < deadline => {
+                saw_empty_group = false;
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(false) | Ok(true) | Err(_) => return false,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_child_exit_without_reaping(child: &Child, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if !process_group_exists(process_group) {
+        if child_exited_without_reaping(child).unwrap_or(false) {
             return true;
         }
         thread::sleep(Duration::from_millis(20));
     }
-    !process_group_exists(process_group)
+    false
 }
 
-#[cfg(unix)]
-fn process_group_exists(process_group: u32) -> bool {
-    let result = unsafe { libc::kill(-(process_group as i32), 0) };
-    if result == 0 {
-        return true;
-    }
-    io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
+#[cfg(not(unix))]
 fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -456,6 +664,34 @@ fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     false
+}
+
+#[cfg(unix)]
+pub(crate) fn child_exited_without_reaping(child: &Child) -> io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.si_signo == libc::SIGCHLD)
+}
+
+pub(crate) fn browser_child_exited(child: &mut Child) -> bool {
+    #[cfg(unix)]
+    {
+        child_exited_without_reaping(child).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        child.try_wait().ok().flatten().is_some()
+    }
 }
 
 #[cfg(windows)]
@@ -495,6 +731,24 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::process::Command;
+
+    #[test]
+    fn browser_command_keeps_profile_keys_out_of_the_os_wallet() {
+        let command = browser_command(Path::new("chrome"), Path::new("profile"), true);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|arg| arg == "--password-store=basic"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "--use-mock-keychain"),
+            "{args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("about:blank"));
+    }
 
     const LOCK_HOLDER_ROOT: &str = "PDPP_BROWSER_LOCK_HOLDER_ROOT";
     const LOCK_EXPECT_BLOCKED_ROOT: &str = "PDPP_BROWSER_LOCK_EXPECT_BLOCKED_ROOT";
@@ -611,6 +865,39 @@ mod tests {
     }
 
     #[test]
+    fn reset_deletes_one_account_profile_and_preserves_its_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let first = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-one",
+            "run-1",
+        )
+        .unwrap();
+        let first_profile = first.profile_dir().to_owned();
+        drop(first);
+        let second = PdppBrowserLease::fixture(
+            root.path(),
+            "chatgpt-pdpp",
+            "account-two",
+            "run-2",
+        )
+        .unwrap();
+        let second_profile = second.profile_dir().to_owned();
+        fs::write(first_profile.join("Cookies"), "first-session").unwrap();
+        fs::write(second_profile.join("Cookies"), "second-session").unwrap();
+        drop(second);
+
+        reset_profile_in(root.path(), "chatgpt-pdpp", "account-one").unwrap();
+
+        assert!(!first_profile.exists());
+        assert_eq!(
+            fs::read_to_string(second_profile.join("Cookies")).unwrap(),
+            "second-session"
+        );
+    }
+
+    #[test]
     fn refuses_implicit_or_unsafe_browser_owners() {
         assert!(validate_owner_id("").is_err());
         assert!(validate_owner_id("../other-owner").is_err());
@@ -693,6 +980,23 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn terminate_does_not_signal_after_the_leader_was_reaped() {
+        let mut child = Command::new("true").spawn().expect("spawn test leader");
+        child.wait().expect("reap test leader");
+        let mut signals = Vec::new();
+
+        assert!(!terminate_unix_browser(&mut child, |group, signal| {
+            signals.push((group, signal));
+        }));
+
+        assert!(
+            signals.is_empty(),
+            "a reaped leader no longer identifies its PGID"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn terminate_browser_waits_for_descendant_process_group_exit() {
         let mut command = Command::new("sh");
         command.args(["-c", "trap '' TERM; (trap '' TERM; sleep 30) & exit 0"]);
@@ -701,6 +1005,85 @@ mod tests {
         let process_group = child.id();
 
         assert!(terminate_browser(&mut child));
-        assert!(!process_group_exists(process_group));
+        assert!(!process_group_has_other_members(process_group, child.id()).unwrap());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminate_does_not_report_success_while_group_member_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("descendant-pid");
+        let pid_file_arg = pid_file.to_string_lossy().into_owned();
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "trap '' TERM; (trap '' TERM; exec sleep 30) & echo $! > \"$1\"; while ! kill -0 \"$(cat \"$1\")\" 2>/dev/null; do :; done; exit 0",
+            "sh",
+            &pid_file_arg,
+        ]);
+        command.process_group(0);
+        let mut child = command.spawn().expect("spawn test browser process tree");
+        let process_group = child.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !pid_file.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        while !child_exited_without_reaping(&child).unwrap() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(pid_file.exists(), "descendant must start before cleanup");
+        assert!(
+            child_exited_without_reaping(&child).unwrap(),
+            "leader must exit first"
+        );
+
+        // A no-op signaller keeps the descendant alive past both signal
+        // attempts. Cleanup must refuse success while it remains.
+        let terminated = terminate_unix_browser(&mut child, |_, _| {});
+        signal_process_group(process_group, libc::SIGKILL);
+        let _ = child.wait();
+        assert!(
+            !terminated,
+            "a live descendant must prevent cleanup success"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn browser_command_drops_appimage_library_paths() {
+        use std::ffi::{OsStr, OsString};
+        let appdir = Path::new("/tmp/.mount_DataCo1");
+        let vars = [
+            (
+                "LD_LIBRARY_PATH",
+                "/tmp/.mount_DataCo1/usr/lib/:/tmp/.mount_DataCo1/lib64/",
+            ),
+            (
+                "PATH",
+                "/tmp/.mount_DataCo1/usr/bin/:/usr/local/bin:/usr/bin",
+            ),
+            ("GTK_PATH", "/tmp/.mount_DataCo1//usr/lib/gtk-3.0"),
+            ("XDG_DATA_DIRS", "/tmp/.mount_DataCo1/usr/share:/usr/share"),
+            ("APPIMAGE", "/home/user/DataConnect.AppImage"),
+            ("SIBLING", "/tmp/.mount_DataCo12/usr/lib"),
+            ("HOME", "/home/user"),
+        ]
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        let mut command = Command::new("browser");
+        remove_appimage_paths(&mut command, vars, appdir);
+        let mut changes: Vec<(&OsStr, Option<&OsStr>)> = command.get_envs().collect();
+        changes.sort();
+        assert_eq!(
+            changes,
+            vec![
+                (OsStr::new("GTK_PATH"), None),
+                (OsStr::new("LD_LIBRARY_PATH"), None),
+                (
+                    OsStr::new("PATH"),
+                    Some(OsStr::new("/usr/local/bin:/usr/bin"))
+                ),
+                (OsStr::new("XDG_DATA_DIRS"), Some(OsStr::new("/usr/share"))),
+            ]
+        );
     }
 }

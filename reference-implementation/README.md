@@ -111,13 +111,21 @@ Overrides:
   AS metadata then omits `registration_endpoint` and advertises only
   `pdpp_registration_modes_supported: ["pre_registered_public"]`.
 
-Default pre-registered public clients seeded at startup include the real
-first-party demo clients (`longview`, `longview_planning_v1`, `cli_longview`,
-`concert_recommendation_app`) plus the dashboard/bootstrap clients
-`pdpp-web-dashboard` and `pdpp-polyfill-owner-bootstrap` so owner device
-bootstrap from the dashboard and the polyfill orchestrator works out of the
-box. The pre-registered set is reference-local convenience; production
-deployments should supply their own `preRegisteredPublicClients` option.
+Default pre-registered public clients seeded at startup are the product
+clients `pdpp_cli` (the published CLI), `pdpp-web-dashboard` (the console's
+operator bootstrap), `dataconnect-console` (the console's owner bearer) and
+`dataconnect-connector-runtime` (the connector runtime's owner bearer). The
+console and the connector runtime hold one owner bearer per subject: an owner
+device approval for either client returns the live bearer that client already
+has while it has at least half its lifetime left, and the runtime keeps that
+bearer in memory between runs. The
+runtime keeps the bearer in its own process: connector child processes never
+receive it. Each admitted run gets a random run-scoped credential
+(`PDPP_BLOB_UPLOAD_TOKEN`) that is valid only for `POST /v1/blobs`, only for
+that run's connector and connection, and only until the run ends. Connectors
+built before that name read the same credential as `PDPP_OWNER_TOKEN`. The pre-registered set
+is reference-local convenience; production deployments should supply their
+own `preRegisteredPublicClients` option.
 
 ### Consent and grant issuance
 
@@ -305,7 +313,7 @@ Unauthenticated HTML requests to the protected routes redirect to `/owner/login?
 The placeholder is intentionally narrow:
 
 - no user table, no external IdP, no multi-user auth
-- stateless HMAC-signed session cookie - rotating `PDPP_OWNER_PASSWORD` invalidates existing sessions
+- owner sessions are stored in the database and are not bound to the password. Changing `PDPP_OWNER_PASSWORD` and restarting leaves existing sessions and owner bearers valid; revoke them under Settings > Owner sessions. A password change in the DataConnect desktop app restarts the server and revokes every owner session and bearer. A change through `/owner/password/change` (the app-managed password) keeps the session that made it and revokes the others
 - public protocol surfaces (`/oauth/par`, `/oauth/register`, `/oauth/token`, `/v1/*`, `/.well-known/*`) are **not** gated
 - the placeholder is still not a durable owner-auth story; it is only the current reference-local browser/session gate
 
@@ -478,7 +486,7 @@ reference stack. The quickest self-hosted path uses the public GHCR images:
 
 ```bash
 cp .env.docker.example .env.docker
-bash scripts/generate-secrets.sh --write  # fills PDPP_OWNER_PASSWORD and VAPID keys
+# Set PDPP_OWNER_PASSWORD and PDPP_CREDENTIAL_ENCRYPTION_KEY in .env.docker
 # set PDPP_REFERENCE_ORIGIN in .env.docker to your deployment URL
 docker compose --env-file .env.docker pull
 pnpm docker:reference:quick

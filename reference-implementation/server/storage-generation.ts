@@ -43,3 +43,24 @@ export function currentStorageGeneration(): number {
 export function isCurrentStorageGeneration(capturedGeneration: number): boolean {
   return capturedGeneration === generation;
 }
+
+/** Thrown when deferred work finds that the storage it captured has been closed or replaced. */
+export class StaleStorageGenerationError extends Error {
+  constructor() {
+    super("storage generation changed since this work was scheduled");
+    this.name = "StaleStorageGenerationError";
+  }
+}
+
+/**
+ * Re-check a captured generation at the last synchronous point before a write.
+ * Call it with no `await` between the check and the storage write, so the
+ * generation cannot change in between; an `await` after an earlier check
+ * (a lock wait, an embedding call, a test pause) can span a close and
+ * re-init.
+ */
+export function assertCurrentStorageGeneration(capturedGeneration: number): void {
+  if (!isCurrentStorageGeneration(capturedGeneration)) {
+    throw new StaleStorageGenerationError();
+  }
+}

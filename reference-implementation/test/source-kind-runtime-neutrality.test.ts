@@ -16,6 +16,7 @@ import { startServer } from "../server/index.ts";
 import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { withTemporaryPostgresDatabase } from "./helpers/postgres-temp-database.ts";
 
 type SourceKind = "connector" | "provider_native";
@@ -128,6 +129,7 @@ async function runConsentGrantRead(backend: Backend, kind: SourceKind): Promise<
       ...(backend.databaseUrl ? { databaseUrl: backend.databaseUrl, storageBackend: "postgres" as const } : {}),
       dbPath: ":memory:",
       nativeManifest: fulfillment,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       reconcilePolyfillManifests: false,
       rsPort: 0,
@@ -321,6 +323,7 @@ async function approveConfiguredDefault(backend: Backend, kind: SourceKind): Pro
       ...(backend.databaseUrl ? { databaseUrl: backend.databaseUrl, storageBackend: "postgres" as const } : {}),
       dbPath: ":memory:",
       nativeManifest: localFulfillment(sourceId, kind, connectorKey),
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       reconcilePolyfillManifests: false,
       rsPort: 0,

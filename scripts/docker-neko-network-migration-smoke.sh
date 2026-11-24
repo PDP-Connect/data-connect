@@ -260,7 +260,7 @@ echo "n.eko network migration Docker smoke: planting a FOREIGN unnamespaced lega
 # legacy network as the real smoke surface to maximize the chance an
 # isolation bug would touch it.
 foreign_id="$(
-  docker run -d \
+  docker run -d --log-driver none \
     --network "$LEGACY_NETWORK" \
     --label "org.pdpp.reference.neko.owner=pdpp-reference" \
     --label "com.docker.compose.project=${FOREIGN_PROJECT_NAME}" \

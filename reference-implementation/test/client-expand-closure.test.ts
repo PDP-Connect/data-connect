@@ -23,6 +23,7 @@ import { startServer } from "../server/index.ts";
 import { closePostgresStorage } from "../server/postgres-storage.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 interface Backend {
   databaseUrl?: string;
@@ -221,6 +222,7 @@ async function runClientExpansionClosure(backend: Backend): Promise<void> {
       ...(backend.databaseUrl ? { databaseUrl: backend.databaseUrl, storageBackend: "postgres" as const } : {}),
       dbPath: ":memory:",
       nativeManifest: fulfillment,
+      preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
       quiet: true,
       reconcilePolyfillManifests: false,
       rsPort: 0,

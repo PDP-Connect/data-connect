@@ -16,6 +16,7 @@
  * connector's declared keys are logical keys that need an operator binding.
  */
 import { canonicalConnectorKey, firstPartyConnectorKeys, nativeConnectorKeys } from "../server/connector-key.ts";
+import { type ReconcileOptions, reconcileConnectorBrowsersPath } from "./browser-executable.ts";
 import { UNDECLARED_TUNING_ENVIRONMENT } from "./undeclared-tuning-environment.ts";
 
 const PLATFORM_KEYS = [
@@ -91,6 +92,7 @@ const RUN_KEYS = [
   "PDPP_CONNECTOR_ID",
   "PDPP_CONNECTOR_INSTANCE_ID",
   "PDPP_OWNER_TOKEN",
+  "PDPP_BLOB_UPLOAD_TOKEN",
   "PDPP_RS_URL",
   "PDPP_REFERENCE_BASE_URL",
   "PDPP_RUN_ID",
@@ -116,6 +118,8 @@ export interface ConnectorChildEnvironmentInput {
   approvedBindings?: readonly ConnectorEnvironmentBinding[];
   /** Operator-authorized connector IDs that may receive ambient proxy aliases. */
   approvedProxyConnectorIds?: readonly string[];
+  /** Test seam for the browsers-path fallback (see browser-executable.ts). */
+  browserPath?: ReconcileOptions;
   connectionEnv?: ConnectorConnectionEnvironment | null;
   /** The connector identity used to evaluate approvedProxyConnectorIds. */
   connectorId?: string;
@@ -673,5 +677,9 @@ export function composeConnectorChildEnvironment(input: ConnectorChildEnvironmen
   );
   apply(env, connectionEnv, platform, true);
   apply(env, input.explicitRunEnv, platform, false);
+  // Last, so it judges the path the connector would actually receive, whichever
+  // layer supplied it. Replaces a path that lacks the bundled Chromium with the
+  // image's own; leaves a path that has it alone.
+  reconcileConnectorBrowsersPath(env, { platform, ...input.browserPath });
   return env;
 }

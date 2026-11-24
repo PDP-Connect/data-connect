@@ -25,8 +25,10 @@ import test from "node:test";
 
 import { listSpineEventsPage } from "../lib/spine.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
+import { getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { markSearchIndexDirtySqlite } from "../server/stores/search-index-dirty-store.ts";
 
 const OWNER_PASSWORD = "ref-connection-pause-owner-password";
 const OWNER_SUBJECT_ID = "owner_local";
@@ -167,6 +169,25 @@ function postResume(asUrl: string, cookie: string, connectionId: string): Promis
     headers: { Accept: "application/json", Cookie: cookie },
     method: "POST",
   });
+}
+
+function postSearchIndexControl(
+  asUrl: string,
+  connectionId: string,
+  stream: string,
+  action: "park" | "rearm",
+  cookie?: string
+): Promise<JsonResult> {
+  return fetchJson(
+    `${asUrl}/_ref/connections/${encodeURIComponent(connectionId)}/search-index/${encodeURIComponent(stream)}/${action}`,
+    {
+      headers: {
+        Accept: "application/json",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      method: "POST",
+    }
+  );
 }
 
 interface SeedInstanceOptions {
@@ -346,6 +367,132 @@ test("owner-session pause requires an owner session (no cookie -> not authentica
     assert.notEqual(resp.status, 200, "an unauthenticated request must not pause the connection");
     const row = await store.get("cin_session_pause_no_cookie");
     assert.equal(row?.status, "active", "an unauthenticated request must not mutate the row");
+  });
+});
+
+test("owner-session search-index controls target only an owned existing dirty scope, including a retired encoded stream", async () => {
+  await withServer(async ({ asUrl }) => {
+    const cookie = await login(asUrl);
+    const connectorKey = await registerConnector(asUrl, loadReferenceManifest("spotify"));
+    await seedInstance({
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_search_control_owned",
+      displayName: "Owner Spotify",
+      sourceBinding: { account_hint: "owner" },
+      sourceBindingKey: "owner",
+    });
+    await seedInstance({
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_search_control_foreign",
+      displayName: "Other Spotify",
+      ownerSubjectId: OTHER_SUBJECT_ID,
+      sourceBinding: { account_hint: "other" },
+      sourceBindingKey: "other",
+    });
+
+    // This stream is deliberately absent from Spotify's current manifest. It is
+    // an existing queued scope, and its encoded identity—not manifest membership—
+    // is the operator control target.
+    const key = {
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_search_control_owned",
+      stream: "retired stream/1",
+    };
+    markSearchIndexDirtySqlite(key, NOW);
+    const foreignKey = {
+      connectorId: connectorKey,
+      connectorInstanceId: "cin_search_control_foreign",
+      stream: "retired stream/1",
+    };
+    markSearchIndexDirtySqlite(foreignKey, NOW);
+    getDb()
+      .prepare(
+        "UPDATE search_index_dirty SET attempts = 8, next_attempt_at = ? WHERE connector_instance_id = ? AND stream = ?"
+      )
+      .run("2099-01-01T00:00:00.000Z", key.connectorInstanceId, key.stream);
+    const row = () =>
+      getDb()
+        .prepare(
+          "SELECT attempts, dirty, next_attempt_at, operator_parked, revision FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?"
+        )
+        .get(key.connectorInstanceId, key.stream) as {
+        attempts: number;
+        dirty: number;
+        next_attempt_at: string | null;
+        operator_parked: number | null;
+        revision: number;
+      };
+    const initial = row();
+    const foreignRow = () =>
+      getDb()
+        .prepare(
+          "SELECT attempts, dirty, next_attempt_at, operator_parked, revision FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?"
+        )
+        .get(foreignKey.connectorInstanceId, foreignKey.stream);
+    const foreignInitial = foreignRow();
+
+    const unauthenticated = await postSearchIndexControl(asUrl, key.connectorInstanceId, key.stream, "park");
+    assert.equal(unauthenticated.status, 401);
+    assert.equal(row().revision, initial.revision, "an unauthenticated action must not mutate the scope");
+
+    const parked = await postSearchIndexControl(asUrl, key.connectorInstanceId, key.stream, "park", cookie);
+    assert.equal(parked.status, 200);
+    assert.deepEqual(
+      {
+        action: parked.body.action,
+        connector_instance_id: parked.body.connector_instance_id,
+        dirty: parked.body.dirty,
+        stream: parked.body.stream,
+      },
+      {
+        action: "park",
+        connector_instance_id: key.connectorInstanceId,
+        dirty: true,
+        stream: key.stream,
+      }
+    );
+    const parkedRow = row();
+    assert.equal(parkedRow.dirty, 1);
+    assert.equal(parkedRow.operator_parked, 1);
+    assert.equal(parkedRow.revision, initial.revision + 1);
+    assert.equal(parkedRow.attempts, 8);
+    assert.equal(parkedRow.next_attempt_at, "2099-01-01T00:00:00.000Z", "park preserves prior failure evidence");
+
+    const foreign = await postSearchIndexControl(asUrl, foreignKey.connectorInstanceId, key.stream, "rearm", cookie);
+    assert.equal(foreign.status, 403, "cross-owner control must be rejected");
+    const missing = await postSearchIndexControl(asUrl, key.connectorInstanceId, "missing stream/1", "rearm", cookie);
+    assert.equal(missing.status, 404, "a missing scope must not be manufactured");
+    markSearchIndexDirtySqlite({ ...key, stream: "clean stream/1" }, NOW);
+    getDb()
+      .prepare("UPDATE search_index_dirty SET dirty = 0 WHERE connector_instance_id = ? AND stream = ?")
+      .run(key.connectorInstanceId, "clean stream/1");
+    const cleanBefore = getDb()
+      .prepare(
+        "SELECT dirty, operator_parked, revision FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?"
+      )
+      .get(key.connectorInstanceId, "clean stream/1");
+    const clean = await postSearchIndexControl(asUrl, key.connectorInstanceId, "clean stream/1", "park", cookie);
+    assert.equal(clean.status, 404, "a clean scope must not be dirtied by an operator action");
+    assert.deepEqual(
+      getDb()
+        .prepare(
+          "SELECT dirty, operator_parked, revision FROM search_index_dirty WHERE connector_instance_id = ? AND stream = ?"
+        )
+        .get(key.connectorInstanceId, "clean stream/1"),
+      cleanBefore
+    );
+    assert.equal(row().operator_parked, 1, "rejected scopes leave the parked target unchanged");
+    assert.deepEqual(foreignRow(), foreignInitial, "cross-owner control must not mutate the foreign scope");
+
+    const rearmed = await postSearchIndexControl(asUrl, key.connectorInstanceId, key.stream, "rearm", cookie);
+    assert.equal(rearmed.status, 200);
+    assert.deepEqual(row(), {
+      attempts: 0,
+      dirty: 1,
+      next_attempt_at: null,
+      operator_parked: 0,
+      revision: parkedRow.revision + 1,
+    });
   });
 });
 

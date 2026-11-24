@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { revalidatePath } from "next/cache";
+import { CONNECTOR_NOT_INSTALLED_CODE, runNowRejectionFromError } from "../lib/connector-implementation.ts";
 import { runConnectionNow, runConnectorNow } from "../lib/operator-runs.ts";
 import { ReferenceServerUnreachableError } from "../lib/owner-token.ts";
 
@@ -26,6 +27,12 @@ export type RunStartFailurePhase = "before_server" | "after_server";
 export type RunNowResult =
   | { ok: true; run_id: string; trace_id: string }
   | { ok: false; reason: "already_running"; run_id?: string; message: string }
+  /**
+   * The reference has no implementation to run this connector
+   * (`connector_not_installed`). `connector_id` is the bare key the owner
+   * install route accepts, so the UI can offer "Install <name>" in place.
+   */
+  | { ok: false; reason: "connector_not_installed"; connector_id: string; message: string }
   | { ok: false; reason: "error"; phase: RunStartFailurePhase; reached_server: boolean; message: string };
 
 interface RunConnectorNowOptions {
@@ -75,6 +82,18 @@ export async function runConnectorNowAction(
         phase: "before_server",
         reached_server: false,
         reason: "error",
+      };
+    }
+    // Typed refusal: no implementation can run this connector. Branch on the
+    // envelope code, never the message, and hand back plain copy plus the key
+    // the install action needs.
+    const rejection = runNowRejectionFromError(err);
+    if (rejection.code === CONNECTOR_NOT_INSTALLED_CODE) {
+      return {
+        connector_id: rejection.connectorId ?? connectorId,
+        message: "This connector isn't installed on this server yet, so it can't sync.",
+        ok: false,
+        reason: "connector_not_installed",
       };
     }
     const message = err instanceof Error ? err.message : String(err);

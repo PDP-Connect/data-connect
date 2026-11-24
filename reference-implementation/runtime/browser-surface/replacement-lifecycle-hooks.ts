@@ -98,6 +98,7 @@ function wrapAllocator(
       });
     },
     ledger,
+    onObserverError: (error) => logReplacementObserverError(input.log, error),
     onPersistenceError: (error) => logReplacementPersistenceError(input.log, error),
     persist: (receipt) => persistReplacementReceipt(input.receiptStore, receipt),
   });
@@ -113,6 +114,11 @@ function persistReplacementReceipt(
 function logReplacementPersistenceError(log: ControllerLogger, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   log.warn?.(`[controller] replacement receipt persistence failed: ${message}`);
+}
+
+function logReplacementObserverError(log: ControllerLogger, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  log.warn?.(`[controller] browser surface replacement observer failed: ${message}`);
 }
 
 async function recordExternalSurfaceLoss(

@@ -9,6 +9,8 @@ IMAGE_BUILD="${PDPP_CORE_SMOKE_SKIP_BUILD:-0}"
 RUN_ID="$(date +%s)-$$"
 NAME="pdpp-core-demo-${RUN_ID}"
 NETWORK="${NAME}-network"
+# Docker json-file log rotation (10 MiB x 5 files); this script reads container logs.
+LOG_BOUND=(--log-driver json-file --log-opt max-size=10m --log-opt max-file=5)
 VOLUME="${NAME}-data"
 TUNNEL_HOST="${PDPP_CORE_SMOKE_TUNNEL_HOST:-pdpp-demo-${RUN_ID}.test}"
 SMOKE_PORT="${PDPP_CORE_SMOKE_PORT:-7662}"
@@ -68,6 +70,24 @@ wait_for_setup_token() {
   return 1
 }
 
+ensure_image_available() {
+  local image="$1"
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    return 0
+  fi
+  for attempt in 1 2 3; do
+    if docker pull "$image"; then
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      echo "docker-core-demo-smoke: retrying image pull for $image ($attempt/3)" >&2
+      sleep "$((attempt * 2))"
+    fi
+  done
+  echo "docker-core-demo-smoke: could not pull required image: $image" >&2
+  return 1
+}
+
 require_command docker
 require_command node
 require_command openssl
@@ -78,6 +98,8 @@ if (( free_kb < 30 * 1024 * 1024 )); then
   echo "docker-core-demo-smoke: requires at least 30 GiB free; found $((free_kb / 1024 / 1024)) GiB" >&2
   exit 1
 fi
+
+ensure_image_available "${PDPP_CORE_SMOKE_NGINX_IMAGE:-nginx:1.29-alpine}"
 
 if [[ "$IMAGE_BUILD" != "1" ]]; then
   revision="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
@@ -116,7 +138,7 @@ http {
 }
 NGINX
 
-docker run --detach --name "$CORE_CONTAINER" \
+docker run --detach --name "$CORE_CONTAINER" "${LOG_BOUND[@]}" \
   --network "$NETWORK" --network-alias core \
   --publish "127.0.0.1:${SMOKE_PORT}:3000" \
   --env PDPP_BIND_HOST=0.0.0.0 \
@@ -131,13 +153,13 @@ docker run --detach --name "$CORE_CONTAINER" \
 # The disposable TLS ingress stands in for the public Cloudflare tunnel. It
 # forwards to the Core container on the same private network; the Core run
 # command above keeps the documented tunnel origin and trusted-host settings.
-docker run --detach --name "$PROXY_CONTAINER" \
+docker run --detach --name "$PROXY_CONTAINER" --log-driver none \
   --network "$NETWORK" --network-alias "$TUNNEL_HOST" --network-alias "$CIMD_HOST" \
   --volume "$TEMP_ROOT/nginx.conf:/etc/nginx/nginx.conf:ro" \
   --volume "$TEMP_ROOT/tunnel.crt:/etc/nginx/tunnel.crt:ro" \
   --volume "$TEMP_ROOT/tunnel.key:/etc/nginx/tunnel.key:ro" \
   --volume "$REPOSITORY_ROOT/scripts/fixtures/docker-core-smoke-cimd.json:/srv/cimd/docker-core-smoke-cimd.json:ro" \
-  nginx:1.29-alpine >/dev/null
+  --pull=never "${PDPP_CORE_SMOKE_NGINX_IMAGE:-nginx:1.29-alpine}" >/dev/null
 
 setup_token="$(wait_for_setup_token)"
 # The helper lives in /app so ESM resolves the image's own Patchright package.

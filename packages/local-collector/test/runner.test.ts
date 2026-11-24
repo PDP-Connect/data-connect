@@ -2179,9 +2179,9 @@ test("resolveExecutionRoot runs a pinned connector from its installed release", 
   assert.equal(executionRoot, dirname(spec.args[0] as string));
 });
 
-test("resolveExecutionRoot resolves a published-shape bundled entrypoint under the local-collector package root", () => {
+test("resolveExecutionRoot resolves an entrypoint under the local-collector package root", () => {
   const executionRoot = resolveExecutionRoot({
-    args: [join(import.meta.dirname, "..", "dist", "polyfill-connectors", "connectors", "claude_code", "index.js")],
+    args: [join(import.meta.dirname, "..", "dist", "bin", "pdpp-local-collector.js")],
   });
   assert.equal(executionRoot, join(import.meta.dirname, ".."));
 });
@@ -2191,8 +2191,8 @@ test("resolveExecutionRoot falls back to the entrypoint's own directory for an o
   assert.equal(executionRoot, "/tmp/some-unrelated-dir");
 });
 
-test("resolveExecutionRoot resolves a relative dev entrypoint to the enclosing repository root", () => {
-  const executionRoot = resolveExecutionRoot({ args: ["connectors/claude_code/index.ts"] });
+test("resolveExecutionRoot resolves a relative development entrypoint to the enclosing repository root", () => {
+  const executionRoot = resolveExecutionRoot({ args: ["connectors/fixture/index.ts"] });
   assert.equal(executionRoot, join(import.meta.dirname, "..", "..", ".."));
 });
 
@@ -4267,12 +4267,13 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
     // interrupt deterministically instead of racing a real finish.
     const dir = await tempDir();
     const fixture = join(dir, "slow.mjs");
+    const readinessPath = join(dir, "record-emitted");
     await writeFile(
       fixture,
       // setInterval (never cleared) keeps the event loop alive; a bare
       // unresolved Promise does not hold Node open once the microtask queue
       // drains, so the child would exit on its own instead of hanging.
-      '  process.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1", data: { id: "m-1" }, emitted_at: new Date(0).toISOString() }) + "\\n");\n  setInterval(() => {}, 1000);\n'
+      `import { writeFileSync } from "node:fs";\nprocess.stdout.write(JSON.stringify({ type: "RECORD", stream: "messages", key: "m-1", data: { id: "m-1" }, emitted_at: new Date(0).toISOString() }) + "\\n", () => writeFileSync(${JSON.stringify(readinessPath)}, "emitted"));\nsetInterval(() => {}, 1000);\n`
     );
     const queuePath = await tempOutboxPath();
     const beforeInt = process.listenerCount("SIGINT");
@@ -4291,22 +4292,39 @@ test("plain run installs a real SIGINT handler and an interrupt mid-run flushes 
       streams: ["messages"],
     });
 
-    // Let the child spawn and emit its record, then interrupt like Ctrl+C
-    // would: invoke the freshly installed SIGINT handler directly (same
-    // technique as installInterruptAbort's tests above).
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The fixture creates this marker from stdout's write callback, so the
+    // record has been emitted before the test interrupts the child.
+    const readinessTimeoutMs = 5_000;
+    const readinessDeadline = Date.now() + readinessTimeoutMs;
+    while (!existsSync(readinessPath) && Date.now() < readinessDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const recordEmitted = existsSync(readinessPath);
     assert.equal(process.listenerCount("SIGINT"), beforeInt + 1, "plain run must install a real SIGINT handler");
     (process.listeners("SIGINT").at(-1) as () => void)();
 
     await assert.rejects(runPromise);
+    assert.ok(
+      recordEmitted,
+      `timed out after ${readinessTimeoutMs}ms waiting for the fixture to emit its record`
+    );
     assert.equal(process.listenerCount("SIGINT"), beforeInt, "the handler must be removed once the run settles");
 
     const outbox = new LocalDeviceOutbox({ path: queuePath });
     try {
-      const status = outbox.summary({ sourceInstanceId: "dsrc-1" });
+      const items = outbox.list({ sourceInstanceId: "dsrc-1" });
       assert.ok(
-        status.ready + status.leased + status.retrying + status.succeeded >= 1,
-        "the record emitted before the interrupt must be durably flushed, not lost"
+        items.some((item) => item.kind === "gap" && item.status === "ready"),
+        "the interrupted run must persist its ready failure gap"
+      );
+      const recordBatch = items.find((item) => item.kind === "record_batch");
+      assert.ok(recordBatch, "the record emitted before the interrupt must be durably flushed");
+      const payload = recordBatch.payload as {
+        records?: Array<{ data?: { id?: unknown }; record_key?: unknown }>;
+      };
+      assert.ok(
+        payload.records?.some((record) => record.record_key === "m-1" && record.data?.id === "m-1"),
+        "the durable record batch must contain the fixture record"
       );
     } finally {
       outbox.close();

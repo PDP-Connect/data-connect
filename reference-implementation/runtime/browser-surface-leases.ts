@@ -15,9 +15,8 @@ import {
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
 
+import { classifyConnectorIntentModality, type ConnectorManifestLike } from "../server/connection-setup-plan.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
-import { BROWSER_BOUND_KEYS } from "../server/generated/connector-registry.generated.ts";
-import { connectorRetainsSurfaceProcess } from "./browser-surface/retained-surface-connectors.ts";
 
 export const DEFAULT_NEKO_READINESS_TIMEOUT_MS = 120_000;
 /**
@@ -49,6 +48,35 @@ export interface NekoBrowserSurfaceRuntimeConfig {
   readonly host?: HostBrowserSurfaceRuntimeConfig;
   readonly leaseConfig: BrowserSurfaceLeaseConfig;
   readonly leaseSweepIntervalMs: number;
+  /**
+   * Set in host mode when PDPP_NEKO_MANAGED_CONNECTORS is unset. It is the
+   * same object as `leaseConfig.managedConnectors`, filled from connector
+   * manifests instead of from an env list.
+   */
+  readonly manifestManagedConnectors?: ManifestManagedConnectors;
+}
+
+/**
+ * The connectors that get a managed browser surface, decided by each
+ * connector's own manifest: a connector qualifies when its manifest declares a
+ * browser binding. A connector installed from the catalog qualifies the same
+ * way as a bundled one, without a connector-key list.
+ *
+ * The lease manager reads membership synchronously, so the server records each
+ * manifest it knows at boot and each manifest a run resolves.
+ */
+export class ManifestManagedConnectors extends Set<string> {
+  observe(connectorId: string, manifest: ConnectorManifestLike | null): void {
+    const aliases = managedConnectorAliases(connectorId);
+    const browserBound = classifyConnectorIntentModality(manifest) === "browser_bound";
+    for (const alias of aliases) {
+      if (browserBound) {
+        this.add(alias);
+      } else {
+        this.delete(alias);
+      }
+    }
+  }
 }
 
 /** Durable cross-run profile identity, drawn from the lease. */
@@ -89,7 +117,7 @@ export function browserSurfaceLeaseEnv(lease: BrowserSurfaceLease, surface: Brow
     PDPP_BROWSER_SURFACE_LEASE_ID: profile.leaseId,
     PDPP_BROWSER_SURFACE_PROFILE_KEY: profile.profileKey,
     PDPP_BROWSER_SURFACE_REMOTE_CDP_URL: transport.remoteCdpUrl,
-    PDPP_BROWSER_SURFACE_REQUIRED: "neko",
+    PDPP_BROWSER_SURFACE_REQUIRED: channel.streamBaseUrl ? "neko" : "host",
     PDPP_BROWSER_SURFACE_STREAM_BASE_URL: channel.streamBaseUrl,
   };
 }
@@ -252,7 +280,6 @@ export function parseNekoBrowserSurfaceRuntimeConfig(
   }
   enforceDynamicModeInvariants(shape);
   const dynamic = parseDynamicRuntimeConfig(env);
-  assertRetainedManagedConnectorReserve(shape.surfaceCap, shape.managedConnectorIds);
   return {
     dynamic,
     leaseConfig,
@@ -261,21 +288,25 @@ export function parseNekoBrowserSurfaceRuntimeConfig(
 }
 
 function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrowserSurfaceRuntimeConfig {
+  // PDPP_NEKO_MANAGED_CONNECTORS is an operator override that limits host
+  // surfaces to the listed connectors. Without it, every connector whose
+  // manifest declares a browser binding gets a host surface.
   const configuredConnectorIds = splitCsv(env.PDPP_NEKO_MANAGED_CONNECTORS);
-  const managedConnectorIds = configuredConnectorIds.length > 0 ? configuredConnectorIds : BROWSER_BOUND_KEYS;
-  const managedConnectors = new Set(managedConnectorIds.flatMap(managedConnectorAliases));
-  const defaultSurfaceCap =
-    managedConnectors.size === 0 ? 0 : Math.max(1, countRetainedManagedConnectors(managedConnectorIds) + 1);
+  const manifestManagedConnectors = configuredConnectorIds.length > 0 ? undefined : new ManifestManagedConnectors();
+  const managedConnectors =
+    manifestManagedConnectors ?? new Set(configuredConnectorIds.flatMap(managedConnectorAliases));
+  const managesConnectors = manifestManagedConnectors !== undefined || managedConnectors.size > 0;
+  // Two browser runs at once: the desktop app's long-standing host default.
+  const defaultSurfaceCap = managesConnectors ? 2 : 0;
   const surfaceCap = parseIntegerEnv(env.PDPP_NEKO_SURFACE_CAP, "PDPP_NEKO_SURFACE_CAP", defaultSurfaceCap);
-  if (managedConnectors.size > 0 && surfaceCap < 1) {
+  if (managesConnectors && surfaceCap < 1) {
     throw new Error("PDPP_NEKO_SURFACE_CAP must be an integer >= 1 when browser host mode manages connectors");
   }
-  assertRetainedManagedConnectorReserve(surfaceCap, managedConnectorIds);
   const leaseEnv = readLeaseConfigEnv(env);
   const leaseConfig = buildLeaseConfig(
     {
       configuredStaticProfileKey: undefined,
-      managedConnectorIds,
+      managedConnectorIds: configuredConnectorIds,
       managedConnectors,
       requestedSurfaceMode: "dynamic",
       staticCdpHttpUrl: undefined,
@@ -303,6 +334,7 @@ function parseHostBrowserSurfaceRuntimeConfig(env: NodeJS.ProcessEnv): NekoBrows
     },
     leaseConfig,
     leaseSweepIntervalMs,
+    ...(manifestManagedConnectors ? { manifestManagedConnectors } : {}),
   };
 }
 
@@ -318,35 +350,6 @@ function splitCsv(value: string | undefined): string[] {
         .filter(Boolean)
     ),
   ];
-}
-
-function assertRetainedManagedConnectorReserve(surfaceCap: number, managedConnectorIds: readonly string[]): void {
-  const retainedManagedConnectorCount = countRetainedManagedConnectors(managedConnectorIds);
-  if (retainedManagedConnectorCount === 0 || surfaceCap > retainedManagedConnectorCount) {
-    return;
-  }
-  // Fair-slot invariant. Credential-boundary connectors (ChatGPT) retain their
-  // surface process across routine idle/capacity reap, so each retained managed
-  // connector permanently holds at least one slot. The cap MUST leave at least
-  // one transient slot for non-retained scheduled work, or the other connectors
-  // could never acquire a surface. This is an explicit operating invariant, not
-  // an operator tuning suggestion: fail config closed rather than deadlock at
-  // runtime. Per-connection retained demand is enforced by the lease manager
-  // against live surfaces and queued requests, including restart reconciliation.
-  throw new Error(
-    `PDPP_NEKO_SURFACE_CAP (${surfaceCap}) must exceed the number of retained credential-boundary managed connectors ` +
-      `(${retainedManagedConnectorCount}) so at least one transient surface slot remains for non-retained scheduled work`
-  );
-}
-
-function countRetainedManagedConnectors(managedConnectorIds: readonly string[]): number {
-  const retained = new Set<string>();
-  for (const connectorId of managedConnectorIds) {
-    if (connectorRetainsSurfaceProcess(connectorId)) {
-      retained.add(canonicalConnectorKey(connectorId) ?? connectorId);
-    }
-  }
-  return retained.size;
 }
 
 function managedConnectorAliases(connectorId: string): string[] {

@@ -33,6 +33,18 @@ const MANIFESTS: Record<string, unknown> = {
       },
     },
   },
+  reddit: {
+    setup: {
+      modality: "static_secret",
+      credential_capture: {
+        kind: "username_password",
+        fields: [
+          { name: "username", type: "text", secret: true, env: ["REDDIT_USERNAME"] },
+          { name: "password", type: "password", secret: true, env: ["REDDIT_PASSWORD"] },
+        ],
+      },
+    },
+  },
   usaa: {
     setup: {
       modality: "static_secret",
@@ -214,6 +226,35 @@ test(
       sourceBinding,
     });
     assert.equal(env, null);
+  })
+);
+
+test(
+  "required browser credentials reach first and later runs, and a missing or revoked credential fails closed",
+  withStore(async (store) => {
+    const sourceBinding = { kind: "browser_enrollment_shell" };
+    seedConnectorInstance({ connectorId: "reddit", connectorInstanceId: "cin_reddit", ownerSubjectId: "owner_1", sourceBinding });
+    const resolve = (binding: unknown) => resolveEnv(store, {
+      connectorId: "reddit", connectorInstanceId: "cin_reddit", ownerSubjectId: "owner_1", sourceBinding: binding,
+    });
+    await assert.rejects(() => resolve(sourceBinding),
+      (err) => err instanceof ConnectorInstanceCredentialError && err.code === "credential_not_found");
+    await store.capture({
+      connectorInstanceId: "cin_reddit", credentialKind: "username_password", now: NOW,
+      ownerSubjectId: "owner_1", secret: JSON.stringify({ username: "synthetic-user", password: "synthetic-password" }),
+    });
+    const expected = { REDDIT_USERNAME: "synthetic-user", REDDIT_PASSWORD: "synthetic-password" };
+    assert.deepEqual(await resolve(sourceBinding), expected);
+    const activeBinding = { kind: "browser_collector" };
+    assert.deepEqual(await resolve(activeBinding), expected);
+    await store.revoke({ connectorInstanceId: "cin_reddit", now: LATER });
+    await assert.rejects(() => resolve(activeBinding),
+      (err) => err instanceof ConnectorInstanceCredentialError && err.code === "credential_revoked");
+    await store.capture({
+      connectorInstanceId: "cin_reddit", credentialKind: "username_password", now: LATEST,
+      ownerSubjectId: "owner_1", secret: JSON.stringify({ username: "retry-user", password: "retry-password" }),
+    });
+    assert.deepEqual(await resolve(activeBinding), { REDDIT_USERNAME: "retry-user", REDDIT_PASSWORD: "retry-password" });
   })
 );
 

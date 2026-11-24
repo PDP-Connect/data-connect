@@ -21,7 +21,7 @@ import { createSqliteConnectorInstanceStore } from "../server/stores/connector-i
 const INSTANCE_ID = "cin_local_device_control_matrix";
 const OWNER_ID = "owner_local";
 const PASSWORD = "local-device-matrix-password";
-const CLIENT_ID = "cli_longview";
+const CLIENT_ID = "pdpp_cli";
 const NOW = "2026-07-21T12:00:00.000Z";
 
 type StartedServer = Awaited<ReturnType<typeof startServer>>;

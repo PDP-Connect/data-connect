@@ -33,10 +33,9 @@ interface RuntimeRequirements {
    * from, so scheduler-readiness can preflight them WITHOUT hardcoding which
    * connector uses which path or env var — the connector declares its own
    * home directory and path layout, the RI just checks whatever it declared.
-   * Mirrors the same override contract the connector's own code already
-   * implements (e.g. packages/polyfill-connectors/connectors/codex/index.ts's
-   * CODEX_HOME/CODEX_SESSIONS_DIR/CODEX_STATE_DB); this module reads that
-   * contract generically instead of re-deriving it by connector name.
+   * Mirrors the override contract declared by the installed connector profile;
+   * this module reads that contract generically instead of re-deriving it by
+   * connector name or depending on a locally vendored source path.
    */
   readonly local_paths?: {
     /** Env var overriding the connector's home directory (e.g. "CODEX_HOME"). */

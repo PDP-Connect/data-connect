@@ -118,7 +118,7 @@ const HTML_ESCAPE_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 const AS_URL = stripSlash(process.env.AS_URL || "http://localhost:7662");
 const RS_URL = stripSlash(process.env.RS_URL || "http://localhost:7663");
-const CLIENT_LABEL = process.env.CLIENT_LABEL || "Reference Client (Longview)";
+const CLIENT_LABEL = process.env.CLIENT_LABEL || "Reference Client (example app)";
 
 function stripSlash(value: string): string {
   return value.replace(TRAILING_SLASHES_RE, "");

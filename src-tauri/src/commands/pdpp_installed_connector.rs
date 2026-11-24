@@ -10,7 +10,7 @@ use super::pdpp_browser::{PdppBrowserBinding, PdppBrowserLease};
 use super::pdpp_collection_state::{
     clear_connection_setup_complete, commit_terminal_run, is_connection_setup_complete,
     load_connection_state, mark_connection_setup_complete, stage_succeeded_run,
-    PdppCollectionConnectionState, DEFAULT_CONNECTION_ID,
+    PdppCollectionConnectionState,
 };
 use super::pdpp_connector::{
     supervise_pdpp_connector, PdppConnectorCommand, PdppEvent, PdppInteractionResponder,
@@ -20,6 +20,7 @@ use super::pdpp_connector::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -288,7 +289,7 @@ fn prepare_run(
     let control = register_run(
         &request.run_id,
         &request.connector_id,
-        request.connection_id(),
+        request.connection_id().as_ref(),
     )?;
     Ok(PreparedPdppRun { control, import })
 }
@@ -302,7 +303,7 @@ fn claim_request_import(
         .map(|path| {
             super::pdpp_manual_import::ImportedDirectory::claim(
                 &request.connector_id,
-                request.connection_id(),
+                request.connection_id().as_ref(),
                 path,
             )
         })
@@ -336,14 +337,15 @@ fn start_installed_pdpp_connector_run_impl(
     import: Option<super::pdpp_manual_import::ImportedDirectory>,
 ) -> Result<InstalledPdppRunCompletion, String> {
     validate_request_metadata(&request)?;
+    let connection_id = request.connection_id();
     let resource_dir = app.path().resource_dir().ok();
     let runtime_root = resolve_pdpp_runtime_root(resource_dir.as_deref())?;
     let (resolved, _import) = resolve_connector_for_run(&request, import, || {
         resolve_active_installed_pdpp_connector(&request.connector_id, &runtime_root)
     })?;
     validate_request(&request, &resolved.manifest)?;
-    let saved_state = load_connection_state(&resolved.connector_id, request.connection_id())?;
-    let setup_complete = browser_setup_complete(&resolved, request.connection_id())?;
+    let saved_state = load_connection_state(&resolved.connector_id, connection_id.as_ref())?;
+    let setup_complete = browser_setup_complete(&resolved, connection_id.as_ref())?;
     let secrets = resolve_child_secrets_for_connection(&request, &resolved, setup_complete)?;
     let start_state = persisted_start_state(&request, &saved_state);
     let export_accumulator = Arc::new(Mutex::new(PdppExportAccumulator::default()));
@@ -403,7 +405,7 @@ fn start_installed_pdpp_connector_run_impl(
         commit_terminal_run(
             &result.status,
             &resolved.connector_id,
-            request.connection_id(),
+            connection_id.as_ref(),
             &request.collection_mode,
             &snapshot_reset_streams,
             &records_by_stream,
@@ -414,7 +416,7 @@ fn start_installed_pdpp_connector_run_impl(
         // commit have succeeded. A failed launch, login, cancellation, or
         // timeout must leave the next attempt in owner-attended setup.
         if should_mark_browser_setup_complete(&resolved, &request, &result.status) {
-            mark_connection_setup_complete(&resolved.connector_id, request.connection_id())?;
+            mark_connection_setup_complete(&resolved.connector_id, connection_id.as_ref())?;
         }
         Some(export)
     } else {
@@ -771,7 +773,7 @@ fn validate_request_metadata(request: &StartInstalledPdppConnectorRequest) -> Re
             "PDPP timeoutSeconds must be between 1 and {MAX_TIMEOUT_SECONDS}"
         ));
     }
-    validate_connection_id(request.connection_id())?;
+    validate_connection_id(request.connection_id().as_ref())?;
     Ok(())
 }
 
@@ -787,7 +789,7 @@ fn validate_run_id(run_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_connection_id(connection_id: &str) -> Result<(), String> {
+pub(super) fn validate_connection_id(connection_id: &str) -> Result<(), String> {
     if connection_id.is_empty()
         || connection_id.len() > MAX_RUN_ID_BYTES
         || !connection_id
@@ -823,11 +825,16 @@ fn persisted_start_state(
 }
 
 impl StartInstalledPdppConnectorRequest {
-    fn connection_id(&self) -> &str {
+    fn connection_id(&self) -> Cow<'_, str> {
         self.connection_id
             .as_deref()
             .filter(|connection_id| !connection_id.is_empty())
-            .unwrap_or(DEFAULT_CONNECTION_ID)
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|| {
+                Cow::Owned(super::pdpp_connections::legacy_connection_id(
+                    &self.connector_id,
+                ))
+            })
     }
 }
 
@@ -1435,6 +1442,7 @@ fn resolve_child_secrets_for_connection(
     resolved: &ResolvedInstalledPdppConnector,
     setup_complete: bool,
 ) -> Result<PdppChildSecrets, String> {
+    let connection_id = request.connection_id();
     if is_manual_upload_connector(&resolved.manifest) {
         if request.github_token.is_some() || request.setup_secrets.is_some() {
             return Err("manual/upload PDPP connectors do not accept credentials".into());
@@ -1445,7 +1453,7 @@ fn resolve_child_secrets_for_connection(
             .ok_or("manual/upload PDPP connector requires importDirectory")?;
         let import_directory = super::pdpp_manual_import::validate_import_directory(
             &resolved.connector_id,
-            request.connection_id(),
+            connection_id.as_ref(),
             import_directory,
         )?;
         let import_env = manual_upload_import_env(&resolved.manifest).ok_or(
@@ -2281,7 +2289,13 @@ fn resolve_node_program_from(executable: &Path, path: Option<&OsStr>) -> Result<
     let executable_dir = executable
         .parent()
         .ok_or("DataConnect executable has no parent directory")?;
-    let bundled = executable_dir.join(BUNDLED_NODE_NAME);
+    let helper =
+        executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+    let bundled = if helper.is_file() {
+        helper
+    } else {
+        executable_dir.join(BUNDLED_NODE_NAME)
+    };
     if bundled.exists() {
         if !bundled.is_file() {
             return Err(format!(
@@ -2462,6 +2476,7 @@ fn redact_secrets(value: &str, secrets: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::pdpp_collection_state::DEFAULT_CONNECTION_ID;
     use tempfile::TempDir;
 
     const CHATGPT_CONNECTOR_INSTALL_ID: &str = "chatgpt-pdpp";
@@ -2626,6 +2641,43 @@ mod tests {
                 .unwrap_err()
                 .contains("not in the connector manifest"));
             assert!(build_export_data(&resolved, &request, &state, &[]).is_err());
+        }
+    }
+
+    #[test]
+    fn discovered_platform_reports_whether_it_keeps_a_browser_session() {
+        let resource_temp = tempfile::tempdir().unwrap();
+        let runtime = resource_temp.path().join("pdpp-runtime");
+        fs::create_dir_all(runtime.join("node_modules/p-queue")).unwrap();
+        fs::create_dir_all(runtime.join("node_modules/patchright")).unwrap();
+        fs::write(runtime.join("connector-loader.mjs"), "export {};\n").unwrap();
+        fs::write(
+            runtime.join("connector-loader-bootstrap.mjs"),
+            "export {};\n",
+        )
+        .unwrap();
+        fs::write(runtime.join("node_modules/p-queue/package.json"), "{}\n").unwrap();
+        fs::write(runtime.join("node_modules/patchright/package.json"), "{}\n").unwrap();
+        for (bindings, expected) in [
+            (json!({ "network": { "required": true } }), false),
+            (
+                json!({ "network": { "required": true }, "browser": { "required": true } }),
+                true,
+            ),
+        ] {
+            let mut manifest = github_manifest();
+            manifest["runtime_requirements"]["bindings"] = bindings;
+            let (temp, mut install) = install_fixture(manifest, success_script());
+            install.root_path = temp.path().to_string_lossy().into_owned();
+            let platforms = super::super::connector::load_pdpp_platforms_with_resource_dir(
+                [install],
+                Some(resource_temp.path()),
+            );
+            assert_eq!(platforms[0].requires_browser, Some(expected));
+            assert_eq!(
+                serde_json::to_value(&platforms[0]).unwrap()["requiresBrowser"],
+                json!(expected)
+            );
         }
     }
 
@@ -3527,6 +3579,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
             timeout_seconds: Some(5),
             import_directory: None,
         }
+    }
+
+    #[test]
+    fn request_connection_id_reuses_legacy_owner_id_unless_an_account_id_is_supplied() {
+        let mut request = request_with_token("test-token");
+        request.connector_id = "chatgpt-pdpp".into();
+        assert_eq!(request.connection_id().into_owned(), "chatgpt-pdpp-owner");
+
+        request.connection_id = Some("connection-account-two".into());
+        assert_eq!(
+            request.connection_id().into_owned(),
+            "connection-account-two"
+        );
     }
 
     fn sorted_env_bytes(environment: &HashMap<String, String>) -> Vec<u8> {
@@ -5163,6 +5228,24 @@ setInterval(() => {}, 1000);
     }
 
     #[test]
+    fn prefers_background_node_helper_without_path() {
+        let ambient_node = PathBuf::from(resolve_node_program().unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("Contents/MacOS/dataconnect");
+        let executable_dir = executable.parent().unwrap();
+        let helper =
+            executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+        fs::create_dir_all(executable_dir).unwrap();
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        crate::test_executable::copy(&ambient_node, &helper);
+        fs::write(executable_dir.join(BUNDLED_NODE_NAME), "invalid old runtime").unwrap();
+        assert_eq!(
+            Path::new(&resolve_node_program_from(&executable, None).unwrap()),
+            helper
+        );
+    }
+
+    #[test]
     fn starts_connector_with_bundled_node_and_no_node_on_path() {
         let ambient_node = PathBuf::from(resolve_node_program().unwrap());
         let app_dir = tempfile::tempdir().unwrap();
@@ -5173,7 +5256,7 @@ setInterval(() => {}, 1000);
         });
         fs::write(&fake_app, b"fixture app").unwrap();
         let bundled_node = app_dir.path().join(BUNDLED_NODE_NAME);
-        fs::copy(&ambient_node, &bundled_node).unwrap();
+        crate::test_executable::copy(&ambient_node, &bundled_node);
 
         let resolved_node = resolve_node_program_from(&fake_app, Some(OsStr::new(""))).unwrap();
         assert_eq!(Path::new(&resolved_node), bundled_node);

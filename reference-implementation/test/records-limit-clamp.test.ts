@@ -215,24 +215,76 @@ test("clampRecordsPageLimit clamps an over-max limit and flags it", () => {
   });
 });
 
-test("clampRecordsPageLimit falls back to the default for non-positive / unparseable limits without flagging a clamp", () => {
-  // A bad limit is not a clamp — there is nothing to honestly report; the
-  // default page is the contract.
-  assert.deepEqual(clampRecordsPageLimit("0"), {
-    clamped: false,
-    limit: RECORDS_DEFAULT_PAGE_LIMIT,
-    requested: null,
+// spec-core §8: `limit` is an integer, and "unsupported query shapes MUST be
+// rejected with HTTP 400 and MUST NOT be silently ignored". Only an over-max
+// integer is clamped; a malformed value is an `invalid_request` on `limit`.
+const MALFORMED_LIMITS: readonly unknown[] = [
+  "",
+  "abc",
+  "0",
+  "-1",
+  "-5",
+  "+5",
+  " 5",
+  "5 ",
+  "1junk",
+  "1.5",
+  "1e2",
+  "0x10",
+  "000",
+  ["1", "2"],
+  { x: "1" },
+  true,
+  0,
+  -5,
+  1.5,
+  Number.NaN,
+  Number.POSITIVE_INFINITY,
+];
+
+test("clampRecordsPageLimit rejects malformed limits as invalid_request on param limit", () => {
+  for (const raw of MALFORMED_LIMITS) {
+    assert.throws(
+      () => clampRecordsPageLimit(raw),
+      (err: unknown) => {
+        const typed = err as Error & { code?: string; param?: string };
+        return typed.code === "invalid_request" && typed.param === "limit";
+      },
+      `limit=${JSON.stringify(raw)} must be rejected`
+    );
+  }
+});
+
+test("clampRecordsPageLimit clamps integers of any length above the maximum", () => {
+  // spec-core §8: "A request for more than 100 is clamped to 100 ... not an
+  // error." The digits decide, so values past 2^53 still clamp.
+  const twoPow53 = "9007199254740992";
+  assert.deepEqual(clampRecordsPageLimit(twoPow53), { clamped: true, limit: 100, requested: 2 ** 53 });
+  const thirtyDigits = "1".padEnd(30, "0");
+  assert.deepEqual(clampRecordsPageLimit(thirtyDigits), { clamped: true, limit: 100, requested: 1e29 });
+  assert.deepEqual(clampRecordsPageLimit(`000${thirtyDigits}`), { clamped: true, limit: 100, requested: 1e29 });
+  assert.deepEqual(clampRecordsPageLimit("9".repeat(400)), {
+    clamped: true,
+    limit: 100,
+    requested: Number.MAX_VALUE,
   });
-  assert.deepEqual(clampRecordsPageLimit("-5"), {
-    clamped: false,
-    limit: RECORDS_DEFAULT_PAGE_LIMIT,
-    requested: null,
+  assert.deepEqual(clampRecordsPageLimit(2 ** 60), { clamped: true, limit: 100, requested: 2 ** 60 });
+});
+
+test("clampRecordsPageLimit accepts the integer boundaries 1, 100, and 101", () => {
+  assert.deepEqual(clampRecordsPageLimit("1"), { clamped: false, limit: 1, requested: 1 });
+  assert.deepEqual(clampRecordsPageLimit("100"), { clamped: false, limit: 100, requested: 100 });
+  assert.deepEqual(clampRecordsPageLimit("101"), { clamped: true, limit: 100, requested: 101 });
+  assert.deepEqual(clampRecordsPageLimit("0010"), { clamped: false, limit: 10, requested: 10 });
+  assert.deepEqual(clampRecordsPageLimit("007"), { clamped: false, limit: 7, requested: 7 });
+  assert.deepEqual(clampRecordsPageLimit("0100"), { clamped: false, limit: 100, requested: 100 });
+  assert.deepEqual(clampRecordsPageLimit("000101"), { clamped: true, limit: 100, requested: 101 });
+  assert.deepEqual(clampRecordsPageLimit(String(Number.MAX_SAFE_INTEGER)), {
+    clamped: true,
+    limit: 100,
+    requested: Number.MAX_SAFE_INTEGER,
   });
-  assert.deepEqual(clampRecordsPageLimit("not-a-number"), {
-    clamped: false,
-    limit: RECORDS_DEFAULT_PAGE_LIMIT,
-    requested: null,
-  });
+  assert.deepEqual(clampRecordsPageLimit(null), { clamped: false, limit: RECORDS_DEFAULT_PAGE_LIMIT, requested: null });
 });
 
 // ─── queryRecords: end-to-end envelope coverage ──────────────────────────────
@@ -262,6 +314,21 @@ test("an in-range limit returns no limit_clamped warning", async () => {
     const response = await queryRecords(target(CONNECTOR_ID, INSTANCE_A), STREAM, grant, { limit: 50 }, manifest);
     assert.equal(response.data.length, 50);
     assert.equal(findLimitClampedWarning(response), null, "no clamp warning for an in-range limit");
+  });
+});
+
+test("queryRecords rejects a malformed limit instead of coercing it to a page size", async () => {
+  await withSeededDb(150, async () => {
+    for (const limit of ["1junk", "abc", "-1", ""]) {
+      await assert.rejects(
+        queryRecords(target(CONNECTOR_ID, INSTANCE_A), STREAM, grant, { limit }, manifest),
+        (err: unknown) => {
+          const typed = err as Error & { code?: string; param?: string };
+          return typed.code === "invalid_request" && typed.param === "limit";
+        },
+        `limit=${JSON.stringify(limit)} must be rejected`
+      );
+    }
   });
 });
 

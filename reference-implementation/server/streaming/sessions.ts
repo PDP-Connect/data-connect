@@ -20,6 +20,7 @@ interface StreamingSessionRecord {
   issued_at: number;
   run_id: string;
   token_hash: string;
+  owner_session_hash: string | null;
   viewport: unknown | null;
 }
 
@@ -36,6 +37,7 @@ interface MintStreamingSessionRequest {
   run_id?: unknown;
   ttlMs?: unknown;
   viewport?: unknown;
+  owner_session_hash?: unknown;
 }
 
 interface AttachStreamingSessionRequest {
@@ -84,15 +86,24 @@ function toStreamingSessionRecord(session: SurfaceSessionRecord): StreamingSessi
     run_id: session.surfaceSessionId,
     token_hash: session.tokenHash,
     viewport: session.viewport,
+    owner_session_hash: null,
   };
 }
 
 export function createStreamingSessionStore(options?: StreamingSessionStoreOptions): StreamingSessionStore {
   const store = createSurfaceSessionStore(options);
+  const ownerSessionHashes = new Map<string, { expiresAt: number; hash: string }>();
+  const now = options?.now ?? Date.now;
+
+  function record(session: SurfaceSessionRecord): StreamingSessionRecord {
+    const owner = ownerSessionHashes.get(session.tokenHash);
+    if (owner && owner.expiresAt <= now()) ownerSessionHashes.delete(session.tokenHash);
+    return { ...toStreamingSessionRecord(session), owner_session_hash: owner?.hash ?? null };
+  }
 
   return {
     attach(request) {
-      return toStreamingSessionRecord(
+      return record(
         store.attach({
           actionId: request.interaction_id,
           surfaceSessionId: request.run_id,
@@ -101,14 +112,14 @@ export function createStreamingSessionStore(options?: StreamingSessionStoreOptio
       );
     },
     authorize(request) {
-      return toStreamingSessionRecord(store.authorize({ token: request.token }));
+      return record(store.authorize({ token: request.token }));
     },
     getSummary(request) {
       const session = store.getSummary({
         actionId: request.interaction_id,
         surfaceSessionId: request.run_id,
       });
-      return session ? toStreamingSessionRecord(session) : null;
+      return session ? record(session) : null;
     },
     invalidate(request = {}) {
       const session = store.invalidate({
@@ -116,7 +127,7 @@ export function createStreamingSessionStore(options?: StreamingSessionStoreOptio
         reason: request.reason,
         surfaceSessionId: request.run_id,
       });
-      return session ? toStreamingSessionRecord(session) : null;
+      return session ? record(session) : null;
     },
     mint(request = {}) {
       const result = store.mint({
@@ -127,9 +138,18 @@ export function createStreamingSessionStore(options?: StreamingSessionStoreOptio
         ttlMs: request.ttlMs,
         viewport: request.viewport,
       });
+      for (const [tokenHash, entry] of ownerSessionHashes) {
+        if (entry.expiresAt <= now()) ownerSessionHashes.delete(tokenHash);
+      }
+      if (typeof request.owner_session_hash === "string" && !ownerSessionHashes.has(result.session.tokenHash)) {
+        ownerSessionHashes.set(result.session.tokenHash, {
+          expiresAt: result.session.expiresAt,
+          hash: request.owner_session_hash,
+        });
+      }
       return {
         idempotency_replayed: result.idempotencyReplayed,
-        session: toStreamingSessionRecord(result.session),
+        session: record(result.session),
         token: result.token,
       };
     },

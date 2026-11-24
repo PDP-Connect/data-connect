@@ -5,11 +5,21 @@
 import { createHash } from "node:crypto"
 import { spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
-import { readFileSync, statSync } from "node:fs"
+import { lstatSync, readFileSync, readlinkSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, join, relative, resolve } from "node:path"
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path"
 import { createInterface } from "node:readline"
+import { assertStagedConsoleConnectors } from "./check-staged-console-connectors.mjs"
 import { isMainModule } from "./is-main-module.js"
+import { MACOS_NODE_HELPER } from "./package-macos-node-helper.mjs"
 
 const REQUIRED_PATH_FRAGMENTS = [
   "connectors/lock.json",
@@ -144,7 +154,7 @@ function packagedEntryPath(entry, platform) {
 export function assertPackagedNode(entries, artifactName, platform) {
   const expectedPath = {
     linux: "usr/bin/pdpp-node",
-    macos: "contents/macos/pdpp-node",
+    macos: MACOS_NODE_HELPER.toLowerCase(),
     windows: "pdpp-node.exe",
   }[platform]
   if (!expectedPath) fail(`Unsupported Node sidecar platform: ${platform}`)
@@ -183,6 +193,70 @@ export function assertPackagedBrowser(entries, artifactName, platform) {
     })
   if (!hasBrowserExecutable) {
     fail(`${artifactName} is missing its packaged Chromium executable`)
+  }
+}
+
+// A macOS framework keeps its content in Versions/<version>. Versions/Current
+// is a relative symlink to that directory, and each other entry at the
+// framework root (the binary, Resources, Helpers, Libraries) is a relative
+// symlink into Versions/Current. `codesign --verify --strict` rejects a
+// framework whose root holds real files: "embedded framework contains
+// modified or invalid version". Tauri's resource copy drops directory
+// symlinks and copies the target of a file symlink. v0.7.59 shipped a
+// Chromium framework in that state, and the downstream signer could not
+// sign it.
+function findFrameworks(root) {
+  return readdirSync(root, { withFileTypes: true }).flatMap(entry => {
+    // Dirent reports a symlink as a symlink, so links are not followed.
+    if (!entry.isDirectory()) return []
+    const child = join(root, entry.name)
+    const nested = findFrameworks(child)
+    return entry.name.endsWith(".framework") ? [child, ...nested] : nested
+  })
+}
+
+function assertFrameworkLink(framework, entry, label) {
+  const link = join(framework, entry)
+  let stats
+  try {
+    stats = lstatSync(link)
+  } catch {
+    fail(`${label} is missing ${entry}`)
+  }
+  if (!stats.isSymbolicLink()) {
+    const kind = stats.isDirectory() ? "directory" : "file"
+    fail(`${label}: ${entry} must be a symlink, found a real ${kind}`)
+  }
+  const target = readlinkSync(link)
+  const resolved = resolve(dirname(link), target)
+  if (isAbsolute(target) || !resolved.startsWith(framework + sep)) {
+    fail(`${label}: ${entry} -> ${target} must stay inside the framework`)
+  }
+  if (!existsSync(link)) fail(`${label}: ${entry} -> ${target} is dangling`)
+  return target
+}
+
+export function assertMacFrameworkLayout(browsersRoot, artifactName) {
+  const frameworks = existsSync(browsersRoot)
+    ? findFrameworks(browsersRoot)
+    : []
+  if (frameworks.length === 0) {
+    fail(`${artifactName} carries no Chromium framework under ${browsersRoot}`)
+  }
+  for (const framework of frameworks) {
+    const label = `${artifactName} ${relative(browsersRoot, framework)}`
+    const current = join("Versions", "Current")
+    assertFrameworkLink(framework, current, label)
+    if (!statSync(join(framework, current)).isDirectory()) {
+      fail(`${label}: ${current} must point to a version directory`)
+    }
+    for (const entry of readdirSync(framework)) {
+      if (entry === "Versions") continue
+      const target = assertFrameworkLink(framework, entry, label)
+      if (!target.startsWith("Versions/Current/")) {
+        fail(`${label}: ${entry} -> ${target} must point into Versions/Current`)
+      }
+    }
   }
 }
 
@@ -299,6 +373,23 @@ export function assertPackagedReferenceStacks(root, artifactName) {
       fail(`${artifactName} is missing reference-stack/${stack}/manifest.json`)
     }
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"))
+
+    if (stack === "console") {
+      if (typeof manifest.server !== "string") {
+        fail(
+          `${artifactName} reference-stack/console/manifest.json has no server`
+        )
+      }
+      try {
+        assertStagedConsoleConnectors({
+          label: `${artifactName} reference-stack/console`,
+          serverRelativePath: manifest.server,
+          stageRoot: stackRoot,
+        })
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error))
+      }
+    }
 
     if (Array.isArray(manifest.files)) {
       const prefixed = manifest.files[0]?.sha256?.startsWith("sha256:") ?? false
@@ -465,9 +556,9 @@ export function selectMacAppExecutables(
     )
   }
 
-  const nodeMatches = executableNames.filter(name => name === "pdpp-node")
+  const nodeMatches = executableNames.filter(name => name === MACOS_NODE_HELPER)
   if (nodeMatches.length !== 1) {
-    fail(`${artifactName} must contain exactly one pdpp-node sidecar`)
+    fail(`${artifactName} must contain exactly one background Node helper`)
   }
   if (declaredExecutable === "pdpp-node") {
     fail(`${artifactName} app executable must be distinct from pdpp-node`)
@@ -476,6 +567,21 @@ export function selectMacAppExecutables(
   return {
     appExecutable: declaredExecutable,
     nodeSidecar: nodeMatches[0],
+  }
+}
+
+export function assertMacNodeHelperInfo(info, artifactName) {
+  const expected = {
+    CFBundleExecutable: "DataConnect",
+    CFBundleIdentifier: "dev.dataconnect.node",
+    CFBundleName: "DataConnect",
+    CFBundleDisplayName: "DataConnect",
+    CFBundlePackageType: "APPL",
+    LSBackgroundOnly: true,
+  }
+  for (const [key, value] of Object.entries(expected)) {
+    if (info[key] !== value)
+      fail(`${artifactName} Node helper has invalid ${key}`)
   }
 }
 
@@ -535,6 +641,10 @@ function verifyMacApp(
   }
   assertPackagedNode(entries, artifactName, "macos")
   assertPackagedBrowser(entries, artifactName, "macos")
+  assertMacFrameworkLayout(
+    join(app, "Contents", "Resources", "playwright-runner", "dist", "browsers"),
+    artifactName
+  )
 
   const executableDirectory = join(app, "Contents", "MacOS")
   const executableNames = readdirSync(executableDirectory, {
@@ -545,6 +655,28 @@ function verifyMacApp(
   const declaredExecutable = readMacBundleExecutable(
     join(app, "Contents", "Info.plist")
   )
+  if (existsSync(join(executableDirectory, "pdpp-node"))) {
+    fail(`${artifactName} still carries a foreground Node sidecar`)
+  }
+  const helperStat = lstatSync(join(app, MACOS_NODE_HELPER))
+  if (!helperStat.isFile() || !(helperStat.mode & 0o111)) {
+    fail(
+      `${artifactName} Node helper must be a regular executable with execute permission`
+    )
+  }
+  assertMacNodeHelperInfo(
+    JSON.parse(
+      run("plutil", [
+        "-convert",
+        "json",
+        "-o",
+        "-",
+        join(app, dirname(MACOS_NODE_HELPER), "../Info.plist"),
+      ])
+    ),
+    artifactName
+  )
+  executableNames.push(MACOS_NODE_HELPER)
   const { appExecutable, nodeSidecar } = selectMacAppExecutables(
     executableNames,
     declaredExecutable,
@@ -553,7 +685,7 @@ function verifyMacApp(
 
   const binaries = [
     join(executableDirectory, appExecutable),
-    join(executableDirectory, nodeSidecar),
+    join(app, nodeSidecar),
     join(
       app,
       "Contents",
@@ -583,6 +715,63 @@ function verifyMacApp(
   }
 }
 
+// hdiutil fails transiently on GitHub's macOS runners: attach can exit with an
+// empty message, and detach can report "Resource busy" while the volume is
+// still in use. Each call gets three tries with a growing pause between them.
+// The last detach try adds -force, so a volume that stays busy is still
+// unmounted. When every try fails, the error carries each try's message.
+const HDIUTIL_ATTEMPTS = 3
+const HDIUTIL_RETRY_DELAY_MS = 1000
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds)
+}
+
+function runHdiutil(args, lastAttemptArgs, runCommand, pause) {
+  const failures = []
+  for (let attempt = 1; attempt <= HDIUTIL_ATTEMPTS; attempt += 1) {
+    const attemptArgs = attempt === HDIUTIL_ATTEMPTS ? lastAttemptArgs : args
+    try {
+      return runCommand("hdiutil", attemptArgs)
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error))
+      if (attempt < HDIUTIL_ATTEMPTS) pause(attempt * HDIUTIL_RETRY_DELAY_MS)
+    }
+  }
+  fail(
+    [
+      `hdiutil ${args[0]} failed after ${HDIUTIL_ATTEMPTS} attempts:`,
+      ...failures.map((message, index) => `  attempt ${index + 1}: ${message}`),
+    ].join("\n")
+  )
+}
+
+export function attachDmg(
+  dmgPath,
+  mountRoot,
+  runCommand = run,
+  pause = sleepSync
+) {
+  const args = [
+    "attach",
+    "-readonly",
+    "-nobrowse",
+    "-mountpoint",
+    mountRoot,
+    dmgPath,
+  ]
+  runHdiutil(args, args, runCommand, pause)
+}
+
+export function detachDmg(mountRoot, runCommand = run, pause = sleepSync) {
+  runHdiutil(
+    ["detach", mountRoot],
+    ["detach", "-force", mountRoot],
+    runCommand,
+    pause
+  )
+}
+
 function verifyMacArtifacts(
   bundleRoot,
   expectedArch,
@@ -609,14 +798,7 @@ function verifyMacArtifacts(
   )
   let attached = false
   try {
-    run("hdiutil", [
-      "attach",
-      "-readonly",
-      "-nobrowse",
-      "-mountpoint",
-      mountRoot,
-      dmgArtifacts[0],
-    ])
+    attachDmg(dmgArtifacts[0], mountRoot)
     attached = true
     const mountedApps = findAppBundles(mountRoot)
     if (mountedApps.length !== 1) {
@@ -630,7 +812,7 @@ function verifyMacArtifacts(
       verifyReferenceStacks
     )
   } finally {
-    if (attached) run("hdiutil", ["detach", mountRoot])
+    if (attached) detachDmg(mountRoot)
     rmSync(mountRoot, { recursive: true, force: true })
   }
 }

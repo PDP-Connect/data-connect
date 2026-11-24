@@ -3,6 +3,7 @@
 
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -14,11 +15,13 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import {
   buildManifest,
   installStagedDependencies,
   launchScript,
+  writeLaunchScript,
   manifestTarget,
   pruneForeignLibcPackages,
   pruneForeignPlatformPrebuilds,
@@ -31,11 +34,15 @@ import {
 import { parseArgs as parseVerifyArgs } from "./verify-reference-stack.mjs"
 
 const temporaryRoots = []
+const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 function fixtureRoot() {
   const root = mkdtempSync(join(tmpdir(), "reference-stack-fixture-"))
   temporaryRoots.push(root)
   mkdirSync(join(root, "reference-implementation", "server"), {
+    recursive: true,
+  })
+  mkdirSync(join(root, "reference-implementation", "scripts"), {
     recursive: true,
   })
   mkdirSync(join(root, "node_modules", "tsx"), { recursive: true })
@@ -50,6 +57,23 @@ function fixtureRoot() {
     join(root, "reference-implementation", "server", "index.ts"),
     "export {}\n"
   )
+  writeFileSync(
+    join(root, "reference-implementation", "scripts", "is-main-module.js"),
+    "export function isMainModule() { return true }\n"
+  )
+  for (const file of [
+    "connector-dependency-loader.mjs",
+    "connector-dependency-loader-bootstrap.mjs",
+  ]) {
+    cpSync(
+      join(
+        projectRoot,
+        "reference-implementation",
+        file
+      ),
+      join(root, "reference-implementation", file)
+    )
+  }
   writeFileSync(join(root, "node_modules", "tsx", "package.json"), "{}\n")
   writeFileSync(
     join(root, "node_modules", "patchright", "package.json"),
@@ -72,6 +96,7 @@ function fixtureRoot() {
   )
   mkdirSync(join(root, "scripts"), { recursive: true })
   writeFileSync(join(root, "scripts", "ensure-reference-stack.js"), "// recipe v1\n")
+  writeFileSync(join(root, "scripts", "is-main-module.js"), "// helper v1\n")
   writeFileSync(join(root, "scripts", "stage-generations.js"), "// helper v1\n")
   return root
 }
@@ -227,7 +252,7 @@ describe("reference stack staging contract", () => {
     const second = fixtureRoot()
     for (const root of [first, second]) {
       writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-      writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+      writeLaunchScript(root)
     }
     const firstManifest = buildManifest({
       nodeBinary: process.execPath,
@@ -257,7 +282,7 @@ describe("reference stack staging contract", () => {
   it("records the Tauri target triple when beforeBuildCommand omits --target", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const previous = process.env.TAURI_ENV_TARGET_TRIPLE
     process.env.TAURI_ENV_TARGET_TRIPLE = "x86_64-unknown-linux-gnu"
     try {
@@ -279,7 +304,7 @@ describe("reference stack staging contract", () => {
   it("rejects a changed staged file", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const manifest = buildManifest({
       nodeBinary: process.execPath,
       projectRoot: root,
@@ -297,7 +322,12 @@ describe("reference stack staging contract", () => {
 
   it("keeps the launcher on the shipped Node ABI and disables first-boot downloads", () => {
     const source = launchScript()
-    expect(source).toContain('process.execPath, ["--import", "tsx"')
+    expect(source).toContain(
+      'console.info("[reference-implementation] launch entry started")'
+    )
+    expect(source).toContain('NODE_ENV: "production"')
+    expect(source).toContain('"--import",\n  "tsx"')
+    expect(source).toContain("parent-lifeline.mjs")
     expect(source).toContain("PDPP_DB_PATH")
     expect(source).toContain(
       'PDPP_BIND_HOST: process.env.PDPP_BIND_HOST || "127.0.0.1"'
@@ -437,7 +467,7 @@ describe("reference stack staging contract", () => {
   it("reuses a valid staged root whose manifest matches the current build", () => {
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const manifest = buildManifest({
       nodeBinary: process.execPath,
       projectRoot: root,
@@ -491,6 +521,16 @@ describe("reference stack staging contract", () => {
         })
 
         expect(explicitStage.reused).toBe(false)
+        expect(
+          existsSync(
+            join(
+              explicitStage.root,
+              "reference-implementation",
+              "scripts",
+              "is-main-module.js"
+            )
+          )
+        ).toBe(true)
         expect(hookStage).toEqual({
           manifest: explicitStage.manifest,
           reused: true,
@@ -512,7 +552,7 @@ describe("reference stack staging contract", () => {
     // reuse must reject it instead of trusting metadata alone.
     const root = fixtureRoot()
     writeFileSync(join(root, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(root, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(root)
     const manifest = buildManifest({
       nodeBinary: process.execPath,
       projectRoot: root,
@@ -607,7 +647,7 @@ describe("reference stack staging contract", () => {
     writeFileSync(join(project, "package-lock.json"), '{"lockfileVersion":3}\n')
     const stage = fixtureRoot()
     writeFileSync(join(stage, "package-lock.json"), '{"lockfileVersion":3}\n')
-    writeFileSync(join(stage, "launch.mjs"), launchScript(), { mode: 0o755 })
+    writeLaunchScript(stage)
 
     const manifest = buildManifest({
         nodeBinary: process.execPath,
@@ -638,7 +678,10 @@ describe("reference stack staging contract", () => {
     mkdirSync(join(project, "reference-implementation"), { recursive: true })
     writeFileSync(
       join(project, "reference-implementation", "package.json"),
-      JSON.stringify({ dependencies: { tsx: "^4.23.13" } })
+      JSON.stringify({
+        dependencies: { tsx: "^4.23.13" },
+        optionalDependencies: { "@opendatalabs/remote-surface": "^1.5.2" },
+      })
     )
     writeFileSync(
       join(project, "package.json"),
@@ -665,7 +708,10 @@ describe("reference stack staging contract", () => {
       npmRecorderPath,
       `const fs = require("node:fs")
 const invocations = JSON.parse(fs.readFileSync(${JSON.stringify(invocationsPath)}, "utf8"))
-invocations.push(process.argv.slice(2))
+invocations.push({
+  args: process.argv.slice(2),
+  packageJson: JSON.parse(fs.readFileSync("package.json", "utf8")),
+})
 fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations))
 `
     )
@@ -684,9 +730,14 @@ fs.writeFileSync(${JSON.stringify(invocationsPath)}, JSON.stringify(invocations)
     )
 
     const invocations = JSON.parse(readFileSync(invocationsPath, "utf8"))
-    const installArgs = invocations.find(args => args[0] === "install")
-    expect(installArgs).toBeDefined()
-    expect(installArgs).toContain("--allow-git=all")
-    expect(installArgs).not.toContain("--no-package-lock")
+    const install = invocations.find(
+      invocation => invocation.args[0] === "install"
+    )
+    expect(install).toBeDefined()
+    expect(install.args).toContain("--allow-git=all")
+    expect(install.args).not.toContain("--no-package-lock")
+    expect(install.packageJson.dependencies["@opendatalabs/remote-surface"]).toBe(
+      "^1.5.2"
+    )
   })
 })

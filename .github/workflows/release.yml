@@ -1,16 +1,20 @@
 name: Release manual-install artifacts
 
 on:
-  # Exercise the matrix on branch promotions and tag builds. The release event
-  # remains the signed artifact publication path.
-  push:
-    branches:
-      - main
-      - integration/unified-stack
-    tags:
-      - "v*"
+  workflow_call:
+    inputs:
+      publish_tag:
+        required: true
+        type: string
+      build_sha:
+        required: true
+        type: string
+  pull_request:
+    # PRs into the test-engineering integration branch are gated by a local
+    # oracle and review; full CI runs once on the batch PR into main.
+    branches-ignore: [testeng/integration]
   release:
-    types: [published]
+    types: [created]
   workflow_dispatch:
     inputs:
       ref:
@@ -29,16 +33,17 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # onnxruntime-node's install script downloads the CUDA 12 provider binaries
+  # from nuget.org on linux/x64 even on CPU-only runners; that download is the
+  # ETIMEDOUT flake that fails `npm ci`. No job here requests the CUDA execution
+  # provider and the CPU binding ships in the package tarball, so skip it.
+  # scripts/ci-onnxruntime-install.test.ts guards this setting.
+  ONNXRUNTIME_NODE_INSTALL: "skip"
 
 jobs:
   build:
     # A dispatch with release_tag only runs clean-install against that release.
-    if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
-    env:
-      APPLE_CERTIFICATE_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' }}
-      APPLE_SIGNING_AVAILABLE: ${{ github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
+    if: inputs.publish_tag != '' || github.event_name == 'pull_request' || (github.event_name == 'release' && startsWith(github.ref_name, 'v')) || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
     strategy:
       fail-fast: false
       matrix:
@@ -82,8 +87,8 @@ jobs:
           # run-script hardcodes its own bundled node-gyp for automatic native rebuilds
           # during `npm ci`, ignoring that config (npm/cli#2839).
           #
-          # That blocker is gone. This workflow runs Node 24.21.0, which bundles npm
-          # 11.19.0 and node-gyp 12.4.0 — past the node-gyp 12.1.0 that added VS2026
+          # That blocker is gone. This workflow runs Node 24.22.1, which bundles npm
+          # 11.19.1 and node-gyp 12.4.0 — past the node-gyp 12.1.0 that added VS2026
           # detection. (The old note here said to wait for Node 22 LTS to bundle
           # npm>=11.6.3; that will not happen, because a Node line does not take a major
           # npm bump mid-life and npm 11 shipped with Node 24.) The runner is therefore
@@ -108,38 +113,56 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
+          ref: ${{ inputs.build_sha || (github.event_name == 'release' && github.ref_name) || (github.event_name == 'workflow_dispatch' && inputs.ref) || github.sha }}
           persist-credentials: false
 
       - name: Verify checked-out release identity
-        if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        if: inputs.publish_tag != '' || github.event_name == 'release'
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
+          EXPECTED_SHA: ${{ inputs.build_sha || github.sha }}
+          AUTOMATIC_TAG: ${{ inputs.publish_tag }}
         run: |
           set -euo pipefail
+          # Build only the selected commit. The ref verifier also checks that
+          # the release tag still points to it. Automatic builds materialize
+          # the version from that tag without a version-bump commit on main.
+          head_sha="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the selected release commit $EXPECTED_SHA."
+            exit 1
+          fi
+          if [ -n "$AUTOMATIC_TAG" ]; then
+            node scripts/desktop-release.mjs set-version "$AUTOMATIC_TAG"
+          fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # Cargo 1.100's per-crate search paths exceed Windows' command-line limit
+      # for sigstore. Keep intermediate paths short without moving the bundles.
+      - name: Shorten Windows Rust build paths
+        if: matrix.os_family == 'windows'
+        shell: pwsh
+        run: '"CARGO_BUILD_BUILD_DIR=C:\t" >> $env:GITHUB_ENV'
+
       - name: Cache Rust dependencies and build output
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: src-tauri -> target
           key: ${{ matrix.target }}
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+          cache-directories: ${{ matrix.os_family == 'windows' && 'C:\t' || '' }}
 
       - name: Stage Node.js runtime sidecar
         shell: bash
@@ -150,23 +173,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
-      - name: Install optional Apple signing certificate
-        if: matrix.os_family == 'macos' && env.APPLE_CERTIFICATE_AVAILABLE == 'true'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_BUILD_CERTIFICATE_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_BUILD_CERTIFICATE_PASSWORD }}
-        run: |
-          set -euo pipefail
-          certificate_path="$RUNNER_TEMP/build_certificate.p12"
-          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$certificate_path"
-          security create-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
-          security set-keychain-settings -lut 21600 "$keychain_path"
-          security unlock-keychain -p "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
-          security import "$certificate_path" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
-          security set-key-partition-list -S apple-tool:,apple: -k "$APPLE_CERTIFICATE_PASSWORD" "$keychain_path"
-          security list-keychain -d user -s "$keychain_path"
 
       - name: Install frontend dependencies
         run: npm ci
@@ -214,24 +220,6 @@ jobs:
       - name: Verify staged reference implementation
         run: node scripts/verify-reference-stack.mjs --profile release
 
-      - name: Optionally sign macOS helper binaries
-        if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}
-          codesign --force --options runtime --timestamp --entitlements playwright-runner/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" playwright-runner/dist/${{ matrix.binary_name }}
-          codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" personal-server/dist/${{ matrix.ps_binary_name }}
-          find personal-server/dist/node_modules -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-          for stack_root in \
-            src-tauri/target/release/reference-stack/ri \
-            src-tauri/target/release/reference-stack/console; do
-            find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
-              -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-            node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
-          done
-
       - name: Clear cached AppImage staging output
         if: matrix.os_family == 'linux'
         run: |
@@ -247,16 +235,14 @@ jobs:
       # then an orphaned diskimages-help process at teardown). Both macOS legs run it, so
       # both carry the risk. Restricting the macOS bundle to "app" skips it entirely; "app"
       # is the .app bundle the DMG step already depends on, so nothing else changes.
-      - name: Build signed Tauri app
-        if: matrix.os_family == 'macos' && env.APPLE_SIGNING_AVAILABLE == 'true'
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        with:
-          args: --target ${{ matrix.target }} --bundles app
-
+      #
+      # macOS code signing and notarization do not happen in this repository.
+      # The unsigned DMG published here carries a build-provenance attestation
+      # (see the publish job); a downstream signer verifies that attestation
+      # before it signs. The entitlement files that its hardened-runtime
+      # signature needs are personal-server/entitlements.plist and
+      # playwright-runner/entitlements.plist.
       - name: Build unsigned Tauri app
-        if: matrix.os_family != 'macos' || env.APPLE_SIGNING_AVAILABLE != 'true'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           ARCH: ${{ matrix.os_family == 'linux' && 'x86_64' || '' }}
@@ -265,8 +251,6 @@ jobs:
 
       - name: Finalize platform bundles
         shell: bash
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_AVAILABLE == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
         run: |
           set -euo pipefail
           bundle_root="src-tauri/target/${{ matrix.target }}/release/bundle"
@@ -290,17 +274,16 @@ jobs:
               mkdir -p "$destination"
               cp -R personal-server/dist/node_modules/. "$destination/"
 
-              if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-                ps_bin="$app/Contents/Resources/personal-server/dist/${{ matrix.ps_binary_name }}"
-                codesign --force --options runtime --timestamp --entitlements personal-server/entitlements.plist --sign "$APPLE_SIGNING_IDENTITY" "$ps_bin"
-                find "$destination" -name '*.node' -type f -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-                for stack_root in "$reference_destination/ri" "$reference_destination/console"; do
-                  find "$stack_root" -type f \( -name '*.node' -o -name '*.dylib' \) \
-                    -exec codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" {} \;
-                  node scripts/verify-reference-stack.mjs --root "$stack_root" --refresh-manifest
-                done
-                codesign --force --deep --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
-              fi
+              # Tauri's resource copy drops directory symlinks and copies the
+              # target of each file symlink. That breaks the Chromium
+              # framework layout (Versions/Current and its root links), and
+              # codesign then rejects the framework. cp -R copies symlinks as
+              # links. verify-bundled-personal-server.mjs checks the layout.
+              browsers_destination="$app/Contents/Resources/playwright-runner/dist/browsers"
+              rm -rf "$browsers_destination"
+              cp -R playwright-runner/dist/browsers "$browsers_destination"
+
+              node scripts/package-macos-node-helper.mjs "$app"
 
               version=$(node -p "require('./src-tauri/tauri.conf.json').version")
               arch=$(echo "${{ matrix.target }}" | cut -d- -f1)
@@ -317,9 +300,6 @@ jobs:
             verification_args=(--platform macos --expected-arch "${{ matrix.expected_arch }}" --bundle-root "$bundle_root")
             if [ "$stack_verification_enabled" = "true" ]; then
               verification_args+=(--verify-reference-stacks)
-            fi
-            if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-              verification_args+=(--verify-code-signature)
             fi
             node scripts/verify-bundled-personal-server.mjs "${verification_args[@]}"
           fi
@@ -342,8 +322,8 @@ jobs:
           fi
 
       - name: Stage verified release artifacts
-        if: github.event_name == 'release'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: inputs.publish_tag != '' || github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == '')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: manual-install-${{ matrix.artifact_key }}
           path: |
@@ -354,28 +334,108 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Cleanup optional Apple keychain
-        if: matrix.os_family == 'macos' && always() && env.APPLE_CERTIFICATE_AVAILABLE == 'true'
-        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+  clean-install-built-windows:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag == ''
+    needs: build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      EVIDENCE_DIR: ${{ github.workspace }}/clean-install-evidence
+    steps:
+      - name: Checkout acceptance script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.22.1"
+
+      - name: Download branch-built Windows installer
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: manual-install-windows-x64
+          path: installer
+
+      - name: Install and launch on a clean Windows runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $appData = Join-Path $env:APPDATA 'dev.dataconnect'
+          if (Test-Path $appData) {
+            Write-Output "::error::$appData exists before install; the VM is not clean."
+            exit 1
+          }
+          $installers = @(Get-ChildItem 'installer' -Recurse -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) { Write-Output "::error::Expected exactly one branch-built Windows installer, found $($installers.Count)."; exit 1 }
+          $installer = $installers[0]
+          New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList '/S' -Wait -PassThru
+          "installer exit code: $($install.ExitCode)" | Tee-Object -FilePath "$env:EVIDENCE_DIR/install.log"
+          if ($install.ExitCode -ne 0) { exit 1 }
+          $uninstall = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Get-ItemProperty | Where-Object { $_.DisplayName -eq 'DataConnect' } | Select-Object -First 1
+          if (-not $uninstall) { Write-Output '::error::DataConnect uninstall entry not found'; exit 1 }
+          $installDir = $uninstall.InstallLocation.Trim('"')
+          $exe = Get-ChildItem $installDir -Filter *.exe |
+            Where-Object { $_.Name -notmatch '^(uninstall|pdpp-node)' } | Select-Object -First 1
+          if (-not $exe) { Write-Output '::error::No app executable in install directory'; exit 1 }
+          Start-Process -FilePath $exe.FullName
+          "APP_DATA_DIR=$appData" >> $env:GITHUB_ENV
+          "APP_LOG_DIR=$(Join-Path $env:LOCALAPPDATA 'dev.dataconnect\logs')" >> $env:GITHUB_ENV
+
+      - name: Assert fresh-install sidecars are serving
+        shell: bash
+        run: node scripts/clean-install-acceptance.mjs --app-data-dir "$APP_DATA_DIR" --log-file "$APP_LOG_DIR/DataConnect.log" --timeout-ms 300000
+
+      - name: Collect clean-install evidence
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:EVIDENCE_DIR/app-logs" | Out-Null
+          if (Test-Path "$env:APP_LOG_DIR") { Copy-Item "$env:APP_LOG_DIR\*" "$env:EVIDENCE_DIR/app-logs" -Recurse -Force }
+          if (Test-Path "$env:APP_DATA_DIR") { Get-ChildItem "$env:APP_DATA_DIR" -Recurse | Format-Table -AutoSize | Out-File "$env:EVIDENCE_DIR/app-data-listing.txt" }
+          Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-Table -AutoSize -Wrap | Out-String -Width 4096 | Out-File "$env:EVIDENCE_DIR/processes.txt"
+
+      - name: Upload clean-install evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-install-branch-windows-latest
+          path: clean-install-evidence
+          if-no-files-found: warn
+          retention-days: 14
 
   publish:
-    if: github.event_name == 'release'
+    if: inputs.publish_tag != '' || github.event_name == 'release'
     needs: build
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+      # Only for the DMG provenance attestation below.
+      id-token: write
+      attestations: write
     steps:
       - name: Download verified release artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: manual-install-*
           path: release-artifacts
+
+      # The downstream macOS signer runs `gh attestation verify` against this
+      # workflow and this tag's commit, and refuses to sign a DMG that has no
+      # matching attestation.
+      - name: Attest macOS DMG provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-artifacts/manual-install-macos-*/dmg/DataConnect_*.dmg
 
       - name: Publish complete platform set
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -402,7 +462,7 @@ jobs:
           gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber --repo "${{ github.repository }}"
 
   publish-core-image:
-    if: github.event_name == 'release'
+    if: inputs.publish_tag != '' || github.event_name == 'release'
     needs: [build, publish]
     runs-on: ubuntu-22.04
     outputs:
@@ -416,15 +476,28 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.ref_name }}
+          ref: ${{ inputs.build_sha || github.ref_name }}
           persist-credentials: false
 
       - name: Verify checked-out release identity
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.publish_tag || github.ref_name }}
+          EXPECTED_SHA: ${{ inputs.build_sha || github.sha }}
+          AUTOMATIC_TAG: ${{ inputs.publish_tag }}
         run: |
           set -euo pipefail
+          # Build only the selected commit. The ref verifier also checks that
+          # the release tag still points to it. Automatic builds materialize
+          # the version from that tag without a version-bump commit on main.
+          head_sha="$(git rev-parse 'HEAD^{commit}')"
+          if [ "$head_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit $head_sha is not the selected release commit $EXPECTED_SHA."
+            exit 1
+          fi
+          if [ -n "$AUTOMATIC_TAG" ]; then
+            node scripts/desktop-release.mjs set-version "$AUTOMATIC_TAG"
+          fi
           node scripts/verify-release-ref.mjs --release-tag "$RELEASE_TAG"
 
       - name: Verify excluded connector type declarations
@@ -434,14 +507,26 @@ jobs:
         run: |
           echo "PDPP_IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/core" >> "$GITHUB_ENV"
 
+      # Fails in seconds if the pinned skopeo digest has been garbage-collected,
+      # instead of after the Core build and scan have already run.
+      - name: Pull pinned skopeo image
+        env:
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3-immutable@sha256:c0ee1f4edca5c01cb8d5611124f92f3cc47196ecab68aee5d0f90834e00574d5
+        run: |
+          set -euo pipefail
+          if ! docker pull "$SKOPEO_IMAGE"; then
+            echo "::error::Pinned skopeo image $SKOPEO_IMAGE could not be pulled. The pinned digest may have been garbage-collected from quay.io; re-pin SKOPEO_IMAGE (see .github/workflows/release.yml and docker-images.yml)."
+            exit 1
+          fi
+
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -459,13 +544,13 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},value=${{ inputs.publish_tag || github.ref_name }}
 
       # Build once into an OCI archive; nothing reaches GHCR until the scan
       # below has read every layer of every platform manifest in it.
       - name: Build Core image without pushing
         id: build-core
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           cache-from: |
             type=gha,scope=core
@@ -474,7 +559,7 @@ jobs:
           context: .
           file: ./Dockerfile
           build-args: |
-            PDPP_REFERENCE_REVISION=${{ github.sha }}
+            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar,tar=true
           platforms: linux/amd64,linux/arm64
@@ -506,11 +591,15 @@ jobs:
         env:
           SCANNED_DIGEST: ${{ steps.scan-core.outputs.digest }}
           VERSION: ${{ steps.meta.outputs.version }}
-          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3-immutable@sha256:c0ee1f4edca5c01cb8d5611124f92f3cc47196ecab68aee5d0f90834e00574d5
         run: |
           set -euo pipefail
+          if [[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::No clean scan digest (got '$SCANNED_DIGEST'); refusing to push."
+            exit 1
+          fi
           skopeo() {
-            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+            docker run --rm --log-driver none --user "$(id -u):$(id -g)" -e HOME=/tmp \
               -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
               "$SKOPEO_IMAGE" "$@" --authfile /auth.json
           }
@@ -527,10 +616,10 @@ jobs:
         shell: bash
         env:
           PUSHED_DIGEST: ${{ steps.push-core.outputs.digest }}
-          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3@sha256:064d2cefb512c97d5a22979599ca05b7198fd6176494a634e1f31bd6b5fbd77a
+          SKOPEO_IMAGE: quay.io/skopeo/stable:v1.22.3-immutable@sha256:c0ee1f4edca5c01cb8d5611124f92f3cc47196ecab68aee5d0f90834e00574d5
         run: |
           set -euo pipefail
-          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
+          docker run --rm --log-driver none --user "$(id -u):$(id -g)" -e HOME=/tmp \
             -v "$HOME/.docker/config.json:/auth.json:ro" -v "$RUNNER_TEMP:/work" \
             "$SKOPEO_IMAGE" copy --all --authfile /auth.json \
             "docker://$PDPP_IMAGE@$PUSHED_DIGEST" oci-archive:/work/core-pushed.oci.tar
@@ -547,7 +636,7 @@ jobs:
   # above. GitHub keeps one pending run per group and cancels a replaced pending
   # run. Re-running a cancelled promoter is safe: it moves latest only forward.
   promote-core-latest:
-    if: github.event_name == 'release' && !github.event.release.prerelease
+    if: inputs.publish_tag != '' || (github.event_name == 'release' && !github.event.release.prerelease)
     needs: publish-core-image
     runs-on: ubuntu-22.04
     concurrency:
@@ -558,10 +647,10 @@ jobs:
       packages: write
     steps:
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -643,9 +732,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
 
       - name: Download release installer
         shell: bash
@@ -656,13 +745,19 @@ jobs:
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR" installer
           gh release download --repo "$GITHUB_REPOSITORY" --pattern "$ASSET_PATTERN" --dir installer -- "$RELEASE_TAG"
-          mapfile -t assets < <(find installer -type f)
-          if [ "${#assets[@]}" -ne 1 ]; then
-            echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found ${#assets[@]}."
+          asset_count=0
+          for asset in installer/*; do
+            [ -f "$asset" ] || continue
+            asset_count=$((asset_count + 1))
+            installer_path="$asset"
+          done
+          if [ "$asset_count" -ne 1 ]; then
+            echo "::error::Expected one $ASSET_PATTERN asset on $RELEASE_TAG, found $asset_count."
             exit 1
           fi
-          echo "INSTALLER=${assets[0]}" >> "$GITHUB_ENV"
-          shasum -a 256 "${assets[0]}" | tee "$EVIDENCE_DIR/installer.sha256"
+          echo "INSTALLER=$installer_path" >> "$GITHUB_ENV"
+          # shellcheck disable=SC2016 # ${...} is a JS template literal, not shell.
+          node -e 'const fs = require("node:fs"); const { createHash } = require("node:crypto"); const file = process.argv[1]; console.log(`${createHash("sha256").update(fs.readFileSync(file)).digest("hex")}  ${file}`)' "$installer_path" > "$EVIDENCE_DIR/installer.sha256"
 
       - name: Install and launch (macOS)
         if: runner.os == 'macOS'
@@ -744,7 +839,7 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: clean-install-${{ matrix.platform }}
           path: clean-install-evidence

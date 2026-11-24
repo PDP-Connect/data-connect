@@ -29,6 +29,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -290,6 +291,7 @@ async function withGmailHarness(fn: (ctx: { asUrl: string; rsUrl: string; connec
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,

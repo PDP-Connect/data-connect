@@ -37,7 +37,7 @@ function referenceBaseUrl(target: ReferenceTarget): string {
   if (configured?.trim()) {
     return configured;
   }
-  return target === "as" ? "http://localhost:7662" : "http://localhost:7663";
+  return target === "as" ? "http://127.0.0.1:7662" : "http://127.0.0.1:7663";
 }
 
 function forwardedProto(request: Request, url: URL): string {

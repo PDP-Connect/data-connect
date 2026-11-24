@@ -4,13 +4,18 @@
 // Unit tests for the typed-error status/type tables extracted from
 // server/index.js into server/routes/ref-error-status.ts. These pin the
 // HTTP-status ↔ error-`type`/`code` contract that the typed-error envelopes
-// (consumed by external Claude / Daisy / ChatGPT) advertise. Before this
+// (consumed by external clients such as Claude and ChatGPT) advertise. Before this
 // extraction the tables had no direct unit coverage.
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { codeToStatus, recoveryAdmissionExtrasForWire, typeFor } from "../server/routes/ref-error-status.ts";
+import {
+  codeToStatus,
+  connectorNotInstalledExtrasForWire,
+  recoveryAdmissionExtrasForWire,
+  typeFor,
+} from "../server/routes/ref-error-status.ts";
 
 function statusFor(code: string): number {
   const status = codeToStatus[code];
@@ -105,4 +110,14 @@ test("recoveryAdmissionExtrasForWire omits malformed fields", () => {
     }),
     {}
   );
+});
+
+test("connectorNotInstalledExtrasForWire names the connector only for connector_not_installed", () => {
+  assert.deepEqual(connectorNotInstalledExtrasForWire({ code: "connector_not_installed", connectorId: "chase" }), {
+    connector_id: "chase",
+  });
+  // Another code carrying a connectorId must not leak the field into its envelope.
+  assert.deepEqual(connectorNotInstalledExtrasForWire({ code: "not_found", connectorId: "chase" }), {});
+  assert.deepEqual(connectorNotInstalledExtrasForWire({ code: "connector_not_installed", connectorId: "" }), {});
+  assert.deepEqual(connectorNotInstalledExtrasForWire(null), {});
 });

@@ -166,7 +166,7 @@ pub(crate) fn port_to_persist(
 /// definition shared by the log line and the OS notification.
 pub(crate) fn moved_port_message(stable: u16, actual: u16) -> String {
     format!(
-        "Port {stable} was in use, so DataConnect started on port {actual}. Anything pointed at \
+        "DataConnect could not bind port {stable}, so it is listening on port {actual}. Anything pointed at \
          port {stable}, such as a tunnel route or a proxy, cannot reach DataConnect until port \
          {stable} is free and DataConnect restarts. Settings > Remote access shows both ports."
     )
@@ -295,5 +295,7 @@ mod tests {
         let message = moved_port_message(7664, 41000);
         assert!(message.contains("7664"), "{message}");
         assert!(message.contains("41000"), "{message}");
+        assert!(message.contains("DataConnect could not bind"), "{message}");
+        assert!(!message.contains("was in use"), "{message}");
     }
 }

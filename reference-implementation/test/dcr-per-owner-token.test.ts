@@ -444,7 +444,7 @@ test("owner device approval binds a public dynamic client to the approving owner
     const sessionCookie = await login(asUrl);
 
     const registered = await registerClient(asUrl, {
-      client_name: "Daisy local owner agent",
+      client_name: "Local owner agent",
       token_endpoint_auth_method: "none",
     });
     assert.equal(registered.status, 201);
@@ -465,7 +465,7 @@ test("owner device approval binds a public dynamic client to the approving owner
     const listedAfterApproval = await listOwnerClients(asUrl, sessionCookie);
     const ownerClient = listedAfterApproval.data.find((row) => row.client_id === registeredClientId);
     assert.ok(ownerClient, "approval should bind the dynamic client to the approving owner");
-    assert.equal(ownerClient.client_name, "Daisy local owner agent");
+    assert.equal(ownerClient.client_name, "Local owner agent");
     assert.equal(ownerClient.active_token_count, 1);
 
     const deleteResp = await fetch(`${asUrl}/oauth/register/${encodeURIComponent(registeredClientId)}`, {
@@ -493,7 +493,7 @@ test("DCR seeds client_uri / logo_uri / policy_uri / tos_uri from AS_PUBLIC_URL 
       });
       assert.equal(result.status, 201, "registration must succeed");
       assert.equal(result.body.client_uri, "https://as.example.com", "client_uri must be seeded from AS_PUBLIC_URL");
-      assert.equal(result.body.logo_uri, "https://as.example.com/icon.svg", "logo_uri must be seeded as base/icon.svg");
+      assert.equal(result.body.logo_uri, "https://as.example.com/icon", "logo_uri must be seeded as base/icon");
       assert.equal(result.body.policy_uri, "https://as.example.com", "policy_uri must be seeded from AS_PUBLIC_URL");
       assert.equal(result.body.tos_uri, "https://as.example.com", "tos_uri must be seeded from AS_PUBLIC_URL");
     });

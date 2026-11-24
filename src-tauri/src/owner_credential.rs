@@ -13,7 +13,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 const OWNER_CREDENTIAL_FILE: &str = "owner-credential";
 pub(crate) const OWNER_PASSWORD_OWNER_SET_MARKER_FILE: &str = "owner-password-owner-set.json";
@@ -65,6 +65,25 @@ struct OwnerPasswordRequestState {
     grant_consumed_request_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     purpose: Option<String>,
+    /// On a stack-restart request: the RI must revoke every owner session
+    /// and bearer when it starts again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoke_sessions: Option<bool>,
+    /// Why `revoke_sessions` is set: "password_change" or "recovery".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revoke_reason: Option<String>,
+}
+
+/// The revocation a stack-restart request asks for. A request without a
+/// reason (written before the field existed) counts as a password change.
+fn owner_session_reset_for(
+    state: &OwnerPasswordRequestState,
+) -> Option<crate::unified::OwnerSessionReset> {
+    use crate::unified::OwnerSessionReset;
+    (state.revoke_sessions == Some(true)).then(|| match state.revoke_reason.as_deref() {
+        Some("recovery") => OwnerSessionReset::Recovery,
+        _ => OwnerSessionReset::PasswordChange,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +128,7 @@ impl CredentialStore for SystemKeyring {
         log::info!("OS keychain load: entry username={}", self.username);
         let started = Instant::now();
         let result = (|| {
+            refuse_keychain_under_test()?;
             let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             match entry.get_password() {
@@ -130,6 +150,7 @@ impl CredentialStore for SystemKeyring {
         log::info!("OS keychain save: entry username={}", self.username);
         let started = Instant::now();
         let result = (|| {
+            refuse_keychain_under_test()?;
             let entry = keyring::Entry::new(KEYRING_SERVICE, &self.username)
                 .map_err(|error| format!("could not initialize OS keychain: {error}"))?;
             entry
@@ -146,8 +167,20 @@ impl CredentialStore for SystemKeyring {
     }
 }
 
+/// Tests drive app-bound helpers such as `set_desktop_owner_password`
+/// through `tauri::test`. Its service name is the installed app's, so under
+/// `cargo test` the keychain is refused and the helpers fall back to the
+/// app-data file, which each test points at a temporary directory. A test
+/// can then never read or overwrite the owner's real keychain entry.
+fn refuse_keychain_under_test() -> Result<(), String> {
+    if cfg!(test) {
+        return Err("the OS keychain is not used under cargo test".to_string());
+    }
+    Ok(())
+}
+
 /// Resolve the app-data path used for the generated owner password.
-pub(crate) fn owner_credential_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn owner_credential_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| path.join(OWNER_CREDENTIAL_FILE))
@@ -266,6 +299,10 @@ pub(crate) fn generate_recovered_v1_credential_encryption_key() -> Result<String
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Error returned by `load_or_create_credential_encryption_key` when the key
+/// is gone but sealed connector credentials still need it.
+pub(crate) const CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS: &str = "Credential encryption key is missing while sealed connector credentials exist. Restore the key from the OS keychain or the credential-encryption-key app-data file; refusing to mint a replacement that would orphan those credentials.";
+
 /// Load the durable instance credential key, or create it only when no sealed
 /// connector credential would be orphaned by doing so.
 pub(crate) fn load_or_create_credential_encryption_key(
@@ -273,24 +310,128 @@ pub(crate) fn load_or_create_credential_encryption_key(
     database_path: &Path,
 ) -> Result<String, String> {
     let mut store = SystemKeyring::new(CREDENTIAL_ENCRYPTION_KEYRING_USERNAME);
-    load_or_create_secret_with_store(
+    load_or_create_credential_encryption_key_with_store(path, database_path, &mut store)
+}
+
+/// Durable record that this install's credential key lives in the OS
+/// keychain. It sits next to the key file and is written whenever the
+/// keychain returns or accepts the key.
+///
+/// A keychain error means different things on different installs. On a
+/// host with no working keychain (file mode, such as headless Linux without
+/// a Secret Service), every keychain call errors and the app-data file is
+/// the real store. On a keychain install, an error is transient (locked,
+/// prompt dismissed, timeout) and the keychain may still hold the key. The
+/// error text cannot separate the two, so this marker does.
+///
+/// Failure modes:
+/// - An install upgraded from a build without the marker has none until
+///   its first start with a working keychain. An outage before that gets
+///   the file-mode behaviour, which is the behaviour before the marker.
+/// - If the marker is lost together with the key file, the install is
+///   treated as file mode and a keychain error reaches the lost-key path.
+/// - If the keychain goes away for good after the marker was written, a
+///   missing key stays a retryable error instead of the lost-key path.
+///   Deleting the marker file restores the file-mode behaviour.
+const CREDENTIAL_KEY_IN_KEYCHAIN_MARKER_FILE: &str = "credential-encryption-key.in-keychain";
+
+fn credential_key_in_keychain_marker(key_path: &Path) -> PathBuf {
+    key_path.with_file_name(CREDENTIAL_KEY_IN_KEYCHAIN_MARKER_FILE)
+}
+
+fn mark_credential_key_in_keychain(key_path: &Path) {
+    let marker = credential_key_in_keychain_marker(key_path);
+    if marker.exists() {
+        return;
+    }
+    if let Err(error) = fs::write(&marker, b"") {
+        log::warn!("Could not record that the credential key is in the OS keychain: {error}");
+    }
+}
+
+fn load_or_create_credential_encryption_key_with_store(
+    path: &Path,
+    database_path: &Path,
+    store: &mut impl CredentialStore,
+) -> Result<String, String> {
+    let key_in_keychain = credential_key_in_keychain_marker(path).exists();
+    let mut store = LoadErrorRecorder {
+        inner: store,
+        load_error: None,
+        keychain_used: false,
+    };
+    let result = load_or_create_secret_with_store(
         path,
         &mut store,
         "Credential encryption key",
         || database_contains_sealed_credentials(database_path),
-        Some("Credential encryption key is missing while sealed connector credentials exist. Restore the key from the OS keychain or the credential-encryption-key app-data file; refusing to mint a replacement that would orphan those credentials."),
-    )
+        Some(CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS),
+    );
+    if result.is_ok() && store.keychain_used {
+        mark_credential_key_in_keychain(path);
+    }
+    // The caller treats the missing-key message as "the key is lost" and
+    // rejects every sealed credential. On a keychain install only a
+    // keychain that answered "no entry" proves that; a keychain error may
+    // still hold the key, so report it as retryable instead. In file mode
+    // the keychain always errors and the missing file is the lost key.
+    match (result, store.load_error) {
+        (Err(message), Some(keychain_error))
+            if key_in_keychain
+                && message == CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS =>
+        {
+            Err(format!(
+                "Could not read the credential encryption key from the OS keychain ({keychain_error}). Sealed connector credentials exist, so nothing was changed. Unlock the keychain and try again. Only if this computer no longer has an OS keychain, delete {marker} and try again.",
+                marker = credential_key_in_keychain_marker(path).display()
+            ))
+        }
+        (result, _) => result,
+    }
+}
+
+/// Remembers whether the keychain load failed, as opposed to answering "no
+/// entry".
+struct LoadErrorRecorder<'a, S: CredentialStore> {
+    inner: &'a mut S,
+    load_error: Option<String>,
+    /// The keychain returned a key or accepted a save.
+    keychain_used: bool,
+}
+
+impl<S: CredentialStore> CredentialStore for LoadErrorRecorder<'_, S> {
+    fn load(&mut self) -> Result<Option<String>, String> {
+        let result = self.inner.load();
+        match &result {
+            Err(error) => self.load_error = Some(error.clone()),
+            Ok(Some(value)) if !value.trim().is_empty() => self.keychain_used = true,
+            Ok(_) => {}
+        }
+        result
+    }
+
+    fn save(&mut self, credential: &str) -> Result<(), String> {
+        let result = self.inner.save(credential);
+        if result.is_ok() {
+            self.keychain_used = true;
+        }
+        result
+    }
 }
 
 /// Replace the owner password in the OS keychain, with the protected app-data
 /// file as the same headless fallback used by initial credential creation.
-pub(crate) fn save_owner_credential(app: &AppHandle, credential: &str) -> Result<(), String> {
+pub(crate) fn save_owner_credential<R: Runtime>(
+    app: &AppHandle<R>,
+    credential: &str,
+) -> Result<(), String> {
     let path = owner_credential_path(app)?;
     let mut store = SystemKeyring::owner();
     save_owner_credential_with_store(&path, &mut store, credential)
 }
 
-pub(crate) fn owner_password_owner_set_marker_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn owner_password_owner_set_marker_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| {
@@ -300,11 +441,13 @@ pub(crate) fn owner_password_owner_set_marker_path(app: &AppHandle) -> Result<Pa
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-pub(crate) fn owner_password_owner_set_marker_exists(app: &AppHandle) -> Result<bool, String> {
+pub(crate) fn owner_password_owner_set_marker_exists<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<bool, String> {
     Ok(owner_password_owner_set_marker_path(app)?.exists())
 }
 
-pub(crate) fn mark_owner_password_owner_set(app: &AppHandle) -> Result<(), String> {
+pub(crate) fn mark_owner_password_owner_set<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let path = owner_password_owner_set_marker_path(app)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
@@ -322,7 +465,10 @@ pub(crate) fn mark_owner_password_owner_set(app: &AppHandle) -> Result<(), Strin
     )
 }
 
-fn owner_password_request_file_path(app: &AppHandle, file_name: &str) -> Result<PathBuf, String> {
+fn owner_password_request_file_path<R: Runtime>(
+    app: &AppHandle<R>,
+    file_name: &str,
+) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map(|path| {
@@ -332,15 +478,19 @@ fn owner_password_request_file_path(app: &AppHandle, file_name: &str) -> Result<
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
 }
 
-fn owner_password_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_window_request_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_WINDOW_REQUEST_FILE)
 }
 
-fn owner_password_recovery_window_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_recovery_window_request_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_RECOVERY_WINDOW_REQUEST_FILE)
 }
 
-fn owner_password_stack_restart_request_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn owner_password_stack_restart_request_path<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_PASSWORD_STACK_RESTART_REQUEST_FILE)
 }
 
@@ -348,8 +498,8 @@ fn owner_os_reauth_request_path(app: &AppHandle) -> Result<PathBuf, String> {
     owner_password_request_file_path(app, OWNER_OS_REAUTH_REQUEST_FILE)
 }
 
-fn owner_password_window_request_file_path(
-    app: &AppHandle,
+fn owner_password_window_request_file_path<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: u64,
 ) -> Result<PathBuf, String> {
     owner_password_request_file_path(
@@ -499,7 +649,10 @@ fn complete_owner_os_reauth_request_at(
         Ok(status) => {
             state.status = Some(status.to_string());
             state.error = None;
-            if status == "authenticated" {
+            // Linux has no verified OS prompt yet; the console lets a Linux
+            // change start only from the desktop's own webview (its local
+            // proof cookie), the same gate as reveal.
+            if status == "authenticated" || status == "skipped_linux_polkit_unverified" {
                 let expires_unix_ms = unix_time_ms_now()?.saturating_add(
                     OWNER_OS_REAUTH_GRANT_TTL
                         .as_millis()
@@ -538,7 +691,9 @@ fn complete_owner_os_reauth_request_at(
     save_owner_password_request_state(&path, &state, "owner OS re-auth result")
 }
 
-fn current_owner_password_window_request_id(app: &AppHandle) -> Result<Option<u64>, String> {
+fn current_owner_password_window_request_id<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<u64>, String> {
     let recovery_path = owner_password_recovery_window_request_path(app)?;
     let recovery_state =
         load_owner_password_request_state(&recovery_path, "owner-password recovery request")?;
@@ -550,8 +705,8 @@ fn current_owner_password_window_request_id(app: &AppHandle) -> Result<Option<u6
     Ok(incomplete_owner_password_request_id(&state))
 }
 
-fn current_owner_password_window_request_state(
-    app: &AppHandle,
+fn current_owner_password_window_request_state<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: u64,
 ) -> Result<OwnerPasswordRequestState, String> {
     let recovery_path = owner_password_recovery_window_request_path(app)?;
@@ -571,10 +726,11 @@ fn current_owner_password_window_request_state(
     load_owner_password_request_state(&index_path, "owner-password window request")
 }
 
-fn consume_owner_password_window_authority(
-    app: &AppHandle,
+/// Consume the window request's authority and return its purpose.
+fn consume_owner_password_window_authority<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let request_id = request_id
         .ok_or_else(|| "Open the password window from Settings before saving.".to_string())?;
     let recovery_path = owner_password_recovery_window_request_path(app)?;
@@ -620,16 +776,17 @@ fn consume_owner_password_window_authority(
             return Err("This password window request is missing a supported purpose.".to_string())
         }
     }
-    if is_recovery_request {
+    let saved = if is_recovery_request {
         save_owner_password_request_state(&recovery_path, &state, "owner-password recovery request")
     } else {
         let request_path = owner_password_window_request_file_path(app, request_id)?;
         save_owner_password_request_state(&request_path, &state, "owner-password window request")
-    }
+    };
+    saved.map(|()| state.purpose.unwrap_or_default())
 }
 
-fn complete_owner_password_window_request(
-    app: &AppHandle,
+fn complete_owner_password_window_request<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
 ) -> Result<(), String> {
     if let Some(request_id) = request_id {
@@ -654,12 +811,27 @@ fn complete_owner_password_window_request(
     Ok(())
 }
 
-pub(crate) fn capture_pending_owner_password_stack_restart_request_id(
-    app: &AppHandle,
-) -> Result<Option<u64>, String> {
+/// A stack-restart request that no start has carried out yet.
+pub(crate) struct PendingStackRestartRequest {
+    pub(crate) request_id: u64,
+    pub(crate) owner_session_reset: Option<crate::unified::OwnerSessionReset>,
+}
+
+/// The stack-restart request still waiting for a start, with the revocation
+/// it asks for. Reading it does not complete it: the start that carries it
+/// out completes it once the stack is ready, so a start that fails, or a
+/// quit before any start, leaves it for the next one.
+pub(crate) fn pending_owner_password_stack_restart_request<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Option<PendingStackRestartRequest>, String> {
     let path = owner_password_stack_restart_request_path(app)?;
     let state = load_owner_password_request_state(&path, "owner-password stack-restart request")?;
-    Ok(incomplete_owner_password_request_id(&state))
+    Ok(
+        incomplete_owner_password_request_id(&state).map(|request_id| PendingStackRestartRequest {
+            request_id,
+            owner_session_reset: owner_session_reset_for(&state),
+        }),
+    )
 }
 
 pub(crate) fn request_owner_password_window_for_recovery(app: &AppHandle) -> Result<(), String> {
@@ -677,8 +849,8 @@ pub(crate) fn request_owner_password_window_for_recovery(app: &AppHandle) -> Res
     save_owner_password_request_state(&path, &state, "owner-password recovery request")
 }
 
-pub(crate) fn complete_owner_password_stack_restart_request(
-    app: &AppHandle,
+pub(crate) fn complete_owner_password_stack_restart_request<R: Runtime>(
+    app: &AppHandle<R>,
     request_id: Option<u64>,
 ) -> Result<(), String> {
     if let Some(request_id) = request_id {
@@ -692,7 +864,38 @@ pub(crate) fn complete_owner_password_stack_restart_request(
     Ok(())
 }
 
-fn queue_delayed_owner_password_stack_restart_request(app: &AppHandle) -> Result<(), String> {
+/// Stands in for OS re-auth and the window watcher in tests: bind a live
+/// "change" grant to window request `request_id`, as the watcher does after
+/// the owner confirms.
+#[cfg(test)]
+pub(crate) fn grant_owner_password_change_for_test(request_id: u64, grant_id: &str) {
+    owner_reauth_grants()
+        .lock()
+        .expect("grant registry")
+        .insert(
+            grant_id.to_string(),
+            OwnerReauthGrant {
+                expires_unix_ms: unix_time_ms_now().expect("system time") + 60_000,
+                purpose: "change".to_string(),
+                reauth_request_id: 0,
+                window_request_id: Some(request_id),
+            },
+        );
+}
+
+/// Queue the stack restart that starts the RI with the password just saved.
+/// A change or a recovery restarts now and revokes every owner session and
+/// bearer: a replaced password must not leave a phone or a CLI token signed
+/// in. First-time setup with remote access off keeps the delayed restart
+/// without revocation: no remote device can be signed in, and the
+/// remote-access form that asked for it saves its config next, which
+/// restarts the stack sooner through the config watcher. First-time setup
+/// with remote access already on (an install from before the password gate)
+/// is a change: a phone may be signed in with the generated password.
+fn queue_owner_password_stack_restart_request<R: Runtime>(
+    app: &AppHandle<R>,
+    purpose: &str,
+) -> Result<(), String> {
     let path = owner_password_stack_restart_request_path(app)?;
     let mut state =
         load_owner_password_request_state(&path, "owner-password stack-restart request")?;
@@ -702,7 +905,19 @@ fn queue_delayed_owner_password_stack_restart_request(app: &AppHandle) -> Result
         .saturating_add(1)
         .max(1);
     state.request_id = next_request_id;
-    state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
+    let revoke_reason = match purpose {
+        "recovery" => Some("recovery"),
+        "initial_setup" if crate::remote_access::saved_remote_access_posture_is_off(app) => None,
+        _ => Some("password_change"),
+    };
+    if revoke_reason.is_none() {
+        state.not_before_unix_ms = Some(unix_time_ms_now()?.saturating_add(180_000));
+        state.revoke_sessions = None;
+    } else {
+        state.not_before_unix_ms = None;
+        state.revoke_sessions = Some(true);
+    }
+    state.revoke_reason = revoke_reason.map(str::to_string);
     save_owner_password_request_state(&path, &state, "owner-password stack-restart request")
 }
 
@@ -710,6 +925,10 @@ pub(crate) fn spawn_owner_password_window_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
+            if crate::unified::shutdown_has_been_requested(&app) {
+                log::debug!("Owner password window watcher stopping: shutdown requested");
+                return;
+            }
             let now_unix_ms = match unix_time_ms_now() {
                 Ok(now) => now,
                 Err(error) => {
@@ -868,9 +1087,91 @@ pub(crate) fn spawn_owner_password_window_watcher(app: AppHandle) {
     });
 }
 
+/// How many times the watcher runs one stack-restart request before it
+/// gives up and marks the request complete. A restart that fails leaves the
+/// tray at "Error", and every later start (quit and reopen, or "Open
+/// DataConnect") reads the saved password anyway, so retrying forever only
+/// tears the stack down every few seconds. Three attempts ride out a slow or
+/// briefly busy sidecar.
+const OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS: u32 = 3;
+const OWNER_PASSWORD_STACK_RESTART_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Default)]
+struct StackRestartWatcherState {
+    last_seen_request_id: u64,
+    failed_request_id: u64,
+    failed_attempts: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StackRestartPoll {
+    Idle,
+    Restarted,
+    Failed,
+    GaveUp,
+}
+
+/// One poll of the stack-restart request file at `path`. Waits while a start
+/// or restart of the stack is already running (`bootstrap_in_flight`): the
+/// running bootstrap reads the saved password itself, and a second one would
+/// race it for the same ports.
+async fn poll_owner_password_stack_restart_request<F, Fut>(
+    path: &Path,
+    watcher: &mut StackRestartWatcherState,
+    bootstrap_in_flight: bool,
+    now_unix_ms: u64,
+    restart: F,
+) -> Result<StackRestartPoll, String>
+where
+    F: FnOnce(Option<crate::unified::OwnerSessionReset>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    const LABEL: &str = "owner-password stack-restart request";
+    if bootstrap_in_flight {
+        return Ok(StackRestartPoll::Idle);
+    }
+    let state = load_owner_password_request_state(path, LABEL)?;
+    let Some(request_id) =
+        pending_owner_password_request_id(&state, watcher.last_seen_request_id, now_unix_ms)
+    else {
+        return Ok(StackRestartPoll::Idle);
+    };
+    match restart(owner_session_reset_for(&state)).await {
+        Ok(()) => {
+            watcher.last_seen_request_id = request_id;
+            complete_owner_password_request_at(path, LABEL, request_id)?;
+            Ok(StackRestartPoll::Restarted)
+        }
+        Err(error) => {
+            if watcher.failed_request_id != request_id {
+                watcher.failed_request_id = request_id;
+                watcher.failed_attempts = 0;
+            }
+            watcher.failed_attempts += 1;
+            if watcher.failed_attempts < OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS {
+                log::warn!(
+                    "Owner password stack-restart request failed (attempt {} of {OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS}): {error}",
+                    watcher.failed_attempts
+                );
+                return Ok(StackRestartPoll::Failed);
+            }
+            log::error!(
+                "Owner password stack-restart request failed {OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS} times; giving up until the next start: {error}"
+            );
+            watcher.last_seen_request_id = request_id;
+            // A revoking request stays pending: the next start of the stack
+            // reads it and revokes, and completes it only once it is ready.
+            if owner_session_reset_for(&state).is_none() {
+                complete_owner_password_request_at(path, LABEL, request_id)?;
+            }
+            Ok(StackRestartPoll::GaveUp)
+        }
+    }
+}
+
 pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut last_seen_request_id = 0_u64;
+        let mut watcher = StackRestartWatcherState::default();
         loop {
             tokio::time::sleep(OWNER_PASSWORD_WINDOW_WATCHER_POLL_INTERVAL).await;
             if crate::unified::shutdown_has_been_requested(&app) {
@@ -886,18 +1187,6 @@ pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
                     continue;
                 }
             };
-            let state = match load_owner_password_request_state(
-                &path,
-                "owner-password stack-restart request",
-            ) {
-                Ok(state) => state,
-                Err(error) => {
-                    log::warn!(
-                        "Owner password stack-restart watcher could not read request file: {error}"
-                    );
-                    continue;
-                }
-            };
             let now_unix_ms = match unix_time_ms_now() {
                 Ok(now) => now,
                 Err(error) => {
@@ -907,27 +1196,28 @@ pub(crate) fn spawn_owner_password_stack_restart_watcher(app: AppHandle) {
                     continue;
                 }
             };
-            let Some(request_id) =
-                pending_owner_password_request_id(&state, last_seen_request_id, now_unix_ms)
-            else {
-                continue;
-            };
-            match crate::unified::restart_after_remote_access_config(app.clone()).await {
-                Ok(()) => {
-                    last_seen_request_id = request_id;
-                    if let Err(error) = complete_owner_password_request_at(
-                        &path,
-                        "owner-password stack-restart request",
-                        request_id,
-                    ) {
-                        log::warn!(
-                            "Owner password stack-restart watcher could not record completion: {error}"
-                        );
-                    }
+            let bootstrap_in_flight = crate::unified::stack_bootstrap_in_flight(&app);
+            let restart_app = app.clone();
+            match poll_owner_password_stack_restart_request(
+                &path,
+                &mut watcher,
+                bootstrap_in_flight,
+                now_unix_ms,
+                |owner_session_reset| {
+                    crate::unified::restart_after_remote_access_config(
+                        restart_app,
+                        owner_session_reset,
+                    )
+                },
+            )
+            .await
+            {
+                Ok(StackRestartPoll::Failed) => {
+                    tokio::time::sleep(OWNER_PASSWORD_STACK_RESTART_RETRY_DELAY).await;
                 }
+                Ok(_) => {}
                 Err(error) => {
-                    log::warn!("Owner password stack-restart request failed: {error}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    log::warn!("Owner password stack-restart watcher: {error}");
                 }
             }
         }
@@ -1109,13 +1399,35 @@ fn open_owner_password_window(app: &AppHandle) {
     }
 }
 
+/// Stands in for `DATACONNECT_OWNER_PASSWORD` / `PDPP_OWNER_PASSWORD` in a
+/// test app, so an IPC test gives the same answer whatever the developer's
+/// shell exports.
+#[cfg(test)]
+pub(crate) struct ConfiguredOwnerPasswordForTest(pub(crate) Option<String>);
+
+fn configured_owner_password_for<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    #[cfg(test)]
+    if let Some(configured) = app.try_state::<ConfiguredOwnerPasswordForTest>() {
+        return configured.0.clone();
+    }
+    let _ = app;
+    configured_owner_password()
+}
+
+/// Every local-origin webview passes the IPC ACL for app commands, so the
+/// legacy `main` window and the recovery window could reach this command
+/// too. Only the password window may save a password.
 #[tauri::command]
-pub(crate) async fn set_desktop_owner_password(
-    app: AppHandle,
+pub(crate) async fn set_desktop_owner_password<R: Runtime>(
+    app: AppHandle<R>,
+    webview: tauri::WebviewWindow<R>,
     password: String,
 ) -> Result<(), String> {
+    if webview.label() != OWNER_PASSWORD_WINDOW_LABEL {
+        return Err("Only the DataConnect password window can save the owner password.".to_string());
+    }
     let window_request_id = current_owner_password_window_request_id(&app)?;
-    if configured_owner_password().is_some() {
+    if configured_owner_password_for(&app).is_some() {
         return Err(
             "This password is set by the environment. Change PDPP_OWNER_PASSWORD and restart DataConnect."
                 .to_string(),
@@ -1126,10 +1438,10 @@ pub(crate) async fn set_desktop_owner_password(
             "Owner passwords must be at least {OWNER_PASSWORD_MIN_LENGTH} characters long."
         ));
     }
-    consume_owner_password_window_authority(&app, window_request_id)?;
+    let purpose = consume_owner_password_window_authority(&app, window_request_id)?;
     save_owner_credential(&app, &password)?;
     mark_owner_password_owner_set(&app)?;
-    queue_delayed_owner_password_stack_restart_request(&app)?;
+    queue_owner_password_stack_restart_request(&app, &purpose)?;
     complete_owner_password_window_request(&app, window_request_id)?;
     if let Some(window) = app.get_webview_window(OWNER_PASSWORD_WINDOW_LABEL) {
         let _ = window.close();
@@ -1307,14 +1619,24 @@ fn save_credential_encryption_key_with_store(
         return Err("Credential encryption key cannot be empty".to_string());
     }
 
-    if store.save(credential).is_ok() {
-        if path.exists() {
-            write_owner_credential_file(path, credential)?;
+    // On a keychain install, no app-data fallback: load prefers the
+    // keychain, so a key written only to the file while the keychain errors
+    // would be shadowed by the keychain's old key once it returns. In file
+    // mode the file is the store. See CREDENTIAL_KEY_IN_KEYCHAIN_MARKER_FILE.
+    match store.save(credential) {
+        Ok(()) => {
+            if path.exists() {
+                write_owner_credential_file(path, credential)?;
+            }
+            mark_credential_key_in_keychain(path);
+            Ok(())
         }
-        return Ok(());
+        Err(error) if credential_key_in_keychain_marker(path).exists() => Err(format!(
+            "Could not save the credential encryption key to the OS keychain ({error}). Unlock the keychain and try again. Only if this computer no longer has an OS keychain, delete {marker} and try again.",
+            marker = credential_key_in_keychain_marker(path).display()
+        )),
+        Err(_) => write_owner_credential_file(path, credential),
     }
-
-    write_owner_credential_file(path, credential)
 }
 
 fn load_or_create_secret_with_store(
@@ -1720,6 +2042,326 @@ mod tests {
         assert_eq!(pending_owner_password_request_id(&state, 0, 1000), Some(8));
     }
 
+    fn pending_stack_restart_request(path: &Path, request_id: u64) {
+        save_owner_password_request_state(
+            path,
+            &OwnerPasswordRequestState {
+                request_id,
+                ..Default::default()
+            },
+            "owner-password stack-restart request",
+        )
+        .expect("write restart request");
+    }
+
+    /// Polls once with a restart that counts its calls and returns `outcome`.
+    fn poll_stack_restart(
+        path: &Path,
+        watcher: &mut StackRestartWatcherState,
+        bootstrap_in_flight: bool,
+        restarts: &std::sync::atomic::AtomicU32,
+        outcome: Result<(), String>,
+    ) -> StackRestartPoll {
+        tauri::async_runtime::block_on(poll_owner_password_stack_restart_request(
+            path,
+            watcher,
+            bootstrap_in_flight,
+            u64::MAX,
+            |_revoke_sessions| async {
+                restarts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                outcome
+            },
+        ))
+        .expect("poll")
+    }
+
+    /// Writes a pending restart request that revokes owner sessions, as a
+    /// password change queues it.
+    fn pending_revoking_stack_restart_request(path: &Path, request_id: u64) {
+        save_owner_password_request_state(
+            path,
+            &OwnerPasswordRequestState {
+                request_id,
+                revoke_sessions: Some(true),
+                revoke_reason: Some("password_change".to_string()),
+                ..Default::default()
+            },
+            "owner-password stack-restart request",
+        )
+        .expect("write restart request");
+    }
+
+    /// The owner quit before the restart after their new password ran. The
+    /// next launch starts the stack with the saved password, so the leftover
+    /// request must not make the watcher start a second bootstrap beside it.
+    #[cfg(desktop)]
+    #[test]
+    fn a_restart_request_left_by_the_last_session_does_not_start_a_second_bootstrap() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        assert!(path.starts_with(root.path()), "{path:?}");
+        pending_stack_restart_request(&path, 41);
+
+        // The startup bootstrap reads the request (`bootstrap_and_open_console`).
+        let (reset, carried) = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, None);
+        assert_eq!(carried, Some(41));
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        // While it runs, the watcher waits.
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, true, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        // It reaches Ready and completes the request (`finish_bootstrap`).
+        complete_owner_password_stack_restart_request(app.handle(), carried).expect("complete");
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 0);
+
+        // A request made during this session still runs.
+        pending_stack_restart_request(&path, 42);
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Restarted
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 1);
+    }
+
+    /// The owner changed the password and quit before the restart ran, and
+    /// the startup bootstrap that carries the revocation fails. The request
+    /// must stay pending, so that "Open DataConnect", which starts with no
+    /// reset of its own, still revokes the old sessions.
+    #[cfg(desktop)]
+    #[test]
+    fn a_revoking_request_stays_pending_when_the_start_that_carries_it_fails() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        pending_revoking_stack_restart_request(&path, 3);
+
+        let startup = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(
+            startup,
+            (
+                Some(crate::unified::OwnerSessionReset::PasswordChange),
+                Some(3)
+            )
+        );
+        // The startup bootstrap fails: it never reaches Ready, so nothing
+        // completes the request.
+        let state =
+            load_owner_password_request_state(&path, "owner-password stack-restart request")
+                .expect("state");
+        assert_eq!(state.completed_request_id, None, "{state:?}");
+        assert_eq!(state.revoke_sessions, Some(true), "{state:?}");
+
+        // `focus_or_bootstrap` passes no reset; the request supplies it.
+        let reopen = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(
+            reopen,
+            (
+                Some(crate::unified::OwnerSessionReset::PasswordChange),
+                Some(3)
+            )
+        );
+    }
+
+    /// The watcher gives up on a revoking restart after the attempt cap. It
+    /// must not drop the revocation: the request stays pending, the watcher
+    /// does not retry it, and the next start revokes.
+    #[cfg(desktop)]
+    #[test]
+    fn a_revoking_request_the_watcher_gave_up_on_is_revoked_by_the_next_start() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        pending_revoking_stack_restart_request(&path, 9);
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        let polls: Vec<_> = (0..10)
+            .map(|_| {
+                poll_stack_restart(
+                    &path,
+                    &mut watcher,
+                    false,
+                    &restarts,
+                    Err("console never became ready".to_string()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            restarts.load(Ordering::SeqCst),
+            OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS
+        );
+        assert_eq!(
+            polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize - 1],
+            StackRestartPoll::GaveUp
+        );
+        assert!(polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize..]
+            .iter()
+            .all(|poll| *poll == StackRestartPoll::Idle));
+        let state =
+            load_owner_password_request_state(&path, "owner-password stack-restart request")
+                .expect("state");
+        assert_eq!(state.completed_request_id, None, "{state:?}");
+        assert_eq!(state.revoke_sessions, Some(true), "{state:?}");
+
+        // The next start: what `bootstrap_and_open_console` gives
+        // `start_managed_stack`, which gives it to `prepare_ri_start`.
+        let (reset, carried) = crate::unified::owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(
+            reset,
+            Some(crate::unified::OwnerSessionReset::PasswordChange)
+        );
+        assert_eq!(carried, Some(9));
+        let data_dir = root.path().join("ri-data");
+        let environment = crate::unified::prepare_ri_start(
+            &data_dir,
+            "owner-password-test",
+            crate::unified::OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test",
+            reset,
+        )
+        .expect("prepare RI start");
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("PDPP_RECOVERY_REVOKE_OWNER_SESSIONS")),
+            Some(&std::ffi::OsString::from("1"))
+        );
+        let written: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("owner-session-recovery-reset.json"))
+                .expect("reset file"),
+        )
+        .expect("reset file is JSON");
+        assert_eq!(written["reason"], "password_change");
+
+        // That start reaches Ready and completes the request; the watcher
+        // stays idle.
+        complete_owner_password_stack_restart_request(app.handle(), carried).expect("complete");
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        assert_eq!(
+            crate::unified::owner_session_reset_for_start(app.handle(), None),
+            (None, None)
+        );
+    }
+
+    /// Writes the saved remote-access posture where the desktop and the RI
+    /// read it, then queues the restart for a first chosen password.
+    #[cfg(desktop)]
+    fn first_password_restart_request(posture: Option<&str>) -> OwnerPasswordRequestState {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let path = owner_password_stack_restart_request_path(app.handle()).expect("path");
+        if let Some(posture) = posture {
+            fs::create_dir_all(path.parent().expect("data dir")).expect("data dir");
+            fs::write(
+                path.with_file_name("remote-access.json"),
+                serde_json::json!({ "posture": posture }).to_string(),
+            )
+            .expect("write remote-access config");
+        }
+        queue_owner_password_stack_restart_request(app.handle(), "initial_setup")
+            .expect("queue restart");
+        load_owner_password_request_state(&path, "owner-password stack-restart request")
+            .expect("restart request")
+    }
+
+    /// True first setup: remote access is off, so no remote device can be
+    /// signed in. The restart waits and revokes nothing.
+    #[cfg(desktop)]
+    #[test]
+    fn a_first_password_with_remote_access_off_does_not_revoke() {
+        for posture in [None, Some("off")] {
+            let state = first_password_restart_request(posture);
+            assert!(state.not_before_unix_ms.is_some(), "{posture:?}: {state:?}");
+            assert_eq!(state.revoke_sessions, None, "{posture:?}");
+            assert_eq!(state.revoke_reason, None, "{posture:?}");
+        }
+    }
+
+    /// An install from before the password gate may have remote access on,
+    /// with a phone signed in with the revealed generated password. The first
+    /// chosen password must sign that phone out.
+    #[cfg(desktop)]
+    #[test]
+    fn a_first_password_with_remote_access_on_revokes_now() {
+        for posture in ["my_devices_only", "public_url", "not-json-posture"] {
+            let state = first_password_restart_request(Some(posture));
+            assert_eq!(state.not_before_unix_ms, None, "{posture}");
+            assert_eq!(state.revoke_sessions, Some(true), "{posture}");
+            assert_eq!(state.revoke_reason.as_deref(), Some("password_change"), "{posture}");
+        }
+    }
+
+    #[test]
+    fn the_restart_watcher_waits_while_the_stack_is_starting() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("restart.json");
+        pending_stack_restart_request(&path, 5);
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, true, &restarts, Ok(())),
+            StackRestartPoll::Idle
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            poll_stack_restart(&path, &mut watcher, false, &restarts, Ok(())),
+            StackRestartPoll::Restarted
+        );
+        assert_eq!(restarts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A restart that keeps failing is tried a bounded number of times, then
+    /// a request that does not revoke is marked complete, instead of tearing
+    /// the stack down every few seconds for as long as the app runs.
+    #[test]
+    fn a_failing_restart_stops_retrying_after_the_attempt_cap() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("restart.json");
+        pending_stack_restart_request(&path, 9);
+        let restarts = AtomicU32::new(0);
+        let mut watcher = StackRestartWatcherState::default();
+        let polls: Vec<_> = (0..10)
+            .map(|_| {
+                poll_stack_restart(
+                    &path,
+                    &mut watcher,
+                    false,
+                    &restarts,
+                    Err("console never became ready".to_string()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            restarts.load(Ordering::SeqCst),
+            OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS
+        );
+        assert_eq!(polls[0], StackRestartPoll::Failed);
+        assert_eq!(
+            polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize - 1],
+            StackRestartPoll::GaveUp
+        );
+        assert!(polls[OWNER_PASSWORD_STACK_RESTART_MAX_ATTEMPTS as usize..]
+            .iter()
+            .all(|poll| *poll == StackRestartPoll::Idle));
+        let state = load_owner_password_request_state(&path, "owner-password stack-restart request")
+            .expect("state");
+        assert_eq!(state.completed_request_id, Some(9));
+    }
+
     #[test]
     fn owner_password_stack_restart_watcher_stops_during_shutdown() {
         let source = include_str!("owner_credential.rs");
@@ -1948,6 +2590,225 @@ mod tests {
             fs::read_to_string(key_path).expect("database key file"),
             key
         );
+    }
+
+    #[test]
+    fn keychain_error_with_sealed_credentials_is_retryable_and_changes_nothing() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        fs::write(credential_key_in_keychain_marker(&key_path), b"").expect("keychain marker");
+        let mut store = MockKeyring::default();
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a keychain error must not mint a key");
+
+        // The unified bootstrap takes the lost-key path only on this exact
+        // message; a keychain error must never produce it.
+        assert_ne!(
+            error,
+            CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+        );
+        assert!(error.contains("mock keyring unavailable"));
+        assert!(!key_path.exists());
+        assert_eq!(store.value, None);
+    }
+
+    #[test]
+    fn keychain_without_entry_and_sealed_credentials_reports_the_lost_key() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring {
+            value: None,
+            available: true,
+        };
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a lost key must not be replaced silently");
+
+        assert_eq!(
+            error,
+            CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+        );
+        assert!(!key_path.exists());
+        assert_eq!(store.value, None);
+    }
+
+    #[test]
+    fn saving_credential_key_while_keychain_errors_writes_no_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        fs::write(credential_key_in_keychain_marker(&key_path), b"").expect("keychain marker");
+        let mut store = MockKeyring::default();
+
+        save_credential_encryption_key_with_store(&key_path, &mut store, "fresh-key")
+            .expect_err("a keychain error must surface");
+
+        assert!(!key_path.exists());
+        assert_eq!(store.value, None);
+    }
+
+    #[test]
+    fn keychain_install_read_error_names_the_marker_and_the_only_exit() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let marker = credential_key_in_keychain_marker(&key_path);
+        fs::write(&marker, b"").expect("keychain marker");
+        let mut store = MockKeyring::default();
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a keychain error must surface");
+
+        assert!(error.contains("Unlock the keychain and try again."));
+        assert!(error.contains(&format!(
+            "Only if this computer no longer has an OS keychain, delete {} and try again.",
+            marker.display()
+        )));
+    }
+
+    #[test]
+    fn keychain_install_save_error_names_the_marker_and_the_only_exit() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let marker = credential_key_in_keychain_marker(&key_path);
+        fs::write(&marker, b"").expect("keychain marker");
+        let mut store = MockKeyring::default();
+
+        let error = save_credential_encryption_key_with_store(&key_path, &mut store, "fresh-key")
+            .expect_err("a keychain error must surface");
+
+        assert!(error.contains("Unlock the keychain and try again."));
+        assert!(error.contains(&format!(
+            "Only if this computer no longer has an OS keychain, delete {} and try again.",
+            marker.display()
+        )));
+    }
+
+    // File mode: the keychain always errors and the app-data file is the
+    // store. No keychain marker exists.
+
+    #[test]
+    fn file_mode_first_run_creates_the_credential_key_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        let mut store = MockKeyring::default();
+
+        let key = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("first-run key");
+
+        assert_eq!(fs::read_to_string(&key_path).expect("key file"), key);
+        assert!(!credential_key_in_keychain_marker(&key_path).exists());
+    }
+
+    #[test]
+    fn file_mode_normal_start_reads_the_credential_key_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        fs::write(&key_path, "file-key").expect("key file");
+        let mut store = MockKeyring::default();
+
+        let key = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("file key");
+
+        assert_eq!(key, "file-key");
+    }
+
+    #[test]
+    fn file_mode_restore_saves_the_credential_key_to_the_file() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring::default();
+
+        save_credential_encryption_key_with_store(&key_path, &mut store, "kit-key")
+            .expect("file-mode save");
+        let key = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect("later start");
+
+        assert_eq!(key, "kit-key");
+    }
+
+    #[test]
+    fn file_mode_lost_key_file_with_sealed_credentials_reports_the_lost_key() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        fs::write(&database_path, [0u8; 16]).expect("encrypted database marker");
+        let mut store = MockKeyring::default();
+
+        let error = load_or_create_credential_encryption_key_with_store(
+            &key_path,
+            &database_path,
+            &mut store,
+        )
+        .expect_err("a lost key must not be replaced silently");
+
+        assert_eq!(
+            error,
+            CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+        );
+        assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn database_key_save_falls_back_to_the_file_when_keychain_errors() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("database-encryption-key");
+        let mut store = MockKeyring::default();
+
+        save_database_encryption_key_with_store(&key_path, &mut store, "db-key")
+            .expect("file fallback");
+
+        assert_eq!(fs::read_to_string(&key_path).expect("key file"), "db-key");
+    }
+
+    #[test]
+    fn keychain_resident_credential_key_writes_the_marker() {
+        let directory = tempdir().expect("temp directory");
+        let key_path = directory.path().join("credential-encryption-key");
+        let database_path = directory.path().join("pdpp.sqlite");
+        let mut store = MockKeyring {
+            value: Some("keychain-key".to_string()),
+            available: true,
+        };
+
+        load_or_create_credential_encryption_key_with_store(&key_path, &database_path, &mut store)
+            .expect("keychain key");
+
+        assert!(credential_key_in_keychain_marker(&key_path).exists());
     }
 
     #[test]

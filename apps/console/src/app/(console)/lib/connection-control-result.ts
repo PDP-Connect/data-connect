@@ -52,7 +52,77 @@ import { describeError } from "./describe-error.ts";
 export type RevokeConnectionOutcome = "revoked" | "already_revoked";
 
 export interface RevokeConnectionResult {
+  /** The post-commit browser-session purge, present on a successful `revoked`. */
+  profilePurge?: ProfilePurgeReport;
   status: RevokeConnectionOutcome;
+}
+
+/**
+ * The reference server's `profile_purge` field: what happened to the saved
+ * browser session (the logged-in browser profile) after a delete or revoke
+ * committed. `failed` means the session is still on disk.
+ */
+export interface ProfilePurgeReport {
+  errorCode?: string;
+  message?: string;
+  status: "purged" | "absent" | "failed";
+}
+
+export function parseProfilePurge(body: unknown): ProfilePurgeReport | undefined {
+  const raw = (body as { profile_purge?: unknown } | null)?.profile_purge;
+  if (!raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const { error_code: errorCode, message, status } = raw as Record<string, unknown>;
+  if (status !== "purged" && status !== "absent" && status !== "failed") {
+    return undefined;
+  }
+  return {
+    status,
+    ...(typeof errorCode === "string" ? { errorCode } : {}),
+    ...(typeof message === "string" ? { message } : {}),
+  };
+}
+
+/**
+ * The banner sentence for a purge the owner must know about, or null when the
+ * session was removed (or there was none). A failed purge also offers the
+ * "Remove saved browser session" retry.
+ */
+export function profilePurgeSentence(purge: ProfilePurgeReport | undefined): string | null {
+  if (purge?.status === "failed") {
+    return `The saved browser session could not be removed (${purge.message ?? purge.errorCode ?? "unknown error"}).`;
+  }
+  return null;
+}
+
+export type BrowserProfilePurgeOutcome = "purge_reported" | "not_removed" | "not_found";
+
+export interface BrowserProfilePurgeResult {
+  profilePurge?: ProfilePurgeReport;
+  status: BrowserProfilePurgeOutcome;
+}
+
+/**
+ * Map a `POST /_ref/connections/:id/browser-profile/purge` response (the retry
+ * for a failed purge) to a typed outcome, or throw a described error.
+ */
+export function classifyBrowserProfilePurgeResponse(
+  status: number,
+  body: unknown,
+  errorCode: string | null
+): BrowserProfilePurgeResult {
+  if (status === 200) {
+    const profilePurge = parseProfilePurge(body);
+    return { status: "purge_reported", ...(profilePurge ? { profilePurge } : {}) };
+  }
+  if (status === 409 && errorCode === "connection_not_removed") {
+    return { status: "not_removed" };
+  }
+  if (status === 404 && errorCode === "connector_instance_not_found") {
+    return { status: "not_found" };
+  }
+  throw new Error(describeError(body, `browser session removal failed (${status})`));
 }
 
 export type ReactivateConnectionOutcome = "reactivated" | "not_revoked" | "not_found";
@@ -97,8 +167,12 @@ export interface ResumeConnectionResult {
 export type DeleteConnectionOutcome = "deleted" | "run_active" | "default_account" | "not_found";
 
 export interface DeleteConnectionResult {
+  /** The in-flight run that blocked the delete, present only on `run_active`. */
+  activeRunId?: string;
   /** Non-secret deletion summary, present only on a successful `deleted`. */
   deletedRecordCount?: number;
+  /** The post-commit browser-session purge, present on a successful `deleted`. */
+  profilePurge?: ProfilePurgeReport;
   status: DeleteConnectionOutcome;
 }
 
@@ -125,7 +199,8 @@ export function classifyRevokeConnectionResponse(
   errorCode: string | null
 ): RevokeConnectionResult {
   if (status === 200) {
-    return { status: "revoked" };
+    const profilePurge = parseProfilePurge(body);
+    return { status: "revoked", ...(profilePurge ? { profilePurge } : {}) };
   }
   if (status === 400 && errorCode === "connector_instance_inactive") {
     return { status: "already_revoked" };
@@ -191,13 +266,16 @@ export function classifyDeleteConnectionResponse(
 ): DeleteConnectionResult {
   if (status === 200) {
     const count = (body as { deleted_record_count?: unknown } | null)?.deleted_record_count;
+    const profilePurge = parseProfilePurge(body);
     return {
       status: "deleted",
       ...(typeof count === "number" ? { deletedRecordCount: count } : {}),
+      ...(profilePurge ? { profilePurge } : {}),
     };
   }
   if (status === 409 && errorCode === "connection_run_active") {
-    return { status: "run_active" };
+    const activeRunId = (body as { error?: { active_run_id?: unknown } } | null)?.error?.active_run_id;
+    return { status: "run_active", ...(typeof activeRunId === "string" ? { activeRunId } : {}) };
   }
   if (status === 409 && errorCode === "default_account_delete_unsupported") {
     return { status: "default_account" };

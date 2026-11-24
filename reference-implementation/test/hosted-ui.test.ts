@@ -24,6 +24,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { HOSTED_UI_CSS_PATH } from "../server/hosted-ui.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
@@ -71,6 +72,7 @@ async function withServer(
   const server: CloseableTestServer = await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...opts,

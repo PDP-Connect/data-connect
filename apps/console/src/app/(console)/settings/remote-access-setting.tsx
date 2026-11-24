@@ -155,7 +155,7 @@ const postureRows: Array<{
   },
   {
     posture: "my_devices_only",
-    label: "My devices only",
+    label: "Local network (LAN)",
     description:
       "Reachable from other devices on this network. No third party is involved -- the owner password is the only gate.",
   },
@@ -336,7 +336,7 @@ export function RemoteAccessSetting({
   const cloudflareTunnelUnavailable =
     !stateIsKnown || cloudflareTunnelInspection?.availability === "unavailable"
   // Distinct from `cloudflareTunnelUnavailable`: that flag means "no Tauri
-  // "My devices only" needs a detected LAN network interface -- unavailable
+  // "Local network (LAN)" needs a detected LAN network interface -- unavailable
   // (e.g. no network connection) is a real, distinct state from every other
   // row's `desktopUnavailable`, so it gets its own inspection the same way
   // ngrok/Cloudflare Tunnel do.
@@ -993,17 +993,16 @@ export function RemoteAccessSetting({
       {showOwnerPasswordMigrationBanner ? (
         <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
           <p>
-            Remote access is on with the original generated password. It still
-            works, but set your own owner password from this computer when you
-            are ready.
+            Remote access is on with the original generated password. Change it
+            when you are ready.
           </p>
           <button
-            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100 disabled:opacity-50"
+            className="justify-self-start rounded-md border border-amber-700/40 px-3 py-1.5 text-sm hover:bg-amber-100"
             disabled={busy || desktopUnavailable}
             onClick={() => void setOwnerPasswordForMigration()}
             type="button"
           >
-            Set owner password
+            Change password
           </button>
         </div>
       ) : null}

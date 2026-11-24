@@ -32,23 +32,11 @@ import { startServer } from "../server/index.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { getSubscriptionSummary } from "../server/stores/client-event-subscription-store.ts";
 import { makeDefaultAccountConnectorInstanceId } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
+import { closeTestServer, type TestServer } from "./helpers/close-test-server.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REFERENCE_IMPL_DIR = join(__dirname, "..");
-
-type TestServer = Awaited<ReturnType<typeof startServer>> & {
-  asServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-  rsServer: { close: (cb: (err?: Error) => void) => void; closeAllConnections: () => void };
-};
-
-async function closeServer(server: TestServer) {
-  server.asServer.closeAllConnections();
-  server.rsServer.closeAllConnections();
-  await Promise.allSettled([
-    new Promise((r) => server.asServer.close(r)),
-    new Promise((r) => server.rsServer.close(r)),
-  ]);
-}
 
 async function fetchJson<T = unknown>(url: string, opts: RequestInit = {}): Promise<{ status: number; body: T }> {
   const resp = await fetch(url, opts);
@@ -359,6 +347,7 @@ test("client event subscriptions deliver signed hints end-to-end", async () => {
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;
@@ -487,7 +476,7 @@ test("client event subscriptions deliver signed hints end-to-end", async () => {
     assert.ok(visible, "client must be able to read the changed record");
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -495,6 +484,7 @@ test("grant revoke disables subscription and notifies client", async () => {
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;
@@ -549,7 +539,7 @@ test("grant revoke disables subscription and notifies client", async () => {
     // skip that path here, the lifecycle property already proven.
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
@@ -557,6 +547,7 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;
@@ -577,7 +568,7 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
     const ownerSubjectId = "e2e_owner";
     const registered = await registerDynamicClient(
       {
-        client_name: "Daisy owner-agent event subscription e2e",
+        client_name: "Local owner agent event subscription e2e",
         token_endpoint_auth_method: "none",
       },
       { issuer_subject_id: ownerSubjectId }
@@ -680,12 +671,18 @@ test("trusted owner-agent event subscriptions deliver signed hints and are revok
     assert.equal(summary.disabled_reason, "client_deleted");
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
 test("discovery: RS protected-resource metadata advertises client_event_subscriptions", async () => {
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const rsUrl = `http://localhost:${server.rsPort}`;
   try {
     interface ClientEventSubscriptionsCapability {
@@ -776,12 +773,18 @@ test("discovery: RS protected-resource metadata advertises client_event_subscrip
     assert.equal(cap.limits.callback_url_max_bytes, 2048);
     assert.equal(cap.envelope.no_record_bodies, true);
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
 test("registered owner bearer cannot see client-grant subscriptions", async () => {
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
   const receiver = await startReceiver();
@@ -808,12 +811,18 @@ test("registered owner bearer cannot see client-grant subscriptions", async () =
     assert.deepEqual(ownerListResp.body.data, []);
   } finally {
     await receiver.close();
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });
 
 test("unregistered owner bearer cannot use event-subscription endpoints", async () => {
-  const server = (await startServer({ asPort: 0, dbPath: ":memory:", quiet: true, rsPort: 0 })) as TestServer;
+  const server = (await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  })) as TestServer;
   const rsUrl = `http://localhost:${server.rsPort}`;
   try {
     const ownerToken = await issueOwnerTokenRecord("e2e_owner");
@@ -822,6 +831,6 @@ test("unregistered owner bearer cannot use event-subscription endpoints", async 
     });
     assert.equal(ownerListResp.status, 403);
   } finally {
-    await closeServer(server);
+    await closeTestServer(server);
   }
 });

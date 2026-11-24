@@ -372,6 +372,12 @@ export function deriveStreamCoverageCondition(
   if (fact.pending_detail_gaps > 0) {
     return "retryable_gap";
   }
+  // 3b. Permanent source loss is accounted but never hydrated and has no recovery
+  //     path: the existing `terminal_gap` axis, never `complete`. Recoverable
+  //     pending work (above) keeps priority when both exist.
+  if ((fact.permanent_detail_gaps ?? 0) > 0) {
+    return "terminal_gap";
+  }
   // Local collectors preserve their observed status set instead of deciding
   // whether absence is owed at the device boundary. A manifest-declared
   // accepted policy is authoritative; without one, an observed non-collected

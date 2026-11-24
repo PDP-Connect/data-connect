@@ -85,10 +85,19 @@ export function mountOwnerConnectorInstall(
     readonly requireOwner: MiddlewareHandler;
     readonly requireToken: MiddlewareHandler;
     readonly handleError: (res: unknown, error: unknown) => void;
+    /**
+     * Called after any mutation that can change which implementation a
+     * connector runs (install, update, uninstall, local-source changes), so
+     * cached owner summaries stop reporting the old `connector_implementation`.
+     */
+    readonly onImplementationChanged?: () => void;
     readonly pdppError: PdppErrorFn;
   }
 ): void {
   const guarded = [options.requireToken, options.requireOwner] as const;
+  const implementationChanged = (): void => {
+    options.onImplementationChanged?.();
+  };
   const catalogHandler: Handler = async (_req, res) => {
     try {
       res.json({
@@ -118,9 +127,9 @@ export function mountOwnerConnectorInstall(
         options.pdppError(res, 400, "invalid_request", "digest must be a sha256 digest", "digest");
         return;
       }
-      res
-        .status(201)
-        .json({ data: projectStatus(await options.service.install(connectorId, digest)), object: "connector_install" });
+      const installed = await options.service.install(connectorId, digest);
+      implementationChanged();
+      res.status(201).json({ data: projectStatus(installed), object: "connector_install" });
     } catch (error) {
       options.handleError(res, error);
     }
@@ -132,7 +141,23 @@ export function mountOwnerConnectorInstall(
         options.pdppError(res, 400, "invalid_request", "connector_id is required", "connector_id");
         return;
       }
-      res.json({ data: projectStatus(await options.service.update(connectorId)), object: "connector_install" });
+      const updated = await options.service.update(connectorId);
+      implementationChanged();
+      res.json({ data: projectStatus(updated), object: "connector_install" });
+    } catch (error) {
+      options.handleError(res, error);
+    }
+  };
+  const uninstallHandler: Handler = async (req, res) => {
+    const connectorKey = bodyString(req, "connector_key");
+    if (!connectorKey) {
+      options.pdppError(res, 400, "invalid_request", "connector_key is required", "connector_key");
+      return;
+    }
+    try {
+      await options.service.uninstall(connectorKey);
+      implementationChanged();
+      res.json({ data: { connector_key: connectorKey, uninstalled: true }, object: "connector_uninstall" });
     } catch (error) {
       options.handleError(res, error);
     }
@@ -156,10 +181,9 @@ export function mountOwnerConnectorInstall(
         options.pdppError(res, 501, "unsupported", "Developer local sources are unavailable.", "source_path");
         return;
       }
-      res.status(201).json({
-        data: projectLocalSource(await options.service.addLocalSource(sourcePath)),
-        object: "connector_install_local_source",
-      });
+      const added = await options.service.addLocalSource(sourcePath);
+      implementationChanged();
+      res.status(201).json({ data: projectLocalSource(added), object: "connector_install_local_source" });
     } catch (error) {
       options.handleError(res, error);
     }
@@ -175,10 +199,9 @@ export function mountOwnerConnectorInstall(
         options.pdppError(res, 501, "unsupported", "Developer local sources are unavailable.", "source_id");
         return;
       }
-      res.json({
-        data: projectLocalSource(await options.service.reloadLocalSource(sourceId)),
-        object: "connector_install_local_source",
-      });
+      const reloaded = await options.service.reloadLocalSource(sourceId);
+      implementationChanged();
+      res.json({ data: projectLocalSource(reloaded), object: "connector_install_local_source" });
     } catch (error) {
       options.handleError(res, error);
     }
@@ -195,6 +218,7 @@ export function mountOwnerConnectorInstall(
         return;
       }
       await options.service.removeLocalSource(sourceId);
+      implementationChanged();
       res.json({ data: { removed: true, source_id: sourceId }, object: "connector_install_local_source" });
     } catch (error) {
       options.handleError(res, error);
@@ -214,6 +238,7 @@ export function mountOwnerConnectorInstall(
         return;
       }
       await options.service.selectLocalSource(connectorKey, sourceId || null);
+      implementationChanged();
       res.json({ data: { connector_key: connectorKey, selected_source_id: sourceId || null }, object: "connector_install_local_source" });
     } catch (error) {
       options.handleError(res, error);
@@ -224,6 +249,7 @@ export function mountOwnerConnectorInstall(
   app.get("/v1/owner/connector-install/local-sources", ...guarded, localSourcesHandler);
   app.post("/v1/owner/connector-install/install", ...guarded, installHandler);
   app.post("/v1/owner/connector-install/update", ...guarded, updateHandler);
+  app.post("/v1/owner/connector-install/uninstall", ...guarded, uninstallHandler);
   app.post("/v1/owner/connector-install/local-sources/add", ...guarded, localAddHandler);
   app.post("/v1/owner/connector-install/local-sources/reload", ...guarded, localReloadHandler);
   app.post("/v1/owner/connector-install/local-sources/remove", ...guarded, localRemoveHandler);

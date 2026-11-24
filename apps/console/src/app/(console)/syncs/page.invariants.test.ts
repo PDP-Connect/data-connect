@@ -46,7 +46,7 @@ const FAILURE_CARD_SOURCE_WORK_RE = /card\.work\?\.group \?\? "other"[\s\S]{0,80
 // so the invariant is "the bounded per-page limit constant is used", not the old
 // literal `listRuns({ limit: SYNCS_OVERVIEW_RUN_LIMIT })` call shape.
 const SYNCS_OVERVIEW_LIST_RUNS_RE = /limit:\s*SYNCS_OVERVIEW_RUN_LIMIT/;
-const RECENT_LIST_RENDER_RE = /<RecentSyncsSection entries=\{model\.recentSyncs\} paging=\{recentSyncsPaging\} \/>/;
+const RECENT_LIST_RENDER_RE = /<RecentSyncsSection connectorIcons=\{connectorIcons\} entries=\{model\.recentSyncs\} paging=\{recentSyncsPaging\} \/>/;
 const RECENT_ROW_HREF_RE = /href=\{entry\.href\}/;
 const RECENT_ROW_PREFETCH_FALSE_RE = /href=\{entry\.href\}\s+prefetch=\{false\}/;
 

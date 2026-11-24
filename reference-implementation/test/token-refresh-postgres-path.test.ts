@@ -372,7 +372,7 @@ if (POSTGRES_URL) {
   // tokens SELECT join) through the real device-authorization flow.
   // ---------------------------------------------------------------------
   test("owner device flow mints + introspects an owner token through real auth.js postgres adapters", async () => {
-    // cli_longview is the owner CLI client that startServer pre-seeds at boot;
+    // pdpp_cli is the owner CLI client that startServer pre-seeds at boot;
     // bare owner device authorization (no resource / authorization_details) is
     // only accepted for a known client.
     interface DeviceAuthorizationBody {
@@ -387,7 +387,7 @@ if (POSTGRES_URL) {
       subject_id?: string;
     }
 
-    const ownerClientId = "cli_longview";
+    const ownerClientId = "pdpp_cli";
     const { body: device } = await fetchJson<DeviceAuthorizationBody>(`${asUrl}/oauth/device_authorization`, {
       body: new URLSearchParams({ client_id: ownerClientId }).toString(),
       headers: { "Content-Type": "application/x-www-form-urlencoded" },

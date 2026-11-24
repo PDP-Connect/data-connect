@@ -10,7 +10,7 @@ PDPP_BROWSER_SURFACE_HOST_ENDPOINT=http://127.0.0.1:<port>
 PDPP_BROWSER_SURFACE_HOST_TOKEN=<shared-secret>
 ```
 
-`PDPP_BROWSER_HEADLESS=1` sets `headless: true`; any other value sets `false`. If `PDPP_NEKO_MANAGED_CONNECTORS` is set, it remains the managed connector list. Otherwise host mode manages the generated browser-bound connector set. The surface cap defaults to the smallest value that preserves the retained-connector reserve and can be overridden with `PDPP_NEKO_SURFACE_CAP`.
+`PDPP_BROWSER_HEADLESS=1` sets `headless: true`; any other value sets `false`. If `PDPP_NEKO_MANAGED_CONNECTORS` is set, it remains the managed connector list. Otherwise host mode manages the generated browser-bound connector set. The surface cap defaults to 2 and can be overridden with `PDPP_NEKO_SURFACE_CAP`.
 
 ### Acquire
 
@@ -23,8 +23,10 @@ Content-Type: application/json
 ```
 
 ```json
-{"run_id":"run-123","connector_id":"chase","headless":false}
+{"run_id":"run-123","connector_id":"chase","connection_id":"cin_abc","migrate_connector_profile":false,"headless":false}
 ```
+
+`connector_id` is the canonical connector key. `connection_id` is the RI connection the run collects for; it is required, and the host keeps one persistent browser profile per `(connector_id, connection_id)`, so two accounts of one connector never share a session and may hold leases at the same time. The same connection cannot hold two leases. RI refuses to acquire a lease that has no connection (`host_browser_surface_missing_lease_context`). `migrate_connector_profile` is `true` only when the owner has exactly one connection of the connector: a host that kept an older per-connector profile may then move it to this connection so the owner stays signed in. With more than one connection the host must not guess; it leaves the old profile and starts the connection clean.
 
 The agent returns HTTP 2xx with:
 
@@ -36,14 +38,25 @@ The agent returns HTTP 2xx with:
 
 ### Lifetime and release
 
-The returned lease belongs to one `run_id`. RI keeps the agent's `surface_id` as opaque host state. On run cleanup, readiness failure, or capacity reclaim, RI sends:
+The returned lease belongs to one `run_id`. RI keeps the agent's `surface_id` as opaque host state. On run cleanup, readiness failure, capacity reclaim, or when an unleased surface passes the idle TTL (`PDPP_NEKO_IDLE_TTL_MS`), RI sends:
 
 ```http
 DELETE <endpoint>/browser-surface/leases/<surface_id>
 Authorization: Bearer <shared-secret>
 ```
 
-The host agent owns the browser process and is responsible for killing it when this DELETE succeeds. RI owns only its run lease and never kills the browser directly. The DELETE should be idempotent so cleanup can safely retry.
+The host agent owns the browser process and is responsible for killing it when this DELETE succeeds. RI owns only its run lease and never kills the browser directly. The DELETE should be idempotent so cleanup can safely retry. RI treats `404` as already released.
+
+### Profile reset
+
+After an owner delete or revoke commits, RI removes that connection's saved session:
+
+```http
+DELETE <endpoint>/browser-surface/profiles/<connector_id>/<connection_id>[?legacy=remove]
+Authorization: Bearer <shared-secret>
+```
+
+The host answers 204 when a profile was removed, 404 when none existed, and 409 while that connection holds a live lease. It removes only this connection's profile. `?legacy=remove` also removes the older per-connector profile; RI sends it only when the owner has no other connection of the connector.
 
 ### Error codes
 

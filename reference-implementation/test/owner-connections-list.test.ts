@@ -29,6 +29,7 @@ import { COLLECTOR_PROTOCOL_VERSION } from "../server/collector-protocol.ts";
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const OWNER_SUBJECT_ID = "owner_local";
 const NOW = "2026-05-31T00:00:00.000Z";
@@ -87,7 +88,14 @@ function asArray(value: unknown): unknown[] {
 }
 
 async function withServer(fn: (ctx: { asUrl: string; rsUrl: string }) => Promise<void>): Promise<void> {
-  const server = await startServer({ asPort: 0, dbPath: ":memory:", ownerAuthPassword: "", quiet: true, rsPort: 0 });
+  const server = await startServer({
+    asPort: 0,
+    dbPath: ":memory:",
+    ownerAuthPassword: "",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    quiet: true,
+    rsPort: 0,
+  });
   const asUrl = `http://localhost:${server.asPort}`;
   const rsUrl = `http://localhost:${server.rsPort}`;
   try {

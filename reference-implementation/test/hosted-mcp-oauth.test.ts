@@ -425,7 +425,7 @@ function renderedHostedMcpPickerErrorText(html: string): string {
 }
 
 async function issueOwnerToken(asUrl: string): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: device } = await fetchJson(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -1052,9 +1052,10 @@ test("hosted MCP OAuth code flow issues a scoped client token usable at /mcp", a
     const initializeServerInfo = resultOf(initialize).serverInfo as Record<string, unknown>;
     assert.equal(initializeServerInfo.name, "pdpp-reference-mcp");
     assert.deepEqual(initializeServerInfo.icons, [
-      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon.svg` },
+      { mimeType: "image/svg+xml", sizes: ["any"], src: `${rsUrl}/icon` },
+      { mimeType: "image/png", sizes: ["180x180"], src: `${rsUrl}/apple-icon` },
     ]);
-    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(initialize.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
 
     const tools = await postMcpJson(rsUrl, accessToken, {
       id: 2,
@@ -1927,7 +1928,7 @@ test("/mcp rejects missing and owner bearers", async () => {
   try {
     const missing = await fetchJson(`${rsUrl}/mcp`, { method: "POST" });
     assert.equal(missing.status, 401);
-    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon.svg>; rel="icon"; type="image/svg+xml"`);
+    assert.equal(missing.resp.headers.get("link"), `<${rsUrl}/icon>; rel="icon"; type="image/svg+xml"`);
     assert.equal(errorOf(missing).resource_metadata, `${rsUrl}/.well-known/oauth-protected-resource/mcp`);
 
     const mcpMetadata = await fetchProtectedResourceMetadata(stringField(errorOf(missing), "resource_metadata"));
@@ -2445,6 +2446,107 @@ test("multi-source hosted MCP picker issues a package token usable at /mcp with 
       mustExist(schemaPackageMetadata(refreshedSchemaData), "schema response carries package metadata").member_count,
       2
     );
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("package member with a tampered client binding is excluded from hosted MCP access", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issued = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id, github.connector_id],
+    });
+    const before = await getGrantPackageAccess(issued.packageId);
+    assert.equal((before?.members as unknown[] | undefined)?.length, 2, "both package members start bound");
+    const member = getDb()
+      .prepare("SELECT token_id FROM grant_package_members WHERE package_id = ? ORDER BY grant_id LIMIT 1")
+      .get(issued.packageId) as { token_id: string } | undefined;
+    assert.ok(member, "package has a child member token");
+    getDb().prepare("UPDATE tokens SET client_id = ? WHERE token_id = ?").run("tampered-client", member.token_id);
+    const tamperedToken = getDb()
+      .prepare("SELECT client_id FROM tokens WHERE token_id = ?")
+      .get(member.token_id) as { client_id: string } | undefined;
+    assert.equal(tamperedToken?.client_id, "tampered-client");
+
+    const access = await getGrantPackageAccess(issued.packageId);
+
+    assert.ok(access, "the package remains active");
+    assert.equal((access.members as unknown[]).length, 1, "the mismatched child binding is dropped");
+
+    const schema = await postMcpJson(rsUrl, issued.accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: { arguments: {}, name: "schema" },
+    });
+    assert.equal(schema.status, 200);
+    const packageInfo = schemaPackageMetadata(structuredContentData(resultOf(schema)));
+    assert.equal(packageInfo?.member_count, 1, "hosted MCP output contains only the bound child");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("mcp_package bearer is rejected by an owner route", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issued = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id, github.connector_id],
+    });
+
+    const response = await fetchJson(`http://localhost:${server.rsPort}/v1/owner/control`, {
+      headers: { Authorization: `Bearer ${issued.accessToken}` },
+    });
+
+    assert.equal(response.status, 403);
+    assert.equal((response.body.error as Record<string, unknown>).code, "permission_error");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("expired package bearer is rejected at /mcp", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  const rsUrl = `http://localhost:${server.rsPort}`;
+
+  try {
+    const spotify = await registerAuthorizedSpotify(asUrl);
+    const github = await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const issued = await completeMultiSourcePackageFlow({
+      asUrl,
+      client,
+      connectorIds: [spotify.connector_id, github.connector_id],
+    });
+    getDb()
+      .prepare("UPDATE tokens SET expires_at = ? WHERE token_id = ?")
+      .run(new Date(Date.now() - 60_000).toISOString(), issued.accessToken);
+
+    const expired = await postMcpJson(rsUrl, issued.accessToken, {
+      id: 1,
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+    });
+
+    assert.equal(expired.status, 401);
   } finally {
     await closeServer(server);
   }
@@ -6976,6 +7078,7 @@ test("a stream declared after review is not added to the issued grant", async ()
       }
     ).manifest;
     const widened = structuredClone(manifest) as typeof manifest & { streams: Record<string, unknown>[] };
+    widened.version = "widened";
     widened.streams.push({ ...structuredClone(widened.streams[0]), name: "late_declared_stream" });
     assert.equal(
       (
@@ -7029,6 +7132,63 @@ test("a stream declared after review is not added to the issued grant", async ()
     } finally {
       getDb().exec("DROP TRIGGER widen_declaration_at_consume");
     }
+  } finally {
+    await closeServer(server);
+  }
+});
+
+
+test("hosted package member failure rolls back all authority and permits one retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    await registerAuthorizedSpotify(asUrl);
+    await registerAuthorizedGithub(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const challenge = await startConsentChallenge(asUrl, client, "atomic-package-retry");
+    const model = await fetchConsentChallengeModel(asUrl, challenge);
+    const body = consentChallengeAcceptBody({
+      chosen: model.sources.map((source) => ({ source, streams: source.streams })),
+      client,
+      model,
+    });
+    const db = getDb();
+    const authorityCounts = () => ({
+      grants: db.prepare("SELECT count(*) AS n FROM grants WHERE client_id = ?").get(client.client_id),
+      packages: db.prepare("SELECT count(*) AS n FROM grant_packages WHERE client_id = ?").get(client.client_id),
+      tokens: db.prepare("SELECT count(*) AS n FROM tokens WHERE client_id = ?").get(client.client_id),
+      members: db.prepare("SELECT count(*) AS n FROM grant_package_members").get(),
+    });
+    const before = authorityCounts();
+    db.exec(`
+      CREATE TRIGGER fail_hosted_package_member
+      AFTER INSERT ON grant_package_members
+      BEGIN
+        SELECT RAISE(ABORT, 'injected hosted member failure');
+      END
+    `);
+    let failed: JsonResponse;
+    try {
+      failed = await postConsentChallenge(asUrl, challenge, "accept", body);
+    } finally {
+      db.exec("DROP TRIGGER fail_hosted_package_member");
+    }
+    assert.equal(failed.status, 400, JSON.stringify(failed.body));
+    assert.deepEqual(authorityCounts(), before, "failed issuance must leave no authority rows");
+    assert.deepEqual(
+      db.prepare("SELECT status, decision_digest FROM consent_challenges WHERE id = ?").get(challenge),
+      { decision_digest: null, status: "pending" }
+    );
+    const retried = await postConsentChallenge(asUrl, challenge, "accept", body);
+    assert.equal(retried.status, 200, JSON.stringify(retried.body));
+    assert.deepEqual(authorityCounts(), {
+      grants: { n: 2 },
+      packages: { n: 1 },
+      tokens: { n: 3 },
+      members: { n: 2 },
+    });
+    assert.equal((await postConsentChallenge(asUrl, challenge, "accept", body)).status, 404);
+    assert.equal(await countGrantPackagesForOwner(), 1);
   } finally {
     await closeServer(server);
   }
@@ -7536,3 +7696,58 @@ for (const invalidDecision of ["stale review", "bad expiry", "empty selection"] 
     }
   });
 }
+
+test("live authorization code rejects bad bindings without burning the honest retry", async () => {
+  const server = await startOpenTestServer();
+  const asUrl = `http://localhost:${server.asPort}`;
+  try {
+    const manifest = await registerAuthorizedSpotify(asUrl);
+    const client = await registerAuthCodeClient(asUrl);
+    const otherClient = await registerAuthCodeClient(asUrl);
+    const prepared = await prepareOauthCodeFlow({ asUrl, client, manifest });
+    // Same shape as a valid verifier, so only the S256 comparison can reject it.
+    const wrongVerifier = `${prepared.verifier[0] === "A" ? "B" : "A"}${prepared.verifier.slice(1)}`;
+    const defaults: Record<string, string> = {
+      client_id: client.client_id,
+      code: prepared.code,
+      code_verifier: prepared.verifier,
+      grant_type: "authorization_code",
+      redirect_uri: "https://client.example/callback",
+    };
+    const redeem = (changes: Record<string, string> = {}) =>
+      fetchJson(`${asUrl}/oauth/token`, {
+        body: new URLSearchParams({ ...defaults, ...changes }).toString(),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        method: "POST",
+      });
+    const refreshCount = () =>
+      (getDb().prepare("SELECT COUNT(*) AS n FROM oauth_refresh_tokens").get() as { n: number }).n;
+    const beforeRefresh = refreshCount();
+    const cases: Array<{ changes: Record<string, string>; message: RegExp }> = [
+      { changes: { code_verifier: wrongVerifier }, message: /PKCE verification failed/ },
+      { changes: { client_id: otherClient.client_id }, message: /client_id mismatch/ },
+      { changes: { redirect_uri: "https://client.example/other" }, message: /redirect_uri mismatch/ },
+    ];
+    for (const entry of cases) {
+      const rejected = await redeem(entry.changes);
+      assert.equal(rejected.status, 400);
+      assert.equal(rejected.body.error, "invalid_grant");
+      assert.match(String(rejected.body.error_description), entry.message);
+      const stored = getDb()
+        .prepare("SELECT status, consumed_at FROM oauth_authorization_codes WHERE code = ?")
+        .get(prepared.code) as { consumed_at: string | null; status: string };
+      assert.deepEqual({ ...stored }, { consumed_at: null, status: "issued" });
+      assert.equal(refreshCount(), beforeRefresh);
+    }
+    const accepted = await redeem();
+    assert.equal(accepted.status, 200);
+    assert.equal(typeof accepted.body.access_token, "string");
+    assert.equal(typeof accepted.body.refresh_token, "string");
+    assert.equal(refreshCount(), beforeRefresh + 1);
+    const replay = await redeem();
+    assert.equal(replay.status, 400);
+    assert.equal(replay.body.error, "invalid_grant");
+  } finally {
+    await closeServer(server);
+  }
+});

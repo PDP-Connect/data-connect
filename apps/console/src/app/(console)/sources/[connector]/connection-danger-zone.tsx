@@ -5,10 +5,16 @@
 
 import { IcButton, IcInput } from "@pdpp/brand-react";
 import { Section } from "@pdpp/operator-ui/components/primitives";
-import { useState } from "react";
-import { deleteConnectionAction, revokeConnectionAction } from "./actions.ts";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+import { deleteConnectionAction, resetAndSyncConnectionAction, revokeConnectionAction } from "./actions.ts";
 
 interface Props {
+  /**
+   * The in-flight run that blocks a delete, when known (from the delete
+   * refusal or the connection's schedule). Enables "Cancel run and delete".
+   */
+  activeRunId?: string | null;
   /**
    * The concrete connection selector (`connection_id` / `connector_instance_id`).
    * Null only when this connector type has no addressable connection yet — the
@@ -20,6 +26,8 @@ interface Props {
   error?: string;
   /** Result banner forwarded from the server action redirect. */
   message?: string;
+  /** Setup-failed shells have no collection state or authorization to revoke. */
+  setupFailed?: boolean;
 }
 
 /**
@@ -31,14 +39,15 @@ interface Props {
  * Revoke is a lightweight confirm (checkbox); it stops future collection while
  * retaining records, grants, and audit. Delete requires reproducing the
  * connection id (typed-id confirmation) before the destructive submit enables;
- * it erases exactly this connection's records and may be refused for an active
- * run or a default-account binding. Both confirmations are enforced again on the
- * server — the client gating is a guardrail, not the gate.
+ * it erases exactly this connection's records and is refused while a run is in
+ * flight; when the blocking run is known, the same confirmed submit cancels it
+ * and retries. Both confirmations are enforced again on the server — the client
+ * gating is a guardrail, not the gate.
  */
-export function ConnectionDangerZone({ connectionId, error, message }: Props) {
+export function ConnectionDangerZone({ activeRunId = null, connectionId, error, message, setupFailed = false }: Props) {
   return (
     <Section
-      description="These actions affect only this connection. Sibling connections of the same connector type are untouched."
+      description="These actions affect only this connection. Sibling connections of the same connector type, and their saved browser sessions, are untouched."
       id="danger-zone"
       title="Danger zone"
     >
@@ -59,12 +68,67 @@ export function ConnectionDangerZone({ connectionId, error, message }: Props) {
         </p>
       ) : (
         <div className="flex flex-col gap-6 rounded-md border border-border p-4">
-          <RevokeForm connectionId={connectionId} />
-          <div className="border-border border-t" />
-          <DeleteForm connectionId={connectionId} />
+          {setupFailed ? null : (
+            <>
+              <RevokeForm connectionId={connectionId} />
+              <div className="border-border border-t" />
+              <ResetSourceForm connectionId={connectionId} />
+              <div className="border-border border-t" />
+            </>
+          )}
+          <DeleteForm activeRunId={activeRunId} connectionId={connectionId} />
         </div>
       )}
     </Section>
+  );
+}
+
+function ResetSourceForm({ connectionId }: { connectionId: string }) {
+  const router = useRouter();
+  const [confirmed, setConfirmed] = useState(false);
+  const [message, setMessage] = useState<{ text: string; tone: "error" | "success" } | null>(null);
+  const [isPending, startTransition] = useTransition();
+  return (
+    <div className="flex flex-col gap-2">
+      <h3 className="pdpp-body font-medium text-foreground">Reset and re-sync</h3>
+      <p className="pdpp-caption text-muted-foreground">
+        Clears this source’s cursor and sync checkpoints, then starts a full sync. Records, credentials, and browser
+        profile are kept.
+      </p>
+      <label className="pdpp-caption flex items-center gap-2 text-muted-foreground">
+        <input checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} type="checkbox" />
+        <span>Clear sync state and start a full sync for {connectionId}.</span>
+      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <IcButton
+          disabled={!confirmed || isPending}
+          onClick={() => {
+            setMessage(null);
+            startTransition(async () => {
+              const result = await resetAndSyncConnectionAction(connectionId);
+              if (result.ok) router.refresh();
+              setMessage(
+                result.ok
+                  ? { text: "Sync state cleared. Full sync started.", tone: "success" }
+                  : { text: result.message, tone: "error" }
+              );
+            });
+          }}
+          type="button"
+        >
+          {isPending ? "Resetting…" : "Reset and re-sync"}
+        </IcButton>
+        {message ? (
+          <span
+            aria-live="polite"
+            className={`pdpp-caption ${message.tone === "error" ? "text-destructive" : "text-status-success-fg"}`}
+            role={message.tone === "error" ? "alert" : "status"}
+          >
+            {message.text}
+          </span>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -73,8 +137,8 @@ function RevokeForm({ connectionId }: { connectionId: string }) {
     <div className="flex flex-col gap-2">
       <h3 className="pdpp-body font-medium text-foreground">Revoke</h3>
       <p className="pdpp-caption text-muted-foreground">
-        Stops future collection. Records, grants, and audit history are retained — revoke does not erase anything. To
-        resume, reconnect this source.
+        Stops future collection and signs out the saved browser session for this source. Records, grants, and audit
+        history are retained. To resume, reconnect this source.
       </p>
       <form action={revokeConnectionAction} className="mt-1 flex flex-wrap items-center gap-3">
         <input name="connection_id" type="hidden" value={connectionId} />
@@ -92,19 +156,29 @@ function RevokeForm({ connectionId }: { connectionId: string }) {
   );
 }
 
-function DeleteForm({ connectionId }: { connectionId: string }) {
+function DeleteForm({ activeRunId, connectionId }: { activeRunId: string | null; connectionId: string }) {
   const [typed, setTyped] = useState("");
   const confirmed = typed === connectionId;
   return (
     <div className="flex flex-col gap-2">
       <h3 className="pdpp-body font-medium text-destructive">Delete</h3>
       <p className="pdpp-caption text-muted-foreground">
-        Permanently erases this connection's records, including everything already collected, and removes the
-        connection. This cannot be undone. Delete is refused while a run is in flight, and for a default-account
-        connection — revoke that instead.
+        Permanently erases this connection's records, including everything already collected, its sync position, and
+        the saved browser session, and removes the connection. This cannot be undone.
       </p>
+      <p className="pdpp-caption text-muted-foreground">
+        Apps you granted access stay authorized. They stop receiving this source's data, and they keep any copies they
+        already received. To end their access, revoke their grants.
+      </p>
+      {activeRunId ? (
+        <p className="pdpp-caption text-muted-foreground">
+          A collection run is in progress. Deleting cancels run <code className="font-mono">{activeRunId}</code> first;
+          records it already saved are erased with the rest.
+        </p>
+      ) : null}
       <form action={deleteConnectionAction} className="mt-1 flex flex-col gap-2">
         <input name="connection_id" type="hidden" value={connectionId} />
+        {activeRunId ? <input name="cancel_run_id" type="hidden" value={activeRunId} /> : null}
         <label className="pdpp-caption flex flex-col gap-1 text-muted-foreground" htmlFor="confirm-delete-input">
           <span>
             Type the connection id <code className="font-mono">{connectionId}</code> to confirm.
@@ -122,7 +196,7 @@ function DeleteForm({ connectionId }: { connectionId: string }) {
         </label>
         <div>
           <IcButton disabled={!confirmed} type="submit" variant="destructive">
-            Delete connection and erase its records
+            {activeRunId ? "Cancel run and delete" : "Delete connection and erase its records"}
           </IcButton>
         </div>
       </form>

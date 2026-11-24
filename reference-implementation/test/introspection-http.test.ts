@@ -47,6 +47,24 @@ function validResponse(): Record<string, unknown> {
   };
 }
 
+function validPackageResponse(): Record<string, unknown> {
+  return {
+    active: true,
+    aud: AUDIENCE,
+    client_id: "package-client",
+    exp: CLOCK_MS / 1000 + 300,
+    grant_package_id: "pkg_pr89",
+    iss: ISSUER,
+    package: {
+      client: { client_id: "package-client" },
+      package_id: "pkg_pr89",
+      subject: { id: "owner_local" },
+    },
+    pdpp_token_kind: "mcp_package",
+    subject_id: "owner_local",
+  };
+}
+
 function responseFetch(
   payload: Record<string, unknown>,
   observe?: (request: { input: string | URL | Request; init?: RequestInit }) => void
@@ -193,6 +211,82 @@ test("remote introspection maps invalid authenticated responses to stable contex
     const result = await introspectorFor(response)("tok_pr89");
     assert.deepEqual(result, { active: false, inactive_reason: fixture.expected });
   }
+});
+
+test("remote introspection rejects malformed and contradictory package authorization context", async () => {
+  const cases: ReadonlyArray<{
+    expected: string;
+    mutate: (response: Record<string, unknown>) => void;
+  }> = [
+    {
+      expected: "context.identity_mismatch",
+      mutate: (response) => {
+        delete response.client_id;
+      },
+    },
+    {
+      expected: "context.identity_mismatch",
+      mutate: (response) => {
+        delete response.subject_id;
+      },
+    },
+    {
+      expected: "context.identity_mismatch",
+      mutate: (response) => {
+        delete response.grant_package_id;
+      },
+    },
+    {
+      expected: "context.rights_missing",
+      mutate: (response) => {
+        delete response.package;
+      },
+    },
+    {
+      expected: "context.identity_mismatch",
+      mutate: (response) => {
+        (response.package as Record<string, unknown>).client = {};
+      },
+    },
+    {
+      expected: "context.identity_mismatch",
+      mutate: (response) => {
+        (response.package as Record<string, unknown>).client = { client_id: "other-client" };
+      },
+    },
+    {
+      expected: "context.identity_mismatch",
+      mutate: (response) => {
+        (response.package as Record<string, unknown>).subject = { id: "other-subject" };
+      },
+    },
+    {
+      expected: "context.grant_mismatch",
+      mutate: (response) => {
+        (response.package as Record<string, unknown>).package_id = "other-package";
+      },
+    },
+  ];
+
+  for (const fixture of cases) {
+    const response = validPackageResponse();
+    fixture.mutate(response);
+    // biome-ignore lint/performance/noAwaitInLoops: Table rows are intentionally resolved in stable assertion order.
+    const result = await introspectorFor(response)("tok_package");
+    assert.deepEqual(result, { active: false, inactive_reason: fixture.expected });
+  }
+});
+
+test("remote introspection ignores unknown extension members when validating a package", async () => {
+  const response = validPackageResponse();
+  response.future_extension = { authority: "unknown" };
+  (response.package as Record<string, unknown>).future_extension = { status: "unknown" };
+
+  const result = await introspectorFor(response)("tok_package");
+
+  assert.equal(result.active, true);
+  assert.equal(result.client_id, "package-client");
+  assert.equal(result.grant_package_id, "pkg_pr89");
 });
 
 test("remote introspection fails closed on transport, status, and JSON errors", async () => {

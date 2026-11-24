@@ -7,6 +7,7 @@ import test from "node:test";
 import express from "express";
 import { normalizeDashboardReturnTo } from "./return-to.ts";
 import { createOwnerAuthPlaceholder } from "../../../../../../reference-implementation/server/owner-auth.ts";
+import { closeDb, initDb } from "../../../../../../reference-implementation/server/db.ts";
 
 // Bare Node does not provide the RSC bundler's empty server-only marker.
 // Keep the actual Next redirect implementation and return-path sanitizer.
@@ -29,6 +30,7 @@ test("consent challenge survives the real console redirect, login form, and auth
   const returnTo = `/consent?challenge=${encodeURIComponent(challenge)}`;
   const destination = await loginDestination(returnTo);
   assert.equal(new URL(destination, "http://localhost").searchParams.get("return_to"), returnTo);
+  initDb(":memory:");
   const auth = createOwnerAuthPlaceholder({ password: "test-password" });
   const app = express();
   app.use(express.urlencoded({ extended: false }));
@@ -59,6 +61,7 @@ test("consent challenge survives the real console redirect, login form, and auth
     assert.ok(response.headers.getSetCookie().some((cookie) => cookie.startsWith("pdpp_owner_session=")));
   } finally {
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    closeDb();
   }
 });
 

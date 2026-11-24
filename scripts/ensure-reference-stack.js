@@ -19,6 +19,7 @@ import {
 import { spawnSync } from "node:child_process"
 import { dirname, join, relative, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { isMainModule } from "./is-main-module.js"
 import {
   KEEP_GENERATIONS,
   collectOldStageGenerations,
@@ -27,6 +28,7 @@ import {
 } from "./stage-generations.js"
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
+const PARENT_LIFELINE_SOURCE = join(SCRIPT_DIR, "parent-lifeline.mjs")
 const DEFAULT_PROJECT_ROOT = resolve(SCRIPT_DIR, "..")
 const DEFAULT_PROFILE = "release"
 const LOCAL_PACKAGES = [
@@ -169,6 +171,8 @@ function sourceInputFiles(projectRoot) {
     // The recipe itself is a behavior-affecting input: changing it must
     // invalidate any cache built under the old recipe.
     join(projectRoot, "scripts", "ensure-reference-stack.js"),
+    join(projectRoot, "scripts", "is-main-module.js"),
+    join(projectRoot, "scripts", "parent-lifeline.mjs"),
     join(projectRoot, "scripts", "stage-generations.js"),
     ...roots.flatMap(root =>
       existsSync(root)
@@ -360,7 +364,10 @@ function createStagedPackageJson(projectRoot, stageRoot) {
       "utf8"
     )
   )
-  const dependencies = { ...riPackage.dependencies }
+  const dependencies = {
+    ...riPackage.dependencies,
+    ...riPackage.optionalDependencies,
+  }
   const rootPackage = JSON.parse(
     readFileSync(join(projectRoot, "package.json"), "utf8")
   )
@@ -593,22 +600,47 @@ import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { spawn } from "node:child_process"
 
+console.info("[reference-implementation] launch entry started")
 const root = dirname(fileURLToPath(import.meta.url))
 const dataDir = resolve(process.env.PDPP_DATA_DIR || process.env.PDPP_REFERENCE_DATA_DIR || join(root, "data"))
 const dbPath = resolve(process.env.PDPP_DB_PATH || join(dataDir, "pdpp.sqlite"))
 mkdirSync(dataDir, { recursive: true })
-const child = spawn(process.execPath, ["--import", "tsx", "reference-implementation/server/index.ts"], {
+const serverArgs = [
+  "--import",
+  new URL("./parent-lifeline.mjs", import.meta.url).href,
+  "--import",
+  "tsx",
+  "reference-implementation/server/index.ts",
+]
+const serverEnv = {
+  ...process.env,
+  NODE_ENV: "production",
+  AS_PORT: process.env.AS_PORT || "0",
+  RS_PORT: process.env.RS_PORT || "0",
+  PDPP_DB_PATH: dbPath,
+  PDPP_BIND_HOST: process.env.PDPP_BIND_HOST || "127.0.0.1",
+  PDPP_EMBEDDING_DOWNLOAD_ALLOWED: process.env.PDPP_EMBEDDING_DOWNLOAD_ALLOWED || "0",
+  PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
+}
+
+// On Linux the desktop app arms PR_SET_PDEATHSIG on this launcher only, and
+// the kernel does not carry that signal to a forked grandchild. Replace this
+// process with the server instead of forking it: the pid, the process group
+// and the armed signal all stay with the server. Without execve (older Node,
+// macOS, Windows) fall back to the forwarding parent below.
+if (process.platform === "linux" && typeof process.execve === "function") {
+  try {
+    process.chdir(root)
+    process.execve(process.execPath, [process.execPath, ...serverArgs], serverEnv)
+  } catch (error) {
+    console.error("[reference-implementation] execve failed, forking instead:", error)
+  }
+}
+
+const child = spawn(process.execPath, serverArgs, {
   cwd: root,
-  env: {
-    ...process.env,
-    AS_PORT: process.env.AS_PORT || "0",
-    RS_PORT: process.env.RS_PORT || "0",
-    PDPP_DB_PATH: dbPath,
-    PDPP_BIND_HOST: process.env.PDPP_BIND_HOST || "127.0.0.1",
-    PDPP_EMBEDDING_DOWNLOAD_ALLOWED: process.env.PDPP_EMBEDDING_DOWNLOAD_ALLOWED || "0",
-    PATCHRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
-    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
-  },
+  env: serverEnv,
   stdio: "inherit",
 })
 
@@ -627,9 +659,10 @@ child.on("exit", (code, signal) => {
 `
 }
 
-function writeLaunchScript(stageRoot) {
+export function writeLaunchScript(stageRoot) {
   const launcherPath = join(stageRoot, "launch.mjs")
   writeFileSync(launcherPath, launchScript(), { mode: 0o755 })
+  copyFileSync(PARENT_LIFELINE_SOURCE, join(stageRoot, "parent-lifeline.mjs"))
 }
 
 function assertNativeFiles(stageRoot) {
@@ -691,7 +724,11 @@ export function buildManifest({
 export function verifyReferenceStackRoot(stageRoot) {
   const requiredPaths = [
     "launch.mjs",
+    "parent-lifeline.mjs",
     "manifest.json",
+    "reference-implementation/scripts/is-main-module.js",
+    "reference-implementation/connector-dependency-loader.mjs",
+    "reference-implementation/connector-dependency-loader-bootstrap.mjs",
     "reference-implementation/server/index.ts",
     "node_modules/tsx/package.json",
     "node_modules/patchright/package.json",
@@ -869,10 +906,7 @@ function parseArgs(argv) {
   return options
 }
 
-if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-) {
+if (isMainModule(import.meta.url, process.argv[1])) {
   try {
     const result = stageReferenceStack(parseArgs(process.argv.slice(2)))
     console.log(

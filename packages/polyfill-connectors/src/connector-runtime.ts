@@ -46,7 +46,7 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { emitToStdout, resourceSet } from "@pdpp/connector-protocol";
+import { emitToStdout, passesTimeRange, resourceSet } from "@pdpp/connector-protocol";
 
 import { type AuthConfig, resolveAuth } from "@pdpp/connector-protocol/auth";
 import type {
@@ -264,6 +264,10 @@ export type BrowserLaunchSource =
       readonly remoteCdpUrl: string;
     }
   | {
+      readonly kind: "managed_host_cdp";
+      readonly remoteCdpUrl: string;
+    }
+  | {
       readonly envKey: string;
       readonly kind: "legacy_remote_cdp";
       readonly remoteCdpUrl: string;
@@ -427,18 +431,9 @@ export function describeUnexpectedFailure(err: unknown): string {
     : combined;
 }
 
-/** Returns true if the scope's time_range excludes this record's date value. */
+/** Returns true if the scope's half-open time_range excludes this record value. */
 function isOutsideTimeRange(timeRange: { since?: string; until?: string }, dateValue: unknown): boolean {
-  if (typeof dateValue !== "string" || !dateValue) {
-    return false;
-  }
-  if (timeRange.since && dateValue < timeRange.since.slice(0, 10)) {
-    return true;
-  }
-  if (timeRange.until && dateValue >= timeRange.until.slice(0, 10)) {
-    return true;
-  }
-  return false;
+  return !passesTimeRange(typeof dateValue === "string" ? dateValue : undefined, timeRange);
 }
 
 /** Build a SKIP_RESULT for a shape-check failure. */
@@ -1136,7 +1131,7 @@ async function resolveCredentials(
 }
 
 /** Factory: returns the emitRecord closure + a live-updating counters object. */
-function makeEmitRecord(deps: {
+export function makeEmitRecord(deps: {
   requested: Map<string, StreamScope>;
   emit: (msg: EmittedMessage) => Promise<void>;
   emittedAt: string;
@@ -1166,6 +1161,12 @@ function makeEmitRecord(deps: {
       return Promise.resolve();
     }
 
+    const streamScope = requested.get(stream);
+    const field = timeRangeFieldFor(stream);
+    if (streamScope?.time_range && isOutsideTimeRange(streamScope.time_range, data[field])) {
+      return Promise.resolve();
+    }
+
     if (isTombstone?.(stream, data)) {
       counters.totalEmitted += 1;
       return emit({
@@ -1176,12 +1177,6 @@ function makeEmitRecord(deps: {
         emitted_at: emittedAt,
         op: "delete",
       });
-    }
-
-    const streamScope = requested.get(stream);
-    const field = timeRangeFieldFor(stream);
-    if (streamScope?.time_range && isOutsideTimeRange(streamScope.time_range, data[field])) {
-      return Promise.resolve();
     }
 
     const validation = validateRecord?.(stream, data);
@@ -1828,6 +1823,7 @@ export function resolveBrowserLaunchSource(
   env: NodeJS.ProcessEnv = process.env
 ): BrowserLaunchSource {
   const managedRequired = env.PDPP_BROWSER_SURFACE_REQUIRED?.trim().toLowerCase() === "neko";
+  const hostCdpRequired = env.PDPP_BROWSER_SURFACE_REQUIRED?.trim().toLowerCase() === "host";
   const managedRemoteCdpUrl = env.PDPP_BROWSER_SURFACE_REMOTE_CDP_URL?.trim();
   if (managedRequired) {
     if (!managedRemoteCdpUrl) {
@@ -1843,6 +1839,15 @@ export function resolveBrowserLaunchSource(
         ? { profileKey: env.PDPP_BROWSER_SURFACE_PROFILE_KEY.trim() }
         : {}),
     };
+  }
+
+  if (hostCdpRequired) {
+    if (!managedRemoteCdpUrl) {
+      throw new TerminalError(
+        "browser surface required: PDPP_BROWSER_SURFACE_REQUIRED=host but PDPP_BROWSER_SURFACE_REMOTE_CDP_URL is missing"
+      );
+    }
+    return { kind: "managed_host_cdp", remoteCdpUrl: managedRemoteCdpUrl };
   }
 
   const legacyRemoteCdpEnvKey = `PDPP_${visibility.profileName.toUpperCase()}_REMOTE_CDP_URL`;
@@ -1911,7 +1916,9 @@ async function acquireBrowser(browser: BrowserConfig, name: string): Promise<Acq
     Boolean(process.env.PDPP_STREAMING_REGISTRATION_TOKEN?.trim() || process.env.PDPP_LOCAL_DEVICE_TOKEN?.trim());
   const launchSource = resolveBrowserLaunchSource(visibility);
   const remoteCdpUrl =
-    launchSource.kind === "managed_neko" || launchSource.kind === "legacy_remote_cdp"
+    launchSource.kind === "managed_neko" ||
+    launchSource.kind === "managed_host_cdp" ||
+    launchSource.kind === "legacy_remote_cdp"
       ? launchSource.remoteCdpUrl
       : undefined;
   try {

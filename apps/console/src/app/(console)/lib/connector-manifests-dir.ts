@@ -48,3 +48,21 @@ export function resolveInstalledConnectorManifestsDir(
     return null
   }
 }
+
+/**
+ * Resolve the committed connector manifests directory for tests. The real
+ * manifests ship in the installed `@pdpp/polyfill-connectors` package (from
+ * the vendored tarball), not in the source-tree `packages/polyfill-connectors`
+ * (which lost its manifests in fce1b2a6b4, "retire five vendored source
+ * trees"). Throws if no manifests directory can be found, since a test that
+ * silently skips its assertions is worse than one that fails loudly.
+ */
+export function resolveCommittedManifestsDirForTests(): string {
+  const installedManifestsDir = resolveInstalledConnectorManifestsDir()
+  if (installedManifestsDir) {
+    return installedManifestsDir
+  }
+  throw new Error(
+    `Unable to resolve ${CONNECTOR_PACKAGE_NAME} manifests directory for tests`
+  )
+}

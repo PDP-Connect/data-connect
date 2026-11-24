@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { renderHook, act } from "@testing-library/react"
 
@@ -127,6 +128,8 @@ describe("useEvents", () => {
       company: "LinkedIn",
       name: "LinkedIn",
       data: expect.any(String),
+      connectionId: null,
+      accountLabel: null,
     })
     expect(mockDispatch).toHaveBeenCalledWith({
       type: "app/updateExportStatus",
@@ -284,6 +287,8 @@ describe("useEvents", () => {
       company: "GitHub",
       name: "github-pdpp",
       data: expect.any(String),
+      connectionId: null,
+      accountLabel: null,
     })
     expect(currentRuns[0].exportData).toEqual(
       expect.objectContaining({
@@ -390,6 +395,8 @@ describe("useEvents", () => {
       company: "GitHub",
       name: "github-pdpp",
       data: expect.any(String),
+      connectionId: null,
+      accountLabel: null,
     })
     const writeCall = mockInvoke.mock.calls.find(
       ([command]) => command === "write_export_data"

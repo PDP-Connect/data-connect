@@ -141,7 +141,6 @@ export interface ProviderAuthAdapter {
 }
 
 interface OptionalModuleMap {
-  readonly browserPolicy: Record<string, unknown> | null;
   readonly browserHandoff: Record<string, unknown> | null;
   readonly browserLaunch: Record<string, unknown> | null;
   readonly capture: Record<string, unknown> | null;
@@ -157,34 +156,65 @@ interface OptionalModuleMap {
   readonly roster: Record<string, unknown> | null;
 }
 
-const optionalRequire = (() => {
+type OptionalRequire = (specifier: string) => unknown;
+
+/**
+ * Where to resolve the optional package from, in order.
+ *
+ * `import.meta.url` is this file when the RI runs it from source. The console
+ * bundles this module, and webpack replaces `import.meta.url` with the path on
+ * the machine that ran `next build`, which does not exist on the owner's
+ * machine. The packaged console runs with its cwd set to the staged runtime
+ * directory (`writeLauncher` in `scripts/ensure-console-stack.js`), and that
+ * directory's node_modules holds the staged package, so the cwd is the
+ * fallback.
+ */
+const optionalRequires: readonly OptionalRequire[] = (() => {
   if (typeof process === "undefined" || typeof process.getBuiltinModule !== "function") {
-    return null;
+    return [];
   }
   const moduleApi = process.getBuiltinModule("module") as {
     createRequire: (url: string | URL) => NodeRequire;
   };
-  return moduleApi.createRequire(import.meta.url);
+  const pathApi = process.getBuiltinModule("path") as { join: (...segments: string[]) => string };
+  return [moduleApi.createRequire(import.meta.url), moduleApi.createRequire(pathApi.join(process.cwd(), "noop.js"))];
 })();
 
-function requireOptional(specifier: string): Record<string, unknown> | null {
-  if (!optionalRequire) {
-    return null;
-  }
-  try {
-    return optionalRequire(specifier) as Record<string, unknown>;
-  } catch (error) {
-    if (error instanceof Error && "code" in error && (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND")) {
-      return null;
+function isModuleNotFound(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND")
+  );
+}
+
+/**
+ * Returns the module from the first base that resolves `specifier`, or null
+ * when no base does. Errors other than "module not found" propagate.
+ */
+export function requireFromFirstResolvingBase(
+  requires: readonly OptionalRequire[],
+  specifier: string
+): Record<string, unknown> | null {
+  for (const requireFromBase of requires) {
+    try {
+      return requireFromBase(specifier) as Record<string, unknown>;
+    } catch (error) {
+      if (!isModuleNotFound(error)) {
+        throw error;
+      }
     }
-    throw error;
   }
+  return null;
+}
+
+function requireOptional(specifier: string): Record<string, unknown> | null {
+  return requireFromFirstResolvingBase(optionalRequires, specifier);
 }
 
 const optionalModules: OptionalModuleMap = {
   browserHandoff: requireOptional("@pdpp/polyfill-connectors/browser-handoff"),
   browserLaunch: requireOptional("@pdpp/polyfill-connectors/browser-launch"),
-  browserPolicy: requireOptional("@pdpp/polyfill-connectors/browser-surface-policy"),
   capture: requireOptional("@pdpp/polyfill-connectors/static-secret-credential-capture"),
   configKinds: requireOptional("@pdpp/polyfill-connectors/connector-config-option-kind-registry"),
   credentialProbe: requireOptional("@pdpp/polyfill-connectors/credential-probe"),
@@ -203,6 +233,12 @@ export function readPolyfillManifests(): readonly PolyfillManifestEntry[] {
   return typeof read === "function" ? (read() as readonly PolyfillManifestEntry[]) : [];
 }
 
+/**
+ * Whether the conformance roster loaded. Without it the two lists below are
+ * empty, which means "unknown", not "no connector is production-ready or a
+ * scaffold".
+ */
+export const CONFORMANCE_ROSTER_LOADED: boolean = optionalModules.roster !== null;
 export const PRODUCTION_READY_CONNECTORS: Readonly<Record<string, { readonly testFile: string }>> =
   (optionalModules.roster?.PRODUCTION_READY_CONNECTORS as Readonly<Record<string, { readonly testFile: string }>> | undefined) ?? {};
 export const KNOWN_SCAFFOLD_CONNECTORS: readonly string[] =
@@ -402,11 +438,6 @@ export function isBundledStaticSecretCredentialKind(kind: string): boolean {
 export function isFullyBundledStaticSecretCredentialKind(kind: string): boolean {
   const value = optionalModules.capture?.isFullyBundledStaticSecretCredentialKind;
   return typeof value === "function" ? value(kind) === true : kind === "secret_bundle";
-}
-
-export function connectorRetainsSurfaceProcess(connectorId: string): boolean {
-  const policy = optionalModules.browserPolicy?.connectorRetainsSurfaceProcess;
-  return typeof policy === "function" ? policy(connectorId) === true : false;
 }
 
 export async function notifyNtfy(args: Record<string, unknown>): Promise<void> {

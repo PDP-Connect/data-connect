@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { useRef } from "react"
 import { RefreshCwIcon } from "lucide-react"
+import { useSearchParams } from "react-router-dom"
 import { PageContainer } from "@/components/elements/page-container"
 import { Spinner } from "@/components/elements/spinner"
 import { PageHeading } from "@/components/typography/page-heading"
 import { Text } from "@/components/typography/text"
 import { Button } from "@/components/ui/button"
 import { useReferenceServer } from "@/hooks/useReferenceServer"
+import { isConsoleSourcesPath } from "@/lib/platform/console-source-path"
 
 const OPERATOR_TOOLS_UNAVAILABLE = "Operator tools are not included in this build."
 
@@ -19,7 +21,12 @@ const LIFECYCLE_LABEL: Record<string, string> = {
 
 export function ServerRepairs() {
   const containerRef = useRef<HTMLDivElement>(null)
-  const { lifecycle, error, origin, retry } = useReferenceServer(containerRef)
+  const [searchParams] = useSearchParams()
+  const requestedPath = searchParams.get("path")
+  const { lifecycle, error, origin, retry } = useReferenceServer(
+    containerRef,
+    isConsoleSourcesPath(requestedPath) ? requestedPath : null
+  )
 
   return (
     <PageContainer className="flex h-full flex-col space-y-small pb-0">

@@ -28,6 +28,7 @@ import { canonicalConnectorKey } from "../server/connector-key.ts";
 import { startServer as startServerUntyped } from "../server/index.ts";
 import { deriveOwnerCsrfSecretFromString, issueOwnerCsrfToken } from "../server/owner-csrf.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 // server/index.js (startServer) and server/auth.ts (device authorization)
 // are untyped JS (allowJs, checkJs:false). Local interfaces model only
@@ -45,7 +46,10 @@ interface ClosableServer {
 }
 
 async function startServer(opts: Record<string, unknown>): Promise<ClosableServer> {
-  const raw: Record<string, unknown> = await startServerUntyped(opts);
+  const raw: Record<string, unknown> = await startServerUntyped({
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
+    ...opts,
+  });
   return {
     asPort: raw.asPort as number,
     asServer: raw.asServer as CloseableHandle,
@@ -930,7 +934,7 @@ test("BFF device flow: JSON-encoded /device/approve with owner session succeeds 
     assert.ok(session.sessionCookie);
 
     const deviceRes = await fetch(`${asUrl}/oauth/device_authorization`, {
-      body: JSON.stringify({ client_id: "pdpp-polyfill-owner-bootstrap" }),
+      body: JSON.stringify({ client_id: "dataconnect-console" }),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });
@@ -952,7 +956,7 @@ test("BFF device flow: JSON-encoded /device/approve with owner session succeeds 
 
     const tokenRes = await fetch(`${asUrl}/oauth/token`, {
       body: JSON.stringify({
-        client_id: "pdpp-polyfill-owner-bootstrap",
+        client_id: "dataconnect-console",
         device_code: device.device_code,
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
       }),
@@ -972,7 +976,7 @@ test("BFF device flow: form-encoded /device/approve without CSRF token still 403
     const session = await login(asUrl, TEST_PASSWORD);
     assert.ok(session.sessionCookie);
     const deviceRes = await fetch(`${asUrl}/oauth/device_authorization`, {
-      body: JSON.stringify({ client_id: "pdpp-polyfill-owner-bootstrap" }),
+      body: JSON.stringify({ client_id: "dataconnect-console" }),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });
@@ -993,7 +997,7 @@ test("BFF device flow: form-encoded /device/approve without CSRF token still 403
 test("BFF device flow: /device/approve without owner session is rejected with 401", async () => {
   await withServer({ ownerAuthPassword: TEST_PASSWORD }, async ({ asUrl }) => {
     const deviceRes = await fetch(`${asUrl}/oauth/device_authorization`, {
-      body: JSON.stringify({ client_id: "pdpp-polyfill-owner-bootstrap" }),
+      body: JSON.stringify({ client_id: "dataconnect-console" }),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     });

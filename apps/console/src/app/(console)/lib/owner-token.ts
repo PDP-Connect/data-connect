@@ -28,7 +28,7 @@ import {
 import { isOwnerSessionRequiredBody } from "./auth-errors.ts";
 import { redirectToOwnerLogin } from "./login-redirect.ts";
 
-const CLIENT_ID = "pdpp-polyfill-owner-bootstrap";
+const CLIENT_ID = "dataconnect-console";
 
 let cachedToken: string | null = null;
 let inFlight: Promise<string> | null = null;

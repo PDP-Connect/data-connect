@@ -510,7 +510,11 @@ export interface MountRsMutationContext {
     err: Error & { code?: string; trace_id?: string; scenario_id?: string }
   ) => Promise<unknown>;
   readonly requireClient: MiddlewareHandler;
+  readonly requireCoreEndpointToken: MiddlewareHandler;
   readonly requireOwner: MiddlewareHandler;
+  // POST /v1/blobs auth: a live run-scoped upload credential for its bound
+  // connector instance, or the owner bearer.
+  readonly requireBlobUploadAuth: MiddlewareHandler;
   // Auth middleware
   readonly requireToken: MiddlewareHandler;
 
@@ -588,8 +592,7 @@ export function mountRsBlobsUpload(app: AppLike, ctx: MountRsMutationContext): v
   app.post(
     "/v1/blobs",
     { contract: "uploadBlob" },
-    ctx.requireToken,
-    ctx.requireOwner,
+    ctx.requireBlobUploadAuth,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const connectorInstanceId = ctx.resolveSingleConnectorIdQueryValue(req.query.connector_instance_id);
@@ -762,6 +765,7 @@ export function mountRsEventSubscriptions(app: AppLike, ctx: MountRsMutationCont
     "/v1/event-subscriptions",
     { contract: "createEventSubscription" } as RouteArg<RouteHandler>,
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const actor = buildBearerActorFromTokenInfo(req);
@@ -808,6 +812,7 @@ export function mountRsEventSubscriptions(app: AppLike, ctx: MountRsMutationCont
     "/v1/event-subscriptions",
     { contract: "listEventSubscriptions" } as RouteArg<RouteHandler>,
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const actor = buildBearerActorFromTokenInfo(req);
@@ -830,6 +835,7 @@ export function mountRsEventSubscriptions(app: AppLike, ctx: MountRsMutationCont
     "/v1/event-subscriptions/:subscription_id",
     { contract: "getEventSubscription" } as RouteArg<RouteHandler>,
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const actor = buildBearerActorFromTokenInfo(req);
@@ -853,6 +859,7 @@ export function mountRsEventSubscriptions(app: AppLike, ctx: MountRsMutationCont
     "/v1/event-subscriptions/:subscription_id",
     { contract: "updateEventSubscription" } as RouteArg<RouteHandler>,
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const actor = buildBearerActorFromTokenInfo(req);
@@ -881,6 +888,7 @@ export function mountRsEventSubscriptions(app: AppLike, ctx: MountRsMutationCont
     "/v1/event-subscriptions/:subscription_id",
     { contract: "deleteEventSubscription" } as RouteArg<RouteHandler>,
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const actor = buildBearerActorFromTokenInfo(req);
@@ -904,6 +912,7 @@ export function mountRsEventSubscriptions(app: AppLike, ctx: MountRsMutationCont
     "/v1/event-subscriptions/:subscription_id/test-event",
     { contract: "sendTestEvent" } as RouteArg<RouteHandler>,
     ctx.requireToken,
+    ctx.requireCoreEndpointToken,
     async (req: RouteRequest, res: RouteResponse) => {
       try {
         const actor = buildBearerActorFromTokenInfo(req);

@@ -1,5 +1,6 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
+// @vitest-environment happy-dom
 import { describe, expect, it, beforeEach, vi } from "vitest"
 import { cleanup, fireEvent, render } from "@testing-library/react"
 import {

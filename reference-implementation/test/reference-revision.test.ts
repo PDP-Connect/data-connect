@@ -2,16 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Unit tests for the reference-revision header helpers
-// (server/reference-revision.ts) — the DETERMINISTIC surface only.
-//
-// `resolveReferenceRevision` has a pure early-return: when an explicit
-// `referenceRevision` is supplied it is normalized (trimmed, non-printable
-// characters stripped, whitespace runs collapsed to '-') and returned before
-// any git/package/env lookup. These tests exercise ONLY that explicit-input
-// path (env-independent) plus the trivial header setter; the git/env fallback
-// is non-deterministic and out of scope.
+// (server/reference-revision.ts): explicit-input normalization, the header
+// setter, and the git fallback's environment using a deterministic fake git.
 
 import { strict as assert } from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -49,4 +46,42 @@ test("setReferenceRevisionHeader writes the value under the canonical header", (
   const res = { setHeader: (name: string, value: string) => calls.push([name, value]) };
   setReferenceRevisionHeader(res, "pdpp-reference@1.0.0+abc123");
   assert.deepEqual(calls, [[PDPP_REFERENCE_REVISION_HEADER, "pdpp-reference@1.0.0+abc123"]]);
+});
+
+test("resolveReferenceRevision disables optional git locks for every invocation", {
+  skip: process.platform === "win32" ? "win32: the fake git is a shell script" : false,
+}, () => {
+  const directory = mkdtempSync(join(tmpdir(), "reference-revision-"));
+  const savedEnv = {
+    PATH: process.env.PATH,
+    PDPP_REFERENCE_REVISION: process.env.PDPP_REFERENCE_REVISION,
+    GIT_OPTIONAL_LOCKS: process.env.GIT_OPTIONAL_LOCKS,
+  };
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  try {
+    writeFileSync(join(directory, "git"), [
+      "#!/bin/sh",
+      'printf "%s:%s\\n" "$1" "${GIT_OPTIONAL_LOCKS-unset}" >> "${0%/*}/invocations"',
+      `if [ "$1" = "rev-parse" ]; then printf "%s\\n" "${sha}"; fi`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.PATH = `${directory}${delimiter}${savedEnv.PATH ?? ""}`;
+    delete process.env.PDPP_REFERENCE_REVISION;
+    process.env.GIT_OPTIONAL_LOCKS = "1";
+
+    const revision = resolveReferenceRevision();
+    assert.ok(revision.endsWith(`+${sha}`), revision);
+    const invocations = readFileSync(join(directory, "invocations"), "utf8").trim().split("\n");
+    assert.ok(invocations.some((line) => line.startsWith("status:")), "git status was invoked");
+    for (const invocation of invocations) {
+      assert.equal(invocation.split(":")[1], "0", invocation);
+    }
+    assert.equal(process.env.GIT_OPTIONAL_LOCKS, "1");
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

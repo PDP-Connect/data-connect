@@ -30,14 +30,23 @@ import {
   // biome-ignore lint/correctness/noUnresolvedImports: Biome cannot resolve this installed package export; Node and TypeScript resolve it.
 } from "@opendatalabs/remote-surface/leases";
 import { notifyNtfy } from "../server/polyfill-connectors-runtime.ts";
+import type { ManifestManagedConnectors } from "./browser-surface-leases.ts";
 import { getOne, referenceQueries } from "../lib/db.ts";
 import { createTraceContext, emitSpineEvent, getRunTerminalStatus, type SpineTraceContext } from "../lib/spine.ts";
 import {
   approveOwnerDeviceAuthorization,
   getConnectorManifest,
   initiateOwnerDeviceAuthorization,
+  introspect,
+  OWNER_TOKEN_TTL_MS,
 } from "../server/auth.ts";
 import { canonicalConnectorKey, canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
+import {
+  assertConnectorLifecycleAvailable,
+  connectorLifecycleDataDir,
+  withConnectorLifecycleLock,
+} from "../server/connector-lifecycle-lock.ts";
+import { CONNECTOR_RUNTIME_OWNER_CLIENT_ID } from "../server/reference-local-defaults.ts";
 import {
   getConnectorSummaryEvidence,
   reconcileDirtyConnectorSummaryEvidence,
@@ -92,6 +101,7 @@ import {
   classifyRecoveryGap,
   filterFreshPressureRows,
   hasForwardEvidenceDebt,
+  isRecoverableDetailGapRow,
   type RecoveryAdmissionDenialReason,
   resolveRecoveryAdmission,
   resolveRecoveryFirstMode,
@@ -280,6 +290,8 @@ export interface RunNowOptions {
    * `deriveCollectionState`.
    */
   fullRefresh?: boolean;
+  /** Atomically clear owner sync state with admission of this full-refresh run. */
+  resetState?: boolean;
   manifest?: ConnectorManifest;
   /** Authenticated subject used by the server admission boundary. */
   ownerSubjectId?: string;
@@ -311,6 +323,13 @@ export interface RunNowResult {
   readonly automation_mode?: RunAutomationMode;
   readonly automation_summary?: string;
   readonly browser_surface?: BrowserSurfaceProjection;
+  /**
+   * The host allocator's own error code/message when the browser-surface lease
+   * ended surface_failed because the host's POST /browser-surface/leases 500'd
+   * (e.g. browser_sandbox_unavailable). Undefined when no structured host
+   * reason is known.
+   */
+  readonly browser_surface_failure?: { readonly code: string; readonly message: string };
   readonly run_id: string;
   readonly status?: "started" | BrowserSurfaceProjection["browser_surface_status"];
   readonly trace_id: string;
@@ -463,6 +482,17 @@ export interface BrowserSurfaceRunProjection extends BrowserSurfaceProjection {
   readonly connector_id: string;
 }
 
+/**
+ * Which implementation a run of this connector would execute, as far as
+ * presence goes. `installed`/`local_source` mean a record exists (its bytes
+ * are verified only when a run starts, which fails `connector_install_invalid`
+ * if they no longer match). `built_in` means the path resolver supplies code
+ * without an install (the reference fixture seed, or an injected resolver).
+ * `not_installed` is the state in which `runNow` refuses with
+ * `connector_not_installed`.
+ */
+export type ConnectorImplementationState = "built_in" | "installed" | "local_source" | "not_installed";
+
 export type ConnectorPathResolver = (
   connectorId: string,
   manifest?: ConnectorManifest,
@@ -498,6 +528,14 @@ export interface RunTargetNonceHooks {
   registerNonce: (args: { runId: string; nonce: string }) => void;
 }
 
+/**
+ * Hooks the controller calls to mint and revoke the per-run blob upload
+ * credential. The child receives the raw token as `PDPP_BLOB_UPLOAD_TOKEN`
+ * instead of an owner bearer; the hook stores only its hash, bound to the
+ * run's connector instance. Revoked when the run ends.
+ */
+export type RunBlobUploadCredentialHooks = import("../server/run-blob-upload-credentials.ts").RunBlobUploadCredentialHooks;
+
 export interface ControllerOptions {
   /**
    * Resolves an exact configured connection before runtime can emit a new
@@ -516,11 +554,20 @@ export interface ControllerOptions {
   asPublicUrl?: string;
   /** Binds a host-provided browser lease to the run before the host is asked to allocate it. */
   beforeBrowserSurfaceLeaseEnsure?: (args: {
+    readonly connectionId: string | null;
     readonly runId: string;
     readonly surfaceId: string;
   }) => Promise<void> | void;
   /** Awaited before a managed surface lease becomes reusable after run cleanup. */
   beforeBrowserSurfaceLeaseRelease?: (args: { readonly runId: string }) => Promise<void> | void;
+  /**
+   * Resolves the host allocator's recorded start failure (code + message) for a
+   * run whose browser-surface lease just went surface_failed. Wired to the host
+   * allocator's `lastStartFailure` in host mode; undefined in dynamic/local mode.
+   */
+  describeBrowserSurfaceStartFailure?: (args: {
+    readonly runId: string;
+  }) => { readonly code: string; readonly message: string } | undefined;
   /**
    * Awaited before the runtime commits an interaction timeout. The reference
    * server uses this to restore (or retire) a presentation surface before a
@@ -544,6 +591,12 @@ export interface ControllerOptions {
   browserSurfaceHealthObservationTtlMs?: number;
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager;
   browserSurfaceLeaseStore?: BrowserSurfaceLeaseStore;
+  /**
+   * Host mode without PDPP_NEKO_MANAGED_CONNECTORS: the lease manager's managed
+   * set, filled from manifests. `runNow` records each manifest it resolves, so
+   * a connector installed after boot gets a surface on its first run.
+   */
+  browserSurfaceManifestManagedConnectors?: Pick<ManifestManagedConnectors, "observe">;
   /**
    * Poll interval for the mid-wait surface-loss detector (ms). Defaults to
    * `DEFAULT_MID_WAIT_SURFACE_LOSS_POLL_INTERVAL_MS` (10 s). Tests set this
@@ -634,11 +687,16 @@ export interface ControllerOptions {
   runtime?: unknown;
   /**
    * Mutable runtime-context bag the surrounding server populates after
-   * its listeners are bound. The controller reads `rsUrl` and the new
-   * `referenceBaseUrl` lazily so it picks up the realized values once
-   * the AS server has actually allocated its port.
+   * its listeners are bound. The controller reads self-call URLs lazily so
+   * it picks up realized values once the AS and RS listeners allocate their
+   * ports; public URLs remain separate for discovery and token identity.
    */
-  runtimeContext?: { rsUrl?: string | null; referenceBaseUrl?: string | null };
+  runtimeContext?: {
+    rsUrl?: string | null;
+    referenceBaseUrl?: string | null;
+    selfCallRsUrl?: string | null;
+    selfCallReferenceBaseUrl?: string | null;
+  };
   scheduler?: unknown;
   // Optional store override; defaults to the configured storage-backed singleton.
   // Tests use this to substitute fakes without touching module-scoped state.
@@ -654,6 +712,12 @@ export interface ControllerOptions {
    *   reference-implementation/server/streaming/run-target-registry.js
    */
   streamingTargetNonceHooks?: RunTargetNonceHooks;
+  /**
+   * Optional run-scoped blob upload credential hooks. When absent, children
+   * get no blob upload credential and blob uploads report unavailable. The
+   * owner bearer is never forwarded to the child.
+   */
+  blobUploadCredentialHooks?: RunBlobUploadCredentialHooks;
 }
 
 function resolveAdmittedRunConnection(
@@ -776,6 +840,12 @@ export interface Controller {
    * closure) succeeds. Exposing it makes scheduled runs lease the warm surface.
    */
   browserSurfaceLeaseManager?: BrowserSurfaceLeaseManager | undefined;
+  /**
+   * The run-scoped blob upload credential hooks this controller mints with.
+   * Exposed so the scheduler's direct (non-controller) run path mints from the
+   * same registry; without them a scheduled run's child could not upload blobs.
+   */
+  blobUploadCredentialHooks?: RunBlobUploadCredentialHooks | undefined;
   cancelBrowserSurfaceRun: (runId: string) => Promise<BrowserSurfaceProjection | null>;
   /**
    * Owner-only single-run cancellation. Aborts only the targeted run's
@@ -857,6 +927,18 @@ export interface Controller {
   ) => Promise<BrowserSurfaceRuntimeSurfaceObservation>;
   promoteBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
   reconcileBrowserSurfaceLeasesAfterBoot: () => Promise<void>;
+  /**
+   * Presence-only answer to "would `runNow` find an implementation for these
+   * connectors?" — the same local-source → install → path-resolver order
+   * `runNow` uses, without starting a run or hashing install bytes. Lets owner
+   * summaries say a connector is not installed before the owner taps Sync.
+   * Batched so a summary page costs one install-store read, not one per row,
+   * and read-only so a summary GET stays write-free. Optional so test doubles
+   * that never project summaries need not supply it.
+   */
+  inspectConnectorImplementations?: (
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ) => Promise<ReadonlyMap<string, ConnectorImplementationState>>;
   respondToInteraction: (runId: string, input?: RunInteractionResponseInput) => RunInteractionAck;
   runNow: (connectorId: string, options?: RunNowOptions) => Promise<RunNowResult>;
   setScheduleEnabled: (
@@ -938,6 +1020,12 @@ interface ActiveRunInteraction {
 // typed instanceof checks instead of sniffing duck-typed properties.
 export class ControllerError extends Error {
   readonly code: string;
+  /**
+   * Bare connector key the error is about. Set on `connector_not_installed`
+   * so the HTTP layer can surface `connector_id` in the error envelope and a
+   * client can offer the install action without parsing the message.
+   */
+  readonly connectorId: string | undefined;
   readonly details: readonly { param: string; message: string }[] | undefined;
   /**
    * ISO timestamp of the next eligible retry window. Set on
@@ -957,6 +1045,7 @@ export class ControllerError extends Error {
     message: string,
     code: string,
     extra: {
+      connectorId?: string;
       details?: readonly { param: string; message: string }[];
       nextEligibleAt?: string;
       pendingPressureGapCount?: number;
@@ -966,6 +1055,7 @@ export class ControllerError extends Error {
   ) {
     super(message);
     this.code = code;
+    this.connectorId = extra.connectorId;
     this.details = extra.details;
     this.nextEligibleAt = extra.nextEligibleAt;
     this.pendingPressureGapCount = extra.pendingPressureGapCount;
@@ -1426,11 +1516,15 @@ interface PendingDetailGapRow {
   readonly attempt_count?: number | null;
   readonly connector_id?: string | null;
   readonly connector_instance_id?: string | null;
+  /** Keyset cursor parts (`created_at`, `gap_id`) when the store returns them. */
+  readonly created_at?: string | null;
   readonly detail_class?: string | null;
+  readonly gap_id?: string | null;
   readonly last_attempt_at?: string | null;
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
   readonly reason?: string | null;
+  readonly retryable?: boolean | null;
   readonly status?: string | null;
   readonly stream?: string | null;
   readonly updated_at?: string | null;
@@ -1440,16 +1534,53 @@ interface PendingDetailGapRow {
  * The read surface of the detail-gap store the controller depends on for the
  * cooldown projection. Kept to one method so a test fake is trivial.
  */
+interface ConnectorDetailGapReadOptions {
+  /** Keyset cursor: only rows strictly after (`created_at`, `gap_id`). */
+  readonly after?: { readonly createdAt: string; readonly gapId: string };
+  /** Connector-wide reads only: scope to one connection in SQL, before the LIMIT. */
+  readonly connectorInstanceId?: string;
+  /** Applied in SQL before the LIMIT: keep only reasons NOT in this list. */
+  readonly excludeReasons?: readonly string[];
+  readonly limit?: number;
+  /** Applied in SQL before the LIMIT: keep only these reasons. */
+  readonly reasons?: readonly string[];
+  /** Applied in SQL before the LIMIT: drop explicit-false (permanent) rows. */
+  readonly recoverableOnly?: boolean;
+}
+
 interface ConnectorDetailGapReadStore {
   listPendingGapsForConnector: (
     connectorId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
   listPendingGapsForConnectorInstance?: (
     connectorId: string,
     connectorInstanceId: string,
-    options?: { limit?: number }
+    options?: ConnectorDetailGapReadOptions
   ) => Promise<readonly PendingDetailGapRow[]> | readonly PendingDetailGapRow[];
+}
+
+/** `next` is strictly after `previous` in the stable (`created_at`, `gap_id`) read order. */
+function gapCursorAdvances(
+  previous: { readonly createdAt: string; readonly gapId: string },
+  next: { readonly createdAt: string; readonly gapId: string }
+): boolean {
+  if (next.createdAt !== previous.createdAt) {
+    return next.createdAt > previous.createdAt;
+  }
+  return next.gapId > previous.gapId;
+}
+
+/**
+ * The detail-gap store override could not be scanned to exhaustion, so whether an
+ * eligible recovery row exists is unknown. Distinct from "none exists".
+ */
+function recoveryScanUnsupported(connectorId: string, connectorInstanceId: string, detail: string): ControllerError {
+  return new ControllerError(
+    `Recovery eligibility could not be established for ${connectorId} (connection ${connectorInstanceId}): ${detail}. ` +
+      "A detail-gap store must return stable keyset pages ordered by (created_at, gap_id) and honor `after`.",
+    "recovery_scan_unsupported"
+  );
 }
 
 function isConnectorDetailGapReadStore(value: unknown): value is ConnectorDetailGapReadStore {
@@ -1583,6 +1714,9 @@ function bucketPressureGapsByInstance(
   ensure: EnsureScheduleFacts
 ): void {
   for (const gap of gaps) {
+    if (!isRecoverableDetailGapRow(gap)) {
+      continue;
+    }
     if (typeof gap.reason !== "string" || !SOURCE_PRESSURE_GAP_REASONS.has(gap.reason)) {
       continue;
     }
@@ -2401,7 +2535,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     opts.connectorPathResolver ||
     ((connectorId: string, manifest?: ConnectorManifest, options?: RunNowOptions) =>
       resolveActiveInstallFirstConnectorPath(connectorId, manifest, options, localSourceStore));
-  const ownerClientId = opts.ownerClientId || "cli_longview";
+  // A client of its own, so the AS can hand every run the same live bearer
+  // without sharing one with a CLI a person signed in.
+  const ownerClientId = opts.ownerClientId || CONNECTOR_RUNTIME_OWNER_CLIENT_ID;
   const ownerSubjectId = opts.ownerSubjectId || "owner_local";
   const schedulerStore = opts.schedulerStore || getDefaultSchedulerStore();
   const detailGapStore: ConnectorDetailGapReadStore =
@@ -2649,7 +2785,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (typeof opts.rsUrl === "string" && opts.rsUrl) {
       return opts.rsUrl;
     }
-    const contextUrl = opts.runtimeContext?.rsUrl;
+    const { runtimeContext } = opts;
+    const contextUrl =
+      runtimeContext && "selfCallRsUrl" in runtimeContext ? runtimeContext.selfCallRsUrl : runtimeContext?.rsUrl;
     if (typeof contextUrl === "string" && contextUrl) {
       return contextUrl;
     }
@@ -2659,9 +2797,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
   /**
    * Resolve the AS base URL the spawned connector child should PUT its
    * streaming-target registration to. Read lazily because the surrounding
-   * server populates `runtimeContext.referenceBaseUrl` AFTER its listener
-   * has actually allocated a port (the same pattern `runtimeContext.rsUrl`
-   * uses).
+   * server populates the internal self-call URL AFTER its listener has
+   * actually allocated a port (the same pattern the RS self-call URL uses).
    *
    * IMPORTANT: this URL is for SERVER-TO-SERVER traffic between the
    * connector child and the AS Fastify listener (both on the same host
@@ -2671,22 +2808,50 @@ export function createController(opts: ControllerOptions = {}): Controller {
    * `/admin/runs/:runId/interactions/:interactionId/streaming-target`,
    * so passing the public URL here surfaces as a silent registration
    * 404 and `companion_start_failed` later. The server populates
-   * `runtimeContext.referenceBaseUrl` with the AS loopback URL for
-   * exactly this reason; we no longer fall back to `opts.asPublicUrl`
-   * or `PDPP_REFERENCE_ORIGIN` (both are public/browser-facing URLs).
+   * `runtimeContext.selfCallReferenceBaseUrl` with the AS loopback URL for
+   * exactly this reason. The public `referenceBaseUrl` is never used as a
+   * self-call fallback.
    *
    * Returns `null` when the context URL is not yet populated so
    * `runConnector` skips the env block entirely.
    */
   function currentReferenceBaseUrl(): string | null {
-    const contextUrl = opts.runtimeContext?.referenceBaseUrl;
+    const { runtimeContext } = opts;
+    const contextUrl =
+      runtimeContext && "selfCallReferenceBaseUrl" in runtimeContext
+        ? runtimeContext.selfCallReferenceBaseUrl
+        : runtimeContext?.referenceBaseUrl;
     if (typeof contextUrl === "string" && contextUrl) {
       return contextUrl;
     }
     return null;
   }
 
+  // The last bearer minted per subject. Every run and every scheduler refresh
+  // asks for one; approving a device request for each would add an
+  // owner_device_auth row and a consent.approved event each time.
+  const runtimeOwnerTokens = new Map<string, string>();
+
+  /**
+   * The subject's cached bearer while it is live and has at least half its
+   * lifetime left (the bound the server reuses a bearer under); otherwise a
+   * newly approved one.
+   */
   async function issueRuntimeOwnerToken(subjectId = ownerSubjectId): Promise<string> {
+    const cached = runtimeOwnerTokens.get(subjectId);
+    if (cached) {
+      const { active, exp } = await introspect(cached);
+      if (active && (exp ?? 0) * 1000 > Date.now() + OWNER_TOKEN_TTL_MS / 2) {
+        return cached;
+      }
+      runtimeOwnerTokens.delete(subjectId);
+    }
+    const token = await mintRuntimeOwnerToken(subjectId);
+    runtimeOwnerTokens.set(subjectId, token);
+    return token;
+  }
+
+  async function mintRuntimeOwnerToken(subjectId: string): Promise<string> {
     const baseUrl = opts.asPublicUrl || process.env.AS_PUBLIC_URL;
     const device = await initiateOwnerDeviceAuthorization(ownerClientId, baseUrl ? { baseUrl } : {});
     const approved = await approveOwnerDeviceAuthorization(device.user_code, subjectId);
@@ -2701,6 +2866,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     browserSurfaceAllocator: browserSurfaceAllocator ?? null,
     ...(opts.beforeBrowserSurfaceLeaseEnsure
       ? { beforeBrowserSurfaceLeaseEnsure: opts.beforeBrowserSurfaceLeaseEnsure }
+      : {}),
+    ...(opts.describeBrowserSurfaceStartFailure
+      ? { describeBrowserSurfaceStartFailure: opts.describeBrowserSurfaceStartFailure }
       : {}),
     browserSurfaceLeaseManager: browserSurfaceLeaseManager ?? null,
     browserSurfaceLeaseStore: browserSurfaceLeaseStore ?? null,
@@ -2834,7 +3002,12 @@ export function createController(opts: ControllerOptions = {}): Controller {
     await Promise.all(
       [...connectorIds].map(async (connectorId) => {
         try {
-          const gaps = (await detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })) ?? [];
+          const gaps =
+            (await detailGapStore.listPendingGapsForConnector(connectorId, {
+              limit: 200,
+              reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+              recoverableOnly: true,
+            })) ?? [];
           bucketPressureGapsByInstance(gaps, connectorId, ensure);
         } catch (err) {
           console.error(
@@ -3112,18 +3285,51 @@ export function createController(opts: ControllerOptions = {}): Controller {
     return nonce;
   }
 
+  function mintRunBlobUploadCredential(input: {
+    readonly connectorId: string;
+    readonly connectorInstanceId: string;
+    readonly ownerSubjectId: string;
+    readonly runId: string;
+  }): string | null {
+    // Per-run credential for POST /v1/blobs, the only authenticated call a
+    // connector child makes. Same lifecycle as the streaming nonce: minted at
+    // admission, hash-stored by the hook, revoked at run end.
+    if (!opts.blobUploadCredentialHooks) {
+      return null;
+    }
+    const token = randomBytes(32).toString("hex");
+    try {
+      opts.blobUploadCredentialHooks.register({ ...input, token });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn?.(`[controller] blob upload credential register failed for ${input.runId}: ${message}`);
+      return null;
+    }
+    return token;
+  }
+
+  function revokeRunBlobUploadCredential(runId: string): void {
+    try {
+      opts.blobUploadCredentialHooks?.revoke({ runId });
+    } catch {
+      /* registry shutdown raced run end — safe to ignore */
+    }
+  }
+
   async function registerActiveRunBookkeeping(input: {
     readonly automationMetadata: Pick<RunNowResult, "automation_mode" | "automation_summary">;
     readonly connectorId: string;
     readonly connectorInstanceId: string;
     readonly key: string;
+    readonly ownerSubjectId: string;
     readonly runId: string;
+    readonly resetState?: boolean;
     readonly sourceWebhookEvent?: SourceWebhookRunEvent;
     readonly sourceWebhookOwnerSubjectId?: string;
     readonly startedAt: string;
     readonly traceContext: SpineTraceContext;
   }): Promise<
-    | { readonly kind: "admitted"; readonly streamingNonce: string | null }
+    | { readonly kind: "admitted"; readonly blobUploadToken: string | null; readonly streamingNonce: string | null }
     | { readonly kind: "replay"; readonly receipt: SourceWebhookRunReceipt }
   > {
     // Advance the fencing token only after the durable gate accepts the row.
@@ -3170,7 +3376,14 @@ export function createController(opts: ControllerOptions = {}): Controller {
       }
       inserted = true;
     } else {
-      inserted = await persistActiveRun(activeRun);
+      if (input.resetState) {
+        if (!schedulerStore.resetStateAndUpsertActiveRun) {
+          throw new ControllerError("Atomic source reset is unavailable.", "reset_state_unavailable");
+        }
+        inserted = await schedulerStore.resetStateAndUpsertActiveRun(activeRun);
+      } else {
+        inserted = await persistActiveRun(activeRun);
+      }
     }
     if (inserted === false) {
       throw new ControllerError(`Connector already has an active run: ${input.runId}`, "run_already_active", {
@@ -3191,7 +3404,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connector_id: input.connectorId,
       pending: null,
     });
-    return { kind: "admitted", streamingNonce: mintStreamingRegistrationNonce(input.runId) };
+    return {
+      blobUploadToken: mintRunBlobUploadCredential({
+        connectorId: input.connectorId,
+        connectorInstanceId: input.connectorInstanceId,
+        ownerSubjectId: input.ownerSubjectId,
+        runId: input.runId,
+      }),
+      kind: "admitted",
+      streamingNonce: mintStreamingRegistrationNonce(input.runId),
+    };
   }
 
   function clearStreamingNonceForRun(runId: string): void {
@@ -3271,30 +3493,35 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // Safe to delete unconditionally here: the guard above already proved
     // activeRuns.get(input.key)?.run_id === input.runId.
     activeRuns.delete(input.key);
-    activeRunPromises.delete(input.runId);
-    activeRunTraceContexts.delete(input.runId);
-    activeRunCancellations.delete(input.runId);
-    clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
-    });
     try {
-      await opts.beforeRunCleanup?.({ runId: input.runId });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn?.(`[controller] run cleanup barrier failed for ${input.runId}: ${message}`);
-    }
-    clearStreamingNonceForRun(input.runId);
-    if (input.browserSurfaceLease) {
+      activeRunTraceContexts.delete(input.runId);
+      activeRunCancellations.delete(input.runId);
+      clearPersistedActiveRun(input.connectorInstanceId, input.runId).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn?.(`[controller] failed to clear active run ${input.runId} for ${input.connectorId}: ${message}`);
+      });
       try {
-        await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+        await opts.beforeRunCleanup?.({ runId: input.runId });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+        log.warn?.(`[controller] run cleanup barrier failed for ${input.runId}: ${message}`);
       }
-      await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+      clearStreamingNonceForRun(input.runId);
+      revokeRunBlobUploadCredential(input.runId);
+      if (input.browserSurfaceLease) {
+        try {
+          await opts.beforeBrowserSurfaceLeaseRelease?.({ runId: input.runId });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn?.(`[controller] browser-surface host release failed for ${input.runId}: ${message}`);
+        }
+        await browserSurface.releaseLease(input.browserSurfaceLease, input.connectorId, input.runId, input.traceContext);
+      }
+      resolveCancelledInteraction(input.runId);
+    } finally {
+      // Keep shutdown drain tracking until lease release has been persisted.
+      activeRunPromises.delete(input.runId);
     }
-    resolveCancelledInteraction(input.runId);
   }
 
   /**
@@ -3387,11 +3614,20 @@ export function createController(opts: ControllerOptions = {}): Controller {
     connectorId: string,
     connectorInstanceId: string
   ): Promise<PendingPressureGap[]> {
+    // Eligibility (this connection, pressure reasons, recoverable) is applied in the
+    // store before the 200-row LIMIT, so older permanent or non-pressure rows, or
+    // another connection's rows, cannot hide this connection's pressure gaps.
     const pendingGapRows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: 200 })
+      detailGapStore.listPendingGapsForConnector(connectorId, {
+        connectorInstanceId,
+        limit: 200,
+        reasons: [...SOURCE_PRESSURE_GAP_REASONS],
+        recoverableOnly: true,
+      })
     );
     const pendingPressureRows = pendingGapRows
       .filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId)
+      .filter(isRecoverableDetailGapRow)
       .filter((row) => typeof row.reason === "string" && SOURCE_PRESSURE_GAP_REASONS.has(row.reason));
     return filterFreshPressureRows(pendingPressureRows, Date.now()).map((row) =>
       projectPendingPressureGap(row, row.reason as string)
@@ -3442,31 +3678,104 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   async function listPendingGapsForContinuation(
     connectorId: string,
-    connectorInstanceId: string
+    connectorInstanceId: string,
+    readOptions: {
+      readonly after?: { readonly createdAt: string; readonly gapId: string };
+      readonly limit?: number;
+      readonly recoverableOnly?: boolean;
+    } = {}
   ): Promise<readonly PendingDetailGapRow[]> {
+    // `connectorInstanceId` is passed to BOTH reads so the connector-wide fallback also
+    // scopes to this connection in SQL, before the LIMIT.
+    const options = { connectorInstanceId, limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT, ...readOptions };
     if (detailGapStore.listPendingGapsForConnectorInstance) {
       return await Promise.resolve(
-        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, {
-          limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT,
-        })
+        detailGapStore.listPendingGapsForConnectorInstance(connectorId, connectorInstanceId, options)
       );
     }
-    const rows = await Promise.resolve(
-      detailGapStore.listPendingGapsForConnector(connectorId, { limit: RECOVERY_CONTINUATION_PENDING_READ_LIMIT })
-    );
+    const rows = await Promise.resolve(detailGapStore.listPendingGapsForConnector(connectorId, options));
     return rows.filter((row) => (row.connector_instance_id || connectorId) === connectorInstanceId);
+  }
+
+  // An explicit recovery-only request is a request to refetch pending detail
+  // gaps. When the connection's ONLY pending gaps are permanent source loss
+  // (`retryable: false`) there is nothing to refetch, and a runtime must not
+  // request or offer a refetch of such a gap: refuse, rather than silently run an
+  // ordinary collection labelled as gap recovery. No pending-gap evidence at all
+  // keeps the existing behavior.
+  async function assertRecoveryOnlyHasRecoverableWork(connectorId: string, connectorInstanceId: string): Promise<void> {
+    // Evidence of "pending exists AND recoverable is absent", not an every() over a
+    // truncated diagnostic page: the recoverable read applies eligibility in SQL
+    // before its LIMIT, and only an empty result makes the second, any-pending read.
+    const recoverable = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+      limit: 1,
+      recoverableOnly: true,
+    });
+    if (recoverable.some(isRecoverableDetailGapRow)) {
+      return;
+    }
+    const anyPending = await listPendingGapsForContinuation(connectorId, connectorInstanceId, { limit: 1 });
+    if (anyPending.length > 0) {
+      throw new ControllerError(
+        "Recovery-only run refused: every pending detail gap is permanent source loss (non-retryable) and cannot be refetched.",
+        "invalid_request",
+        { recoveryAdmissionReason: "permanent_loss" }
+      );
+    }
   }
 
   async function hasEligibleNonPressureRecoveryWork(
     connectorId: string,
     connectorInstanceId: string
   ): Promise<boolean> {
-    const rows = await listPendingGapsForContinuation(connectorId, connectorInstanceId);
+    // Eligibility is `resolveRecoveryAdmission` over a row, which depends on the row's
+    // recovery class, its own retry floor and its work domain, so no fixed-size page of
+    // the OLDEST recoverable rows can decide it: they may all be retryable pressure,
+    // still inside their floor, or owner-required / connector-defect. Walk the
+    // connection's recoverable pending gaps in stable keyset pages until an admissible
+    // non-pressure row is found or the pending set is proven exhausted (a short page).
     const nowMs = Date.now();
-    return rows.some((row) => {
-      const classification = classifyRecoveryGap(row);
-      return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
-    });
+    let after: { createdAt: string; gapId: string } | undefined;
+    for (;;) {
+      // biome-ignore lint/performance/noAwaitInLoops: each page depends on the previous cursor.
+      const page = await listPendingGapsForContinuation(connectorId, connectorInstanceId, {
+        recoverableOnly: true,
+        ...(after ? { after } : {}),
+      });
+      if (
+        page.some((row) => {
+          const classification = classifyRecoveryGap(row);
+          return classification.isNonPressureRecovery && resolveRecoveryAdmission(row, { nowMs }).ok;
+        })
+      ) {
+        return true;
+      }
+      if (page.length < RECOVERY_CONTINUATION_PENDING_READ_LIMIT) {
+        return false;
+      }
+      // A FULL page of inadmissible rows only proves "no eligible row yet". The next
+      // cursor must come from the store and must strictly advance; an adapter that gives
+      // no cursor, ignores `after`, or answers with a backwards / repeating cursor leaves
+      // rows beyond this page unexamined. That is scan uncertainty, not absence: it must
+      // never be read as "no eligible work" (which would pick forward collection or stop
+      // a continuation), so it is reported as its own error.
+      const last = page[page.length - 1];
+      if (!(last?.created_at && last.gap_id)) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "a full page carried no created_at/gap_id cursor"
+        );
+      }
+      if (after && !gapCursorAdvances(after, { createdAt: last.created_at, gapId: last.gap_id })) {
+        throw recoveryScanUnsupported(
+          connectorId,
+          connectorInstanceId,
+          "the page cursor did not strictly advance (the store ignored `after`, repeated or went backwards)"
+        );
+      }
+      after = { createdAt: last.created_at, gapId: last.gap_id };
+    }
   }
 
   // Forward-evidence-debt probe for `resolveEffectiveRecoveryOnly` (mirrors
@@ -3525,6 +3834,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
     options: RunNowOptions,
     scopedToResources: boolean
   ): Promise<boolean> {
+    if (options.recoveryOnly === true) {
+      await assertRecoveryOnlyHasRecoverableWork(connectorId, connectorInstanceId);
+    }
     const nonPressureRecoveryEligible =
       options.recoveryOnly === undefined && !scopedToResources
         ? await hasEligibleNonPressureRecoveryWork(connectorId, connectorInstanceId)
@@ -3573,8 +3885,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       );
       return;
     }
-    if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
-      return;
+    try {
+      if (!(await hasEligibleNonPressureRecoveryWork(input.connectorId, input.connectorInstanceId))) {
+        return;
+      }
+    } catch (err) {
+      // Scan uncertainty is not "drained": report it by its own code and start nothing
+      // (no continuation, and never forward collection). Any other failure keeps its
+      // existing path.
+      if (err instanceof ControllerError && err.code === "recovery_scan_unsupported") {
+        log.warn?.(`[controller] recovery continuation not started (${err.code}): ${err.message}`);
+        return;
+      }
+      throw err;
     }
     // Manifest automation policy gate. A recovery continuation is started BY
     // THE CONTROLLER, not by an owner gesture: it is an unattended automatic
@@ -3762,6 +4085,39 @@ export function createController(opts: ControllerOptions = {}): Controller {
     }
   }
 
+  async function inspectConnectorImplementations(
+    connectors: readonly { readonly connectorId: string; readonly manifest?: ConnectorManifest }[]
+  ): Promise<ReadonlyMap<string, ConnectorImplementationState>> {
+    const states = new Map<string, ConnectorImplementationState>();
+    if (connectors.length === 0) {
+      return states;
+    }
+    const installed = new Set(
+      (await activeConnectorInstallStore.listActive()).map((record) => record.connectorId)
+    );
+    // Developer-local sources are rare; skip the per-connector selection
+    // lookup entirely when none are registered.
+    const hasLocalSources = (await localSourceStore.list()).length > 0;
+    // The fallback `runNow` reaches when neither a local source nor an install
+    // is active. Calling the default resolver here would re-read both stores
+    // per connector, so use its seed-fixture tail directly.
+    const fallbackResolver = opts.connectorPathResolver || resolveDefaultConnectorPath;
+    for (const { connectorId, manifest } of connectors) {
+      if (states.has(connectorId)) {
+        continue;
+      }
+      if (hasLocalSources && (await localSourceStore.getSelectedForConnector(connectorId))) {
+        states.set(connectorId, "local_source");
+      } else if (installed.has(connectorId)) {
+        states.set(connectorId, "installed");
+      } else {
+        const path = await Promise.resolve(fallbackResolver(connectorId, manifest));
+        states.set(connectorId, path ? "built_in" : "not_installed");
+      }
+    }
+    return states;
+  }
+
   async function validateRunNowPreconditions(
     connectorId: string,
     options: RunNowOptions,
@@ -3793,6 +4149,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (!manifest) {
       throw new ControllerError(`Unknown connector: ${connectorId}`, "not_found");
     }
+    opts.browserSurfaceManifestManagedConnectors?.observe(connectorId, manifest);
     if (!options.sourceWebhookEvent) {
       assertNoConflictingActiveRun(key);
       await assertNoConflictingDurableActiveRun(key);
@@ -3810,7 +4167,8 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (!connectorPath) {
       throw new ControllerError(
         `No runnable connector implementation is available for ${connectorId}: no verified install is active, and its manifest is not a reference fixture`,
-        "not_found"
+        "connector_not_installed",
+        { connectorId }
       );
     }
     return {
@@ -3944,6 +4302,15 @@ export function createController(opts: ControllerOptions = {}): Controller {
 
   // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Run admission owns ordered source-webhook replay, active-run, browser-surface, and runtime-launch state transitions.
   async function runNow(connectorId: string, options: RunNowOptions = {}): Promise<RunNowResult> {
+    const lifecycleId = canonicalConnectorKey(connectorId) ?? connectorId;
+    const dataDir = connectorLifecycleDataDir();
+    return withConnectorLifecycleLock(dataDir, lifecycleId, () => {
+      assertConnectorLifecycleAvailable(dataDir, lifecycleId);
+      return runNowUnlocked(connectorId, options);
+    });
+  }
+
+  async function runNowUnlocked(connectorId: string, options: RunNowOptions = {}): Promise<RunNowResult> {
     const runOwnerSubjectId = options.ownerSubjectId ?? ownerSubjectId;
     const admittedConnection = await resolveAdmittedRunConnection(
       opts,
@@ -4000,11 +4367,16 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // option. Pass an explicit `{ connector_id, connector_instance_id }` object
     // so an explicit connection run reads its own durable state and defaults to
     // incremental when that state is non-empty.
+    if (options.resetState && !options.fullRefresh) {
+      throw new ControllerError("Reset state requires a full-refresh run.", "invalid_reset_run");
+    }
     const { state, collectionMode } = deriveCollectionState(
-      (await getSyncState({
-        connector_id: admittedConnectorId,
-        connector_instance_id: connectorInstanceId,
-      })) as { state?: unknown } | null,
+      options.resetState
+        ? null
+        : ((await getSyncState({
+            connector_id: admittedConnectorId,
+            connector_instance_id: connectorInstanceId,
+          })) as { state?: unknown } | null),
       options.fullRefresh === true
     );
     const ownerToken = options.ownerToken || (await issueRuntimeOwnerToken(runOwnerSubjectId));
@@ -4021,7 +4393,9 @@ export function createController(opts: ControllerOptions = {}): Controller {
       connectorId: admittedConnectorId,
       connectorInstanceId,
       key,
+      ownerSubjectId: runOwnerSubjectId,
       runId,
+      ...(options.resetState ? { resetState: true } : {}),
       ...(sourceWebhookEvent ? { sourceWebhookEvent, sourceWebhookOwnerSubjectId: runOwnerSubjectId } : {}),
       startedAt,
       traceContext,
@@ -4029,7 +4403,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     if (bookkeeping.kind === "replay") {
       return sourceWebhookReceiptRunHandle(bookkeeping.receipt);
     }
-    const { streamingNonce } = bookkeeping;
+    const { blobUploadToken, streamingNonce } = bookkeeping;
     let browserSurfaceLease: BrowserSurfaceLease | null = null;
     let browserSurfaceEnv: Record<string, string> | null = null;
     try {
@@ -4093,6 +4467,19 @@ export function createController(opts: ControllerOptions = {}): Controller {
       baseInteractionHandler
     );
     const handleAssistanceProgress = (msg: unknown) => {
+      const assistanceStatus = msg as Record<string, unknown>;
+      if (assistanceStatus.type === "ASSISTANCE_STATUS" && assistanceStatus.status === "resolved") {
+        const entry = activeRunInteractions.get(runId);
+        const pending = entry?.pending;
+        if (entry && pending?.kind === "otp" && pending.interaction_id === assistanceStatus.assistance_request_id) {
+          entry.pending = null;
+          pending.resolve({
+            request_id: pending.interaction_id,
+            status: "success",
+            type: "INTERACTION_RESPONSE",
+          });
+        }
+      }
       // Progress is persisted via the event spine, not this callback. The
       // one exception is nonblocking ASSISTANCE: the owner has to act
       // somewhere outside PDPP (e.g. approve a ChatGPT push in the app) and
@@ -4152,6 +4539,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
           state,
           ...(scopedResources ? { scope: { streams: scopedResources } } : {}),
           automationMode: automationMetadata.automation_mode ?? null,
+          blobUploadToken,
           browserSurfaceEnv,
           cancelSignal: cancellation.signal,
           collectionMode,
@@ -4594,6 +4982,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     // is the in-scope const from createController's options; exposing it makes
     // server/index.ts's scheduler seam + isManagedConnector predicate live.
     browserSurfaceLeaseManager,
+    blobUploadCredentialHooks: opts.blobUploadCredentialHooks,
     cancelBrowserSurfaceRun: (runId: string) => browserSurface.cancelBrowserSurfaceRun(runId),
     cancelRun,
     cleanupIdleBrowserSurfaces: () => browserSurface.cleanupIdleBrowserSurfaces(),
@@ -4610,6 +4999,7 @@ export function createController(opts: ControllerOptions = {}): Controller {
     getSchedule,
     isNeedsHuman: (connectorId: string, options: ConnectorInstanceOptions = {}) =>
       needsHumanAttention.has(runtimeKey(connectorId, options.connectorInstanceId)),
+    inspectConnectorImplementations,
     issueRuntimeOwnerToken,
     listBrowserSurfaceRunProjections,
     listSchedules,

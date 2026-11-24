@@ -27,6 +27,7 @@ import { startServer } from "../server/index.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 
 const CONNECTOR_ID = "spotify";
 const SOURCE_ID = "https://registry.pdpp.dev/connectors/spotify";
@@ -171,6 +172,7 @@ async function issueOwnerOnlyHarness(testFn: (server: TestServer) => Promise<voi
   const server = (await startServer({
     asPort: 0,
     dbPath: ":memory:",
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
   })) as TestServer;

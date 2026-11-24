@@ -23,6 +23,7 @@ import {
   summarizeOutboxStallRemediation,
   summarizeSchedule,
 } from "../../lib/connection-evidence.ts";
+import { dispositionForInstallState } from "../../lib/connector-implementation.ts";
 import type {
   DeviceSourceInstance,
   RefActionRemediation,
@@ -65,6 +66,12 @@ export interface ConnectionDiagnosticsProps {
    *  remediation command template. */
   connectorId: string | null;
   /**
+   * The reference reports no implementation to run this connector. The
+   * forward disposition then reads as blocked on the install instead of the
+   * coverage-derived value, matching the per-stream lines.
+   */
+  connectorNotInstalled?: boolean;
+  /**
    * Connection-summary local-device progress, including the count-backed
    * `outbox_counts` rollup. Used to show the scale of stuck work in the
    * stalled-outbox remediation. `null` for scheduler-managed connections.
@@ -97,6 +104,7 @@ export function ConnectionDiagnostics({
   connectionHealth,
   connectionId,
   connectorId,
+  connectorNotInstalled = false,
   localDeviceProgress,
   now,
   providerOrigin,
@@ -154,6 +162,7 @@ export function ConnectionDiagnostics({
               connectionHealth={connectionHealth}
               connectionId={connectionId}
               connectorId={connectorId}
+              connectorNotInstalled={connectorNotInstalled}
               localDeviceProgress={localDeviceProgress}
               providerOrigin={providerOrigin}
               renderedVerdict={renderedVerdict}
@@ -445,6 +454,7 @@ function ProjectedStateDiagnostics({
   connectionHealth,
   connectionId,
   connectorId,
+  connectorNotInstalled,
   localDeviceProgress,
   providerOrigin,
   renderedVerdict,
@@ -453,6 +463,7 @@ function ProjectedStateDiagnostics({
   connectionHealth: RefConnectionHealthSnapshot | null;
   connectionId: string | null;
   connectorId: string | null;
+  connectorNotInstalled: boolean;
   localDeviceProgress: RefLocalDeviceProgress | null;
   providerOrigin: string | null;
   renderedVerdict: RefRenderedVerdict | null;
@@ -486,7 +497,10 @@ function ProjectedStateDiagnostics({
   // (the owner-reported "matched: 0, nothing to do" dead end). Older references
   // that don't send `remediation` fall back to the legacy steps below.
   const verdictRemediation = primaryOwnerActionRemediation(renderedVerdict);
-  const forwardDisposition = formatForwardDisposition(connectionHealth.forward_disposition);
+  const forwardDisposition = dispositionForInstallState(
+    formatForwardDisposition(connectionHealth.forward_disposition),
+    connectorNotInstalled
+  );
   const dominantCondition = formatDominantCondition(connectionHealth);
   const conditionById = new Map((connectionHealth.conditions ?? []).map((condition) => [condition.id, condition]));
   const visibleConditions = (connectionHealth.supporting_condition_ids ?? [])

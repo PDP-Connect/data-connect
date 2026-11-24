@@ -37,6 +37,7 @@ import { registerPdppAuthorizationRoutes } from './pdpp/github-authorization/htt
 import { loadInstalledManifest } from './pdpp/installed-manifest.js';
 import { loadInstalledPdppServingProfiles } from './pdpp/serving-profile.js';
 import { createPersonalServerServeOptions } from './listener-options.cjs';
+import { applyTunnelStartupPolicy } from './startup-config.js';
 
 // Bare specifiers that have to be loaded from beside the executable rather than
 // from the pkg snapshot. The value names the package directory and the export
@@ -650,6 +651,13 @@ async function main() {
       type: 'log',
       message: `[init] gateway config: chainId=${config.gateway?.chainId}, url=${config.gateway?.url}, contracts=${JSON.stringify(config.gateway?.contracts ?? {})}`,
     });
+    const hasMasterKey = !!masterKeySignature;
+    const hasExternalServiceConfiguration = Boolean(
+      hasMasterKey && gatewayUrl && accountUrl && tunnelServerAddr
+    );
+    // Without these endpoints the wrapper skips tunnel startup below, so do not
+    // let the library download and extract frpc inside createServer().
+    applyTunnelStartupPolicy(config, hasExternalServiceConfiguration);
     send({
       type: 'log',
       message: `[init] tunnel config: serverAddr=${config.tunnel?.serverAddr}, enabled=${config.tunnel?.enabled}`,
@@ -756,15 +764,10 @@ async function main() {
     // background services. This way the library's startBackgroundServices()
     // finds the registration on its first check and connects the tunnel
     // immediately, with no restart cycle needed.
-    const hasMasterKey = !!masterKeySignature;
     send({
       type: 'log',
       message: `[bg] hasMasterKey: ${hasMasterKey}, gatewayUrl: ${config.gateway?.url || 'none'}`,
     });
-
-    const hasExternalServiceConfiguration = Boolean(
-      hasMasterKey && gatewayUrl && accountUrl && tunnelServerAddr
-    );
 
     if (!hasExternalServiceConfiguration) {
       send({

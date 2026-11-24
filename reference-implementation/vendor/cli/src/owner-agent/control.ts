@@ -4,8 +4,8 @@
 // Non-secret owner-agent control discovery for the `pdpp owner-agent control`
 // subcommand.
 //
-// A trusted local owner agent (Daisy/Simon-style) needs a typed, route-guess-
-// free way to answer two questions before it operates an owner's instance:
+// A trusted local owner agent needs a typed, route-guess-free way to answer
+// two questions before it operates an owner's instance:
 //   1. "What owner-agent control actions does this build support?" — the
 //      bearer-authed capability document `GET /v1/owner/control`.
 //   2. "Which connection instances are configured, and which still need an

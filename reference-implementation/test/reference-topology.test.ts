@@ -89,6 +89,8 @@ test("reference topology in composed mode with no configured origin does not lea
   });
 
   assert.equal(topology.mode, REFERENCE_MODE_COMPOSED);
+  assert.equal(topology.asInternalUrl, "http://127.0.0.1:7662");
+  assert.equal(topology.rsInternalUrl, "http://127.0.0.1:7663");
   assert.equal(topology.browserOrigin, DEFAULT_REFERENCE_BROWSER_ORIGIN, "advisory browserOrigin keeps its default");
   assert.equal(topology.asPublicUrl, "", "asPublicUrl must not inherit the browser-origin placeholder");
   assert.equal(topology.rsPublicUrl, "", "rsPublicUrl must not inherit the browser-origin placeholder");

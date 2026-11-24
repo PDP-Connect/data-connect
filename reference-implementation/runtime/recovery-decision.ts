@@ -61,6 +61,11 @@ export type RecoveryClass =
   | "connector_defect"
   /** Informational non-gap (out of scope / disabled); not owner-drainable retry. */
   | "informational"
+  /**
+   * Permanent source loss (`retryable: false`, reason `source_unrepresentable`).
+   * Accounted, never hydrated, never scheduled/requested/offered as a refetch.
+   */
+  | "permanent_loss"
   /** Reason absent or unrecognized; treated as generic recoverable work. */
   | "unknown";
 
@@ -98,6 +103,11 @@ export interface RecoveryGapRow {
   readonly last_error?: { readonly class?: unknown } | null;
   readonly next_attempt_after?: string | null;
   readonly reason?: string | null;
+  /**
+   * Durable `connector_detail_gaps.retryable`. `false` = permanent source loss and
+   * DOMINATES every other hint; `true`/`null`/absent keep their prior meaning.
+   */
+  readonly retryable?: boolean | null;
   readonly status?: string | null;
   readonly stream?: string | null;
   /**
@@ -189,6 +199,9 @@ export function classifyRecoveryReason(reason: string | null | undefined): Recov
   if (INFORMATIONAL_RECOVERY_REASON_CODES.has(normalized)) {
     return "informational";
   }
+  if (normalized === "source_unrepresentable") {
+    return "permanent_loss";
+  }
   if (normalized === "run_cap_deferred") {
     return "run_cap_deferred";
   }
@@ -221,12 +234,25 @@ export interface RecoveryGapClassification {
   readonly workDomain: ProviderWorkDomain | null;
 }
 
+/**
+ * True unless the durable row is explicitly permanent (`retryable === false`).
+ * The one predicate every scheduling/offer seam uses, so a null/absent legacy
+ * value keeps its old-contract eligibility.
+ */
+export function isRecoverableDetailGapRow(row: { readonly retryable?: boolean | null } | null | undefined): boolean {
+  return row?.retryable !== false;
+}
+
 export function classifyRecoveryGap(row: RecoveryGapRow): RecoveryGapClassification {
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   const connectorClass = nonEmpty(row?.detail_class) ?? nonEmpty(row?.last_error?.class);
   // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
   const reasonClass = classifyRecoveryReason(row?.reason);
-  const recoveryClass = connectorRecoveryClass(connectorClass, reasonClass);
+  // The explicit discriminator wins over class/cap/pressure hints. A bare
+  // `not_retriable` diagnostic hint is NOT a guard; only the durable boolean is.
+  const recoveryClass = isRecoverableDetailGapRow(row)
+    ? connectorRecoveryClass(connectorClass, reasonClass)
+    : "permanent_loss";
 
   const isSourcePressure = recoveryClass === "provider_pressure";
   return {
@@ -276,7 +302,12 @@ function connectorRecoveryClass(connectorClass: string | null, reasonClass: Reco
  * controller's manual retry/refresh gate so an owner-started denial classifies
  * with the same vocabulary as an automatic one (tasks 2.3/2.6).
  */
-export type RecoveryAdmissionDenialReason = "cooldown" | "budget" | "owner_required" | "system_issue";
+export type RecoveryAdmissionDenialReason =
+  | "cooldown"
+  | "budget"
+  | "owner_required"
+  | "system_issue"
+  | "permanent_loss";
 
 export type RecoveryAdmission =
   | { readonly ok: true; readonly mode: "recover"; readonly workDomain: ProviderWorkDomain }
@@ -325,6 +356,9 @@ export function resolveRecoveryAdmission(
 ): RecoveryAdmission {
   const classification = classifyRecoveryGap(row);
   const { workDomain } = classification;
+  if (classification.recoveryClass === "permanent_loss") {
+    return { ok: false, reason: "permanent_loss" };
+  }
   if (!workDomain) {
     // No identifiable provider work domain — cannot safely attempt.
     return { ok: false, reason: "system_issue" };
@@ -803,6 +837,7 @@ export interface RecoveryAdmissionDiagnostics {
 const WHY_NOT_NOW_PRECEDENCE: readonly RecoveryAdmissionDenialReason[] = [
   "owner_required",
   "system_issue",
+  "permanent_loss",
   "budget",
   "cooldown",
 ];

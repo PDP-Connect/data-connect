@@ -429,6 +429,7 @@ fn kill_orphan(_pid: i32, _pgid: Option<i32>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
     use std::process::{Command, Stdio};
     use tempfile::tempdir;
 
@@ -719,16 +720,32 @@ mod tests {
         let directory = tempdir().expect("temp app data");
         let mut leader = TestChild(
             Command::new("sh")
-                .args(["-c", "sleep 300 & wait"])
+                .args([
+                    "-c",
+                    "sleep 300 & child=$!; printf '%s\\n' \"$child\"; wait",
+                ])
                 .process_group(0)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
                 .expect("spawn a process-group leader"),
         );
         let pid = leader.id() as i32;
         let pgid = pid;
+        let mut child_pid = String::new();
+        std::io::BufReader::new(leader.stdout.take().expect("leader stdout"))
+            .read_line(&mut child_pid)
+            .expect("read descendant pid");
+        let child_pid: i32 = child_pid.trim().parse().expect("parse descendant pid");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { libc::getpgid(child_pid) } != pgid {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the descendant must join the leader's process group before it exits"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let mut lease = lease_for(&leader, "console", 1);
         lease.owner_started_at_ticks = u64::MAX;
         lease.pgid = Some(pgid);

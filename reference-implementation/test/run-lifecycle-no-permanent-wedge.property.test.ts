@@ -35,7 +35,7 @@ import test from "node:test";
 test("run lifecycle: no permanent wedge", async (t) => {
   await t.test(
     "a run whose owner epoch never returns becomes terminal",
-    { todo: "requires the owner module and boot adjudication as a transition" },
+    { skip: "requires the owner module and boot adjudication as a transition" },
     () => {
       // Cover every non-terminal state, not just `running`. A run wedged in
       // `awaiting_interaction` is the case that costs the owner a real OTP.
@@ -44,7 +44,7 @@ test("run lifecycle: no permanent wedge", async (t) => {
 
   await t.test(
     "the connector instance admits a new run after adjudication",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // Assert admission SUCCEEDS -- the 409 `active_run_exists` path must be
       // gone. Terminality alone is not the property that matters here.
@@ -53,7 +53,7 @@ test("run lifecycle: no permanent wedge", async (t) => {
 
   await t.test(
     "the durable projection never claims running against a terminal event log",
-    { todo: "requires the owner module" },
+    { skip: "requires the owner module" },
     () => {
       // The zombie-row condition measured on UAT. The event and its
       // projection must commit in one transaction.

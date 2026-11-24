@@ -2,10 +2,12 @@
   "name": "@dataconnect/e2e-owner-journey",
   "private": true,
   "version": "1.0.0",
-  "description": "Playwright owner-journey smoke check for a running DataConnect console.",
+  "description": "Playwright checks on a disposable, isolated DataConnect console.",
   "type": "module",
   "scripts": {
-    "test:e2e": "playwright test"
+    "test:e2e": "node harness.mjs",
+    "test:harness": "node --test harness.test.mjs",
+    "test:harness:cleanup": "node --test harness-cleanup.test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.51.1",

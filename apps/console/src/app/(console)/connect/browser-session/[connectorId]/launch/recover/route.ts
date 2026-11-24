@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { NextResponse } from "next/server";
-import { isBrowserBoundConnector } from "../../../../../lib/connection-modality.ts";
+import { loadBrowserConnectSupport } from "../../../../../lib/load-browser-connect-support.ts";
 import { requireDashboardAccess } from "../../../../../lib/dashboard-access.ts";
 import { listRuns, type RunSummary } from "../../../../../lib/ref-client.ts";
 import { isRecoverableBrowserSessionRun } from "../recovery-classification.ts";
@@ -36,7 +36,8 @@ export async function GET(request: Request, { params }: { params: Promise<RouteP
 
   await requireDashboardAccess(pagePath(connectorId));
 
-  if (!isBrowserBoundConnector(connectorId)) {
+  const browserConnect = await loadBrowserConnectSupport(connectorId);
+  if (!browserConnect.browserBound) {
     return NextResponse.json({ message: "This source does not use browser setup." }, { status: 400 });
   }
 

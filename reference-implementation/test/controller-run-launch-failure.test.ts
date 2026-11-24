@@ -26,7 +26,11 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { emitSpineEvent, getRunTerminalEvent, listSpineEventsPage } from "../lib/spine.ts";
-import { __resetControllerInteractionStateForTests, createController } from "../runtime/controller.ts";
+import {
+  __resetControllerInteractionStateForTests,
+  createController,
+  type PendingInteractionProjection,
+} from "../runtime/controller.ts";
 import type { RuntimeRunConnectorResult } from "../runtime/index.ts";
 import { closeDb, initDb } from "../server/db.ts";
 import type { ActiveRunRecord, SchedulerStore } from "../server/stores/scheduler-store.ts";
@@ -248,6 +252,67 @@ test("post-spawn rejection with a runtime-recorded terminal event is not double-
     "cin_post_spawn",
     "runtime terminal carries the connection identity used by scoped duplicate suppression"
   );
+});
+
+test("resolved OTP clears the controller broker while the run is active and admits the next interaction", async (t) => {
+  freshDb(t);
+
+  let controller!: ReturnType<typeof createController>;
+  const observed: {
+    pendingAfterResolution: PendingInteractionProjection | null;
+    pendingBeforeResolution: PendingInteractionProjection | null;
+    pendingSecondInteraction: PendingInteractionProjection | null;
+    runActiveAfterResolution: boolean;
+  } = {
+    pendingAfterResolution: null,
+    pendingBeforeResolution: null,
+    pendingSecondInteraction: null,
+    runActiveAfterResolution: false,
+  };
+  controller = createController({
+    admitRunConnection: fakeAdmitRunConnection(),
+    connectorPathResolver: () => "/tmp/connector.js",
+    logger: { error: () => undefined, warn: () => undefined },
+    runConnectorImpl: async (opts) => {
+      const firstResponse = opts.onInteraction?.({ kind: "otp", request_id: "otp_first" }) as Promise<unknown>;
+      await new Promise((resolve) => setImmediate(resolve));
+      observed.pendingBeforeResolution = controller.getPendingInteraction("run_otp_broker");
+      opts.onProgress?.({
+        assistance_request_id: "otp_first",
+        status: "resolved",
+        type: "ASSISTANCE_STATUS",
+      });
+      observed.pendingAfterResolution = controller.getPendingInteraction("run_otp_broker");
+      observed.runActiveAfterResolution = Boolean(controller.findActiveRunByRunId("run_otp_broker"));
+      if (observed.pendingAfterResolution) {
+        controller.respondToInteraction("run_otp_broker");
+      }
+      await firstResponse;
+
+      const secondResponse = opts.onInteraction?.({ kind: "otp", request_id: "otp_second" }) as Promise<unknown>;
+      observed.pendingSecondInteraction = controller.getPendingInteraction("run_otp_broker");
+      if (observed.pendingSecondInteraction?.interaction_id === "otp_second") {
+        controller.respondToInteraction("run_otp_broker", { data: { code: "123456" }, status: "success" });
+      }
+      await secondResponse;
+
+      return { records_emitted: 0, status: "succeeded" };
+    },
+    schedulerStore: createSchedulerStore(),
+  });
+
+  await controller.runNow(CONNECTOR_ID, {
+    connectorInstanceId: "cin_otp_broker",
+    manifest: MANIFEST,
+    ownerToken: "owner-token",
+    runId: "run_otp_broker",
+  });
+  await controller.drainActiveRuns(1000);
+
+  assert.equal(observed.pendingBeforeResolution?.interaction_id, "otp_first");
+  assert.equal(observed.pendingAfterResolution, null);
+  assert.equal(observed.runActiveAfterResolution, true, "run remains active after automatic OTP resolution");
+  assert.equal(observed.pendingSecondInteraction?.interaction_id, "otp_second");
 });
 
 // biome-ignore lint/suspicious/useAwait: Async callback preserves the dependency contract and rejection timing.

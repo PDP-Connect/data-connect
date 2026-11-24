@@ -1,5 +1,14 @@
+# Docker keeps every container's stdout/stderr in an unrotated file by default.
+# Rotate at 10 MiB x 5 files (50 MiB per container). Values are strings.
+x-bounded-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   reference:
+    logging: *bounded-logging
     # The default GHCR image (and the `reference` build target below) is this
     # split-service's deliberately browser-free AS/RS runtime. The normal
     # browser-capable self-host path is the published Core image and the
@@ -222,6 +231,7 @@ services:
   # service can depend on it. A custom env file must keep
   # PDPP_STORAGE_BACKEND=postgres and PDPP_DATABASE_URL paired.
   postgres:
+    logging: *bounded-logging
     image: ${PDPP_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
     environment:
       POSTGRES_USER: ${PDPP_POSTGRES_USER:-pdpp}
@@ -279,6 +289,7 @@ services:
   # root Dockerfile — see deploy/docker/Dockerfile's header comment for the
   # path-layout differences this compose reconciles).
   web:
+    logging: *bounded-logging
     image: ${PDPP_WEB_IMAGE:-ghcr.io/pdp-connect/data-connect/console:main}
     build:
       context: ./apps/console

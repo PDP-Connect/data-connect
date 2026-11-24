@@ -34,20 +34,15 @@ export async function invoke<T>(
       return fixture.connectorUpdates as T
     case "download_connector":
       return undefined as T
-    case "start_connector_run":
-      if (activeScenario === "home-error") {
-        throw new Error("Fixture connector failed to authorize")
-      }
-      return undefined as T
     case "start_installed_pdpp_connector_run":
       if (activeScenario === "home-error") {
         throw new Error("Fixture connector failed to authorize")
       }
       return undefined as T
-    case "stop_connector_run":
     case "stop_installed_pdpp_connector_run":
     case "submit_installed_pdpp_interaction_response":
     case "reset_installed_pdpp_browser_profile":
+    case "clear_pdpp_collection_state":
     case "delete_exported_run":
     case "open_folder":
     case "open_platform_export_folder":
@@ -56,6 +51,7 @@ export async function invoke<T>(
     case "clear_personal_server_data":
       return undefined as T
     case "is_installed_pdpp_browser_setup_complete":
+    case "reference_server_has_connection":
       return false as T
     case "get_user_data_path":
       return "/Users/demo/DataConnect" as T

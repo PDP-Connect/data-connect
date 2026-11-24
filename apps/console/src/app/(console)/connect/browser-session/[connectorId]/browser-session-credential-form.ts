@@ -9,28 +9,31 @@ import {
 
 type FormReader = Pick<FormData, "get">;
 
-export interface OptionalBrowserCredentialSubmission {
+export interface BrowserCredentialSubmission {
   readonly secret: string;
   readonly setupFields: Record<string, string>;
 }
 
-export type OptionalBrowserCredentialResult =
-  | { readonly ok: true; readonly submission: OptionalBrowserCredentialSubmission }
-  | { readonly error: string; readonly ok: false; readonly setupFields: Record<string, string> };
+export type BrowserCredentialResult =
+  | { readonly ok: true; readonly submission: BrowserCredentialSubmission }
+  | {
+      readonly error: string;
+      readonly ok: false;
+      readonly setupFields: Record<string, string>;
+    };
 
 /**
- * Applies the browser-session page's optional credential control to the
- * existing manifest-authored static-secret payload builder. An unchecked
- * control returns null, so the no-secret browser path never touches the
- * credential capture route. A checked control validates all manifest-required
+ * Applies the browser-session page's credential control to the existing
+ * manifest-authored static-secret payload builder. Only a manifest-optional
+ * capture may take the no-secret browser path. Required capture validates all
  * fields before the route creates or mutates a connection.
  */
-export function optionalBrowserCredentialSubmission(
+export function browserCredentialSubmission(
   setup: StaticSecretSetup,
-  formData: FormReader
-): OptionalBrowserCredentialResult | null {
+  formData: FormReader,
+): BrowserCredentialResult | null {
   const remember = formData.get("remember_sign_in_details");
-  if (remember !== "1" && remember !== "true") {
+  if (setup.credential_capture.required === false && remember !== "1" && remember !== "true") {
     return null;
   }
 

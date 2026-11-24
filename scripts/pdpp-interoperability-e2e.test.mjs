@@ -26,7 +26,7 @@ const PDPP_ROOT =
   process.env.DATACONNECT_PDPP_ROOT || "/home/tnunamak/code/pdpp"
 const REFERENCE_ROOT = join(PDPP_ROOT, "reference-implementation")
 const TEST_DCR_INITIAL_ACCESS_TOKEN = "dataconnect-pdpp-interop-dcr-token"
-const OWNER_BOOTSTRAP_CLIENT_ID = "cli_longview"
+const OWNER_BOOTSTRAP_CLIENT_ID = "pdpp_cli"
 
 function requiredPath(path) {
   assert.ok(

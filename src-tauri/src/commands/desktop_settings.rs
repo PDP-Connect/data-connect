@@ -67,6 +67,17 @@ const AUTOSTART_COMMAND_KIND: &str = "set_autostart_enabled";
 /// command is no longer pending, so it is never applied late.
 const AUTOSTART_COMMAND_TTL: chrono::Duration = chrono::Duration::seconds(600);
 
+pub(crate) fn missing_autostart_state_is_disabled<E: std::fmt::Display>(
+    result: Result<bool, E>,
+) -> Result<bool, E> {
+    // tauri-plugin-autostart stringifies the Windows registry error, so its
+    // stable OS error code is the only portable discriminator left here.
+    match result {
+        Err(error) if error.to_string().contains("(os error 2)") => Ok(false),
+        other => other,
+    }
+}
+
 /// Resolve the shared protocol directory, the SAME directory
 /// `remote_access_config_path` uses (see `remote_access.rs`).
 pub(crate) fn autostart_protocol_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -367,6 +378,24 @@ mod tests {
                 "autostart-store.ts no longer uses {name}"
             );
         }
+    }
+
+    #[test]
+    fn missing_os_autostart_state_is_reported_as_disabled() {
+        let missing = std::io::Error::from_raw_os_error(2);
+        assert!(!missing_autostart_state_is_disabled(Err(missing)).expect("missing state"));
+
+        let denied = std::io::Error::from_raw_os_error(5);
+        assert_eq!(
+            missing_autostart_state_is_disabled(Err(denied))
+                .expect_err("permission errors remain visible")
+                .raw_os_error(),
+            Some(5)
+        );
+        assert!(
+            missing_autostart_state_is_disabled(Ok::<bool, std::io::Error>(true))
+                .expect("enabled state")
+        );
     }
 
     #[test]

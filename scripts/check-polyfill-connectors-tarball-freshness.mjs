@@ -108,6 +108,44 @@ export function normalizeVendoredPackageJson(text) {
   return `${JSON.stringify(pkg, null, 2)}\n`
 }
 
+// PR #329 adds host Chrome CDP support in this repository. The upstream pin
+// predates that seam, so apply this narrow PDP-Connect patch to the rebuild.
+function applyHostCdpPatch(packageDir) {
+  const jsPath = join(packageDir, "src", "connector-runtime.js")
+  let js = readFileSync(jsPath, "utf8")
+  const resolverNeedle =
+    '    const legacyRemoteCdpEnvKey = `PDPP_${visibility.profileName.toUpperCase()}_REMOTE_CDP_URL`;'
+  const resolverPatch =
+    '    const hostCdpRequired = env.PDPP_BROWSER_SURFACE_REQUIRED?.trim().toLowerCase() === "host";\n' +
+    '    if (hostCdpRequired) {\n' +
+    '        if (!managedRemoteCdpUrl) {\n' +
+    '            throw new TerminalError("browser surface required: PDPP_BROWSER_SURFACE_REQUIRED=host but PDPP_BROWSER_SURFACE_REMOTE_CDP_URL is missing");\n' +
+    '        }\n' +
+    '        return { kind: "managed_host_cdp", remoteCdpUrl: managedRemoteCdpUrl };\n' +
+    '    }\n'
+  const attachNeedle =
+    '    const remoteCdpUrl = launchSource.kind === "managed_neko" ||\n        launchSource.kind === "legacy_remote_cdp"'
+  const attachPatch =
+    '    const remoteCdpUrl = launchSource.kind === "managed_neko" ||\n' +
+    '        launchSource.kind === "managed_host_cdp" ||\n' +
+    '        launchSource.kind === "legacy_remote_cdp"'
+  if (!js.includes(resolverNeedle) || js.includes("const hostCdpRequired"))
+    throw new Error("pinned connector-runtime.js no longer matches the host CDP patch base")
+  if (!js.includes(attachNeedle))
+    throw new Error("pinned connector-runtime.js no longer matches the CDP attach patch base")
+  js = js.replace(resolverNeedle, `${resolverPatch}${resolverNeedle}`)
+  js = js.replace(attachNeedle, attachPatch)
+  writeFileSync(jsPath, js)
+
+  const dtsPath = join(packageDir, "src", "connector-runtime.d.ts")
+  let dts = readFileSync(dtsPath, "utf8")
+  const unionNeedle = '} | {\n    readonly envKey: string;\n    readonly kind: "legacy_remote_cdp";'
+  const unionPatch = '} | {\n    readonly kind: "managed_host_cdp";\n    readonly remoteCdpUrl: string;\n} | {\n    readonly envKey: string;\n    readonly kind: "legacy_remote_cdp";'
+  if (!dts.includes(unionNeedle) || dts.includes('kind: "managed_host_cdp"'))
+    throw new Error("pinned connector-runtime.d.ts no longer matches the host CDP patch base")
+  writeFileSync(dtsPath, dts.replace(unionNeedle, unionPatch))
+}
+
 // Returns a list of differences between two { relativePath: sha256 } maps.
 export function diffFileDigests(vendored, rebuilt) {
   const differences = []
@@ -245,6 +283,7 @@ function rebuildDigests(pin, scratch) {
     recursive: true,
     force: true,
   })
+  applyHostCdpPatch(join(unpacked, "package"))
   // Whole extraction root: npm strips the first path component of every entry,
   // so a root other than package/ would still install.
   return fileDigests(unpacked)

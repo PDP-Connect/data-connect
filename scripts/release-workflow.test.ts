@@ -6,7 +6,9 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
@@ -41,39 +43,80 @@ function readWorkflowStep(workflow: string, name: string) {
   return workflow.slice(start, end)
 }
 
-// Returns why the publish-core-image job could push an image it has not
-// scanned, or [] when every GHCR write follows the full-layer secret scan.
-function coreImageScanGaps(workflow: string) {
-  const job = workflow.slice(
-    workflow.indexOf("  publish-core-image:"),
-    workflow.indexOf("  promote-core-latest:")
-  )
+type ScannedPublish = {
+  job: string
+  build: string
+  scan: string
+  push: string
+  rescan: string
+  scanId: string
+  archive: string
+  // The only `if:` a scan or push step may carry. The dispatch publish filters
+  // its matrix per step; the release publish has no step conditions.
+  allowedIf?: string
+}
+
+const DIGEST_GUARD = '[[ ! "$SCANNED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]'
+
+// Returns why a publish job could push an image it has not scanned, or []
+// when every GHCR write follows a passing full-layer secret scan of the same
+// archive. A scan or push step that can "pass" without its script succeeding
+// (continue-on-error, if: always(), or the default shell, which has no
+// pipefail and so hides the scanner's exit status behind `| tee`) counts too.
+function scannedPublishGaps(spec: ScannedPublish) {
+  const { job, archive } = spec
   const gaps: string[] = []
   const step = (name: string) => {
     const marker = `      - name: ${name}\n`
     return job.includes(marker) ? readWorkflowStep(job, name) : undefined
   }
-  const build = step("Build Core image without pushing")
-  const scan = step("Scan every layer of the built Core image for secret files")
-  const push = step("Push the scanned Core image")
-  const rescan = step("Re-scan the pushed Core image from GHCR by digest")
+  const build = step(spec.build)
+  const scan = step(spec.scan)
+  const push = step(spec.push)
+  const rescan = step(spec.rescan)
+  const jobHeader = job.slice(0, job.indexOf("\n    steps:\n"))
+  if (jobHeader.includes("continue-on-error"))
+    gaps.push("job has continue-on-error")
   if (!build?.includes("push: false")) gaps.push("build step pushes")
-  if (
-    !build?.includes("outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar")
-  )
+  if (!build?.includes(`outputs: type=oci,dest=\${{ runner.temp }}/${archive}`))
     gaps.push("build step does not write the OCI archive")
+  // build-args values are recorded verbatim in mode=max provenance, and the
+  // scanner skips in-toto layers, so a secret there would be published.
+  const buildArgs = build?.match(/\n\s+build-args: \|\n((?:\s{12}.*\n)*)/)?.[1]
+  if (buildArgs === undefined || /secrets\.|github\.token/.test(buildArgs))
+    gaps.push("build-args carry a secret into provenance")
   if (
     !scan?.includes(
-      'check-image-secrets.sh oci-archive "$RUNNER_TEMP/core.oci.tar"'
+      `check-image-secrets.sh oci-archive "$RUNNER_TEMP/${archive}"`
     )
   )
     gaps.push("no scan of the built archive")
-  if (!push?.includes("--preserve-digests oci-archive:/work/core.oci.tar"))
+  for (const [label, text] of [
+    ["scan", scan],
+    ["push", push],
+  ] as const) {
+    if (text === undefined) continue
+    if (text.includes("continue-on-error"))
+      gaps.push(`${label} step has continue-on-error`)
+    for (const cond of text.match(/^ {8}if: .*$/gm) ?? [])
+      if (cond !== `        if: ${spec.allowedIf}`)
+        gaps.push(`${label} step has ${cond.trim()}`)
+    if (!/^ {8}shell: bash$/m.test(text))
+      gaps.push(`${label} step does not use shell: bash`)
+  }
+  if (!push?.includes(`--preserve-digests oci-archive:/work/${archive}`))
     gaps.push("push does not copy the scanned archive")
   if (!push?.includes('"$pushed" != "$SCANNED_DIGEST"'))
     gaps.push("push does not assert pushed digest equals scanned digest")
-  if (!push?.includes("SCANNED_DIGEST: ${{ steps.scan-core.outputs.digest }}"))
+  if (
+    !push?.includes(
+      `SCANNED_DIGEST: \${{ steps.${spec.scanId}.outputs.digest }}`
+    )
+  )
     gaps.push("push does not take the digest from the scan")
+  const guardAt = push?.indexOf(DIGEST_GUARD) ?? -1
+  if (guardAt === -1 || guardAt > (push?.indexOf("skopeo copy") ?? -1))
+    gaps.push("push does not check the scan digest before skopeo copy")
   if (!rescan?.includes('"docker://$PDPP_IMAGE@$PUSHED_DIGEST"'))
     gaps.push("no re-scan of the pushed digest")
   const order = [build, scan, push, rescan].map(text =>
@@ -95,6 +138,42 @@ function coreImageScanGaps(workflow: string) {
   return gaps
 }
 
+function coreImageScanGaps(workflow: string) {
+  return scannedPublishGaps({
+    job: workflow.slice(
+      workflow.indexOf("  publish-core-image:"),
+      workflow.indexOf("  promote-core-latest:")
+    ),
+    build: "Build Core image without pushing",
+    scan: "Scan every layer of the built Core image for secret files",
+    push: "Push the scanned Core image",
+    rescan: "Re-scan the pushed Core image from GHCR by digest",
+    scanId: "scan-core",
+    archive: "core.oci.tar",
+  })
+}
+
+const dockerImagesWorkflowPath = resolve(
+  process.cwd(),
+  ".github/workflows/docker-images.yml"
+)
+
+// The manual diagnostic publish writes the same GHCR packages as a release.
+function dispatchImageScanGaps(workflow: string) {
+  const at = workflow.indexOf("\n  publish:\n")
+  return scannedPublishGaps({
+    job: at === -1 ? "" : workflow.slice(at + 1),
+    build: "Build image without pushing",
+    scan: "Scan every layer of the built image for secret files",
+    push: "Push the scanned image",
+    rescan: "Re-scan the pushed image from GHCR by digest",
+    scanId: "scan-image",
+    archive: "image.oci.tar",
+    allowedIf:
+      "github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image",
+  })
+}
+
 function readWorkflowRunScript(workflow: string, name: string) {
   const step = readWorkflowStep(workflow, name)
   const marker = "        run: |\n"
@@ -106,6 +185,27 @@ function readWorkflowRunScript(workflow: string, name: string) {
     .split("\n")
     .map(line => (line.startsWith("          ") ? line.slice(10) : line))
     .join("\n")
+}
+
+function readCleanInstallBashScripts(workflow: string) {
+  const cleanInstall = workflow.slice(workflow.indexOf("\n  clean-install:\n"))
+  const steps = cleanInstall.split(/\n      - name: /).slice(1)
+
+  return steps.flatMap(step => {
+    if (!/^        shell: bash$/m.test(step)) return []
+    const marker = "        run: |\n"
+    const start = step.indexOf(marker)
+    const inline = step.match(/^        run: (.+)$/m)?.[1]
+    if (start === -1 && inline === undefined) return []
+    const script =
+      (start === -1 ? inline : undefined) ??
+      step
+        .slice(start + marker.length)
+        .split("\n")
+        .map(line => (line.startsWith("          ") ? line.slice(10) : line))
+        .join("\n")
+    return [{ name: step.split("\n", 1)[0], script }]
+  })
 }
 
 // Values GitHub Actions would substitute into a run script before the runner's
@@ -136,16 +236,54 @@ function substituteActionsExpressions(script: string) {
 }
 
 describe("release workflow", () => {
-  it("runs the installer matrix on branch and release events without an updater", () => {
+  it("keeps every clean-install Bash script portable across runner shells", () => {
+    const scripts = readCleanInstallBashScripts(readReleaseWorkflow())
+
+    expect(scripts.map(({ name }) => name)).toEqual([
+      "Download release installer",
+      "Install and launch (macOS)",
+      "Assert owner password not yet set and sidecars serving",
+      "Collect evidence",
+    ])
+
+    for (const { name, script } of scripts) {
+      expect(script, name).not.toMatch(
+        /\b(?:mapfile|readarray|coproc)\b|\bdeclare\s+-[A-Za-z]*[Ang][A-Za-z]*\b|\$\{[A-Za-z_][A-Za-z0-9_]*(?:,,?|\^\^?)[^}]*\}|\bshopt\s+-s\s+globstar|&>>|\|&|;{1,2}&/
+      )
+      // shasum is absent from Git Bash on windows-latest. The hash step uses
+      // Node, which Setup Node provides on all three clean-install runners.
+      expect(script, name).not.toMatch(/\bshasum\b/)
+      const syntaxCheck = spawnSync("bash", ["-n"], { input: script })
+      expect(syntaxCheck.status, `${name}: ${syntaxCheck.stderr}`).toBe(0)
+    }
+
+    // Verify the shell commands needed by each runner image stay in steps
+    // whose runner provides them. Setup Node provides node everywhere; the
+    // hosted images provide gh and Git Bash coreutils; macOS provides its
+    // installer tools; windows-latest provides pwsh; macOS provides ps.
+    const requiredCommands = [
+      [0, ["gh", "mkdir", "node"]],
+      [1, ["mktemp", "hdiutil", "tee", "ditto", "codesign", "open"]],
+      [2, ["node"]],
+      [3, ["mkdir", "cp", "ls", "pwsh", "ps"]],
+    ] as const
+    for (const [index, commands] of requiredCommands) {
+      for (const command of commands) {
+        expect(
+          scripts[index].script,
+          `${scripts[index].name}: ${command}`
+        ).toMatch(new RegExp(`\\b${command}\\b`))
+      }
+    }
+    expect(scripts[0].script).toContain("gh release download")
+    expect(scripts[3].script).toContain("pwsh -NoProfile")
+  })
+
+  it("builds manual-install artifacts on demand without an updater", () => {
     const workflow = readReleaseWorkflow()
 
     expect(workflow).toContain("workflow_dispatch:")
-    expect(workflow).toContain(
-      "push:\n    branches:\n      - main\n      - integration/unified-stack"
-    )
-    expect(workflow).toContain('      - "v*"')
-    expect(workflow).toContain("types: [published]")
-    expect(workflow).not.toContain("  pull_request:")
+    expect(workflow).toContain("pull_request:")
     expect(workflow).toContain("Stage verified release artifacts")
     expect(workflow).toContain("Publish complete platform set")
     expect(workflow).toContain("ubuntu-22.04")
@@ -162,7 +300,7 @@ describe("release workflow", () => {
       "verification_args=(--platform macos --expected-arch"
     )
     expect(workflow).toContain("npm ci")
-    expect(workflow).toContain('node-version: "24.21.0"')
+    expect(workflow).toContain('node-version: "24.22.1"')
     expect(workflow).toContain("Stage Node.js runtime sidecar")
     expect(workflow).toContain(
       'node scripts/stage-pdpp-node.mjs --target "${{ matrix.target }}"'
@@ -181,15 +319,14 @@ describe("release workflow", () => {
     expect(workflow).toContain(
       "node scripts/verify-reference-stack.mjs --profile release"
     )
-    expect(workflow).toContain("if: github.event_name == 'release'")
+    expect(workflow).toContain("if: inputs.publish_tag != '' || github.event_name == 'release'")
     expect(workflow).not.toMatch(
       /updater|latest\.json|TAURI_SIGNING_PRIVATE_KEY/i
     )
   })
 
-  it("keeps signing optional and has no Vana or Corsali release dependency", () => {
+  it("does no macOS signing or notarization and has no Vana or Corsali release dependency", () => {
     const workflow = readReleaseWorkflow()
-    const signedBuild = readWorkflowStep(workflow, "Build signed Tauri app")
     const unsignedBuild = readWorkflowStep(workflow, "Build unsigned Tauri app")
     const finalizeBundles = readWorkflowStep(
       workflow,
@@ -197,24 +334,24 @@ describe("release workflow", () => {
     )
     const removeGeneratedDmgs = `find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -delete`
 
-    expect(workflow).toContain("APPLE_SIGNING_IDENTITY")
-    expect(signedBuild).toContain("env.APPLE_SIGNING_AVAILABLE == 'true'")
-    expect(signedBuild).toContain(
-      "APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}"
-    )
-    expect(unsignedBuild).toContain("env.APPLE_SIGNING_AVAILABLE != 'true'")
-    expect(unsignedBuild).not.toContain("APPLE_SIGNING_IDENTITY")
-    expect(workflow).toContain(
-      "github.event_name == 'release' && secrets.APPLE_BUILD_CERTIFICATE_BASE64 != ''"
-    )
-    expect(workflow).toContain(
-      "env.APPLE_SIGNING_AVAILABLE == 'true' && secrets.APPLE_SIGNING_IDENTITY || ''"
-    )
-    expect(workflow).toContain("verification_args+=(--verify-code-signature)")
-    expect(workflow).toContain(
-      'codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" src-tauri/binaries/pdpp-node-${{ matrix.target }}'
-    )
-    expect(workflow).toContain("codesign --force --deep --options runtime")
+    // A downstream signer signs the attested DMG. This repository holds no
+    // Apple credentials and has no second, dormant signing path.
+    expect(workflow).not.toMatch(/secrets\.APPLE_|APPLE_SIGNING_IDENTITY/)
+    expect(workflow).not.toContain("apple-signing-availability")
+    expect(workflow).not.toMatch(/codesign --force|notarytool|stapler/)
+    expect(workflow).not.toMatch(/security (?:create|import|delete)-keychain/)
+    expect(workflow).not.toContain("--verify-code-signature")
+    expect(workflow).not.toContain("Build signed Tauri app")
+    expect(unsignedBuild).not.toMatch(/^\s+if:/m)
+    expect(finalizeBundles).not.toContain("env:")
+    // The signer applies these entitlements under the hardened runtime.
+    for (const path of [
+      "personal-server/entitlements.plist",
+      "playwright-runner/entitlements.plist",
+    ]) {
+      const entitlements = readFileSync(resolve(process.cwd(), path), "utf8")
+      expect(entitlements, path).toContain("com.apple.security.cs.allow-jit")
+    }
     expect(workflow).toContain(
       "node scripts/create-macos-dmg.mjs --volume-name DataConnect"
     )
@@ -227,6 +364,197 @@ describe("release workflow", () => {
     expect(workflow).not.toContain("VITE_PRIVY_CLIENT_ID")
     expect(workflow).not.toMatch(/msi\/\*\.msi/i)
     expect(workflow).not.toMatch(/vana\.(?:com|org)|corsali/i)
+  })
+
+  it("restores the Chromium framework symlinks after Tauri, before the DMG", () => {
+    const finalizeBundles = readWorkflowStep(
+      readReleaseWorkflow(),
+      "Finalize platform bundles"
+    )
+    const copyCommand =
+      'cp -R playwright-runner/dist/browsers "$browsers_destination"'
+    const start = finalizeBundles.indexOf("browsers_destination=")
+    const end = finalizeBundles.indexOf(copyCommand) + copyCommand.length
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(end).toBeLessThan(
+      finalizeBundles.indexOf("node scripts/create-macos-dmg.mjs")
+    )
+
+    const root = mkdtempSync(join(tmpdir(), "release-browsers-"))
+    try {
+      const frameworkPath = join(
+        "chromium-1243",
+        "chrome-mac-arm64",
+        "Google Chrome for Testing.app",
+        "Contents",
+        "Frameworks",
+        "F.framework"
+      )
+      // playwright-runner's build output keeps the upstream links.
+      const built = join(root, "playwright-runner", "dist", "browsers")
+      mkdirSync(join(built, frameworkPath, "Versions", "1.0"), {
+        recursive: true,
+      })
+      writeFileSync(join(built, frameworkPath, "Versions", "1.0", "F"), "bin")
+      symlinkSync("1.0", join(built, frameworkPath, "Versions", "Current"))
+      symlinkSync("Versions/Current/F", join(built, frameworkPath, "F"))
+      // Tauri's copy: no links, the binary copied to the root.
+      const app = join(root, "DataConnect.app")
+      const packaged = join(
+        app,
+        "Contents/Resources/playwright-runner/dist/browsers",
+        frameworkPath
+      )
+      mkdirSync(join(packaged, "Versions", "1.0"), { recursive: true })
+      writeFileSync(join(packaged, "Versions", "1.0", "F"), "bin")
+      writeFileSync(join(packaged, "F"), "bin")
+
+      execFileSync(
+        "bash",
+        ["-euo", "pipefail", "-c", finalizeBundles.slice(start, end)],
+        { cwd: root, env: { ...process.env, app } }
+      )
+
+      expect(readlinkSync(join(packaged, "Versions", "Current"))).toBe("1.0")
+      expect(readlinkSync(join(packaged, "F"))).toBe("Versions/Current/F")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it("refuses a release checkout whose HEAD is not the selected release commit", () => {
+    const workflow = readReleaseWorkflow()
+    const marker = "      - name: Verify checked-out release identity\n"
+    const scripts = workflow
+      .split(marker)
+      .slice(1)
+      .map(rest =>
+        readWorkflowRunScript(
+          marker + rest,
+          "Verify checked-out release identity"
+        )
+      )
+    // The build job and the Core image job both check out the tag name.
+    expect(scripts).toHaveLength(2)
+
+    const repo = mkdtempSync(join(tmpdir(), "release-head-sha-"))
+    try {
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim()
+      git("init", "-q")
+      git(
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "a"
+      )
+      const eventSha = git("rev-parse", "HEAD")
+      git(
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "b"
+      )
+      const movedSha = git("rev-parse", "HEAD")
+      mkdirSync(join(repo, "scripts"))
+      writeFileSync(
+        join(repo, "scripts/verify-release-ref.mjs"),
+        'console.log("verify-release-ref ran")\n'
+      )
+
+      for (const script of scripts) {
+        const run = (githubSha: string) =>
+          spawnSync("bash", ["-c", script], {
+            cwd: repo,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GITHUB_SHA: githubSha,
+              EXPECTED_SHA: githubSha,
+              AUTOMATIC_TAG: "",
+              RELEASE_TAG: "v1.2.3",
+            },
+          })
+        const moved = run(eventSha)
+        expect(moved.status).toBe(1)
+        expect(moved.stdout).toContain(
+          `Checked-out commit ${movedSha} is not the selected release commit ${eventSha}`
+        )
+        expect(moved.stdout).not.toContain("verify-release-ref ran")
+
+        const same = run(movedSha)
+        expect(same.status).toBe(0)
+        expect(same.stdout).toContain("verify-release-ref ran")
+      }
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
+  it("attests each published DMG in the publish job only", () => {
+    const workflow = readReleaseWorkflow()
+    const publishJob = workflow.slice(
+      workflow.indexOf("\n  publish:\n"),
+      workflow.indexOf("\n  publish-core-image:\n")
+    )
+    const attest = readWorkflowStep(workflow, "Attest macOS DMG provenance")
+
+    expect(publishJob).toContain(
+      "permissions:\n      contents: write\n      # Only for the DMG provenance attestation below.\n      id-token: write\n      attestations: write\n    steps:"
+    )
+    expect(attest).toMatch(
+      /uses: actions\/attest-build-provenance@[0-9a-f]{40} # v\d/
+    )
+    expect(attest).toContain(
+      "subject-path: release-artifacts/manual-install-macos-*/dmg/DataConnect_*.dmg"
+    )
+    expect(publishJob.indexOf(attest)).toBeGreaterThan(
+      publishJob.indexOf("- name: Download verified release artifacts")
+    )
+    expect(publishJob.indexOf(attest)).toBeLessThan(
+      publishJob.indexOf("- name: Publish complete platform set")
+    )
+    // No other job may mint OIDC tokens or write attestations.
+    expect(workflow.split("id-token: write").length - 1).toBe(1)
+    expect(workflow.split("attestations: write").length - 1).toBe(1)
+  })
+
+  it("finds exactly one branch installer in the preserved nsis artifact layout", () => {
+    const workflow = readReleaseWorkflow()
+    const installStep = readWorkflowStep(
+      workflow,
+      "Install and launch on a clean Windows runner"
+    )
+    const root = mkdtempSync(join(tmpdir(), "data-connect-branch-installer-"))
+    const installerDirectory = join(root, "installer")
+    const nsisDirectory = join(installerDirectory, "nsis")
+    const installerName = "DataConnect_0.7.54_x64-setup.exe"
+
+    try {
+      mkdirSync(nsisDirectory, { recursive: true })
+      writeFileSync(join(nsisDirectory, installerName), "installer")
+
+      expect(readdirSync(installerDirectory)).toEqual(["nsis"])
+      expect(readdirSync(nsisDirectory)).toContain(installerName)
+      expect(installStep).toContain(
+        "$installers = @(Get-ChildItem 'installer' -Recurse -File -Filter '*-setup.exe')"
+      )
+      expect(installStep).toContain("if ($installers.Count -ne 1)")
+      expect(installStep).toContain("$installer = $installers[0]")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it("replaces Tauri's x64 DMG without deleting artifacts outside the bundle", () => {
@@ -277,10 +605,10 @@ describe("release workflow", () => {
 
     expect(workflow).toContain("permissions:\n  contents: read")
     expect(workflow).toContain(
-      "publish:\n    if: github.event_name == 'release'\n    needs: build"
+      "publish:\n    if: inputs.publish_tag != '' || github.event_name == 'release'\n    needs: build"
     )
     expect(workflow).toContain("permissions:\n      contents: write")
-    expect(stagedArtifacts).toContain("if: github.event_name == 'release'")
+    expect(stagedArtifacts).toContain("if: inputs.publish_tag != '' || github.event_name == 'release'")
     expect(stagedArtifacts).toContain(
       "manual-install-${{ matrix.artifact_key }}"
     )
@@ -312,7 +640,7 @@ describe("release workflow", () => {
     )
 
     expect(workflow).toContain(
-      "publish-core-image:\n    if: github.event_name == 'release'\n    needs: [build, publish]"
+      "publish-core-image:\n    if: inputs.publish_tag != '' || github.event_name == 'release'\n    needs: [build, publish]"
     )
     expect(publishCoreImage).toContain("packages: write")
     expect(publishCoreImage).not.toContain("id-token:")
@@ -328,12 +656,12 @@ describe("release workflow", () => {
     expect(buildCore).toContain("push: false")
     expect(buildCore).toContain("target: core")
     expect(buildCore).toContain("platforms: linux/amd64,linux/arm64")
-    expect(buildCore).toContain("PDPP_REFERENCE_REVISION=${{ github.sha }}")
+    expect(buildCore).toContain("PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}")
   })
 
   it("runs clean-install instead of build only on a dispatch that names a release", () => {
     const workflow = readReleaseWorkflow()
-    type Trigger = { event: string; releaseTag?: string }
+    type Trigger = { event: string; releaseTag?: string; publishTag?: string }
     // Evaluates the simple ==, !=, &&, || job gates this workflow uses.
     const runs = (job: string, trigger: Trigger) => {
       const gate = new RegExp(`\\n  ${job}:\\n(?:    #.*\\n)*    if: (.*)\\n`)
@@ -342,18 +670,25 @@ describe("release workflow", () => {
       const expression = match[1]
         .replaceAll("github.event_name", "event")
         .replaceAll("inputs.release_tag", "releaseTag")
+        .replaceAll("inputs.publish_tag", "publishTag")
+        .replaceAll("startsWith(github.ref_name, 'v')", "true")
         .replaceAll("!github.event.release.prerelease", "true")
         .replaceAll("!=", "!==")
         .replaceAll(/([^!=])==/g, "$1===")
-      return new Function("event", "releaseTag", `return ${expression}`)(
+      return new Function("event", "releaseTag", "publishTag", `return ${expression}`)(
         trigger.event,
-        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : ""
+        trigger.event === "workflow_dispatch" ? (trigger.releaseTag ?? "") : "",
+        trigger.publishTag ?? ""
       )
     }
     const scenarios: Array<[Trigger, string[]]> = [
       [{ event: "workflow_dispatch", releaseTag: "v2.4.0" }, ["clean-install"]],
       [{ event: "workflow_dispatch", releaseTag: "" }, ["build"]],
       [{ event: "pull_request" }, ["build"]],
+      [
+        { event: "workflow_run", publishTag: "v1.2.3" },
+        ["build", "publish", "publish-core-image", "promote-core-latest"],
+      ],
       [
         { event: "release" },
         ["build", "publish", "publish-core-image", "promote-core-latest"],
@@ -423,6 +758,248 @@ describe("release workflow", () => {
     expect(coreImageScanGaps(rebuilds)).toContain(
       "push does not copy the scanned archive"
     )
+    // Reviewer mutants from the PR #260 review. Each let a dirty or unscanned
+    // image reach GHCR while this test still passed.
+    const push = readWorkflowStep(workflow, "Push the scanned Core image")
+    const r2 = workflow.replace(
+      scanStep,
+      scanStep.replace(
+        "        shell: bash\n",
+        "        continue-on-error: true\n        shell: bash\n"
+      )
+    )
+    expect(r2).not.toBe(workflow)
+    expect(coreImageScanGaps(r2)).toContain("scan step has continue-on-error")
+
+    const r3 = workflow.replace(
+      scanStep,
+      scanStep
+        .replace("        shell: bash\n", "")
+        .replace("          set -euo pipefail\n", "")
+    )
+    expect(r3).not.toBe(workflow)
+    expect(coreImageScanGaps(r3)).toContain(
+      "scan step does not use shell: bash"
+    )
+
+    const r5 = workflow.replace(
+      push,
+      push.replace(
+        "        id: push-core\n",
+        "        id: push-core\n        if: always()\n"
+      )
+    )
+    expect(r5).not.toBe(workflow)
+    expect(coreImageScanGaps(r5)).toContain("push step has if: always()")
+
+    const unguarded = workflow.replace(
+      push,
+      push.replace(DIGEST_GUARD, "false")
+    )
+    expect(unguarded).not.toBe(workflow)
+    expect(coreImageScanGaps(unguarded)).toContain(
+      "push does not check the scan digest before skopeo copy"
+    )
+
+    const secretArg = workflow.replace(
+      "            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar",
+      "            PDPP_REFERENCE_REVISION=${{ inputs.build_sha || github.sha }}\n            NPM_TOKEN=${{ secrets.NPM_TOKEN }}\n          labels: ${{ steps.meta.outputs.labels }}\n          outputs: type=oci,dest=${{ runner.temp }}/core.oci.tar"
+    )
+    expect(secretArg).not.toBe(workflow)
+    expect(coreImageScanGaps(secretArg)).toContain(
+      "build-args carry a secret into provenance"
+    )
+  })
+
+  it("gives the manual diagnostic publish the same scan-then-push gate", () => {
+    const workflow = readFileSync(dockerImagesWorkflowPath, "utf8")
+    expect(dispatchImageScanGaps(workflow)).toEqual([])
+
+    const direct = workflow
+      .replace(
+        "          outputs: type=oci,dest=${{ runner.temp }}/image.oci.tar,tar=true\n",
+        ""
+      )
+      .replace(
+        "          push: false\n          sbom: true\n          tags: ${{ steps.meta.outputs.tags }}\n          target: ${{ matrix.target }}\n\n      - name: Scan",
+        "          push: true\n          sbom: true\n          tags: ${{ steps.meta.outputs.tags }}\n          target: ${{ matrix.target }}\n\n      - name: Scan"
+      )
+    expect(direct).not.toBe(workflow)
+    expect(dispatchImageScanGaps(direct)).toEqual(
+      expect.arrayContaining([
+        "build step pushes",
+        '"push: true" before the scan',
+      ])
+    )
+
+    const always = workflow.replace(
+      "        id: push-image\n        if: github.event.inputs.image == 'all' || github.event.inputs.image == matrix.image\n",
+      "        id: push-image\n        if: always()\n"
+    )
+    expect(always).not.toBe(workflow)
+    expect(dispatchImageScanGaps(always)).toContain(
+      "push step has if: always()"
+    )
+  })
+
+  describe("scanned-image push script", () => {
+    // Runs the real push step with `docker` stubbed. The stub records every
+    // call; skopeo runs through `docker run`, so no call means no push.
+    function runPush(
+      workflowPath: string,
+      step: string,
+      env: Record<string, string>
+    ) {
+      const script = readWorkflowRunScript(
+        readFileSync(workflowPath, "utf8"),
+        step
+      )
+      const root = mkdtempSync(join(tmpdir(), "data-connect-push-"))
+      try {
+        const log = join(root, "docker.log")
+        const result = spawnSync(
+          "bash",
+          ["-c", `docker() { echo "$*" >> "${log}"; }\n${script}`],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              RUNNER_TEMP: root,
+              GITHUB_OUTPUT: join(root, "out"),
+              PDPP_IMAGE: "ghcr.io/pdp-connect/data-connect/core",
+              SKOPEO_IMAGE: "skopeo",
+              VERSION: "0.7.55",
+              ...env,
+            },
+          }
+        )
+        let calls = ""
+        try {
+          calls = readFileSync(log, "utf8")
+        } catch {}
+        return {
+          status: result.status,
+          stderr: result.stdout + result.stderr,
+          calls,
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    for (const [workflowPath, step, extra] of [
+      [releaseWorkflowPath, "Push the scanned Core image", {}],
+      [
+        dockerImagesWorkflowPath,
+        "Push the scanned image",
+        {
+          TAG_REF:
+            "ghcr.io/pdp-connect/data-connect/core:dispatch-sha-abc1234\n",
+        },
+      ],
+    ] as const) {
+      it(`${step}: refuses to push without a clean scan digest`, () => {
+        for (const digest of ["", "sha256:short", `sha256:${"A".repeat(64)}`]) {
+          const run = runPush(workflowPath, step, {
+            ...extra,
+            SCANNED_DIGEST: digest,
+          })
+          expect(run.status).toBe(1)
+          expect(run.stderr).toContain("refusing to push")
+          expect(run.calls).toBe("")
+        }
+        const ok = runPush(workflowPath, step, {
+          ...extra,
+          SCANNED_DIGEST: `sha256:${"b".repeat(64)}`,
+        })
+        expect(ok.calls).toContain("copy --all --preserve-digests")
+        // The stub registry serves different bytes, so the equality check
+        // must fail the step after the copy.
+        expect(ok.status).toBe(1)
+        expect(ok.stderr).toContain("differs from scanned digest")
+      })
+
+      if (workflowPath === dockerImagesWorkflowPath) {
+        it("dispatch publish refuses tags outside the dispatch-sha namespace", () => {
+          for (const tag of [
+            "ghcr.io/pdp-connect/data-connect/core:latest",
+            "ghcr.io/pdp-connect/data-connect/core:v1.2.3",
+            "ghcr.io/pdp-connect/data-connect/core:sha-abc1234",
+          ]) {
+            const run = runPush(workflowPath, step, {
+              ...extra,
+              SCANNED_DIGEST: `sha256:${"b".repeat(64)}`,
+              TAG_REF: tag,
+            })
+            expect(run.status).toBe(1)
+            expect(run.stderr).toContain("Expected one")
+            expect(run.calls).toBe("")
+          }
+        })
+      }
+    }
+  })
+
+  describe("skopeo pin", () => {
+    // A tag can be rebuilt and the old manifest garbage-collected out from
+    // under it (this happened to v1.22.3 on quay.io/skopeo/stable); a bare
+    // digest with no readable version is unauditable. Every reference must
+    // carry both.
+    const SKOPEO_PIN =
+      /quay\.io\/skopeo\/stable:[\w.-]+@sha256:[0-9a-f]{64}/g
+
+    function skopeoPins(workflow: string) {
+      return [...workflow.matchAll(SKOPEO_PIN)].map(m => m[0])
+    }
+
+    it("pins every skopeo image reference to tag@sha256", () => {
+      for (const workflow of [readReleaseWorkflow(), readFileSync(dockerImagesWorkflowPath, "utf8")]) {
+        const skopeoLines = workflow
+          .split("\n")
+          .filter(line => line.includes("SKOPEO_IMAGE:"))
+        expect(skopeoLines.length).toBeGreaterThan(0)
+        for (const line of skopeoLines) {
+          expect(line).toMatch(SKOPEO_PIN)
+        }
+      }
+    })
+
+    it("uses the same skopeo pin everywhere it appears", () => {
+      const pins = [
+        ...skopeoPins(readReleaseWorkflow()),
+        ...skopeoPins(readFileSync(dockerImagesWorkflowPath, "utf8")),
+      ]
+      expect(pins.length).toBeGreaterThan(0)
+      expect(new Set(pins).size).toBe(1)
+    })
+
+    it("pulls the pinned skopeo image before the Core build, in the release workflow", () => {
+      const job = readReleaseWorkflow().slice(
+        readReleaseWorkflow().indexOf("  publish-core-image:"),
+        readReleaseWorkflow().indexOf("  promote-core-latest:")
+      )
+      const pullAt = job.indexOf("- name: Pull pinned skopeo image")
+      const buildAt = job.indexOf("- name: Build Core image without pushing")
+      expect(pullAt).toBeGreaterThan(-1)
+      expect(buildAt).toBeGreaterThan(-1)
+      expect(pullAt).toBeLessThan(buildAt)
+      const pullStep = readWorkflowStep(job, "Pull pinned skopeo image")
+      expect(pullStep).toContain("docker pull")
+      expect(pullStep).toMatch(SKOPEO_PIN)
+    })
+
+    it("pulls the pinned skopeo image before the build, in the manual dispatch workflow", () => {
+      const workflow = readFileSync(dockerImagesWorkflowPath, "utf8")
+      const job = workflow.slice(workflow.indexOf("\n  publish:\n") + 1)
+      const pullAt = job.indexOf("- name: Pull pinned skopeo image")
+      const buildAt = job.indexOf("- name: Build image without pushing")
+      expect(pullAt).toBeGreaterThan(-1)
+      expect(buildAt).toBeGreaterThan(-1)
+      expect(pullAt).toBeLessThan(buildAt)
+      const pullStep = readWorkflowStep(job, "Pull pinned skopeo image")
+      expect(pullStep).toContain("docker pull")
+      expect(pullStep).toMatch(SKOPEO_PIN)
+    })
   })
 
   it("pushes only versioned Core tags and serializes only latest promotion", () => {
@@ -443,7 +1020,7 @@ describe("release workflow", () => {
     )
     expect(workflow.match(/concurrency:/g)).toHaveLength(1)
     expect(promoter).toContain(
-      "promote-core-latest:\n    if: github.event_name == 'release' && !github.event.release.prerelease\n    needs: publish-core-image"
+      "promote-core-latest:\n    if: inputs.publish_tag != '' || (github.event_name == 'release' && !github.event.release.prerelease)\n    needs: publish-core-image"
     )
     expect(promoter).toContain(
       "concurrency:\n      group: core-image-latest-promotion\n      cancel-in-progress: false"

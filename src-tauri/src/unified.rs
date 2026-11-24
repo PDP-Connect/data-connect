@@ -16,7 +16,7 @@ use crate::commands::process_supervisor::{
 };
 use crate::commands::{
     attach_reference_server, login_reference_server_with_password,
-    login_reference_server_with_password_and_host,
+    login_reference_server_with_password_and_host, DESKTOP_OWNER_SESSION_LABEL,
 };
 use crate::owner_credential::{
     configured_owner_password, credential_encryption_key_path, database_encryption_key_path,
@@ -75,6 +75,18 @@ pub(crate) const UNIFIED_DB_DIRECTORY: &str = "unified";
 const UNIFIED_DB_FILE: &str = "pdpp.sqlite";
 const CREDENTIAL_ENCRYPTION_KEY_ENV: &str = "PDPP_CREDENTIAL_ENCRYPTION_KEY";
 const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
+// Read by `applyRecoveryOwnerSessionReset` in
+// `reference-implementation/server/index.ts`: with the env var set to "1" and
+// the reset file present, the RI revokes every owner session and owner bearer
+// after DB initialization and before its listeners and scheduler start.
+const RECOVERY_REVOKE_OWNER_SESSIONS_ENV: &str = "PDPP_RECOVERY_REVOKE_OWNER_SESSIONS";
+const RECOVERY_OWNER_SESSION_RESET_FILE: &str = "owner-session-recovery-reset.json";
+// Read by `readCredentialRecoveryStateMarker` in
+// `reference-implementation/server/index.ts`, which accepts only
+// `{ "version": 1, "cause": "legacy_v1_kit_missing_credential_key" }` and
+// renames the file to `.applied` once the credential rows are rejected.
+const CREDENTIAL_RECOVERY_STATE_FILE: &str = "credential-recovery-state.json";
+const CREDENTIAL_KEY_LOST_CAUSE: &str = "legacy_v1_kit_missing_credential_key";
 // Read by `inspectNgrok` in `reference-implementation/server/remote-access-config.ts`
 // to tell a browser-reached self-hoster honestly that ngrok cannot activate
 // without this supervisor's config watcher and native tunnel supervision. Set
@@ -83,6 +95,11 @@ const DATABASE_ENCRYPTION_KEY_ENV: &str = "PDPP_DATABASE_ENCRYPTION_KEY";
 // either, so it is exactly as unable to activate ngrok as a plain self-hosted
 // deployment, and must report the same honest "unavailable" answer.
 const MANAGED_DESKTOP_HOST_ENV: &str = "PDPP_MANAGED_DESKTOP_HOST";
+// With `MANAGED_DESKTOP_HOST_ENV`, tells the RI and the console that the
+// desktop keychain supplies `PDPP_OWNER_PASSWORD`. The value stays
+// `desktop_generated` after the owner sets their own password in the
+// password window: read it as "the desktop manages this password", not
+// "the desktop generated the current value".
 const OWNER_PASSWORD_SOURCE_ENV: &str = "PDPP_OWNER_PASSWORD_SOURCE";
 const OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED: &str = "desktop_generated";
 const OWNER_CREDENTIAL_REVEAL_PROOF_ENV: &str = "PDPP_OWNER_CREDENTIAL_REVEAL_PROOF";
@@ -147,6 +164,10 @@ struct UnifiedRuntimeState {
     session_cookie: Mutex<Option<String>>,
     sidecars_ready: Mutex<BTreeSet<String>>,
     stack: Mutex<Option<UnifiedStack>>,
+    /// Serializes every operation that can start the managed stack. The
+    /// config watcher can observe tunnel fields before bootstrap has stored
+    /// its handles, so teardown and restart must wait for that bootstrap.
+    stack_start_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     shutdown: Mutex<ShutdownState>,
     /// The live ngrok session, held OUTSIDE `stack` so a config-change
     /// restart (`restart_after_remote_access_config`, which tears down and
@@ -157,6 +178,44 @@ struct UnifiedRuntimeState {
     /// owner just adopted stale before the console ever loaded it. See
     /// `reuse_or_start_ngrok_provider`.
     ngrok: Mutex<Option<HeldNgrok>>,
+}
+
+/// Run a stack lifecycle operation while holding the shared gate.
+/// The operation future provides a controllable seam for lifecycle tests.
+async fn with_stack_start_gate<T, Fut>(
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> Fut,
+) -> T
+where
+    Fut: std::future::Future<Output = T>,
+{
+    let _guard = gate.lock_owned().await;
+    operation().await
+}
+
+async fn try_with_stack_start_gate<T, Fut>(
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> Fut,
+) -> Result<T, ()>
+where
+    Fut: std::future::Future<Output = T>,
+{
+    let Ok(_guard) = gate.try_lock_owned() else {
+        return Err(());
+    };
+    Ok(operation().await)
+}
+
+async fn try_recovery_start<T, Fut>(
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    operation: impl FnOnce() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = T>,
+{
+    try_with_stack_start_gate(gate, operation)
+        .await
+        .map_err(|()| "A DataConnect stack start or restart is already in progress".to_string())
 }
 
 /// A live ngrok tunnel plus enough of its own configuration to tell whether
@@ -509,9 +568,18 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     spawn_autostart_watcher(app_handle.clone());
     spawn_origin_verification_watcher(app_handle.clone());
     crate::commands::recovery_key::spawn_recovery_export_watcher(app_handle.clone());
+    // The console asks for the password window, OS re-auth and a stack
+    // restart by writing request files under the data directory. Only these
+    // watchers act on them; v0.7.59 never started them.
+    // A restart request left by the last session is carried out by the
+    // startup bootstrap below: `bootstrap_and_open_console` reads it, and
+    // completes it only once the stack is ready.
+    crate::owner_credential::spawn_owner_password_window_watcher(app_handle.clone());
+    crate::owner_credential::spawn_owner_os_reauth_watcher(app_handle.clone());
+    crate::owner_credential::spawn_owner_password_stack_restart_watcher(app_handle.clone());
     tauri::async_runtime::spawn(async move {
         if let Err(failure) =
-            bootstrap_and_open_console(app_handle.clone(), should_show, None).await
+            bootstrap_and_open_console(app_handle.clone(), should_show, None, None).await
         {
             handle_bootstrap_failure(&app_handle, "Unified DataConnect startup", failure);
         }
@@ -519,10 +587,8 @@ pub(crate) fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-/// Unified mode does not build the legacy window, which is the only consumer
-/// of `vana://` links. Record each one received so a dropped link shows in
-/// the log instead of vanishing. Whether unified mode should serve these
-/// links is an open product decision; this boundary only reports.
+/// No URL scheme is registered, so the OS should not deliver links. Record any
+/// that arrive so a dropped link shows in the log instead of vanishing.
 fn report_unhandled_deep_links(app: &tauri::App) {
     use tauri_plugin_deep_link::DeepLinkExt;
     if let Ok(Some(urls)) = app.deep_link().get_current() {
@@ -541,10 +607,14 @@ fn report_unhandled_deep_links(app: &tauri::App) {
 /// in the query, so only the scheme and host are included.
 fn unhandled_deep_link_notice(url: &tauri::Url) -> String {
     format!(
-        "Ignoring a {}://{} link: unified mode has no handler for incoming links",
-        url.scheme(),
-        url.host_str().unwrap_or("")
+        "Ignoring a {} link: unified mode has no handler for incoming links",
+        log_url_origin(url)
     )
+}
+
+/// Safe common prefix for URL logs: no userinfo, query, or fragment.
+fn log_url_origin(url: &tauri::Url) -> String {
+    format!("{}://{}", url.scheme(), url.host_str().unwrap_or(""))
 }
 
 pub(crate) fn focus_or_bootstrap(app: AppHandle) {
@@ -554,7 +624,7 @@ pub(crate) fn focus_or_bootstrap(app: AppHandle) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        if let Err(failure) = bootstrap_and_open_console(app.clone(), true, None).await {
+        if let Err(failure) = bootstrap_and_open_console(app.clone(), true, None, None).await {
             handle_bootstrap_failure(&app, "Opening the DataConnect console", failure);
         }
     });
@@ -668,12 +738,35 @@ fn resolve_staged_root(resource_dir: &Path, profile: &str, sidecar: &str) -> Opt
 }
 
 fn resolve_node_binary(resource_dir: &Path) -> Option<PathBuf> {
-    let binary_roots = [
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf));
+    resolve_node_binary_from(resource_dir, executable_dir.as_deref())
+}
+
+fn resolve_node_binary_from(
+    resource_dir: &Path,
+    executable_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut binary_roots = Vec::with_capacity(5);
+    if let Some(executable_dir) = executable_dir {
+        // Launch the actual helper path: an outer MacOS/pdpp-node symlink
+        // still inherits the foreground app's LaunchServices identity.
+        let helper =
+            executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+        if helper.is_file() {
+            return Some(helper);
+        }
+        // Tauri places externalBin beside the app executable (Contents/MacOS
+        // on macOS), not in the resource directory.
+        binary_roots.push(executable_dir.to_path_buf());
+    }
+    binary_roots.extend([
         resource_dir.join("binaries"),
         resource_dir.join("_up_").join("binaries"),
         resource_dir.to_path_buf(),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("binaries"),
-    ];
+    ]);
     for root in binary_roots {
         for name in ["pdpp-node", "pdpp-node.exe"] {
             let candidate = root.join(name);
@@ -723,22 +816,9 @@ fn ri_process_spec(
     app: &AppHandle,
     node_binary: &Path,
     root: &Path,
-    data_dir: &Path,
-    owner_password: &str,
-    owner_password_source: OwnerPasswordSource,
-    owner_credential_reveal_proof: &str,
-    credential_encryption_key: &str,
-    database_encryption_key: &str,
+    mut env: BTreeMap<OsString, OsString>,
     remote_access: &RemoteAccessConfig,
 ) -> ProcessSpec {
-    let mut env = ri_environment(
-        data_dir,
-        owner_password,
-        owner_password_source,
-        owner_credential_reveal_proof,
-        credential_encryption_key,
-        database_encryption_key,
-    );
     env.extend(remote_access.fields.environment());
     add_browser_host_environment(app, &mut env);
     ProcessSpec {
@@ -788,6 +868,92 @@ fn ri_readiness_host_header(trusted_hosts: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Why a start revokes every owner session and bearer. The RI logs the
+/// reason from the reset file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnerSessionReset {
+    /// A recovery-code start (#280), or a password saved from the recovery
+    /// window.
+    Recovery,
+    /// The owner replaced the password in Settings, or chose their first
+    /// password while remote access was already on.
+    PasswordChange,
+}
+
+impl OwnerSessionReset {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Recovery => "recovery",
+            Self::PasswordChange => "password_change",
+        }
+    }
+}
+
+/// Prepare `data_dir` for one RI start and return that start's RI
+/// environment. A start with an `owner_session_reset` also writes the
+/// owner-session reset file with its reason; the RI revokes owner sessions
+/// and bearers only when it sees both that file and
+/// `PDPP_RECOVERY_REVOKE_OWNER_SESSIONS`.
+/// Both inputs are made here, together, so a test of this function covers
+/// what `start_managed_stack` gives the RI.
+pub(crate) fn prepare_ri_start(
+    data_dir: &Path,
+    owner_password: &str,
+    owner_password_source: OwnerPasswordSource,
+    owner_credential_reveal_proof: &str,
+    credential_encryption_key: &str,
+    database_encryption_key: &str,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<BTreeMap<OsString, OsString>, String> {
+    fs::create_dir_all(data_dir)
+        .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
+    if let Some(reset) = owner_session_reset {
+        crate::atomic_write::write_json_atomically(
+            &data_dir.join(RECOVERY_OWNER_SESSION_RESET_FILE),
+            &serde_json::json!({ "version": 1, "reason": reset.reason() }),
+            "Failed to write owner-session reset state",
+        )?;
+    }
+    Ok(ri_environment(
+        data_dir,
+        owner_password,
+        owner_password_source,
+        owner_credential_reveal_proof,
+        credential_encryption_key,
+        database_encryption_key,
+        owner_session_reset.is_some(),
+    ))
+}
+
+/// The owner-session reset one start of the managed stack carries out, and
+/// the pending stack-restart request that start settles. A revoking request
+/// stays pending until a start that revokes reaches Ready, so a failed
+/// start, a restart watcher that gave up, or a quit cannot drop the
+/// revocation. Any start reads the saved password, so it also settles a
+/// request that does not revoke.
+pub(crate) fn owner_session_reset_for_start<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    requested: Option<OwnerSessionReset>,
+) -> (Option<OwnerSessionReset>, Option<u64>) {
+    match crate::owner_credential::pending_owner_password_stack_restart_request(app) {
+        Ok(Some(pending)) => {
+            log::info!(
+                "Owner password stack-restart request {} is carried out by this start",
+                pending.request_id
+            );
+            (
+                requested.or(pending.owner_session_reset),
+                Some(pending.request_id),
+            )
+        }
+        Ok(None) => (requested, None),
+        Err(error) => {
+            log::warn!("Could not read the owner password stack-restart request: {error}");
+            (requested, None)
+        }
+    }
+}
+
 fn ri_environment(
     data_dir: &Path,
     owner_password: &str,
@@ -795,6 +961,7 @@ fn ri_environment(
     owner_credential_reveal_proof: &str,
     credential_encryption_key: &str,
     database_encryption_key: &str,
+    revoke_existing_sessions: bool,
 ) -> BTreeMap<OsString, OsString> {
     let mut env = env_map(vec![
         (OsString::from("AS_PORT"), OsString::from("{port}")),
@@ -802,10 +969,6 @@ fn ri_environment(
         (
             OsString::from("PDPP_DB_PATH"),
             data_dir.join(UNIFIED_DB_FILE).into_os_string(),
-        ),
-        (
-            OsString::from("PDPP_DATA_DIR"),
-            data_dir.as_os_str().to_os_string(),
         ),
         (
             OsString::from("PDPP_OWNER_PASSWORD"),
@@ -840,17 +1003,14 @@ fn ri_environment(
             OsString::from("1"),
         ),
     ]);
-    if remote_access_configuration_supported() {
+    if revoke_existing_sessions {
         env.insert(
-            OsString::from(MANAGED_DESKTOP_HOST_ENV),
+            OsString::from(RECOVERY_REVOKE_OWNER_SESSIONS_ENV),
             OsString::from("1"),
         );
-        if matches!(owner_password_source, OwnerPasswordSource::DesktopGenerated) {
-            env.insert(
-                OsString::from(OWNER_PASSWORD_SOURCE_ENV),
-                OsString::from(OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED),
-            );
-        }
+    }
+    env.extend(managed_desktop_environment(data_dir, owner_password_source));
+    if remote_access_configuration_supported() {
         // The owner needs to know whether `cloudflared` is already installed
         // BEFORE they pick the Cloudflare Tunnel option and paste a token --
         // see `cloudflared_binary_is_installed`'s doc comment. Checked here,
@@ -870,13 +1030,44 @@ fn ri_environment(
     env
 }
 
+/// The data directory and the managed-desktop flags, for both the RI and the
+/// console. One source keeps the two processes in agreement about who
+/// manages the owner password and where the request files the desktop
+/// watchers read are. In v0.7.59 only the RI got the flags: the console fell
+/// back to the RI's "env" answer, hid "Reveal password", and refused every
+/// desktop-mediated action.
+fn managed_desktop_environment(
+    data_dir: &Path,
+    owner_password_source: OwnerPasswordSource,
+) -> BTreeMap<OsString, OsString> {
+    let mut env = env_map(vec![(
+        OsString::from("PDPP_DATA_DIR"),
+        data_dir.as_os_str().to_os_string(),
+    )]);
+    if remote_access_configuration_supported() {
+        env.insert(
+            OsString::from(MANAGED_DESKTOP_HOST_ENV),
+            OsString::from("1"),
+        );
+        if matches!(owner_password_source, OwnerPasswordSource::DesktopGenerated) {
+            env.insert(
+                OsString::from(OWNER_PASSWORD_SOURCE_ENV),
+                OsString::from(OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED),
+            );
+        }
+    }
+    env
+}
+
 fn console_process_spec(
     node_binary: &Path,
     root: &Path,
     ri_origin: &str,
     rs_origin: &str,
     owner_password: &str,
+    owner_password_source: OwnerPasswordSource,
     owner_credential_reveal_proof: &str,
+    data_dir: &Path,
     remote_access: &RemoteAccessConfig,
     stable_port: u16,
 ) -> ProcessSpec {
@@ -915,6 +1106,7 @@ fn console_process_spec(
             OsString::from(stable_port.to_string()),
         ),
     ]);
+    env.extend(managed_desktop_environment(data_dir, owner_password_source));
     if let Some(provider) = remote_access.provider.as_deref() {
         env.insert(
             OsString::from("PDPP_ACTIVE_TUNNEL_PROVIDER"),
@@ -1015,6 +1207,7 @@ fn start_managed_stack(
     database_encryption_key: &str,
     remote_access: &RemoteAccessConfig,
     held_ngrok: Option<HeldNgrok>,
+    owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<ManagedStackStart, String> {
     let resource_dir = app
         .path()
@@ -1045,9 +1238,16 @@ fn start_managed_stack(
         .app_data_dir()
         .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
         .join(UNIFIED_DB_DIRECTORY);
-    fs::create_dir_all(&data_dir)
-        .map_err(|error| format!("Failed to create unified data directory: {error}"))?;
     let owner_credential_reveal_proof = owner_credential_reveal_proof_key()?;
+    let ri_env = prepare_ri_start(
+        &data_dir,
+        owner_password,
+        owner_password_source,
+        owner_credential_reveal_proof,
+        credential_encryption_key,
+        database_encryption_key,
+        owner_session_reset,
+    )?;
 
     let sink = UnifiedEventSink { app: app.clone() };
     // One observer per supervisor (each owns its own label's lease file).
@@ -1066,18 +1266,7 @@ fn start_managed_stack(
     // tunnel's forward target (the console's port) is unaffected by it.
     let preferred_ri_port = read_preferred_ri_port(app);
     let ri = Supervisor::new(
-        ri_process_spec(
-            app,
-            &node_binary,
-            &ri_root,
-            &data_dir,
-            owner_password,
-            owner_password_source,
-            owner_credential_reveal_proof,
-            credential_encryption_key,
-            database_encryption_key,
-            remote_access,
-        ),
+        ri_process_spec(app, &node_binary, &ri_root, ri_env, remote_access),
         sink.clone(),
     )
     .with_observer(lease_observer())
@@ -1119,15 +1308,28 @@ fn start_managed_stack(
             &ri_origin,
             &rs_origin,
             owner_password,
+            owner_password_source,
             owner_credential_reveal_proof,
+            &data_dir,
             remote_access,
             console_port_plan.stable,
         ),
         sink.clone(),
     )
     .with_observer(lease_observer())
-    .start_on_port(console_port_plan.preferred)
-    .map_err(|error| format!("Failed to start staged console: {error}"))?;
+    .start_on_port(console_port_plan.preferred);
+    let console = match console {
+        Ok(console) => console,
+        Err(error) => {
+            let ri_stop = ri.stop().err().map(|stop| stop.to_string());
+            return Err(match ri_stop {
+                Some(stop) => format!(
+                    "Failed to start staged console: {error}; failed to stop staged RI: {stop}"
+                ),
+                None => format!("Failed to start staged console: {error}"),
+            });
+        }
+    };
     report_console_port_outcome(
         app,
         &data_dir,
@@ -1193,9 +1395,9 @@ fn start_managed_stack(
             }
         };
     if let Some(fields) = applied_fields {
-        apply_ngrok_tunnel_outcome(app, &fields, None);
+        apply_cloudflare_tunnel_outcome(app, &fields, None);
     } else if let Some(error) = tunnel_error.as_deref() {
-        apply_ngrok_tunnel_outcome(app, &remote_access.fields, Some(error));
+        apply_cloudflare_tunnel_outcome(app, &remote_access.fields, Some(error));
     }
 
     Ok(ManagedStackStart {
@@ -1741,10 +1943,29 @@ fn apply_ngrok_tunnel_outcome(
     fields: &crate::remote_access::ReachabilityFields,
     tunnel_error: Option<&str>,
 ) {
+    apply_public_url_tunnel_outcome(app, "ngrok", fields, tunnel_error);
+}
+
+/// Persist the outcome of this run's Cloudflare tunnel start attempt in the
+/// shared reachability fields consumed by the console.
+fn apply_cloudflare_tunnel_outcome(
+    app: &AppHandle,
+    fields: &crate::remote_access::ReachabilityFields,
+    tunnel_error: Option<&str>,
+) {
+    apply_public_url_tunnel_outcome(app, "Cloudflare", fields, tunnel_error);
+}
+
+fn apply_public_url_tunnel_outcome(
+    app: &AppHandle,
+    provider: &str,
+    fields: &crate::remote_access::ReachabilityFields,
+    tunnel_error: Option<&str>,
+) {
     let current = match load_remote_access_config(app) {
         Ok(config) => config,
         Err(error) => {
-            log::error!("Could not read the remote-access config to persist the ngrok tunnel outcome: {error}");
+            log::error!("Could not read the remote-access config to persist the {provider} tunnel outcome: {error}");
             return;
         }
     };
@@ -1758,7 +1979,7 @@ fn apply_ngrok_tunnel_outcome(
         ..current
     };
     if let Err(error) = save_remote_access_config(app, updated) {
-        log::error!("Could not persist the ngrok tunnel outcome: {error}");
+        log::error!("Could not persist the {provider} tunnel outcome: {error}");
     }
 }
 
@@ -2066,10 +2287,18 @@ fn teardown_stack<R: tauri::Runtime>(
         Some(deadline) => stack.stop_until(deadline),
         None => stack.stop(),
     });
+    crate::commands::release_browser_surface_host_leases(app);
     if reason.stops_tunnel() {
         stop_held_ngrok(app);
     }
     result
+}
+
+#[cfg(test)]
+pub(crate) fn teardown_config_change_without_stack_for_test<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    teardown_stack(app, StopReason::ConfigChange, None, None)
 }
 
 /// `teardown` for the startup-error paths, which are no-ops when the stack
@@ -2402,7 +2631,7 @@ struct BootstrapSecrets {
 }
 
 #[derive(Clone, Copy)]
-enum OwnerPasswordSource {
+pub(crate) enum OwnerPasswordSource {
     Configured,
     DesktopGenerated,
 }
@@ -2500,10 +2729,43 @@ async fn bootstrap_and_open_console(
     app: AppHandle,
     should_show: bool,
     preserved_path: Option<String>,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), BootstrapFailure> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    match try_with_stack_start_gate(start_gate, || {
+        bootstrap_and_open_console_with_stack_guard(
+            app,
+            should_show,
+            preserved_path,
+            owner_session_reset,
+        )
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(()) => {
+            log::debug!("Ignoring duplicate unified stack bootstrap while one is in flight");
+            Ok(())
+        }
+    }
+}
+
+async fn bootstrap_and_open_console_with_stack_guard(
+    app: AppHandle,
+    should_show: bool,
+    preserved_path: Option<String>,
+    owner_session_reset: Option<OwnerSessionReset>,
 ) -> Result<(), BootstrapFailure> {
     set_status(&app, UnifiedStatus::Starting);
 
     let attach = attach_mode();
+    // Attach mode starts no stack, so it can carry out no restart request.
+    let (owner_session_reset, stack_restart_request_id) = if attach {
+        (owner_session_reset, None)
+    } else {
+        owner_session_reset_for_start(&app, owner_session_reset)
+    };
+
     let secrets_app = app.clone();
     let BootstrapSecrets {
         password,
@@ -2543,6 +2805,7 @@ async fn bootstrap_and_open_console(
                 &database_encryption_key_for_sidecar,
                 &remote_access_for_sidecars,
                 held_ngrok,
+                owner_session_reset,
             )
         })
         .await
@@ -2565,6 +2828,7 @@ async fn bootstrap_and_open_console(
         should_show,
         &remote_access.fields.trusted_hosts,
         preserved_path,
+        stack_restart_request_id,
     )
     .await
     .map_err(BootstrapFailure::from)
@@ -2600,6 +2864,7 @@ async fn finish_bootstrap(
     should_show: bool,
     trusted_hosts: &str,
     preserved_path: Option<String>,
+    stack_restart_request_id: Option<u64>,
 ) -> Result<(), String> {
     let host_header = ri_readiness_host_header(trusted_hosts);
     let ri_origin_for_state = ri_origin.clone();
@@ -2607,6 +2872,7 @@ async fn finish_bootstrap(
         ri_origin,
         password,
         host_header.as_deref(),
+        Some(DESKTOP_OWNER_SESSION_LABEL),
     )
     .await
     {
@@ -2695,13 +2961,83 @@ async fn finish_bootstrap(
         cookies.push(cookie);
     }
 
-    if let Err(error) = create_or_update_console_window(app, navigate_to, cookies, should_show) {
+    if let Err(error) = create_or_update_console_window(app, navigate_to, cookies, should_show).await {
         teardown_managed_on_error(app, managed, StopReason::BootstrapFailed);
         return Err(error);
     }
     spawn_console_deep_health_watch(console_origin_for_health_watch);
+    // No failure branch is left: this start carried out the restart request
+    // it read. Complete it before Ready, while the restart watcher still
+    // waits, so the watcher never runs it a second time.
+    if let Err(error) = crate::owner_credential::complete_owner_password_stack_restart_request(
+        app,
+        stack_restart_request_id,
+    ) {
+        log::warn!("Could not complete the owner password stack-restart request: {error}");
+    }
     set_status(app, UnifiedStatus::Ready);
     close_recovery_window(app);
+    Ok(())
+}
+
+fn credential_recovery_state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| {
+            path.join(UNIFIED_DB_DIRECTORY)
+                .join(CREDENTIAL_RECOVERY_STATE_FILE)
+        })
+        .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))
+}
+
+/// Record that a v1 kit restored the database without its credential key.
+/// Written atomically (temp file, fsync, rename) so the RI never reads a
+/// partial marker.
+fn mark_recovery_credential_state(app: &AppHandle) -> Result<(), String> {
+    write_credential_recovery_state(&credential_recovery_state_path(app)?)
+}
+
+fn write_credential_recovery_state(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("Failed to create credential recovery state directory: {error}")
+        })?;
+    }
+    crate::atomic_write::write_json_atomically(
+        path,
+        &serde_json::json!({ "version": 1, "cause": CREDENTIAL_KEY_LOST_CAUSE }),
+        "Failed to write credential recovery state",
+    )
+}
+
+fn clear_recovery_credential_state(app: &AppHandle) -> Result<(), String> {
+    remove_credential_recovery_state(&credential_recovery_state_path(app)?)
+}
+
+fn remove_credential_recovery_state(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Failed to clear credential recovery state: {error}"
+        )),
+    }
+}
+
+fn credential_encryption_key_missing_for_sealed_credentials(error: &str) -> bool {
+    error == crate::owner_credential::CREDENTIAL_ENCRYPTION_KEY_MISSING_FOR_SEALED_CREDENTIALS
+}
+
+/// Settles the lost credential-key marker after a recovery start failed.
+/// The RI renames the marker to `.applied` only after the credential rows
+/// transition, so a marker still at `path` was never applied and is removed.
+/// This is safe: a failed import persists neither the database key nor the
+/// fresh credential key, so the next start goes through import again, and
+/// import rewrites or clears the marker. A `.applied` marker is not touched.
+fn discard_unconsumed_recovery_marker(path: &Path, created: bool) -> Result<(), String> {
+    if created {
+        remove_credential_recovery_state(path)?;
+    }
     Ok(())
 }
 
@@ -2719,6 +3055,17 @@ pub(crate) async fn import_database_encryption_recovery_code(
     app: AppHandle,
     code: String,
 ) -> Result<(), String> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    try_recovery_start(start_gate, || {
+        import_database_encryption_recovery_code_with_stack_guard(app, code)
+    })
+    .await?
+}
+
+async fn import_database_encryption_recovery_code_with_stack_guard(
+    app: AppHandle,
+    code: String,
+) -> Result<(), String> {
     let imported = crate::recovery_code::decode_for_import(&code).map_err(|error| {
         log::info!("Recovery import: rejected at decode stage ({error})");
         "That code is not a valid recovery code. Check for a typo and try again.".to_string()
@@ -2730,6 +3077,8 @@ pub(crate) async fn import_database_encryption_recovery_code(
     // key opens the vault.
     let kit_credential_key = imported.credential_encryption_key;
     let mut restored_credential_key = None;
+    // Set only when this attempt wrote the v1 lost credential-key marker.
+    let mut created_v1_recovery_marker = false;
 
     let secrets_app = app.clone();
     let attach = attach_mode();
@@ -2748,7 +3097,10 @@ pub(crate) async fn import_database_encryption_recovery_code(
             secrets.password,
             secrets.remote_access,
             match secrets.credential_encryption_key {
-                Some(key) => key,
+                Some(key) => {
+                    clear_recovery_credential_state(&app)?;
+                    key
+                }
                 None => {
                     restored_credential_key = kit_credential_key.clone();
                     restored_credential_key.clone().ok_or_else(|| {
@@ -2789,13 +3141,36 @@ pub(crate) async fn import_database_encryption_recovery_code(
             })
             .await
             .map_err(|error| format!("Credential encryption key task failed: {error}"))?;
-            let credential_encryption_key = match (loaded_credential_key, &kit_credential_key) {
-                (Ok(key), _) => key,
-                (Err(_), Some(key)) => {
-                    restored_credential_key = Some(key.clone());
-                    key.clone()
+            let credential_encryption_key = match loaded_credential_key {
+                Ok(existing) => {
+                    clear_recovery_credential_state(&app)?;
+                    existing
                 }
-                (Err(error), None) => return Err(error),
+                Err(error)
+                    if credential_encryption_key_missing_for_sealed_credentials(&error)
+                        && kit_credential_key.is_none() =>
+                {
+                    // A v1 kit restores only the database key. The sealed
+                    // credentials can never be opened again, so start with a
+                    // fresh key and tell the RI to reject the old rows before
+                    // its scheduler can try them. The marker is written
+                    // before startup and the RI consumes it (renames it to
+                    // `.applied`) only after the rows transition.
+                    let fresh_key =
+                        crate::owner_credential::generate_recovered_v1_credential_encryption_key()?;
+                    mark_recovery_credential_state(&app)?;
+                    created_v1_recovery_marker = true;
+                    restored_credential_key = Some(fresh_key.clone());
+                    fresh_key
+                }
+                Err(error) => match &kit_credential_key {
+                    Some(key) => {
+                        clear_recovery_credential_state(&app)?;
+                        restored_credential_key = Some(key.clone());
+                        key.clone()
+                    }
+                    None => return Err(error),
+                },
             };
             (
                 configured_owner_password().unwrap_or(owner_password),
@@ -2828,6 +3203,10 @@ pub(crate) async fn import_database_encryption_recovery_code(
             &candidate_key_for_attempt,
             &remote_access_for_attempt,
             None,
+            // Whoever held a session before the key was lost must sign in
+            // again: the RI revokes owner sessions and bearers before it
+            // serves or schedules anything.
+            Some(OwnerSessionReset::Recovery),
         )
     })
     .await
@@ -2851,6 +3230,11 @@ pub(crate) async fn import_database_encryption_recovery_code(
     let (ri_origin, console_url) = match result {
         Ok(value) => value,
         Err(_) => {
+            // A marker the RI did not consume must not reach a later normal
+            // start, which would reject every connector credential.
+            if let Ok(path) = credential_recovery_state_path(&app) {
+                let _ = discard_unconsumed_recovery_marker(&path, created_v1_recovery_marker);
+            }
             // start_managed_stack failing partway through can leave one
             // sidecar up and the other not -- e.g. the RI itself refused to
             // open the vault (assertDatabaseKey threw). stop_stack's
@@ -2869,14 +3253,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
     // persist now, before finishing the rest of bootstrap (which can itself
     // still fail for unrelated reasons -- login, console readiness -- but
     // the key having worked is independent of those).
-    if let Err(error) = crate::owner_credential::save_database_encryption_key(&app, &candidate_key)
-    {
-        log::error!("Recovery import: verified key could not be persisted to the OS keychain: {error}");
-        teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
-        return Err(format!(
-            "The code worked, but the key could not be saved for future launches: {error}"
-        ));
-    }
+    // Save the credential key first: the recovery window reopens only while
+    // the database key is missing, so a failed credential-key save after a
+    // saved database key would leave no way back to the kit.
     if let Some(credential_key) = restored_credential_key.as_deref() {
         if let Err(error) =
             crate::owner_credential::save_credential_encryption_key(&app, credential_key)
@@ -2887,6 +3266,21 @@ pub(crate) async fn import_database_encryption_recovery_code(
                 "The code worked, but the key could not be saved for future launches: {error}"
             ));
         }
+    }
+    if let Err(error) = crate::owner_credential::save_database_encryption_key(&app, &candidate_key)
+    {
+        log::error!("Recovery import: verified key could not be persisted to the OS keychain: {error}");
+        teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
+        return Err(format!(
+            "The code worked, but the key could not be saved for future launches: {error}"
+        ));
+    }
+    // The owner may not know the password this install holds, and the RI
+    // has just revoked their sessions: queue "Set your password" before the
+    // recovered console opens.
+    if let Err(error) = crate::owner_credential::request_owner_password_window_for_recovery(&app) {
+        teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected);
+        return Err(error);
     }
 
     finish_bootstrap(
@@ -2901,6 +3295,9 @@ pub(crate) async fn import_database_encryption_recovery_code(
         // were on" to return to -- the recovery window is a distinct
         // surface from the console, and the console had never successfully
         // opened yet in this session.
+        None,
+        // This start revokes for recovery but does not read the
+        // stack-restart request; a later start still carries that out.
         None,
     )
     .await
@@ -2937,17 +3334,63 @@ fn console_path_before_restart(app: &AppHandle) -> Option<String> {
             // propagate a shape `console_url_preserving_path` was not
             // proven safe for.
             log::warn!(
-                "console_path_before_restart: console URL path {path_and_query:?} failed validation, falling back to root"
+                "{}", console_restart_path_warning(&url, &path_and_query,
+                    "console_path_before_restart: console URL path failed validation")
             );
             None
         }
     }
 }
 
-pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result<(), String> {
+/// True while a start or restart of the managed stack is running.
+pub(crate) fn stack_bootstrap_in_flight(app: &AppHandle) -> bool {
+    app.try_state::<UnifiedRuntimeState>()
+        .and_then(|state| {
+            state
+                .status
+                .lock()
+                .ok()
+                .map(|status| matches!(*status, UnifiedStatus::Starting | UnifiedStatus::Restarting))
+        })
+        .unwrap_or(false)
+}
+
+/// Restart the managed stack after a config or owner-password change. With
+/// an `owner_session_reset` the RI revokes every owner session and bearer
+/// before it serves (the #280 recovery mechanism, see `prepare_ri_start`);
+/// the desktop then signs its own webview in again with the new password.
+pub(crate) async fn restart_after_remote_access_config(
+    app: AppHandle,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), String> {
     if !remote_access_configuration_supported() {
         return Err("Remote access requires the managed desktop stack".into());
     }
+    let result = restart_managed_stack(app.clone(), owner_session_reset).await;
+    // Without this a failed restart left the tray at "Restarting" or
+    // "Starting", and the owner-password restart watcher, which waits while
+    // a bootstrap runs, would wait forever.
+    if result.is_err() {
+        set_status(&app, UnifiedStatus::Error);
+    }
+    result
+}
+
+async fn restart_managed_stack(
+    app: AppHandle,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), String> {
+    let start_gate = app.state::<UnifiedRuntimeState>().stack_start_gate.clone();
+    with_stack_start_gate(start_gate, || {
+        restart_managed_stack_with_stack_guard(app, owner_session_reset)
+    })
+    .await
+}
+
+async fn restart_managed_stack_with_stack_guard(
+    app: AppHandle,
+    owner_session_reset: Option<OwnerSessionReset>,
+) -> Result<(), String> {
     let preserved_path = console_path_before_restart(&app);
     set_status(&app, UnifiedStatus::Restarting);
     tokio::task::spawn_blocking({
@@ -2968,7 +3411,7 @@ pub(crate) async fn restart_after_remote_access_config(app: AppHandle) -> Result
     // not the moment to also introduce new recovery-window UI; the tray
     // status still reaches NeedsRecovery on the NEXT natural bootstrap
     // attempt (app relaunch or "Open console"), which does open it.
-    bootstrap_and_open_console(app, true, preserved_path)
+    bootstrap_and_open_console_with_stack_guard(app, true, preserved_path, owner_session_reset)
         .await
         .map_err(|failure| match failure {
             BootstrapFailure::NeedsRecovery => {
@@ -3017,10 +3460,9 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// Decrypt a pending `ngrok_authtoken_sealed` (written by `owner-remote-access.ts`'s
 /// POST handler, see `RemoteAccessConfig::ngrok_authtoken_sealed`'s doc comment
 /// in `remote_access.rs`) into the OS keychain, then blank the sealed field
-/// back to `None` on disk. Returns the config with the field cleared either
-/// way -- on decrypt failure the sealed token is dropped rather than retried
-/// forever, since a bad token needs the owner to resubmit it, not a poll loop
-/// hammering the same ciphertext every 3 seconds.
+/// back to `None` on disk only after durable storage succeeds. On failure,
+/// leave the sealed token on disk and return an error so the watcher retries
+/// on its next poll without advancing its baseline or restarting the stack.
 ///
 /// Must run BEFORE `restart_after_remote_access_config`: the restart's own
 /// `start_managed_stack` reads the ngrok authtoken back out of the keychain
@@ -3037,44 +3479,33 @@ const AUTOSTART_STATE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 fn apply_pending_ngrok_authtoken(
     app: &AppHandle,
     config: RemoteAccessConfig,
-) -> RemoteAccessConfig {
-    let Some(sealed) = config.ngrok_authtoken_sealed.clone() else {
-        return config;
-    };
-    let outcome = (|| -> Result<(), String> {
-        let key_path = credential_encryption_key_path(app)?;
-        let database_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
-            .join(UNIFIED_DB_DIRECTORY)
-            .join(UNIFIED_DB_FILE);
-        let credential_encryption_key =
-            load_or_create_credential_encryption_key(&key_path, &database_path)?;
-        let token = crate::sealed_credential::open_sealed_credential(
-            &sealed,
-            &credential_encryption_key,
-        )
-        .map_err(|error| format!("Failed to decrypt the pending ngrok authtoken: {error}"))?;
-        crate::owner_credential::store_provider_credential_reference(
-            crate::remote_access_ngrok::NGROK_PROVIDER_ID,
-            &token,
-        )
-    })();
-    if let Err(error) = outcome {
-        log::error!("Could not apply the pending ngrok authtoken: {error}");
-    }
-    let cleared = RemoteAccessConfig {
-        ngrok_authtoken_sealed: None,
-        ..config
-    };
-    match save_remote_access_config(app, cleared.clone()) {
-        Ok(saved) => saved,
-        Err(error) => {
-            log::error!("Could not clear the pending ngrok authtoken from disk: {error}");
-            cleared
-        }
-    }
+) -> Result<RemoteAccessConfig, String> {
+    apply_pending_credential_handoff(
+        config,
+        |config| &mut config.ngrok_authtoken_sealed,
+        |sealed| {
+            let key_path = credential_encryption_key_path(app)?;
+            let database_path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+                .join(UNIFIED_DB_DIRECTORY)
+                .join(UNIFIED_DB_FILE);
+            let credential_encryption_key =
+                load_or_create_credential_encryption_key(&key_path, &database_path)?;
+            let token = crate::sealed_credential::open_sealed_credential(
+                sealed,
+                &credential_encryption_key,
+            )
+            .map_err(|error| format!("Failed to decrypt the pending ngrok authtoken: {error}"))?;
+            crate::owner_credential::store_provider_credential_reference(
+                crate::remote_access_ngrok::NGROK_PROVIDER_ID,
+                &token,
+            )
+        },
+        || load_remote_access_config(app),
+        |config| save_remote_access_config(app, config),
+    )
 }
 
 /// Decrypt a pending `cloudflare_tunnel_token_sealed` into the OS keychain,
@@ -3085,44 +3516,208 @@ fn apply_pending_ngrok_authtoken(
 fn apply_pending_cloudflare_tunnel_token(
     app: &AppHandle,
     config: RemoteAccessConfig,
-) -> RemoteAccessConfig {
-    let Some(sealed) = config.cloudflare_tunnel_token_sealed.clone() else {
-        return config;
+) -> Result<RemoteAccessConfig, String> {
+    apply_pending_credential_handoff(
+        config,
+        |config| &mut config.cloudflare_tunnel_token_sealed,
+        |sealed| {
+            let key_path = credential_encryption_key_path(app)?;
+            let database_path = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
+                .join(UNIFIED_DB_DIRECTORY)
+                .join(UNIFIED_DB_FILE);
+            let credential_encryption_key =
+                load_or_create_credential_encryption_key(&key_path, &database_path)?;
+            let token = crate::sealed_credential::open_sealed_credential(
+                sealed,
+                &credential_encryption_key,
+            )
+            .map_err(|error| {
+                format!("Failed to decrypt the pending Cloudflare tunnel token: {error}")
+            })?;
+            crate::owner_credential::store_provider_credential_reference(
+                crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
+                &token,
+            )
+        },
+        || load_remote_access_config(app),
+        |config| save_remote_access_config(app, config),
+    )
+}
+
+/// Store before changing the persisted handoff; a failed store remains retryable.
+fn apply_pending_credential_handoff(
+    mut config: RemoteAccessConfig,
+    pending_field: fn(&mut RemoteAccessConfig) -> &mut Option<String>,
+    store: impl FnOnce(&str) -> Result<(), String>,
+    reload: impl FnOnce() -> Result<RemoteAccessConfig, String>,
+    save: impl FnOnce(RemoteAccessConfig) -> Result<RemoteAccessConfig, String>,
+) -> Result<RemoteAccessConfig, String> {
+    let Some(consumed) = pending_field(&mut config).clone() else {
+        return Ok(config);
     };
-    let outcome = (|| -> Result<(), String> {
-        let key_path = credential_encryption_key_path(app)?;
-        let database_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve DataConnect app-data directory: {error}"))?
-            .join(UNIFIED_DB_DIRECTORY)
-            .join(UNIFIED_DB_FILE);
-        let credential_encryption_key =
-            load_or_create_credential_encryption_key(&key_path, &database_path)?;
-        let token = crate::sealed_credential::open_sealed_credential(
-            &sealed,
-            &credential_encryption_key,
-        )
-        .map_err(|error| {
-            format!("Failed to decrypt the pending Cloudflare tunnel token: {error}")
-        })?;
-        crate::owner_credential::store_provider_credential_reference(
-            crate::remote_access_cloudflare::CLOUDFLARE_TUNNEL_PROVIDER_ID,
-            &token,
-        )
-    })();
-    if let Err(error) = outcome {
-        log::error!("Could not apply the pending Cloudflare tunnel token: {error}");
+    store(&consumed)?;
+    // The keychain can block while the owner writes from another process.
+    // Reload only after it succeeds, and change only the handoff we consumed.
+    let mut current = reload()?;
+    let pending = pending_field(&mut current);
+    if pending.as_deref() == Some(consumed.as_str()) {
+        *pending = None;
     }
-    let cleared = RemoteAccessConfig {
-        cloudflare_tunnel_token_sealed: None,
-        ..config
-    };
-    match save_remote_access_config(app, cleared.clone()) {
-        Ok(saved) => saved,
-        Err(error) => {
-            log::error!("Could not clear the pending Cloudflare tunnel token from disk: {error}");
-            cleared
+    // Two processes share this file without a file lock: an owner write in
+    // the remaining reload-to-atomic-rename window can still race. Do not put
+    // keychain work or any other blocking external call between reload/save.
+    save(current)
+}
+
+#[cfg(test)]
+mod pending_credential_handoff_tests {
+    use super::*;
+
+    type PendingField = fn(&mut RemoteAccessConfig) -> &mut Option<String>;
+
+    fn pending_fields() -> [PendingField; 2] {
+        [
+            |config| &mut config.ngrok_authtoken_sealed,
+            |config| &mut config.cloudflare_tunnel_token_sealed,
+        ]
+    }
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new(config: &RemoteAccessConfig) -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "dataconnect-handoff-{}-{id}", std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            let fixture = Self(root);
+            fixture.save(config.clone()).unwrap();
+            fixture
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("remote-access.json")
+        }
+
+        fn load(&self) -> Result<RemoteAccessConfig, String> {
+            let content = fs::read_to_string(self.path()).map_err(|e| e.to_string())?;
+            let config = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+            crate::remote_access::validate_remote_access_config(config)
+        }
+
+        fn save(&self, config: RemoteAccessConfig) -> Result<RemoteAccessConfig, String> {
+            let config = crate::remote_access::validate_remote_access_config(config)?;
+            crate::atomic_write::write_json_atomically(
+                &self.path(), &config, "handoff fixture write",
+            )?;
+            Ok(config)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn initial_config() -> RemoteAccessConfig {
+        let mut config = off_remote_access_config();
+        config.posture = crate::remote_access::RemoteAccessPosture::PublicUrl;
+        config.provider = Some("user_supplied_origin".to_owned());
+        config.fields.reference_origin = Some("https://old.example.test".to_owned());
+        config.fields.trusted_hosts = "old.example.test".to_owned();
+        config.console_port = Some(4321);
+        // Synthetic ciphertext only; store is always injected, never real keychain.
+        config.ngrok_authtoken_sealed = Some("ngrok-sealed-fixture".to_owned());
+        config.cloudflare_tunnel_token_sealed = Some("cloudflare-sealed-fixture".to_owned());
+        config
+    }
+
+    #[test]
+    fn handoff_preserves_concurrent_remote_access_off() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let expected = off_remote_access_config();
+            let result = apply_pending_credential_handoff(
+                initial, field,
+                |_| fixture.save(expected.clone()).map(|_| ()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected, "watcher must receive the current off config");
+        }
+    }
+
+    #[test]
+    fn handoff_preserves_concurrent_newer_token_and_origin() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let mut expected = initial.clone();
+            *field(&mut expected) = Some("newer-sealed-fixture".to_owned());
+            expected.fields.reference_origin = Some("https://new.example.test".to_owned());
+            expected.fields.trusted_hosts = "new.example.test".to_owned();
+            expected.console_port = Some(5432);
+            let result = apply_pending_credential_handoff(
+                initial, field,
+                |_| fixture.save(expected.clone()).map(|_| ()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected, "watcher must receive the fresh config");
+        }
+    }
+
+    #[test]
+    fn handoff_clears_only_consumed_field_without_concurrent_change() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let mut expected = initial.clone();
+            let consumed = field(&mut expected).take().unwrap();
+            let result = apply_pending_credential_handoff(
+                initial, field, |sealed| {
+                    assert_eq!(sealed, consumed);
+                    Ok(())
+                },
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn failed_store_retains_each_handoff_until_successful_retry() {
+        for field in pending_fields() {
+            let initial = initial_config();
+            let fixture = Fixture::new(&initial);
+            let original_bytes = fs::read(fixture.path()).unwrap();
+            for failure in ["decryption unavailable", "keychain locked"] {
+                let result = apply_pending_credential_handoff(
+                    initial.clone(), field, |_| Err(failure.to_owned()),
+                    || panic!("failed store must not reload"),
+                    |_| panic!("failed store must not save"),
+                );
+                assert_eq!(result, Err(failure.to_owned()));
+                assert_eq!(fs::read(fixture.path()).unwrap(), original_bytes);
+                assert_eq!(fixture.load().unwrap(), initial);
+            }
+            let mut expected = initial.clone();
+            *field(&mut expected) = None;
+            let result = apply_pending_credential_handoff(
+                initial, field, |_| Ok(()),
+                || fixture.load(), |config| fixture.save(config),
+            ).unwrap();
+            assert_eq!(fixture.load().unwrap(), expected);
+            assert_eq!(result, expected);
         }
     }
 }
@@ -3198,9 +3793,13 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
                 })
                 .await
                 {
-                    Ok(config) => config,
+                    Ok(Ok(config)) => config,
+                    Ok(Err(error)) => {
+                        log::error!("Pending ngrok authtoken handoff failed; retained for retry: {error}");
+                        continue;
+                    }
                     Err(error) => {
-                        log::error!("Pending ngrok authtoken task failed: {error}");
+                        log::error!("Pending ngrok authtoken task failed; retained for retry: {error}");
                         continue;
                     }
                 }
@@ -3214,9 +3813,13 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
                 })
                 .await
                 {
-                    Ok(config) => config,
+                    Ok(Ok(config)) => config,
+                    Ok(Err(error)) => {
+                        log::error!("Pending Cloudflare tunnel token handoff failed; retained for retry: {error}");
+                        continue;
+                    }
                     Err(error) => {
-                        log::error!("Pending Cloudflare tunnel token task failed: {error}");
+                        log::error!("Pending Cloudflare tunnel token task failed; retained for retry: {error}");
                         continue;
                     }
                 }
@@ -3229,7 +3832,7 @@ pub(crate) fn spawn_remote_access_config_watcher(app: AppHandle) {
             }
             log::info!("Remote-access config changed on disk; restarting the managed stack");
             last_applied = current;
-            if let Err(error) = restart_after_remote_access_config(app.clone()).await {
+            if let Err(error) = restart_after_remote_access_config(app.clone(), None).await {
                 log::error!(
                     "Automatic restart after a remote-access config change failed: {error}"
                 );
@@ -3273,8 +3876,9 @@ fn tick_autostart_watcher(app: &AppHandle) -> Result<(), String> {
         &root,
         chrono::Utc::now(),
         || {
-            manager
-                .is_enabled()
+            crate::commands::desktop_settings::missing_autostart_state_is_disabled(
+                manager.is_enabled(),
+            )
                 .map_err(|error| format!("Failed to read autostart state: {error}"))
         },
         || {
@@ -3651,13 +4255,19 @@ fn owner_session_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>
 }
 
 fn owner_credential_reveal_cookie(url: &tauri::Url, value: &str) -> Result<Cookie<'static>, String> {
-    let _host = url
+    let host = url
         .host_str()
-        .ok_or_else(|| "Console URL has no cookie host".to_string())?;
-    Ok(Cookie::build((OWNER_CREDENTIAL_REVEAL_COOKIE, value.to_string()))
-        .path("/")
-        .http_only(true)
-        .build())
+        .ok_or_else(|| "Console URL has no cookie host".to_string())?
+        .to_string();
+    // wry turns a missing domain into "" and WebKitGTK then never sends the
+    // cookie, so the domain is required here, as for the session cookie.
+    Ok(
+        Cookie::build((OWNER_CREDENTIAL_REVEAL_COOKIE, value.to_string()))
+            .domain(host)
+            .path("/")
+            .http_only(true)
+            .build(),
+    )
 }
 
 /// Opens an external link clicked inside the console window in the owner's
@@ -3740,36 +4350,128 @@ fn open_external_dry_run_is_enabled() -> bool {
 /// that needs to log them.
 fn decide_console_navigation(url: &tauri::Url, console_origin: &tauri::Url) -> bool {
     if is_console_origin(url, console_origin) {
-        log::info!("on_navigation: url={url} decision=allowed-internal");
+        log::info!("{}", console_navigation_notice(url, "allowed-internal"));
         return true;
     }
     if url.scheme() == "https" {
         if open_external_dry_run_is_enabled() {
-            log::info!("on_navigation: url={url} decision=opened-externally (dry run: would open {url})");
+            log::info!("{}", console_navigation_notice(url, "opened-externally (dry run)"));
         } else {
             match open::that_detached(url.as_str()) {
-                Ok(()) => log::info!("on_navigation: url={url} decision=opened-externally"),
-                Err(error) => log::error!(
-                    "on_navigation: url={url} decision=opened-externally failed to open: {error}"
+                Ok(()) => log::info!("{}", console_navigation_notice(url, "opened-externally")),
+                // Opener errors may echo the raw URL argument.
+                Err(_) => log::error!(
+                    "{}", console_navigation_notice(url, "opened-externally failed to open")
                 ),
             }
         }
     } else {
-        log::warn!("on_navigation: url={url} decision=refused (non-https scheme)");
+        log::warn!("{}", console_navigation_notice(url, "refused (non-https scheme)"));
     }
     false
 }
 
-fn set_cookies_then_navigate<SetCookies, Navigate>(
-    set_cookies: SetCookies,
-    navigate: Navigate,
-) -> Result<(), String>
-where
-    SetCookies: FnOnce() -> Result<(), String>,
-    Navigate: FnOnce() -> Result<(), String>,
-{
-    set_cookies()?;
-    navigate()
+/// Never format the raw URL (or an opener error) into a navigation log.
+fn console_navigation_notice(url: &tauri::Url, decision: &str) -> String {
+    format!(
+        "on_navigation: url={}{} decision={decision}",
+        log_url_origin(url),
+        url.path()
+    )
+}
+
+#[cfg(test)]
+mod restart_log_redaction_tests {
+    use super::*;
+
+    fn assert_warning_redacted(raw: &str) {
+        let url = tauri::Url::parse(
+            "https://USER_SENTINEL:PASSWORD_SENTINEL@example.test:8443//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET"
+        ).unwrap();
+        for context in [
+            "console_path_before_restart: console URL path failed validation",
+            "console_url_preserving_path: rejected path for restart redirect",
+        ] {
+            let warning = console_restart_path_warning(&url, raw, context);
+            for secret in [
+                "SYNTHETIC_QUERY_SECRET",
+                "SYNTHETIC_FRAGMENT_SECRET",
+                "USER_SENTINEL",
+                "PASSWORD_SENTINEL",
+            ] {
+                assert!(!warning.contains(secret), "warning leaked {secret}");
+            }
+            assert_eq!(
+                warning,
+                format!("{context}: url=https://example.test//callback, falling back to root")
+            );
+        }
+    }
+
+    #[test]
+    fn restart_warnings_omit_query_secrets() {
+        assert_warning_redacted("//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET");
+    }
+
+    #[test]
+    fn restart_warnings_omit_fragment_without_query() {
+        assert_warning_redacted("//callback#SYNTHETIC_FRAGMENT_SECRET");
+    }
+
+    #[test]
+    fn rejected_absolute_input_omits_userinfo() {
+        assert_warning_redacted("https://USER_SENTINEL:PASSWORD_SENTINEL@example.test//callback?code=SYNTHETIC_QUERY_SECRET#SYNTHETIC_FRAGMENT_SECRET");
+    }
+}
+
+/// Shared pure formatting boundary for restart validation warnings.
+fn console_restart_path_warning(
+    url: &tauri::Url,
+    raw: &str,
+    context: &str,
+) -> String {
+    // The rejected input need not be a valid path. Split both delimiters
+    // before rendering it; never resolve it against the console origin.
+    // log_url_origin shares navigation logging's userinfo-free policy.
+    // An invalid absolute-URL input must not expose its authority either.
+    let parsed = tauri::Url::parse(raw).ok();
+    let path = parsed.as_ref().map(|url| url.path()).unwrap_or_else(|| {
+        raw.split(['?', '#']).next().unwrap_or_default()
+    });
+    format!(
+        "{context}: url={}{path}, falling back to root",
+        log_url_origin(url)
+    )
+}
+
+#[cfg(test)]
+mod navigation_log_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn all_navigation_notices_omit_credentials() {
+        for scheme in ["https", "http"] {
+            let url = tauri::Url::parse(&format!(
+                "{scheme}://USER_SENTINEL:PASSWORD_SENTINEL@example.test/consent?code=QUERY_SENTINEL#FRAGMENT_SENTINEL"
+            )).unwrap();
+            for decision in [
+                "allowed-internal",
+                "opened-externally (dry run)",
+                "opened-externally",
+                "opened-externally failed to open",
+                "refused (non-https scheme)",
+            ] {
+                let notice = console_navigation_notice(&url, decision);
+                assert_eq!(
+                    notice,
+                    format!("on_navigation: url={scheme}://example.test/consent decision={decision}")
+                );
+                for secret in ["USER_SENTINEL", "PASSWORD_SENTINEL", "QUERY_SENTINEL", "FRAGMENT_SENTINEL"] {
+                    assert!(!notice.contains(secret));
+                }
+            }
+        }
+    }
 }
 
 /// A path+query string safe to append to a FRESH console origin this
@@ -3818,7 +4520,8 @@ fn console_url_preserving_path(
     };
     let Some(path_and_query) = ConsolePathAndQuery::parse(raw) else {
         log::warn!(
-            "console_url_preserving_path: rejected path {raw:?} for restart redirect, falling back to root"
+            "{}", console_restart_path_warning(console_origin, raw,
+                "console_url_preserving_path: rejected path for restart redirect")
         );
         return console_origin.clone();
     };
@@ -3840,28 +4543,14 @@ fn console_url_preserving_path(
     url
 }
 
-fn create_or_update_console_window(
+async fn create_or_update_console_window(
     app: &AppHandle,
     url: tauri::Url,
     cookies: Vec<Cookie<'static>>,
     should_show: bool,
 ) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(CONSOLE_WINDOW_LABEL) {
-        set_cookies_then_navigate(
-            || {
-                for cookie in &cookies {
-                    window
-                        .set_cookie(cookie.clone())
-                        .map_err(|error| format!("Failed to set console cookie: {error}"))?;
-                }
-                Ok(())
-            },
-            || {
-                window
-                    .navigate(url.clone())
-                    .map_err(|error| format!("Failed to navigate console: {error}"))
-            },
-        )?;
+        crate::webview_cookies::set_cookies_then_navigate(window.as_ref(), cookies, url).await?;
         if should_show {
             window
                 .show()
@@ -3899,21 +4588,7 @@ fn create_or_update_console_window(
             .build()
             .map_err(|error| format!("Failed to create console window: {error}"))?;
 
-    set_cookies_then_navigate(
-        || {
-            for cookie in cookies {
-                window
-                    .set_cookie(cookie)
-                    .map_err(|error| format!("Failed to set console cookie: {error}"))?;
-            }
-            Ok(())
-        },
-        || {
-            window
-                .navigate(url)
-                .map_err(|error| format!("Failed to navigate console: {error}"))
-        },
-    )?;
+    crate::webview_cookies::set_cookies_then_navigate(window.as_ref(), cookies, url).await?;
 
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
@@ -4104,27 +4779,83 @@ mod tests {
     use std::io;
     use std::net::TcpListener;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
     use std::thread;
     use std::time::Instant;
     use tempfile::{tempdir, NamedTempFile};
 
     #[test]
     fn unhandled_deep_link_notice_omits_the_grant_secret() {
-        let url: tauri::Url = "vana://connect?sessionId=s-1&secret=hunter2&scopes=a"
+        let url: tauri::Url = "example://connect?sessionId=s-1&secret=hunter2&scopes=a"
             .parse()
             .expect("url");
         let notice = unhandled_deep_link_notice(&url);
-        assert!(notice.contains("vana://connect"), "{notice}");
+        assert!(notice.contains("example://connect"), "{notice}");
         assert!(!notice.contains("hunter2") && !notice.contains("s-1"), "{notice}");
     }
 
+    const FAKE_READINESS_DEADLINE: Duration = Duration::from_secs(3);
+    const FAKE_RESTART_BACKOFF: Duration = Duration::from_millis(25);
+    const FAKE_STOP_TOTAL: Duration = Duration::from_secs(2);
+
     #[derive(Clone, Default)]
-    struct RecordingSink(Arc<Mutex<Vec<ProcessLifecycleEvent>>>);
+    struct RecordingSink(Arc<(Mutex<Vec<ProcessLifecycleEvent>>, Condvar)>);
 
     impl EventSink for RecordingSink {
         fn emit(&self, event: ProcessLifecycleEvent) {
-            self.0.lock().expect("lifecycle events lock").push(event);
+            let (events, changed) = &*self.0;
+            events.lock().expect("lifecycle events lock").push(event);
+            changed.notify_all();
+        }
+    }
+
+    fn wait_for_fake_ri_restart(
+        events: &Arc<(Mutex<Vec<ProcessLifecycleEvent>>, Condvar)>,
+        idle_window: Duration,
+    ) -> Result<Vec<ProcessLifecycleEvent>, String> {
+        let (events_lock, changed) = &**events;
+        let mut events = events_lock
+            .lock()
+            .map_err(|_| "lifecycle events lock poisoned".to_string())?;
+        let mut last_ri_event_count = events
+            .iter()
+            .filter(|event| event.label == RI_LABEL)
+            .count();
+        let mut last_progress_at = Instant::now();
+
+        loop {
+            let ready_count = events
+                .iter()
+                .filter(|event| {
+                    event.label == RI_LABEL && matches!(event.state, LifecycleState::Ready)
+                })
+                .count();
+            let restarted = events.iter().any(|event| {
+                event.label == RI_LABEL && matches!(event.state, LifecycleState::Restarting)
+            });
+            if ready_count >= 2 && restarted {
+                return Ok(events.clone());
+            }
+
+            let idle_remaining = idle_window.saturating_sub(last_progress_at.elapsed());
+            if idle_remaining.is_zero() {
+                return Err(format!(
+                    "no RI lifecycle progress for {idle_window:?}; observed {last_ri_event_count} RI events"
+                ));
+            }
+            events = changed
+                .wait_timeout(events, idle_remaining)
+                .map_err(|_| "lifecycle events lock poisoned while waiting".to_string())?
+                .0;
+
+            let current_ri_event_count = events
+                .iter()
+                .filter(|event| event.label == RI_LABEL)
+                .count();
+            if current_ri_event_count > last_ri_event_count {
+                last_ri_event_count = current_ri_event_count;
+                last_progress_at = Instant::now();
+            }
         }
     }
 
@@ -4783,7 +5514,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             stop: StopPolicy {
                 grace: Duration::from_millis(300),
                 escalate: Duration::from_secs(1),
-                total: Duration::from_secs(2),
+                total: FAKE_STOP_TOTAL,
             },
             requested_port: None,
         }
@@ -4808,7 +5539,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 ri_env,
                 Readiness::HttpGet {
                     url_from_port: format!("http://127.0.0.1:{{port+1}}{RI_HEALTH_PATH}"),
-                    deadline: Duration::from_secs(3),
+                    deadline: FAKE_READINESS_DEADLINE,
                     host_header: None,
                 },
                 ri_restart,
@@ -4825,7 +5556,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 BTreeMap::from([(OsString::from("PORT"), OsString::from("{port}"))]),
                 Readiness::HttpGet {
                     url_from_port: "http://127.0.0.1:{port}/".to_string(),
-                    deadline: Duration::from_secs(3),
+                    deadline: FAKE_READINESS_DEADLINE,
                     host_header: None,
                 },
                 RestartPolicy::Bounded {
@@ -5496,6 +6227,59 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
+    fn cloudflare_start_outcome_uses_cloudflare_outcome_handling() {
+        let source = include_str!("unified.rs");
+        let body = source
+            .split_once("fn start_managed_stack(")
+            .expect("managed stack start")
+            .1
+            .split_once("fn resolve_ngrok_options(")
+            .expect("next function after managed stack start")
+            .0;
+        let cloudflare_outcome = body
+            .split_once("match start_cloudflare_tunnel_provider")
+            .expect("Cloudflare provider start")
+            .1
+            .split_once("Ok(ManagedStackStart")
+            .expect("managed stack return")
+            .0;
+
+        assert!(
+            contains_code(cloudflare_outcome, "apply_cloudflare_tunnel_outcome"),
+            "Cloudflare success and failure outcomes must use Cloudflare handling, not the ngrok handler"
+        );
+        assert!(
+            !contains_code(cloudflare_outcome, "apply_ngrok_tunnel_outcome"),
+            "a Cloudflare result must not be recorded through ngrok outcome handling"
+        );
+    }
+
+    /// The owner-password window, OS re-auth and stack-restart requests are
+    /// files that only these watchers act on. v0.7.59 defined them but never
+    /// started them, so the console's requests were never served.
+    #[test]
+    fn setup_starts_the_owner_request_watchers() {
+        let source = include_str!("unified.rs");
+        let setup = source
+            .split_once("pub(crate) fn setup(")
+            .expect("setup")
+            .1
+            .split_once("\n}\n")
+            .expect("end of setup")
+            .0;
+        for watcher in [
+            "spawn_owner_password_window_watcher",
+            "spawn_owner_os_reauth_watcher",
+            "spawn_owner_password_stack_restart_watcher",
+        ] {
+            assert!(
+                contains_code(setup, &format!("crate::owner_credential::{watcher}(")),
+                "setup must start {watcher}"
+            );
+        }
+    }
+
+    #[test]
     fn watcher_declaration_scan_requires_a_real_declaration() {
         let source = r##"
             fn mentions_spawn_remote_access_config_watcher() {}
@@ -5926,7 +6710,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:1",
             "http://127.0.0.1:2",
             "owner-password",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof",
+            Path::new("/tmp/unified"),
             &crate::remote_access::off_remote_access_config(),
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -5947,6 +6733,63 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
     }
 
+    /// The console decides what "Owner password" shows, and where it writes
+    /// the request files the desktop watchers read, from these variables.
+    /// In v0.7.59 only the RI got them, so the console fell back to the RI's
+    /// "env" answer and showed "uses PDPP_OWNER_PASSWORD" on the desktop.
+    #[test]
+    fn console_and_ri_receive_the_same_managed_desktop_flags() {
+        assert!(
+            remote_access_configuration_supported(),
+            "this test needs the managed-stack posture (no attach or legacy env vars)"
+        );
+        let data_dir = Path::new("/tmp/unified");
+        let environments = |source| {
+            let ri = ri_environment(
+                data_dir,
+                "owner-password-test",
+                source,
+                "reveal-proof-test",
+                "credential-key-test",
+                "database-key-test",
+                false,
+            );
+            let console = console_process_spec(
+                Path::new("/tmp/pdpp-node"),
+                Path::new("/tmp/console"),
+                "http://127.0.0.1:1",
+                "http://127.0.0.1:2",
+                "owner-password-test",
+                source,
+                "reveal-proof-test",
+                data_dir,
+                &crate::remote_access::off_remote_access_config(),
+                crate::console_port::DEFAULT_CONSOLE_PORT,
+            )
+            .env
+            .vars;
+            (ri, console)
+        };
+        let key = |name: &'static str| std::ffi::OsStr::new(name);
+
+        let (ri, console) = environments(OwnerPasswordSource::DesktopGenerated);
+        for name in [MANAGED_DESKTOP_HOST_ENV, OWNER_PASSWORD_SOURCE_ENV, "PDPP_DATA_DIR"] {
+            assert_eq!(console.get(key(name)), ri.get(key(name)), "{name}");
+        }
+        assert_eq!(console.get(key(MANAGED_DESKTOP_HOST_ENV)), Some(&OsString::from("1")));
+        assert_eq!(
+            console.get(key(OWNER_PASSWORD_SOURCE_ENV)),
+            Some(&OsString::from(OWNER_PASSWORD_SOURCE_DESKTOP_GENERATED))
+        );
+        assert_eq!(console.get(key("PDPP_DATA_DIR")), Some(&OsString::from("/tmp/unified")));
+
+        let (ri, console) = environments(OwnerPasswordSource::Configured);
+        for name in [MANAGED_DESKTOP_HOST_ENV, OWNER_PASSWORD_SOURCE_ENV, "PDPP_DATA_DIR"] {
+            assert_eq!(console.get(key(name)), ri.get(key(name)), "{name}");
+        }
+        assert_eq!(console.get(key(OWNER_PASSWORD_SOURCE_ENV)), None);
+    }
+
     #[test]
     fn the_console_receives_the_active_tunnel_provider_when_configured() {
         let mut remote_access = crate::remote_access::off_remote_access_config();
@@ -5957,7 +6800,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:1",
             "http://127.0.0.1:2",
             "owner-password",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &remote_access,
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -5982,6 +6827,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             reveal_proof,
             credential_key,
             database_key,
+            false,
         );
 
         assert_eq!(
@@ -6000,6 +6846,954 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     }
 
     #[test]
+    fn only_the_recovery_startup_asks_the_ri_to_revoke_owner_sessions() {
+        let environment = |revoke| {
+            ri_environment(
+                Path::new("/tmp/unified"),
+                "owner-password-test",
+                OwnerPasswordSource::DesktopGenerated,
+                "reveal-proof-test",
+                "credential-key-test",
+                "database-key-test",
+                revoke,
+            )
+        };
+        let key = std::ffi::OsStr::new(RECOVERY_REVOKE_OWNER_SESSIONS_ENV);
+        assert_eq!(environment(true).get(key), Some(&OsString::from("1")));
+        assert_eq!(environment(false).get(key), None);
+    }
+
+    #[test]
+    fn the_credential_recovery_marker_matches_the_ri_reader() {
+        // `readCredentialRecoveryStateMarker` in
+        // reference-implementation/server/index.ts accepts only this shape.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
+        write_credential_recovery_state(&path).expect("write marker");
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("read marker"))
+                .expect("marker is JSON");
+        assert_eq!(
+            written,
+            serde_json::json!({ "version": 1, "cause": "legacy_v1_kit_missing_credential_key" })
+        );
+    }
+
+    struct DiscardingSink;
+
+    impl EventSink for DiscardingSink {
+        fn emit(&self, _event: ProcessLifecycleEvent) {}
+    }
+
+    /// Runs `source` as a fake RI through the real supervisor, the way
+    /// `start_managed_stack` starts the RI, and returns the start error.
+    fn start_fake_ri(data_dir: &Path, source: &str) -> String {
+        let script = data_dir.join("fake-ri.js");
+        fs::write(&script, source).expect("write fake RI");
+        let node = std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+            .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+            .find(|candidate| candidate.is_file())
+            .expect("node executable in test PATH");
+        let mut env = BTreeMap::new();
+        env.insert(OsString::from("PORT"), OsString::from("{port}"));
+        env.insert(OsString::from("PDPP_DATA_DIR"), data_dir.as_os_str().to_os_string());
+        let spec = ProcessSpec {
+            label: "reference-implementation".to_string(),
+            program: node,
+            args: vec![script.into_os_string()],
+            cwd: None,
+            env: EnvironmentSpec::cleared(env),
+            readiness: Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline: Duration::from_secs(5),
+            },
+            restart: RestartPolicy::Bounded {
+                max: 2,
+                backoff: Duration::from_millis(20),
+            },
+            process_group: true,
+            stop: StopPolicy {
+                grace: Duration::from_millis(300),
+                escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
+            },
+            requested_port: None,
+        };
+        match Supervisor::new(spec, DiscardingSink).start() {
+            Ok(handle) => {
+                let _ = handle.stop();
+                panic!("the fake RI must fail to start");
+            }
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_rejected_recovery_key_leaves_no_credential_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
+        write_credential_recovery_state(&path).expect("write marker");
+
+        // Exits the way `assertDatabaseKey` does when SQLCipher refuses the
+        // key: before the RI reads the marker.
+        let error = start_fake_ri(
+            dir.path(),
+            "throw new Error('Could not open the encrypted SQLite vault at ' + process.env.PDPP_DATA_DIR + '/pdpp.sqlite. The key is wrong.');",
+        );
+        discard_unconsumed_recovery_marker(&path, true).expect("settle marker");
+
+        assert!(!path.exists(), "stale marker after refused start: {error}");
+    }
+
+    #[test]
+    fn a_startup_failure_after_the_marker_was_applied_keeps_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(CREDENTIAL_RECOVERY_STATE_FILE);
+        let applied = dir.path().join(format!("{CREDENTIAL_RECOVERY_STATE_FILE}.applied"));
+        write_credential_recovery_state(&path).expect("write marker");
+
+        // The RI opened the vault, transitioned the rows and consumed the
+        // marker, then failed before readiness.
+        let error = start_fake_ri(
+            dir.path(),
+            "const fs = require('fs'); const p = process.env.PDPP_DATA_DIR + '/credential-recovery-state.json'; if (fs.existsSync(p)) fs.renameSync(p, p + '.applied'); process.exit(1);",
+        );
+        discard_unconsumed_recovery_marker(&path, true).expect("settle marker");
+
+        assert!(applied.exists(), "applied marker removed: {error}");
+        assert!(!path.exists());
+    }
+
+    fn node_on_test_path() -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").expect("test PATH"))
+            .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
+            .find(|candidate| candidate.is_file())
+            .expect("node executable in test PATH")
+    }
+
+    /// Starts `args` under `node` through the real supervisor, with
+    /// `environment` as its whole environment, the way `start_managed_stack`
+    /// starts the RI, and waits for the RI to print `READY`.
+    fn start_ri_with(
+        environment: BTreeMap<OsString, OsString>,
+        cwd: Option<PathBuf>,
+        args: Vec<OsString>,
+        deadline: Duration,
+    ) -> Result<crate::commands::process_supervisor::SupervisorHandle, String> {
+        let spec = ProcessSpec {
+            label: "reference-implementation".to_string(),
+            program: node_on_test_path(),
+            args,
+            cwd,
+            env: EnvironmentSpec::cleared(environment),
+            readiness: Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline,
+            },
+            restart: RestartPolicy::Never,
+            process_group: true,
+            stop: StopPolicy {
+                grace: Duration::from_millis(300),
+                escalate: Duration::from_secs(1),
+                total: Duration::from_secs(2),
+            },
+            requested_port: None,
+        };
+        Supervisor::new(spec, DiscardingSink)
+            .start()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The desktop half of a start: the v1 import writes the credential
+    /// marker (`mark_recovery_credential_state` calls
+    /// `write_credential_recovery_state`), then `start_managed_stack` calls
+    /// `prepare_ri_start` for the RI environment.
+    fn desktop_start_environment(
+        data_dir: &Path,
+        credential_key: &str,
+        database_key: &str,
+        recovery: bool,
+    ) -> BTreeMap<OsString, OsString> {
+        if recovery {
+            write_credential_recovery_state(&data_dir.join(CREDENTIAL_RECOVERY_STATE_FILE))
+                .expect("write v1 marker");
+        }
+        prepare_ri_start(
+            data_dir,
+            "owner-password-test-0927",
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            credential_key,
+            database_key,
+            recovery.then_some(OwnerSessionReset::Recovery),
+        )
+        .expect("prepare RI start")
+    }
+
+    /// What the RI sees at startup, read the way
+    /// reference-implementation/server/index.ts reads it
+    /// (`readCredentialRecoveryStateMarker`, `applyRecoveryOwnerSessionReset`).
+    const RECORDING_FAKE_RI: &str = r#"
+const fs = require('fs');
+const path = require('path');
+const dir = process.env.PDPP_DATA_DIR;
+const readJson = (name) => {
+  const p = path.join(dir, name);
+  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null;
+};
+const marker = readJson('credential-recovery-state.json');
+const markerAccepted = marker !== null && typeof marker === 'object' && !Array.isArray(marker)
+  && marker.version === 1 && marker.cause === 'legacy_v1_kit_missing_credential_key';
+const reset = readJson('owner-session-recovery-reset.json');
+fs.writeFileSync(path.join(dir, 'seen.json'), JSON.stringify({
+  revokeEnv: process.env.PDPP_RECOVERY_REVOKE_OWNER_SESSIONS ?? null,
+  marker, markerAccepted, reset,
+}));
+console.log('READY');
+setInterval(() => {}, 1000);
+"#;
+
+    #[test]
+    fn only_a_desktop_recovery_start_gives_the_ri_its_recovery_inputs() {
+        let seen = |recovery: bool| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let data_dir = dir.path().join("unified");
+            let environment = desktop_start_environment(&data_dir, "cred", "db", recovery);
+            let script = dir.path().join("fake-ri.js");
+            fs::write(&script, RECORDING_FAKE_RI).expect("write fake RI");
+            let handle = start_ri_with(
+                environment,
+                None,
+                vec![script.into_os_string()],
+                Duration::from_secs(10),
+            )
+            .expect("fake RI starts");
+            let _ = handle.stop();
+            serde_json::from_str::<serde_json::Value>(
+                &fs::read_to_string(data_dir.join("seen.json")).expect("fake RI report"),
+            )
+            .expect("report is JSON")
+        };
+
+        let recovery = seen(true);
+        assert_eq!(recovery["revokeEnv"], "1", "{recovery}");
+        assert_eq!(recovery["markerAccepted"], true, "{recovery}");
+        assert!(recovery["reset"].is_object(), "no reset file: {recovery}");
+
+        let normal = seen(false);
+        assert_eq!(normal["revokeEnv"], serde_json::Value::Null, "{normal}");
+        assert_eq!(normal["marker"], serde_json::Value::Null, "{normal}");
+        assert_eq!(normal["reset"], serde_json::Value::Null, "{normal}");
+    }
+
+    /// The reference implementation's source directory, or why its Node
+    /// dependencies (tsx and the SQLCipher binding) cannot load here.
+    fn runnable_reference_implementation() -> Result<PathBuf, String> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or("src-tauri has no parent directory")?
+            .join("reference-implementation");
+        let probe = std::process::Command::new(node_on_test_path())
+            .args([
+                "--import",
+                "tsx",
+                "-e",
+                "new (require('better-sqlite3-multiple-ciphers'))(':memory:').close()",
+            ])
+            .current_dir(&root)
+            .output()
+            .map_err(|error| format!("cannot run node: {error}"))?;
+        if probe.status.success() {
+            Ok(root)
+        } else {
+            let stderr = String::from_utf8_lossy(&probe.stderr);
+            // Node's stderr also echoes minified tsx source; keep the error.
+            let error = stderr.lines().find(|line| line.starts_with("Error"));
+            Err(error.unwrap_or(stderr.trim()).to_owned())
+        }
+    }
+
+    /// Resolves the real RI for a test, or explains why it cannot. Under CI
+    /// (`CI=true`) a missing prerequisite fails the test: a skipped test's
+    /// stderr is captured, so a skip would look like a pass. Locally it
+    /// prints the same message and returns `None` so the test can skip.
+    fn reference_implementation_or_skip() -> Option<PathBuf> {
+        let reason = match runnable_reference_implementation() {
+            Ok(root) => return Some(root),
+            Err(reason) => reason,
+        };
+        let message = format!(
+            "real-RI prerequisite missing: tsx or the SQLCipher binding \
+             (better-sqlite3-multiple-ciphers) cannot load in reference-implementation/. \
+             Provide them with the \"Install connector tooling\" (`npm ci --ignore-scripts`) \
+             and \"Build workspace packages\" steps of \
+             .github/workflows/rust-unit-tests.yml.\nnode said: {reason}"
+        );
+        if std::env::var("CI").as_deref() == Ok("true") {
+            panic!("{message}");
+        }
+        eprintln!("SKIPPED: {message}");
+        None
+    }
+
+    #[test]
+    fn a_desktop_recovery_start_revokes_owner_sessions_and_bearers_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let driver = ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("unified");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let database_key = "database-key-test-0927";
+        let seed_path = dir.path().join("seed.json");
+        let result_path = dir.path().join("result.json");
+
+        // Before the key was lost: a normal desktop start, then the owner
+        // signs in and mints a bearer on the encrypted database.
+        let seed = std::process::Command::new(node_on_test_path())
+            .arg("--import")
+            .arg("tsx")
+            .arg(&driver)
+            .arg("seed")
+            .arg(&seed_path)
+            .current_dir(&ri_root)
+            .env_clear()
+            .envs(desktop_start_environment(&data_dir, "cred-before", database_key, false))
+            .env("AS_PORT", "0")
+            .env("RS_PORT", "0")
+            .output()
+            .expect("run seed driver");
+        assert!(
+            seed.status.success(),
+            "seed failed: {}",
+            String::from_utf8_lossy(&seed.stderr)
+        );
+        let seeded: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&seed_path).expect("seed")).expect("json");
+        assert_eq!(seeded["sessionStatus"], 204, "session works before recovery");
+        assert_eq!(seeded["bearerStatus"], 200, "bearer works before recovery");
+        let header = fs::read(data_dir.join("pdpp.sqlite")).expect("database");
+        assert!(
+            !header.starts_with(b"SQLite format 3\0"),
+            "the database must be encrypted"
+        );
+
+        // A v1 recovery start: the same database key, a fresh credential key.
+        let fresh_credential_key =
+            crate::owner_credential::generate_recovered_v1_credential_encryption_key()
+                .expect("fresh key");
+        let environment =
+            desktop_start_environment(&data_dir, &fresh_credential_key, database_key, true);
+        let handle = start_ri_with(
+            environment,
+            Some(ri_root.clone()),
+            vec![
+                OsString::from("--import"),
+                OsString::from("tsx"),
+                driver.into_os_string(),
+                OsString::from("recover"),
+                result_path.clone().into_os_string(),
+                seed_path.into_os_string(),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("real RI starts for recovery");
+        let _ = handle.stop();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result_path).expect("result"))
+                .expect("json");
+        assert_eq!(result["oldSessionStatus"], 401, "{result}");
+        assert_eq!(result["oldBearerStatus"], 401, "{result}");
+        assert_eq!(result["freshSessionStatus"], 204, "{result}");
+        assert!(data_dir
+            .join(format!("{RECOVERY_OWNER_SESSION_RESET_FILE}.applied"))
+            .exists());
+        assert!(data_dir
+            .join(format!("{CREDENTIAL_RECOVERY_STATE_FILE}.applied"))
+            .exists());
+        assert!(!data_dir.join(CREDENTIAL_RECOVERY_STATE_FILE).exists());
+        // CI greps for this line to prove the test ran rather than skipped.
+        println!("REAL-RI RECOVERY TEST RAN");
+    }
+
+    /// Runs one mode of the real-RI driver to completion under the RI
+    /// environment a normal desktop start builds, and returns its output.
+    fn run_ri_driver(
+        ri_root: &Path,
+        data_dir: &Path,
+        owner_password: &str,
+        mode: &str,
+        extra_args: &[&str],
+    ) -> serde_json::Value {
+        let output = data_dir
+            .parent()
+            .expect("data dir parent")
+            .join(format!("driver-{mode}.json"));
+        let environment = prepare_ri_start(
+            data_dir,
+            owner_password,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test-0928",
+            None,
+        )
+        .expect("prepare RI start");
+        let run = std::process::Command::new(node_on_test_path())
+            .arg("--import")
+            .arg("tsx")
+            .arg(ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts"))
+            .arg(mode)
+            .arg(&output)
+            .args(extra_args)
+            .current_dir(ri_root)
+            .env_clear()
+            .envs(environment)
+            .env("AS_PORT", "0")
+            .env("RS_PORT", "0")
+            .output()
+            .expect("run RI driver");
+        assert!(
+            run.status.success(),
+            "{mode} failed: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        serde_json::from_str(&fs::read_to_string(&output).expect("driver output"))
+            .expect("driver output is JSON")
+    }
+
+    /// A desktop owner sets their first password in the native window, then
+    /// turns remote access on. In v0.7.59 the window's save failed with
+    /// "command not found", so no owner-set marker was written and the RI
+    /// kept refusing the turn-on with `owner_password_required`.
+    #[test]
+    fn a_password_set_in_the_desktop_window_unlocks_remote_access_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join(UNIFIED_DB_DIRECTORY);
+        assert!(data_dir.starts_with(root.path()), "{data_dir:?}");
+        fs::create_dir_all(&data_dir).expect("data dir");
+
+        let generated = "generated-owner-password-0928";
+        let before = run_ri_driver(&ri_root, &data_dir, generated, "turn-on-remote-access", &[]);
+        assert_eq!(before["status"], 409, "{before}");
+        assert_eq!(before["code"], "owner_password_required", "{before}");
+
+        // The console's "set a password first" step, then the native window.
+        run_ri_driver(&ri_root, &data_dir, generated, "request-password-window", &["initial_setup"]);
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let chosen = "owner-chosen-password-0928";
+        crate::invoke_from(
+            &window,
+            "set_desktop_owner_password",
+            serde_json::json!({ "password": chosen }),
+        )
+        .expect("the window saves the password");
+        // First-time setup does not restart now or revoke: the remote-access
+        // save that follows restarts the stack through the config watcher.
+        let restart: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("owner-password-stack-restart-request.json"))
+                .expect("restart request"),
+        )
+        .expect("restart request is JSON");
+        assert!(restart["notBeforeUnixMs"].is_u64(), "{restart}");
+        assert_eq!(restart["revokeSessions"], serde_json::Value::Null, "{restart}");
+
+        // The next start reads the saved password, as `load_bootstrap_secrets`
+        // does (under cargo test the keychain is refused, so the app-data file).
+        let saved = crate::owner_credential::load_or_create_owner_credential(
+            &crate::owner_credential::owner_credential_path(app.handle()).expect("credential path"),
+        )
+        .expect("saved password");
+        assert_eq!(saved, chosen);
+        let after = run_ri_driver(&ri_root, &data_dir, &saved, "turn-on-remote-access", &[]);
+        assert_eq!(after["status"], 200, "{after}");
+        println!("REAL-RI REMOTE-ACCESS GATE TEST RAN");
+    }
+
+    /// The RI logs why it revoked owner sessions from the reset file's
+    /// reason. A password change must not be logged as a recovery.
+    #[test]
+    fn the_owner_session_reset_file_names_its_reason() {
+        for (reset, reason) in [
+            (OwnerSessionReset::Recovery, "recovery"),
+            (OwnerSessionReset::PasswordChange, "password_change"),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let environment = prepare_ri_start(
+                root.path(),
+                "owner-password-test",
+                OwnerPasswordSource::DesktopGenerated,
+                "reveal-proof-test",
+                "credential-key-test",
+                "database-key-test",
+                Some(reset),
+            )
+            .expect("prepare RI start");
+            let written: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(root.path().join(RECOVERY_OWNER_SESSION_RESET_FILE))
+                    .expect("reset file"),
+            )
+            .expect("reset file is JSON");
+            assert_eq!(written, serde_json::json!({ "version": 1, "reason": reason }));
+            assert_eq!(
+                environment.get(&OsString::from(RECOVERY_REVOKE_OWNER_SESSIONS_ENV)),
+                Some(&OsString::from("1"))
+            );
+        }
+    }
+
+    /// The owner changes the desktop password in the native window. The
+    /// restart that applies it must sign out every other browser and CLI
+    /// token: owner sessions live in the database and are not bound to the
+    /// password, so before this only a recovery start revoked them and a
+    /// phone signed in with the old password stayed signed in.
+    #[test]
+    fn a_desktop_password_change_revokes_owner_sessions_and_bearers_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join(UNIFIED_DB_DIRECTORY);
+        assert!(data_dir.starts_with(root.path()), "{data_dir:?}");
+        fs::create_dir_all(&data_dir).expect("data dir");
+
+        let old_password = "old-owner-password-0928";
+        let seeded = run_ri_driver(&ri_root, &data_dir, old_password, "seed", &[]);
+        assert_eq!(seeded["sessionStatus"], 204, "{seeded}");
+        assert_eq!(seeded["bearerStatus"], 200, "{seeded}");
+
+        // Settings asks for the window after OS re-auth; the grant stands in
+        // for the confirmed re-auth.
+        let grant_id = "grant-test-0928";
+        let request = run_ri_driver(
+            &ri_root,
+            &data_dir,
+            old_password,
+            "request-password-window",
+            &["change", grant_id],
+        );
+        let request_id = request["requestId"].as_u64().expect("request id");
+        crate::owner_credential::grant_owner_password_change_for_test(request_id, grant_id);
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let new_password = "new-owner-password-0928";
+        crate::invoke_from(
+            &window,
+            "set_desktop_owner_password",
+            serde_json::json!({ "password": new_password }),
+        )
+        .expect("the window saves the password");
+
+        // The restart the stack-restart watcher runs for that request.
+        let restart: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(data_dir.join("owner-password-stack-restart-request.json"))
+                .expect("restart request"),
+        )
+        .expect("restart request is JSON");
+        assert_eq!(restart["revokeSessions"], true, "{restart}");
+        assert_eq!(restart["revokeReason"], "password_change", "{restart}");
+        let saved = crate::owner_credential::load_or_create_owner_credential(
+            &crate::owner_credential::owner_credential_path(app.handle()).expect("credential path"),
+        )
+        .expect("saved password");
+        assert_eq!(saved, new_password);
+        let result_path = root.path().join("change-result.json");
+        let environment = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test-0928",
+            Some(OwnerSessionReset::PasswordChange),
+        )
+        .expect("prepare RI start");
+        let handle = start_ri_with(
+            environment,
+            Some(ri_root.clone()),
+            vec![
+                OsString::from("--import"),
+                OsString::from("tsx"),
+                ri_root
+                    .join("test/fixtures/desktop-recovery-ri-driver.ts")
+                    .into_os_string(),
+                OsString::from("recover"),
+                result_path.clone().into_os_string(),
+                data_dir
+                    .parent()
+                    .expect("app data dir")
+                    .join("driver-seed.json")
+                    .into_os_string(),
+            ],
+            Duration::from_secs(120),
+        )
+        .expect("real RI starts with the new password");
+        let _ = handle.stop();
+
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result_path).expect("result"))
+                .expect("json");
+        assert_eq!(result["oldSessionStatus"], 401, "{result}");
+        assert_eq!(result["oldBearerStatus"], 401, "{result}");
+        assert_eq!(result["freshSessionStatus"], 204, "{result}");
+        assert_eq!(
+            restart["notBeforeUnixMs"],
+            serde_json::Value::Null,
+            "a change restarts now, not after the first-setup delay: {restart}"
+        );
+        println!("REAL-RI PASSWORD CHANGE TEST RAN");
+    }
+
+    /// The owner changes the desktop password, and the first start after it
+    /// fails. The revocation must survive that failure: the next start that
+    /// succeeds signs out the old session and bearer. Before this, the
+    /// failed start (or the watcher giving up) completed the request, and the
+    /// next start ran with no reset, so the old session and bearer stayed
+    /// valid under the new password.
+    #[test]
+    fn a_password_change_whose_first_start_fails_is_revoked_by_the_next_start_in_the_real_ri() {
+        let Some(ri_root) = reference_implementation_or_skip() else {
+            return;
+        };
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = crate::mock_app_with_data_dir(root.path());
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .expect("app data dir")
+            .join(UNIFIED_DB_DIRECTORY);
+        assert!(data_dir.starts_with(root.path()), "{data_dir:?}");
+        fs::create_dir_all(&data_dir).expect("data dir");
+        let driver = ri_root.join("test/fixtures/desktop-recovery-ri-driver.ts");
+        let seed_path = data_dir
+            .parent()
+            .expect("app data dir")
+            .join("driver-seed.json");
+
+        let old_password = "old-owner-password-0928";
+        let seeded = run_ri_driver(&ri_root, &data_dir, old_password, "seed", &[]);
+        assert_eq!(seeded["sessionStatus"], 204, "{seeded}");
+        assert_eq!(seeded["bearerStatus"], 200, "{seeded}");
+
+        let grant_id = "grant-test-0928-failed-start";
+        let request = run_ri_driver(
+            &ri_root,
+            &data_dir,
+            old_password,
+            "request-password-window",
+            &["change", grant_id],
+        );
+        let request_id = request["requestId"].as_u64().expect("request id");
+        crate::owner_credential::grant_owner_password_change_for_test(request_id, grant_id);
+        let window = tauri::WebviewWindowBuilder::new(&app, "owner-password", Default::default())
+            .build()
+            .expect("build the owner-password window");
+        let new_password = "new-owner-password-0928";
+        crate::invoke_from(
+            &window,
+            "set_desktop_owner_password",
+            serde_json::json!({ "password": new_password }),
+        )
+        .expect("the window saves the password");
+        let saved = crate::owner_credential::load_or_create_owner_credential(
+            &crate::owner_credential::owner_credential_path(app.handle()).expect("credential path"),
+        )
+        .expect("saved password");
+        assert_eq!(saved, new_password);
+
+        let start_args = |result_path: &Path| {
+            vec![
+                OsString::from("--import"),
+                OsString::from("tsx"),
+                driver.clone().into_os_string(),
+                OsString::from("recover"),
+                result_path.to_path_buf().into_os_string(),
+                seed_path.clone().into_os_string(),
+            ]
+        };
+
+        // The first start carries the revocation and fails before the RI
+        // serves: a wrong database key stands in for any such failure.
+        let (reset, carried) = owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, Some(OwnerSessionReset::PasswordChange));
+        let failing = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "wrong-database-key-0928",
+            reset,
+        )
+        .expect("prepare the failing start");
+        let failed_result = root.path().join("failed-start.json");
+        let failed = start_ri_with(
+            failing,
+            Some(ri_root.clone()),
+            start_args(&failed_result),
+            Duration::from_secs(60),
+        );
+        assert!(failed.is_err(), "the start with a wrong key must fail");
+        assert!(!failed_result.exists(), "the failed start must not serve");
+
+        // The next start, from "Open DataConnect" or the next launch, passes
+        // no reset of its own. The pending request supplies it.
+        let (reset, next_carried) = owner_session_reset_for_start(app.handle(), None);
+        assert_eq!(reset, Some(OwnerSessionReset::PasswordChange));
+        assert_eq!(next_carried, carried);
+        let environment = prepare_ri_start(
+            &data_dir,
+            &saved,
+            OwnerPasswordSource::DesktopGenerated,
+            "reveal-proof-test",
+            "credential-key-test",
+            "database-key-test-0928",
+            reset,
+        )
+        .expect("prepare the next start");
+        let result_path = root.path().join("next-start.json");
+        let handle = start_ri_with(
+            environment,
+            Some(ri_root.clone()),
+            start_args(&result_path),
+            Duration::from_secs(120),
+        )
+        .expect("real RI starts with the new password");
+        let _ = handle.stop();
+        let result: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&result_path).expect("result")).expect("json");
+        assert_eq!(result["oldSessionStatus"], 401, "{result}");
+        assert_eq!(result["oldBearerStatus"], 401, "{result}");
+        assert_eq!(result["freshSessionStatus"], 204, "{result}");
+
+        // That start reached Ready and completes the request: a later start
+        // does not revoke again.
+        crate::owner_credential::complete_owner_password_stack_restart_request(
+            app.handle(),
+            next_carried,
+        )
+        .expect("complete");
+        assert_eq!(
+            owner_session_reset_for_start(app.handle(), None),
+            (None, None)
+        );
+        println!("REAL-RI FAILED-START REVOCATION TEST RAN");
+    }
+
+    /// The tests of `owner_session_reset_for_start` stand in for the
+    /// bootstrap, which needs the real runtime. This pins the bootstrap to
+    /// it: each start reads the pending request before the stack starts, and
+    /// completes it after the last failure branch, before Ready.
+    #[test]
+    fn every_bootstrap_carries_out_the_pending_stack_restart_request() {
+        let source = include_str!("unified.rs");
+        let section = |from: &str, to: &str| {
+            let start = source.find(from).expect(from);
+            let end = start + source[start..].find(to).expect(to);
+            &source[start..end]
+        };
+        let bootstrap = section(
+            "async fn bootstrap_and_open_console(",
+            "async fn finish_bootstrap(",
+        );
+        let read = bootstrap
+            .find("owner_session_reset_for_start(&app, owner_session_reset)")
+            .expect("the bootstrap reads the pending request");
+        let start = bootstrap
+            .find("start_managed_stack(")
+            .expect("the bootstrap starts the stack");
+        assert!(read < start, "the request is read before the stack starts");
+        let password = bootstrap
+            .find("load_bootstrap_secrets(")
+            .expect("the bootstrap reads the password");
+        assert!(read < password, "the request is read before the password");
+        assert!(bootstrap.contains("stack_restart_request_id,\n    )\n    .await"));
+
+        let finish = section(
+            "async fn finish_bootstrap(",
+            "\n/// Recovery-window command",
+        );
+        let last_failure = finish
+            .rfind("teardown_managed_on_error(")
+            .expect("finish_bootstrap has failure branches");
+        let complete = finish
+            .find("complete_owner_password_stack_restart_request(")
+            .expect("finish_bootstrap completes the request");
+        let ready = finish
+            .find("set_status(app, UnifiedStatus::Ready)")
+            .expect("finish_bootstrap sets Ready");
+        assert!(last_failure < complete && complete < ready);
+    }
+
+    #[tokio::test]
+    async fn config_restart_waits_for_cloudflare_bootstrap_to_store_before_teardown() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let lifecycle = Arc::new(Mutex::new((Vec::<&'static str>::new(), None::<usize>)));
+        let (cloudflare_applied_tx, cloudflare_applied_rx) = tokio::sync::oneshot::channel();
+        let (continue_bootstrap_tx, continue_bootstrap_rx) = tokio::sync::oneshot::channel();
+
+        let bootstrap = {
+            let gate = gate.clone();
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move {
+                try_with_stack_start_gate(gate, || async move {
+                    lifecycle.lock().unwrap().0.push("start:1");
+                    lifecycle.lock().unwrap().0.push("cloudflare-applied");
+                    cloudflare_applied_tx.send(()).unwrap();
+                    continue_bootstrap_rx.await.unwrap();
+                    let mut state = lifecycle.lock().unwrap();
+                    state.1 = Some(1);
+                    state.0.push("store:1");
+                    state.0.push("finish-bootstrap");
+                })
+                .await
+                .unwrap();
+            })
+        };
+
+        cloudflare_applied_rx.await.unwrap();
+        let (restart_entered_tx, restart_entered_rx) = tokio::sync::oneshot::channel();
+        let restart = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(with_stack_start_gate(gate, || async move {
+                let _ = restart_entered_tx.send(());
+                let mut state = lifecycle.lock().unwrap();
+                let stored = state.1.take();
+                match stored {
+                    Some(stack) => state.0.push(if stack == 1 {
+                        "teardown:1"
+                    } else {
+                        "teardown:unknown"
+                    }),
+                    None => state.0.push("teardown:empty"),
+                }
+                state.0.push("start:2");
+                state.1 = Some(2);
+                state.0.push("store:2");
+                state.0.push("finish-bootstrap");
+            }))
+        };
+        let restart_entered_while_bootstrap_paused =
+            tokio::time::timeout(Duration::from_millis(10), restart_entered_rx)
+                .await
+                .is_ok();
+
+        continue_bootstrap_tx.send(()).unwrap();
+        bootstrap.await.unwrap();
+        restart.await.unwrap();
+        assert!(
+            !restart_entered_while_bootstrap_paused,
+            "restart must wait for bootstrap to store and finish; lifecycle: {:?}",
+            lifecycle.lock().unwrap().0
+        );
+        assert_eq!(
+            lifecycle.lock().unwrap().0,
+            [
+                "start:1",
+                "cloudflare-applied",
+                "store:1",
+                "finish-bootstrap",
+                "teardown:1",
+                "start:2",
+                "store:2",
+                "finish-bootstrap"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_access_restart_tears_down_the_stored_stack_once_and_replaces_it_once() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let lifecycle = Arc::new(Mutex::new((Vec::<&'static str>::new(), None::<usize>)));
+        try_with_stack_start_gate(gate.clone(), || {
+            let lifecycle = lifecycle.clone();
+            async move {
+                lifecycle.lock().unwrap().0.push("start:1");
+                lifecycle.lock().unwrap().1 = Some(1);
+                lifecycle.lock().unwrap().0.push("store:1");
+                lifecycle.lock().unwrap().0.push("finish-bootstrap");
+            }
+        })
+        .await
+        .unwrap();
+
+        with_stack_start_gate(gate, || {
+            let lifecycle = lifecycle.clone();
+            async move {
+                let mut state = lifecycle.lock().unwrap();
+                assert_eq!(state.1.take(), Some(1));
+                state.0.push("teardown:1");
+                state.0.push("start:2");
+                state.1 = Some(2);
+                state.0.push("store:2");
+                state.0.push("finish-bootstrap");
+            }
+        })
+        .await;
+        let state = lifecycle.lock().unwrap();
+        assert_eq!(state.1, Some(2));
+        assert_eq!(
+            state
+                .0
+                .iter()
+                .filter(|event| **event == "teardown:1")
+                .count(),
+            1
+        );
+        assert_eq!(
+            state
+                .0
+                .iter()
+                .filter(|event| event.starts_with("start:"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_reports_busy_then_stores_one_stack_after_gate_release() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let start_guard = gate.clone().lock_owned().await;
+        let stores = Arc::new(Mutex::new(0));
+        let busy = try_recovery_start(gate.clone(), || async {
+            *stores.lock().unwrap() += 1;
+        })
+        .await;
+        assert_eq!(
+            busy.unwrap_err(),
+            "A DataConnect stack start or restart is already in progress"
+        );
+        assert_eq!(*stores.lock().unwrap(), 0);
+
+        drop(start_guard);
+        try_with_stack_start_gate(gate, || {
+            let stores = stores.clone();
+            async move { *stores.lock().unwrap() += 1 }
+        })
+        .await
+        .unwrap();
+        assert_eq!(*stores.lock().unwrap(), 1);
+    }
+
+    #[test]
     fn a_pinned_console_port_reaches_the_console_process_spec() {
         let mut remote_access = off_remote_access_config();
         remote_access.console_port = Some(4310);
@@ -6014,7 +7808,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &remote_access,
             4310,
         );
@@ -6026,7 +7822,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &off_remote_access_config(),
             crate::console_port::DEFAULT_CONSOLE_PORT,
         );
@@ -6043,7 +7841,9 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
             "http://127.0.0.1:7662",
             "http://127.0.0.1:7663",
             "owner-password-test",
+            OwnerPasswordSource::DesktopGenerated,
             "reveal-proof-test",
+            Path::new("/tmp/unified"),
             &off_remote_access_config(),
             38739,
         );
@@ -6095,6 +7895,39 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(
             resolve_staged_root(directory.path(), "release", "console"),
             Some(root)
+        );
+    }
+
+    #[test]
+    fn node_sidecar_resolves_beside_the_macos_app_executable() {
+        let directory = tempdir().expect("app bundle temp directory");
+        let resources = directory.path().join("Contents").join("Resources");
+        let executable_dir = directory.path().join("Contents").join("MacOS");
+        let node_binary = executable_dir.join("pdpp-node");
+        fs::create_dir_all(&resources).expect("app resources directory");
+        fs::create_dir_all(&executable_dir).expect("app executable directory");
+        fs::write(&node_binary, "node runtime").expect("bundled Node.js executable");
+
+        assert_eq!(
+            resolve_node_binary_from(&resources, Some(&executable_dir)),
+            Some(node_binary)
+        );
+    }
+
+    #[test]
+    fn node_sidecar_prefers_the_background_helper_bundle() {
+        let directory = tempdir().expect("app bundle temp directory");
+        let resources = directory.path().join("Contents/Resources");
+        let executable_dir = directory.path().join("Contents/MacOS");
+        let helper =
+            executable_dir.join("../Helpers/DataConnect Helper.app/Contents/MacOS/DataConnect");
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::create_dir_all(&executable_dir).unwrap();
+        fs::write(&helper, "background node").unwrap();
+        fs::write(executable_dir.join("pdpp-node"), "foreground node").unwrap();
+        assert_eq!(
+            resolve_node_binary_from(&resources, Some(&executable_dir)),
+            Some(helper)
         );
     }
 
@@ -6399,36 +8232,31 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         let console_script = fake_console_script();
         let events = RecordingSink::default();
         let observed = Arc::clone(&events.0);
+        let restart_max = 1;
+        let restart_backoff = FAKE_RESTART_BACKOFF;
         let (mut stack, _, _) = fake_stack(
             ri_script.path(),
             console_script.path(),
             events,
             RestartPolicy::Bounded {
-                max: 1,
-                backoff: Duration::from_millis(25),
+                max: restart_max,
+                backoff: restart_backoff,
             },
             BTreeMap::new(),
         );
 
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            let events = observed.lock().expect("lifecycle events lock");
-            let ready_count = events
-                .iter()
-                .filter(|event| {
-                    event.label == RI_LABEL && matches!(event.state, LifecycleState::Ready)
-                })
-                .count();
-            let restarted = events.iter().any(|event| {
-                event.label == RI_LABEL && matches!(event.state, LifecycleState::Restarting)
-            });
-            drop(events);
-            if ready_count >= 2 && restarted {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        let events = observed.lock().expect("lifecycle events lock");
+        // An idle period covers the fake supervisor's full readiness, stop,
+        // restart-backoff, and poll budgets for each configured attempt. Every
+        // new RI event restarts that bounded window, so healthy progress under
+        // CI load does not race a wall-clock deadline.
+        let idle_window = (FAKE_READINESS_DEADLINE
+            + restart_backoff
+            + FAKE_STOP_TOTAL
+            + crate::commands::process_supervisor::READINESS_POLL_INTERVAL)
+            * restart_max.saturating_add(1);
+        let observed_events = wait_for_fake_ri_restart(&observed, idle_window);
+        stack.stop().expect("fake stack should stop");
+        let events = observed_events.expect("RI restart lifecycle events should arrive");
         assert!(events.iter().any(|event| {
             event.label == RI_LABEL && matches!(event.state, LifecycleState::Restarting)
         }));
@@ -6440,37 +8268,6 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
                 })
                 .count()
                 >= 2
-        );
-        drop(events);
-        stack.stop().expect("fake stack should stop");
-    }
-
-    #[test]
-    fn console_cookie_is_set_before_navigation() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let set_events = Arc::clone(&events);
-        let navigate_events = Arc::clone(&events);
-
-        set_cookies_then_navigate(
-            || {
-                set_events
-                    .lock()
-                    .expect("set events lock")
-                    .push("set_cookie");
-                Ok(())
-            },
-            || {
-                let mut events = navigate_events.lock().expect("navigate events lock");
-                assert_eq!(events.as_slice(), ["set_cookie"]);
-                events.push("navigate");
-                Ok(())
-            },
-        )
-        .expect("navigation ordering");
-
-        assert_eq!(
-            events.lock().expect("events lock").as_slice(),
-            ["set_cookie", "navigate"]
         );
     }
 
@@ -6588,13 +8385,123 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(cookie.http_only(), Some(true));
     }
 
+    /// The console webview must send both cookies the desktop sets on it.
+    /// wry turns a cookie with no domain into a WebKitGTK cookie with domain
+    /// "", which WebKitGTK stores and never sends; the reveal cookie had no
+    /// domain until this test was written. This builds a real WebKitGTK
+    /// webview, sets the two cookies through wry, and records the Cookie header
+    /// at a local HTTP server.
+    ///
+    /// It needs a display, so it is ignored by default. Run it on its own
+    /// display and session bus, never the desktop's:
+    ///
+    /// ```text
+    /// xvfb-run -a dbus-run-session -- cargo test --lib -- --ignored --exact \
+    ///     unified::tests::the_console_webview_sends_the_session_and_reveal_cookies --nocapture
+    /// ```
+    #[cfg(target_os = "linux")]
     #[test]
-    fn owner_credential_reveal_cookie_is_host_only_and_http_only() {
+    #[ignore = "needs a display: run under xvfb-run and dbus-run-session"]
+    fn the_console_webview_sends_the_session_and_reveal_cookies() {
+        use gtk::prelude::*;
+        use std::io::{BufRead, BufReader, Write};
+        use wry::WebViewBuilderExtUnix;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        let (seen, requests) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
+                let mut cookie = String::new();
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("cookie") {
+                            cookie = value.trim().to_string();
+                        }
+                    }
+                }
+                if request_line.starts_with("GET /settings ") {
+                    let _ = seen.send(cookie);
+                }
+                let body = "<html><body>console</body></html>";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+
+        gtk::init().expect("GTK needs a display: run under xvfb-run");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        let webview = wry::WebViewBuilder::new()
+            .with_url("about:blank")
+            .build_gtk(&window)
+            .expect("build the webview");
+        window.show_all();
+        let url: tauri::Url = format!("http://127.0.0.1:{port}/").parse().expect("url");
+        for cookie in [
+            owner_session_cookie(&url, "session-value").expect("session cookie"),
+            owner_credential_reveal_cookie(&url, "reveal-value").expect("reveal cookie"),
+        ] {
+            webview.set_cookie(&cookie).expect("set cookie");
+        }
+        webview
+            .load_url(&format!("http://127.0.0.1:{port}/settings"))
+            .expect("load the console");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let cookie = loop {
+            // Bounded so a busy event queue cannot keep the deadline from firing.
+            for _ in 0..64 {
+                if !gtk::events_pending() {
+                    break;
+                }
+                gtk::main_iteration_do(false);
+            }
+            if let Ok(cookie) = requests.try_recv() {
+                break cookie;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the webview never requested /settings"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        println!("WEBKITGTK COOKIE HEADER: {cookie}");
+        let pairs: Vec<&str> = cookie.split("; ").collect();
+        assert!(
+            pairs.contains(&"pdpp_owner_session=session-value"),
+            "{cookie}"
+        );
+        assert!(
+            pairs.contains(&format!("{OWNER_CREDENTIAL_REVEAL_COOKIE}=reveal-value").as_str()),
+            "the reveal cookie was not sent: {cookie:?}"
+        );
+        println!("WEBKITGTK COOKIE TEST RAN");
+    }
+
+    #[test]
+    fn owner_credential_reveal_cookie_sets_the_console_host_and_is_http_only() {
         let url: tauri::Url = "http://127.0.0.1:4310/".parse().expect("test url");
         let cookie = owner_credential_reveal_cookie(&url, "reveal-proof").expect("reveal cookie");
         assert_eq!(cookie.name(), OWNER_CREDENTIAL_REVEAL_COOKIE);
         assert_eq!(cookie.value(), "reveal-proof");
-        assert_eq!(cookie.domain(), None);
+        assert_eq!(cookie.domain(), Some("127.0.0.1"));
+        let session = owner_session_cookie(&url, "session").expect("session cookie");
+        assert_eq!(cookie.domain(), session.domain());
         assert_eq!(cookie.path(), Some("/"));
         assert_eq!(cookie.http_only(), Some(true));
     }
@@ -6609,7 +8516,7 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
     fn console_window_wires_on_navigation_unconditionally() {
         let source = include_str!("unified.rs");
         let start = source
-            .find("fn create_or_update_console_window(")
+            .find("async fn create_or_update_console_window(")
             .expect("create_or_update_console_window must exist");
         let body = &source[start..];
         assert!(

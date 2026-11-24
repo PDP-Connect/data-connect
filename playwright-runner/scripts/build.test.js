@@ -1,9 +1,19 @@
 // Copyright The PDP-Connect Contributors
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+  copyBrowserDirectory,
   getBrowserDirectoryName,
   parseBuildOptions,
   supportsBrowserProvisioning,
@@ -82,5 +92,32 @@ describe("playwright-runner build options", () => {
     expect(resolverSource.indexOf("getSystemChromePath()")).toBeLessThan(
       resolverSource.indexOf("getDownloadedChromiumPath()")
     )
+  })
+})
+
+describe("copyBrowserDirectory", () => {
+  it("keeps the macOS framework symlinks relative", () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-copy-"))
+    try {
+      const framework = join(root, "source", "F.framework")
+      mkdirSync(join(framework, "Versions", "1.0", "Helpers"), {
+        recursive: true,
+      })
+      writeFileSync(join(framework, "Versions", "1.0", "F"), "binary")
+      symlinkSync("1.0", join(framework, "Versions", "Current"))
+      symlinkSync("Versions/Current/F", join(framework, "F"))
+      symlinkSync("Versions/Current/Helpers", join(framework, "Helpers"))
+
+      copyBrowserDirectory(join(root, "source"), join(root, "copy"))
+
+      const copied = join(root, "copy", "F.framework")
+      expect(readlinkSync(join(copied, "Versions", "Current"))).toBe("1.0")
+      expect(readlinkSync(join(copied, "F"))).toBe("Versions/Current/F")
+      expect(readlinkSync(join(copied, "Helpers"))).toBe(
+        "Versions/Current/Helpers"
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

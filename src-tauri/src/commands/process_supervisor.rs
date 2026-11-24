@@ -3,20 +3,26 @@
 //! A small, policy-driven supervisor for local sidecar processes.
 //!
 //! The `process_group` option is implemented with POSIX process groups on Unix.
-//! Windows has no POSIX process-group equivalent in `std::process`; until a
-//! Job Object implementation is added, graceful group signalling is not
-//! available there and the option stops only the leader after escalation.
+//! Windows has no POSIX process-group equivalent in `std::process`; graceful
+//! group signalling is not available there and the option stops only the
+//! leader after escalation. (Each Windows sidecar is in a kill-on-close Job
+//! Object, but only to clean up after the app dies, not for graceful stops.)
+//!
+//! A sidecar must not outlive the app. Every sidecar gets a stdin pipe the
+//! supervisor never writes to (`PARENT_LIFELINE_ENV`): the kernel closes it
+//! when the app dies, on every OS, and the sidecar exits on EOF. Linux
+//! (`PR_SET_PDEATHSIG`) and Windows (Job Object) add a kernel-level kill.
 
 use serde::Serialize;
-use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::collections::BTreeSet;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::sync::OnceLock;
@@ -25,8 +31,67 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+#[cfg(windows)]
+mod windows_job;
+
 const SUPERVISOR_EVENT: &str = "process-supervisor";
-const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+pub(crate) const READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(any(windows, test))]
+const WINDOWS_RUNTIME_ENVIRONMENT_KEYS: [&str; 7] = [
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "PATH",
+    "PATHEXT",
+];
+
+#[cfg(any(windows, test))]
+fn windows_child_environment(
+    inherited: impl IntoIterator<Item = (OsString, OsString)>,
+    configured: &BTreeMap<OsString, OsString>,
+) -> BTreeMap<OsString, OsString> {
+    let mut environment = BTreeMap::new();
+    for (key, value) in inherited {
+        if is_windows_runtime_environment_key(&key) {
+            set_case_insensitive_environment_value(&mut environment, key, value);
+        }
+    }
+    for (key, value) in configured {
+        set_case_insensitive_environment_value(&mut environment, key.clone(), value.clone());
+    }
+    environment
+}
+
+#[cfg(any(windows, test))]
+fn is_windows_runtime_environment_key(key: &OsStr) -> bool {
+    key.to_str().is_some_and(|key| {
+        WINDOWS_RUNTIME_ENVIRONMENT_KEYS
+            .iter()
+            .any(|required| key.eq_ignore_ascii_case(required))
+    })
+}
+
+#[cfg(any(windows, test))]
+fn set_case_insensitive_environment_value(
+    environment: &mut BTreeMap<OsString, OsString>,
+    key: OsString,
+    value: OsString,
+) {
+    if let Some(existing_key) = environment
+        .keys()
+        .find(|existing| {
+            existing
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&key.to_string_lossy())
+        })
+        .cloned()
+    {
+        environment.remove(&existing_key);
+    }
+    environment.insert(key, value);
+}
 
 #[cfg(unix)]
 type ProcessGroupRegistry = Arc<Mutex<BTreeSet<libc::pid_t>>>;
@@ -202,9 +267,14 @@ impl From<io::Error> for SupervisorError {
 
 struct SupervisorState {
     stopping: AtomicBool,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     #[cfg(unix)]
-    process_group_id: Mutex<Option<libc::pid_t>>,
+    process_group_id: Arc<Mutex<Option<libc::pid_t>>>,
+    #[cfg(unix)]
+    retirement_started: AtomicBool,
+    #[cfg(all(test, unix))]
+    fail_retirement_spawn: AtomicBool,
+    cleanup_error: Mutex<Option<String>>,
     finished: Mutex<bool>,
     finished_signal: Condvar,
     stop_deadline: Mutex<Option<Instant>>,
@@ -215,9 +285,14 @@ impl SupervisorState {
     fn new() -> Self {
         Self {
             stopping: AtomicBool::new(false),
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
-            process_group_id: Mutex::new(None),
+            process_group_id: Arc::new(Mutex::new(None)),
+            #[cfg(unix)]
+            retirement_started: AtomicBool::new(false),
+            #[cfg(all(test, unix))]
+            fail_retirement_spawn: AtomicBool::new(false),
+            cleanup_error: Mutex::new(None),
             finished: Mutex::new(false),
             finished_signal: Condvar::new(),
             stop_deadline: Mutex::new(None),
@@ -280,26 +355,10 @@ fn register_process_group(process_group: u32) -> Result<(), SupervisorError> {
 #[cfg(unix)]
 fn unregister_process_group(process_group: libc::pid_t) {
     if let Some(Ok(registry)) = PROCESS_GROUP_REGISTRY.get() {
-        if let Ok(mut process_groups) = registry.lock() {
-            process_groups.remove(&process_group);
-        }
-    }
-}
-
-#[cfg(unix)]
-fn take_process_group_id(state: &SupervisorState) -> Option<libc::pid_t> {
-    state.process_group_id.lock().ok()?.take()
-}
-
-#[cfg(unix)]
-struct ProcessGroupRegistration(Option<libc::pid_t>);
-
-#[cfg(unix)]
-impl Drop for ProcessGroupRegistration {
-    fn drop(&mut self) {
-        if let Some(slot) = self.0.take() {
-            unregister_process_group(slot);
-        }
+        // Serialize removal with the shutdown handler before releasing the
+        // leader's PID. Poisoning must not silently skip unregistering.
+        registry.lock().unwrap_or_else(|error| error.into_inner())
+            .remove(&process_group);
     }
 }
 
@@ -509,6 +568,12 @@ impl SupervisorHandle {
                 ));
             }
         }
+        if let Some(error) = self.state.cleanup_error.lock()
+            .map_err(|_| SupervisorError::Message("supervisor state was poisoned".to_string()))?
+            .as_ref()
+        {
+            return Err(SupervisorError::Message(error.clone()));
+        }
         Ok(())
     }
 }
@@ -530,22 +595,31 @@ fn run_supervisor(
     let mut restart_count = 0;
     let mut readiness_reported = false;
 
-    // Every `return` below is a terminal exit of this supervisor, and each
-    // one is preceded by `state.finish()`. Announcing the reap from a guard
-    // means a new exit path cannot silently forget to do it and leave a
-    // lease pointing at a dead pid.
+    // A dead leader can still own live descendants. Revoke the durable
+    // lease only after cleanup has confirmed the entire process tree exited.
     struct ReapGuard<'a> {
         observer: &'a Arc<dyn ProcessObserver>,
         label: &'a str,
+        state: &'a SupervisorState,
     }
     impl Drop for ReapGuard<'_> {
         fn drop(&mut self) {
-            self.observer.reaped(self.label);
+            let child_reaped = self.state.child.lock()
+                .map(|child| child.is_none()).unwrap_or(false);
+            #[cfg(unix)]
+            let group_reaped = self.state.process_group_id.lock()
+                .map(|group| group.is_none()).unwrap_or(false);
+            #[cfg(not(unix))]
+            let group_reaped = true;
+            if child_reaped && group_reaped {
+                self.observer.reaped(self.label);
+            }
         }
     }
     let _reap_guard = ReapGuard {
         observer: &observer,
         label: &spec.label,
+        state: &state,
     };
 
     loop {
@@ -618,6 +692,14 @@ fn run_supervisor(
                 return;
             }
             ReadinessOutcome::Exited(status) => {
+                if let Err(error) = stop_current_child(&spec, &state) {
+                    let _ = ready_sender.send(Err(format!("failed to clean up {}: {error}", spec.label)));
+                    log::error!("[{}] failed to clean up exited process tree: {error}", spec.label);
+                    state.finish();
+                    return;
+                }
+                let (stdout_tail, stderr_tail) = spawned.output.drain();
+                log_exit_before_readiness(&spec.label, status.as_ref(), &stdout_tail, &stderr_tail);
                 emit(
                     &spec,
                     &sink,
@@ -637,10 +719,12 @@ fn run_supervisor(
                         },
                     ),
                     Ok(None) => {}
-                    Err(error) => log::error!(
-                        "[{}] failed to stop after readiness timeout: {error}",
-                        spec.label
-                    ),
+                    Err(error) => {
+                        log::error!("[{}] failed to stop after readiness timeout: {error}", spec.label);
+                        let _ = ready_sender.send(Err(format!("failed to clean up {}: {error}", spec.label)));
+                        state.finish();
+                        return;
+                    }
                 }
             }
             ReadinessOutcome::StopRequested => {
@@ -700,8 +784,12 @@ fn monitor_ready_process(
             return false;
         }
 
-        match take_exited_child(state) {
+        match poll_child_exit(state) {
             Ok(Some(status)) => {
+                if let Err(error) = stop_current_child(spec, state) {
+                    log::error!("[{}] failed to clean up exited process tree: {error}", spec.label);
+                    return false;
+                }
                 emit(
                     spec,
                     sink,
@@ -773,27 +861,416 @@ fn emit_stopped(spec: &ProcessSpec, state: &SupervisorState, sink: &Arc<dyn Even
 struct SpawnedProcess {
     child: Child,
     stdout_lines: mpsc::Receiver<String>,
+    output: CapturedOutput,
     #[cfg(unix)]
     process_group_id: Option<libc::pid_t>,
+    /// Write end of the child's stdin pipe. Never written to; held open for as
+    /// long as this value lives, so the child sees EOF only when the app
+    /// closes it or dies. See `PARENT_LIFELINE_ENV`.
+    #[allow(dead_code)] // held for its Drop, not read
+    lifeline: Option<ChildStdin>,
+    /// Windows: the kernel kills the child's process tree when this closes.
+    #[cfg(windows)]
+    #[allow(dead_code)] // held for its Drop, not read
+    job: Option<windows_job::KillOnCloseJob>,
+}
+
+/// Set on every sidecar to arm its parent lifeline: the sidecar exits when its
+/// stdin reaches EOF. `scripts/parent-lifeline.mjs` reads it.
+const PARENT_LIFELINE_ENV: &str = "PDPP_PARENT_LIFELINE";
+const PARENT_LIFELINE_STDIN: &str = "stdin";
+
+const OUTPUT_TAIL_LINES: usize = 40;
+const OUTPUT_LINE_MAX_BYTES: usize = 8 * 1024;
+const OUTPUT_STREAM_MAX_BYTES: usize = 64 * 1024;
+const OUTPUT_READ_BUFFER_BYTES: usize = 4 * 1024;
+const OUTPUT_DRAIN_DEADLINE: Duration = Duration::from_millis(300);
+const OUTPUT_TRUNCATED_MARKER: &str = "[line truncated; contents hidden]";
+
+#[derive(Default)]
+struct CapturedOutput {
+    stdout: Arc<Mutex<OutputTail>>,
+    stderr: Arc<Mutex<OutputTail>>,
+    readers: Vec<thread::JoinHandle<()>>,
+}
+
+impl CapturedOutput {
+    fn drain(self) -> (Vec<String>, Vec<String>) {
+        // A descendant can inherit a pipe and keep it open after the leader
+        // exits. Wait briefly for ordinary EOF, then detach unfinished readers
+        // and report the output captured so far instead of hanging startup.
+        let deadline = Instant::now() + OUTPUT_DRAIN_DEADLINE;
+        while self.readers.iter().any(|reader| !reader.is_finished()) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5).min(remaining));
+        }
+        for reader in self.readers {
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
+        }
+        (tail_snapshot(&self.stdout), tail_snapshot(&self.stderr))
+    }
+}
+
+#[derive(Default)]
+struct OutputTail {
+    lines: VecDeque<String>,
+    bytes: usize,
+}
+
+impl OutputTail {
+    fn push(&mut self, line: String) {
+        let line_bytes = line.len().saturating_add(1);
+        if line_bytes > OUTPUT_STREAM_MAX_BYTES {
+            return;
+        }
+        while self.lines.len() >= OUTPUT_TAIL_LINES
+            || self.bytes.saturating_add(line_bytes) > OUTPUT_STREAM_MAX_BYTES
+        {
+            let Some(removed) = self.lines.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(removed.len().saturating_add(1));
+        }
+        self.bytes = self.bytes.saturating_add(line_bytes);
+        self.lines.push_back(line);
+    }
+}
+
+fn append_tail(tail: &Mutex<OutputTail>, line: String) {
+    if let Ok(mut tail) = tail.lock() {
+        tail.push(line);
+    }
+}
+
+fn tail_snapshot(tail: &Mutex<OutputTail>) -> Vec<String> {
+    tail.lock()
+        .map(|tail| tail.lines.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn log_exit_before_readiness(
+    label: &str,
+    status: Option<&ExitStatus>,
+    stdout_tail: &[String],
+    stderr_tail: &[String],
+) {
+    log::error!(
+        "{}",
+        exit_before_readiness_message(label, status, stdout_tail, stderr_tail)
+    );
+}
+
+fn exit_before_readiness_message(
+    label: &str,
+    status: Option<&ExitStatus>,
+    stdout_tail: &[String],
+    stderr_tail: &[String],
+) -> String {
+    let stdout = if stdout_tail.is_empty() {
+        "(empty)".to_string()
+    } else {
+        stdout_tail.join("\n")
+    };
+    let stderr = if stderr_tail.is_empty() {
+        "(empty)".to_string()
+    } else {
+        stderr_tail.join("\n")
+    };
+    format!(
+        "[{}] exited before readiness: exit_code={:?}; stdout tail:\n{}\nstderr tail:\n{}",
+        label,
+        status.and_then(ExitStatus::code),
+        stdout,
+        stderr
+    )
+}
+
+fn redact_child_output(line: &str, secrets: &[String]) -> String {
+    let mut redacted = redact_bearer_values(&redact_labeled_values(line));
+    for secret in secrets {
+        if secret.len() >= 4 {
+            redacted = redacted.replace(secret, "[REDACTED]");
+        }
+    }
+    truncate_output_line(redacted, false)
+}
+
+fn redact_labeled_values(value: &str) -> String {
+    const SENSITIVE_LABELS: [&str; 18] = [
+        "credentialEncryptionKey",
+        "databaseEncryptionKey",
+        "ownerCredentialRevealProof",
+        "setupToken",
+        "access_token",
+        "accessToken",
+        "refresh_token",
+        "refreshToken",
+        "set-cookie",
+        "proxy-authorization",
+        "authorization",
+        "cookie",
+        "password",
+        "passwd",
+        "secret",
+        "apiKey",
+        "token",
+        "key",
+    ];
+    let mut bytes = value.as_bytes().to_vec();
+    let mut scan = 0;
+    while scan < bytes.len() {
+        let mut found = None;
+        for label in SENSITIVE_LABELS {
+            let label_bytes = label.as_bytes();
+            let Some(end) = scan.checked_add(label_bytes.len()) else {
+                continue;
+            };
+            if end > bytes.len()
+                || !bytes[scan..end].eq_ignore_ascii_case(label_bytes)
+                || (scan > 0 && is_label_byte(bytes[scan - 1]))
+            {
+                continue;
+            }
+            let json_key = scan > 0
+                && bytes[scan - 1] == b'"'
+                && bytes.get(end) == Some(&b'"');
+            let mut separator = end;
+            if bytes.get(separator) == Some(&b'"') || bytes.get(separator) == Some(&b'\'') {
+                separator += 1;
+            }
+            while bytes.get(separator).is_some_and(u8::is_ascii_whitespace) {
+                separator += 1;
+            }
+            if bytes.get(separator) != Some(&b':') && bytes.get(separator) != Some(&b'=') {
+                continue;
+            }
+            let json_member = json_key && bytes.get(separator) == Some(&b':');
+            let mut start = separator + 1;
+            while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+                start += 1;
+            }
+            let quote = bytes
+                .get(start)
+                .copied()
+                .filter(|byte| *byte == b'"' || *byte == b'\'');
+            let redact_to_line_end = matches!(
+                label.to_ascii_lowercase().as_str(),
+                "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+            );
+            if redact_to_line_end && json_member && quote == Some(b'"') {
+                start += 1;
+                let mut end_value = start;
+                while end_value < bytes.len() {
+                    if bytes[end_value] == b'\\' {
+                        end_value = (end_value + 2).min(bytes.len());
+                    } else if bytes[end_value] == b'"' {
+                        break;
+                    } else {
+                        end_value += 1;
+                    }
+                }
+                found = Some((start, end_value));
+                break;
+            } else if redact_to_line_end {
+                found = Some((start, bytes.len()));
+                break;
+            } else {
+                let mut end_value = start;
+                if let Some(quote) = quote {
+                    start += 1;
+                    end_value = start;
+                    while end_value < bytes.len() {
+                        if bytes[end_value] == b'\\' {
+                            end_value = (end_value + 2).min(bytes.len());
+                        } else if bytes[end_value] == quote {
+                            break;
+                        } else {
+                            end_value += 1;
+                        }
+                    }
+                } else {
+                    while end_value < bytes.len()
+                        && !bytes[end_value].is_ascii_whitespace()
+                        && !b",}] ;".contains(&bytes[end_value])
+                    {
+                        end_value += 1;
+                    }
+                }
+                found = Some((start, end_value));
+                break;
+            }
+        }
+        if let Some((start, end)) = found {
+            bytes.splice(start..end, b"[REDACTED]".iter().copied());
+            scan = start + "[REDACTED]".len();
+        } else {
+            scan += 1;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn is_label_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn is_secret_environment_key(key: &OsStr) -> bool {
+    let key = key.to_string_lossy().to_ascii_lowercase();
+    [
+        "password",
+        "token",
+        "secret",
+        "credential",
+        "encryption_key",
+        "reveal_proof",
+    ]
+    .iter()
+    .any(|sensitive| key.contains(sensitive))
+}
+
+fn redact_bearer_values(value: &str) -> String {
+    const CREDENTIAL_SCHEMES: [&[u8]; 2] = [b"bearer", b"basic"];
+    let mut bytes = value.as_bytes().to_vec();
+    let mut scan = 0;
+    while scan < bytes.len() {
+        let Some(scheme) = CREDENTIAL_SCHEMES.iter().find(|scheme| {
+            let end = scan + scheme.len();
+            end <= bytes.len()
+                && bytes[scan..end].eq_ignore_ascii_case(scheme)
+                && (scan == 0 || !is_label_byte(bytes[scan - 1]))
+        }) else {
+            scan += 1;
+            continue;
+        };
+        let end_scheme = scan + scheme.len();
+        let mut start = end_scheme;
+        if bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+            while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+                start += 1;
+            }
+            let mut end = start;
+            while end < bytes.len()
+                && !bytes[end].is_ascii_whitespace()
+                && !b"\"' ,}];".contains(&bytes[end])
+            {
+                end += 1;
+            }
+            if end > start {
+                bytes.splice(start..end, b"[REDACTED]".iter().copied());
+                scan = start + "[REDACTED]".len();
+                continue;
+            }
+        }
+        scan = end_scheme;
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn truncate_output_line(mut line: String, truncated: bool) -> String {
+    if truncated {
+        let limit = OUTPUT_LINE_MAX_BYTES.saturating_sub(OUTPUT_TRUNCATED_MARKER.len());
+        let mut end = limit.min(line.len());
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+        line.push(' ');
+        line.push_str(OUTPUT_TRUNCATED_MARKER);
+    } else if line.len() > OUTPUT_LINE_MAX_BYTES {
+        let mut end = OUTPUT_LINE_MAX_BYTES;
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        line.truncate(end);
+    }
+    line
+}
+
+fn read_bounded_output_line(reader: &mut impl BufRead) -> io::Result<Option<String>> {
+    let mut bytes = Vec::with_capacity(OUTPUT_LINE_MAX_BYTES);
+    let mut truncated = false;
+    loop {
+        let (consume, newline, at_eof) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                (0, false, true)
+            } else {
+                let newline_at = available.iter().position(|byte| *byte == b'\n');
+                let data_len = newline_at.unwrap_or(available.len());
+                let remaining = OUTPUT_LINE_MAX_BYTES.saturating_sub(bytes.len());
+                let keep = data_len.min(remaining);
+                bytes.extend_from_slice(&available[..keep]);
+                truncated |= data_len > keep;
+                (
+                    newline_at.map_or(available.len(), |index| index + 1),
+                    newline_at.is_some(),
+                    false,
+                )
+            }
+        };
+        if at_eof {
+            if bytes.is_empty() && !truncated {
+                return Ok(None);
+            }
+            let line = String::from_utf8_lossy(&bytes).into_owned();
+            return Ok(Some(if truncated {
+                OUTPUT_TRUNCATED_MARKER.to_string()
+            } else {
+                truncate_output_line(line, false)
+            }));
+        }
+        reader.consume(consume);
+        if newline {
+            let line = String::from_utf8_lossy(&bytes).into_owned();
+            return Ok(Some(if truncated {
+                // Do not retain a prefix of a potentially sensitive value from
+                // an overlong line; preserve only the fact that it was long.
+                OUTPUT_TRUNCATED_MARKER.to_string()
+            } else {
+                truncate_output_line(line, false)
+            }));
+        }
+    }
 }
 
 fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, SupervisorError> {
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
-        .stdin(Stdio::null())
+        // A pipe the supervisor never writes to: the lifeline. The kernel
+        // closes our end when the app dies however it dies, which is the one
+        // parent-death signal that exists on every OS.
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(cwd) = &spec.cwd {
         command.current_dir(cwd);
     }
 
-    if spec.env.clear {
+    let environment = if spec.env.clear {
         command.env_clear();
-    }
-    for (key, value) in &spec.env.vars {
+        #[cfg(windows)]
+        {
+            windows_child_environment(std::env::vars_os(), &spec.env.vars)
+        }
+        #[cfg(not(windows))]
+        {
+            spec.env.vars.clone()
+        }
+    } else {
+        spec.env.vars.clone()
+    };
+    for (key, value) in &environment {
         command.env(key, render_port(value, port));
     }
+    // After the loop, so it is set whether or not the environment is cleared
+    // and cannot be overridden by the spec.
+    command.env(PARENT_LIFELINE_ENV, PARENT_LIFELINE_STDIN);
 
     #[cfg(unix)]
     if spec.process_group {
@@ -829,7 +1306,15 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     // uses. macOS/Windows still get the userspace SIGTERM/SIGINT/SIGHUP
     // handler (install_parent_signal_handlers) and the process-group
     // SIGTERM/SIGKILL escalation on normal shutdown; they just lack this
-    // specific kernel-level SIGKILL/OOM/segfault backstop.
+    // specific kernel-level SIGKILL/OOM/segfault backstop. They rely on the
+    // stdin lifeline above instead (PARENT_LIFELINE_ENV), which the sidecar
+    // acts on while it is running.
+    //
+    // PDEATHSIG covers only this direct child: the kernel clears it across
+    // fork(), so a grandchild is not covered. A program that forks the real
+    // server (a launcher script) must exec it instead, as the staged
+    // `launch.mjs` files do on Linux (`process.execve`); otherwise the
+    // grandchild outlives a SIGKILLed app and keeps its port.
     #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -863,6 +1348,21 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     }
 
     let mut child = command.spawn()?;
+    let lifeline = child.stdin.take();
+    // Kernel backstop on Windows: the sidecar and everything it starts die
+    // when the app's last handle to the job closes. A failure here leaves the
+    // stdin lifeline as the only cover, so log it and keep going.
+    #[cfg(windows)]
+    let job = match windows_job::KillOnCloseJob::adopt(&child) {
+        Ok(job) => Some(job),
+        Err(error) => {
+            log::warn!(
+                "[{}] could not place the sidecar in a kill-on-close job: {error}",
+                spec.label
+            );
+            None
+        }
+    };
     #[cfg(unix)]
     let process_group_id = if spec.process_group {
         match register_process_group(child.id()) {
@@ -879,11 +1379,12 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     let stdout = match child.stdout.take() {
         Some(stdout) => stdout,
         None => {
-            let _ = child.kill();
-            let _ = child.wait();
             #[cfg(unix)]
-            if let Some(process_group) = process_group_id {
-                unregister_process_group(process_group);
+            cleanup_failed_spawn(spec, child, process_group_id);
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill();
+                let _ = child.wait();
             }
             return Err(SupervisorError::Message(
                 "failed to pipe supervisor stdout".to_string(),
@@ -893,11 +1394,12 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     let stderr = match child.stderr.take() {
         Some(stderr) => stderr,
         None => {
-            let _ = child.kill();
-            let _ = child.wait();
             #[cfg(unix)]
-            if let Some(process_group) = process_group_id {
-                unregister_process_group(process_group);
+            cleanup_failed_spawn(spec, child, process_group_id);
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill();
+                let _ = child.wait();
             }
             return Err(SupervisorError::Message(
                 "failed to pipe supervisor stderr".to_string(),
@@ -906,41 +1408,77 @@ fn spawn_process(spec: &ProcessSpec, port: u16) -> Result<SpawnedProcess, Superv
     };
 
     let (stdout_sender, stdout_lines) = mpsc::channel();
+    let secrets = spec
+        .env
+        .vars
+        .iter()
+        .filter(|(key, _)| is_secret_environment_key(key))
+        .filter_map(|(_, value)| value.to_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    let stdout_secrets = secrets.clone();
+    let stderr_secrets = secrets;
+    let mut output = CapturedOutput::default();
     let label = spec.label.clone();
-    thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            match line {
-                Ok(line) => {
+    let stdout_tail = Arc::clone(&output.stdout);
+    output.readers.push(thread::spawn(move || {
+        let mut reader = BufReader::with_capacity(OUTPUT_READ_BUFFER_BYTES, stdout);
+        loop {
+            match read_bounded_output_line(&mut reader) {
+                Ok(Some(line)) => {
+                    let line = redact_child_output(&line, &stdout_secrets);
                     log::info!("[{label}] stdout: {line}");
+                    append_tail(&stdout_tail, line.clone());
                     let _ = stdout_sender.send(line);
                 }
+                Ok(None) => break,
                 Err(error) => {
                     log::warn!("[{label}] stdout read error: {error}");
                     break;
                 }
             }
         }
-    });
+    }));
 
     let label = spec.label.clone();
-    thread::spawn(move || {
-        for line in BufReader::new(stderr).lines() {
-            match line {
-                Ok(line) => log::warn!("[{label}] stderr: {line}"),
+    let stderr_tail = Arc::clone(&output.stderr);
+    output.readers.push(thread::spawn(move || {
+        let mut reader = BufReader::with_capacity(OUTPUT_READ_BUFFER_BYTES, stderr);
+        loop {
+            match read_bounded_output_line(&mut reader) {
+                Ok(Some(line)) => {
+                    let line = redact_child_output(&line, &stderr_secrets);
+                    log::warn!("[{label}] stderr: {line}");
+                    append_tail(&stderr_tail, line);
+                }
+                Ok(None) => break,
                 Err(error) => {
                     log::warn!("[{label}] stderr read error: {error}");
                     break;
                 }
             }
         }
-    });
+    }));
 
     Ok(SpawnedProcess {
         child,
         stdout_lines,
+        output,
         #[cfg(unix)]
         process_group_id,
+        lifeline,
+        #[cfg(windows)]
+        job,
     })
+}
+
+#[cfg(unix)]
+fn cleanup_failed_spawn(spec: &ProcessSpec, child: Child, group: Option<libc::pid_t>) {
+    let state = SupervisorState::new();
+    *state.child.lock().unwrap() = Some(child);
+    *state.process_group_id.lock().unwrap() = group;
+    if let Err(error) = stop_current_child(spec, &state) {
+        log::error!("failed to clean up incomplete spawn: {error}");
+    }
 }
 
 fn render_port(value: &OsStr, port: u16) -> OsString {
@@ -1008,6 +1546,12 @@ fn wait_for_readiness(
                 Ok(line) if line.contains(marker) => return ReadinessOutcome::Ready,
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // EOF can race the parent's observation of the child's
+                    // exit status when the child writes and exits at once.
+                    thread::sleep(READINESS_POLL_INTERVAL);
+                    if let Some(status) = child_exit_status(state) {
+                        return ReadinessOutcome::Exited(Some(status));
+                    }
                     return ReadinessOutcome::TimedOut(
                         "stdout closed before its readiness marker was seen".to_string(),
                     );
@@ -1065,30 +1609,58 @@ fn wait_for_readiness(
     }
 }
 
-fn child_exit_status(state: &SupervisorState) -> Option<ExitStatus> {
-    let mut child = state.child.lock().ok()?;
-    child.as_mut()?.try_wait().ok().flatten()
+// Registered Unix leaders are identity anchors, including after exit.
+// WNOWAIT preserves their PID until every group signal source is detached.
+fn inspect_child_exit(child: &mut Child, anchored: bool) -> io::Result<Option<ExitStatus>> {
+    #[cfg(unix)]
+    if anchored {
+        return peek_leader_exit(child.id());
+    }
+    let _ = anchored;
+    child.try_wait()
 }
 
-fn take_exited_child(state: &SupervisorState) -> io::Result<Option<ExitStatus>> {
-    let mut child_slot = state
-        .child
-        .lock()
-        .map_err(|_| io::Error::other("supervisor child state was poisoned"))?;
-    let Some(child) = child_slot.as_mut() else {
-        return Ok(None);
-    };
-    match child.try_wait()? {
-        Some(status) => {
-            let _ = child_slot.take();
-            #[cfg(unix)]
-            if let Ok(mut process_group_id) = state.process_group_id.lock() {
-                if let Some(process_group) = process_group_id.take() {
-                    unregister_process_group(process_group);
-                }
-            }
-            Ok(Some(status))
+#[cfg(unix)]
+fn peek_leader_exit(pid: u32) -> io::Result<Option<ExitStatus>> {
+    use std::os::unix::process::ExitStatusExt;
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted { continue; }
+            return Err(error);
         }
+        if unsafe { info.si_pid() } == 0 { return Ok(None); }
+        let status = unsafe { info.si_status() };
+        let raw = match info.si_code {
+            libc::CLD_EXITED => (status & 0xff) << 8,
+            libc::CLD_KILLED => status & 0x7f,
+            libc::CLD_DUMPED => (status & 0x7f) | 0x80,
+            _ => return Err(io::Error::other("unexpected waitid exit status")),
+        };
+        return Ok(Some(ExitStatus::from_raw(raw)));
+    }
+}
+
+fn child_exit_status(state: &SupervisorState) -> Option<ExitStatus> {
+    poll_child_exit(state).ok().flatten()
+}
+
+fn poll_child_exit(state: &SupervisorState) -> io::Result<Option<ExitStatus>> {
+    let mut child_slot = state.child.lock()
+        .map_err(|_| io::Error::other("supervisor child state was poisoned"))?;
+    #[cfg(unix)]
+    let anchored = state.process_group_id.lock()
+        .map_err(|_| io::Error::other("supervisor process-group state was poisoned"))?
+        .is_some();
+    #[cfg(not(unix))]
+    let anchored = false;
+    match child_slot.as_mut() {
+        Some(child) => inspect_child_exit(child, anchored),
         None => Ok(None),
     }
 }
@@ -1097,15 +1669,128 @@ fn stop_current_child(
     spec: &ProcessSpec,
     state: &SupervisorState,
 ) -> io::Result<Option<ExitStatus>> {
+    let result = stop_current_child_inner(spec, state);
+    if let Err(error) = &result {
+        *state.cleanup_error.lock().unwrap_or_else(|error| error.into_inner()) =
+            Some(format!("process tree cleanup failed: {error}"));
+        #[cfg(unix)]
+        start_process_group_retirement(state);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn start_process_group_retirement(state: &SupervisorState) {
+    if state.process_group_id.lock().unwrap_or_else(|error| error.into_inner()).is_none()
+        || state.retirement_started.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    // A failed generation never restarts. This latch therefore bounds work
+    // to one retirement worker per retained group, including repeated stops.
+    let child = Arc::clone(&state.child);
+    let group = Arc::clone(&state.process_group_id);
+    if let Err(error) = spawn_retirement_worker(state, move || retire_process_group(&child, &group))
+    {
+        // Never retire inline: startup waits on a readiness channel without
+        // a timeout. Keep registration and the unreaped leader even if the
+        // state is dropped (Child's Drop does not reap). The sticky cleanup
+        // error still reaches callers; resource exhaustion costs an anchor,
+        // never a signal to a recycled process-group identity.
+        log::error!("failed to spawn group retirement worker: {error}; retaining anchor");
+    }
+}
+
+#[cfg(unix)]
+fn spawn_retirement_worker(
+    state: &SupervisorState,
+    worker: impl FnOnce() + Send + 'static,
+) -> io::Result<thread::JoinHandle<()>> {
+    #[cfg(test)]
+    if state.fail_retirement_spawn.load(Ordering::Acquire) {
+        return Err(io::Error::other("injected retirement spawn failure"));
+    }
+    let _ = state;
+    thread::Builder::new().name("sidecar-group-retirement".into()).spawn(worker)
+}
+
+#[cfg(unix)]
+fn retire_process_group(
+    child: &Mutex<Option<Child>>,
+    group: &Mutex<Option<libc::pid_t>>,
+) {
+    const RETIREMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    loop {
+        {
+            // Lock order: child, group, registry. No path reaps the leader
+            // while its PGID remains reachable by the shutdown handler.
+            let mut child = child.lock().unwrap_or_else(|error| error.into_inner());
+            let mut group = group.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(pgid) = *group else { return };
+            let Some(leader) = child.as_mut() else { return };
+            let exited = matches!(peek_leader_exit(leader.id()), Ok(Some(_)));
+            if let Some(Ok(registry)) = PROCESS_GROUP_REGISTRY.get() {
+                let mut registry = registry.lock().unwrap_or_else(|error| error.into_inner());
+                if exited && matches!(process_group_has_other_members(pgid as u32), Ok(false)) {
+                    // A member hidden from the procfs scan may still exist.
+                    signal_process_group_direct(pgid as u32, libc::SIGKILL);
+                    registry.remove(&pgid);
+                    group.take();
+                    // WNOWAIT already observed exit; this cannot wait for a
+                    // live leader. Keep the child on an unexpected reap error.
+                    match leader.wait() {
+                        Ok(_) => { child.take(); }
+                        Err(error) => log::error!("failed to reap retired leader: {error}"),
+                    }
+                    return;
+                }
+                signal_process_group_direct(pgid as u32, libc::SIGKILL);
+            }
+        }
+        thread::sleep(RETIREMENT_POLL_INTERVAL);
+    }
+}
+
+fn stop_current_child_inner(
+    spec: &ProcessSpec,
+    state: &SupervisorState,
+) -> io::Result<Option<ExitStatus>> {
     let mut child_slot = state
         .child
         .lock()
         .map_err(|_| io::Error::other("supervisor child state was poisoned"))?;
-    let Some(mut child) = child_slot.take() else {
+    let Some(child) = child_slot.as_mut() else {
         return Ok(None);
     };
+    // Borrow, rather than take, so errors/timeouts retain both ownership
+    // records. A replacement generation must never overwrite this tree.
+    let status = stop_process_tree(spec, state, child)?;
     #[cfg(unix)]
-    let _process_group_registration = ProcessGroupRegistration(take_process_group_id(state));
+    {
+        let mut group = state.process_group_id.lock()
+            .map_err(|_| io::Error::other("supervisor process-group state was poisoned"))?;
+        if let Some(process_group) = *group {
+            // The scan cannot see a member hidden by hidepid or by a
+            // nondumpable process, yet we may still be able to signal it.
+            // The unreaped leader still reserves this PGID, so a final
+            // SIGKILL reaches only our own group.
+            signal_process_group_direct(process_group as u32, libc::SIGKILL);
+            unregister_process_group(process_group);
+            group.take();
+            // stop_process_tree only observes exit on Unix group leaders.
+            // Release the PID only after the registry lock removed its PGID.
+            child.wait()?;
+        }
+    }
+    child_slot.take();
+    Ok(status)
+}
+
+fn stop_process_tree(
+    spec: &ProcessSpec,
+    state: &SupervisorState,
+    child: &mut Child,
+) -> io::Result<Option<ExitStatus>> {
     let pid = child.id();
     let deadline = state
         .stop_deadline
@@ -1136,9 +1821,9 @@ fn stop_current_child(
     }
 
     let graceful_deadline = deadline.min(Instant::now() + spec.stop.grace);
-    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, graceful_deadline)? {
+    if wait_for_process_tree_exit(child, pid, spec.process_group, graceful_deadline)? {
         log::info!("[{}] process tree exited after graceful stop", spec.label);
-        return child.try_wait();
+        return inspect_child_exit(child, spec.process_group);
     }
 
     log::warn!(
@@ -1159,9 +1844,9 @@ fn stop_current_child(
     }
 
     let escalate_deadline = deadline.min(Instant::now() + spec.stop.escalate);
-    if wait_for_process_tree_exit(&mut child, pid, spec.process_group, escalate_deadline)? {
+    if wait_for_process_tree_exit(child, pid, spec.process_group, escalate_deadline)? {
         log::info!("[{}] process tree exited after force-kill", spec.label);
-        return child.try_wait();
+        return inspect_child_exit(child, spec.process_group);
     }
 
     log::error!(
@@ -1169,7 +1854,7 @@ fn stop_current_child(
         spec.label,
         spec.stop.total
     );
-    if child.try_wait()?.is_none() {
+    if inspect_child_exit(child, spec.process_group)?.is_none() {
         log::warn!(
             "[{}] retrying direct leader kill without waiting",
             spec.label
@@ -1180,7 +1865,10 @@ fn stop_current_child(
     if spec.process_group {
         signal_process_group(pid, libc::SIGKILL);
     }
-    child.try_wait()
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "process tree exit was not confirmed; retaining ownership",
+    ))
 }
 
 fn wait_for_process_tree_exit(
@@ -1190,11 +1878,11 @@ fn wait_for_process_tree_exit(
     deadline: Instant,
 ) -> io::Result<bool> {
     loop {
-        let leader_exited = child.try_wait()?.is_some();
+        let leader_exited = inspect_child_exit(child, has_process_group)?.is_some();
         let group_exited = {
             #[cfg(unix)]
             {
-                !has_process_group || !process_group_exists(process_group)
+                !has_process_group || !process_group_has_other_members(process_group)?
             }
             #[cfg(not(unix))]
             {
@@ -1215,12 +1903,14 @@ fn wait_for_process_tree_exit(
 
 #[cfg(unix)]
 fn signal_process_group(pid: u32, signal: libc::c_int) {
-    // Reuse the existing PS group-signal behavior while the leader is alive.
-    super::server::kill_process_group(pid, signal);
-    // If the leader has already exited, getpgid(pid) can fail even while a
-    // descendant remains in the group. The direct group id is stable because
-    // this module creates the group with CommandExt::process_group(0).
-    signal_process_group_direct(pid, signal);
+    // Only signal registered identities, under the same lock as retirement
+    // and shutdown. The unreaped leader reserves PID == PGID throughout.
+    if let Some(Ok(registry)) = PROCESS_GROUP_REGISTRY.get() {
+        let registry = registry.lock().unwrap_or_else(|error| error.into_inner());
+        if registry.contains(&(pid as libc::pid_t)) {
+            signal_process_group_direct(pid, signal);
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -1230,7 +1920,141 @@ fn signal_process_group_direct(pid: u32, signal: libc::c_int) {
     }
 }
 
-#[cfg(unix)]
+// Do not use kill(-pgid, 0) for cleanup: the zombie anchor itself exists.
+// Enumeration errors fail closed, retaining ownership and the anchor.
+// Test seam: process groups whose members the procfs scan must not see,
+// standing in for hidepid or nondumpable members.
+#[cfg(all(test, target_os = "linux"))]
+static SCAN_HIDDEN_GROUPS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+#[cfg(target_os = "linux")]
+fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
+    #[cfg(test)]
+    if SCAN_HIDDEN_GROUPS.lock().unwrap_or_else(|error| error.into_inner()).contains(&process_group) {
+        return Ok(false);
+    }
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if proc_stat_error_skips_entry(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == process_group { continue; }
+        let stat = match std::fs::read(entry.path().join("stat")) {
+            Ok(stat) if stat.is_empty() => continue,
+            Ok(stat) => stat,
+            Err(error) if proc_stat_error_skips_entry(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        if proc_stat_pgrp_is_member(parse_proc_stat_pgrp(&stat)?, process_group) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat_pgrp(stat: &[u8]) -> io::Result<i32> {
+    // comm may contain spaces, parentheses, or non-UTF8 bytes.
+    let end = stat.iter().rposition(|byte| *byte == b')')
+        .ok_or_else(|| io::Error::other("malformed proc stat"))?;
+    stat[end + 1..].split(|byte| byte.is_ascii_whitespace())
+        .filter(|field| !field.is_empty()).nth(2)
+        .and_then(|field| std::str::from_utf8(field).ok())
+        .and_then(|field| field.parse::<i32>().ok())
+        .ok_or_else(|| io::Error::other("missing proc stat pgrp"))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_pgrp_is_member(pgrp: i32, process_group: u32) -> bool {
+    // The kernel can emit -1 when the task is exiting.
+    pgrp > 0 && pgrp as u32 == process_group
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod proc_stat_pgrp_tests {
+    use super::{parse_proc_stat_pgrp, proc_stat_pgrp_is_member};
+
+    #[test]
+    fn parses_signed_pgrps_and_matches_only_positive_owned_groups() {
+        let cases: &[(&[u8], i32, bool)] = &[
+            (b"4242 (node) X 0 -1\n", -1, false),
+            (b"4242 (node) S 1 77\n", 77, true),
+            (b"4242 (node) S 1 78\n", 78, false),
+            (b"4242 (node) Z 1 77\n", 77, true),
+            (b"4242 (a)b)) S 1 77\n", 77, true),
+            (b"4242 (\xff) S 1 77\n", 77, true),
+            (b"4242 (node) S 1 0\n", 0, false),
+        ];
+        for &(stat, expected_pgrp, expected_member) in cases {
+            let pgrp = parse_proc_stat_pgrp(stat).unwrap();
+            assert_eq!(pgrp, expected_pgrp);
+            assert_eq!(proc_stat_pgrp_is_member(pgrp, 77), expected_member);
+        }
+        let mut full = b"4242 (node) X 0 -1".to_vec();
+        full.extend_from_slice(&b" 0".repeat(47));
+        full.push(b'\n');
+        let pgrp = parse_proc_stat_pgrp(&full).unwrap();
+        assert_eq!(pgrp, -1);
+        assert!(!proc_stat_pgrp_is_member(pgrp, 77));
+    }
+
+    #[test]
+    fn malformed_records_remain_errors() {
+        let cases: &[&[u8]] = &[
+            b"4242 (node) S 1\n",
+            b"4242 (node) S 1 invalid\n",
+            b"4242 (node S 1 77\n",
+        ];
+        for &stat in cases {
+            assert!(parse_proc_stat_pgrp(stat).is_err());
+        }
+    }
+}
+
+// A vanished process is not a member. An entry we may not read (hidepid,
+// a nondumpable or setuid member) is skipped: while it lives it still
+// occupies the PGID, so skipping it cannot let a later signal reach a
+// reused id. Cleanup sends a final SIGKILL to the anchored group before
+// it unregisters, so a hidden member that we can signal is still killed.
+#[cfg(target_os = "linux")]
+fn proc_stat_error_skips_entry(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    ) || error.raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(target_os = "macos")]
+fn process_group_has_other_members(process_group: u32) -> io::Result<bool> {
+    // sys/proc_info.h; libc exposes proc_listpids but not this selector.
+    const PROC_PGRP_ONLY: u32 = 2;
+    // Two slots suffice: at most one PID can be the excluded anchor.
+    // XNU enumerates both allproc and zombproc and returns bytes copied.
+    let mut pids = [0 as libc::pid_t; 2];
+    let bytes = unsafe {
+        libc::proc_listpids(PROC_PGRP_ONLY, process_group,
+            pids.as_mut_ptr().cast(), std::mem::size_of_val(&pids) as libc::c_int)
+    };
+    if bytes <= 0 {
+        return Err(io::Error::other("could not enumerate anchored process group"));
+    }
+    let count = bytes as usize / std::mem::size_of::<libc::pid_t>();
+    if count > pids.len() || bytes as usize % std::mem::size_of::<libc::pid_t>() != 0 {
+        return Err(io::Error::other("invalid process group enumeration"));
+    }
+    Ok(pids[..count].iter().any(|pid| *pid > 0 && *pid as u32 != process_group))
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn process_group_has_other_members(_process_group: u32) -> io::Result<bool> {
+    Err(io::Error::other("process group enumeration unsupported on this Unix"))
+}
+
+#[cfg(all(test, unix))]
 fn process_group_exists(process_group: u32) -> bool {
     let result = unsafe { libc::kill(-(process_group as libc::pid_t), 0) };
     if result == 0 {
@@ -1432,6 +2256,286 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, LifecycleState::Stopped)));
+    }
+
+    #[test]
+    fn fast_exit_diagnostics_include_drained_stdout_stderr_and_exit_code() {
+        let script = node_script(
+            r#"process.stdout.write('fast stdout tail\n'); process.stderr.write('fast stderr tail\n'); process.exitCode = 23;"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "never emitted".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let state = SupervisorState::new();
+        let spawned = spawn_process(&spec, 0).unwrap();
+        state.child.lock().unwrap().replace(spawned.child);
+
+        let ReadinessOutcome::Exited(Some(status)) =
+            wait_for_readiness(&spec.readiness, 0, &state, &spawned.stdout_lines)
+        else {
+            panic!("fast child should exit before readiness");
+        };
+        let (stdout_tail, stderr_tail) = spawned.output.drain();
+        let message =
+            exit_before_readiness_message(&spec.label, Some(&status), &stdout_tail, &stderr_tail);
+
+        assert!(message.contains("exit_code=Some(23)"), "{message}");
+        assert!(message.contains("fast stdout tail"), "{message}");
+        assert!(message.contains("fast stderr tail"), "{message}");
+    }
+
+    /// Waits for `child` to exit, killing it after `timeout` so a failing test
+    /// does not leak a process.
+    fn exited_within(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The parent lifeline: the child gets a stdin pipe the supervisor holds
+    /// open, plus the flag that arms the child. Dropping the pipe is what the
+    /// kernel does to it when the app dies.
+    #[test]
+    fn closing_the_lifeline_ends_a_child_that_watches_its_stdin() {
+        let script = node_script(
+            r#"process.stdout.write('lifeline=' + process.env.PDPP_PARENT_LIFELINE + '\n');
+process.stdin.on('end', () => process.exit(0));
+process.stdin.resume();"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "lifeline=".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        // The spec cannot turn the lifeline off.
+        spec.env.vars.insert(
+            OsString::from(PARENT_LIFELINE_ENV),
+            OsString::from("disabled"),
+        );
+        let mut spawned = spawn_process(&spec, 0).unwrap();
+
+        let first_line = spawned
+            .stdout_lines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child output");
+        assert_eq!(first_line, "lifeline=stdin");
+
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            spawned.child.try_wait().unwrap().is_none(),
+            "child must stay up while the supervisor holds the lifeline"
+        );
+
+        drop(spawned.lifeline.take());
+        let status = exited_within(&mut spawned.child, Duration::from_secs(10))
+            .expect("child must exit once the lifeline closes");
+        assert!(status.success(), "{status:?}");
+    }
+
+    /// Windows kernel backstop: the job kills a child that ignores stdin.
+    #[cfg(windows)]
+    #[test]
+    fn closing_the_job_kills_a_child_that_ignores_its_stdin() {
+        let script = node_script(
+            r#"process.stdout.write('up\n'); setInterval(() => {}, 1000);"#,
+        );
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "up".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let mut spawned = spawn_process(&spec, 0).unwrap();
+        spawned
+            .stdout_lines
+            .recv_timeout(Duration::from_secs(10))
+            .expect("child output");
+        assert!(spawned.job.is_some(), "child was not placed in a job");
+
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            spawned.child.try_wait().unwrap().is_none(),
+            "child must stay up while the supervisor holds the job"
+        );
+
+        drop(spawned.job.take());
+        assert!(
+            exited_within(&mut spawned.child, Duration::from_secs(10)).is_some(),
+            "child must be killed when the job handle closes"
+        );
+    }
+
+    #[test]
+    fn output_reader_caps_a_huge_line_and_total_tail_bytes() {
+        let mut reader = BufReader::with_capacity(
+            OUTPUT_READ_BUFFER_BYTES,
+            std::io::Cursor::new(vec![b'x'; OUTPUT_LINE_MAX_BYTES * 128]),
+        );
+        let line = read_bounded_output_line(&mut reader).unwrap().unwrap();
+        assert_eq!(line, OUTPUT_TRUNCATED_MARKER);
+        assert!(line.len() <= OUTPUT_LINE_MAX_BYTES);
+
+        let mut tail = OutputTail::default();
+        for _ in 0..OUTPUT_TAIL_LINES {
+            tail.push("x".repeat(OUTPUT_LINE_MAX_BYTES));
+        }
+        assert!(tail.bytes <= OUTPUT_STREAM_MAX_BYTES);
+        assert!(tail
+            .lines
+            .iter()
+            .all(|line| line.len() <= OUTPUT_LINE_MAX_BYTES));
+    }
+
+    #[test]
+    fn readiness_diagnostic_redacts_setup_tokens_bearers_passwords_and_keys() {
+        let child_line = r#"{"setupToken":"setup-token-value","authorization":"Bearer bearer-token-value","password":"owner-password-value","credentialEncryptionKey":"credential-key-value","apiKey":"api-key-value"}"#;
+        let redacted = redact_child_output(child_line, &[]);
+        let diagnostic = exit_before_readiness_message("test-sidecar", None, &[redacted], &[]);
+
+        for secret in [
+            "setup-token-value",
+            "bearer-token-value",
+            "owner-password-value",
+            "credential-key-value",
+            "api-key-value",
+        ] {
+            assert!(
+                !diagnostic.contains(secret),
+                "diagnostic leaked {secret}: {diagnostic}"
+            );
+        }
+        assert!(diagnostic.contains("[REDACTED]"), "{diagnostic}");
+    }
+
+    #[test]
+    fn readiness_diagnostic_redacts_auth_and_cookie_labels_conservatively() {
+        let line_with_split_label = format!(
+            "{}Authorization: Digest username=\"alice\", response=\"boundary-digest-secret\"",
+            ".".repeat(OUTPUT_READ_BUFFER_BYTES - 6)
+        );
+        let mut reader = BufReader::with_capacity(
+            OUTPUT_READ_BUFFER_BYTES,
+            std::io::Cursor::new(line_with_split_label.into_bytes()),
+        );
+        let split_label_line = read_bounded_output_line(&mut reader)
+            .unwrap()
+            .unwrap();
+
+        for child_line in [
+            "Authorization: Bearer fixture-secret-0123456789".to_string(),
+            "authorization: bearer x".to_string(),
+            "Authorization: Basic base64".to_string(),
+            "Authorization: Digest username=\"alice\", realm=\"api\", response=\"digest-response-probe\"".to_string(),
+            r#"{"authorization":"Digest username=\"alice\", realm=\"api\", response=\"json-digest-secret\""}"#.to_string(),
+            "Cookie: sessionid=cookie-session-secret; theme=dark; auth=cookie-auth-secret".to_string(),
+            "Set-Cookie: sessionid=set-cookie-secret; HttpOnly; SameSite=Strict".to_string(),
+            "Proxy-Authorization: token proxy-secret".to_string(),
+            "request failed with Bearer inline-bearer-secret".to_string(),
+            "response body contains Basic dXNlcjpwYXNz".to_string(),
+            split_label_line,
+        ] {
+            let diagnostic = exit_before_readiness_message(
+                "test-sidecar",
+                None,
+                &[redact_child_output(&child_line, &[])],
+                &[],
+            );
+            for secret in [
+                "fixture-secret-0123456789",
+                "bearer x",
+                "base64",
+                "digest-response-probe",
+                "json-digest-secret",
+                "cookie-session-secret",
+                "cookie-auth-secret",
+                "set-cookie-secret",
+                "boundary-digest-secret",
+                "proxy-secret",
+                "inline-bearer-secret",
+                "dXNlcjpwYXNz",
+            ] {
+                assert!(
+                    !diagnostic.contains(secret),
+                    "diagnostic leaked {secret}: {diagnostic}"
+                );
+            }
+        }
+
+        let benign_line = "healthcheck: sidecar is ready";
+        assert_eq!(redact_child_output(benign_line, &[]), benign_line);
+
+        let redacted_with_scheme_secret =
+            redact_child_output("Bearer configured-anchor-secret", &["Bearer".to_string()]);
+        assert!(
+            !redacted_with_scheme_secret.contains("configured-anchor-secret"),
+            "credential scheme redaction leaked its value: {redacted_with_scheme_secret}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_drain_returns_when_descendant_keeps_pipe_open() {
+        let directory = tempdir().unwrap();
+        let pid_path = directory.path().join("descendant.pid");
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {{}}, 1000)'], {{ stdio: 'inherit' }});
+fs.writeFileSync({:?}, String(child.pid));
+console.log('leader exited while descendant holds pipes');
+process.exit(23);"#,
+            pid_path
+        ));
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "never emitted".to_string(),
+                deadline: Duration::from_secs(3),
+            },
+        );
+        spec.process_group = false;
+        let state = SupervisorState::new();
+        let spawned = spawn_process(&spec, 0).unwrap();
+        state.child.lock().unwrap().replace(spawned.child);
+        let ReadinessOutcome::Exited(Some(status)) =
+            wait_for_readiness(&spec.readiness, 0, &state, &spawned.stdout_lines)
+        else {
+            panic!("leader should exit before readiness");
+        };
+
+        let started = Instant::now();
+        let (stdout_tail, stderr_tail) = spawned.output.drain();
+        let drain_elapsed = started.elapsed();
+        let descendant_pid: i32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        unsafe {
+            libc::kill(descendant_pid, libc::SIGKILL);
+        }
+
+        assert_eq!(status.code(), Some(23));
+        assert!(drain_elapsed < OUTPUT_DRAIN_DEADLINE + Duration::from_millis(250));
+        assert!(stdout_tail
+            .iter()
+            .any(|line| line.contains("leader exited")));
+        assert!(stderr_tail.is_empty());
     }
 
     #[cfg(unix)]
@@ -1825,10 +2929,10 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         handle.stop().unwrap();
     }
 
-    /// The console-port contract against real sockets and a real child:
-    /// the port survives relaunches with no in-memory hint, a collision
-    /// moves the console but does not overwrite the persisted port, and the
-    /// next launch after the collision clears returns to it.
+    /// The console-port contract against a real child plus an injected
+    /// collision plan: the port survives relaunches with no in-memory hint,
+    /// a collision does not overwrite the persisted port, and the next
+    /// launch after the collision clears returns to it.
     #[test]
     fn a_persisted_console_port_survives_relaunches_and_a_collision_is_not_persisted() {
         use crate::console_port::{
@@ -1880,12 +2984,22 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         assert_eq!(stable, first, "a first launch keeps the port it chose");
         assert_eq!(launch().1, first, "a relaunch reuses the persisted port");
 
-        let occupied = TcpListener::bind(("127.0.0.1", first)).unwrap();
-        let (stable, moved) = launch();
-        assert_eq!(stable, first, "the console is still told its stable port");
-        assert_ne!(moved, first);
+        let collision_fallback = first.wrapping_add(1).max(1);
+        let collision = plan_console_port(
+            None,
+            Some(first),
+            None,
+            |port| port != first,
+            || Some(collision_fallback),
+        );
+        assert_eq!(collision.stable, first, "the console keeps its stable port");
+        assert_eq!(collision.preferred, None);
+        assert_eq!(
+            port_to_persist(None, Some(first), collision_fallback),
+            None,
+            "a collision fallback must not replace the persisted port"
+        );
         assert_eq!(read_persisted_console_port(dir.path()), Some(first));
-        drop(occupied);
 
         assert_eq!(
             launch().1,
@@ -2015,6 +3129,115 @@ server.listen(Number(process.env.PORT), '127.0.0.1');
         );
         let result = Supervisor::new(spec, ArcSink(Arc::clone(&sink))).start();
         assert!(result.is_err());
+    }
+
+
+    #[cfg(unix)]
+    fn assert_exited_leader_tree_is_gone_before_restart(ready_first: bool) {
+        let directory = tempdir().unwrap();
+        let identity = directory.path().join("old-group");
+        let exit_gate = directory.path().join("exit-leader");
+        let result = directory.path().join("replacement");
+
+        // Also clean up the old group if an assertion detects the regression.
+        struct GroupCleanup(PathBuf);
+        impl Drop for GroupCleanup {
+            fn drop(&mut self) {
+                if let Ok(text) = fs::read_to_string(&self.0) {
+                    if let Ok(group) = text.trim().parse::<u32>() {
+                        signal_process_group_direct(group, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        let _cleanup = GroupCleanup(identity.clone());
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const identity = {:?};
+const exitGate = {:?};
+const result = {:?};
+const readyFirst = {};
+if (!fs.existsSync(identity)) {{
+  // Arm the descendant before exiting. The ready-crash case ignores TERM
+  // so that recovery must also exercise the KILL escalation.
+  const child = spawn(process.execPath, ['-e', readyFirst
+    ? "process.on('SIGTERM', () => {{}}); console.log('ARMED'); setInterval(() => {{}}, 1000);"
+    : "console.log('ARMED'); setInterval(() => {{}}, 1000);"],
+    {{ stdio: ['ignore', 'pipe', 'ignore'] }});
+  child.stdout.once('data', () => {{
+    fs.writeFileSync(identity, String(process.pid));
+    if (readyFirst) {{
+      console.log('READY');
+      setInterval(() => {{ if (fs.existsSync(exitGate)) process.exit(17); }}, 10);
+    }} else {{
+      process.exit(17);
+    }}
+  }});
+}} else {{
+  let oldGroup = 'alive';
+  try {{ process.kill(-Number(fs.readFileSync(identity, 'utf8')), 0); }}
+  catch (error) {{ if (error.code === 'ESRCH') oldGroup = 'gone'; }}
+  fs.writeFileSync(result, oldGroup);
+  console.log('READY');
+  setInterval(() => {{}}, 1000);
+}}
+"#,
+            identity.to_string_lossy(),
+            exit_gate.to_string_lossy(),
+            result.to_string_lossy(),
+            ready_first,
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let mut spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "READY".to_string(),
+                deadline: Duration::from_secs(15),
+            },
+        );
+        spec.restart = RestartPolicy::Bounded {
+            max: 1,
+            backoff: Duration::ZERO,
+        };
+        // Allow the system's orphan reaper to remove killed descendants.
+        spec.stop.escalate = Duration::from_secs(10);
+        spec.stop.total = Duration::from_secs(12);
+        let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
+            .start()
+            .expect("the clean replacement should reach readiness");
+        if ready_first {
+            fs::write(&exit_gate, "exit").unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !result.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        handle.stop().unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&result).expect("a replacement must have started"),
+            "gone",
+            "the old descendant group must be empty before replacement code runs",
+        );
+        assert_eq!(
+            states(&sink).iter()
+                .filter(|event| matches!(event, LifecycleState::Starting))
+                .count(),
+            2,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_leader_exit_kills_descendants_before_restart() {
+        assert_exited_leader_tree_is_gone_before_restart(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_readiness_leader_exit_kills_descendants_before_restart() {
+        assert_exited_leader_tree_is_gone_before_restart(false);
     }
 
     #[test]
@@ -2210,7 +3433,13 @@ setInterval(() => {}, 1000);
         let environment: Value =
             serde_json::from_str(&fs::read_to_string(report.path()).unwrap()).unwrap();
         let object = environment.as_object().unwrap();
-        assert_eq!(object.len(), 3);
+        for key in object.keys() {
+            assert!(
+                ["ALLOWED", "PORT", "REPORT_PATH", PARENT_LIFELINE_ENV].contains(&key.as_str())
+                    || is_windows_runtime_environment_key(OsStr::new(key)),
+                "unexpected child environment variable: {key}"
+            );
+        }
         assert_eq!(object.get("ALLOWED").and_then(Value::as_str), Some("yes"));
         assert!(object.get("SECRET").is_none());
         assert!(object
@@ -2225,6 +3454,40 @@ setInterval(() => {}, 1000);
         );
     }
 
+    #[test]
+    fn windows_cleared_environment_preserves_runtime_variables() {
+        let inherited = [
+            ("sYsTeMrOoT", "C:\\Windows"),
+            ("SystemDrive", "C:"),
+            ("windir", "C:\\Windows"),
+            ("temp", "C:\\Temp"),
+            ("TMP", "C:\\Temp"),
+            ("Path", "C:\\Windows\\System32"),
+            ("PATHEXT", ".COM;.EXE;.BAT;.CMD"),
+            ("UNRELATED_SECRET", "do-not-forward"),
+        ]
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+        let configured =
+            BTreeMap::from([(OsString::from("NODE_ENV"), OsString::from("production"))]);
+        let environment = windows_child_environment(inherited, &configured);
+
+        for required in WINDOWS_RUNTIME_ENVIRONMENT_KEYS {
+            assert!(
+                environment
+                    .keys()
+                    .any(|key| key.to_string_lossy().eq_ignore_ascii_case(required)),
+                "Windows child environment must preserve {required}"
+            );
+        }
+        assert_eq!(
+            environment.get(OsStr::new("NODE_ENV")),
+            Some(&OsString::from("production"))
+        );
+        assert!(!environment.keys().any(|key| key
+            .to_string_lossy()
+            .eq_ignore_ascii_case("UNRELATED_SECRET")));
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_process_group_stop_kills_a_child_of_a_child() {
@@ -2234,9 +3497,12 @@ setInterval(() => {}, 1000);
             r#"const fs = require('node:fs');
 const {{ spawn }} = require('node:child_process');
 const done = {:?};
-const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{ require('node:fs').writeFileSync(process.env.DONE, 'terminated'); process.exit(0); }}); setInterval(() => {{}}, 1000);"], {{ env: {{ DONE: done }}, stdio: 'ignore' }});
-fs.writeFileSync({:?}, String(child.pid));
-console.log('GROUP-READY');
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{ require('node:fs').writeFileSync(process.env.DONE, 'terminated'); process.exit(0); }}); process.stdout.write('armed'); setInterval(() => {{}}, 1000);"], {{ env: {{ DONE: done }}, stdio: ['ignore', 'pipe', 'ignore'] }});
+// Report ready only after the grandchild has installed its SIGTERM handler.
+child.stdout.once('data', () => {{
+  fs.writeFileSync({:?}, String(child.pid));
+  console.log('GROUP-READY');
+}});
 setInterval(() => {{}}, 1000);
 "#,
             grandchild_done.path().to_string_lossy(),
@@ -2247,7 +3513,7 @@ setInterval(() => {{}}, 1000);
             script.path(),
             Readiness::StdoutMarker {
                 marker: "GROUP-READY".to_string(),
-                deadline: Duration::from_secs(3),
+                deadline: Duration::from_secs(15),
             },
         );
         let handle = Supervisor::new(spec, ArcSink(Arc::clone(&sink)))
@@ -2255,7 +3521,7 @@ setInterval(() => {{}}, 1000);
             .unwrap();
         handle.stop().unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline
             && fs::read_to_string(grandchild_done.path())
                 .unwrap()
@@ -2271,9 +3537,18 @@ setInterval(() => {{}}, 1000);
             .unwrap()
             .parse::<libc::pid_t>()
             .unwrap();
-        let result = unsafe { libc::kill(pid, 0) };
-        assert_eq!(result, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+        // The orphaned grandchild stays a zombie until its new parent reaps it,
+        // so poll until the pid is gone instead of checking once.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut errno = None;
+        while Instant::now() < deadline {
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                errno = io::Error::last_os_error().raw_os_error();
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(errno, Some(libc::ESRCH));
     }
 
     #[cfg(unix)]
@@ -2333,6 +3608,227 @@ setInterval(() => {{}}, 1000);
         );
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+
+    // Own the surviving group member here so a zombie reliably holds the
+    // group until the test explicitly reaps it, independently of PID 1.
+    #[cfg(unix)]
+    fn failed_group_fixture() -> (ProcessSpec, Arc<SupervisorState>, Child, libc::pid_t) {
+        use std::os::unix::process::CommandExt;
+        install_parent_signal_handlers().unwrap();
+        let mut leader = Command::new("/bin/sh")
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .process_group(0)
+            .spawn().unwrap();
+        let pgid = leader.id() as libc::pid_t;
+        let member = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 60"])
+            .process_group(pgid)
+            .spawn().unwrap();
+        register_process_group(pgid as u32).unwrap();
+        drop(leader.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !leader_is_waitable(pgid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(leader_is_waitable(pgid));
+        let state = Arc::new(SupervisorState::new());
+        *state.child.lock().unwrap() = Some(leader);
+        *state.process_group_id.lock().unwrap() = Some(pgid);
+        let mut spec = base_spec(Path::new("unused"), Readiness::StdoutMarker {
+            marker: "READY".into(), deadline: Duration::from_secs(1),
+        });
+        spec.stop = StopPolicy {
+            grace: Duration::ZERO, escalate: Duration::ZERO, total: Duration::ZERO,
+        };
+        (spec, state, member, pgid)
+    }
+
+    #[cfg(unix)]
+    fn group_is_registered(pgid: libc::pid_t) -> bool {
+        PROCESS_GROUP_REGISTRY.get().unwrap().as_ref().unwrap()
+            .lock().unwrap().contains(&pgid)
+    }
+
+    #[cfg(unix)]
+    fn leader_is_waitable(pid: libc::pid_t) -> bool {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::waitid(libc::P_PID, pid as libc::id_t, &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) == 0
+                && info.si_pid() == pid
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stop_kills_a_term_ignoring_member_hidden_from_the_group_scan() {
+        let leader_pid = NamedTempFile::new().unwrap();
+        let member_pid = NamedTempFile::new().unwrap();
+        let script = node_script(&format!(
+            r#"const fs = require('node:fs');
+const {{ spawn }} = require('node:child_process');
+const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {{}}); process.stdout.write('armed'); setInterval(() => {{}}, 1000);"], {{ stdio: ['ignore', 'pipe', 'ignore'] }});
+child.stdout.once('data', () => {{
+  fs.writeFileSync({:?}, String(child.pid));
+  fs.writeFileSync({:?}, String(process.pid));
+  console.log('GROUP-READY');
+}});
+setInterval(() => {{}}, 1000);
+"#,
+            member_pid.path().to_string_lossy(),
+            leader_pid.path().to_string_lossy()
+        ));
+        let spec = base_spec(
+            script.path(),
+            Readiness::StdoutMarker {
+                marker: "GROUP-READY".to_string(),
+                deadline: Duration::from_secs(15),
+            },
+        );
+        let handle = Supervisor::new(spec, ArcSink(Arc::new(RecordingSink::default())))
+            .start()
+            .unwrap();
+        let pgid = fs::read_to_string(leader_pid.path()).unwrap().parse::<u32>().unwrap();
+        let member = fs::read_to_string(member_pid.path()).unwrap().parse::<libc::pid_t>().unwrap();
+        SCAN_HIDDEN_GROUPS.lock().unwrap().insert(pgid);
+        let stopped = handle.stop();
+        SCAN_HIDDEN_GROUPS.lock().unwrap().remove(&pgid);
+        stopped.unwrap();
+        // The member ignores SIGTERM and the scan cannot see it, so only the
+        // final SIGKILL before unregistering can end it. It may linger as a
+        // zombie until its new parent reaps it, so poll.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut errno = None;
+        while Instant::now() < deadline {
+            if unsafe { libc::kill(member, 0) } == -1 {
+                errno = io::Error::last_os_error().raw_os_error();
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        if errno.is_none() {
+            unsafe { libc::kill(member, libc::SIGKILL) };
+        }
+        assert_eq!(errno, Some(libc::ESRCH), "hidden SIGTERM-ignoring member survived stop");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unreadable_or_vanished_proc_entries_do_not_fail_group_cleanup() {
+        assert!(proc_stat_error_skips_entry(&io::Error::from(io::ErrorKind::NotFound)));
+        assert!(proc_stat_error_skips_entry(&io::Error::from(io::ErrorKind::PermissionDenied)));
+        assert!(proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::ESRCH)));
+        assert!(proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::EACCES)));
+        assert!(!proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::EIO)));
+        assert!(!proc_stat_error_skips_entry(&io::Error::from_raw_os_error(libc::EMFILE)));
+        // No process can be in a group above pid_max; a full scan of this
+        // host's procfs, including entries of other users, must succeed.
+        assert!(!process_group_has_other_members(0x7fff_fff0).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_cleanup_keeps_zombie_anchor_until_registry_removal() {
+        let (spec, state, mut member, pgid) = failed_group_fixture();
+        let cleanup = stop_current_child(&spec, &state);
+        let registry = PROCESS_GROUP_REGISTRY.get().unwrap().as_ref().unwrap();
+        let registered = registry.lock().unwrap();
+        let anchored_before = leader_is_waitable(pgid);
+        let retained = registered.contains(&pgid);
+        let _ = member.kill();
+        member.wait().unwrap();
+        // Holding the registry lock prevents removal. Reaping must wait too.
+        thread::sleep(Duration::from_millis(60));
+        let anchored_until_removal = leader_is_waitable(pgid);
+        drop(registered);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (group_is_registered(pgid) || leader_is_waitable(pgid))
+            && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let retired = !group_is_registered(pgid) && !leader_is_waitable(pgid);
+        unregister_process_group(pgid);
+        assert!(cleanup.is_err());
+        assert!(retained);
+        assert!(anchored_before, "registered leader was already reaped");
+        assert!(anchored_until_removal, "leader reaped before registry removal");
+        assert!(retired, "leader not reaped after registry removal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retirement_spawn_failure_returns_without_reaping_anchor() {
+        let (spec, state, mut member, pgid) = failed_group_fixture();
+        state.fail_retirement_spawn.store(true, Ordering::Release);
+        let worker_state = Arc::clone(&state);
+        let (tx, rx) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let result = stop_current_child(&spec, &worker_state);
+            tx.send(result.is_err()).unwrap();
+        });
+        let returned = rx.recv_timeout(Duration::from_millis(200));
+        let anchored = leader_is_waitable(pgid);
+        let retained = group_is_registered(pgid);
+        let _ = member.kill();
+        member.wait().unwrap();
+        caller.join().unwrap();
+        // Explicit test teardown: unregister before reaping our leader.
+        unregister_process_group(pgid);
+        if let Some(mut leader) = state.child.lock().unwrap().take() {
+            leader.wait().unwrap();
+        }
+        assert_eq!(returned.ok(), Some(true), "spawn failure blocked cleanup");
+        assert!(anchored, "spawn failure reaped registered leader");
+        assert!(retained, "spawn failure discarded registration");
+        assert!(state.cleanup_error.lock().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_cleanup_registration_retires_without_another_supervisor_call() {
+        let (spec, state, mut member, pgid) = failed_group_fixture();
+        let cleanup = stop_current_child(&spec, &state);
+        let held = process_group_exists(pgid as u32) && group_is_registered(pgid);
+        // Reap even on a regression so this test never leaves a live process.
+        let _ = member.kill();
+        member.wait().unwrap();
+        assert!(cleanup.is_err());
+        assert!(held, "the surviving group must stay registered");
+        // The leader itself remains a zombie until retirement unregisters.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while group_is_registered(pgid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let retired = !group_is_registered(pgid);
+        unregister_process_group(pgid); // failure-path test hygiene
+        assert!(retired, "empty failed group remained in the shutdown registry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_reports_post_crash_cleanup_failure_after_finished() {
+        let (spec, state, mut member, pgid) = failed_group_fixture();
+        let sink: Arc<dyn EventSink> = Arc::new(RecordingSink::default());
+        let mut restart_count = 0;
+        assert!(!monitor_ready_process(&spec, &state, &sink, &mut restart_count));
+        state.finish();
+        let handle = SupervisorHandle {
+            state, port: 0, stop_budget: Duration::from_secs(1),
+        };
+        let result = handle.stop();
+        let _ = member.kill();
+        member.wait().unwrap();
+        // Don't unregister early on the fixed implementation: let its worker
+        // observe ESRCH before this test returns.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while group_is_registered(pgid) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        unregister_process_group(pgid);
+        assert!(result.is_err(), "post-crash cleanup failure was reported as success");
     }
 
     #[derive(Clone)]

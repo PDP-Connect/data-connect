@@ -21,8 +21,8 @@
  * call sites to hoist statements to module scope.
  */
 
-import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { load as loadSqliteVec } from "sqlite-vec";
 import {
@@ -32,7 +32,11 @@ import {
 import { canonicalConnectorKey } from "./connector-key.ts";
 import { RECORD_REJECTION_GENERATION, recordRejectionReplayKey } from "./record-rejection-replay-key.ts";
 import { SqliteDriver } from "./sqlite-driver.ts";
-import { openSqliteDatabase, type SqliteEncryptionOptions } from "./sqlite-encryption.ts";
+import {
+  openSqliteDatabase,
+  resolveDatabaseEncryptionKey,
+  type SqliteEncryptionOptions,
+} from "./sqlite-encryption.ts";
 import { bumpStorageGeneration } from "./storage-generation.ts";
 
 const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 30_000;
@@ -58,6 +62,7 @@ interface SqliteDatabase {
   pragma: (source: string, options?: { simple?: boolean }) => unknown;
   prepare: (sql: string) => SqliteStatement;
   transaction: <T>(fn: () => T) => (() => T) & { immediate: () => T };
+  serialize: () => Buffer;
 }
 type VectorIndexKind = "sqlite-vec" | "blob-flat";
 type DatabaseHandle = SqliteDatabase & { vectorIndexKind: VectorIndexKind };
@@ -231,6 +236,7 @@ interface LastRunRow extends ConnectorScopedRow {
 }
 
 interface SemanticIndexRow extends ConnectorScopedRow {
+  input_identity?: string | null;
   embedding?: Uint8Array;
   record_key: string;
   rowid?: number;
@@ -276,6 +282,13 @@ const BROWSER_SURFACE_LEASE_CREATE_TABLE_NAME_PATTERN =
   /^(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(?:"browser_surface_leases"|browser_surface_leases)/i;
 
 let db: DatabaseHandle | null = null;
+let sqliteMemorySchemaSnapshot: Buffer | null = null;
+let sqliteSchemaSnapshotRestores = 0;
+
+/** How many databases this process opened from a schema snapshot (tests only). */
+export function sqliteSchemaSnapshotRestoreCountForTests(): number {
+  return sqliteSchemaSnapshotRestores;
+}
 let sqliteStoreCacheGeneration = 0;
 let sqliteStoreCacheIdentity = "sqlite:closed:0";
 
@@ -520,10 +533,26 @@ CREATE TABLE IF NOT EXISTS connectors (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Content digest of the manifest first accepted under each (connector, version),
+-- kept independent of which revision is current so a superseded version's
+-- accepted content is still protected from equivocation.
+CREATE TABLE IF NOT EXISTS connector_accepted_declarations (
+  connector_id        TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  content_digest      TEXT NOT NULL,
+  PRIMARY KEY (connector_id, declaration_version)
+);
+
 CREATE TABLE IF NOT EXISTS connector_installs (
   connector_id TEXT PRIMARY KEY,
   record_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS connector_lifecycle_locks (
+  connector_id TEXT PRIMARY KEY,
+  owner_token TEXT NOT NULL,
+  owner_pid INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS connector_activations (
@@ -904,6 +933,61 @@ CREATE TABLE IF NOT EXISTS grants (
   expires_at     TEXT,
   trace_id       TEXT,
   scenario_id    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pairwise_identity_handles (
+  issuer TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+  source_id TEXT NOT NULL,
+  internal_id TEXT NOT NULL,
+  client_sector TEXT,
+  scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+  handle TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
+);
+CREATE TABLE IF NOT EXISTS pairwise_trusted_client_sectors (
+  issuer TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  client_sector TEXT NOT NULL,
+  PRIMARY KEY (issuer, client_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id)
+);
+CREATE TABLE IF NOT EXISTS pairwise_as_instance_authority_versions (
+  subject_id TEXT NOT NULL,
+  internal_instance_id TEXT NOT NULL,
+  canonical_source_id TEXT NOT NULL,
+  declaration_version TEXT NOT NULL,
+  accepted_legacy_source_aliases_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY (subject_id, internal_instance_id, declaration_version)
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_root_keys (
+  issuer TEXT PRIMARY KEY,
+  key_version INTEGER NOT NULL CHECK (key_version = 1),
+  root_key_hex TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_legacy_backfills (
+  issuer TEXT PRIMARY KEY,
+  completed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_issuer_migrations (
+  from_issuer TEXT NOT NULL,
+  to_issuer TEXT NOT NULL,
+  migrated_at TEXT NOT NULL,
+  PRIMARY KEY (from_issuer, to_issuer)
+);
+CREATE TABLE IF NOT EXISTS pairwise_identity_deployment (
+  singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+  issuer TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS tokens (
@@ -1369,6 +1453,8 @@ CREATE TABLE IF NOT EXISTS browser_surfaces (
   profile_dir      TEXT,
   profile_volume   TEXT,
   browser_generation_hash TEXT,
+  allocator_metadata_json TEXT,
+  retained INTEGER CHECK (retained IS NULL OR retained IN (0, 1)),
   active_lease_id  TEXT,
   created_at       TEXT NOT NULL,
   last_used_at     TEXT NOT NULL,
@@ -1849,6 +1935,19 @@ CREATE TABLE IF NOT EXISTS grant_connector_state (
   PRIMARY KEY(grant_id, connector_instance_id, stream)
 );
 
+-- Opaque public read cursors hold compact metadata, never record payloads.
+CREATE TABLE IF NOT EXISTS rs_opaque_cursors (
+  token_digest    TEXT PRIMARY KEY,
+  kind            TEXT NOT NULL CHECK (kind IN ('page', 'changes_page', 'changes_since')),
+  scope_digest    TEXT NOT NULL,
+  context_digest  TEXT NOT NULL,
+  internal_cursor TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  expires_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_expiry ON rs_opaque_cursors(expires_at);
+CREATE INDEX IF NOT EXISTS idx_rs_opaque_cursors_scope ON rs_opaque_cursors(scope_digest, kind, created_at);
+
 CREATE TABLE IF NOT EXISTS connector_detail_gaps (
   gap_id              TEXT PRIMARY KEY,
   connector_id        TEXT NOT NULL,
@@ -1874,6 +1973,8 @@ CREATE TABLE IF NOT EXISTS connector_detail_gaps (
   lease_id            TEXT,
   lease_attempted     INTEGER NOT NULL DEFAULT 0,
   lease_expires_at    TEXT,
+  -- 1 = retryable, 0 = permanent source loss, NULL = legacy / unclassified.
+  retryable           INTEGER,
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
   CHECK (status IN ('pending', 'in_progress', 'recovered', 'terminal'))
@@ -1972,6 +2073,22 @@ CREATE TABLE IF NOT EXISTS stream_evidence_run_registry (
 
 CREATE INDEX IF NOT EXISTS idx_stream_evidence_run_registry_instance
   ON stream_evidence_run_registry(connector_instance_id);
+
+-- Consecutive runs each staged checkpoint was withheld for the same reason
+-- (server/stores/checkpoint-withhold-store.ts). Scheduling state only: a
+-- commit keeps the row as a tombstone (last_run_id holds a versioned run
+-- ledger), and a lost row only delays a stall report.
+CREATE TABLE IF NOT EXISTS connector_checkpoint_withholds (
+  connector_id          TEXT NOT NULL,
+  connector_instance_id TEXT NOT NULL,
+  grant_id              TEXT NOT NULL,
+  state_stream          TEXT NOT NULL,
+  reason_key            TEXT NOT NULL,
+  consecutive_runs      INTEGER NOT NULL CHECK(consecutive_runs >= 1),
+  last_run_id           TEXT NOT NULL,
+  updated_at            TEXT NOT NULL,
+  PRIMARY KEY (connector_id, connector_instance_id, grant_id, state_stream)
+);
 
 CREATE TABLE IF NOT EXISTS version_counter (
   connector_id  TEXT NOT NULL,
@@ -2152,6 +2269,7 @@ CREATE TABLE IF NOT EXISTS semantic_search_rowid (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   rowid         INTEGER NOT NULL,
+  input_identity TEXT,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 
@@ -2167,6 +2285,7 @@ CREATE TABLE IF NOT EXISTS semantic_search_blob (
   scope_key     TEXT NOT NULL,
   record_key    TEXT NOT NULL,
   embedding     BLOB NOT NULL,
+  input_identity TEXT,
   PRIMARY KEY(connector_instance_id, scope_key, record_key)
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_search_blob_plan
@@ -2475,15 +2594,16 @@ CREATE TABLE IF NOT EXISTS manifest_write_violations (
 -- scope rotates out of contention and a later healthy scope can take its
 -- page slot, while the failing scope still gets retried periodically.
 -- revision is a monotonic per-scope generation counter, atomically
--- incremented by every mark-dirty write (revision = revision + 1 in the
--- SAME statement, same idiom as connector_instances.manifest_generation).
+-- incremented by every changed mark and explicit park/rearm (revision =
+-- revision + 1 in the SAME statement, same idiom as
+-- connector_instances.manifest_generation).
 -- A reconcile's clear is CAS'd on the revision value it read when it
 -- listed the scope, NOT on marked_at: two durable marks issued within
 -- the same millisecond receive the identical ISO marked_at string (no
 -- guaranteed sub-millisecond monotonicity), so a marked_at-only CAS can
 -- silently pass even though a concurrent write re-dirtied the scope after
--- the reconcile's read -- revision cannot collide, because it only ever
--- increases by exactly 1 per mark and the clear demands an exact match.
+-- the reconcile's read -- revision cannot collide, because every ingest or
+-- operator control advances it and the clear demands an exact match.
 -- marked_at is kept for queue ordering (oldest-first) and operator-facing
 -- diagnostics ONLY; it is no longer part of any correctness-bearing check.
 CREATE TABLE IF NOT EXISTS search_index_dirty (
@@ -2497,10 +2617,28 @@ CREATE TABLE IF NOT EXISTS search_index_dirty (
   last_error            TEXT,
   attempts              INTEGER NOT NULL DEFAULT 0,
   next_attempt_at       TEXT,
+  -- 0 automatic retry state; 1 explicit operator park; NULL legacy delay
+  -- whose provenance cannot be inferred safely.
+  operator_parked       INTEGER DEFAULT 0,
   PRIMARY KEY(connector_instance_id, stream)
 );
 CREATE INDEX IF NOT EXISTS idx_search_index_dirty_pending
   ON search_index_dirty(dirty);
+
+-- Pending re-derivation of manifest-derived record columns for one stream of
+-- one connection, queued with a manifest publication; deleted once done.
+CREATE TABLE IF NOT EXISTS record_derived_repair_pending (
+  connector_instance_id TEXT NOT NULL,
+  connector_id          TEXT NOT NULL,
+  stream                TEXT NOT NULL,
+  job_id                TEXT NOT NULL,
+  after_record_key      TEXT,
+  marked_at             TEXT NOT NULL,
+  attempts              INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at       TEXT,
+  last_error            TEXT,
+  PRIMARY KEY(connector_instance_id, stream)
+);
 
 -- Deployment-scoped provider app config (e.g. a shared OAuth client
 -- id/secret), keyed generically by (identity_group, logical_key) -- never
@@ -2566,12 +2704,13 @@ function withCachedPrepare(raw: SqliteDatabase): DatabaseHandle {
  *       ("The reference's default semantic index SHALL persist across
  *        process restarts")
  */
-function addColumnIfMissing(raw: SqliteDatabase, table: string, column: string, type: string): void {
+function addColumnIfMissing(raw: SqliteDatabase, table: string, column: string, type: string): boolean {
   const cols = raw.prepare(`PRAGMA table_info(${table})`).all();
   if (cols.some((c) => c.name === column)) {
-    return;
+    return false;
   }
   raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  return true;
 }
 
 function rekeyRecordRejectionReplayKeys(raw: SqliteDatabase): void {
@@ -4377,6 +4516,8 @@ function migrateConnectorDetailGapInstanceColumns(raw: SqliteDatabase, opts: Mig
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_id", "TEXT");
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_attempted", "INTEGER NOT NULL DEFAULT 0");
   addColumnIfMissing(raw, "connector_detail_gaps", "lease_expires_at", "TEXT");
+  // Additive, nullable, never backfilled: NULL = legacy / unclassified keeps its old eligibility.
+  addColumnIfMissing(raw, "connector_detail_gaps", "retryable", "INTEGER");
   const legacyLeaseLess = raw
     .prepare(`
     UPDATE connector_detail_gaps
@@ -5939,13 +6080,13 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
   const migration = raw.transaction(() => {
     const rowids = raw
       .prepare(
-        `SELECT ${rowidHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, rowid
+        `SELECT ${rowidHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, rowid, ${hasTableColumn(raw, "semantic_search_rowid", "input_identity") ? "input_identity" : "NULL AS input_identity"}
         FROM semantic_search_rowid`
       )
       .all<SemanticIndexRow>();
     const blobs = raw
       .prepare(
-        `SELECT ${blobHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, embedding
+        `SELECT ${blobHasInstance ? "connector_instance_id," : ""} connector_id, scope_key, record_key, embedding, ${hasTableColumn(raw, "semantic_search_blob", "input_identity") ? "input_identity" : "NULL AS input_identity"}
         FROM semantic_search_blob`
       )
       .all<SemanticIndexRow>();
@@ -6009,6 +6150,7 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
         scope_key     TEXT NOT NULL,
         record_key    TEXT NOT NULL,
         rowid         INTEGER NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
 
@@ -6018,6 +6160,7 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
         scope_key     TEXT NOT NULL,
         record_key    TEXT NOT NULL,
         embedding     BLOB NOT NULL,
+        input_identity TEXT,
         PRIMARY KEY(connector_instance_id, scope_key, record_key)
       );
       CREATE INDEX IF NOT EXISTS idx_semantic_search_blob_plan
@@ -6025,19 +6168,33 @@ function migrateSemanticSearchInstanceColumns(raw: SqliteDatabase, opts: Migrati
     `);
 
     const insertRowid = raw.prepare(
-      `INSERT INTO semantic_search_rowid(connector_instance_id, connector_id, scope_key, record_key, rowid)
-        VALUES(?, ?, ?, ?, ?)`
+      `INSERT INTO semantic_search_rowid(connector_instance_id, connector_id, scope_key, record_key, rowid, input_identity)
+        VALUES(?, ?, ?, ?, ?, ?)`
     );
     for (const row of rowids) {
-      insertRowid.run(resolveInstanceId(row), row.connector_id, row.scope_key, row.record_key, row.rowid);
+      insertRowid.run(
+        resolveInstanceId(row),
+        row.connector_id,
+        row.scope_key,
+        row.record_key,
+        row.rowid,
+        row.input_identity ?? null
+      );
     }
 
     const insertBlob = raw.prepare(
-      `INSERT INTO semantic_search_blob(connector_instance_id, connector_id, scope_key, record_key, embedding)
-        VALUES(?, ?, ?, ?, ?)`
+      `INSERT INTO semantic_search_blob(connector_instance_id, connector_id, scope_key, record_key, embedding, input_identity)
+        VALUES(?, ?, ?, ?, ?, ?)`
     );
     for (const row of blobs) {
-      insertBlob.run(resolveInstanceId(row), row.connector_id, row.scope_key, row.record_key, row.embedding);
+      insertBlob.run(
+        resolveInstanceId(row),
+        row.connector_id,
+        row.scope_key,
+        row.record_key,
+        row.embedding,
+        row.input_identity ?? null
+      );
     }
 
     const insertMeta = raw.prepare(
@@ -6098,33 +6255,36 @@ function loadVectorExtension(raw: SqliteDatabase): VectorIndexKind {
   }
 }
 
-export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
-  // Detach, don't close: a previously-returned handle belongs to whoever
-  // holds it. See `detachDb()` for why closing here was a cross-instance
-  // interference defect.
-  detachDb();
-  const busyTimeoutMs = resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs);
-  if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true });
+/**
+ * Publish `bytes` as a new database file at `path`, or throw if `path` cannot be
+ * published: EEXIST when anything already exists there, or another error from
+ * `link` when the filesystem has no hard links. The bytes are written in full to
+ * a unique temporary file in the same directory first, so no other process can
+ * open a partly written database. The hard link then makes the file visible at
+ * `path` in one step, and it never replaces a competing database. The temporary
+ * file is removed either way.
+ */
+export function publishSchemaSnapshotFile(
+  path: string,
+  bytes: Buffer,
+  link: (existingPath: string, newPath: string) => void = linkSync,
+): void {
+  const temporaryPath = `${path}.snapshot-${process.pid}-${randomBytes(8).toString("hex")}`;
+  try {
+    writeFileSync(temporaryPath, bytes, { flag: "wx" });
+    link(temporaryPath, path);
+  } finally {
+    rmSync(temporaryPath, { force: true });
   }
-  const raw = openSqliteDatabase(Database, path, busyTimeoutMs, opts) as unknown as SqliteDatabase;
-  sqliteStoreCacheGeneration += 1;
-  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
-  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
+}
 
-  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
-  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
-  // invalid on in-memory DBs.
-  if (path !== ":memory:") {
-    raw.pragma("journal_mode = WAL");
-    raw.pragma("synchronous = NORMAL");
-    raw.pragma("temp_store = MEMORY");
-    raw.pragma("mmap_size = 268435456");
-    raw.pragma("cache_size = -65536");
-  }
-
-  const vectorIndexKind = loadVectorExtension(raw);
-
+/**
+ * Create the schema on `raw`, a connection to a database with no schema yet.
+ * It does not read or write the module's database handle or store-cache
+ * identity, so `initDb` can run it on a private `:memory:` connection (see
+ * `buildPrivateSchemaSnapshot`) as well as on the connection it returns.
+ */
+function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   // The first non-trivial write on the freshly opened DB. On Docker dev
   // restart the previous process may still be closing its WAL writer;
   // wrap with the same bounded retry policy used by
@@ -6132,6 +6292,61 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   // crash the new process. Sync because better-sqlite3 / initDb are sync.
   runWithSqliteBusyRetrySync(() => raw.exec(SCHEMA), {
     onRetry: opts.onSchemaRetry,
+  });
+  // The red-stage table may already contain random handles. Add metadata in
+  // place so those exact issued mappings remain readable as legacy rows.
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "pairwise_identity_handles", "client_sector", "TEXT"));
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "pairwise_identity_handles", "scheme", "TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1'))")
+  );
+  // A legacy row and its v1 successor share the original six-column tuple, so
+  // the key must include scheme. SQLite cannot change a primary key in place:
+  // rebuild once, atomically, copying every disclosed handle unchanged. The
+  // shape is re-read inside the write lock so a concurrent starter skips it.
+  runWithSqliteBusyRetrySync(() => {
+    raw
+      .transaction(() => {
+        const key = raw
+          .prepare("SELECT name FROM pragma_table_info('pairwise_identity_handles') WHERE pk > 0 ORDER BY pk")
+          .all<{ name: string }>()
+          .map((column) => column.name)
+          .join(",");
+        if (key === "issuer,subject_id,client_id,kind,source_id,internal_id,scheme") return;
+        if (key !== "issuer,subject_id,client_id,kind,source_id,internal_id") {
+          throw new Error("Unsupported pairwise_identity_handles primary key; refusing an unsafe migration.");
+        }
+        raw.exec(`
+          CREATE TABLE pairwise_identity_handles_new (
+            issuer TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('subject','grantor','instance')),
+            source_id TEXT NOT NULL,
+            internal_id TEXT NOT NULL,
+            client_sector TEXT,
+            scheme TEXT NOT NULL DEFAULT 'legacy' CHECK (scheme IN ('legacy','v1')),
+            handle TEXT NOT NULL UNIQUE,
+            PRIMARY KEY (issuer,subject_id,client_id,kind,source_id,internal_id,scheme)
+          );
+          INSERT INTO pairwise_identity_handles_new
+            (issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle)
+          SELECT issuer,subject_id,client_id,kind,source_id,internal_id,client_sector,scheme,handle
+            FROM pairwise_identity_handles;
+          DROP TABLE pairwise_identity_handles;
+          ALTER TABLE pairwise_identity_handles_new RENAME TO pairwise_identity_handles;
+          CREATE UNIQUE INDEX idx_pairwise_identity_handles_v1_scope
+            ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+            WHERE scheme = 'v1';
+        `);
+      })
+      .immediate();
+  });
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_pairwise_identity_handles_v1_scope
+         ON pairwise_identity_handles(issuer, client_sector, kind, subject_id, internal_id)
+         WHERE scheme = 'v1'`
+    );
   });
   // Older registries contain only the uniqueness key. Keep those claims
   // spent, but leave them without a replay payload so the store fails closed
@@ -6288,6 +6503,10 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_dir", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "profile_volume", "TEXT"));
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "browser_generation_hash", "TEXT"));
+  runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "browser_surfaces", "allocator_metadata_json", "TEXT"));
+  runWithSqliteBusyRetrySync(() =>
+    addColumnIfMissing(raw, "browser_surfaces", "retained", "INTEGER CHECK (retained IS NULL OR retained IN (0, 1))")
+  );
   // Dataset summary projection fencing: a `generation` column lets rebuild
   // and reconcile writers guard their final summary write against
   // concurrent record/blob delta writers. Pre-existing rows seed with 0;
@@ -6314,6 +6533,23 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
     addColumnIfMissing(raw, "search_index_dirty", "attempts", "INTEGER NOT NULL DEFAULT 0")
   );
   runWithSqliteBusyRetrySync(() => addColumnIfMissing(raw, "search_index_dirty", "next_attempt_at", "TEXT"));
+  // Existing delayed rows have no provenance: do not guess whether an old
+  // deadline was automatic or an intentional operator park. New rows use the
+  // default (0) on both fresh and upgraded tables; legacy delayed rows remain
+  // NULL until an automatic failure or explicit control action classifies them.
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec("BEGIN IMMEDIATE");
+    try {
+      if (addColumnIfMissing(raw, "search_index_dirty", "operator_parked", "INTEGER DEFAULT 0")) {
+        raw.exec(`UPDATE search_index_dirty
+                  SET operator_parked = CASE WHEN next_attempt_at IS NULL THEN 0 ELSE NULL END`);
+      }
+      raw.exec("COMMIT");
+    } catch (error) {
+      raw.exec("ROLLBACK");
+      throw error;
+    }
+  });
   // Monotonic per-scope CAS generation (see the CREATE TABLE comment above):
   // a pre-existing reference DB created the table before this column
   // existed. Pre-existing rows seed with 0; any subsequent mark-dirty write
@@ -6377,6 +6613,12 @@ export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHan
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
+  // A legacy vector has no evidence that it was produced from the current
+  // normalized input. NULL deliberately forces one guarded refresh.
+  runWithSqliteBusyRetrySync(() => {
+    addColumnIfMissing(raw, "semantic_search_blob", "input_identity", "TEXT");
+    addColumnIfMissing(raw, "semantic_search_rowid", "input_identity", "TEXT");
+  });
   runWithSqliteBusyRetrySync(() => migrateLexicalSearchInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateLocalDeviceConnectorInstances(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordSemanticTimeColumn(raw));
@@ -6605,6 +6847,125 @@ CREATE TABLE IF NOT EXISTS cimd_client_documents (
   runWithSqliteBusyRetrySync(() =>
     raw.transaction(() => ensureConnectorSummarySourceRevisionPrimitive(raw)).immediate()
   );
+}
+
+/**
+ * The schema as a serialized database image, built on a private `:memory:`
+ * connection that no other code can reach. The build starts from an empty
+ * database, so a file created from the image holds no rows from any other
+ * database.
+ */
+function buildPrivateSchemaSnapshot(opts: InitDbOptions): Buffer {
+  const seed = openSqliteDatabase(
+    Database,
+    ":memory:",
+    resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs),
+    opts,
+  ) as unknown as SqliteDatabase;
+  try {
+    loadVectorExtension(seed);
+    buildSqliteSchema(seed, opts);
+    return seed.serialize();
+  } finally {
+    seed.close();
+  }
+}
+
+/**
+ * Create `path` from the schema image, so a fresh database file starts with its
+ * schema built. The image is built privately and is never copied from `path`,
+ * because another process may be writing to `path` at this moment. Returns false
+ * when `path` was not published, and the caller then opens it and builds the
+ * schema in place: another process created `path` first (EEXIST), or the
+ * filesystem has no hard links. Any other error also returns false; the in-place
+ * build then reports a real problem.
+ */
+function publishFileSchemaSnapshot(path: string, opts: InitDbOptions): boolean {
+  if (sqliteMemorySchemaSnapshot === null) {
+    sqliteMemorySchemaSnapshot = buildPrivateSchemaSnapshot(opts);
+  }
+  try {
+    publishSchemaSnapshotFile(path, sqliteMemorySchemaSnapshot);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function initDb(path = ":memory:", opts: InitDbOptions = {}): DatabaseHandle {
+  // Detach, don't close: a previously-returned handle belongs to whoever
+  // holds it. See `detachDb()` for why closing here was a cross-instance
+  // interference defect.
+  detachDb();
+  const busyTimeoutMs = resolveSqliteBusyTimeoutMs(opts.busyTimeoutMs);
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true });
+  }
+  const hasMigrationCallback =
+    opts.onSchemaMigration !== undefined ||
+    opts.onSchemaRetry !== undefined ||
+    opts.onEncryptionMigrationStep !== undefined;
+  // Test runs only (the RI runner requires PDPP_TEST_PROFILE): a test process
+  // opens many fresh databases, and rebuilding the schema for each one cost
+  // about 6.6% of the memory gate's CPU. Production opens one database per
+  // process and never takes this path. Anything that must observe or change
+  // the schema build bypasses it: migration callbacks, encryption, and the
+  // test-only source-revision install marker.
+  const canUseSchemaSnapshot =
+    process.env.PDPP_TEST_PROFILE !== undefined &&
+    !hasMigrationCallback &&
+    !process.env.PDPP_TEST_SOURCE_REVISION_INSTALL_LOCK_PATH &&
+    resolveDatabaseEncryptionKey(opts.encryptionKey) === null;
+  const restoredMemorySchema =
+    path === ":memory:" && canUseSchemaSnapshot && sqliteMemorySchemaSnapshot !== null;
+  let restoredFileSchema = false;
+  if (path !== ":memory:" && canUseSchemaSnapshot) {
+    if (!existsSync(path) && !existsSync(`${path}-wal`) && !existsSync(`${path}-shm`)) {
+      restoredFileSchema = publishFileSchemaSnapshot(path, opts);
+    }
+  }
+  const raw = (restoredMemorySchema
+    ? new Database(sqliteMemorySchemaSnapshot as Buffer, { timeout: busyTimeoutMs })
+    : openSqliteDatabase(Database, path, busyTimeoutMs, opts)) as unknown as SqliteDatabase;
+  sqliteStoreCacheGeneration += 1;
+  sqliteStoreCacheIdentity = `sqlite:${String(path)}:${sqliteStoreCacheGeneration}`;
+  raw.pragma(`busy_timeout = ${busyTimeoutMs}`);
+
+  // Performance PRAGMAs — see openspec/changes/add-polyfill-connector-system/
+  // design-notes/sqlite-performance-recommendations.md for rationale. WAL is
+  // invalid on in-memory DBs.
+  if (path !== ":memory:") {
+    raw.pragma("journal_mode = WAL");
+    raw.pragma("synchronous = NORMAL");
+    raw.pragma("temp_store = MEMORY");
+    raw.pragma("mmap_size = 268435456");
+    raw.pragma("cache_size = -65536");
+  }
+
+  const vectorIndexKind = loadVectorExtension(raw);
+
+  // SQLite connection settings are not part of a serialized database. The
+  // schema-building path restores foreign_keys during its migrations; a
+  // deserialized connection must restore it explicitly.
+  if (restoredMemorySchema || restoredFileSchema) {
+    sqliteSchemaSnapshotRestores += 1;
+    raw.pragma("foreign_keys = ON");
+    db = withCachedPrepare(raw);
+    Object.defineProperty(raw, "vectorIndexKind", {
+      configurable: false,
+      enumerable: true,
+      value: vectorIndexKind,
+      writable: false,
+    });
+    return db;
+  }
+
+  buildSqliteSchema(raw, opts);
+  if (
+    path === ":memory:" && canUseSchemaSnapshot && !restoredMemorySchema
+  ) {
+    sqliteMemorySchemaSnapshot = raw.serialize();
+  }
   db = withCachedPrepare(raw);
   // Stamp the chosen vector-index backend onto the wrapped db so
   // search-semantic.js can select without re-probing. The Proxy's

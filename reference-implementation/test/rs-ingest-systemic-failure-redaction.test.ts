@@ -120,7 +120,7 @@ interface TokenBody {
 }
 
 async function issueOwnerToken(asUrl: string, subjectId = "owner_local"): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body } = await fetchJson(`${asUrl}/oauth/device_authorization`, {
     body: new URLSearchParams({ client_id: clientId }).toString(),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

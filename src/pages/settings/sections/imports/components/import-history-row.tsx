@@ -99,6 +99,11 @@ export const ImportHistoryRow = memo(function ImportHistoryRow({
             <Text as="div" intent="body" weight="semi">
               {run.name}
             </Text>
+            {run.accountLabel ? (
+              <Text as="div" intent="fine" muted>
+                {run.accountLabel}
+              </Text>
+            ) : null}
             <ImportRunStateLabel status={run.status} />
           </div>
         }

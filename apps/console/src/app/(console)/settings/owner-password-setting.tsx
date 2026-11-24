@@ -9,13 +9,22 @@ import {
   changeOwnerPasswordAction,
   requestDesktopOwnerPasswordChangeAction,
 } from "./owner-password-actions.ts"
+import { OwnerCredentialSetting } from "./owner-credential-setting.tsx"
 import type { OwnerPasswordSource } from "./owner-password-data.ts"
 
+/**
+ * The one "Owner password" section. `source` comes from the RI
+ * (`loadOwnerPasswordSource`). For "desktop", the DataConnect keychain holds
+ * the password: reveal it for another device, or set a new one through the
+ * native window. `canReveal` is true only in the desktop's own webview.
+ */
 export function OwnerPasswordSetting({
-  linuxLocalOnlyNoPromptNotice = null,
+  canReveal = false,
+  managedDesktop = false,
   source,
 }: {
-  linuxLocalOnlyNoPromptNotice?: string | null
+  canReveal?: boolean
+  managedDesktop?: boolean
   source: OwnerPasswordSource
 }) {
   const router = useRouter()
@@ -76,11 +85,7 @@ export function OwnerPasswordSetting({
         )
         return
       }
-      setMessage(
-        result.linuxPolkitUnverified && !linuxLocalOnlyNoPromptNotice
-          ? "Password window opened."
-          : "Password window opened."
-      )
+      setMessage("Password window opened.")
       router.refresh()
     } catch (error) {
       setMessage(
@@ -91,6 +96,16 @@ export function OwnerPasswordSetting({
     } finally {
       setBusy(false)
     }
+  }
+
+  if (source === "env" && managedDesktop) {
+    return (
+      <p className="pdpp-caption text-muted-foreground">
+        This password comes from <code>DATACONNECT_OWNER_PASSWORD</code> or{" "}
+        <code>PDPP_OWNER_PASSWORD</code> in the environment DataConnect started
+        with. Change it there, then restart DataConnect.
+      </p>
+    )
   }
 
   if (source === "env") {
@@ -117,7 +132,13 @@ export function OwnerPasswordSetting({
 
   if (source === "desktop") {
     return (
-      <div className="grid justify-items-start gap-2">
+      <div className="grid justify-items-start gap-3">
+        <p className="pdpp-caption text-muted-foreground">
+          DataConnect stores this password on this computer for signing in on
+          other devices. Changing it signs out other browser sessions and
+          command-line tokens and restarts the server.
+        </p>
+        {canReveal ? <OwnerCredentialSetting /> : null}
         {message ? (
           <p className="pdpp-caption text-muted-foreground" role="status">
             {message}
@@ -125,22 +146,12 @@ export function OwnerPasswordSetting({
         ) : null}
         <button
           className="rounded-md bg-foreground px-3 py-1.5 text-sm text-background hover:opacity-90 disabled:opacity-50"
-          disabled={busy || Boolean(linuxLocalOnlyNoPromptNotice)}
+          disabled={busy}
           onClick={() => void requestDesktopChange()}
           type="button"
         >
           {busy ? "Checking…" : "Change password"}
         </button>
-        <p className="pdpp-caption text-muted-foreground">
-          {linuxLocalOnlyNoPromptNotice
-            ? "Password change is unavailable on Linux until OS re-auth is verified."
-            : "DataConnect will ask this computer to confirm first, then open the local password window."}
-        </p>
-        {linuxLocalOnlyNoPromptNotice ? (
-          <p className="pdpp-caption text-muted-foreground" role="status">
-            {linuxLocalOnlyNoPromptNotice}
-          </p>
-        ) : null}
       </div>
     )
   }

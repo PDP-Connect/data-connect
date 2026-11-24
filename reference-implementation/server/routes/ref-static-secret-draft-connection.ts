@@ -216,6 +216,7 @@ function projectField(field: StaticSecretSetupField): Record<string, unknown> {
   return {
     autocomplete: field.autocomplete,
     description: field.description,
+    env: field.env,
     help_text: field.helpText,
     help_url: field.helpUrl,
     identity: field.identity,

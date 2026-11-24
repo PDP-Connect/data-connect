@@ -19,6 +19,8 @@ import {
   decodeCursor as wrapperDecodeCursor,
 } from "./db.ts";
 import {
+  deriveTokenAuditId,
+  normalizeDeviceAuditFields,
   postgresEmitSpineEvent,
   postgresGetRunStartedEvent,
   postgresGetRunTerminalEvent,
@@ -403,17 +405,20 @@ function normalizeSpineEventInput(input: SpineEventInput): NormalizedSpineEvent 
   const actorType = asString(input.actor_type, "system");
   const actorId = asString(input.actor_id, "pdpp_reference");
   const source = deriveSourceFromEventInput(input, actorType, actorId);
+  const tokenId = asOptionalString(input.token_id);
+  const objectId = asString(input.object_id, generateSpineId("obj"));
+  const deviceAudit = normalizeDeviceAuditFields(input.object_type, objectId, input.data);
   return {
     actor_id: actorId,
     actor_type: actorType,
     client_id: asOptionalString(input.client_id),
     connector_instance_id: deriveConnectorInstanceIdFromEventInput(input),
-    data_json: serializeSpineEventData(input.data, source),
+    data_json: serializeSpineEventData(deviceAudit.data, source),
     event_id: asString(input.event_id, generateSpineId("evt")),
     event_type: asOptionalString(input.event_type),
     grant_id: asOptionalString(input.grant_id),
     interaction_id: asOptionalString(input.interaction_id),
-    object_id: asString(input.object_id, generateSpineId("obj")),
+    object_id: input.object_type === "token" ? deriveTokenAuditId(objectId) : deviceAudit.object_id,
     object_type: asString(input.object_type, "event"),
     occurred_at: occurredAt,
     recorded_at: nowIso(),
@@ -428,7 +433,7 @@ function normalizeSpineEventInput(input: SpineEventInput): NormalizedSpineEvent 
     stream_id: asOptionalString(input.stream_id),
     subject_id: asOptionalString(input.subject_id),
     subject_type: asOptionalString(input.subject_type),
-    token_id: asOptionalString(input.token_id),
+    token_id: tokenId === null ? null : deriveTokenAuditId(tokenId),
     trace_id: asString(input.trace_id, generateSpineId("trc")),
     version: asString(input.version, SPINE_VERSION),
   };

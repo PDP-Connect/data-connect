@@ -1,0 +1,19 @@
+# Copyright The PDP-Connect Contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Ubuntu 23.10+ restricts unprivileged user namespaces with AppArmor, so the
+# bundled Chromium cannot create its sandbox and aborts with "No usable
+# sandbox!". This profile, modelled on Ubuntu's /etc/apparmor.d/chrome, allows
+# everything and grants the bundled Chromium the userns permission. The
+# revision directory changes with each Playwright update, and arm64 builds
+# use chrome-linux/ instead of chrome-linux64/.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile dataconnect-chromium /usr/lib/DataConnect/playwright-runner/dist/browsers/chromium-[0-9]*/chrome-linux{,64}/chrome flags=(unconfined) {
+  userns,
+
+  # Site-specific additions and overrides. See local/README for details.
+  include if exists <local/dataconnect-chromium>
+}

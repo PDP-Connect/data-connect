@@ -8,10 +8,12 @@ import { fileURLToPath } from "node:url"
 
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 const SETTING_FILE = `${HERE}remote-access-setting.tsx`
+const SETTINGS_PAGE_FILE = `${HERE}page.tsx`
 const ACTIONS_FILE = `${HERE}remote-access-actions.ts`
 const WINDOW_FILE = `${HERE}../../../../../../public/owner-password.html`
 const OWNER_CREDENTIAL_RUST_FILE = `${HERE}../../../../../../src-tauri/src/owner_credential.rs`
 const UNIFIED_RUST_FILE = `${HERE}../../../../../../src-tauri/src/unified.rs`
+const RECOVERY_CODE_RUST_FILE = `${HERE}../../../../../../src-tauri/src/recovery_code.rs`
 
 test("remote access opens the native owner-password window and retries the pending save", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
@@ -39,12 +41,35 @@ test("remote-access first setup opens the desktop owner-password window without 
   assert.match(actions, /requestOwnerPasswordStackRestart/)
 })
 
-test("the migration banner can set the password and request restart for existing remote installs", async () => {
+test("the migration banner opens initial setup and restarts after the owner password is saved", async () => {
   const setting = await readFile(SETTING_FILE, "utf8")
+  const actions = await readFile(ACTIONS_FILE, "utf8")
+  const requestAction = actions.slice(
+    actions.indexOf("export async function requestOwnerPasswordWindowAction"),
+    actions.indexOf("export async function restartAfterOwnerPasswordSetAction")
+  )
 
-  assert.match(setting, /setOwnerPasswordForMigration/)
-  assert.match(setting, /Set owner password/)
+  const migrationHandler = setting.match(
+    /const setOwnerPasswordForMigration = async \(\) => \{([\s\S]*?)\n  \}/
+  )?.[1]
+  assert.ok(migrationHandler, "migration handler should remain in the setting")
+  assert.match(migrationHandler, /requestOwnerPasswordWindow\(\)/)
+  assert.match(migrationHandler, /loadRemoteAccessState\(\)/)
+  assert.match(migrationHandler, /state\.ownerPasswordOwnerSet/)
+  assert.match(migrationHandler, /restartAfterOwnerPasswordSet\(\)/)
+  assert.ok(
+    migrationHandler.indexOf("state.ownerPasswordOwnerSet") <
+      migrationHandler.indexOf("restartAfterOwnerPasswordSet()"),
+    "restart must follow the owner-set marker"
+  )
+  assert.match(requestAction, /hasValidLocalOwnerCredentialRevealProofCookie/)
+  assert.match(actions, /purpose: "initial_setup"/)
+  assert.match(setting, /onClick=\{\(\) => void setOwnerPasswordForMigration\(\)\}/)
+  assert.match(setting, /disabled=\{busy \|\| desktopUnavailable\}/)
+  assert.match(setting, /Change password/)
   assert.match(setting, /showOwnerPasswordMigrationBanner/)
+  assert.doesNotMatch(setting, /href="#owner-password"/)
+  assert.doesNotMatch(setting, /requestDesktopOwnerPasswordChangeAction/)
 })
 
 test("native password window uses the app-origin Tauri command", async () => {
@@ -93,7 +118,7 @@ test("native OS reauth waits asynchronously and late callbacks cannot mint grant
   )
 })
 
-test("native grants are opaque purpose-bound tokens and Linux skipped auth cannot mint a write grant", async () => {
+test("native grants are opaque purpose-bound tokens minted after OS reauth or the Linux no-prompt result", async () => {
   const rust = await readFile(OWNER_CREDENTIAL_RUST_FILE, "utf8")
 
   assert.match(rust, /HashMap<String, OwnerReauthGrant>/)
@@ -101,12 +126,16 @@ test("native grants are opaque purpose-bound tokens and Linux skipped auth canno
   assert.match(rust, /purpose: "change"\.to_string\(\)/)
   assert.match(rust, /window_request_id: None/)
   assert.match(rust, /grant\.window_request_id = Some\(request_id\)/)
-  assert.match(rust, /status == "authenticated"/)
   assert.match(rust, /Ok\("skipped_linux_polkit_unverified"\)/)
+  // Linux has no verified OS prompt; the console gates a Linux change on
+  // the desktop webview's local proof cookie (owner-password-actions.test.ts).
+  const mint =
+    'if status == "authenticated" || status == "skipped_linux_polkit_unverified"'
   assert.ok(
-    rust.indexOf('if status == "authenticated"') <
-      rust.indexOf("let grant_id = uuid::Uuid::new_v4().to_string()"),
-    "write grants must be minted only for authenticated OS reauth results"
+    rust.indexOf(mint) >= 0 &&
+      rust.indexOf(mint) <
+        rust.indexOf("let grant_id = uuid::Uuid::new_v4().to_string()"),
+    "write grants must be minted only for an OS reauth result"
   )
 })
 
@@ -127,14 +156,18 @@ test("desktop recovery imports v2 kits before startup and treats v1 kits as lost
     rust.indexOf("pub(crate) async fn import_database_encryption_recovery_code")
   )
 
-  assert.match(rust, /decode_recovery_kit_for_import/)
-  assert.match(rust, /crate::recovery_code::decode_v2\(code\)/)
-  assert.match(rust, /crate::recovery_code::decode\(code\)/)
-  assert.match(rust, /LegacyV1KitMissingCredentialKey/)
+  const recoveryCode = await readFile(RECOVERY_CODE_RUST_FILE, "utf8")
+  const decodeForImport = recoveryCode.slice(
+    recoveryCode.indexOf("pub(crate) fn decode_for_import"),
+    recoveryCode.indexOf("pub(crate) fn encode_v2")
+  )
+  assert.match(command, /crate::recovery_code::decode_for_import\(&code\)/)
+  assert.match(decodeForImport, /match decode_v2\(code\)/)
+  assert.match(decodeForImport, /database_encryption_key: decode\(code\)\?/)
+  assert.match(rust, /CREDENTIAL_KEY_LOST_CAUSE: &str = "legacy_v1_kit_missing_credential_key"/)
   assert.doesNotMatch(rust, /RecoveredFromV2Kit/)
   assert.match(command, /clear_recovery_credential_state\(&app\)\?/)
-  assert.match(command, /if created_v1_recovery_marker/)
-  assert.match(command, /recovery_attempt_failed_before_server_credential_transition/)
+  assert.match(command, /discard_unconsumed_recovery_marker\(&path, created_v1_recovery_marker\)/)
   assert.match(command, /credential_encryption_key_missing_for_sealed_credentials/)
   const loadedSecretsArm = command.slice(
     command.indexOf("Ok(secrets) =>"),
@@ -143,45 +176,49 @@ test("desktop recovery imports v2 kits before startup and treats v1 kits as lost
   assert.match(loadedSecretsArm, /clear_recovery_credential_state\(&app\)\?/)
   const existingKeyArm = command.slice(
     command.indexOf("Ok(existing) =>"),
-    command.indexOf("Err(error) if credential_encryption_key_missing_for_sealed_credentials")
+    command.indexOf("if credential_encryption_key_missing_for_sealed_credentials(&error)")
   )
   assert.match(existingKeyArm, /clear_recovery_credential_state\(&app\)\?/)
-  assert.match(command, /let _ = clear_recovery_credential_state\(&app\)/)
   assert.match(command, /save_credential_encryption_key\(&app, credential_key\)/)
-  assert.match(command, /request_owner_password_window_for_recovery\(&app\)\?/)
+  assert.match(command, /request_owner_password_window_for_recovery\(&app\)/)
   assert.match(rust, /revoke_existing_sessions: bool/)
-  assert.match(rust, /PDPP_RECOVERY_REVOKE_OWNER_SESSIONS/)
+  assert.match(rust, /RECOVERY_REVOKE_OWNER_SESSIONS_ENV: &str = "PDPP_RECOVERY_REVOKE_OWNER_SESSIONS"/)
+  assert.match(rust, /RECOVERY_OWNER_SESSION_RESET_FILE: &str = "owner-session-recovery-reset\.json"/)
   assert.match(await readFile(OWNER_CREDENTIAL_RUST_FILE, "utf8"), /owner-password-recovery-window-request\.json/)
+  assert.ok(
+    command.indexOf("decode_for_import(&code)") < command.indexOf("mark_recovery_credential_state("),
+    "an invalid kit must fail at decode, before any lost credential-key marker is written"
+  )
   assert.ok(
     command.indexOf("mark_recovery_credential_state(") <
       command.indexOf("start_managed_stack("),
     "legacy v1 recovery must record lost credential-key state before the managed stack can decrypt pending credentials or schedule connectors"
   )
   assert.ok(
-    command.indexOf("request_owner_password_window_for_recovery(&app)?") <
+    command.indexOf("request_owner_password_window_for_recovery(&app)") <
       command.indexOf("finish_bootstrap("),
     "recovery must queue Set your password before opening the recovered console"
   )
 })
 
-test("v1 recovery keeps the lost credential-key marker when server transition startup fails", async () => {
+test("v1 recovery discards only a marker the RI did not consume", async () => {
+  // Behavior is proven by the Rust tests that start a fake RI through the
+  // supervisor; this pins the wiring.
   const rust = await readFile(UNIFIED_RUST_FILE, "utf8")
   const helper = rust.slice(
-    rust.indexOf("fn recovery_attempt_failed_before_server_credential_transition"),
+    rust.indexOf("fn discard_unconsumed_recovery_marker"),
     rust.indexOf("/// Recovery-window command")
   )
   const command = rust.slice(
-    rust.indexOf("Err(error) => {", rust.indexOf("let (ri_origin, console_url) = match result")),
+    rust.indexOf("Err(_) => {", rust.indexOf("let (ri_origin, console_url) = match result")),
     rust.indexOf("teardown_managed_on_error(&app, true, StopReason::VaultKeyRejected)", rust.indexOf("let (ri_origin, console_url) = match result"))
   )
 
-  assert.match(helper, /Could not open the encrypted SQLite vault/)
-  assert.match(helper, /The SQLite vault at /)
-  assert.ok(
-    command.indexOf("recovery_attempt_failed_before_server_credential_transition(&error)") <
-      command.indexOf("let _ = clear_recovery_credential_state(&app)"),
-    "v1 recovery must only clear its marker for a proven database-key failure before server credential transition"
-  )
+  assert.match(helper, /remove_credential_recovery_state\(path\)/)
+  assert.doesNotMatch(helper, /\.applied"/)
+  assert.match(command, /discard_unconsumed_recovery_marker\(&path, created_v1_recovery_marker\)/)
+  assert.match(rust, /fn a_rejected_recovery_key_leaves_no_credential_marker/)
+  assert.match(rust, /fn a_startup_failure_after_the_marker_was_applied_keeps_it/)
 })
 
 test("recovery startup revokes existing owner sessions before scheduler startup and console exposure", async () => {
@@ -193,10 +230,10 @@ test("recovery startup revokes existing owner sessions before scheduler startup 
   )
   const finish = rust.slice(
     rust.indexOf("async fn finish_bootstrap"),
-    rust.indexOf("async fn revoke_other_owner_sessions_after_recovery")
+    rust.indexOf("fn credential_recovery_state_path")
   )
 
-  assert.match(recoveryStart, /start_managed_stack\([\s\S]*None,[\s\S]*true,/)
+  assert.match(recoveryStart, /start_managed_stack\([\s\S]*None,[\s\S]*Some\(OwnerSessionReset::Recovery\),/)
   assert.match(server, /RECOVERY_REVOKE_OWNER_SESSIONS_ENV/)
   assert.match(server, /revokeAllSessions/)
   assert.match(server, /listOwnerBearers/)

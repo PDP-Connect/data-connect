@@ -5,6 +5,7 @@ import { parseCoverageDiagnosticsStateSnapshot } from "./polyfill-connectors-run
 /**
  * PDPP Resource Server — record storage and grant-enforced query
  */
+import { crashPoint } from "./crash-point.ts";
 import { getDb } from "./db.ts";
 import { assertGrantedManifestReadAuthority, assertManifestReadAuthority } from "./manifest-read-authority.ts";
 import type { ComputedLexicalFields } from "./search.ts";
@@ -66,7 +67,10 @@ import {
   withConnectorInstanceWrite,
 } from "./connector-instance-write-coordinator.ts";
 import { canonicalConnectorKey } from "./connector-key.ts";
-import { assertConnectorManifestStreamSubsetSync } from "./connector-manifest-write-fence.ts";
+import {
+  assertConnectorManifestStreamSubsetSync,
+  lockConnectorManifestPublication,
+} from "./connector-manifest-write-fence.ts";
 import { markConnectorSummaryEvidenceDirty } from "./connector-summary-read-model.ts";
 import { applyDatasetSummaryRecordDelta, markDatasetSummaryProjectionStale } from "./dataset-summary-read-model.ts";
 import { COLLECTION_SCOPE_STATE_KEY, readStoredCollectionScope } from "./local-collection-scope.ts";
@@ -115,6 +119,7 @@ import {
   jsonPathForTopLevelField,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
   type TimeConstraint,
 } from "./record-filters.ts";
 import {
@@ -124,7 +129,12 @@ import {
 } from "./retained-size-read-model.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import { createStorageBackend } from "./storage-backend.ts";
-import { currentStorageGeneration, isCurrentStorageGeneration } from "./storage-generation.ts";
+import {
+  assertCurrentStorageGeneration,
+  currentStorageGeneration,
+  isCurrentStorageGeneration,
+  StaleStorageGenerationError,
+} from "./storage-generation.ts";
 import {
   getChangeHistoryLimit,
   nowIso,
@@ -138,7 +148,7 @@ import {
 } from "./stores/connector-instance-store.ts";
 import { getDefaultConnectorStateStore } from "./stores/connector-state-store.ts";
 import { advanceSqliteDeviceIngestPrefix } from "./stores/device-exporter-store.ts";
-import { markSearchIndexDirtySqlite, recordSearchIndexDirtyFailure } from "./stores/search-index-dirty-store.ts";
+import { markSearchIndexDirtySqlite, recordSearchIndexDirtyEvidence } from "./stores/search-index-dirty-store.ts";
 
 export { resolveRecordIdentityForBinding } from "./connection-identity.ts";
 
@@ -346,6 +356,7 @@ interface ResponseRecord {
   emitted_at: string;
   expanded?: Record<string, unknown>;
   id: string;
+  instance_id?: string;
   meta?: RecordResponseMeta;
   object: "record";
   // Logical byte length of this record's current `record_json` (SQLite:
@@ -505,6 +516,7 @@ interface ReadWarning {
   param?: string;
 }
 interface FanInOptions {
+  streamStore?: { listStreams: typeof listStreams };
   concurrency?: unknown;
   extraWarnings?: ReadWarning[];
   onInFlightChange?: unknown;
@@ -1050,13 +1062,6 @@ function releaseIndexWork(generation: number): void {
  * and then queue behind another generation's held admission permit for an
  * arbitrarily long time before actually running its operation.
  */
-class StaleStorageGenerationError extends Error {
-  constructor() {
-    super("storage generation changed while queued for index-work admission");
-    this.name = "StaleStorageGenerationError";
-  }
-}
-
 async function withIndexWork<T>(operation: () => Promise<T>, generation = currentStorageGeneration()): Promise<T> {
   await acquireIndexWork(generation);
   try {
@@ -1815,13 +1820,13 @@ async function runDeferredRecordIndexes(
     try {
       // biome-ignore lint/performance/noAwaitInLoops: One connector instance's derived index repairs are intentionally ordered.
       await withIndexWork(
-        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}),
+        () => maintainRecordIndexesWithinPermit(storageTarget, record, version, {}, scheduledGeneration),
         scheduledGeneration
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (isCurrentStorageGeneration(scheduledGeneration)) {
-        await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, message).catch(() => {
+        await recordSearchIndexDirtyEvidence({ connectorInstanceId, stream }, message).catch(() => {
           // Evidence write is itself best-effort; never mask the original failure.
         });
       }
@@ -2309,6 +2314,7 @@ async function ingestSqliteRecord(
 
   // Durable mutation unit: returns the operation outcome so derived index
   // maintenance can run *after* the commit succeeds.
+  crashPoint("ingest:before-write-transaction");
   const outcome = writeTransaction<DurableIngestOutcome>(() => {
     assertSqliteRunStillAdmitted(options.runId, connectorInstanceId);
     if (options.requireConnectionAdmission) {
@@ -2371,10 +2377,15 @@ async function ingestSqliteRecord(
       connectorId,
       connectorInstanceId,
       stream,
+      connectorInstanceId,
+      stream,
+      connectorInstanceId,
+      stream,
     ]);
     const nextVersion = allocated.max_version;
 
     maybeFault("after-version-allocation", { connectorId, connectorInstanceId, nextVersion, recordKey, stream });
+    crashPoint("ingest:after-version-allocation");
 
     writeRecordChange({
       connectorId,
@@ -2391,6 +2402,7 @@ async function ingestSqliteRecord(
     maybeFault("after-records-mutation", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
 
     maybeFault("after-record-changes-append", { connectorId, connectorInstanceId, nextVersion, op, recordKey, stream });
+    crashPoint("ingest:after-record-write");
 
     // Scope-keyed dirty mark, inside the SAME transaction as the record
     // mutation above: this scope's lexical/semantic index may now be stale,
@@ -2399,6 +2411,7 @@ async function ingestSqliteRecord(
     // writes -- so the mark must be atomic with the write, not best-effort
     // after it. See server/stores/search-index-dirty-store.ts.
     markSearchIndexDirtySqlite({ connectorId, connectorInstanceId, stream }, nowIso());
+    crashPoint("ingest:after-dirty-mark");
 
     const insertedChangeJsonBytes = byteLength(op === "delete" ? current?.record_json : recordJson);
     const { prunedBytesForDelta, prunedRowsForDelta } = pruneRecordChangeHistory(
@@ -2423,8 +2436,10 @@ async function ingestSqliteRecord(
       stream,
     });
 
+    crashPoint("ingest:before-commit");
     return finishDurableOutcome({ kind: "changed", op, selfHeal, version: nextVersion });
   });
+  crashPoint("ingest:after-commit-before-ack");
 
   if (outcome.kind === "noop") {
     return { accepted: true, changed: false };
@@ -2497,7 +2512,7 @@ export async function maintainRecordIndexes(
   generation: number = currentStorageGeneration()
 ): Promise<void> {
   return await withIndexWork(
-    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options),
+    () => maintainRecordIndexesWithinPermit(storageTarget, record, expectedVersion, options, generation),
     generation
   );
 }
@@ -2565,7 +2580,7 @@ function scheduleRecordIndexMaintenance(
         // closed mid-flight, in which case writing failure evidence would
         // touch a different generation's table under the same scope key.
         if (isCurrentStorageGeneration(scheduledGeneration)) {
-          await recordSearchIndexDirtyFailure({ connectorInstanceId, stream }, message).catch(() => {
+          await recordSearchIndexDirtyEvidence({ connectorInstanceId, stream }, message).catch(() => {
             // Evidence write is itself best-effort; never let it mask the
             // original failure or throw out of a fire-and-forget lane.
           });
@@ -2782,7 +2797,8 @@ async function maintainRecordIndexesWithinPermit(
   storageTarget: RecordStorageTarget,
   record: RecordEnvelope,
   expectedVersion: number,
-  options: RecordIngestOptions
+  options: RecordIngestOptions,
+  generation: number
 ): Promise<void> {
   const connectorId = connectorIdForStorageTarget(storageTarget);
   const connectorInstanceId = resolveStorageConnectorInstanceId(storageTarget, connectorId);
@@ -2834,6 +2850,7 @@ async function maintainRecordIndexesWithinPermit(
       connectorInstanceId,
       data,
       declaredFields: options.attemptContext ? (attemptFacts?.semanticFields ?? []) : undefined,
+      generation,
       recordKey,
       stream,
     });
@@ -2854,43 +2871,54 @@ async function maintainRecordIndexesWithinPermit(
     stream,
   });
 
+  // withIndexWork checked the generation before this operation started, but the
+  // compute awaits above can span a storage close and re-init. The version check
+  // below cannot tell the new database from the old one: the same key can sit at
+  // the same version there with different content.
   if (isPostgresStorageBackend()) {
-    return withPostgresTransaction(async (client) => {
-      const current = await client.query<{ version: string | number; deleted: boolean }>(
-        `SELECT version, deleted FROM records
+    return withPostgresTransaction(
+      async (client) => {
+        assertCurrentStorageGeneration(generation);
+        // Match repair's instance -> publication -> derived DML order, including deletes.
+        await lockConnectorManifestPublication(client, connectorId);
+        const current = await client.query<{ version: string | number; deleted: boolean }>(
+          `SELECT version, deleted FROM records
           WHERE connector_instance_id = $1 AND stream = $2 AND record_key = $3
           FOR UPDATE`,
-        [connectorInstanceId, stream, recordKey]
-      );
-      if (!isRecordStillCurrent(current.rows[0], expectedVersion, op)) {
-        return;
-      }
-      if (op === "delete") {
-        await lexicalModule.applyLexicalDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
-        await semanticModule.applySemanticDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
-        return;
-      }
-      if (computedLexical) {
-        await lexicalModule.applyLexicalFieldsWithClient(client, {
-          computed: computedLexical,
-          connectorId,
-          connectorInstanceId,
-          recordKey,
-          stream,
-        });
-      }
-      if (computedSemantic) {
-        await semanticModule.applySemanticEntriesWithClient(client, {
-          computed: computedSemantic,
-          connectorId,
-          connectorInstanceId,
-          recordKey,
-          stream,
-        });
-      }
-    });
+          [connectorInstanceId, stream, recordKey]
+        );
+        if (!isRecordStillCurrent(current.rows[0], expectedVersion, op)) {
+          return;
+        }
+        if (op === "delete") {
+          await lexicalModule.applyLexicalDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
+          await semanticModule.applySemanticDeleteWithClient(client, { connectorInstanceId, recordKey, stream });
+          return;
+        }
+        if (computedLexical) {
+          await lexicalModule.applyLexicalFieldsWithClient(client, {
+            computed: computedLexical,
+            connectorId,
+            connectorInstanceId,
+            recordKey,
+            stream,
+          });
+        }
+        if (computedSemantic) {
+          await semanticModule.applySemanticEntriesWithClient(client, {
+            computed: computedSemantic,
+            connectorId,
+            connectorInstanceId,
+            recordKey,
+            stream,
+          });
+        }
+      },
+      { lockConnectorInstanceId: connectorInstanceId }
+    );
   }
 
+  assertCurrentStorageGeneration(generation);
   return writeTransaction(() => {
     const current = getOne<CurrentRecordRow>(referenceQueries.recordsIngestGetCurrentRecordState, [
       connectorInstanceId,
@@ -4121,7 +4149,9 @@ function buildPaginatedSqlParts(
 
   const selectParts = ["record_key", "record_json", "emitted_at"];
   if (cursorField) {
-    selectParts.push(`${jsonExtractExpr(cursorField)} AS __cursor_val`);
+    // NULLIF folds '' into NULL so the missing bucket ties on the cursor and
+    // orders by pk alone, which is what buildCursorSeekClause seeks by.
+    selectParts.push(`NULLIF(${jsonExtractExpr(cursorField)}, '') AS __cursor_val`);
     selectParts.push(
       `CASE WHEN ${jsonExtractExpr(cursorField)} IS NULL OR ${jsonExtractExpr(cursorField)} = '' ` +
         "     THEN 1 ELSE 0 END AS __cursor_missing"
@@ -4288,6 +4318,10 @@ function decorateRecordWithConnectionIdentity(record: ResponseRecord, identity: 
   if (connectionId) {
     record.connection_id = connectionId;
     record.connector_instance_id = connectionId;
+    // instance_id is the grant's handle for this source instance. Grants carry
+    // the stored connector instance id today; switch to clientVisibleInstanceId
+    // when pairwise grants are wired.
+    record.instance_id = connectionId;
   }
   const displayName = typeof identity.displayName === "string" ? identity.displayName.trim() : "";
   if (displayName) {
@@ -5440,7 +5474,8 @@ interface ValidatedQueryContext {
 
 function validateQueryCursors(
   requestParams: RequestParams,
-  expansions: ReturnType<typeof normalizeExpandRequest>
+  expansions: ReturnType<typeof normalizeExpandRequest>,
+  compiledFilters: readonly CompiledFilter[]
 ): { changesSince: ChangesSinceCursor | null; paginationCursor: PaginationCursor | null } {
   const changesSince =
     typeof requestParams.changes_since === "string" ? parseChangesSinceCursor(requestParams.changes_since) : null;
@@ -5454,6 +5489,7 @@ function validateQueryCursors(
   }
   if (changesSince !== null || paginationCursor?.session === "changes") {
     rejectListOnlyParamsForChangesFeed(requestParams);
+    rejectFiltersWithChangesFeed(compiledFilters);
   }
   if ((changesSince !== null || paginationCursor?.session === "changes") && expansions.length) {
     throw invalidQueryError("expand is not supported with changes_since", "invalid_expand");
@@ -5503,7 +5539,7 @@ async function validateQueryRecordsRequest(
     requestWarnings.push(buildLimitClampedWarning(requestedLimit));
   }
 
-  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions);
+  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, compiledFilters);
 
   return {
     changesSince,
@@ -6409,6 +6445,10 @@ async function deleteRecordWithinCoordinator(storageTarget: RecordStorageTarget,
       connectorId,
       connectorInstanceId,
       stream,
+      connectorInstanceId,
+      stream,
+      connectorInstanceId,
+      stream,
     ]);
     const nextVersion = allocated.max_version;
 
@@ -6679,6 +6719,7 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
       if (!instanceStreams) {
         return;
       }
+      crashPoint("connector-teardown:before-durable-delete");
       writeTransaction(() => {
         advanceSqliteRecordResetGenerationForStreams(connectorInstanceId, instanceStreams);
         for (const stream of instanceStreams) {
@@ -6695,18 +6736,25 @@ export async function deleteAllRecordsForConnector(connectorId: string, instance
           // `deleteConnectionRecordRowsSqlite`.
           exec(referenceQueries.recordsDeleteDeleteBlobsByStream, [connectorInstanceId, stream]);
         }
+        crashPoint("connector-teardown:before-commit");
       });
+      crashPoint("connector-teardown:after-durable-delete");
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         await markConnectorSummaryEvidenceDirty({
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId: storageConnectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
   if (deletedCount > 0) {
     markDatasetSummaryProjectionStale("bulk connector record delete bypassed exact dataset summary projection deltas");
     await markRetainedSizeConnectionDirty({ connectorInstanceId: null });
@@ -6795,6 +6843,7 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
       }
       await mapWithConcurrency(instanceStreams, 1, async (stream) => {
         await postgresDeleteAllRecords(storageTarget, stream);
+        crashPoint("connector-teardown:after-durable-delete");
         await withPostgresTransaction(
           async (client) => {
             const unbound = await client.query<{ blob_id: string }>(
@@ -6824,7 +6873,9 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           },
           { lockConnectorInstanceId: connectorInstanceId }
         );
+        crashPoint("connector-teardown:after-blob-delete");
         await markRetainedSizeStreamDirty({ connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-retained-dirty");
         // Parity with the SQLite arm above: a connector-wide record delete
         // changes this connection's count/stream evidence and must mark the
         // connector-summary evidence row dirty too, not just retained-size.
@@ -6836,11 +6887,15 @@ async function postgresDeleteAllRecordsForConnector(connectorId: string, instanc
           connectorInstanceId,
           reason: "bulk connector record delete changed connection count/stream evidence",
         });
+        crashPoint("connector-teardown:after-summary-dirty");
         await lexicalIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-lexical-delete");
         await semanticIndexDeleteByConnectorStream({ connectorId, connectorInstanceId, stream });
+        crashPoint("connector-teardown:after-semantic-delete");
       });
     })
   );
+  crashPoint("connector-teardown:after-instances");
 
   if (deletedCount > 0) {
     // Postgres dashboard summary reads from the retained-size projection
@@ -8020,6 +8075,80 @@ function compareMergedBuckets(left: AggregateGroup, right: AggregateGroup, isSca
   return JSON.stringify(left.key).localeCompare(JSON.stringify(right.key));
 }
 
+function decorateStreamSummary(summary: StreamListEntry, binding: ReadBinding): StreamListEntry {
+  const decorated = { ...summary };
+  const wireBinding = projectReadBindingForWire(binding);
+  if (wireBinding?.connection_id) {
+    decorated.connection_id = wireBinding.connection_id;
+    decorated.connector_instance_id = wireBinding.connection_id;
+    const displayName = Reflect.get(wireBinding, "display_name");
+    if (typeof displayName === "string" && displayName) {
+      decorated.display_name = displayName;
+    }
+  }
+  return decorated;
+}
+
+/**
+ * Resolve authority per stream before reading storage, then enumerate each
+ * connection once. Keep grant entries (including resource/time constraints)
+ * intact and reconstruct stream-major, binding-major order after bounded I/O.
+ */
+export async function listStreamsByResolvedBindings(
+  grant: ReadGrant,
+  manifest: ReadManifest | null,
+  resolveBindingsForStream: NonNullable<FanInOptions["resolveBindingsForStream"]>,
+  opts: FanInOptions = {}
+): Promise<StreamListEntry[]> {
+  const namedGrants = grant.streams.filter((streamGrant) => streamGrant?.name);
+  const resolved = await mapWithConcurrency(
+    namedGrants,
+    fanInReadConcurrency(opts),
+    resolveBindingsForStream,
+    fanInMapOptions(opts)
+  );
+  const groups = new Map<
+    string,
+    { binding: ReadBinding; streams: ReadGrant["streams"]; indices: number[] }
+  >();
+  for (const [index, streamGrant] of namedGrants.entries()) {
+    for (const binding of resolved[index] ?? []) {
+      let group = groups.get(binding.connectorInstanceId);
+      if (!group) {
+        group = { binding, streams: [], indices: [] };
+        groups.set(binding.connectorInstanceId, group);
+      }
+      if (!group.indices.includes(index)) {
+        group.streams.push(streamGrant);
+        group.indices.push(index);
+      }
+    }
+  }
+  const perConnection = await mapWithConcurrency(
+    [...groups.values()],
+    fanInReadConcurrency(opts),
+    async ({ binding, streams, indices }) => {
+      const rows = await (opts.streamStore?.listStreams ?? listStreams)(
+        buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId),
+        { ...grant, streams },
+        manifest
+      );
+      return {
+        id: binding.connectorInstanceId,
+        rows: new Map(indices.map((index, position) => [index, rows[position]])),
+      };
+    },
+    fanInMapOptions(opts)
+  );
+  const byConnection = new Map(perConnection.map(({ id, rows }) => [id, rows]));
+  return resolved.flatMap((bindings, index) =>
+    (bindings ?? []).flatMap((binding) => {
+      const summary = byConnection.get(binding.connectorInstanceId)?.get(index);
+      return summary ? [decorateStreamSummary(summary, binding)] : [];
+    })
+  );
+}
+
 /**
  * Fan-in stream-list summaries across multiple bindings.
  *
@@ -8050,7 +8179,6 @@ export async function listStreamsAcrossBindings(
     typeof opts.resolveBindingsForStream === "function" ? opts.resolveBindingsForStream : null;
 
   const summaries: StreamListEntry[] = [];
-  const grantStreams = Array.isArray(grant.streams) ? grant.streams : [];
 
   // When no per-stream resolver is wired, fall back to the prior shape:
   // iterate every (binding, stream-in-grant) pair once.
@@ -8060,21 +8188,8 @@ export async function listStreamsAcrossBindings(
       fanInReadConcurrency(opts),
       async (binding) => {
         const target = buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId);
-        const perBinding = await listStreams(target, grant, manifest);
-        const wireBinding = projectReadBindingForWire(binding);
-        return perBinding.map((summary) => {
-          const decorated: StreamListEntry = { ...summary };
-          if (wireBinding?.connection_id) {
-            decorated.connection_id = wireBinding.connection_id;
-            decorated.connector_instance_id = wireBinding.connection_id;
-            const wireDisplayName = Reflect.get(wireBinding, "display_name");
-            const displayName = typeof wireDisplayName === "string" ? wireDisplayName : null;
-            if (displayName) {
-              decorated.display_name = displayName;
-            }
-          }
-          return decorated;
-        });
+        const perBinding = await (opts.streamStore?.listStreams ?? listStreams)(target, grant, manifest);
+        return perBinding.map((summary) => decorateStreamSummary(summary, binding));
       },
       fanInMapOptions(opts)
     );
@@ -8084,50 +8199,7 @@ export async function listStreamsAcrossBindings(
     return summaries;
   }
 
-  // Per-stream resolver path: each stream's bindings honor its own
-  // grant-scope `connection_id` constraint. Streams whose grant entry
-  // pins different connections do not bleed each other's counts.
-  const namedGrants = grantStreams.filter((sg) => sg?.name);
-  const perStreamResults = await mapWithConcurrency(
-    namedGrants,
-    fanInReadConcurrency(opts),
-    async (streamGrant) => {
-      const bindingsForStream = await resolveBindingsForStream(streamGrant);
-      if (!bindingsForStream || bindingsForStream.length === 0) {
-        return [];
-      }
-      const singleStreamGrant = { ...grant, streams: [streamGrant] };
-      const perBindingResults = await mapWithConcurrency(
-        bindingsForStream,
-        fanInReadConcurrency(opts),
-        async (binding) => {
-          const target = buildBindingStorageTarget(binding.connectorId, binding.connectorInstanceId);
-          const perBinding = await listStreams(target, singleStreamGrant, manifest);
-          const wireBinding = projectReadBindingForWire(binding);
-          return perBinding.map((summary) => {
-            const decorated: StreamListEntry = { ...summary };
-            if (wireBinding?.connection_id) {
-              decorated.connection_id = wireBinding.connection_id;
-              decorated.connector_instance_id = wireBinding.connection_id;
-              const wireDisplayName = Reflect.get(wireBinding, "display_name");
-              const displayName = typeof wireDisplayName === "string" ? wireDisplayName : null;
-              if (displayName) {
-                decorated.display_name = displayName;
-              }
-            }
-            return decorated;
-          });
-        },
-        fanInMapOptions(opts)
-      );
-      return perBindingResults.flat();
-    },
-    fanInMapOptions(opts)
-  );
-  for (const perStream of perStreamResults) {
-    summaries.push(...perStream);
-  }
-  return summaries;
+  return listStreamsByResolvedBindings(grant, manifest, resolveBindingsForStream, opts);
 }
 
 /**

@@ -7,7 +7,7 @@ import { IcButton } from "@pdpp/brand-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useState, useTransition } from "react";
 import type { ConnectorInstallRowModel } from "../../lib/connector-install-presentation.ts";
-import { installConnectorAction, updateConnectorAction } from "./connector-install-actions.ts";
+import { installConnectorAction, uninstallConnectorAction, updateConnectorAction } from "./connector-install-actions.ts";
 
 function activationTone(state: ConnectorInstallRowModel["activationState"]): string {
   if (state === "active") {
@@ -20,7 +20,7 @@ function activationTone(state: ConnectorInstallRowModel["activationState"]): str
 }
 
 export function ConnectorInstallRow({ compact = false, model }: { compact?: boolean; model: ConnectorInstallRowModel }) {
-  const { action, connectorId } = model;
+  const { action, connectorId, connectorKey } = model;
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [message, setMessage] = useState<{
@@ -49,6 +49,19 @@ export function ConnectorInstallRow({ compact = false, model }: { compact?: bool
       router.refresh();
     });
   }, [action, connectorId, router]);
+  const uninstall = useCallback(() => {
+    if (!window.confirm(`Uninstall ${connectorId}? This is allowed only when no sources use it.`)) return;
+    setMessage(null);
+    startTransition(async () => {
+      const result = await uninstallConnectorAction(connectorKey);
+      if (!result.ok) {
+        setMessage({ message: result.message, tone: "error" });
+        return;
+      }
+      setMessage({ message: "Uninstall complete. Refreshing status…", tone: "success" });
+      router.refresh();
+    });
+  }, [connectorId, connectorKey, router]);
 
   const idleLabel = action?.kind === "install" ? "Install" : "Update";
   let buttonLabel = idleLabel;
@@ -99,11 +112,18 @@ export function ConnectorInstallRow({ compact = false, model }: { compact?: bool
           Host blocked: {model.hostBlockReason}
         </p>
       ) : null}
-      {action ? (
+      {action || model.installedDigest ? (
         <div className="flex flex-wrap items-center gap-2">
-          <IcButton disabled={isPending} onClick={submit} size="sm" type="button">
-            {buttonLabel}
-          </IcButton>
+          {action ? (
+            <IcButton disabled={isPending} onClick={submit} size="sm" type="button">
+              {buttonLabel}
+            </IcButton>
+          ) : null}
+          {model.installedDigest ? (
+            <IcButton disabled={isPending} onClick={uninstall} size="sm" type="button" variant="destructive">
+              {isPending ? "Uninstalling…" : "Uninstall"}
+            </IcButton>
+          ) : null}
           {message ? (
             <span aria-live="polite" className={feedbackClassName} role={feedbackRole}>
               {message.message}

@@ -189,7 +189,7 @@ function errorCode(body: JsonObject): unknown {
 }
 
 async function issueOwnerToken(asUrl: string, sessionCookie: string): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body: device, status: deviceStatus } = await fetchJson(`${asUrl}/oauth/device_authorization`, {
     body: JSON.stringify({ client_id: clientId }),
     headers: { "Content-Type": "application/json" },

@@ -287,8 +287,6 @@ export async function resolveStaticSecretRunEnv({
     );
   }
   assertRunOwnerSubjectId(ownerSubjectId);
-  const binding = record(sourceBinding);
-  const browserSessionSource = binding?.kind === "browser_collector" || binding?.kind === "browser_enrollment_shell";
   let recovered: RecoveredCredential;
   try {
     recovered = await credentialStore.recoverSecret({
@@ -297,7 +295,7 @@ export async function resolveStaticSecretRunEnv({
     });
   } catch (err) {
     if (
-      (browserSessionSource || !profile.required) &&
+      !profile.required &&
       err instanceof ConnectorInstanceCredentialError &&
       (err.code === "credential_not_found" || err.code === "credential_revoked" || err.code === "credential_rejected")
     ) {

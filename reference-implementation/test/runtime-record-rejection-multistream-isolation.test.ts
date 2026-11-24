@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { cursorAuditFact } from "../runtime/cursor-audit-fact.ts";
 import { loadSyncState, runConnector } from "../runtime/index.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
@@ -182,7 +183,7 @@ interface TokenBody {
 }
 
 async function issueOwnerToken(asUrl: string, ownerSession: string): Promise<string> {
-  const clientId = "cli_longview";
+  const clientId = "pdpp_cli";
   const { body } = await fetchJson(`${asUrl}/oauth/device_authorization`, {
     body: JSON.stringify({ client_id: clientId }),
     headers: { "Content-Type": "application/json" },
@@ -429,12 +430,12 @@ test("runtime/server SQLite isolates durable record rejections and cursor commit
       .all<{ data_json: string; stream_id: string }>(runId);
     assert.deepEqual(
       stateEvents.map((event) => ({
-        cursor: (JSON.parse(event.data_json) as { cursor?: { cursor?: string } }).cursor?.cursor,
+        cursor_sha256: (JSON.parse(event.data_json) as { cursor_sha256?: string }).cursor_sha256,
         stream: event.stream_id,
       })),
       [
-        { cursor: "after_stream_a_rejection", stream: "stream_a" },
-        { cursor: "after_stream_b_accept", stream: "stream_b" },
+        { cursor_sha256: cursorAuditFact({ cursor: "after_stream_a_rejection" }).cursor_sha256, stream: "stream_a" },
+        { cursor_sha256: cursorAuditFact({ cursor: "after_stream_b_accept" }).cursor_sha256, stream: "stream_b" },
       ]
     );
 

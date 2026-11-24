@@ -24,6 +24,12 @@
  */
 
 import { type ConnectorCatalogEntry, isExperimentalEntry, isOwnerActionableEntry } from "./connection-catalog.ts";
+import {
+  type ConnectorInstallActivationState,
+  type ConnectorInstallLifecycle,
+  type ConnectorInstallRowModel,
+  connectorInstallRowModel,
+} from "./connector-install-presentation.ts";
 
 export interface SourceSetupStatus {
   /** One short owner-facing exception label; supported is the implied default. */
@@ -40,6 +46,9 @@ export interface SourceSetupAction {
 }
 
 export function publicTierLabel(tier: ConnectorCatalogEntry["publicTier"]): string {
+  if (tier === "unknown") {
+    return "Tier not declared";
+  }
   return tier === "development" ? "In development" : tier.charAt(0).toUpperCase() + tier.slice(1);
 }
 
@@ -64,8 +73,8 @@ export function sourceSetupContext(entry: ConnectorCatalogEntry): string | null 
 
 /**
  * A browser-bound connector whose manifest also declares static-secret
- * capture (e.g. Amazon, ChatGPT, Reddit): the dashboard's browser-session
- * page is a real, dedicated setup path for these regardless of whether the
+ * capture: the dashboard's browser-session page is a real, dedicated setup
+ * path for these regardless of whether the
  * connector has cleared the separate manual-browser-collector proof roster
  * (`isSupportedBrowserCollectorConnector`) that `owner_actionable` is gated
  * on server-side. That roster answers "has a human proven this exact
@@ -137,10 +146,8 @@ export type SourceSetupAvailability =
 
 /** Owner-facing picker order: actionable dispositions first, unsupported last. */
 export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
-  // A row with no click target at all (see `sourceSetupRowIsUnavailable`)
-  // sorts after every other rank, including the experimental opt-in below:
-  // there is nothing here to compare against those on cost/benefit, only a
-  // dead end, so it never interrupts a scan of rows the owner can act on.
+  // Entries with no account-setup path sort last, whatever their package state:
+  // installing a package never creates a setup path.
   if (sourceSetupRowIsUnavailable(entry)) {
     return 10;
   }
@@ -177,20 +184,12 @@ export function sourceSetupRank(entry: ConnectorCatalogEntry): number {
 }
 
 /**
- * Whether this row has no click target at all: a known scaffold, or any
- * other disposition `sourceSetupAction` refuses (proof-gated, unproven,
- * unsupported, unknown). These are the rows the owner has called out as
- * "should not allow you to install" -- offering an install or add control
- * that can never work is worse than not offering one, so the catalog must
- * never render an action (including the Package column's install button)
- * for a row this returns true for, and must sort every such row after
- * every row that does have one.
- *
- * Deliberately narrower than `sourceSetupAvailability(entry) ===
- * "not_available_here"`: that check also covers a real (non-scaffold)
- * Development entry with a genuine self-test action -- e.g. an unproven
- * local-collector connector -- which DOES have something to click and must
- * not be treated as dead.
+ * Whether account setup has no action for this disposition and tier. The
+ * answer does not depend on package state: installing a package makes the
+ * existing setup path reachable but never creates one, so an entry for which
+ * this is true is not installable either. Entries without a `registrationStatus`
+ * (manifest-only entries, the ones that precede their package) are judged on
+ * disposition and tier alone.
  */
 export function sourceSetupRowIsUnavailable(entry: ConnectorCatalogEntry): boolean {
   return sourceSetupAction(entry) === null;
@@ -206,7 +205,7 @@ export function sourceSetupStatus(entry: ConnectorCatalogEntry): SourceSetupStat
     // Collapsing these into one badge would hide exactly the distinction the
     // owner needs to decide whether clicking a card can do anything. "Not
     // built yet" reads as a known roadmap gap (part of the shared "not
-    // available yet" family with "Not packaged yet" below), never as a
+    // available yet" family), never as a
     // broken build.
     return entry.isKnownScaffold
       ? {
@@ -451,7 +450,7 @@ export function sourceSetupGuidance(entry: ConnectorCatalogEntry): string {
     return unclassifiedSetupGuidance(entry);
   }
   if (browserBoundWithStoredCredentials(entry)) {
-    return "Sign in in the secure browser. Saving sign-in details is optional and may help with setup or repair, but one-time codes, passkeys, and other human steps still happen in the browser. Automatic reconnection is not guaranteed.";
+    return "Enter this source's sign-in details when requested. Complete one-time codes, passkeys, and other human steps in the secure browser. Automatic reconnection is not guaranteed.";
   }
   switch (entry.disposition) {
     case "local_collector_enroll":
@@ -507,8 +506,8 @@ export function sourceSetupAction(entry: ConnectorCatalogEntry): SourceSetupActi
     return null;
   }
   // Browser-bound connectors that also declare credential capture still start
-  // from the one browser-session path. The optional saved-sign-in-details
-  // fields live inside that page rather than becoming a second picker choice.
+  // from the one browser-session path. Manifest sign-in fields live inside
+  // that page rather than becoming a second picker choice.
   if (browserBoundWithStoredCredentials(entry)) {
     return {
       href: `/connect/browser-session/${encodeURIComponent(entry.connectorKey)}`,
@@ -551,8 +550,80 @@ export function sourceSetupAction(entry: ConnectorCatalogEntry): SourceSetupActi
   }
 }
 
+/**
+ * The setup action a catalog card renders, given the connector's package state
+ * (`null` when the install route is not available on this server). Every setup
+ * route reads the registered manifest from the reference, so a connector that is
+ * neither registered nor in the package catalog has no working action: its
+ * setup page answers 404.
+ */
+export function sourceSetupCardAction(
+  entry: ConnectorCatalogEntry,
+  packageState: ConnectorInstallActivationState | null,
+  packageAvailabilityUnknown: boolean
+): SourceSetupAction | null {
+  if (sourceSetupRowIsUnavailable(entry) || packageAvailabilityUnknown || packageState === "not_installed") {
+    return null;
+  }
+  // `packageState` is non-null only when the install catalog has facts for this
+  // connector. Such an entry gets its setup routes once the reference has
+  // registered it: right after install it is not registered yet and its setup
+  // page answers 404. An entry with no package facts (`packageState === null`)
+  // is not gated: manifest-only entries carry no `registrationStatus`, and
+  // their setup routes are judged by disposition alone.
+  if (packageState !== null && entry.registrationStatus !== "registered") {
+    return null;
+  }
+  return sourceSetupAction(entry);
+}
+
+export interface SourceSetupCardModel {
+  installModel: ConnectorInstallRowModel | null;
+  /** The disposition/tier offers no account-setup path, so no package action is offered either. */
+  noSetupPath: boolean;
+  packageAvailabilityUnknown: boolean;
+  packageNeedsInstall: boolean;
+  /** Package installed, setup path exists, but the reference has not registered the connector yet. */
+  registrationPending: boolean;
+  setupAction: SourceSetupAction | null;
+  unavailable: boolean;
+}
+
+/** One card decision shared by the package column and the catalog grouping. */
+export function sourceSetupCardModel(
+  entry: ConnectorCatalogEntry,
+  lifecycle: ConnectorInstallLifecycle | null,
+  catalogTransientlyUnavailable: boolean
+): SourceSetupCardModel {
+  // No setup path means no reason to install: the package could never be used.
+  const noSetupPath = sourceSetupRowIsUnavailable(entry);
+  const installModel = lifecycle && !noSetupPath ? connectorInstallRowModel(entry, lifecycle) : null;
+  const packageAvailabilityUnknown = catalogTransientlyUnavailable && !lifecycle?.installed && !noSetupPath;
+  const setupAction = entry.isKnownScaffold
+    ? null
+    : sourceSetupCardAction(entry, installModel?.activationState ?? null, packageAvailabilityUnknown);
+  const packageActionAvailable = !(entry.isKnownScaffold || packageAvailabilityUnknown) && Boolean(installModel?.action);
+  const packageInstalled =
+    installModel?.activationState === "active" || installModel?.activationState === "update_available";
+  const registrationPending =
+    !(entry.isKnownScaffold || packageAvailabilityUnknown || setupAction) &&
+    packageInstalled &&
+    entry.registrationStatus !== "registered";
+  return {
+    installModel,
+    noSetupPath,
+    packageAvailabilityUnknown,
+    packageNeedsInstall: packageActionAvailable && installModel?.activationState === "not_installed",
+    registrationPending,
+    setupAction,
+    unavailable:
+      entry.isKnownScaffold ||
+      !(setupAction || packageActionAvailable || packageAvailabilityUnknown || registrationPending),
+  };
+}
+
 export function sourceSetupSecondaryAction(_entry: ConnectorCatalogEntry): SourceSetupAction | null {
-  // Stored credentials are an optional part of the browser-session page. Keep
+  // Stored credentials are part of the browser-session page. Keep
   // the Add Source catalog to one primary account-connect action so the legacy
   // static-secret route cannot look like an equal setup modality.
   return null;
@@ -581,7 +652,12 @@ export function sourceSetupAvailability(entry: ConnectorCatalogEntry): SourceSet
   }
 }
 
-/** Only runnable actions belong in /sources/add; server-setting and runbook cards do not. */
+/**
+ * Only runnable actions belong in /sources/add; server-setting and runbook cards do not.
+ * Policy: an offer needs a declared `supported` or `preview` tier. A
+ * `development` or undeclared (`unknown`) tier is never an offer, so a tier the
+ * manifest did not declare fails closed rather than being promoted.
+ */
 export function isRunnableAddOffer(entry: ConnectorCatalogEntry): boolean {
   const availability = sourceSetupAvailability(entry);
   if (entry.publicTier === "supported") {

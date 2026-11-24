@@ -35,6 +35,7 @@ import { startServer } from "../server/index.ts";
 import { OWNER_AUTH_DEFAULT_SUBJECT_ID } from "../server/owner-auth.ts";
 import { ingestRecord } from "../server/records.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { TEST_PRE_REGISTERED_PUBLIC_CLIENTS } from "./fixtures/demo-clients.ts";
 import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
 
 interface GrantedConnection {
@@ -495,6 +496,7 @@ async function withHttpHarness(
     asPort: 0,
     dbPath: ":memory:",
     dynamicClientRegistrationInitialAccessTokens: [TEST_DCR_INITIAL_ACCESS_TOKEN],
+    preRegisteredPublicClients: TEST_PRE_REGISTERED_PUBLIC_CLIENTS,
     quiet: true,
     rsPort: 0,
     ...TEST_INTROSPECTION_SERVER_OPTS,
@@ -749,6 +751,7 @@ test("client schema and stream metadata remain a closed resolved-grant projectio
       assert.ok(approved.token, JSON.stringify(approved));
 
       const changedManifest = structuredClone(baseManifest) as Record<string, unknown>;
+      changedManifest.version = "2";
       const [changedStream] = changedManifest.streams as Record<string, unknown>[];
       assert.ok(changedStream);
       const changedSchema = changedStream.schema as Record<string, unknown>;
@@ -833,6 +836,7 @@ test("client relationship metadata checks has_many foreign keys against the rela
   await withHttpHarness(
     async ({ asUrl, rsUrl }) => {
       const manifest = structuredClone(baseManifest) as Record<string, unknown>;
+      manifest.version = "2";
       const [parent] = manifest.streams as Record<string, unknown>[];
       assert.ok(parent);
       parent.relationships = [
