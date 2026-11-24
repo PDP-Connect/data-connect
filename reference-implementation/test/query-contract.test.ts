@@ -1815,6 +1815,19 @@ test("owner expansion hydrates declared has_many relations", async () => {
       },
     ]);
 
+    await Promise.all(
+      ["expand[]=recently_played", "expand[0]=recently_played", "expand=recently_played&expand=recently_played"].map(
+        async (expand) => {
+          const accepted = await fetchJson(
+            `${rsUrl}/v1/streams/saved_tracks/records?connector_id=${encodeURIComponent(connectorId)}&${expand}&expand_limit[recently_played]=1`,
+            { headers: { Authorization: `Bearer ${ownerToken}` } }
+          );
+          assert.equal(accepted.status, 200, `${expand}: ${JSON.stringify(accepted.body)}`);
+          assert.equal(accepted.body.data[0].expanded.recently_played.data[0].id, "play_1");
+        }
+      )
+    );
+
     const { status, body } = await fetchJson(
       `${rsUrl}/v1/streams/saved_tracks/records?connector_id=${encodeURIComponent(connectorId)}&expand=recently_played&expand_limit[recently_played]=1`,
       { headers: { Authorization: `Bearer ${ownerToken}` } }
