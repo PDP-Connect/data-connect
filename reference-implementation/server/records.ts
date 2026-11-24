@@ -120,6 +120,7 @@ import {
   jsonPathForTopLevelField,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
   type TimeConstraint,
 } from "./record-filters.ts";
 import {
@@ -356,6 +357,7 @@ interface ResponseRecord {
   emitted_at: string;
   expanded?: Record<string, unknown>;
   id: string;
+  instance_id?: string;
   meta?: RecordResponseMeta;
   object: "record";
   // Logical byte length of this record's current `record_json` (SQLite:
@@ -4344,6 +4346,10 @@ function decorateRecordWithConnectionIdentity(record: ResponseRecord, identity: 
   if (connectionId) {
     record.connection_id = connectionId;
     record.connector_instance_id = connectionId;
+    // instance_id is the grant's handle for this source instance. Grants carry
+    // the stored connector instance id today; switch to clientVisibleInstanceId
+    // when pairwise grants are wired.
+    record.instance_id = connectionId;
   }
   const displayName = typeof identity.displayName === "string" ? identity.displayName.trim() : "";
   if (displayName) {
@@ -5536,7 +5542,8 @@ interface ValidatedQueryContext {
 
 function validateQueryCursors(
   requestParams: RequestParams,
-  expansions: ReturnType<typeof normalizeExpandRequest>
+  expansions: ReturnType<typeof normalizeExpandRequest>,
+  compiledFilters: readonly CompiledFilter[]
 ): { changesSince: ChangesSinceCursor | null; paginationCursor: PaginationCursor | null } {
   const changesSince =
     typeof requestParams.changes_since === "string" ? parseChangesSinceCursor(requestParams.changes_since) : null;
@@ -5550,6 +5557,7 @@ function validateQueryCursors(
   }
   if (changesSince !== null || paginationCursor?.session === "changes") {
     rejectListOnlyParamsForChangesFeed(requestParams);
+    rejectFiltersWithChangesFeed(compiledFilters);
   }
   if ((changesSince !== null || paginationCursor?.session === "changes") && expansions.length) {
     throw invalidQueryError("expand is not supported with changes_since", "invalid_expand");
@@ -5599,7 +5607,7 @@ async function validateQueryRecordsRequest(
     requestWarnings.push(buildLimitClampedWarning(requestedLimit));
   }
 
-  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions);
+  const { changesSince, paginationCursor } = validateQueryCursors(requestParams, expansions, compiledFilters);
 
   return {
     changesSince,

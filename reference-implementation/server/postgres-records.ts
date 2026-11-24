@@ -59,6 +59,7 @@ import {
   nonNullSchemaTypes,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
 } from "./record-filters.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import {
@@ -1149,6 +1150,10 @@ function decorateRecordWithConnectionIdentity(record: JsonObject | null, identit
   if (connectionId) {
     record.connection_id = connectionId;
     record.connector_instance_id = connectionId;
+    // instance_id is the grant's handle for this source instance. Grants carry
+    // the stored connector instance id today; switch to clientVisibleInstanceId
+    // when pairwise grants are wired.
+    record.instance_id = connectionId;
   }
   const displayName = typeof identity.displayName === "string" ? identity.displayName.trim() : "";
   if (displayName) {
@@ -2592,6 +2597,7 @@ export async function postgresQueryRecords(
   );
 
   if (requestParams.changes_since !== null && requestParams.changes_since !== undefined) {
+    rejectFiltersWithChangesFeed(compiledFilters);
     return queryPostgresChangesSince({
       compiledFilters,
       connectorInstanceId,
