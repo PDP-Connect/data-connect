@@ -1,7 +1,8 @@
 #!/bin/sh
 # Copyright The PDP-Connect Contributors
 # SPDX-License-Identifier: Apache-2.0
-# Index the .desktop file so the x-scheme-handler/vana MIME type is registered.
+# Refresh the desktop entry cache so the installed .desktop file, and the
+# removal of any scheme handler an older version registered, take effect.
 update-desktop-database -q /usr/share/applications || true
 
 # Install and load the AppArmor profile that lets the bundled Chromium create
