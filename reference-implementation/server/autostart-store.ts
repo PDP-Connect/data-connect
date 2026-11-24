@@ -64,6 +64,18 @@ function parseObserved(value: unknown): ObservedState {
   return state as ObservedState
 }
 
+function parseAutostartResult(value: unknown, commandId: string,
+  desiredEnabled: boolean): AutostartResult | null {
+  if (!value || typeof value !== "object") return null
+  const result = value as Partial<AutostartResult>
+  if (result.commandId !== commandId || result.kind !== "set_autostart_enabled" ||
+      result.desiredEnabled !== desiredEnabled ||
+      (result.status !== "succeeded" && result.status !== "failed") ||
+      typeof result.enabled !== "boolean" ||
+      (result.error !== null && typeof result.error !== "string")) return null
+  return result as AutostartResult
+}
+
 async function writeCommand(path: string, command: object): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const temporary = `${path}.${randomUUID()}.tmp`
@@ -104,9 +116,13 @@ export function createAutostartStore(dataDir: string, onWrite: () => void = () =
     })
     for (const name of names) {
       if (!/^ast_[A-Za-z0-9_-]{22}\.json$/.test(name)) continue
-      const command = await readJson(join(directory, name)) as { createdAt?: string } | null
-      if (!command?.createdAt || Date.now() - Date.parse(command.createdAt) >= 600_000) continue
-      if (!await readJson(join(dataDir, "autostart-results", name))) return true
+      const commandId = name.slice(0, -5)
+      const command = await readJson(join(directory, name)) as { createdAt?: unknown; desiredEnabled?: unknown } | null
+      if (typeof command?.createdAt !== "string" || typeof command.desiredEnabled !== "boolean") continue
+      const createdAt = Date.parse(command.createdAt)
+      if (!Number.isFinite(createdAt) || Date.now() - createdAt >= 600_000) continue
+      if (!parseAutostartResult(await readJson(join(dataDir, "autostart-results", name)),
+        commandId, command.desiredEnabled)) return true
     }
     return false
   }
@@ -139,13 +155,8 @@ export function createAutostartStore(dataDir: string, onWrite: () => void = () =
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       await sleep(pollIntervalMs)
-      const raw = await readJson(resultPath)
-      if (!raw) continue
-      const result = raw as Partial<AutostartResult>
-      if (result.commandId !== commandId || result.kind !== "set_autostart_enabled" ||
-          result.desiredEnabled !== desiredEnabled ||
-          (result.status !== "succeeded" && result.status !== "failed") ||
-          typeof result.enabled !== "boolean") continue
+      const result = parseAutostartResult(await readJson(resultPath), commandId, desiredEnabled)
+      if (!result) continue
       if (result.status === "failed" || result.enabled !== desiredEnabled || result.error) {
         throw new Error(result.error || "Desktop autostart did not reach the requested state")
       }
