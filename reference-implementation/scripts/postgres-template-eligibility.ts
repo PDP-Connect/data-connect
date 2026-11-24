@@ -171,7 +171,11 @@ export const POSTGRES_TEMPLATE_ELIGIBLE_FILES: readonly string[] = [
   "test/run-connection-identity-postgres.test.ts",
   "test/runtime-cancel-ingest-commit-boundary-probe.test.ts",
   "test/runtime-cursor-audit-fact.test.ts",
+  // Manifest-drift checkpoint withholding over a disposable fixture; does not observe schema bootstrap.
+  "test/runtime-ingest-manifest-drift.test.ts",
   "test/runtime-record-rejection-system-journey.test.ts",
+  // Verifies child ingest before parent checkpoint commit, not schema bootstrap or migration.
+  "test/runtime-stream-collection-failed-commit.test.ts",
   "test/scheduler-dispatch-wedge-health-reason.test.ts",
   "test/scheduler-owner-isolation.test.ts",
   "test/scheduler-store-reset-state-admission.test.ts",
