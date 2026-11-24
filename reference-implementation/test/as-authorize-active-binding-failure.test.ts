@@ -80,6 +80,7 @@ test("POST /oauth/authorize/mcp-package reports an active-binding storage failur
     providerName: "PDPP",
     requireCsrf: (() => undefined) as never,
     requireOwnerSession: (() => undefined) as never,
+    resolveIssuer: () => "http://as.example",
     resolvePublicUrl: () => "http://as.example",
     selectionParsers: {
       parseHostedMcpSelections,
@@ -213,6 +214,7 @@ test("POST /oauth/authorize/mcp-package revokes a created package when code issu
     providerName: "PDPP",
     requireCsrf: (() => undefined) as never,
     requireOwnerSession: (() => undefined) as never,
+    resolveIssuer: () => "http://as.example",
     resolvePublicUrl: () => "http://as.example",
     revokeGrantPackage: async (id) => {
       revokedPackage = id;
