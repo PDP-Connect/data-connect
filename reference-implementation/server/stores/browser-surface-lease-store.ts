@@ -29,6 +29,7 @@ interface Queryable {
 interface BrowserSurfaceRow {
   account_key: string | null;
   active_lease_id: string | null;
+  allocator_metadata_json: string | null;
   backend: BrowserSurface["backend"];
   browser_generation_hash: string | null;
   cdp_url: string;
@@ -162,20 +163,31 @@ function optionalString(value: string | null | undefined): string | undefined {
   return value || undefined;
 }
 
+// The allocator client keeps only the SDK surface fields and allocator_metadata,
+// so these columns fall back to the allocator's metadata keys.
+const ALLOCATOR_METADATA_FALLBACKS = [
+  ["container_name", "container_name"],
+  ["profile_dir", "profile_path"],
+  ["window_settle_endpoint", "window_settle_endpoint"],
+] as const;
+
 function surfaceMetadata(surface: BrowserSurfaceWithPersistenceMetadata): BrowserSurfacePersistenceMetadata {
-  const metadata = surface as BrowserSurfacePersistenceMetadata;
-  const allocatorProfilePath = surface.allocator_metadata?.profile_path;
-  if (metadata.profile_dir || typeof allocatorProfilePath !== "string" || allocatorProfilePath.length === 0) {
-    return metadata;
+  let metadata: BrowserSurfacePersistenceMetadata = surface;
+  for (const [column, allocatorKey] of ALLOCATOR_METADATA_FALLBACKS) {
+    const value = surface.allocator_metadata?.[allocatorKey];
+    if (!metadata[column] && typeof value === "string" && value.length > 0) {
+      metadata = { ...metadata, [column]: value };
+    }
   }
-  return { ...metadata, profile_dir: allocatorProfilePath };
+  return metadata;
 }
 
 function mapSurface(row: BrowserSurfaceRow | null | undefined): BrowserSurfaceWithPersistenceMetadata | null {
   if (!row) {
     return null;
   }
-  const surface = {
+  const surface: BrowserSurfaceWithPersistenceMetadata = {
+    ...(row.allocator_metadata_json ? { allocator_metadata: JSON.parse(row.allocator_metadata_json) } : {}),
     backend: row.backend,
     cdp_url: row.cdp_url,
     connector_id: row.connector_id,
@@ -270,6 +282,7 @@ function sqliteSurfaceParams(surface: BrowserSurfaceWithPersistenceMetadata): Bi
     surface.active_lease_id ?? null,
     surface.created_at,
     surface.last_used_at,
+    surface.allocator_metadata == null ? null : JSON.stringify(surface.allocator_metadata),
   ];
 }
 
@@ -406,9 +419,9 @@ class SqliteBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
       `INSERT INTO browser_surfaces(
         surface_id, backend, profile_key, connector_id, surface_subject_id, account_key, surface_mode, surface_source,
         cdp_url, stream_base_url, stream_origin, window_settle_endpoint, health, container_id, container_name,
-        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at
+        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json
       )
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(surface_id) DO UPDATE SET
         backend = excluded.backend,
         profile_key = excluded.profile_key,
@@ -445,7 +458,8 @@ class SqliteBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
         END,
         active_lease_id = excluded.active_lease_id,
         created_at = excluded.created_at,
-        last_used_at = excluded.last_used_at`,
+        last_used_at = excluded.last_used_at,
+        allocator_metadata_json = excluded.allocator_metadata_json`,
       sqliteSurfaceParams(surface)
     );
     return Promise.resolve(surface);
@@ -662,9 +676,9 @@ class PostgresBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
       `INSERT INTO browser_surfaces(
         surface_id, backend, profile_key, connector_id, surface_subject_id, account_key, surface_mode, surface_source,
         cdp_url, stream_base_url, stream_origin, window_settle_endpoint, health, container_id, container_name,
-        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at
+        profile_dir, profile_volume, browser_generation_hash, active_lease_id, created_at, last_used_at, allocator_metadata_json
       )
-      VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       ON CONFLICT(surface_id) DO UPDATE SET
         backend = EXCLUDED.backend,
         profile_key = EXCLUDED.profile_key,
@@ -701,7 +715,8 @@ class PostgresBrowserSurfaceLeaseStore implements BrowserSurfaceLeaseStore {
         END,
         active_lease_id = EXCLUDED.active_lease_id,
         created_at = EXCLUDED.created_at,
-        last_used_at = EXCLUDED.last_used_at`,
+        last_used_at = EXCLUDED.last_used_at,
+        allocator_metadata_json = EXCLUDED.allocator_metadata_json`,
       sqliteSurfaceParams(surface)
     );
     return surface;

@@ -10,7 +10,7 @@ import test from "node:test";
 // biome-ignore lint/correctness/noUnresolvedImports: the test runner resolves this runtime fixture import outside Biome static resolution.
 import type { BrowserSurfaceLease } from "@opendatalabs/remote-surface/leases";
 import Database from "./helpers/sqlite-driver.ts";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { closeDb, getDb, initDb } from "../server/db.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import {
@@ -222,6 +222,43 @@ async function assertNoPriorityBootstrapLocks(admin: Pool) {
   );
   assert.equal(locks.rows[0].count, 0, "public bootstrap leaves no advisory locks behind");
 }
+
+test("SQLite surface persistence does not require the obsolete retained column", async () => {
+  const store = setup();
+  try {
+    typedDb().exec("ALTER TABLE browser_surfaces DROP COLUMN retained");
+    const value = surface({
+      active_lease_id: "lease_1",
+      browser_generation_hash: "a".repeat(64),
+      container_id: "container_1",
+      profile_dir: "/synthetic/profile",
+      profile_volume: "synthetic-volume",
+      window_settle_endpoint: "http://synthetic/window-settle",
+    });
+    await assert.doesNotReject(async () => {
+      await store.upsertSurface(value);
+    });
+    assert.deepEqual(await store.getSurface(value.surface_id), value);
+  } finally {
+    teardown();
+  }
+});
+
+test("obsolete retained values stay historical while other SQLite metadata updates", async () => {
+  const store = setup();
+  try {
+    const value = surface({ profile_dir: "/synthetic/profile", profile_volume: "synthetic-volume" });
+    await store.upsertSurface(value);
+    typedDb().prepare("UPDATE browser_surfaces SET retained = 1 WHERE surface_id = ?").run(value.surface_id);
+    const updated = { ...value, health: "unhealthy" as const };
+    await store.upsertSurface(updated);
+    assert.deepEqual(await store.getSurface(value.surface_id), updated);
+    const row = typedDb().prepare("SELECT retained FROM browser_surfaces WHERE surface_id = ?").get(value.surface_id);
+    assert.deepEqual(row, { retained: 1 });
+  } finally {
+    teardown();
+  }
+});
 
 test("persists and reloads browser surfaces and leases as domain objects", async () => {
   const store = setup();
@@ -651,6 +688,25 @@ test("persists and retains allocator profile-path provenance across surface heal
       "neko-profile-chatgpt-connection",
       "same-key health reconciliation must retain profile volume with its path"
     );
+  } finally {
+    teardown();
+  }
+});
+
+test("fills container name and window-settle endpoint from allocator metadata alone", async () => {
+  const store = setup();
+  try {
+    const allocated = surface({
+      allocator_metadata: {
+        container_name: "pdpp-neko-chatgpt-abc",
+        window_settle_endpoint: "http://pdpp-neko-chatgpt-abc:9223/pdpp/window-settle",
+      },
+      surface_id: "surface_allocator_metadata_only",
+    });
+    await store.upsertSurface(allocated);
+    const persisted = await store.getSurface(allocated.surface_id);
+    assert.equal(persisted?.container_name, "pdpp-neko-chatgpt-abc");
+    assert.equal(persisted?.window_settle_endpoint, "http://pdpp-neko-chatgpt-abc:9223/pdpp/window-settle");
   } finally {
     teardown();
   }
@@ -1306,6 +1362,7 @@ test("Postgres store maps dynamic surface metadata with the same persistence sha
   const dynamicSurfaceRow = {
     account_key: dynamicSurface.account_key ?? null,
     active_lease_id: dynamicSurface.active_lease_id ?? null,
+    allocator_metadata_json: null,
     backend: dynamicSurface.backend,
     browser_generation_hash: dynamicSurface.browser_generation_hash ?? null,
     cdp_url: dynamicSurface.cdp_url,
@@ -1318,6 +1375,7 @@ test("Postgres store maps dynamic surface metadata with the same persistence sha
     profile_dir: dynamicSurface.profile_dir ?? null,
     profile_key: dynamicSurface.profile_key,
     profile_volume: dynamicSurface.profile_volume ?? null,
+    retained: null,
     stream_base_url: dynamicSurface.stream_base_url,
     stream_origin: dynamicSurface.stream_origin ?? null,
     surface_id: dynamicSurface.surface_id,
@@ -1362,6 +1420,7 @@ test("Postgres store maps dynamic surface metadata with the same persistence sha
     "lease_pg",
     "2026-05-12T12:00:00.000Z",
     "2026-05-12T12:00:00.000Z",
+    null,
   ]);
   assert.deepEqual(await store.getSurface("surface_dynamic_pg"), dynamicSurface);
 });
@@ -1730,6 +1789,39 @@ test("Postgres simultaneous legacy boots serialize priority migration before cat
     await admin.query("DROP TABLE IF EXISTS browser_surface_leases");
     await admin.query("DROP TABLE IF EXISTS browser_surfaces");
     await admin.end();
+  }
+});
+
+test("Postgres surface persistence does not require the obsolete retained column", {
+  skip: POSTGRES_URL ? false : "PDPP_TEST_POSTGRES_URL is required",
+}, async () => {
+  const postgresUrl = mustExist(POSTGRES_URL ?? null, "PDPP_TEST_POSTGRES_URL is set (test is skipped otherwise)");
+  const pool = new Pool({ connectionString: postgresUrl, max: 1 });
+  let client: PoolClient | undefined;
+  try {
+    await initPostgresStorage({ backend: "postgres", databaseUrl: postgresUrl });
+    client = await pool.connect();
+    await client.query("CREATE TEMP TABLE browser_surfaces (LIKE public.browser_surfaces INCLUDING ALL)");
+    await client.query("ALTER TABLE pg_temp.browser_surfaces DROP COLUMN retained");
+    const store = createPostgresBrowserSurfaceLeaseStore(client);
+    const value = surface({
+      active_lease_id: "synthetic-lease",
+      browser_generation_hash: "b".repeat(64),
+      container_id: "synthetic-container",
+      profile_dir: "/synthetic/profile",
+      profile_volume: "synthetic-volume",
+    });
+    await assert.doesNotReject(async () => {
+      await store.upsertSurface(value);
+    });
+    assert.deepEqual(await store.getSurface(value.surface_id), value);
+  } finally {
+    client?.release();
+    try {
+      await pool.end();
+    } finally {
+      await closePostgresStorage();
+    }
   }
 });
 

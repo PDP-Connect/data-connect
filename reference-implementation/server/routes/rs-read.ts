@@ -78,6 +78,7 @@ import {
   type StreamsListInput,
 } from "../../operations/rs-streams-list/index.ts";
 import { rejectUnsupportedClientQuery } from "../record-filters.ts";
+import { withTokenKindRecordShape } from "../record-wire-shape.ts";
 import type { MiddlewareHandler, RouteArg } from "./_route-contract.ts";
 
 // Express-shaped surface, structurally typed to avoid pulling in the
@@ -1903,10 +1904,13 @@ export function mountRsRecordsList(app: AppLike, ctx: MountRsReadContext): void 
 
         return res.json(
           ctx.finalizeCanonicalEnvelope(
-            {
-              ...result.result,
-              url: req.path,
-            },
+            withTokenKindRecordShape(
+              {
+                ...result.result,
+                url: req.path,
+              },
+              tokenInfo
+            ) as Record<string, unknown>,
             req
           )
         );
@@ -2040,11 +2044,14 @@ export function mountRsRecordDetail(app: AppLike, ctx: MountRsReadContext): void
         });
         return res.json(
           ctx.finalizeCanonicalEnvelope(
-            withRecordSourceIdentity(result.record, {
-              requestConnectionId: resolveRequestConnectionId(req.query),
-              sourceDescriptor,
-              storageBinding,
-            }),
+            withTokenKindRecordShape(
+              withRecordSourceIdentity(result.record, {
+                requestConnectionId: resolveRequestConnectionId(req.query),
+                sourceDescriptor,
+                storageBinding,
+              }),
+              tokenInfo
+            ) as Record<string, unknown>,
             req
           )
         );

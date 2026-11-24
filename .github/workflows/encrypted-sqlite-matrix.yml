@@ -69,7 +69,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install dependencies
@@ -83,7 +83,7 @@ jobs:
         run: |
           node -e '
             const [expectedPlatform, expectedArch] = process.argv.slice(1);
-            if (process.versions.node !== "24.21.0") throw new Error(`expected Node 24.21.0, got ${process.versions.node}`);
+            if (process.versions.node !== "24.22.1") throw new Error(`expected Node 24.22.1, got ${process.versions.node}`);
             if (process.platform !== expectedPlatform) throw new Error(`expected ${expectedPlatform}, got ${process.platform}`);
             if (process.arch !== expectedArch) throw new Error(`expected ${expectedArch}, got ${process.arch}`);
             console.log(`${process.version} ${process.platform}/${process.arch}`);
