@@ -61,6 +61,9 @@ A second narrow exception removes `emitted_at` from the client and `mcp_package`
 output shapes and from the stored record URI text. Core "Response records" forbids
 `emitted_at` in non-owner responses at the locked protocol revision; owner-token
 shapes are unchanged.
+A third narrow exception adds `instance_id` to the stored record URI text. Core
+requires every served record to carry the grant's handle for its source
+instance; existing members and their order are unchanged.
 The generator refuses to run from another revision.
 To refresh deliberately, first check out the gate revision so
 the generator and helper exist, then apply the gate to a detached worktree at

@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * A client tombstone in a real changes response carries only Core members.
- * Core Section 4 allows {object, id, instance_id, stream, deleted}; the RI does
- * not yet store instance_id on tombstones, so it is not asserted here.
- * The owner response for the same deletion is unchanged.
+ * A client tombstone in a real changes response carries exactly the Core
+ * members {object, id, instance_id, stream, deleted}, with instance_id equal
+ * to the instance in the client's grant. The owner response for the same
+ * deletion is unchanged.
  */
 
 import assert from "node:assert/strict";
@@ -25,7 +25,6 @@ type JsonObject = Record<string, unknown>;
 const CONNECTOR_ID = "https://registry.pdpp.dev/connectors/github";
 const STREAM = "repositories";
 const OWNER_SUBJECT = "exact_tombstone_owner";
-const CLIENT_TOMBSTONE_ALLOWED = new Set(["object", "id", "instance_id", "stream", "deleted"]);
 const CLIENT_TOMBSTONE_FORBIDDEN = [
   "connection_id",
   "connector_instance_id",
@@ -136,7 +135,7 @@ async function loadGithubManifest(): Promise<JsonObject> {
   return JSON.parse(await readFile(path, "utf8")) as JsonObject;
 }
 
-test("served client tombstone has only Core members; owner tombstone is unchanged", async () => {
+test("served client tombstone is exactly the Core members with the grant instance_id; owner tombstone is unchanged", async () => {
   const server = await startServer({
     asPort: 0,
     dbPath: ":memory:",
@@ -190,18 +189,22 @@ test("served client tombstone has only Core members; owner tombstone is unchange
     assert.ok(clientTombstone, `client delta has repo-1: ${JSON.stringify(clientDelta.body)}`);
     assert.ok(ownerTombstone, `owner delta has repo-1: ${JSON.stringify(ownerDelta.body)}`);
 
-    // (a) every served key is a Core member.
-    for (const key of Object.keys(clientTombstone)) {
-      assert.ok(
-        CLIENT_TOMBSTONE_ALLOWED.has(key),
-        `unexpected client tombstone member "${key}": ${JSON.stringify(clientTombstone)}`
-      );
-    }
-    // (b) the required members are present with the right values.
-    assert.equal(clientTombstone.object, "record");
-    assert.equal(clientTombstone.id, "repo-1");
-    assert.equal(clientTombstone.stream, STREAM);
-    assert.equal(clientTombstone.deleted, true);
+    // (a) the client tombstone is exactly the Core member set, with
+    // instance_id equal to the instance in the client's grant (the default
+    // account instance seeded for this owner/connector).
+    const expectedInstanceId = makeDefaultAccountConnectorInstanceId(
+      OWNER_SUBJECT,
+      canonicalConnectorKey(CONNECTOR_ID) ?? CONNECTOR_ID
+    );
+    assert.deepEqual(clientTombstone, {
+      deleted: true,
+      id: "repo-1",
+      instance_id: expectedInstanceId,
+      object: "record",
+      stream: STREAM,
+    });
+    // (b) the client instance_id names the same binding the owner sees.
+    assert.equal(clientTombstone.instance_id, ownerTombstone.connector_instance_id);
     // (c) the leaking members are absent.
     for (const key of CLIENT_TOMBSTONE_FORBIDDEN) {
       assert.equal(key in clientTombstone, false, `client tombstone must not carry "${key}"`);
