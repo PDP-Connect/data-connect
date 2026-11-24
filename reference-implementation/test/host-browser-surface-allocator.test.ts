@@ -218,53 +218,196 @@ test("lease DELETE answered 500 still fails and keeps the lease for a later retr
 	assert.equal(calls.filter((call) => call.method === "DELETE").length, 2);
 });
 
-test("lease POST outlasts the short request budget while the host starts a cold browser; DELETE keeps the short budget", async () => {
-	// The host answers the lease POST after 20 ms, well past the 1 ms request
-	// budget; Node fires timers in expiry order, so without the longer lease
-	// budget the POST is always aborted first. The DELETE never answers, so only
-	// its own budget can end it.
-	const slowFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
-		await new Promise<void>((resolve, reject) => {
-			const timer = init?.method === "POST" ? setTimeout(resolve, 20) : undefined;
-			init?.signal?.addEventListener("abort", () => {
-				clearTimeout(timer);
-				reject(new Error("aborted"));
-			});
+/**
+ * A host that keeps the lease protocol's contract: one start per run_id, which
+ * a repeated POST joins, and a released run whose late start is torn down and
+ * refused. Its start completes only when the test calls finishStart.
+ */
+function createSlowStartHost(): {
+	readonly calls: MockRequest[];
+	readonly fetchImpl: typeof fetch;
+	readonly finishStart: () => Promise<void>;
+	readonly heldRunIds: ReadonlySet<string>;
+	readonly startedRunIds: readonly string[];
+} {
+	const calls: MockRequest[] = [];
+	const heldRunIds = new Set<string>();
+	const releasedRunIds = new Set<string>();
+	const startedRunIds: string[] = [];
+	const starts = new Map<string, Promise<void>>();
+	let finish: () => void = () => undefined;
+	const startFinished = new Promise<void>((resolve) => {
+		finish = resolve;
+	});
+	const refused = {
+		json: async () => ({
+			error: "surface_start_failed",
+			message: "Run id has already been released",
+		}),
+		ok: false,
+		status: 500,
+	} as Response;
+	const fetchImpl = (async (
+		input: string | URL | Request,
+		init?: RequestInit,
+	) => {
+		const url = String(input);
+		calls.push({
+			...(init?.body === undefined ? {} : { body: String(init.body) }),
+			...(init?.method === undefined ? {} : { method: init.method }),
+			url,
 		});
-		if (init?.method === "POST") {
-			return {
-				json: async () => ({
-					cdp_url: "http://127.0.0.1:9222/host-cdp",
-					surface_id: "host-surface-slow",
-				}),
-				ok: true,
-				status: 200,
-			} as Response;
+		if (init?.method === "DELETE") {
+			const runId = decodeURIComponent(
+				url.split("/browser-surface/runs/")[1] ?? "",
+			);
+			releasedRunIds.add(runId);
+			heldRunIds.delete(runId);
+			return { json: async () => ({}), ok: true, status: 204 } as Response;
 		}
-		return { json: async () => ({}), ok: true, status: 204 } as Response;
+		const { run_id: runId } = JSON.parse(String(init?.body)) as {
+			run_id: string;
+		};
+		if (releasedRunIds.has(runId)) {
+			return refused;
+		}
+		let start = starts.get(runId);
+		if (!start) {
+			startedRunIds.push(runId);
+			start = startFinished.then(() => {
+				if (!releasedRunIds.has(runId)) {
+					heldRunIds.add(runId);
+				}
+			});
+			starts.set(runId, start);
+		}
+		const joined = start;
+		await new Promise<void>((resolve, reject) => {
+			init?.signal?.addEventListener("abort", () =>
+				reject(new Error("aborted")),
+			);
+			joined.then(resolve, reject);
+		});
+		if (releasedRunIds.has(runId)) {
+			return refused;
+		}
+		return {
+			json: async () => ({
+				cdp_url: "http://127.0.0.1:9222/host-cdp",
+				surface_id: `host-surface-${runId}`,
+			}),
+			ok: true,
+			status: 200,
+		} as Response;
 	}) as typeof fetch;
-	const allocator = createHostBrowserSurfaceAllocator({
+	return {
+		calls,
+		fetchImpl,
+		finishStart: async () => {
+			finish();
+			await Promise.all(starts.values());
+		},
+		heldRunIds,
+		startedRunIds,
+	};
+}
+
+function slowStartAllocator(
+	fetchImpl: typeof fetch,
+): HostBrowserSurfaceAllocator {
+	return createHostBrowserSurfaceAllocator({
 		endpoint: "http://127.0.0.1:9916/agent",
-		fetchImpl: slowFetch,
+		fetchImpl,
 		headless: false,
-		leaseStartTimeoutMs: 1_000,
+		now: () => new Date("2026-09-16T16:00:00.000Z"),
 		requestTimeoutMs: 1,
 		token: "shared-secret",
 	});
-	allocator.bindRunToSurface({ runId: "run-slow", surfaceId: "surface_1" });
+}
 
-	const surface = await allocator.ensureSurface({
+test("an unanswered lease POST leaves the surface starting, and asking again adopts the host's one start", async () => {
+	const host = createSlowStartHost();
+	const allocator = slowStartAllocator(host.fetchImpl);
+	const manager = dynamicManager();
+	const acquired = manager.acquire({
 		connectorId: "chase",
 		profileKey: "chase:cin_chase",
 		surfaceSubjectId: "cin_chase",
-		surfaceId: "surface_1",
+		runId: "run-slow",
+	});
+	allocator.bindRunToSurface({ runId: "run-slow", surfaceId: "surface_1" });
+
+	// Two POSTs time out while the host is still starting the browser.
+	for (const _attempt of [1, 2]) {
+		const waiting = await manager.ensureStartingSurfaceReady({
+			allocator,
+			leaseId: acquired.lease.lease_id,
+		});
+		assert.equal(waiting.lease.status, "starting_surface");
+		assert.equal(waiting.surface?.health, "starting");
+	}
+	await host.finishStart();
+	const ready = await manager.ensureStartingSurfaceReady({
+		allocator,
+		leaseId: acquired.lease.lease_id,
 	});
 
-	assert.equal(surface.cdp_url, "http://127.0.0.1:9222/host-cdp");
-	await assert.rejects(
-		allocator.stopSurface({ reason: "operator", surfaceId: "surface_1" }),
-		/timed out after 1ms/,
+	assert.equal(ready.lease.status, "leased");
+	assert.equal(ready.surface?.cdp_url, "http://127.0.0.1:9222/host-cdp");
+	assert.deepEqual(host.startedRunIds, ["run-slow"]);
+	assert.equal(allocator.lastStartFailure("run-slow"), undefined);
+	const postedRunIds = host.calls.map(
+		(call) => (JSON.parse(call.body ?? "{}") as { run_id?: string }).run_id,
 	);
+	assert.deepEqual(postedRunIds, ["run-slow", "run-slow", "run-slow"]);
+});
+
+test("stopping an unanswered start releases its run, so the host drops the browser when the start completes", async () => {
+	const host = createSlowStartHost();
+	const allocator = slowStartAllocator(host.fetchImpl);
+	const manager = dynamicManager();
+	const acquired = manager.acquire({
+		connectorId: "chase",
+		profileKey: "chase:cin_chase",
+		surfaceSubjectId: "cin_chase",
+		runId: "run-abandoned",
+	});
+	allocator.bindRunToSurface({
+		runId: "run-abandoned",
+		surfaceId: "surface_1",
+	});
+	const waiting = await manager.ensureStartingSurfaceReady({
+		allocator,
+		leaseId: acquired.lease.lease_id,
+	});
+	assert.equal(waiting.surface?.health, "starting");
+
+	const stopped = await allocator.stopSurface({
+		reason: "surface_failed",
+		surfaceId: "surface_1",
+	});
+	await host.finishStart();
+
+	assert.equal(stopped?.health, "stopping");
+	assert.equal(
+		host.calls.at(-1)?.url,
+		"http://127.0.0.1:9916/agent/browser-surface/runs/run-abandoned",
+	);
+	assert.equal(host.heldRunIds.size, 0);
+	assert.equal(await allocator.getSurfaceStatus("surface_1"), null);
+	assert.deepEqual(await allocator.listSurfaces(), []);
+	// A late retry of the released run is refused, never leased.
+	allocator.bindRunToSurface({
+		runId: "run-abandoned",
+		surfaceId: "surface_1",
+	});
+	const retried = await manager.ensureStartingSurfaceReady({
+		allocator,
+		leaseId: acquired.lease.lease_id,
+	});
+	assert.equal(retried.lease.status, "surface_failed");
+	assert.equal(host.heldRunIds.size, 0);
+	assert.deepEqual(host.startedRunIds, ["run-abandoned"]);
 });
 
 test("release after a lost acquire response targets the stable run id", async () => {

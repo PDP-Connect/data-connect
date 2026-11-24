@@ -10,11 +10,6 @@ import type {
 import { canonicalConnectorKey } from "../server/connector-key.ts";
 
 const DEFAULT_HOST_REQUEST_TIMEOUT_MS = 5_000;
-// A lease POST returns only after the host has started the browser, and the
-// desktop host allows a cold browser start up to 10 seconds. A shorter budget
-// abandons a start the host still completes: that browser then holds the
-// connection's profile and refuses the retry with browser_profile_in_use.
-const DEFAULT_HOST_LEASE_START_TIMEOUT_MS = 30_000;
 
 export interface HostBrowserSurfaceLeaseBinding {
 	/**
@@ -31,8 +26,6 @@ export interface HostBrowserSurfaceAllocatorOptions {
 	readonly fetchImpl?: typeof fetch;
 	readonly headless: boolean;
 	readonly now?: () => Date;
-	/** Budget for the lease POST, which waits for the host to start a browser. */
-	readonly leaseStartTimeoutMs?: number;
 	readonly requestTimeoutMs?: number;
 	readonly token: string;
 }
@@ -88,7 +81,8 @@ export class HostBrowserSurfaceAllocatorError extends Error {
 }
 
 interface HostLeaseRecord {
-	readonly hostSurfaceId: string;
+	/** Null while a lease POST for the run has had no answer. */
+	readonly hostSurfaceId: string | null;
 	readonly runId: string;
 	readonly surface: BrowserSurface;
 }
@@ -120,7 +114,6 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 	readonly #fetch: FetchImpl;
 	readonly #headless: boolean;
 	readonly #now: () => Date;
-	readonly #leaseStartTimeoutMs: number;
 	readonly #requestTimeoutMs: number;
 	readonly #token: string;
 	readonly #leasesBySurfaceId = new Map<string, HostLeaseRecord>();
@@ -137,8 +130,6 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		this.#fetch = (options.fetchImpl ?? fetch) as FetchImpl;
 		this.#headless = options.headless;
 		this.#now = options.now ?? (() => new Date());
-		this.#leaseStartTimeoutMs =
-			options.leaseStartTimeoutMs ?? DEFAULT_HOST_LEASE_START_TIMEOUT_MS;
 		this.#requestTimeoutMs =
 			options.requestTimeoutMs ?? DEFAULT_HOST_REQUEST_TIMEOUT_MS;
 		this.#token = options.token.trim();
@@ -166,7 +157,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		request: EnsureBrowserSurfaceRequest,
 	): Promise<BrowserSurface> {
 		const existing = this.#leasesBySurfaceId.get(request.surfaceId);
-		if (existing) {
+		if (existing?.hostSurfaceId) {
 			return existing.surface;
 		}
 		const runId = this.#pendingRunIdsBySurfaceId.get(request.surfaceId);
@@ -205,19 +196,42 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 					code: error.hostError ?? error.code,
 					message: error.hostMessage ?? error.message,
 				});
+				if (error.code === "host_browser_surface_timeout") {
+					// No answer does not mean no browser: the host can still be
+					// starting one for this run. Report the surface as starting. The
+					// lease manager asks again within its readiness budget, and the
+					// host answers a repeated run_id with the start it already has.
+					return this.#recordSurface(request, runId, null);
+				}
 			}
 			throw error;
 		}
 		this.#lastStartFailureByRunId.delete(runId);
-		const hostLease = parseHostSurfaceLeaseResponse(response);
+		const surface = this.#recordSurface(
+			request,
+			runId,
+			parseHostSurfaceLeaseResponse(response),
+		);
+		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
+		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
+		return surface;
+	}
+
+	#recordSurface(
+		request: EnsureBrowserSurfaceRequest,
+		runId: string,
+		hostLease: HostSurfaceLeaseResponse | null,
+	): BrowserSurface {
 		const now = this.#now().toISOString();
 		const surface: BrowserSurface = {
-			allocator_metadata: { host_surface_id: hostLease.surface_id },
+			...(hostLease
+				? { allocator_metadata: { host_surface_id: hostLease.surface_id } }
+				: {}),
 			backend: "neko",
-			cdp_url: hostLease.cdp_url,
+			cdp_url: hostLease?.cdp_url ?? "",
 			connector_id: request.connectorId,
 			created_at: now,
-			health: "ready",
+			health: hostLease ? "ready" : "starting",
 			last_used_at: now,
 			profile_key: request.profileKey,
 			// The host contract supplies CDP only. The legacy field is required by
@@ -226,11 +240,12 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			stream_base_url: "",
 			surface_id: request.surfaceId,
 		};
-		const record = { hostSurfaceId: hostLease.surface_id, runId, surface };
-		this.#leasesBySurfaceId.set(request.surfaceId, record);
+		this.#leasesBySurfaceId.set(request.surfaceId, {
+			hostSurfaceId: hostLease?.surface_id ?? null,
+			runId,
+			surface,
+		});
 		this.#surfaceIdsByRunId.set(runId, request.surfaceId);
-		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
-		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
 		return surface;
 	}
 
@@ -268,12 +283,19 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		if (!record) {
 			return null;
 		}
+		// An unanswered start has no host surface id. Releasing its run makes
+		// the host tear down that browser when the start completes, and refuse
+		// the run from then on.
 		await this.#requestNoContent(
 			"DELETE",
-			this.#leaseUrl(record.hostSurfaceId),
+			record.hostSurfaceId === null
+				? this.#runUrl(record.runId)
+				: this.#leaseUrl(record.hostSurfaceId),
 		);
 		this.#leasesBySurfaceId.delete(request.surfaceId);
 		this.#surfaceIdsByRunId.delete(record.runId);
+		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
+		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
 		return { ...record.surface, health: "stopping" };
 	}
 
@@ -294,9 +316,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		url: string,
 		body: Record<string, unknown>,
 	): Promise<unknown> {
-		const response = await this.#request(method, url, JSON.stringify(body), {
-			timeoutMs: this.#leaseStartTimeoutMs,
-		});
+		const response = await this.#request(method, url, JSON.stringify(body));
 		try {
 			return await response.json();
 		} catch (error) {
@@ -319,13 +339,13 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 		method: "DELETE" | "POST",
 		url: string,
 		body?: string,
-		{
-			notFoundIsSuccess = false,
-			timeoutMs = this.#requestTimeoutMs,
-		}: { notFoundIsSuccess?: boolean; timeoutMs?: number } = {},
+		{ notFoundIsSuccess = false }: { notFoundIsSuccess?: boolean } = {},
 	): Promise<FetchResponseLike> {
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), timeoutMs);
+		const timeout = setTimeout(
+			() => controller.abort(),
+			this.#requestTimeoutMs,
+		);
 		try {
 			const response = await this.#fetch(url, {
 				headers: {
@@ -347,7 +367,7 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			if (controller.signal.aborted) {
 				throw new HostBrowserSurfaceAllocatorError(
 					"host_browser_surface_timeout",
-					`host browser surface ${method} ${url} timed out after ${timeoutMs}ms`,
+					`host browser surface ${method} ${url} timed out after ${this.#requestTimeoutMs}ms`,
 					{ cause: error },
 				);
 			}
