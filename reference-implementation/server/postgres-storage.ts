@@ -2022,7 +2022,7 @@ async function bootstrapPostgresSchemaOnce({
         file_name TEXT NOT NULL,
         staging_path TEXT NOT NULL,
         final_path TEXT,
-        file_size_bytes INTEGER NOT NULL DEFAULT 0,
+        file_size_bytes BIGINT NOT NULL DEFAULT 0,
         artifact_sha256 TEXT,
         status TEXT NOT NULL CHECK (status IN ('uploaded', 'validating', 'staged', 'duplicate', 'failed')),
         acquisition_batch_id TEXT REFERENCES acquisition_batches(batch_id) ON DELETE SET NULL,
@@ -2038,6 +2038,22 @@ async function bootstrapPostgresSchemaOnce({
       -- backfill to NULL, which the sweep also treats as orphaned.
       ALTER TABLE manual_upload_artifacts
         ADD COLUMN IF NOT EXISTS owner_epoch TEXT;
+      -- Widen legacy upload sizes without taking an ACCESS EXCLUSIVE lock
+      -- for this type change again on every boot after the upgrade.
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+            FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND table_name = 'manual_upload_artifacts'
+             AND column_name = 'file_size_bytes'
+             AND data_type = 'integer'
+        ) THEN
+          ALTER TABLE manual_upload_artifacts
+            ALTER COLUMN file_size_bytes TYPE BIGINT;
+        END IF;
+      END $$;
       CREATE INDEX IF NOT EXISTS idx_pg_manual_upload_artifacts_connection_created
         ON manual_upload_artifacts(connector_instance_id, created_at DESC);
 
