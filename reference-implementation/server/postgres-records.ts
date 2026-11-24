@@ -58,6 +58,7 @@ import {
   nonNullSchemaTypes,
   passesRequestFilters,
   passesTimeConstraint,
+  rejectFiltersWithChangesFeed,
 } from "./record-filters.ts";
 import { firstSemanticTimeValue, SEMANTIC_TIME_UNKNOWN } from "./semantic-time-coercion.ts";
 import {
@@ -2510,6 +2511,7 @@ export async function postgresQueryRecords(
   );
 
   if (requestParams.changes_since !== null && requestParams.changes_since !== undefined) {
+    rejectFiltersWithChangesFeed(compiledFilters);
     return queryPostgresChangesSince({
       compiledFilters,
       connectorInstanceId,

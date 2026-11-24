@@ -28,7 +28,8 @@ test("Core image packages the managed display, durable profile root, and full Ch
   // container replacement — the defect that restarted the Slack sync from zero.
   assert.ok(dockerfile.includes("PDPP_CONNECTOR_ARTIFACT_ROOT=/var/lib/pdpp/connector-artifacts"));
   assert.ok(dockerfile.includes("chrome-linux64/chrome"));
-  assert.ok(!dockerfile.includes("chromium_headless_shell"));
+  // No Chrome Headless Shell; scripts/chrome-distrust-policy.test.ts covers why.
+  assert.ok(dockerfile.includes("npx patchright install --with-deps --no-shell chromium"));
   const headlessOverride = ["PDPP_BROWSER_HEADLESS: $", "{PDPP_BROWSER_HEADLESS:-}"].join("");
   assert.ok(compose.includes(headlessOverride));
 });
