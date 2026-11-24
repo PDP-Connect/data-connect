@@ -219,9 +219,13 @@ test("lease DELETE answered 500 still fails and keeps the lease for a later retr
 });
 
 test("lease POST outlasts the short request budget while the host starts a cold browser; DELETE keeps the short budget", async () => {
+	// The host answers the lease POST after 20 ms, well past the 1 ms request
+	// budget; Node fires timers in expiry order, so without the longer lease
+	// budget the POST is always aborted first. The DELETE never answers, so only
+	// its own budget can end it.
 	const slowFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
 		await new Promise<void>((resolve, reject) => {
-			const timer = setTimeout(resolve, 60);
+			const timer = init?.method === "POST" ? setTimeout(resolve, 20) : undefined;
 			init?.signal?.addEventListener("abort", () => {
 				clearTimeout(timer);
 				reject(new Error("aborted"));
@@ -244,7 +248,7 @@ test("lease POST outlasts the short request budget while the host starts a cold 
 		fetchImpl: slowFetch,
 		headless: false,
 		leaseStartTimeoutMs: 1_000,
-		requestTimeoutMs: 20,
+		requestTimeoutMs: 1,
 		token: "shared-secret",
 	});
 	allocator.bindRunToSurface({ runId: "run-slow", surfaceId: "surface_1" });
@@ -259,7 +263,7 @@ test("lease POST outlasts the short request budget while the host starts a cold 
 	assert.equal(surface.cdp_url, "http://127.0.0.1:9222/host-cdp");
 	await assert.rejects(
 		allocator.stopSurface({ reason: "operator", surfaceId: "surface_1" }),
-		/timed out after 20ms/,
+		/timed out after 1ms/,
 	);
 });
 
