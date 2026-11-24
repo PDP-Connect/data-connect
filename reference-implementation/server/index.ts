@@ -663,6 +663,7 @@ import {
   fanoutPendingInteractionWebPush,
   fanoutTestWebPush,
   resolveWebPushConfig,
+  WEB_PUSH_UNRESOLVED,
   type WebPushConfig,
   type WebPushSubscriptionStore,
 } from "./web-push-notifications.ts";
@@ -5064,7 +5065,7 @@ export function buildAsApp(opts: ServerOpts = {}) {
   const ownerDeviceAuthStore = createOwnerDeviceAuthStore() as unknown as OwnerDeviceAuthStore;
   const deviceExporterStore = opts.deviceExporterStore || createDeviceExporterStore();
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
-  const webPushConfig = opts.webPushConfig || resolveWebPushConfig();
+  const webPushConfig = opts.webPushConfig || WEB_PUSH_UNRESOLVED;
   const dynamicClientRegistrationEnabled = resolveDynamicClientRegistrationEnabled(opts);
   const dynamicClientRegistrationInitialAccessTokens = resolveDynamicClientRegistrationInitialAccessTokens(opts);
   const publicDcrRateLimiter = createPublicDcrRateLimiter(opts.publicDynamicClientRegistrationRateLimit ?? undefined);
@@ -9094,7 +9095,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const resolvedOwnerAuthConfig = earlyOwnerAuthConfig;
   const ownerAuthSubjectId = resolvedOwnerAuthConfig.subjectId || OWNER_AUTH_DEFAULT_SUBJECT_ID;
 
-  const webPushConfig = opts.webPushConfig || resolveWebPushConfig();
+  const webPushConfig = opts.webPushConfig || (await resolveWebPushConfig({ publicOrigin: configuredAsIssuer }));
   const webPushStore = opts.webPushSubscriptionStore || createWebPushSubscriptionStore();
   // Reference-internal run-target registry, lifted out of buildAsApp so the
   // controller can hand the same instance the per-run nonce hooks it needs
@@ -9131,6 +9132,7 @@ export async function startServer(opts: ServerOpts = {}) {
   const connectionScopedRunEnvResolver = opts.connectionScopedRunEnvResolver ?? buildConnectionScopedRunEnvResolver();
   const controller = createController({
     ...(configuredAsPublicUrl === null ? {} : { asPublicUrl: configuredAsPublicUrl }),
+    webPushConfig,
     ...(connectorEnvironmentPolicy.approvedBindings.length > 0
       ? {
           approvedEnvironmentBindings: connectorEnvironmentPolicy.approvedBindings,
@@ -10270,7 +10272,7 @@ function createReferenceSchedulerManager({
   schedulerStore = getDefaultSchedulerStore(),
   connectorPathResolver = resolveActiveInstallFirstConnectorPath,
   ownerSubjectId = OWNER_AUTH_DEFAULT_SUBJECT_ID,
-  webPushConfig = resolveWebPushConfig(),
+  webPushConfig,
   webPushSubscriptionStore = createWebPushSubscriptionStore(),
 }: {
   connectionScopedRunEnvResolver?: ServerOpts["connectionScopedRunEnvResolver"];

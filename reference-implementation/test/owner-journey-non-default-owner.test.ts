@@ -341,11 +341,13 @@ test("non-default owner completes a full journey (token/runtime/interaction/push
     await pushStore.upsert(
       OWNER_SUBJECT_ID,
       { endpoint: "https://push.example.invalid/sub/alice", keys: { auth: "a", p256dh: "p" } },
+      VAPID_PUBLIC,
       {}
     );
     await pushStore.upsert(
       FOREIGN_SUBJECT_ID,
       { endpoint: "https://push.example.invalid/sub/mallory", keys: { auth: "a", p256dh: "p" } },
+      VAPID_PUBLIC,
       {}
     );
     const notifiedEndpoints: string[] = [];

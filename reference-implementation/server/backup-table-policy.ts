@@ -445,6 +445,10 @@ export const BACKUP_TABLE_INVENTORY: Record<string, BackupTableInventoryEntry> =
     classification: "backup_required",
     reason: "Push subscription rows are durable notification configuration.",
   },
+  web_push_vapid_keys: {
+    classification: "backup_required",
+    reason: "The sealed Web Push signing key requires the credential encryption key to decrypt after restore.",
+  },
 };
 
 const SQLITE_INTERNAL_TABLES = new Set(["sqlite_sequence", "sqlite_stat1", "sqlite_stat4"]);

@@ -820,6 +820,12 @@ async function migratePostgresStreamEvidenceRunRegistry(client: PoolClient): Pro
   await client.query("ALTER TABLE stream_evidence_run_registry ADD COLUMN IF NOT EXISTS event_id TEXT");
 }
 
+// A subscription is only deliverable under the VAPID key it was created
+// against. Rows from before the column existed stay NULL and read as stale.
+async function migratePostgresWebPushSubscriptionVapidKey(client: PoolClient): Promise<void> {
+  await client.query("ALTER TABLE web_push_subscriptions ADD COLUMN IF NOT EXISTS vapid_public_key TEXT");
+}
+
 async function migratePostgresBrowserSurfaceLeaseLifecycleChecks(client: PoolClient): Promise<void> {
   const constraints = await client.query<ConstraintRow>(`
     SELECT conname, pg_get_constraintdef(oid) AS definition
@@ -2602,10 +2608,18 @@ async function bootstrapPostgresSchemaOnce({
         last_used_at TEXT,
         user_agent TEXT,
         platform TEXT,
-        device_label TEXT
+        device_label TEXT,
+        vapid_public_key TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_pg_web_push_subscriptions_owner_active
         ON web_push_subscriptions(owner_subject_id, revoked_at, updated_at);
+
+      CREATE TABLE IF NOT EXISTS web_push_vapid_keys (
+        singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
+        public_key TEXT NOT NULL,
+        sealed_private_key TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
 
       CREATE TABLE IF NOT EXISTS device_exporters (
         device_id TEXT PRIMARY KEY,
@@ -3952,6 +3966,7 @@ async function bootstrapPostgresSchemaOnce({
     await migratePostgresConnectorInstancesSourceKindBrowserCollector(client);
     await migratePostgresConnectorSummaryEvidenceRepairChunkPageSize(client);
     await migratePostgresStreamEvidenceRunRegistry(client);
+    await migratePostgresWebPushSubscriptionVapidKey(client);
     await migratePostgresSemanticEmbeddingToVector(client, log);
     await ensurePostgresLexicalScopedGinIndex(client, log);
     await ensurePostgresRecordsCanonicalCountIndex(client, log);

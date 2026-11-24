@@ -12,10 +12,11 @@ import { join } from "node:path";
 import test from "node:test";
 import tls from "node:tls";
 
-import { closeDb, initDb } from "../server/db.ts";
+import { closeDb, getDb, initDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, initPostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
 import { createPinnedHttpsAgent, resolveAllowedAddresses } from "../server/ssrf-guard.ts";
+import { createCredentialCipher } from "../server/stores/credential-encryption.ts";
 import {
   buildAssistancePushPayload,
   buildEscalationPushPayload,
@@ -33,11 +34,13 @@ import {
   fanoutPendingInteractionWebPush as fanoutPendingInteractionWebPushUntyped,
   fanoutTestWebPush as fanoutTestWebPushUntyped,
   guardWebPushEndpoint as guardWebPushEndpointUntyped,
+  resolveWebPushConfig,
   resolveWebPushModuleApi as resolveWebPushModuleApiUntyped,
   resolveWebPushUrgency,
   shouldFanoutAssistanceProgress,
   WEB_PUSH_SEND_TIMEOUT_MS,
 } from "../server/web-push-notifications.ts";
+import { loadOrCreateWebPushVapidKeys } from "../server/web-push-vapid-keys.ts";
 
 // `web-push` (the npm package) has no bundled types and no `@types/web-push`
 // is installed. Declared here, test-file-local, covering only the members
@@ -945,6 +948,7 @@ interface WebPushSubscriptionRecord {
 
 interface WebPushSubscriptionRawRecord extends WebPushSubscriptionRecord {
   keys: SubscriptionKeys;
+  vapid_public_key: string | null;
 }
 
 interface WebPushSubscriptionStore {
@@ -962,6 +966,7 @@ interface WebPushSubscriptionStore {
   upsert: (
     ownerSubjectId: string,
     subscription: { endpoint: string; keys: SubscriptionKeys },
+    vapidPublicKey: string,
     platform?: Record<string, unknown>
   ) => Promise<WebPushSubscriptionRecord> | WebPushSubscriptionRecord;
 }
@@ -981,7 +986,7 @@ async function runWebPushSubscriptionStoreConformance(
   const localEndpoint = `https://push.example.invalid/sub/${prefix}-local`;
   const otherEndpoint = `https://push.example.invalid/sub/${prefix}-other`;
 
-  const created = await store.upsert("owner_local", sampleSubscription(localEndpoint), {
+  const created = await store.upsert("owner_local", sampleSubscription(localEndpoint), VAPID_PUBLIC, {
     device_label: "Pixel test device",
     platform: "android",
   });
@@ -990,7 +995,7 @@ async function runWebPushSubscriptionStoreConformance(
   assert.equal(created.device_label, "Pixel test device");
   assert.equal(created.revoked_at, null);
 
-  await store.upsert("owner_other", sampleSubscription(otherEndpoint), { platform: "desktop" });
+  await store.upsert("owner_other", sampleSubscription(otherEndpoint), VAPID_PUBLIC, { platform: "desktop" });
   assert.equal((await store.list("owner_local")).length, 1);
   assert.equal((await store.list("owner_other")).length, 1);
   const activeRawLocal = await store.listActiveRaw("owner_local");
@@ -1004,6 +1009,7 @@ async function runWebPushSubscriptionStoreConformance(
     auth: "auth-secret",
     p256dh: "public-key-material",
   });
+  assert.equal(activeRaw0.vapid_public_key, VAPID_PUBLIC, "the subscription records the key it was created under");
 
   await store.markFailure(localEndpoint, "temporary upstream error");
   let [visible]: Array<WebPushSubscriptionRecord | undefined> = await store.list("owner_local");
@@ -1024,7 +1030,9 @@ async function runWebPushSubscriptionStoreConformance(
   assert.equal(visible.last_failure_reason, "Gone");
   assert.equal(visible.revoked_at !== null, true);
 
-  const revived = await store.upsert("owner_local", sampleSubscription(localEndpoint), { platform: "updated" });
+  const revived = await store.upsert("owner_local", sampleSubscription(localEndpoint), VAPID_PUBLIC, {
+    platform: "updated",
+  });
   assert.equal(revived.revoked_at, null);
   assert.equal(revived.platform, "updated");
 
@@ -1140,8 +1148,8 @@ test("manual run Web Push payload still routes manual_action interactions to the
 
 test("web push send failures mark subscriptions without blocking successful fallback work", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/gone"), {});
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/ok"), {});
+  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/gone"), VAPID_PUBLIC, {});
+  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/ok"), VAPID_PUBLIC, {});
 
   const sent: unknown[] = [];
   await fanoutPendingInteractionWebPush({
@@ -1179,8 +1187,8 @@ test("web push send failures mark subscriptions without blocking successful fall
 
 test("web push fanout is scoped to the interaction owner subject", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/local"), {});
-  await store.upsert("owner_other", sampleSubscription("https://push.example.invalid/sub/other"), {});
+  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/local"), VAPID_PUBLIC, {});
+  await store.upsert("owner_other", sampleSubscription("https://push.example.invalid/sub/other"), VAPID_PUBLIC, {});
 
   const endpoints: unknown[] = [];
   await fanoutPendingInteractionWebPush({
@@ -1223,6 +1231,191 @@ test("SQLite WebPushSubscriptionStore persists owner-scoped subscription state",
   } finally {
     closeDb();
   }
+});
+
+const CREDENTIAL_KEY_ENV = "PDPP_CREDENTIAL_ENCRYPTION_KEY";
+
+/** Runs `body` against a fresh in-memory SQLite store with a credential encryption key set (or unset). */
+async function withVapidStore(body: () => Promise<void>, credentialKey: string | null = "test-credential-key") {
+  const previous = process.env[CREDENTIAL_KEY_ENV];
+  const previousFile = process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE;
+  if (credentialKey === null) {
+    delete process.env[CREDENTIAL_KEY_ENV];
+    delete process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE;
+  } else {
+    process.env[CREDENTIAL_KEY_ENV] = credentialKey;
+  }
+  initDb();
+  try {
+    await body();
+  } finally {
+    closeDb();
+    if (previous === undefined) {
+      delete process.env[CREDENTIAL_KEY_ENV];
+    } else {
+      process.env[CREDENTIAL_KEY_ENV] = previous;
+    }
+    if (previousFile !== undefined) {
+      process.env.PDPP_CREDENTIAL_ENCRYPTION_KEY_FILE = previousFile;
+    }
+  }
+}
+
+test("the server generates its VAPID key pair once, seals the private key, and returns the same pair afterwards", async () => {
+  await withVapidStore(async () => {
+    const first = await resolveWebPushConfig();
+    assert.equal(first.enabled, true);
+    assert.ok(first.enabled && first.publicKey && first.privateKey);
+    // A real P-256 pair: 65-byte uncompressed public point, 32-byte private scalar.
+    assert.equal(Buffer.from(first.publicKey ?? "", "base64url").length, 65);
+    assert.equal(Buffer.from(first.privateKey ?? "", "base64url").length, 32);
+
+    const row = getDb().prepare("SELECT public_key, sealed_private_key FROM web_push_vapid_keys").get() as {
+      public_key: string;
+      sealed_private_key: string;
+    };
+    assert.equal(row.public_key, first.publicKey);
+    assert.ok(!row.sealed_private_key.includes(first.privateKey ?? ""), "private key must not be stored in plaintext");
+    assert.equal(createCredentialCipher("test-credential-key").open(row.sealed_private_key), first.privateKey);
+
+    const second = await resolveWebPushConfig();
+    assert.deepEqual(
+      { privateKey: second.privateKey, publicKey: second.publicKey },
+      { privateKey: first.privateKey, publicKey: first.publicKey }
+    );
+  });
+});
+
+test("the VAPID subject is the public https origin, else the fallback contact", async () => {
+  await withVapidStore(async () => {
+    assert.equal(
+      (await resolveWebPushConfig({ publicOrigin: "https://data.example.test/path" })).subject,
+      "https://data.example.test"
+    );
+    assert.equal(
+      (await resolveWebPushConfig({ publicOrigin: "http://localhost:7662" })).subject,
+      "mailto:pdpp-reference@example.invalid"
+    );
+    assert.equal((await resolveWebPushConfig()).subject, "mailto:pdpp-reference@example.invalid");
+  });
+});
+
+test("concurrent first resolves converge on one stored VAPID pair", async () => {
+  await withVapidStore(async () => {
+    const [a, b] = await Promise.all([resolveWebPushConfig(), resolveWebPushConfig()]);
+    assert.equal(a.publicKey, b.publicKey);
+    assert.equal(a.privateKey, b.privateKey);
+    const count = getDb().prepare("SELECT COUNT(*) AS n FROM web_push_vapid_keys").get() as { n: number };
+    assert.equal(count.n, 1);
+  });
+});
+
+test("a pair stored by another caller between this caller's read and insert wins", async () => {
+  await withVapidStore(async () => {
+    const cipher = createCredentialCipher("test-credential-key");
+    // Our read already found no row. A concurrent first use stores its pair
+    // while we seal ours, so our insert-if-absent must lose and read back theirs.
+    const racingCipher = {
+      ...cipher,
+      seal: (plaintext: string) => {
+        getDb()
+          .prepare(
+            "INSERT INTO web_push_vapid_keys(singleton, public_key, sealed_private_key, created_at) VALUES(1, ?, ?, ?)"
+          )
+          .run("BCompetitorPublic", cipher.seal("competitor-private"), new Date().toISOString());
+        return cipher.seal(plaintext);
+      },
+    };
+    const keys = await loadOrCreateWebPushVapidKeys(racingCipher);
+    assert.deepEqual(keys, { privateKey: "competitor-private", publicKey: "BCompetitorPublic" });
+  });
+});
+
+test("PDPP_WEB_PUSH_VAPID_* environment variables are ignored", async () => {
+  const names = ["PDPP_WEB_PUSH_VAPID_PUBLIC_KEY", "PDPP_WEB_PUSH_VAPID_PRIVATE_KEY", "PDPP_WEB_PUSH_VAPID_SUBJECT"];
+  const saved = names.map((name) => process.env[name]);
+  process.env.PDPP_WEB_PUSH_VAPID_PUBLIC_KEY = "junk-public";
+  process.env.PDPP_WEB_PUSH_VAPID_PRIVATE_KEY = "junk-private";
+  process.env.PDPP_WEB_PUSH_VAPID_SUBJECT = "mailto:junk@example.invalid";
+  try {
+    await withVapidStore(async () => {
+      const config = await resolveWebPushConfig({ publicOrigin: "https://data.example.test" });
+      assert.equal(config.enabled, true);
+      assert.notEqual(config.publicKey, "junk-public");
+      assert.notEqual(config.privateKey, "junk-private");
+      assert.equal(config.subject, "https://data.example.test");
+    });
+  } finally {
+    names.forEach((name, index) => {
+      const value = saved[index];
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    });
+  }
+});
+
+test("Web Push reports unavailable, and stores nothing, when no credential encryption key is configured", async () => {
+  await withVapidStore(async () => {
+    const config = await resolveWebPushConfig();
+    assert.equal(config.enabled, false);
+    assert.match(config.unavailableReason ?? "", /Credential encryption is required/);
+    const count = getDb().prepare("SELECT COUNT(*) AS n FROM web_push_vapid_keys").get() as { n: number };
+    assert.equal(count.n, 0);
+  }, null);
+});
+
+test("fanout skips a subscription registered under another VAPID key and marks it stale", async () => {
+  const store = createMemoryWebPushSubscriptionStore();
+  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/current"), VAPID_PUBLIC, {});
+  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/old-key"), "BOldKey", {});
+
+  const sentTo: string[] = [];
+  const result = await fanoutTestWebPush({
+    config: {
+      enabled: true,
+      privateKey: VAPID_PRIVATE,
+      publicKey: VAPID_PUBLIC,
+      subject: "mailto:test@example.invalid",
+      unavailableReason: null,
+    },
+    log: { warn: () => undefined },
+    ownerSubjectId: "owner_local",
+    sender: (subscriptionArg: unknown) => {
+      sentTo.push((subscriptionArg as { endpoint: string }).endpoint);
+    },
+    store: toWebPushSubscriptionStore(store),
+  });
+
+  assert.deepEqual(sentTo, ["https://push.example.invalid/sub/current"]);
+  assert.equal(result.sent, 1);
+  const list = await store.list("owner_local");
+  const stale = list.find((record) => record?.endpoint?.endsWith("/old-key"));
+  assert.ok(stale);
+  assert.equal(stale.last_failure_reason, "vapid_key_changed");
+  assert.equal(stale.revoked_at, null);
+
+  // Registering again under the current key makes it deliverable.
+  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/old-key"), VAPID_PUBLIC, {});
+  sentTo.length = 0;
+  await fanoutTestWebPush({
+    config: {
+      enabled: true,
+      privateKey: VAPID_PRIVATE,
+      publicKey: VAPID_PUBLIC,
+      subject: "mailto:test@example.invalid",
+      unavailableReason: null,
+    },
+    log: { warn: () => undefined },
+    ownerSubjectId: "owner_local",
+    sender: (subscriptionArg: unknown) => {
+      sentTo.push((subscriptionArg as { endpoint: string }).endpoint);
+    },
+    store: toWebPushSubscriptionStore(store),
+  });
+  assert.equal(sentTo.length, 2);
 });
 
 test("Postgres WebPushSubscriptionStore conforms when PDPP_TEST_POSTGRES_URL is set", {
@@ -1413,9 +1606,24 @@ test("assistance Web Push payload routes to the run page and omits raw assistanc
 
 test("assistance Web Push fanout targets the owner and surfaces failures as marked subscriptions", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/assist-local"), {});
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/assist-gone"), {});
-  await store.upsert("owner_other", sampleSubscription("https://push.example.invalid/sub/assist-other"), {});
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/assist-local"),
+    VAPID_PUBLIC,
+    {}
+  );
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/assist-gone"),
+    VAPID_PUBLIC,
+    {}
+  );
+  await store.upsert(
+    "owner_other",
+    sampleSubscription("https://push.example.invalid/sub/assist-other"),
+    VAPID_PUBLIC,
+    {}
+  );
 
   interface SentEntry {
     endpoint: string;
@@ -1474,7 +1682,12 @@ test("assistance Web Push fanout targets the owner and surfaces failures as mark
 
 test("assistance Web Push fanout reports unavailable when VAPID is unconfigured", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/assist-noop"), {});
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/assist-noop"),
+    VAPID_PUBLIC,
+    {}
+  );
 
   const result = await fanoutAssistanceWebPush({
     assistance: {
@@ -1567,8 +1780,18 @@ test("test notification Web Push payload carries no secrets and routes to the ov
 
 test("test Web Push fanout is scoped to the requesting owner subject", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/test-local"), {});
-  await store.upsert("owner_other", sampleSubscription("https://push.example.invalid/sub/test-other"), {});
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/test-local"),
+    VAPID_PUBLIC,
+    {}
+  );
+  await store.upsert(
+    "owner_other",
+    sampleSubscription("https://push.example.invalid/sub/test-other"),
+    VAPID_PUBLIC,
+    {}
+  );
 
   const endpoints: unknown[] = [];
   const result = await fanoutTestWebPush({
@@ -1597,7 +1820,12 @@ test("test Web Push fanout is scoped to the requesting owner subject", async () 
 
 test("test Web Push fanout reports unavailable when VAPID is not configured", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/test-unavail"), {});
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/test-unavail"),
+    VAPID_PUBLIC,
+    {}
+  );
 
   const result = await fanoutTestWebPush({
     config: { enabled: false, privateKey: null, publicKey: null, subject: "mailto:test@example.invalid" },
@@ -1764,7 +1992,12 @@ test("failed push delivery updates subscription metadata without changing higher
   // any caller-owned state. We assert this by capturing a snapshot of an
   // out-of-band "attention" object and proving it is byte-equal afterwards.
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/state-test"), {});
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/state-test"),
+    VAPID_PUBLIC,
+    {}
+  );
 
   const attentionLikeState = Object.freeze({
     attention_id: "att_99",
@@ -1808,7 +2041,7 @@ test("failed push delivery updates subscription metadata without changing higher
 
 test("410 Gone revokes the subscription but still leaves out-of-band state untouched", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/gone-test"), {});
+  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/gone-test"), VAPID_PUBLIC, {});
 
   const attentionLikeState = Object.freeze({ lifecycle: "open" });
   const before = JSON.stringify(attentionLikeState);
@@ -1846,7 +2079,12 @@ test("410 Gone revokes the subscription but still leaves out-of-band state untou
 
 test("fanoutEscalationWebPush: rendered verdict channel suppresses non-attention pushes", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/calm-verdict"), {});
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/calm-verdict"),
+    VAPID_PUBLIC,
+    {}
+  );
   let sendCount = 0;
 
   const result = await fanoutEscalationWebPush({
@@ -1881,7 +2119,12 @@ test("fanoutEscalationWebPush: rendered verdict channel suppresses non-attention
 
 test("fanoutEscalationWebPush: rendered attention verdict sends to owner subscriptions", async () => {
   const store = createMemoryWebPushSubscriptionStore();
-  await store.upsert("owner_local", sampleSubscription("https://push.example.invalid/sub/attention-verdict"), {});
+  await store.upsert(
+    "owner_local",
+    sampleSubscription("https://push.example.invalid/sub/attention-verdict"),
+    VAPID_PUBLIC,
+    {}
+  );
   const sent: Array<{ endpoint: string; payload: { type: unknown; url: unknown } }> = [];
 
   const result = await fanoutEscalationWebPush({

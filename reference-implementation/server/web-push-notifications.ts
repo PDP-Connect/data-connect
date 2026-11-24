@@ -14,6 +14,8 @@ import {
 import { getStorageBackendKind, isPostgresStorageBackend, postgresQuery } from "./postgres-storage.ts";
 import type { DnsLookupAll } from "./ssrf-guard.ts";
 import { createPinnedHttpsAgent, resolveAllowedAddresses } from "./ssrf-guard.ts";
+import { CredentialEncryptionError } from "./stores/credential-encryption.ts";
+import { loadOrCreateWebPushVapidKeys } from "./web-push-vapid-keys.ts";
 
 const DEFAULT_TTL_SECONDS = 10 * 60;
 
@@ -62,6 +64,8 @@ export interface WebPushSubscriptionRecord extends NormalizedWebPushPlatform {
   p256dh: string;
   revoked_at: string | null;
   updated_at: string;
+  /** The VAPID public key the browser subscribed against; null for rows from before it was recorded. */
+  vapid_public_key: string | null;
 }
 
 /** Owner-facing projection: never carries the raw `p256dh`/`auth` keys. */
@@ -115,6 +119,7 @@ export interface WebPushSubscriptionStore {
   upsert: (
     ownerSubjectId: string,
     subscription: WebPushSubscriptionInput,
+    vapidPublicKey: string,
     platform?: WebPushPlatformInput
   ) => PublicWebPushSubscription | null | Promise<PublicWebPushSubscription | null>;
 }
@@ -216,6 +221,9 @@ interface WebPushCodedError extends Error {
  */
 export const WEB_PUSH_SEND_TIMEOUT_MS = 10_000;
 
+/** `last_failure_reason` of a subscription created under a VAPID key other than the current one. */
+export const WEB_PUSH_STALE_VAPID_KEY_REASON = "vapid_key_changed";
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -224,30 +232,54 @@ function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-export function resolveWebPushConfig(env: NodeJS.ProcessEnv = process.env): WebPushConfig {
-  const publicKey = nonEmptyString(env.PDPP_WEB_PUSH_VAPID_PUBLIC_KEY);
-  const privateKey = nonEmptyString(env.PDPP_WEB_PUSH_VAPID_PRIVATE_KEY);
-  const subject = nonEmptyString(env.PDPP_WEB_PUSH_VAPID_SUBJECT) || "mailto:pdpp-reference@example.invalid";
-  // `publicKey && privateKey` is the same enabled predicate as before; testing
-  // the two keys directly (rather than a precomputed boolean) is what lets the
-  // compiler carry their non-null-ness into the `enabled: true` arm.
-  if (publicKey && privateKey) {
-    return {
-      enabled: true,
-      privateKey,
-      publicKey,
-      subject,
-      unavailableReason: null,
-    };
+/** RFC 8292 §2.1 requires a contact URI; used only when the instance has no https public origin. */
+const FALLBACK_VAPID_SUBJECT = "mailto:pdpp-reference@example.invalid";
+
+/** The VAPID subject: the instance's public https origin, which RFC 8292 allows, else the fallback contact. */
+function vapidSubject(publicOrigin: string | null | undefined): string {
+  try {
+    const url = new URL(publicOrigin ?? "");
+    if (url.protocol === "https:") {
+      return url.origin;
+    }
+  } catch {
+    // Not a URL: no origin is configured.
   }
-  return {
-    enabled: false,
-    privateKey: privateKey || null,
-    publicKey: publicKey || null,
-    subject,
-    unavailableReason: "VAPID public/private keys are not configured",
-  };
+  return FALLBACK_VAPID_SUBJECT;
 }
+
+/**
+ * Resolve the server's Web Push configuration from its own stored key pair,
+ * creating the pair on first use (see `web-push-vapid-keys.ts`). Nothing is
+ * read from the environment. The only way this is unavailable is a missing or
+ * mismatched credential encryption key, which is reported rather than
+ * worked around with a plaintext key.
+ */
+export async function resolveWebPushConfig({
+  publicOrigin = null,
+}: {
+  publicOrigin?: string | null;
+} = {}): Promise<WebPushConfig> {
+  const subject = vapidSubject(publicOrigin);
+  try {
+    const keys = await loadOrCreateWebPushVapidKeys();
+    return { enabled: true, privateKey: keys.privateKey, publicKey: keys.publicKey, subject, unavailableReason: null };
+  } catch (err) {
+    if (err instanceof CredentialEncryptionError) {
+      return { enabled: false, privateKey: null, publicKey: null, subject, unavailableReason: err.message };
+    }
+    throw err;
+  }
+}
+
+/** For callers that build a server without resolving keys (direct low-level use); never sends. */
+export const WEB_PUSH_UNRESOLVED: WebPushConfig = Object.freeze({
+  enabled: false,
+  privateKey: null,
+  publicKey: null,
+  subject: FALLBACK_VAPID_SUBJECT,
+  unavailableReason: "Web Push keys were not resolved for this server instance",
+});
 
 function redactEndpoint(endpoint: string | null | undefined): string | null {
   if (!endpoint) {
@@ -318,6 +350,7 @@ function rawSubscriptionRecord(record: WebPushSubscriptionRecord): RawWebPushSub
 function buildSubscriptionRecord(
   ownerSubjectId: string,
   subscription: WebPushSubscriptionInput,
+  vapidPublicKey: string,
   platform: WebPushPlatformInput = {}
 ): WebPushSubscriptionRecord {
   const normalized = normalizeSubscription(subscription);
@@ -336,6 +369,7 @@ function buildSubscriptionRecord(
     p256dh: normalized.keys.p256dh,
     revoked_at: null,
     updated_at: timestamp,
+    vapid_public_key: vapidPublicKey,
     ...metadata,
   };
 }
@@ -407,9 +441,10 @@ export function createMemoryWebPushSubscriptionStore(): WebPushSubscriptionStore
     upsert(
       ownerSubjectId: string,
       subscription: WebPushSubscriptionInput,
+      vapidPublicKey: string,
       platform: WebPushPlatformInput = {}
     ): PublicWebPushSubscription | null {
-      const recordInput = buildSubscriptionRecord(ownerSubjectId, subscription, platform);
+      const recordInput = buildSubscriptionRecord(ownerSubjectId, subscription, vapidPublicKey, platform);
       const existing = byEndpoint.get(recordInput.endpoint);
       const record = {
         ...recordInput,
@@ -501,9 +536,10 @@ export function createSqliteWebPushSubscriptionStore(): WebPushSubscriptionStore
     upsert(
       ownerSubjectId: string,
       subscription: WebPushSubscriptionInput,
+      vapidPublicKey: string,
       platform: WebPushPlatformInput = {}
     ): PublicWebPushSubscription | null {
-      const record = buildSubscriptionRecord(ownerSubjectId, subscription, platform);
+      const record = buildSubscriptionRecord(ownerSubjectId, subscription, vapidPublicKey, platform);
       exec(referenceQueries.webPushUpsertSubscription, [
         record.id,
         record.owner_subject_id,
@@ -515,6 +551,7 @@ export function createSqliteWebPushSubscriptionStore(): WebPushSubscriptionStore
         record.user_agent,
         record.platform,
         record.device_label,
+        record.vapid_public_key,
       ]);
       return publicRecord(getByEndpoint(record.endpoint));
     },
@@ -524,7 +561,7 @@ export function createSqliteWebPushSubscriptionStore(): WebPushSubscriptionStore
 export function createPostgresWebPushSubscriptionStore(): WebPushSubscriptionStore {
   async function getByEndpoint(endpoint: string): Promise<WebPushSubscriptionRecord | null> {
     const result = await postgresQuery(
-      `SELECT id, owner_subject_id, endpoint, p256dh, auth, created_at, updated_at, revoked_at, last_success_at, last_failure_at, last_failure_reason, last_used_at, user_agent, platform, device_label
+      `SELECT id, owner_subject_id, endpoint, p256dh, auth, created_at, updated_at, revoked_at, last_success_at, last_failure_at, last_failure_reason, last_used_at, user_agent, platform, device_label, vapid_public_key
        FROM web_push_subscriptions
        WHERE endpoint = $1`,
       [endpoint]
@@ -541,7 +578,7 @@ export function createPostgresWebPushSubscriptionStore(): WebPushSubscriptionSto
       { activeOnly = true, includeEndpoint = true }: WebPushListOptions = {}
     ): Promise<(PublicWebPushSubscription | null)[]> {
       const result = await postgresQuery<WebPushSubscriptionRecord>(
-        `SELECT id, owner_subject_id, endpoint, p256dh, auth, created_at, updated_at, revoked_at, last_success_at, last_failure_at, last_failure_reason, last_used_at, user_agent, platform, device_label
+        `SELECT id, owner_subject_id, endpoint, p256dh, auth, created_at, updated_at, revoked_at, last_success_at, last_failure_at, last_failure_reason, last_used_at, user_agent, platform, device_label, vapid_public_key
          FROM web_push_subscriptions
          WHERE owner_subject_id = $1
            AND ($2::boolean = FALSE OR revoked_at IS NULL)
@@ -556,7 +593,7 @@ export function createPostgresWebPushSubscriptionStore(): WebPushSubscriptionSto
         return [];
       }
       const result = await postgresQuery<WebPushSubscriptionRecord>(
-        `SELECT id, owner_subject_id, endpoint, p256dh, auth, created_at, updated_at, revoked_at, last_success_at, last_failure_at, last_failure_reason, last_used_at, user_agent, platform, device_label
+        `SELECT id, owner_subject_id, endpoint, p256dh, auth, created_at, updated_at, revoked_at, last_success_at, last_failure_at, last_failure_reason, last_used_at, user_agent, platform, device_label, vapid_public_key
          FROM web_push_subscriptions
          WHERE owner_subject_id = $1
            AND revoked_at IS NULL
@@ -630,14 +667,15 @@ export function createPostgresWebPushSubscriptionStore(): WebPushSubscriptionSto
     async upsert(
       ownerSubjectId: string,
       subscription: WebPushSubscriptionInput,
+      vapidPublicKey: string,
       platform: WebPushPlatformInput = {}
     ): Promise<PublicWebPushSubscription | null> {
-      const record = buildSubscriptionRecord(ownerSubjectId, subscription, platform);
+      const record = buildSubscriptionRecord(ownerSubjectId, subscription, vapidPublicKey, platform);
       await postgresQuery(
         `INSERT INTO web_push_subscriptions(
            id, owner_subject_id, endpoint, p256dh, auth, created_at, updated_at, revoked_at,
-           user_agent, platform, device_label
-         ) VALUES($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10)
+           user_agent, platform, device_label, vapid_public_key
+         ) VALUES($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, $11)
          ON CONFLICT(endpoint) DO UPDATE SET
            owner_subject_id = EXCLUDED.owner_subject_id,
            p256dh = EXCLUDED.p256dh,
@@ -646,7 +684,8 @@ export function createPostgresWebPushSubscriptionStore(): WebPushSubscriptionSto
            revoked_at = NULL,
            user_agent = EXCLUDED.user_agent,
            platform = EXCLUDED.platform,
-           device_label = EXCLUDED.device_label`,
+           device_label = EXCLUDED.device_label,
+           vapid_public_key = EXCLUDED.vapid_public_key`,
         [
           record.id,
           record.owner_subject_id,
@@ -658,6 +697,7 @@ export function createPostgresWebPushSubscriptionStore(): WebPushSubscriptionSto
           record.user_agent,
           record.platform,
           record.device_label,
+          record.vapid_public_key,
         ]
       );
       return publicRecord(await getByEndpoint(record.endpoint));
@@ -1075,6 +1115,14 @@ async function sendPayloadToOwnerSubscriptions({
   const failures: string[] = [];
   await Promise.all(
     subscriptions.map(async (record) => {
+      // A push service rejects a send signed with a different VAPID key than
+      // the one the subscription was created against, so such a subscription
+      // is not deliverable until the browser registers again.
+      if (record.vapid_public_key !== config.publicKey) {
+        failures.push(WEB_PUSH_STALE_VAPID_KEY_REASON);
+        await store.markFailure(record.endpoint, WEB_PUSH_STALE_VAPID_KEY_REASON);
+        return;
+      }
       try {
         await sender({ endpoint: record.endpoint, keys: record.keys }, payload, config);
         await store.markSuccess(record.endpoint);
@@ -1155,7 +1203,7 @@ export interface FanoutPendingInteractionWebPushArgs {
 }
 
 export async function fanoutPendingInteractionWebPush({
-  config = resolveWebPushConfig(),
+  config: givenConfig,
   store = getDefaultWebPushSubscriptionStore(),
   sender = defaultSendNotification,
   interaction,
@@ -1167,7 +1215,7 @@ export async function fanoutPendingInteractionWebPush({
   recordOutcome = null,
 }: FanoutPendingInteractionWebPushArgs): Promise<WebPushFanoutResult> {
   const result = await fanoutPendingInteractionWebPushImpl({
-    config,
+    config: givenConfig ?? (await resolveWebPushConfig()),
     connectorDisplayName,
     interaction,
     log,
@@ -1245,7 +1293,7 @@ export interface FanoutAssistanceWebPushArgs {
 }
 
 export async function fanoutAssistanceWebPush({
-  config = resolveWebPushConfig(),
+  config: givenConfig,
   store = getDefaultWebPushSubscriptionStore(),
   sender = defaultSendNotification,
   assistance,
@@ -1257,7 +1305,7 @@ export async function fanoutAssistanceWebPush({
 }: FanoutAssistanceWebPushArgs): Promise<WebPushFanoutResult> {
   const result = await fanoutAssistanceWebPushImpl({
     assistance,
-    config,
+    config: givenConfig ?? (await resolveWebPushConfig()),
     connectorDisplayName,
     log,
     ownerSubjectId,
@@ -1321,13 +1369,13 @@ export interface FanoutTestWebPushArgs {
 }
 
 export async function fanoutTestWebPush({
-  config = resolveWebPushConfig(),
+  config: givenConfig,
   store = getDefaultWebPushSubscriptionStore(),
   sender = defaultSendNotification,
   ownerSubjectId,
   log = console,
 }: FanoutTestWebPushArgs): Promise<WebPushFanoutResult> {
-  await Promise.resolve();
+  const config = givenConfig ?? (await resolveWebPushConfig());
   if (!config.enabled) {
     return { attempted: 0, sent: 0, unavailable: true };
   }
@@ -1416,7 +1464,7 @@ export interface FanoutEscalationWebPushArgs {
  * than in-run interaction prompts.
  */
 export async function fanoutEscalationWebPush({
-  config = resolveWebPushConfig(),
+  config: givenConfig,
   store = getDefaultWebPushSubscriptionStore(),
   sender = defaultSendNotification,
   connectorDisplayName,
@@ -1426,7 +1474,7 @@ export async function fanoutEscalationWebPush({
   renderedVerdict,
   log = console,
 }: FanoutEscalationWebPushArgs): Promise<WebPushFanoutResult> {
-  await Promise.resolve();
+  const config = givenConfig ?? (await resolveWebPushConfig());
   if (!config.enabled) {
     return { attempted: 0, sent: 0, unavailable: true };
   }

@@ -575,6 +575,8 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly webPushMarkSuccess: MutationQuery;
   readonly webPushRevokeSubscription: MutationQuery;
   readonly webPushUpsertSubscription: MutationQuery;
+  readonly webPushVapidKeyGet: ReadOneQuery;
+  readonly webPushVapidKeyInsertIfAbsent: MutationQuery;
 }
 
 interface ParsedFrontmatter {
