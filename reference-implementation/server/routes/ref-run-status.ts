@@ -30,6 +30,11 @@
 // payload the `/_ref/runs/:runId/timeline` surface already exposes; no raw
 // connector stderr, secrets, or tokens are added.
 //
+// Every body carries `record_outcomes`: whole-run rejected and unaccounted
+// record totals summed in the database over all of the run's events (see
+// `RunStatusRecordOutcomes`), so the answer is the same for active and
+// finished runs and never depends on a timeline page.
+//
 // See openspec/changes/surface-run-handle-resolvability.
 
 import type { MiddlewareHandler, PdppErrorFn } from "./_route-contract.ts";
@@ -85,8 +90,16 @@ export type BrowserSurfaceRunStatus =
   | "surface_failed"
   | "waiting_for_browser_surface";
 
+/** Structural slice of `lib/spine.ts` `RunRecordOutcomes`. */
+export interface RunStatusBatchOutcomes {
+  readonly rejected_in_batches: number | null;
+  readonly unaccounted_by_stream: Readonly<Record<string, number>>;
+}
+
 export interface MountRefRunStatusContext {
   readonly controller: RunStatusController | null | undefined;
+  /** Whole-run batch/evidence sums over every event of the run (never a timeline page). */
+  getRunRecordOutcomes: (runId: string) => Promise<RunStatusBatchOutcomes> | RunStatusBatchOutcomes;
   getLatestRunEvent?: (runId: string) => Promise<RunStatusLifecycleEvent | null> | RunStatusLifecycleEvent | null;
   getRunStartedEvent: (runId: string) => Promise<RunStatusLifecycleEvent | null> | RunStatusLifecycleEvent | null;
   getRunTerminalEvent: (runId: string) => Promise<RunStatusTerminalEvent | null> | RunStatusTerminalEvent | null;
@@ -123,18 +136,44 @@ export interface RunStatusBody {
   readonly known_gaps_summary?: unknown;
   readonly links: { readonly timeline: string };
   readonly object: "run_status";
-  /**
-   * The run's total of records the store rejected for good, copied from the
-   * terminal event's `records_permanently_rejected`. Same window-independent
-   * source as `known_gaps`. Absent when the run has no terminal event yet or
-   * the terminal event predates the field.
-   */
-  readonly records_permanently_rejected?: number | undefined;
+  readonly record_outcomes: RunStatusRecordOutcomes;
   readonly run_id: string;
   readonly started_at: string | null;
   readonly status: "active" | "completed" | "failed" | "cancelled" | "abandoned" | BrowserSurfaceRunStatus;
   readonly terminal_reason: string | null;
   readonly trace_id: string | null;
+}
+
+/**
+ * Whole-run record outcomes, correct for active and finished runs and
+ * independent of timeline paging. `permanently_rejected` is the count of
+ * records the store rejected for good; it is absent when the server cannot
+ * compute it (some batch events predate the count and no terminal total
+ * exists), never 0. `unaccounted_by_stream` lists streams with a positive
+ * count of records the connector could not account for.
+ */
+export interface RunStatusRecordOutcomes {
+  readonly permanently_rejected?: number;
+  readonly unaccounted_by_stream: Readonly<Record<string, number>>;
+}
+
+/** A run that never reached the connector has no record outcomes to report. */
+const NO_RECORD_OUTCOMES: RunStatusRecordOutcomes = { unaccounted_by_stream: {} };
+
+/**
+ * The terminal event's total wins when present: it is the runtime's own sum
+ * for the run. Otherwise fall back to the sum over the run's batch events.
+ */
+export function buildRecordOutcomes(
+  batch: RunStatusBatchOutcomes,
+  terminal: RunStatusLifecycleEvent | null
+): RunStatusRecordOutcomes {
+  const permanentlyRejected =
+    readCount(terminal?.data ?? null, "records_permanently_rejected") ?? batch.rejected_in_batches;
+  return {
+    ...(permanentlyRejected === null ? {} : { permanently_rejected: permanentlyRejected }),
+    unaccounted_by_stream: batch.unaccounted_by_stream,
+  };
 }
 
 function timelineLink(runId: string): { timeline: string } {
@@ -222,7 +261,8 @@ function buildFailureSummary(terminal: RunStatusTerminalEvent): RunStatusFailure
 export function buildTerminalRunStatusBody(
   runId: string,
   terminal: RunStatusTerminalEvent,
-  started: RunStatusLifecycleEvent | null
+  started: RunStatusLifecycleEvent | null,
+  recordOutcomes: RunStatusRecordOutcomes
 ): RunStatusBody {
   return {
     completed_at: terminal.occurred_at,
@@ -235,7 +275,7 @@ export function buildTerminalRunStatusBody(
     known_gaps_summary: terminal.data?.known_gaps_summary,
     links: timelineLink(runId),
     object: "run_status",
-    records_permanently_rejected: readCount(terminal.data, "records_permanently_rejected"),
+    record_outcomes: recordOutcomes,
     run_id: runId,
     started_at: started?.occurred_at ?? null,
     status: terminal.status,
@@ -244,7 +284,10 @@ export function buildTerminalRunStatusBody(
   };
 }
 
-export function buildActiveRunStatusBody(active: RunStatusActiveRun): RunStatusBody {
+export function buildActiveRunStatusBody(
+  active: RunStatusActiveRun,
+  recordOutcomes: RunStatusRecordOutcomes
+): RunStatusBody {
   return {
     completed_at: null,
     connector_id: active.connector_id,
@@ -252,6 +295,7 @@ export function buildActiveRunStatusBody(active: RunStatusActiveRun): RunStatusB
     failure: null,
     links: timelineLink(active.run_id),
     object: "run_status",
+    record_outcomes: recordOutcomes,
     run_id: active.run_id,
     started_at: active.started_at,
     status: "active",
@@ -260,7 +304,11 @@ export function buildActiveRunStatusBody(active: RunStatusActiveRun): RunStatusB
   };
 }
 
-function buildStartedOnlyRunStatusBody(runId: string, started: RunStatusLifecycleEvent): RunStatusBody {
+function buildStartedOnlyRunStatusBody(
+  runId: string,
+  started: RunStatusLifecycleEvent,
+  recordOutcomes: RunStatusRecordOutcomes
+): RunStatusBody {
   // `run.started` exists but no terminal event and no in-process owner —
   // the honest projection is "no terminal recorded yet"; boot reconciliation
   // will convert orphans to a terminal `run.failed` on the next start.
@@ -271,6 +319,7 @@ function buildStartedOnlyRunStatusBody(runId: string, started: RunStatusLifecycl
     failure: null,
     links: timelineLink(runId),
     object: "run_status",
+    record_outcomes: recordOutcomes,
     run_id: runId,
     started_at: started.occurred_at,
     status: "active",
@@ -311,6 +360,7 @@ function buildBrowserSurfaceRunStatusBody(runId: string, event: RunStatusLifecyc
         : null,
     links: timelineLink(runId),
     object: "run_status",
+    record_outcomes: NO_RECORD_OUTCOMES,
     run_id: runId,
     started_at: null,
     status: surfaceStatus,
@@ -333,18 +383,21 @@ export function mountRefRunStatus(app: AppLike, ctx: MountRefRunStatusContext): 
           return res.json(browserSurfaceStatus);
         }
         const started = await ctx.getRunStartedEvent(runId);
-        return res.json(buildTerminalRunStatusBody(runId, terminal, started));
+        const recordOutcomes = buildRecordOutcomes(await ctx.getRunRecordOutcomes(runId), terminal);
+        return res.json(buildTerminalRunStatusBody(runId, terminal, started, recordOutcomes));
       }
 
       // biome-ignore lint/suspicious/noUnnecessaryConditions: TypeScript boundary permits nullish input; this guard preserves runtime behavior.
       const active = ctx.controller?.findActiveRunByRunId?.(runId) ?? null;
       if (active) {
-        return res.json(buildActiveRunStatusBody(active));
+        const recordOutcomes = buildRecordOutcomes(await ctx.getRunRecordOutcomes(runId), null);
+        return res.json(buildActiveRunStatusBody(active, recordOutcomes));
       }
 
       const started = await ctx.getRunStartedEvent(runId);
       if (started) {
-        return res.json(buildStartedOnlyRunStatusBody(runId, started));
+        const recordOutcomes = buildRecordOutcomes(await ctx.getRunRecordOutcomes(runId), null);
+        return res.json(buildStartedOnlyRunStatusBody(runId, started, recordOutcomes));
       }
 
       const latest = (await ctx.getLatestRunEvent?.(runId)) ?? null;
