@@ -13,6 +13,7 @@ import {
   type WebPushUnavailableCause,
   webPushUnavailableCause,
 } from "../lib/web-push-availability.ts";
+import { subscribeWithServerKey } from "../lib/web-push-subscription.ts";
 
 type SwState = "registered" | "absent" | "unknown" | "unsupported";
 
@@ -73,13 +74,6 @@ const INITIAL_DEVICE_STATE: DeviceState = {
   swState: "unknown",
   unavailable: null,
 };
-
-function urlBase64ToUint8Array(base64String: string) {
-  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const rawData = window.atob(base64);
-  return Uint8Array.from([...rawData].map((char) => char.charCodeAt(0)));
-}
 
 // Each row in the diagnostic checklist. Unknown state means indeterminate,
 // so the owner can distinguish "checked and fine" from "could not tell here".
@@ -228,13 +222,13 @@ function vapidRow(config: WebPushConfig): DiagnosticRow {
   if (config.enabled && config.public_key) {
     return {
       detail: "/_ref/web-push/config reports enabled",
-      label: "Server VAPID keys configured",
+      label: "Server notification keys available",
       state: "ok",
     };
   }
   return {
-    detail: config.unavailable_reason || "Server VAPID keys are not configured.",
-    label: "Server VAPID keys configured",
+    detail: config.unavailable_reason || "The server has no notification keys.",
+    label: "Server notification keys available",
     state: "fail",
   };
 }
@@ -670,12 +664,7 @@ export function WebPushSettings({
         setEnableError(message);
         return;
       }
-      const subscription =
-        (await registration.pushManager.getSubscription()) ??
-        (await registration.pushManager.subscribe({
-          applicationServerKey: urlBase64ToUint8Array(config.public_key),
-          userVisibleOnly: true,
-        }));
+      const subscription = await subscribeWithServerKey(registration.pushManager, config.public_key);
       const response = await fetch("/_ref/web-push/subscriptions", {
         body: JSON.stringify({
           device_label: "DataConnect browser",

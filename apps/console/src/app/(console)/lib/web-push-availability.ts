@@ -75,8 +75,8 @@ const COPY: Readonly<Record<WebPushUnavailableCause, WebPushUnavailableCopy>> = 
   },
   "server-not-configured": {
     detail:
-      "The server has no VAPID keys, so it cannot send alerts to any device. Add them to the server configuration and restart the server.",
-    title: "Alerts are not set up on this server.",
+      "The server creates its own alert signing keys, but it needs a credential encryption key to store them. Set one in the server configuration and restart the server.",
+    title: "Alerts are unavailable on this server.",
   },
   "permission-denied": {
     detail: "Allow notifications for this site in browser or system settings, then reload this page.",

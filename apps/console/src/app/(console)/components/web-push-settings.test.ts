@@ -32,8 +32,7 @@ const SENSITIVE_WORD_PATTERN = /password|cookie|token|otp|answer/i;
 const SERVICE_WORKER_REGISTER_PATTERN = /navigator\.serviceWorker\.register\("\/pdpp-dashboard-sw\.js"\)/;
 const SERVICE_WORKER_LOOKUP_PATTERN = /navigator\.serviceWorker\.getRegistration\("\/"\)/;
 const SERVICE_WORKER_UPDATE_PATTERN = /registration\?\.update\(\)/;
-const PUSH_SUBSCRIBE_PATTERN = /registration\.pushManager\.subscribe/;
-const PUSH_EXISTING_SUBSCRIPTION_PATTERN = /registration\.pushManager\.getSubscription\(\)/;
+const PUSH_SUBSCRIBE_PATTERN = /subscribeWithServerKey\(registration\.pushManager, config\.public_key\)/;
 const WEB_PUSH_POST_PATTERN = /fetch\("\/_ref\/web-push\/subscriptions"/;
 const WEB_PUSH_DELETE_PATTERN = /method:\s*"DELETE"/;
 const FIRST_SAVED_ENDPOINT_PATTERN = /subscriptions\[0\]\?\.endpoint/;
@@ -139,7 +138,6 @@ test("dashboard notification setup registers, posts, reuses, and deletes browser
   assert.match(src, SERVICE_WORKER_REGISTER_PATTERN);
   assert.match(src, SERVICE_WORKER_LOOKUP_PATTERN);
   assert.match(src, SERVICE_WORKER_UPDATE_PATTERN);
-  assert.match(src, PUSH_EXISTING_SUBSCRIPTION_PATTERN);
   assert.match(src, PUSH_SUBSCRIBE_PATTERN);
   assert.match(src, WEB_PUSH_POST_PATTERN);
   assert.match(src, WEB_PUSH_DELETE_PATTERN);
@@ -204,7 +202,7 @@ test("dashboard exposes diagnostic checklist covering every web push preconditio
     "Service Worker API available",
     "Push API (PushManager) available",
     "Notification API available",
-    "Server VAPID keys configured",
+    "Server notification keys available",
     "Service worker registered",
     "Notification permission granted",
     "Browser push subscription active",

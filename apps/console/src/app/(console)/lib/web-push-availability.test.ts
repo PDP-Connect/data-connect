@@ -6,7 +6,7 @@
  *
  * Walkthrough item A8: the desktop app showed one headline, "This browser
  * cannot receive DataConnect notifications.", for six different causes,
- * including a server with no VAPID keys. These tests pin one cause per
+ * including a server with no credential encryption key. These tests pin one cause per
  * condition, and an owner-facing title and next step for each.
  */
 
@@ -44,7 +44,7 @@ const LOCALHOST_PATTERN = /localhost/;
 const THIS_BROWSER_TITLE_PATTERN = /^This browser /;
 const ON_THIS_COMPUTER_PATTERN = /on this computer/;
 const PHONE_PATTERN = /phone/;
-const VAPID_KEYS_PATTERN = /VAPID keys/;
+const ENCRYPTION_KEY_PATTERN = /credential encryption key/;
 const RESTART_PATTERN = /restart/;
 const BROWSER_PATTERN = /browser/i;
 const ALLOW_NOTIFICATIONS_PATTERN = /Allow notifications/;
@@ -98,7 +98,7 @@ test("browser causes say where alerts work on this computer and on a phone", () 
 
 test("server-not-configured names the server action and does not blame the browser", () => {
   const { detail, title } = describeWebPushUnavailable("server-not-configured");
-  assert.match(detail, VAPID_KEYS_PATTERN);
+  assert.match(detail, ENCRYPTION_KEY_PATTERN);
   assert.match(detail, RESTART_PATTERN);
   assert.doesNotMatch(`${title} ${detail}`, BROWSER_PATTERN);
 });
