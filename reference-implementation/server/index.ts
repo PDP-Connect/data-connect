@@ -54,7 +54,6 @@ import { deriveClientEventsFromRecordChange } from "../operations/rs-client-even
 import { isHealthRelevant as isAttentionHealthRelevant } from "../runtime/attention.ts";
 import { checkBrowserExecutableAtBoot } from "../runtime/browser-executable.ts";
 import { createOptionalBrowserSurfaceLeaseManager } from "../runtime/browser-surface/remote-surface-optional.ts";
-import { connectorRetainsSurfaceProcess } from "../runtime/browser-surface/retained-surface-connectors.ts";
 import {
   type BrowserSurfaceLeaseSweepCloseSource,
   type BrowserSurfaceLeaseSweepTimer,
@@ -529,6 +528,7 @@ import {
   mountRsRoot,
 } from "./routes/root-and-discovery.ts";
 import { mountRsHostedMcp } from "./routes/rs-hosted-mcp.ts";
+import { createRunBlobUploadCredentialRegistry } from "./run-blob-upload-credentials.ts";
 import { mountRsBlobsUpload, mountRsEventSubscriptions, mountRsMutation } from "./routes/rs-mutation.ts";
 import { mountRsBlobRead, mountRsReadQueries } from "./routes/rs-read.ts";
 import { mountRefRunCancel } from "./routes/run-cancel.ts";
@@ -945,6 +945,12 @@ interface ServerOpts {
   rsPublicUrl?: string | null;
   rsUrl?: string | null;
   runTargetRegistry?: import("./streaming/run-target-registry.ts").RunTargetRegistry | null;
+  /**
+   * Run-scoped blob upload credentials shared with the controller. The blob
+   * upload route accepts these as an alternative to the owner bearer; no other
+   * route consults them. Standalone RS apps without it accept only owner tokens.
+   */
+  blobUploadCredentials?: import("./run-blob-upload-credentials.ts").RunBlobUploadCredentialRegistry | null;
   schedulerStore?: SchedulerStore;
   semanticRetrievalBackend?: unknown;
   semanticRetrievalCapability?: unknown;
@@ -7512,6 +7518,38 @@ function buildRsApp(opts: ServerOpts = {}) {
   });
   const requireToken = (req: ReqLike, res: ResLike, next: () => void) =>
     requireTokenWithIntrospection(req, res, next, introspectToken);
+  // POST /v1/blobs auth: a live run-scoped upload credential, bound to one
+  // connector instance, or else the ordinary owner bearer. The credential is
+  // recognised only here; every other route authenticates through
+  // `requireToken`, where it is an unknown bearer and gets 401.
+  const requireBlobUploadAuth = (req: ReqLike, res: ResLike, next: () => void) => {
+    const auth = req.headers?.authorization;
+    const presented = typeof auth === "string" && auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    const binding = presented ? (opts.blobUploadCredentials?.verify(presented) ?? null) : null;
+    if (!binding) {
+      return requireToken(req, res, () => requireOwner(req, res, next));
+    }
+    const requestedConnectorId = resolveSingleConnectorIdQueryValue(req.query?.connector_id);
+    const requestedInstanceId = resolveSingleConnectorIdQueryValue(req.query?.connector_instance_id);
+    const connectorMatches =
+      requestedConnectorId !== null &&
+      (canonicalConnectorKey(requestedConnectorId) ?? requestedConnectorId) ===
+        (canonicalConnectorKey(binding.connectorId) ?? binding.connectorId);
+    if (!(connectorMatches && requestedInstanceId === binding.connectorInstanceId)) {
+      return pdppError(
+        res,
+        403,
+        "permission_error",
+        "Run upload credential is bound to a different connector instance"
+      );
+    }
+    req.tokenInfo = {
+      active: true,
+      pdpp_token_kind: "run_blob_upload",
+      subject_id: binding.ownerSubjectId,
+    };
+    next();
+  };
 
   app.use(((
     req: ReqLike & { headers: Record<string, string | string[] | undefined> },
@@ -7676,6 +7714,7 @@ function buildRsApp(opts: ServerOpts = {}) {
     rejectState,
     requireClient,
     requireCoreEndpointToken,
+    requireBlobUploadAuth,
     requireOwner,
     requireToken,
     resolveGrantScopedStateGrant,
@@ -9062,6 +9101,7 @@ export async function startServer(opts: ServerOpts = {}) {
       ? {}
       : { browserSurfaceReadinessProbe: opts.browserSurfaceReadinessProbe }),
   };
+  const blobUploadCredentials = opts.blobUploadCredentials ?? createRunBlobUploadCredentialRegistry();
   const runTargetRegistry = createRunTargetRegistry({
     ...(opts.streamingLogger === null ? {} : { logger: opts.streamingLogger }),
     isNekoDescriptorApproved: (descriptor, context) =>
@@ -9139,6 +9179,7 @@ export async function startServer(opts: ServerOpts = {}) {
     resolveStaticSecretRunEnv:
       connectionScopedRunEnvResolver as import("../runtime/controller.ts").StaticSecretRunEnvResolver,
     runtimeContext,
+    blobUploadCredentialHooks: blobUploadCredentials,
     streamingTargetNonceHooks: {
       clearNonce: (args) => runTargetRegistry.clearNonce(args),
       registerNonce: (args) => runTargetRegistry.registerNonce(args),
@@ -9508,6 +9549,7 @@ export async function startServer(opts: ServerOpts = {}) {
     asIssuer: configuredAsIssuer || asPublicUrl,
     asPort,
     asPublicUrl,
+    blobUploadCredentials,
     configuredProviderAuthConnectorKeys,
     controller,
     ownerLive: resolveOwnerLive(opts),
@@ -9911,33 +9953,6 @@ export async function startServer(opts: ServerOpts = {}) {
   };
 }
 
-// Deterministically re-derive credential-boundary retention on rehydrated
-// surfaces at boot, BEFORE the lease manager can run any idle-cleanup or
-// capacity-reclaim. `retained` is not a persisted column; it is a pure function
-// of the surface's connector via the RI retention registry. Fail-closed: a
-// surface whose connector is not registered stays non-retained.
-function rederiveRetainedSurfaces(surfaces: Record<string, unknown>[]) {
-  return surfaces.map((surface: Record<string, unknown>) =>
-    connectorRetainsSurfaceProcess(surface.connector_id as string) ? { ...surface, retained: true } : surface
-  );
-}
-
-// Same re-derivation, for rehydrated NON-TERMINAL LEASES. A queued
-// (waiting_for_browser_surface) or starting_surface ChatGPT lease that has not
-// yet materialized a surface carries no surface row for
-// rederiveRetainedSurfaces to mark — without this, that lease rehydrates as an
-// ordinary (non-retained) lease, and once it does materialize a surface (via
-// #resolveNewLease / queue promotion) that surface would be created without
-// the retained flag, making it evictable by routine idle-TTL or
-// capacity-pressure reap. `retained` is not a persisted lease column either;
-// it is re-derived the same way, by connector_id, fail-closed for an
-// unregistered connector.
-function rederiveRetainedLeases(leases: Record<string, unknown>[]) {
-  return leases.map((lease: Record<string, unknown>) =>
-    connectorRetainsSurfaceProcess(lease.connector_id as string) ? { ...lease, retained: true } : lease
-  );
-}
-
 // Independent periodic sweep for the managed browser-surface lease
 // lifecycle: expires past-TTL waiting leases, reconciles surfaces against the
 // Constructs (but never starts) the periodic browser-surface lease sweep
@@ -10046,21 +10061,8 @@ export async function resolveNekoBrowserSurfaceControllerOptions({
   }
 
   await browserSurfaceLeaseStore.repairStaleSurfaceActiveLeases();
-  // The per-connection fair-slot invariant is enforced in the lease manager at
-  // retained-surface CREATION time (typed retained_capacity_reserved), NOT by
-  // counting these rehydrated surfaces — observed surfaces are not demand.
-  const rehydratedSurfaces = rederiveRetainedSurfaces(
-    (await browserSurfaceLeaseStore.listSurfaces()) as unknown as Record<string, unknown>[]
-  );
-  // Re-derive retention on rehydrated NON-TERMINAL LEASES too, not only
-  // surfaces: a queued/starting ChatGPT lease with no surface row yet would
-  // otherwise rehydrate non-retained and later materialize an evictable
-  // surface. Both re-derivations must run before the manager is constructed,
-  // so no idle-cleanup or capacity-reclaim can ever see a retaining
-  // lease/surface without the flag.
-  const rehydratedLeases = rederiveRetainedLeases(
-    (await browserSurfaceLeaseStore.listNonTerminalLeases()) as unknown as Record<string, unknown>[]
-  );
+  const rehydratedSurfaces = await browserSurfaceLeaseStore.listSurfaces();
+  const rehydratedLeases = await browserSurfaceLeaseStore.listNonTerminalLeases();
   // Optional: null when @opendatalabs/remote-surface is not installed, which
   // disables the browser-surface / streaming path rather than crashing boot.
   const browserSurfaceLeaseManager = await (
@@ -10488,6 +10490,7 @@ function createReferenceSchedulerManager({
         }) as RunManagedFn)
       : null;
     scheduler = createScheduler({
+      ...(controller?.blobUploadCredentialHooks ? { blobUploadCredentialHooks: controller.blobUploadCredentialHooks } : {}),
       connectors,
       ...(connectorEnvironmentPolicy?.approvedBindings.length
         ? {

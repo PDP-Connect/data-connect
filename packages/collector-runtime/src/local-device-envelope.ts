@@ -110,7 +110,14 @@ function canonicalRecordKey(key: string | readonly string[]): string {
   return typeof key === "string" ? key : JSON.stringify(key);
 }
 
+function validateSourceInstanceId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("sourceInstanceId must be a non-blank string");
+  }
+}
+
 export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnvelopeInput): LocalDeviceRecordEnvelope {
+  validateSourceInstanceId(input.sourceInstanceId);
   const body = {
     connector_id: input.connectorId,
     data: toNormalizedRecordData(input.record.data),
@@ -138,6 +145,10 @@ export function buildLocalDeviceRecordEnvelope(input: BuildLocalDeviceRecordEnve
 export function buildLocalDeviceIngestBatchRequest(
   input: BuildLocalDeviceIngestBatchRequestInput
 ): LocalDeviceIngestBatchRequest {
+  validateSourceInstanceId(input.sourceInstanceId);
+  if (input.records.some((record) => record.source_instance_id !== input.sourceInstanceId)) {
+    throw new Error("batch sourceInstanceId must match every record envelope");
+  }
   return {
     batch_id: input.batchId,
     batch_seq: input.batchSeq,

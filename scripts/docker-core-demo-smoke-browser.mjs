@@ -88,7 +88,8 @@ function signClientAssertion({ audience, clientId, privateKey }) {
   return `${signingInput}.${sign("RSA-SHA256", Buffer.from(signingInput), privateKey).toString("base64url")}`;
 }
 
-const browser = await chromium.launch({ headless: true });
+// The image ships no Chrome Headless Shell, so name the full Chromium channel.
+const browser = await chromium.launch({ channel: "chromium", headless: true });
 try {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();

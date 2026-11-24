@@ -44,7 +44,12 @@ permissions:
 jobs:
   test-postgres:
     name: test reference implementation (postgres)
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: Patchright publishes no Chromium for
+    # Ubuntu 26.04, which ubuntu-latest resolved to on this lane's run of
+    # 2026-11-02 (GitHub migrates it gradually). The install script then
+    # skips the browser download, and owner-connection-delete.test.ts, which
+    # launches a real browser, fails.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - name: Checkout
@@ -56,7 +61,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           cache: npm
 
       - name: Install PostgreSQL server tools and pgvector
