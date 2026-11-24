@@ -7,6 +7,8 @@
  * Combined AS + RS implementing PDPP v0.1.0 core spec.
  * Starts on port 7662 (AS/introspection) and 7663 (RS query API).
  */
+import { manifestDeclaresSemanticFields, queueStartupSearchIndexRetry } from "./startup-search-index-retry.ts";
+import { currentStorageGeneration } from "./storage-generation.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, renameSync } from "node:fs";
 import os from "node:os";
@@ -639,6 +641,7 @@ import {
 } from "./stores/run-history-backfill-stage.ts";
 import { getDefaultSchedulerStore, type SchedulerStore } from "./stores/scheduler-store.ts";
 import {
+  connectorHasRetainedSemanticState,
   countDirtySearchIndexScopes,
   parkSearchIndexDirtyScope,
   rearmSearchIndexDirtyScope,
@@ -913,6 +916,8 @@ interface ServerOpts {
   } | null;
   trustedProxies?: string | null;
   ownerToken?: string | null;
+  /** Single-use capability for synthetic retained-state restart tests. */
+  testOnlyAlreadyAdmittedPostgresChildAttachment?: string;
   postgresBootstrapLockTimeoutMs?: number;
   postgresSemanticHnswMaintenanceImpl?: typeof schedulePostgresSemanticHnswMaintenance;
   preRegisteredPublicClients?: unknown;
@@ -1292,11 +1297,44 @@ async function collectRetrievalStartupBackfillManifests({
   return registered.map(({ manifest }) => manifest);
 }
 
+const STARTUP_TICKET_RETRY_BASE_MS = 250;
+const STARTUP_TICKET_RETRY_MAX_MS = 30_000;
+
+/** Exponential backoff from 250 ms, capped at 30 s. */
+function startupTicketRetryDelayMs(attempt: number): number {
+  return Math.min(STARTUP_TICKET_RETRY_MAX_MS, STARTUP_TICKET_RETRY_BASE_MS * 2 ** attempt);
+}
+
+/**
+ * Waits `ms`; resolves false at once if `signal` aborts first. The timer is
+ * unref'd: this is background retry, and a retry that outlives its owner (a
+ * caller that never aborts the signal) must not hold the process open.
+ */
+export function sleepUnlessAborted(ms: number, signal: AbortSignal | null): Promise<boolean> {
+  if (signal?.aborted) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, ms);
+    timer.unref();
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function runRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1308,6 +1346,26 @@ async function runRetrievalStartupBackfill({
   const startedAt = Date.now();
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill started");
 
+  // A failed queue write (for example a transient read or write fault while
+  // finding the scopes to mark) must not leave a failed backfill without a
+  // ticket. Those manifests stay in this local list and are retried with
+  // bounded backoff until a mark commits or shutdown aborts the run, so a fault
+  // that outlasts a fixed number of attempts still ends in a ticket. No new
+  // durable state: if the process stops first, the next startup repeats the
+  // backfill.
+  const queueWriteFailed: ConnectorManifest[] = [];
+  const queueRetry = async (manifest: ConnectorManifest, err: unknown) => {
+    try {
+      await queueStartupSearchIndexRetry(manifest as never, generation);
+    } catch (queueError) {
+      logger.warn(
+        { connectorId: manifest.connector_id, err, queueError },
+        "retrieval startup backfill retry queue write failed"
+      );
+      queueWriteFailed.push(manifest);
+    }
+  };
+
   for (const manifest of manifests) {
     if (signal?.aborted) {
       logger.info({ reason: "shutdown" }, "retrieval startup backfill aborted between connectors");
@@ -1318,6 +1376,7 @@ async function runRetrievalStartupBackfill({
       logger.info({ connectorId }, "retrieval startup backfill connector started");
       // biome-ignore lint/performance/noAwaitInLoops: Work is intentionally sequential to preserve ordering and state transitions.
       await lexicalIndexBackfillForManifest({
+        generation,
         log: (msg) => logger.info(msg),
         manifest: manifest as never,
         signal,
@@ -1325,10 +1384,23 @@ async function runRetrievalStartupBackfill({
       const semanticBackend = getSemanticBackend();
       if (semanticBackend?.available()) {
         await semanticIndexBackfillForManifest({
+          generation,
           log: (msg) => logger.info(msg),
           manifest: manifest as never,
           signal,
         });
+      } else if (
+        semanticBackend &&
+        (manifestDeclaresSemanticFields(manifest) || (await connectorHasRetainedSemanticState(String(connectorId))))
+      ) {
+        // Configured but not available (for example still warming): the semantic
+        // half is unproven, so leave a ticket. Retained semantic state counts like
+        // declared fields, because removed-field cleanup also needs the backend.
+        // With no backend configured at all nothing is queued, or every boot would
+        // dirty every semantic connector.
+        logger.warn({ connectorId }, "retrieval startup backfill skipped semantic pass: backend unavailable");
+        await queueRetry(manifest, new Error("semantic backend unavailable at startup"));
+        continue;
       }
       logger.info({ connectorId }, "retrieval startup backfill connector completed");
     } catch (err) {
@@ -1339,7 +1411,34 @@ async function runRetrievalStartupBackfill({
         return;
       }
       logger.warn({ connectorId, err }, "retrieval startup backfill failed for connector");
+      await queueRetry(manifest, err);
     }
+  }
+
+  let pending = queueWriteFailed;
+  for (let attempt = 0; pending.length > 0; attempt++) {
+    // biome-ignore lint/performance/noAwaitInLoops: Backoff is sequential by design.
+    if (!(await sleepUnlessAborted(startupTicketRetryDelayMs(attempt), signal))) {
+      logger.info({ reason: "shutdown" }, "retrieval startup ticket retry aborted");
+      return;
+    }
+    const stillFailing: ConnectorManifest[] = [];
+    for (const manifest of pending) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: Never hold more than one instance deletion fence.
+        await queueStartupSearchIndexRetry(manifest as never, generation);
+      } catch (queueError) {
+        if (signal?.aborted) {
+          return;
+        }
+        logger.warn(
+          { attempt: attempt + 1, connectorId: manifest.connector_id, queueError },
+          "retrieval startup backfill ticket write failed again; retrying"
+        );
+        stillFailing.push(manifest);
+      }
+    }
+    pending = stillFailing;
   }
 
   logger.info(
@@ -1349,10 +1448,12 @@ async function runRetrievalStartupBackfill({
 }
 
 function scheduleRetrievalStartupBackfill({
+  generation = currentStorageGeneration(),
   manifests,
   logger,
   signal = null,
 }: {
+  generation?: number;
   manifests: ConnectorManifest[];
   logger: LoggerLike;
   signal?: AbortSignal | null;
@@ -1364,7 +1465,7 @@ function scheduleRetrievalStartupBackfill({
   logger.info({ connectorCount: manifests.length }, "retrieval startup backfill scheduled after AS/RS listen");
 
   return new Promise((resolve) => setImmediate(resolve))
-    .then(() => runRetrievalStartupBackfill({ logger, manifests, signal }))
+    .then(() => runRetrievalStartupBackfill({ generation, logger, manifests, signal }))
     .catch((err) => {
       // Abort-driven exits travel through this catch when the loop
       // re-throws an AbortError-like value before reaching the inner
@@ -8792,6 +8893,9 @@ export async function startServer(opts: ServerOpts = {}) {
     ...(opts.postgresBootstrapLockTimeoutMs === undefined
       ? {}
       : { bootstrapLockTimeoutMs: opts.postgresBootstrapLockTimeoutMs }),
+    ...(opts.testOnlyAlreadyAdmittedPostgresChildAttachment === undefined
+      ? {}
+      : { testOnlyAlreadyAdmittedChildAttachment: opts.testOnlyAlreadyAdmittedPostgresChildAttachment }),
     log: (msg: string) => logger.info(msg),
   });
   const uninstallRecoveryStore = createConnectorInstallStore();
@@ -9736,6 +9840,7 @@ export async function startServer(opts: ServerOpts = {}) {
   });
   await schedulerManager.start();
   const startupBackfillAbortController = new AbortController();
+  const startupBackfillGeneration = currentStorageGeneration();
   const startupBackfillDone = manifestReconciliationDone
     .then(() =>
       collectRetrievalStartupBackfillManifests({
@@ -9745,6 +9850,7 @@ export async function startServer(opts: ServerOpts = {}) {
     )
     .then((manifests) =>
       scheduleRetrievalStartupBackfill({
+        generation: startupBackfillGeneration,
         logger,
         manifests,
         signal: startupBackfillAbortController.signal,
