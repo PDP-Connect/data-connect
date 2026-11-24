@@ -94,6 +94,10 @@ fn create_legacy_main_window<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // GTK sends the program name as the Wayland app_id; it must equal productName so it matches DataConnect.desktop.
+    #[cfg(target_os = "linux")]
+    gtk::glib::set_prgname(Some("DataConnect"));
+
     // rustls cannot pick a process-level CryptoProvider when both `ring` and
     // `aws-lc-rs` are present in the tree (they both are, transitively), and
     // it panics on first TLS use instead of failing gracefully. ngrok opens a

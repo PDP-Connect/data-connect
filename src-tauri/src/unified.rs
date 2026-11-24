@@ -8464,7 +8464,11 @@ setInterval(() => {}, 1000);
 
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let cookie = loop {
-            while gtk::events_pending() {
+            // Bounded so a busy event queue cannot keep the deadline from firing.
+            for _ in 0..64 {
+                if !gtk::events_pending() {
+                    break;
+                }
                 gtk::main_iteration_do(false);
             }
             if let Ok(cookie) = requests.try_recv() {

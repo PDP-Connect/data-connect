@@ -493,7 +493,7 @@ test("DCR seeds client_uri / logo_uri / policy_uri / tos_uri from AS_PUBLIC_URL 
       });
       assert.equal(result.status, 201, "registration must succeed");
       assert.equal(result.body.client_uri, "https://as.example.com", "client_uri must be seeded from AS_PUBLIC_URL");
-      assert.equal(result.body.logo_uri, "https://as.example.com/icon.svg", "logo_uri must be seeded as base/icon.svg");
+      assert.equal(result.body.logo_uri, "https://as.example.com/icon", "logo_uri must be seeded as base/icon");
       assert.equal(result.body.policy_uri, "https://as.example.com", "policy_uri must be seeded from AS_PUBLIC_URL");
       assert.equal(result.body.tos_uri, "https://as.example.com", "tos_uri must be seeded from AS_PUBLIC_URL");
     });
