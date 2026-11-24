@@ -17,33 +17,11 @@ import { canonicalConnectorKeyFromManifest } from "../server/connector-key.ts";
 import { startServer } from "../server/index.ts";
 import { computeHostedMcpDecisionDigest } from "../server/routes/as-consent-ui-helpers.ts";
 import { createSqliteConnectorInstanceStore } from "../server/stores/connector-instance-store.ts";
+import { closeTestServer, type TestServer } from "./helpers/close-test-server.ts";
 import { TEST_INTROSPECTION_SERVER_OPTS } from "./helpers/introspection-test-credentials.ts";
 
 const REDIRECT_URI = "https://client.example/callback";
 const REFERENCE_IMPL_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-interface TestServer {
-	readonly asPort: number;
-	readonly asServer: {
-		closeAllConnections?: () => void;
-		close: (callback: () => void) => void;
-	};
-	readonly rsServer: {
-		closeAllConnections?: () => void;
-		close: (callback: () => void) => void;
-	};
-	readonly schedulerManager?: { stop?: () => void } | null;
-}
-
-async function closeServer(server: TestServer): Promise<void> {
-	server.schedulerManager?.stop?.();
-	server.asServer.closeAllConnections?.();
-	server.rsServer.closeAllConnections?.();
-	await Promise.allSettled([
-		new Promise<void>((resolve) => server.asServer.close(() => resolve())),
-		new Promise<void>((resolve) => server.rsServer.close(() => resolve())),
-	]);
-}
 
 function startTestServer(
 	extra: Record<string, unknown> = {},
@@ -206,7 +184,7 @@ test("metadata advertises authorization_response_iss_parameter_supported", async
 		assert.equal(status, 200);
 		assert.equal(body.authorization_response_iss_parameter_supported, true);
 	} finally {
-		await closeServer(server);
+		await closeTestServer(server);
 	}
 });
 
@@ -297,7 +275,7 @@ test("consent-challenge accept returns a code redirect_url with iss equal to the
 			"a success redirect carries the code",
 		);
 	} finally {
-		await closeServer(server);
+		await closeTestServer(server);
 	}
 });
 
@@ -344,7 +322,7 @@ for (const [label, extra] of [
 				"a success redirect carries the code",
 			);
 		} finally {
-			await closeServer(server);
+			await closeTestServer(server);
 		}
 	});
 }
@@ -373,7 +351,7 @@ test("consent-challenge reject returns an access_denied redirect_url with iss", 
 		assert.equal(location.searchParams.get("error"), "access_denied");
 		assert.equal(location.searchParams.get("code"), null);
 	} finally {
-		await closeServer(server);
+		await closeTestServer(server);
 	}
 });
 
@@ -405,7 +383,7 @@ test("POST /oauth/authorize/mcp-package/cancel redirects with access_denied and 
 			"The owner denied the request",
 		);
 	} finally {
-		await closeServer(server);
+		await closeTestServer(server);
 	}
 });
 
@@ -480,7 +458,7 @@ test("POST /consent/approve code redirect carries iss equal to the metadata issu
 			"a success redirect carries the code",
 		);
 	} finally {
-		await closeServer(server);
+		await closeTestServer(server);
 	}
 });
 
@@ -512,7 +490,7 @@ test("iss matches the metadata issuer when the configured issuer has a trailing 
 			"slash-state",
 		);
 	} finally {
-		await closeServer(server);
+		await closeTestServer(server);
 	}
 });
 
