@@ -77,8 +77,15 @@ export function mountBrowserSurfaceViewer({
   try {
     viewer.mount(node).catch((error) => {
       // A retired mount's late failure is not an event of the live stream.
-      if (!released) {
-        logMountError(error);
+      if (released) {
+        return;
+      }
+      logMountError(error);
+      // A viewer that failed to mount must not keep its transport posting input.
+      try {
+        release();
+      } catch (releaseError) {
+        logMountError(releaseError);
       }
     });
     onTransportMounted(transport);

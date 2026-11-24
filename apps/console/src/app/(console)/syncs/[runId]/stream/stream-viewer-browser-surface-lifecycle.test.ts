@@ -163,14 +163,20 @@ test("a mount failure that arrives after cleanup is not logged to the host", asy
   assert.deepEqual(h.logs, []);
 });
 
-test("a mount failure on a live mount is logged to the host", async () => {
+test("a mount failure on a live mount is logged and retires the mount", async () => {
   const h = makeHarness();
   const { promise, reject } = deferredMount();
   h.mounts.mount = () => promise;
   mountBrowserSurfaceViewer(h.options());
   reject(new Error("mount failure"));
   await promise.catch(() => undefined);
+  // The rejection handler runs one microtask after the awaited promise settles.
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(h.logs, ["surface.cdp-frame.viewer_mount_error"]);
+  assert.equal(h.viewers[0]?.unmounts, 1);
+  assert.equal(h.transportRef.current, null);
+  assert.equal(h.mountedTransports.at(-1), null);
+  assert.equal(await withFetchLog(h.fetches, async () => postsInput(h.transports[0] ?? null, h.fetches)), false);
 });
 
 test("a throwing mount notification during initialization retires the mount and handles its pending mount failure", async () => {
