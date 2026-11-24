@@ -222,6 +222,16 @@ export function parseBuildOptions(argv) {
   return { isLean, outputPath, requireBrowser, target }
 }
 
+export function reportBuildCompletion(platformName, signBinary, writeLog) {
+  // macOS builds are not complete unless the required signer succeeds.
+  if (platformName === "darwin") {
+    writeLog("Signing binary for macOS...")
+    signBinary()
+    writeLog("Binary signed successfully")
+  }
+  writeLog("Build complete!")
+}
+
 async function build(options) {
   const { isLean, outputPath, requireBrowser, target } = options
 
@@ -303,22 +313,11 @@ async function build(options) {
     log("Skipping browser copy (lean build)")
   }
 
-  // Sign the binary on macOS (required for it to run after being copied)
-  if (PLATFORM === "darwin") {
-    log("Signing binary for macOS...")
-    try {
-      execSync(`codesign --force --sign - "${outputPath}"`, {
-        stdio: "inherit",
-      })
-      log("Binary signed successfully")
-    } catch (e) {
-      log(
-        "Warning: Failed to sign binary (may cause issues running the binary)"
-      )
-    }
-  }
-
-  log("Build complete!")
+  reportBuildCompletion(PLATFORM, () => {
+    execSync(`codesign --force --sign - "${outputPath}"`, {
+      stdio: "inherit",
+    })
+  }, log)
   log(`Output: ${DIST}`)
 
   // List output

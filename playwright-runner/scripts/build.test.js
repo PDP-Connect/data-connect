@@ -17,6 +17,7 @@ import {
   getBrowserDirectoryName,
   getPlaywrightBrowserPath,
   parseBuildOptions,
+  reportBuildCompletion,
   supportsBrowserProvisioning,
 } from "./build.js"
 
@@ -62,6 +63,37 @@ describe("playwright-runner build options", () => {
     expect(options.outputPath).toMatch(
       /playwright-runner\/dist\/release-runner$/
     )
+
+    const failure = new Error("synthetic required finalization failure")
+    const rejectFinalization = () => {
+      throw failure
+    }
+    const reported = []
+    expect(() =>
+      reportBuildCompletion("darwin", rejectFinalization, message =>
+        reported.push(message)
+      )
+    ).toThrow(failure)
+    expect(reported).toEqual(["Signing binary for macOS..."])
+
+    const completed = []
+    reportBuildCompletion(
+      "darwin",
+      () => completed.push("sign callback"),
+      message => completed.push(message)
+    )
+    expect(completed).toEqual([
+      "Signing binary for macOS...",
+      "sign callback",
+      "Binary signed successfully",
+      "Build complete!",
+    ])
+
+    const otherPlatform = []
+    reportBuildCompletion("linux", rejectFinalization, message =>
+      otherPlatform.push(message)
+    )
+    expect(otherPlatform).toEqual(["Build complete!"])
   })
 
   it("keeps lean builds incompatible with browser provisioning", () => {
