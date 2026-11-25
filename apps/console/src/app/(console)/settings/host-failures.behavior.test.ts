@@ -293,6 +293,17 @@ test("an address that may still be on offers Turn off, and stays Needs your acti
   });
 });
 
+test("an unconfirmed cleanup with no listed routes stays possibly live", async () => {
+  const handler = host({
+    "/state": ok({ ...idleState, lifecycle: { cleanup: "unconfirmed", handle: { id: "route-1" } } }),
+  });
+  await withScreen(handler, async ({ mainText }) => {
+    assert.match(mainText(), /Couldn't confirm the service closed your address\./);
+    assert.match(mainText(), /Unknown, possibly live/);
+    assert.doesNotMatch(mainText(), /Only this computer can open/);
+  });
+});
+
 test("a confirmed cleanup returns to Off", async () => {
   let confirmed = false;
   const handler = host({

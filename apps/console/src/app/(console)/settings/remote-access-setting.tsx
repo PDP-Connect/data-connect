@@ -119,12 +119,12 @@ const catalogRefreshAfter = (tookMs: number) =>
  * wrap under the dot instead of splitting into columns. As the start card's
  * header band it carries the divider (`framed`); above Step 1 it floats alone.
  */
-function OffStatusRow({ journalWarning, framed = false }: { journalWarning: string | null; framed?: boolean }) {
+function OffStatusRow({ possiblyLive, framed = false }: { possiblyLive: boolean; framed?: boolean }) {
   return (
     <p className={`text-sm font-medium ${framed ? "border-b px-4 py-3" : ""}`} role="status">
       <span aria-hidden="true" className="mr-2 inline-block size-2.5 rounded-full bg-muted-foreground/50 align-middle" />
-      {journalWarning ? "Unknown, possibly live " : "Off "}
-      {journalWarning ? null : <span className="font-normal text-muted-foreground">· Only this computer can open DataConnect.</span>}
+      {possiblyLive ? "Unknown, possibly live " : "Off "}
+      {possiblyLive ? null : <span className="font-normal text-muted-foreground">· Only this computer can open DataConnect.</span>}
     </p>
   );
 }
@@ -969,6 +969,7 @@ export function RemoteAccessSetting({
     : state.recovery?.blockedBy
       ? "An earlier address may still work. Check remote access before starting another route."
       : journalUnreadableWarning(state.journalUnreadable, state.journalScan);
+  const possiblyLive = Boolean(journalWarning) || state.lifecycle?.cleanup === "unconfirmed";
   const serviceLabel = wayLabel ?? "the service";
   const done = prep.status === "done" && prep.providerId === wayId ? prep.result : null;
   return (
@@ -1048,11 +1049,11 @@ export function RemoteAccessSetting({
         <Button onClick={() => void request("/recovery/check", {}).then(refresh)}>Check earlier addresses</Button>
       ) : null}
       {idle && passwordMissing && visibleRoutes.length === 0 && !operation ? (
-        <OffStatusRow journalWarning={journalWarning} />
+        <OffStatusRow possiblyLive={possiblyLive} />
       ) : null}
       {idle && !passwordMissing ? (
         <section aria-label="Turn on remote access" className="overflow-hidden rounded-xl border">
-          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed journalWarning={journalWarning} /> : null}
+          {visibleRoutes.length === 0 && !operation ? <OffStatusRow framed possiblyLive={possiblyLive} /> : null}
           <div className="grid gap-4 p-4">
             <div className="grid gap-1">
               <p className="pdpp-label uppercase tracking-wide">Step 2 of 2</p>
