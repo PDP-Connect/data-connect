@@ -113,6 +113,9 @@ test("key identity: the registry URL and the manifest both give the catalog key"
   assert.equal(canonicalConnectorKeyFromManifest({ connector_id: REGISTRY_ID }), KEY);
 });
 
+/** The resource server URL each run is given; the child must receive exactly this. */
+const RS_URL = "http://127.0.0.1:9/catalog-only-rs";
+
 /** A connector executable that records every PDPP_* variable it was started with, then reports DONE. */
 function captureScript(capturePath: string): string {
   return `
@@ -139,7 +142,7 @@ function assertOnlyDeclaredKnob(seen: Record<string, string>): void {
   assert.deepEqual(seen, {
     PDPP_CONNECTOR_ID: KEY,
     PDPP_CONNECTOR_INSTANCE_ID: "cin_catalog",
-    PDPP_RS_URL: seen.PDPP_RS_URL,
+    PDPP_RS_URL: RS_URL,
     [OWN_KNOB]: "25",
   });
 }
@@ -170,6 +173,7 @@ async function runCapture(options: {
       ownerSubjectId: "owner-1",
       ownerToken: "test-token",
       persistState: false,
+      rsUrl: RS_URL,
       state: null,
     } as unknown as RuntimeRunConnectorOptions)) as { status: string };
     assert.equal(result.status, "succeeded");
