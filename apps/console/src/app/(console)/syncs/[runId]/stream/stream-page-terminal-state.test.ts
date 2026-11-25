@@ -51,7 +51,7 @@ const RUN_STATUS_INSTANCE_CONTEXT_RE =
 const INSTANCE_SCOPED_SUMMARY_MATCH_RE =
   /listConnectorSummaries\(\{\s*connectionRouteId:\s*resolveConnectorSummaryRouteId\(connectorId,\s*connectorInstanceId\)/;
 const BROWSER_ASSISTANCE_STREAM_KIND_RE =
-  /interactionKind=\{streamableAssistance\.kind === "otp" \? "otp" : "manual_action"\}[\s\S]{0,220}interactionMessage=\{`Sign in to/;
+  /interactionKind=\{streamableAssistance\.kind === "otp" \? "otp" : "manual_action"\}[\s\S]{0,220}interactionMessage=\{normalizeInteractionPrompt\([\s\S]{0,80}streamableAssistance\.message/;
 const BROWSER_ASSISTANCE_RESPONSE_CONTRACT_RE =
   /interactionRequiresResponse=\{streamableAssistance\.responseContract === "response_required"\}/;
 // Brief item 4 and DIRECTION.md, “What must stay true” #3: keep system terms out of visible state copy.

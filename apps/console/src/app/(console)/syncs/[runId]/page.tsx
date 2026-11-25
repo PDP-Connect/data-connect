@@ -5,7 +5,7 @@ import { Callout, PageHeader, Section, StatusBadge } from "@pdpp/operator-ui/com
 import { dashboardRoutes } from "@pdpp/operator-ui/components/views/routes";
 import { exploreHrefFromEnvelope } from "@pdpp/operator-ui/components/views/timeline-detail-view";
 import { TimelineView } from "@pdpp/operator-ui/components/timeline-view";
-import { formatRelative } from "@pdpp/display";
+import { formatRelative, humanizeFieldLabel } from "@pdpp/display";
 import { buttonVariants } from "@pdpp/operator-ui/ui/button";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -261,6 +261,7 @@ export default async function RunDetailPage({
         currentAssistance={currentAssistance}
         runId={runId}
       />
+      <CollectedKindsSection events={events} />
       <details className="mb-8 pt-4" data-testid="sync-details">
         <summary className="cursor-pointer text-sm font-medium text-muted-foreground">Details</summary>
         <div className="pt-5">
@@ -336,8 +337,10 @@ function CurrentAssistanceSection({
   ) {
     return null;
   }
+  // A credentials request with no fields keeps the server's own message; the
+  // projected "Enter the requested details" would ask for fields that are not drawn.
   const credentialView =
-    currentAssistance.kind === "credentials"
+    currentAssistance.kind === "credentials" && currentAssistance.fields.length > 0
       ? projectCredentialInteraction(currentAssistance.fields, credentialSetup)
       : null;
   const supportsStreaming =
@@ -351,6 +354,7 @@ function CurrentAssistanceSection({
     (currentAssistance.ownerAction === "provide_value" ||
       (currentAssistance.ownerAction === "operate_attachment" &&
         (!requiresBrowserSurfaceAssistance(currentAssistance) || supportsStreaming)));
+  const interactionKind = interactionFormKind(currentAssistance);
 
   return (
     <Callout
@@ -363,7 +367,7 @@ function CurrentAssistanceSection({
       surface="human"
       title="Waiting for your input"
     >
-      {supportsStreaming ? (
+      {requiresBrowserSurfaceAssistance(currentAssistance) ? (
         <Link
           className={buttonVariants({ className: "min-h-11", size: "sm", variant: "outline" })}
           href={`/syncs/${encodeURIComponent(runId)}/stream`}
@@ -371,21 +375,47 @@ function CurrentAssistanceSection({
           Open the browser
         </Link>
       ) : null}
-      {requiresBrowserSurfaceAssistance(currentAssistance) && !supportsStreaming ? (
-        <p className="pdpp-caption text-muted-foreground">The browser is getting ready.</p>
-      ) : null}
       {!requiresBrowserSurfaceAssistance(currentAssistance) && supportsSubmit ? (
         <RunInteractionForm
           fields={credentialView?.fields ?? currentAssistance.fields}
           interactionId={currentAssistance.id}
           key={currentAssistance.id}
-          kind={currentAssistance.kind}
+          kind={interactionKind}
           message={credentialView?.message ?? currentAssistance.message}
           runId={runId}
           submitLabel={credentialView?.submitLabel}
         />
       ) : null}
     </Callout>
+  );
+}
+
+function interactionFormKind(assistance: CurrentRunAssistance): string {
+  if (assistance.kind === "otp" || assistance.fields.length > 0) {
+    return assistance.kind;
+  }
+  return "manual_action";
+}
+
+function CollectedKindsSection({ events }: { events: SpineEvent[] }) {
+  const collectedKinds = getCollectedKinds(events);
+  if (collectedKinds.length === 0) {
+    return null;
+  }
+
+  return (
+    <Section title="What it collected">
+      <dl className="divide-y divide-border">
+        {collectedKinds.map(({ count, kind }) => (
+          <div className="flex items-center justify-between gap-4 py-2" key={kind}>
+            <dt>{humanizeFieldLabel(kind)}</dt>
+            <dd className="tabular-nums">
+              {count.toLocaleString()} {count === 1 ? "record" : "records"}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </Section>
   );
 }
 
@@ -1179,6 +1209,29 @@ function getLatestProgress(events: SpineEvent[]): LatestProgress | null {
     stream: typeof latest.stream_id === "string" && latest.stream_id ? latest.stream_id : null,
     total,
   };
+}
+
+function getCollectedKinds(events: SpineEvent[]): { count: number; kind: string }[] {
+  const terminalEvent = [...events].reverse().find((event) =>
+    event.event_type === "run.completed" || event.event_type === "run.failed"
+  );
+  const facts = terminalEvent?.data.collection_facts;
+  if (!facts || typeof facts !== "object" || Array.isArray(facts)) {
+    return [];
+  }
+  const { streams } = facts as { streams?: unknown };
+  if (!Array.isArray(streams)) {
+    return [];
+  }
+  return streams.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+    const { collected, stream } = entry as { collected?: unknown; stream?: unknown };
+    return typeof stream === "string" && stream.trim() && typeof collected === "number" && Number.isFinite(collected)
+      ? [{ count: collected, kind: stream }]
+      : [];
+  });
 }
 
 function isUserFacingProgressEvent(event: SpineEvent): boolean {

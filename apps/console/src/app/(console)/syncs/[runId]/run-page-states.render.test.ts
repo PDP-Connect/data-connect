@@ -18,6 +18,13 @@ const NOW = Date.parse("2026-11-25T12:00:00.000Z");
 const RUN_ID = "run_render_1";
 const CONNECTION_ID = "conn_strava_1";
 const CONNECTOR_ID = "https://registry.pdpp.org/connectors/strava";
+const OPEN_BROWSER_RE = /Open the browser/;
+const CANCEL_INTERACTION_RE = /Cancel interaction/;
+const DONE_RE = /Done/;
+const ANSWER_FORM_RE = /Answer this request/;
+const WHAT_COLLECTED_RE = /What it collected/;
+const ACTIVITIES_RE = /Activities/;
+const COLLECTED_COUNT_RE = /8/;
 
 function Link({ children, href, ...props }: React.ComponentProps<"a"> & { href: string }) {
   return createElement("a", { ...props, href }, children);
@@ -174,10 +181,22 @@ const otpRequest = event("run.assistance_requested", {
 });
 const browserRequest = event("run.assistance_requested", {
   assistance_request_id: "assist_browser",
-  attachments: [{ kind: "browser_surface", ref: "surface_1" }],
+  attachments: [{ kind: "browser_surface", ref: null, status: "pending" }],
   kind: "manual_action",
   message: "Sign in to Strava in the browser.",
   owner_action: "operate_attachment",
+  progress_posture: "blocked",
+  response_contract: "response_required",
+});
+// The one shape the runtime emits that reaches the sync page's Done answer: a
+// schema-less `credentials` INTERACTION (runtime/index.ts
+// buildAssistanceRequestedDataFromInteraction). `manual_action` always carries a
+// browser attachment, and structured ASSISTANCE cannot be response_required.
+const fieldlessRequest = event("run.assistance_requested", {
+  assistance_request_id: "assist_done",
+  kind: "credentials",
+  message: "Confirm that you completed the step.",
+  owner_action: "provide_value",
   progress_posture: "blocked",
   response_contract: "response_required",
 });
@@ -227,6 +246,12 @@ const scenarios: Record<string, Scenario> = {
     status: statusFor("active"),
     terminal: null,
   },
+  "needs-done": {
+    events: [started, fieldlessRequest],
+    expect: [/Done/, /Confirm that you completed the step\./],
+    status: statusFor("active"),
+    terminal: null,
+  },
   "needs-approval": {
     events: [started, approvalRequest],
     expect: [/Waiting for you to approve the request\./],
@@ -240,7 +265,9 @@ const scenarios: Record<string, Scenario> = {
     terminal: null,
   },
   done: {
-    events: [started, progress, event("run.completed", {}, { status: "succeeded" })],
+    events: [started, progress, event("run.completed", {
+      collection_facts: { streams: [{ collected: 8, stream: "activities" }] },
+    }, { status: "succeeded" })],
     expect: [/This sync finished\./],
     status: statusFor("completed"),
     terminal: "completed",
@@ -335,9 +362,21 @@ for (const name of Object.keys(scenarios)) {
   });
 }
 
-test("sync page, needs-browser: the answer form is not drawn next to Open the browser", async () => {
-  // Pins the worker's choice (brief item 1, "its one form or button") so a
-  // change to it is deliberate; see INTAKE.md for the lead's decision.
+test("sync page, needs-browser: remote browser steps link to the browser page", async () => {
   const { visible } = await renderScenario("needs-browser");
-  assert.doesNotMatch(visible, /Cancel interaction/);
+  assert.match(visible, OPEN_BROWSER_RE);
+  assert.doesNotMatch(visible, CANCEL_INTERACTION_RE);
+});
+
+test("sync page, fieldless request: non-browser steps have a Done answer", async () => {
+  const { visible } = await renderScenario("needs-done");
+  assert.match(visible, DONE_RE);
+  assert.match(visible, ANSWER_FORM_RE);
+});
+
+test("sync page, finished: collected kinds and counts are shown", async () => {
+  const { visible } = await renderScenario("done");
+  assert.match(visible, WHAT_COLLECTED_RE);
+  assert.match(visible, ACTIVITIES_RE);
+  assert.match(visible, COLLECTED_COUNT_RE);
 });

@@ -142,7 +142,7 @@ export function RunInteractionForm({ runId, interactionId, kind, message, fields
 
 function getSubmitLabel(kind: Props["kind"]): string {
   if (kind === "manual_action") {
-    return "I've completed this step — continue";
+    return "Done";
   }
   if (kind === "otp") {
     return "Submit code";

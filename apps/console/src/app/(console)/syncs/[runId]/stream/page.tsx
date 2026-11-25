@@ -28,6 +28,7 @@ import {
   resolveConnectorSummaryRouteId,
 } from "./connector-context-resolution.ts";
 import { NoAssistanceRunPoller } from "./no-assistance-run-poller.tsx";
+import { normalizeInteractionPrompt } from "./interaction-prompt.ts";
 import {
   type NoAssistanceEndedStatus,
   resolveNoAssistanceEndedTerminalStatus,
@@ -288,7 +289,10 @@ export default async function RunInteractionStreamPage({
       interactionId={streamableAssistance.id}
       // Only an OTP step gets the code field; every other browser step keeps the manual Done dock.
       interactionKind={streamableAssistance.kind === "otp" ? "otp" : "manual_action"}
-      interactionMessage={`Sign in to ${connectorWithIcon?.displayName ?? "the data source"}. DataConnect continues on its own when you're done.`}
+      interactionMessage={normalizeInteractionPrompt(
+        streamableAssistance.message,
+        `Sign in to ${connectorWithIcon?.displayName ?? "the data source"}. DataConnect continues on its own when you're done.`
+      )}
       interactionRequiresResponse={streamableAssistance.responseContract === "response_required"}
       runId={runId}
     />
