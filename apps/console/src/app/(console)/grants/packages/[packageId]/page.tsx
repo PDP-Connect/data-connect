@@ -36,6 +36,8 @@ import {
 } from "../../../lib/ref-client.ts";
 import { listConnectorManifests } from "../../../lib/rs-client.ts";
 import { technicalClientCaption } from "../../client-caption.ts";
+import { activePackageAccesses } from "../../app-access.ts";
+import { RemovePackageAccess } from "../../remove-access-confirmation.tsx";
 import { revokePackageAction } from "./revoke-action.ts";
 
 export const dynamic = "force-dynamic";
@@ -88,7 +90,8 @@ export default async function GrantPackageDetailPage({
 
   const summaries = await listGrants({ client_id: pkg.client_id, limit: 50 }).catch(() => null);
   const appName = summaries?.data.find((grant) => grant.client?.client_name?.trim())?.client?.client_name?.trim() ?? "App";
-  const sources = [...new Set(pkg.children.flatMap((child) => child.source ? [formatSourceWithConnectionForDisplay(child.source)] : []))];
+  const activeChildren = activePackageAccesses(pkg.children);
+  const sources = [...new Set(activeChildren.flatMap((child) => child.source ? [formatSourceWithConnectionForDisplay(child.source)] : []))];
   const childIds = new Set(pkg.children.map((child) => child.grant_id));
   const lastRead = summaries?.data.filter((grant) => childIds.has(grant.grant_id)).map((grant) => grant.last_at).sort().at(-1) ?? null;
 
@@ -115,6 +118,7 @@ export default async function GrantPackageDetailPage({
   // server does not send `persisted_status`.
   const isRevocable = (pkg.persisted_status ?? pkg.status) === "active";
   const childCount = pkg.children.length;
+  const activeChildCount = activeChildren.length;
   const subscriptionsHref = "/event-subscriptions";
   const relative = (value: string | null) => {
     if (!value) return "Not available";
@@ -133,7 +137,7 @@ export default async function GrantPackageDetailPage({
         <p className="mb-4 text-[13px] text-destructive">Access could not be removed. Try again.</p>
       ) : null}
 
-      {sp.revoked === "yes" ? (
+      {pkg.status === "revoked" ? (
         <p className="mb-4 text-[13px] text-muted-foreground">Access removed.</p>
       ) : null}
 
@@ -148,15 +152,11 @@ export default async function GrantPackageDetailPage({
 
       {isRevocable ? (
         <Section title="Remove access">
-          <details className="rounded-md border border-border-strong p-3">
-            <summary className="flex min-h-11 cursor-pointer items-center text-[13px] font-medium text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">Remove access</summary>
-            <p className="my-2 text-[13px] text-foreground">{appName} will no longer read your data. It keeps what it already read.</p>
-            <form action={revokePackageAction}>
-              <input name="package_id" type="hidden" value={pkg.package_id} />
-              <input name="confirm_revoke" type="hidden" value="yes" />
-              <IcButton size="sm" type="submit" variant="destructive">Remove access</IcButton>
-            </form>
-          </details>
+          <RemovePackageAccess
+            action={revokePackageAction}
+            packageId={pkg.package_id}
+            sentence={`${appName} will no longer read your data. It keeps what it already read.`}
+          />
         </Section>
       ) : null}
 
@@ -214,7 +214,7 @@ export default async function GrantPackageDetailPage({
       </Section>
 
       <Section
-        description={childCount === 1 ? "1 source-bounded child grant." : `${childCount} source-bounded child grants.`}
+        description={activeChildCount === 1 ? "1 active access." : `${activeChildCount} active accesses.`}
         title="Children"
       >
         {childCount === 0 ? (

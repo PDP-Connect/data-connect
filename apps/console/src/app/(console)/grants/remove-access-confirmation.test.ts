@@ -46,6 +46,23 @@ test("the confirmation posts the named ids with the confirmation field, and Canc
   assert.doesNotMatch(html.replace(/name="grant_id"/g, ""), BANNED);
 });
 
+test("Cancel closes the confirmation without calling the removal action", () => {
+  let actionCalls = 0;
+  let cancelCalls = 0;
+  const confirmation = RemoveAccessConfirmation({
+    action: () => { actionCalls += 1; },
+    fields: [["package_id", "package-1"]],
+    id: "remove-package",
+    onCancel: () => { cancelCalls += 1; },
+    sentence: "Chat helper will no longer read your data. It keeps what it already read.",
+    submitLabel: "Remove access",
+  });
+  const [, controls] = confirmation.props.children as [unknown, { props: { children: [unknown, { props: { onClick: () => void } }] } }];
+  controls.props.children[1].props.onClick();
+  assert.equal(cancelCalls, 1);
+  assert.equal(actionCalls, 0);
+});
+
 test("Remove this access starts closed: a plain button, no form", () => {
   const html = renderToStaticMarkup(
     React.createElement(RemoveThisAccess, {

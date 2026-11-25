@@ -23,13 +23,15 @@ test("pending approval queue renders Review and a confirmed Don't allow action, 
   const approval: PendingApproval = {
     approval_id: "apr_queue_only",
     batch: false,
-    client_id: "concert_finder",
+    client_id: "https://music.example/client",
     created_at: "2026-08-11T12:00:00.000Z",
     grant_preview: { source: { id: "spotify", kind: "connector" }, streams: [{ name: "top_artists" }] },
     kind: "consent",
     object: "approval",
   };
-  const html = renderToStaticMarkup(PendingApprovalRow({ approval, denyAction: noAction }));
+  const html = renderToStaticMarkup(PendingApprovalRow({ appName: "Concert finder", approval, denyAction: noAction }));
+  // apps-repair.md P2: the waiting row title uses the app name supplied from request details.
+  assert.match(html, /Concert finder/);
   assert.match(html, REVIEW_LABEL_RE);
   assert.match(html, DENY_LABEL_RE);
   // DIRECTION.md §What must stay true: destructive actions need a confirmation step that names the effect.

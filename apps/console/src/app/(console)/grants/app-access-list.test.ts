@@ -43,6 +43,21 @@ test("empty app list uses one plain sentence", () => {
   assert.doesNotMatch(html, /\b(grant|bearer|scope|manifest|stream|connector|OAuth|PKCE)\b/i);
 });
 
+test("removed app rows do not say the app can still read data", () => {
+  const html = render([{
+    grantIds: [],
+    hrefId: "access-removed",
+    lastRead: null,
+    name: "ChatGPT",
+    packageIds: [],
+    sources: [],
+    status: "Removed",
+  }]);
+  // apps-repair.md P2: only live accesses belong in the app's readable-data line.
+  assert.match(html, /Removed/);
+  assert.doesNotMatch(html, /Can read data from this server/);
+});
+
 test("app removal names what happens and requires opening a confirmation step", async () => {
   const src = await readFile(`${HERE}app-access-list.tsx`, "utf8");
   // RAISE-RULES 5: destructive actions name the effect and wait for confirmation.

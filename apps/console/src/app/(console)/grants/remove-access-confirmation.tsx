@@ -85,3 +85,33 @@ export function RemoveThisAccess({
     />
   );
 }
+
+/** Package removal uses the same explicit confirmation and Cancel as app-row removal. */
+export function RemovePackageAccess({
+  action,
+  packageId,
+  sentence,
+}: {
+  action: RemoveAction;
+  packageId: string;
+  sentence: string;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  if (!confirming) {
+    return (
+      <IcButton className="min-h-11 text-destructive" onClick={() => setConfirming(true)} size="sm" type="button" variant="ghost">
+        Remove access
+      </IcButton>
+    );
+  }
+  return (
+    <RemoveAccessConfirmation
+      action={action}
+      fields={[["package_id", packageId]]}
+      id={`remove-package-${packageId}`}
+      onCancel={() => setConfirming(false)}
+      sentence={sentence}
+      submitLabel="Remove access"
+    />
+  );
+}

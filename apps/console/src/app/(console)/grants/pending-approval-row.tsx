@@ -10,10 +10,12 @@ import { appSourceName } from "./app-access.ts";
 /** Queue row only. It can route to review or deny; grant issuance is absent. */
 export function PendingApprovalRow({
   approval,
+  appName,
   connectorIcons = {},
   denyAction,
 }: {
   approval: PendingApproval;
+  appName: string;
   connectorIcons?: Readonly<Record<string, import("@pdpp/brand-react").ConnectorIconLike | null | undefined>>;
   denyAction: (formData: FormData) => void | Promise<void>;
 }) {
@@ -24,8 +26,6 @@ export function PendingApprovalRow({
       })
     : [];
   const connectorId = approval.grant_preview?.source?.kind === "connector" ? approval.grant_preview.source.connector_id ?? approval.grant_preview.source.id : null;
-  const appName = "App";
-
   return (
     <div className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0">

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { formatSourceForDisplay, formatRelative, grantRowLabel } from "@pdpp/display";
-import type { GrantSummary } from "../lib/ref-client.ts";
+import type { GrantPackageChild, GrantSummary } from "../lib/ref-client.ts";
 
 export interface AppAccess {
   /** Active access outside any package; removed one by one. */
@@ -33,10 +33,26 @@ export function appSourceName(source: Parameters<typeof formatSourceForDisplay>[
   return label ? `${label[0]?.toUpperCase()}${label.slice(1)}` : label;
 }
 
+export function activePackageAccesses<T extends Pick<GrantPackageChild, "grant_status" | "member_status">>(children: readonly T[]): T[] {
+  return children.filter((child) => child.grant_status === "active" && child.member_status === "active");
+}
+
+/**
+ * Title for a waiting request. The approval read carries only `client_id`, so
+ * the name comes from the app's existing access. No host fallback: an identity
+ * made on Connect an app has a `client_id` on this server's own host
+ * (`/oauth/client-metadata/…`), and any app can pick a host shaped like a
+ * trusted name (`chatgpt.com.example.io`).
+ */
+export function pendingApprovalAppName(clientName: string | null | undefined): string {
+  return clientName?.trim() || "An app";
+}
+
 export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAccess[] {
   const groups = new Map<string, { app: AppAccess; statuses: string[] }>();
   for (const grant of grants) {
     const key = grant.client_id || grant.grant_id;
+    const isActive = ACTIVE_STATUSES.has(grant.status);
     let group = groups.get(key);
     if (!group) {
       group = {
@@ -53,7 +69,7 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
       };
       groups.set(key, group);
     }
-    if (ACTIVE_STATUSES.has(grant.status)) {
+    if (isActive) {
       const packageId = grant.grant_package_id;
       if (packageId) {
         if (!group.app.packageIds.includes(packageId)) group.app.packageIds.push(packageId);
@@ -67,7 +83,7 @@ export function groupGrantAccessByApp(grants: readonly GrantSummary[]): AppAcces
     }
     group.statuses.push(grant.status);
     const source = appSourceName(grant.source) ?? grant.connector_id ?? grantRowLabel(grant);
-    if (source && !group.app.sources.includes(source)) group.app.sources.push(source);
+    if (isActive && source && !group.app.sources.includes(source)) group.app.sources.push(source);
   }
 
   return [...groups.values()]

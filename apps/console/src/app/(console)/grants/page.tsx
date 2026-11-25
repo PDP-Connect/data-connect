@@ -11,7 +11,7 @@ import Link from "next/link";
 import { ConnectorMark } from "@/app/(console)/components/connector-mark.tsx";
 import { RecordroomShellWithPalette } from "@/app/(console)/components/recordroom-shell-with-palette.tsx";
 import { AppAccessList } from "./app-access-list.tsx";
-import { groupGrantAccessByApp } from "./app-access.ts";
+import { groupGrantAccessByApp, pendingApprovalAppName } from "./app-access.ts";
 import { DeveloperModeRequestLink } from "./developer-mode-gate.tsx";
 import { revokeGrantAccessAction } from "./[grantId]/revoke-action.ts";
 import { ServerUnreachable } from "../components/shell.tsx";
@@ -101,6 +101,11 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
   }
 
   const ownerLoginUrl = getOwnerLoginPath();
+  const apps = groupGrantAccessByApp(result.data);
+  const clientNames = new Map(result.data.flatMap((grant) => {
+    const name = grant.client?.client_name?.trim();
+    return grant.client_id && name ? [[grant.client_id, name] as const] : [];
+  }));
   const filterApps = [...new Map(result.data.flatMap((grant) => grant.client_id ? [[grant.client_id, grant.client?.client_name?.trim() || "App"] as const] : [])).entries()];
   const filterSources = [...new Map(result.data.flatMap((grant) => grant.source ? [[grant.source.id, formatSourceForDisplay(grant.source)] as const] : [])).entries()];
 
@@ -108,6 +113,8 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
   // part of an app's access, so removing "the app" from it would leave the rest.
   // The app filter keeps all of that app's access, so removal stays offered there.
   const listNarrowed = Boolean(params.cursor || params.q || params.status || params.source_kind || params.source_id);
+  // A filtered list can hold one app or none; keep the filters (and Clear filters) in reach then.
+  const appFiltersSet = Boolean(params.client_id || params.source_kind || params.source_id);
 
   return (
     <RecordroomShellWithPalette>
@@ -118,7 +125,7 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
           <DataList>
             {approvals.data.map((approval) => (
               <li key={approval.approval_id}>
-                <PendingApprovalRow approval={approval} connectorIcons={connectorIcons} denyAction={denyPendingApprovalAction} />
+                <PendingApprovalRow appName={pendingApprovalAppName(clientNames.get(approval.client_id ?? ""))} approval={approval} connectorIcons={connectorIcons} denyAction={denyPendingApprovalAction} />
               </li>
             ))}
           </DataList>
@@ -129,27 +136,27 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
       ) : null}
 
       <Section title="Apps that can read your data">
-        <form action="/grants" className="mb-2 flex flex-wrap items-end gap-2" method="get">
+        {apps.length > 1 || appFiltersSet ? <form action="/grants" className="mb-2 flex flex-wrap items-end gap-2" method="get">
           {params.q ? <input name="q" type="hidden" value={params.q} /> : null}
           {params.status ? <input name="status" type="hidden" value={params.status} /> : null}
           {params.demo ? <input name="demo" type="hidden" value={params.demo} /> : null}
           <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="apps-filter-app">
             App
-            <IcSelect defaultValue={params.client_id ?? ""} id="apps-filter-app" name="client_id" options={[{ label: "All apps", value: "" }, ...filterApps.map(([value, label]) => ({ label, value }))]} />
+            <IcSelect defaultValue={params.client_id ?? ""} id="apps-filter-app" name="client_id" options={filterApps.map(([value, label]) => ({ label, value }))} placeholder="All apps" />
           </label>
           <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground" htmlFor="apps-filter-kind">
             Kind
-            <IcSelect defaultValue={params.source_kind ?? ""} id="apps-filter-kind" name="source_kind" options={[{ label: "All kinds", value: "" }, { label: "Data source", value: "connector" }, { label: "Built-in source", value: "provider_native" }]} />
+            <IcSelect defaultValue={params.source_kind ?? ""} id="apps-filter-kind" name="source_kind" options={[{ label: "Data source", value: "connector" }, { label: "Built-in source", value: "provider_native" }]} placeholder="All kinds" />
           </label>
           <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="apps-filter-source">
             Data source
-            <IcSelect defaultValue={params.source_id ?? ""} id="apps-filter-source" name="source_id" options={[{ label: "All data sources", value: "" }, ...filterSources.map(([value, label]) => ({ label, value }))]} />
+            <IcSelect defaultValue={params.source_id ?? ""} id="apps-filter-source" name="source_id" options={filterSources.map(([value, label]) => ({ label, value }))} placeholder="All data sources" />
           </label>
           <IcButton size="sm" type="submit" variant="ghost">Filter</IcButton>
           {params.client_id || params.source_kind || params.source_id ? <Link className="min-h-11 rounded-[6px] border border-border px-3 py-2 text-[13px] text-muted-foreground" href="/grants">Clear filters</Link> : null}
-        </form>
+        </form> : null}
         <AppAccessList
-          apps={groupGrantAccessByApp(result.data)}
+          apps={apps}
           canRemove={!(result.has_more || listNarrowed)}
           removeAction={revokeGrantAccessAction}
           returnTo="/grants"
@@ -166,25 +173,16 @@ export default async function GrantsPage({ searchParams }: { searchParams: Promi
         <form action="/grants" className="flex flex-wrap items-end gap-2 border-b border-border py-3" method="get">
           {params.demo ? <input name="demo" type="hidden" value={params.demo} /> : null}
           {params.cursor ? <input name="cursor" type="hidden" value={params.cursor} /> : null}
+          {params.client_id ? <input name="client_id" type="hidden" value={params.client_id} /> : null}
+          {params.source_kind ? <input name="source_kind" type="hidden" value={params.source_kind} /> : null}
+          {params.source_id ? <input name="source_id" type="hidden" value={params.source_id} /> : null}
           <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground">
             Search access
             <input className="h-10 rounded-[6px] border border-border bg-background px-3 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" defaultValue={params.q ?? ""} name="q" placeholder="ID contains…" type="search" />
           </label>
           <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-state">
             State
-            <IcSelect defaultValue={params.status ?? ""} id="access-filter-state" name="status" options={[{ label: "Any state", value: "" }, { label: "Active", value: "issued" }, { label: "Removed", value: "revoked" }, { label: "Not allowed", value: "denied" }, { label: "Failed", value: "failed" }, { label: "Waiting", value: "pending" }]} />
-          </label>
-          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-app">
-            App
-            <IcSelect defaultValue={params.client_id ?? ""} id="access-filter-app" name="client_id" options={[{ label: "All apps", value: "" }, ...filterApps.map(([value, label]) => ({ label, value }))]} />
-          </label>
-          <label className="grid min-w-32 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-kind">
-            Data source kind
-            <IcSelect defaultValue={params.source_kind ?? ""} id="access-filter-kind" name="source_kind" options={[{ label: "All kinds", value: "" }, { label: "Data source", value: "connector" }, { label: "Built-in data source", value: "provider_native" }]} />
-          </label>
-          <label className="grid min-w-36 gap-1 text-[13px] text-muted-foreground" htmlFor="access-filter-source">
-            Data source
-            <IcSelect defaultValue={params.source_id ?? ""} id="access-filter-source" name="source_id" options={[{ label: "All data sources", value: "" }, ...filterSources.map(([value, label]) => ({ label, value }))]} />
+            <IcSelect defaultValue={params.status ?? ""} id="access-filter-state" name="status" options={[{ label: "Active", value: "issued" }, { label: "Removed", value: "revoked" }, { label: "Not allowed", value: "denied" }, { label: "Failed", value: "failed" }, { label: "Waiting", value: "pending" }]} placeholder="Any state" />
           </label>
           <IcButton size="sm" type="submit" variant="ghost">Filter</IcButton>
           {params.q || params.status || params.client_id || params.source_kind || params.source_id ? <Link className="inline-flex min-h-11 items-center rounded-[6px] border border-border px-3 py-2 text-[13px] text-muted-foreground" href="/grants">Clear filters</Link> : null}

@@ -39,6 +39,9 @@ test("grants list formats visible client captions instead of rendering raw clien
   const pendingApprovalRowSrc = await readFile(PENDING_APPROVAL_ROW_FILE, "utf8");
   const captionSrc = await readFile(CLIENT_CAPTION_FILE, "utf8");
   assert.match(pageSrc, PAGE_USES_CLIENT_CAPTION_RE);
+  // apps-repair.md P2: waiting requests use the best available app name.
+  assert.match(pageSrc, /appName=\{pendingApprovalAppName\(clientNames\.get/);
+  assert.match(pendingApprovalRowSrc, /<p className="text-\[15px\] font-medium text-foreground">\{appName\}<\/p>/);
   // RAISE-RULES 4: an unrecognized app id is available only inside folded Details.
   assert.match(pendingApprovalRowSrc, /<details[\s\S]*App id: \{approval\.client_id\}[\s\S]*<\/details>/);
   assert.match(captionSrc, CLIENT_CAPTION_HELPER_RE);
@@ -62,10 +65,23 @@ test("the packages list stays reachable from the page heading", async () => {
   assert.match(src, /href="\/grants\/packages">Packages/);
 });
 
-test("Apps groups the existing grant read into app rows and keeps its three filters visible", async () => {
+test("Apps only shows useful top filters and keeps duplicate app filters out of Details", async () => {
   const src = await readFile(PAGE_FILE, "utf8");
-  // DIRECTION.md §Home: apps are presented as one row per app with the data sources it can read.
-  assert.match(src, /groupGrantAccessByApp\(result\.data\)/);
+  // apps-repair.md P2: hide filters for zero or one app, use named placeholders, and do not repeat them in Details.
+  assert.match(src, /const apps = groupGrantAccessByApp\(result\.data\)/);
+  assert.match(src, /apps\.length > 1 \|\| appFiltersSet \? <form/);
+  // Deputy repair: a filter that leaves one app or none must not hide the filters and Clear filters.
+  assert.match(src, /const appFiltersSet = Boolean\(params\.client_id \|\| params\.source_kind \|\| params\.source_id\)/);
+  assert.match(src, /placeholder="All apps"/);
+  assert.match(src, /placeholder="All kinds"/);
+  assert.match(src, /placeholder="All data sources"/);
+  assert.doesNotMatch(src, /label: "All apps", value: ""/);
+  assert.doesNotMatch(src, /label: "All kinds", value: ""/);
+  assert.doesNotMatch(src, /label: "All data sources", value: ""/);
+  const details = src.slice(src.indexOf("<details"));
+  assert.doesNotMatch(details, /<IcSelect[^>]*name="client_id"/);
+  assert.doesNotMatch(details, /<IcSelect[^>]*name="source_kind"/);
+  assert.doesNotMatch(details, /<IcSelect[^>]*name="source_id"/);
   assert.match(src, /name="client_id"/);
   assert.match(src, /name="source_kind"/);
   assert.match(src, /name="source_id"/);

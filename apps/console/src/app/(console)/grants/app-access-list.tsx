@@ -50,11 +50,10 @@ function AppAccessRow({
       <Link className="min-w-0 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" href={`/grants/${encodeURIComponent(app.hrefId)}`}>
         <span className="block truncate text-[15px] font-medium text-foreground">{app.name}</span>
         <span className="mt-1 block text-[13px] text-muted-foreground">
-          Can read {app.sources.length ? app.sources.join(", ") : "data from this server"}
+          {app.status ?? `Can read ${app.sources.length ? app.sources.join(", ") : "data from this server"}`}
         </span>
         <span className="mt-0.5 block text-[13px] tabular-nums text-muted-foreground">
           Last read {formatAppLastRead(app.lastRead)}
-          {app.status ? ` · ${app.status}` : ""}
         </span>
       </Link>
       {canRemove && app.status === null ? (
