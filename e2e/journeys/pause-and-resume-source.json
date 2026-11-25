@@ -11,7 +11,7 @@
         "role": "button",
         "name": "Pause syncing"
       },
-      "readyText": "Collection paused.",
+      "readyText": "Paused. Your records and sign-in are kept.",
       "assertText": "Collection paused. Your records, schedule, and sign-in are kept — resume whenever you're ready."
     },
     {
