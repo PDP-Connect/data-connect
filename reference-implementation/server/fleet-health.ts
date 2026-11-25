@@ -352,7 +352,15 @@ function reconcileFleetScope(
   inventory: readonly FleetConfiguredConnection[],
   summaries: readonly FleetSummary[]
 ): ReconciledFleetScope {
-  const summariesByConnectionId = new Map(summaries.map((summary) => [summary.connection_id, summary]));
+  const summariesByConnectionId = new Map<string, FleetSummary>();
+  const ambiguousSummaryIds = new Set<string>();
+  for (const summary of summaries) {
+    if (summariesByConnectionId.has(summary.connection_id)) {
+      ambiguousSummaryIds.add(summary.connection_id);
+    } else {
+      summariesByConnectionId.set(summary.connection_id, summary);
+    }
+  }
   const inventoryByConnectionId = new Map(inventory.map((connection) => [connection.connectorInstanceId, connection]));
   const assessed: FleetConnectionReference[] = [];
   const pausedLifecycle: FleetConnectionReference[] = [];
@@ -375,6 +383,11 @@ function reconcileFleetScope(
       setupPending.push(ref);
       continue;
     }
+    // Do not let input order decide which report represents an ambiguous connection.
+    // Every candidate is surfaced as unassessed in the summary pass below.
+    if (ambiguousSummaryIds.has(connection.connectorInstanceId)) {
+      continue;
+    }
     const summary = summariesByConnectionId.get(connection.connectorInstanceId);
     if (scope !== "operational" || !summary) {
       unassessed.push(ref);
@@ -385,7 +398,7 @@ function reconcileFleetScope(
   }
 
   for (const summary of summaries) {
-    if (!inventoryByConnectionId.has(summary.connection_id)) {
+    if (ambiguousSummaryIds.has(summary.connection_id) || !inventoryByConnectionId.has(summary.connection_id)) {
       unassessed.push(summaryReference(summary));
     }
   }
