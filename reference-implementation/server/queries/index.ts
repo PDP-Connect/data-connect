@@ -453,7 +453,6 @@ export interface ReferenceQueryRegistry extends Readonly<Record<string, Register
   readonly recordsIngestRepairCurrentDerivedFacts: MutationQuery;
   readonly recordsIngestUpsertRecord: MutationQuery;
   readonly recordsListStreamVisibleCandidates: IterateQuery;
-  readonly recordsSnapshotsGetMinRecordChangeVersion: ReadOneQuery;
   // Records — change-log snapshot/page reads for /changes feed.
   readonly recordsSnapshotsGetSnapshotAtVersion: ReadOneQuery;
   readonly recordsSnapshotsListChangeGroups: IterateQuery;
@@ -894,7 +893,6 @@ export function loadReferenceQueries(queryDir = QUERIES_DIR): ReferenceQueryRegi
     "recordsGetFieldWindow",
     // Records — change-log snapshot/page.
     "recordsSnapshotsGetSnapshotAtVersion",
-    "recordsSnapshotsGetMinRecordChangeVersion",
     "recordsSnapshotsListChangeGroups",
     // Records — deletion.
     "recordsDeleteCountRecordsByStream",
