@@ -2091,11 +2091,15 @@ CREATE TABLE IF NOT EXISTS connector_checkpoint_withholds (
   PRIMARY KEY (connector_id, connector_instance_id, grant_id, state_stream)
 );
 
+-- changes_floor: the oldest changes_since watermark whose delta can still be
+-- reconstructed. History pruning advances it; see pruneRecordChangeHistory.
+-- Lives on the counter row so a bulk reset (which deletes the row) clears it.
 CREATE TABLE IF NOT EXISTS version_counter (
   connector_id  TEXT NOT NULL,
   connector_instance_id TEXT NOT NULL,
   stream        TEXT NOT NULL,
   max_version   INTEGER NOT NULL DEFAULT 0,
+  changes_floor INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(connector_instance_id, stream)
 );
 
@@ -6612,6 +6616,32 @@ function buildSqliteSchema(raw: SqliteDatabase, opts: InitDbOptions): void {
   runWithSqliteBusyRetrySync(() => migrateConnectorSyncStateInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateConnectorDetailGapInstanceColumns(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateRecordStorageInstanceColumns(raw, opts));
+  // Pre-existing DBs predate changes_floor. Seed it at each stream's head so
+  // every older changes_since token expires once (clients re-sync from
+  // `beginning`): history may already have been pruned or compacted, and the
+  // floor cannot tell. The column and seed commit together so an interrupted
+  // seed cannot leave a column that makes the next startup skip it.
+  runWithSqliteBusyRetrySync(() => {
+    raw.exec("BEGIN IMMEDIATE");
+    try {
+      if (addColumnIfMissing(raw, "version_counter", "changes_floor", "INTEGER NOT NULL DEFAULT 0")) {
+        raw.exec(
+          `UPDATE version_counter
+              SET changes_floor = MAX(max_version,
+                COALESCE((SELECT MAX(rc.version) FROM record_changes rc
+                           WHERE rc.connector_instance_id = version_counter.connector_instance_id
+                             AND rc.stream = version_counter.stream), 0),
+                COALESCE((SELECT MAX(r.version) FROM records r
+                           WHERE r.connector_instance_id = version_counter.connector_instance_id
+                             AND r.stream = version_counter.stream), 0))`
+        );
+      }
+      raw.exec("COMMIT");
+    } catch (error) {
+      raw.exec("ROLLBACK");
+      throw error;
+    }
+  });
   runWithSqliteBusyRetrySync(() => migrateBlobOriginInstanceColumn(raw, opts));
   runWithSqliteBusyRetrySync(() => migrateSemanticSearchInstanceColumns(raw, opts));
   // A legacy vector has no evidence that it was produced from the current

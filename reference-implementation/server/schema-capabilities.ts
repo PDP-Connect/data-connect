@@ -13,7 +13,7 @@
  * inputs. It does NOT own the complete protocol/runtime implementation of field
  * types or aggregation operators: a genuinely NEW aggregation operator also
  * touches validation (connector-manifest-validation.ts) and execution
- * (record-aggregation.js, records.js). What lands ENTIRELY here is a change to how
+ * (records.js). What lands ENTIRELY here is a change to how
  * existing capabilities are PROJECTED into responses.
  *
  * Invariant: pure schema analysis — capability projection is centralised here.
