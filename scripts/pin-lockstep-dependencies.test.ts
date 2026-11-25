@@ -57,25 +57,22 @@ describe("pinLockstepDependencies on the release config", () => {
     expect(pinned.map(({ dependency }) => dependency)).toEqual(
       expect.arrayContaining(["@pdpp/connector-protocol", "@pdpp/cli", "@pdpp/read-core"])
     )
-    for (const { root } of packages) {
-      for (const [dependency, range] of Object.entries(read(root).dependencies ?? {})) {
-        if (names.has(dependency)) {
-          expect(range, `${root} ${dependency}`).toBe(VERSION)
-        }
-      }
-    }
   })
 
-  it("leaves other dependencies and fields as committed", () => {
+  it("changes each manifest only by setting its lockstep dependencies to the release version", () => {
     pinLockstepDependencies(VERSION, tree)
 
     for (const { root } of packages) {
       const before = read(root, REPO_ROOT)
-      const after = read(root)
-      const external = (manifest: Manifest) =>
-        Object.entries(manifest.dependencies ?? {}).filter(([dependency]) => !names.has(dependency))
-      expect(external(after), root).toEqual(external(before))
-      expect({ ...after, dependencies: undefined }, root).toEqual({ ...before, dependencies: undefined })
+      const dependencies =
+        before.dependencies &&
+        Object.fromEntries(
+          Object.entries(before.dependencies).map(([dependency, range]) => [
+            dependency,
+            names.has(dependency) ? VERSION : range,
+          ])
+        )
+      expect(read(root), root).toStrictEqual({ ...before, ...(dependencies && { dependencies }) })
     }
   })
 })
