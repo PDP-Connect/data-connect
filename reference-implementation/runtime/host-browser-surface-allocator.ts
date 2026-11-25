@@ -255,21 +255,49 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 			throw error;
 		}
 		this.#lastStartFailureByRunId.delete(runId);
-		const stillBound = this.#isBound(request.surfaceId, runId);
 		const surface = this.#recordSurfaceIfStillBound(
 			request,
 			runId,
 			parseHostSurfaceLeaseResponse(response),
 		);
-		if (stillBound) {
-			this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
-			this.#migrateProfileBySurfaceId.delete(request.surfaceId);
-		}
+		this.#forgetBinding(request.surfaceId, runId);
 		return surface;
 	}
 
 	#isBound(surfaceId: string, runId: string): boolean {
 		return this.#pendingRunIdsBySurfaceId.get(surfaceId) === runId;
+	}
+
+	// The two helpers below run after an awaited host request. While it ran,
+	// the surface may have been bound to, or started for, another run, so each
+	// removes only state that still belongs to `runId`.
+
+	/** Drop `runId`'s pending binding of `surfaceId`. */
+	#forgetBinding(surfaceId: string, runId: string): void {
+		if (this.#isBound(surfaceId, runId)) {
+			this.#pendingRunIdsBySurfaceId.delete(surfaceId);
+			this.#migrateProfileBySurfaceId.delete(surfaceId);
+		}
+	}
+
+	/** Drop `record`, the lease `runId` held on `surfaceId`, and the run's index entry. */
+	#forgetLease(
+		surfaceId: string,
+		runId: string,
+		record: HostLeaseRecord | undefined,
+	): void {
+		if (
+			record?.runId === runId &&
+			this.#leasesBySurfaceId.get(surfaceId) === record
+		) {
+			this.#leasesBySurfaceId.delete(surfaceId);
+		}
+		if (
+			this.#surfaceIdsByRunId.get(runId) === surfaceId &&
+			this.#leasesBySurfaceId.get(surfaceId)?.runId !== runId
+		) {
+			this.#surfaceIdsByRunId.delete(runId);
+		}
 	}
 
 	/**
@@ -333,17 +361,18 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 
 	async releaseRun(runId: string): Promise<void> {
 		const surfaceId = this.#surfaceIdsByRunId.get(runId);
+		const record = surfaceId
+			? this.#leasesBySurfaceId.get(surfaceId)
+			: undefined;
 		const pendingSurfaceId = [...this.#pendingRunIdsBySurfaceId].find(
 			([, pendingRunId]) => pendingRunId === runId,
 		)?.[0];
 		await this.#requestNoContent("DELETE", this.#runUrl(runId));
 		if (surfaceId) {
-			this.#leasesBySurfaceId.delete(surfaceId);
-			this.#surfaceIdsByRunId.delete(runId);
+			this.#forgetLease(surfaceId, runId, record);
 		}
 		if (pendingSurfaceId) {
-			this.#pendingRunIdsBySurfaceId.delete(pendingSurfaceId);
-			this.#migrateProfileBySurfaceId.delete(pendingSurfaceId);
+			this.#forgetBinding(pendingSurfaceId, runId);
 		}
 		this.#lastStartFailureByRunId.delete(runId);
 	}
@@ -364,10 +393,8 @@ class HostBrowserSurfaceAllocatorImpl implements HostBrowserSurfaceAllocator {
 				? this.#runUrl(record.runId)
 				: this.#leaseUrl(record.hostSurfaceId),
 		);
-		this.#leasesBySurfaceId.delete(request.surfaceId);
-		this.#surfaceIdsByRunId.delete(record.runId);
-		this.#pendingRunIdsBySurfaceId.delete(request.surfaceId);
-		this.#migrateProfileBySurfaceId.delete(request.surfaceId);
+		this.#forgetLease(request.surfaceId, record.runId, record);
+		this.#forgetBinding(request.surfaceId, record.runId);
 		return { ...record.surface, health: "stopping" };
 	}
 
