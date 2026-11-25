@@ -162,6 +162,29 @@ test("local admission rejects unsupported runtime bindings", async () => {
   )
 })
 
+test("a selection pointing at a record for another connector key selects nothing", async () => {
+  const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
+  temporaryRoots.push(dataDir)
+  const store = createFileLocalConnectorSourceStore(dataDir)
+  const source = await store.add(fixture({ key: "first-fixture" }))
+  await store.select("first-fixture", source.sourceId)
+  // An earlier add() replaced the record without an identity check, so a state
+  // file can keep the first key's selection on a record for another key.
+  const statePath = join(dataDir, "connector-local-sources.json")
+  const state = JSON.parse(readFileSync(statePath, "utf8"))
+  state.sources[source.sourceId] = {
+    ...state.sources[source.sourceId],
+    connectorId: "https://registry.pdpp.dev/connectors/second-fixture",
+    connectorKey: "second-fixture",
+  }
+  writeFileSync(statePath, JSON.stringify(state))
+  assert.equal(await store.getSelectedForConnector("first-fixture"), null)
+  assert.equal(
+    await store.getSelectedForConnector(source.connectorId),
+    null
+  )
+})
+
 test("re-adding a source whose profile changed connector key is rejected", async () => {
   const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
   temporaryRoots.push(dataDir)
