@@ -181,44 +181,93 @@ export function migrateRenamedConnectorIdsSqlite(raw: SqliteLike): ConnectorIdRe
   if (!anyStored) {
     return NO_RENAME;
   }
-  const changes = (result: unknown): number => Number((result as { changes?: number }).changes ?? 0);
   const run = raw.transaction((): ConnectorIdRenameResult => {
     let changed = 0;
     const superseded: Record<string, number> = {};
+    const supersededParents = new Set<string>();
     for (const [oldId, newId] of renameEntries()) {
-      const parent = raw.prepare("SELECT * FROM connectors WHERE connector_id = ?").get(oldId);
-      if (parent && raw.prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get(newId) === undefined) {
-        const copy: Record<string, unknown> = { ...parent, connector_id: newId, manifest: rewriteManifestIds(parent.manifest, oldId, newId) };
-        const names = Object.keys(copy);
-        raw
-          .prepare(`INSERT INTO connectors (${names.map(quote).join(", ")}) VALUES (${names.map(() => "?").join(", ")})`)
-          .run(...names.map((n) => copy[n]));
+      if (adoptParentSqlite(raw, oldId, newId) === "superseded") {
+        supersededParents.add(oldId);
       }
       for (const c of columns.filter((x) => x.table !== "connectors")) {
         const drop = dropSupersededRowsSql(c, { new: "?", old: "?" });
         if (drop) {
-          countSuperseded(superseded, c.table, changes(raw.prepare(drop).run(oldId, newId)));
+          countSuperseded(superseded, c.table, sqliteChanges(raw.prepare(drop).run(oldId, newId)));
         }
       }
     }
     for (const c of columns.filter((x) => x.table !== "connectors")) {
       const rename = renameCaseSql(c.column, () => "?");
-      changed += changes(
+      changed += sqliteChanges(
         raw
           .prepare(`UPDATE ${quote(c.table)} SET ${quote(c.column)} = ${rename.sql} WHERE ${quote(c.column)} IN (${marks})`)
           .run(...rename.params, ...olds)
       );
     }
-    changed += changes(raw.prepare(`DELETE FROM connectors WHERE connector_id IN (${marks})`).run(...olds));
+    // Old parents go last, once no child names them. One the current row
+    // already covered is a superseded row, like the children above.
+    const oldParents = partitionOldParents(olds, supersededParents);
+    countSuperseded(superseded, "connectors", deleteConnectorsSqlite(raw, oldParents.superseded));
+    changed += deleteConnectorsSqlite(raw, oldParents.copied);
     // A connection created without a name is labelled with its connector id.
     // Keep that placeholder in step with the id it names; a connection of
     // another connector that happens to carry the same text keeps it.
     for (const [oldId, newId] of renameEntries()) {
-      changed += changes(raw.prepare(renamePlaceholderLabelSql(() => "?")).run(newId, oldId, newId));
+      changed += sqliteChanges(raw.prepare(renamePlaceholderLabelSql(() => "?")).run(newId, oldId, newId));
     }
     return { changedRows: changed + sumSuperseded(superseded), supersededRows: superseded };
   });
   return run.immediate();
+}
+
+const sqliteChanges = (result: unknown): number => Number((result as { changes?: number }).changes ?? 0);
+
+/**
+ * What happens to an old id's `connectors` row: it is copied to the current
+ * id, or the current id already has one and the old row is superseded.
+ */
+type ParentOutcome = "absent" | "copied" | "superseded";
+
+function connectorCopy(parent: Record<string, unknown>, oldId: string, newId: string): Record<string, unknown> {
+  return { ...parent, connector_id: newId, manifest: rewriteManifestIds(parent.manifest, oldId, newId) };
+}
+
+function adoptParentSqlite(raw: SqliteLike, oldId: string, newId: string): ParentOutcome {
+  const parent = raw.prepare("SELECT * FROM connectors WHERE connector_id = ?").get(oldId) as
+    | Record<string, unknown>
+    | undefined;
+  if (!parent) {
+    return "absent";
+  }
+  if (raw.prepare("SELECT 1 FROM connectors WHERE connector_id = ?").get(newId) !== undefined) {
+    return "superseded";
+  }
+  const copy = connectorCopy(parent, oldId, newId);
+  const names = Object.keys(copy);
+  raw
+    .prepare(`INSERT INTO connectors (${names.map(quote).join(", ")}) VALUES (${names.map(() => "?").join(", ")})`)
+    .run(...names.map((n) => copy[n]));
+  return "copied";
+}
+
+function deleteConnectorsSqlite(raw: SqliteLike, ids: readonly string[]): number {
+  if (ids.length === 0) {
+    return 0;
+  }
+  return sqliteChanges(
+    raw.prepare(`DELETE FROM connectors WHERE connector_id IN (${ids.map(() => "?").join(", ")})`).run(...ids)
+  );
+}
+
+/** Split the old ids into parents the current row covered and the rest. */
+function partitionOldParents(
+  olds: readonly string[],
+  supersededParents: ReadonlySet<string>
+): { copied: string[]; superseded: string[] } {
+  return {
+    copied: olds.filter((id) => !supersededParents.has(id)),
+    superseded: olds.filter((id) => supersededParents.has(id)),
+  };
 }
 
 /** Parameters: the current id, the old id, the current id. */
@@ -290,17 +339,10 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
   try {
     let changed = 0;
     const superseded: Record<string, number> = {};
+    const supersededParents = new Set<string>();
     for (const [oldId, newId] of renameEntries()) {
-      const parent = await client.query("SELECT * FROM connectors WHERE connector_id = $1", [oldId]);
-      const current = await client.query("SELECT 1 FROM connectors WHERE connector_id = $1", [newId]);
-      const parentRow = parent.rows[0] as Record<string, unknown> | undefined;
-      if (parentRow && current.rowCount === 0) {
-        const copy: Record<string, unknown> = { ...parentRow, connector_id: newId, manifest: rewriteManifestIds(parentRow.manifest, oldId, newId) };
-        const names = Object.keys(copy);
-        await client.query(
-          `INSERT INTO connectors (${names.map(quote).join(", ")}) VALUES (${names.map((_, i) => `$${i + 1}`).join(", ")})`,
-          names.map((n) => copy[n])
-        );
+      if ((await adoptParentPostgres(client, oldId, newId)) === "superseded") {
+        supersededParents.add(oldId);
       }
       for (const c of columns.filter((x) => x.table !== "connectors")) {
         const drop = dropSupersededRowsSql(c, { new: "$2", old: "$1" });
@@ -318,8 +360,11 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
       );
       changed += result.rowCount ?? 0;
     }
-    const removed = await client.query(`DELETE FROM connectors WHERE connector_id IN (${marks})`, olds);
-    changed += removed.rowCount ?? 0;
+    // Old parents go last, once no child names them. One the current row
+    // already covered is a superseded row, like the children above.
+    const oldParents = partitionOldParents(olds, supersededParents);
+    countSuperseded(superseded, "connectors", await deleteConnectorsPostgres(client, oldParents.superseded));
+    changed += await deleteConnectorsPostgres(client, oldParents.copied);
     // A connection created without a name is labelled with its connector id.
     // Keep that placeholder in step with the id it names; a connection of
     // another connector that happens to carry the same text keeps it.
@@ -337,4 +382,30 @@ export async function migrateRenamedConnectorIdsPostgres(client: PoolClient): Pr
     }
     throw err;
   }
+}
+
+async function adoptParentPostgres(client: PoolClient, oldId: string, newId: string): Promise<ParentOutcome> {
+  const parent = (await client.query("SELECT * FROM connectors WHERE connector_id = $1", [oldId])).rows[0] as
+    | Record<string, unknown>
+    | undefined;
+  if (!parent) {
+    return "absent";
+  }
+  if ((await client.query("SELECT 1 FROM connectors WHERE connector_id = $1", [newId])).rowCount !== 0) {
+    return "superseded";
+  }
+  const copy = connectorCopy(parent, oldId, newId);
+  const names = Object.keys(copy);
+  await client.query(
+    `INSERT INTO connectors (${names.map(quote).join(", ")}) VALUES (${names.map((_, i) => `$${i + 1}`).join(", ")})`,
+    names.map((n) => copy[n])
+  );
+  return "copied";
+}
+
+async function deleteConnectorsPostgres(client: PoolClient, ids: readonly string[]): Promise<number> {
+  if (ids.length === 0) {
+    return 0;
+  }
+  return (await client.query("DELETE FROM connectors WHERE connector_id = ANY($1::text[])", [ids])).rowCount ?? 0;
 }

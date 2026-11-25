@@ -15,7 +15,7 @@ import { closeDb, getDb, initDb } from "../server/db.ts";
 type Db = ReturnType<typeof getDb>;
 
 const NOW = "2026-11-14T00:00:00.000Z";
-const SUPERSEDED_INSTALL_LOG = /were deleted \(connector_installs: 1\)/;
+const SUPERSEDED_LOG = /were deleted \(connector_installs: 1, connectors: 1\)/;
 
 function seedConnector(db: Db, connectorId: string): void {
   db.prepare("INSERT INTO connectors (connector_id, manifest, created_at) VALUES (?, ?, ?)").run(
@@ -140,8 +140,8 @@ test(
       );
     }
     const result = migrateRenamedConnectorIdsSqlite(db);
-    assert.deepEqual(result.supersededRows, { connector_installs: 1 });
-    assert.match(String(describeConnectorIdRename(result)), SUPERSEDED_INSTALL_LOG);
+    assert.deepEqual(result.supersededRows, { connector_installs: 1, connectors: 1 });
+    assert.match(String(describeConnectorIdRename(result)), SUPERSEDED_LOG);
     assert.deepEqual(ids(db, "connectors"), ["claude-code"]);
     const rows = db.prepare("SELECT connector_id, record_json FROM connector_installs").all() as {
       connector_id: string;
