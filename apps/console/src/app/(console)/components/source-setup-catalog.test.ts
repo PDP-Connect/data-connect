@@ -13,7 +13,7 @@ import {
   parseConnectorInstallStatusResponse,
 } from "../lib/connector-install-contract.ts";
 import { connectorInstallCatalogFixture, connectorInstallStatusFixture } from "../lib/connector-install-fixtures.ts";
-import { connectorInstallRowModel, type ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
+import { buildConnectorInstallLifecycleByConnector, connectorInstallRowModel, connectorLookupKey, type ConnectorInstallLifecycle } from "../lib/connector-install-presentation.ts";
 
 // The catalog's import graph reaches `server-only`, which throws outside a
 // server component, and its recovery notice calls `useRouter`, which needs a
@@ -127,6 +127,23 @@ const setupCapable: ConnectorCatalogEntry = {
   disposition: "browser_collector_manual",
   ownerActionable: true,
 };
+
+test("a hyphenated package row is indexed by its normalized manifest connector key", () => {
+  assert.ok(browserPackage.catalog);
+  const listing = { ...browserPackage.catalog, connector_key: "new-browser" };
+  const lifecycle = buildConnectorInstallLifecycleByConnector([listing], []);
+  assert.equal(lifecycle[connectorLookupKey("new_browser")]?.catalog, listing);
+});
+
+test("conflicting latest package digests produce no offered target", (t) => {
+  assert.ok(browserPackage.catalog);
+  const first = { ...browserPackage.catalog, connector_key: "new-browser" };
+  const second = { ...first, digest: "sha256:" + (first.digest.endsWith("f") ? "e" : "f").repeat(64) };
+  const warning = t.mock.method(console, "warn", () => undefined);
+  const lifecycle = buildConnectorInstallLifecycleByConnector([first, second], []);
+  assert.equal(lifecycle[connectorLookupKey("new_browser")]?.catalog, null);
+  assert.equal(warning.mock.callCount(), 1);
+});
 
 test("an unregistered browser connector offers Install before account setup exists", async () => {
   const html = await render(false, setupCapable, browserPackage);
