@@ -31,8 +31,6 @@ const OPERATOR_ARTIFACT_RE = /browser-collector runbook|\bneko\b|n\.eko|hosted C
 const SERVER_ACTION_TRANSPORT_RE = /startBrowserEnrollmentAction|from "\.\/actions\.ts"|<form action=\{[^}]+Action/;
 const POST_ROUTE_TRANSPORT_RE =
   /<form\s+action=\{`\/connect\/browser-session\/\$\{encodeURIComponent\(service\.connectorKey\)\}\/start`\}\s+className="grid gap-4"\s+method="post"\s*>/;
-const PAGE_PRIMARY_ACTION_LABEL_RE =
-  /const primaryActionLabel = repairMode \? `Reconnect \$\{displayName\}` : "Connect account";/;
 const START_ROUTE_POST_RE = /export async function POST/;
 const START_ROUTE_AUTH_RE = /await requireDashboardAccess\(pagePath\(connectorId\)\)/;
 const START_ROUTE_ORIGIN_RE = /if \(!originMatchesHost\(request\)\)/;

@@ -7,12 +7,13 @@ import { mock, test } from "node:test";
 import * as React from "react";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import type { ConnectorInstallRowModel } from "../lib/connector-install-presentation.ts";
+import type { PackageRow } from "../settings/packages/package-rows-model.ts";
 
 let uninstallResult: { ok: boolean; message?: string } = { message: "Connector still has sources.", ok: false };
 let uninstallCalls = 0;
 let refreshCalls = 0;
 let confirmResult = false;
+let updateCalls = 0;
 
 const components = (async () => {
   Object.assign(globalThis, { React });
@@ -75,11 +76,14 @@ const components = (async () => {
         uninstallCalls += 1;
         return uninstallResult;
       },
-      updateConnectorAction: async () => ({ ok: true }),
+      updateConnectorAction: async () => {
+        updateCalls += 1;
+        return { ok: true };
+      },
     },
   });
-  const { ConnectorInstallRow } = await import("./add/connector-install-row.tsx");
-  return { ConnectorInstallRow, dom };
+  const { PackageTable } = await import("../settings/packages/package-table.tsx");
+  return { PackageTable, dom };
 })();
 
 async function mounted<T>(element: ReturnType<typeof createElement>, run: (container: HTMLElement) => Promise<T>) {
@@ -102,89 +106,53 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
   return found;
 }
 
-test("connector row confirms uninstall and displays refusal or success without optimistic removal", async () => {
-  const { ConnectorInstallRow } = await components;
-  const model = {
-    action: null,
-    activationLabel: "Installed",
-    activationState: "active",
-    connectorId: "github",
-    connectorKey: "github",
-    hostBlockReason: null,
-    installedDigest: "sha256:abc…xyz",
-    installedDigestFull: "sha256:abcdef",
-    installedVersion: "1.0.0",
-    targetVersion: null,
-    tier: "supported",
-  } as ConnectorInstallRowModel;
+const row: PackageRow = {
+  canUninstall: true,
+  connectorId: "github",
+  connectorKey: "github",
+  displayName: "GitHub",
+  icon: null,
+  updateTo: null,
+  version: "1.0.0",
+};
+
+// Design "Data source packages": Uninstall asks first, a refusal shows plain copy with the server's words one step away.
+test("package table confirms uninstall and displays refusal or success without optimistic removal", async () => {
+  const { PackageTable } = await components;
   uninstallCalls = 0;
   refreshCalls = 0;
   confirmResult = false;
-  await mounted(createElement(ConnectorInstallRow, { model }), async (container) => {
+  await mounted(createElement(PackageTable, { rows: [row] }), async (container) => {
     const uninstall = button(container, "Uninstall");
     await act(async () => uninstall.click());
     assert.equal(uninstallCalls, 0);
-    assert.equal(container.querySelector('[data-testid="connector-package-status"]')?.textContent, "Installed");
 
     confirmResult = true;
     uninstallResult = { message: "Connector still has sources.", ok: false };
     await act(async () => uninstall.click());
     assert.equal(uninstallCalls, 1);
-    // RAISE-RULES 4: keep raw server error text in Details and show fixed plain copy in the row.
-    assert.equal(container.querySelector('[role="alert"]')?.textContent, "Couldn't complete this action. Try again.");
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Couldn't complete this\. Try again\./);
     assert.ok([...container.querySelectorAll("details")].some((details) => details.textContent?.includes("Connector still has sources.")));
-    assert.equal(container.querySelector('[data-testid="connector-package-status"]')?.textContent, "Installed");
+    assert.ok(container.querySelector('[data-testid="package-row-github"]'));
 
     uninstallResult = { ok: true };
     await act(async () => uninstall.click());
     assert.equal(uninstallCalls, 2);
-    assert.equal(container.querySelector('[role="status"]')?.textContent, "Uninstall complete. Refreshing status…");
     assert.equal(refreshCalls, 1);
   });
 });
 
-test("Add-page package controls use explicit primary and Details presentations", async () => {
-  const { ConnectorInstallRow } = await components;
-  const installModel = {
-    action: { digest: "sha256:target", kind: "install", version: "1.0.0" },
-    activationLabel: "Available",
-    activationState: "not_installed",
-    connectorId: "github",
-    connectorKey: "github",
-    hostBlockReason: null,
-    installedDigest: null,
-    installedDigestFull: null,
-    installedVersion: null,
-    targetVersion: "1.0.0",
-    tier: "supported",
-  } as ConnectorInstallRowModel;
-  await mounted(createElement(ConnectorInstallRow, { model: installModel, presentation: "primary-action" }), async (container) => {
-    assert.equal(container.querySelectorAll("button").length, 1);
-    button(container, "Install");
-    assert.equal(container.querySelector('[data-testid="connector-package-status"]'), null);
-    assert.equal(container.querySelector("details"), null);
+test("package table offers Update only when a newer version exists, and it calls the update action", async () => {
+  const { PackageTable } = await components;
+  updateCalls = 0;
+  await mounted(createElement(PackageTable, { rows: [{ ...row, updateTo: "2.0.0" }] }), async (container) => {
+    await act(async () => button(container, "Update").click());
+    assert.equal(updateCalls, 1);
   });
-
-  const updateModel = {
-    ...installModel,
-    action: { digest: "sha256:target", kind: "update", version: "2.0.0" },
-    activationLabel: "Update available",
-    activationState: "update_available",
-    installedDigest: "sha256:old",
-    installedDigestFull: "sha256:old-full",
-    installedVersion: "1.0.0",
-    targetVersion: "2.0.0",
-  } as ConnectorInstallRowModel;
-  // Add-page repair decision 2: package status and secondary controls stay in the one Details fold.
-  await mounted(createElement(ConnectorInstallRow, { model: updateModel, presentation: "details-actions" }), async (container) => {
-    assert.equal(container.querySelectorAll("button").length, 2);
-    button(container, "Update");
-    button(container, "Uninstall");
-    assert.equal(container.querySelector('[data-testid="connector-package-status"]'), null);
-    assert.equal(container.querySelector("details"), null);
+  await mounted(createElement(PackageTable, { rows: [row] }), async (container) => {
+    assert.equal([...container.querySelectorAll("button")].some((item) => item.textContent?.trim() === "Update"), false);
   });
-  await mounted(createElement(ConnectorInstallRow, { model: updateModel, presentation: "uninstall-only" }), async (container) => {
-    assert.equal(container.querySelectorAll("button").length, 1);
-    button(container, "Uninstall");
+  await mounted(createElement(PackageTable, { rows: [{ ...row, canUninstall: false }] }), async (container) => {
+    assert.equal([...container.querySelectorAll("button")].some((item) => item.textContent?.trim() === "Uninstall"), false);
   });
 });
