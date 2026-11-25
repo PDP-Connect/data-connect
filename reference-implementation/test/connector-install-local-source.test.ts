@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { strict as assert } from "node:assert"
+import { createHash } from "node:crypto"
 import {
   mkdirSync,
   mkdtempSync,
@@ -55,6 +56,32 @@ function fixture(
   )
   return root
 }
+
+test("records parsed fields and the digest of the exact manifest bytes", async () => {
+  const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
+  temporaryRoots.push(dataDir)
+  const root = fixture()
+  const manifest = {
+    connector_id: "https://registry.pdpp.dev/connectors/snapshot-fixture",
+    connector_key: "snapshot-fixture",
+    display_name: "Snapshot fixture",
+    streams: [{ name: "items" }],
+    version: "1.2.3",
+  }
+  const bytes = Buffer.from(JSON.stringify(manifest, null, 2) + "\n", "utf8")
+  writeFileSync(join(root, "profile", "collection-profile.json"), bytes)
+
+  const record = await createFileLocalConnectorSourceStore(dataDir).add(root)
+  assert.equal(record.connectorId, manifest.connector_id)
+  assert.equal(record.displayName, manifest.display_name)
+  assert.equal(record.version, manifest.version)
+  assert.deepEqual(record.manifest, manifest)
+  assert.equal(
+    record.manifestSha256,
+    "sha256:" + createHash("sha256").update(bytes).digest("hex")
+  )
+  assert.equal(record.trust, "developer-local-unsigned")
+})
 
 test("local sources coexist by key, select explicitly, and remain outside verified installs", async () => {
   const dataDir = mkdtempSync(join(process.cwd(), "tmp-local-source-state-"))
