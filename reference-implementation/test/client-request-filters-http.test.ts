@@ -13,7 +13,7 @@ import { configureNativeManifest, registerConnector } from "../server/auth.ts";
 import { closeDb, getDb } from "../server/db.ts";
 import { startServer } from "../server/index.ts";
 import { closePostgresStorage, postgresQuery } from "../server/postgres-storage.ts";
-import { ingestRecord } from "../server/records.ts";
+import { deleteRecord, ingestRecord } from "../server/records.ts";
 import { createRequestConnectorInstanceStore } from "../server/request-store-factories.ts";
 import { buildReadRequest } from "../vendor/cli/src/read/commands.ts";
 import { createPdppMcpServer } from "../vendor/mcp-server/src/server.ts";
@@ -332,6 +332,31 @@ for (const backend of ["sqlite", "postgres"] as const) {
         ["m150"]
       );
       assert.equal(selective.body.has_more, false);
+      // A deletion in a filtered feed is the same bare tombstone as a filter
+      // exit, and deleting a record the filter never matched reports nothing.
+      const beforeDeletes = await request(`${base}/records?fields=id&${filters}&changes_since=beginning`, modern.token);
+      assert.equal(beforeDeletes.status, 200, JSON.stringify(beforeDeletes.body));
+      assert.ok(beforeDeletes.body.data.some((record) => record.id === "b"));
+      assert.ok(!beforeDeletes.body.data.some((record) => record.id === "a"));
+      await deleteRecord(target, stream.name, "b");
+      await deleteRecord(target, stream.name, "a");
+      const deletions = await request(
+        `${base}/records?fields=id&${filters}&changes_since=${encodeURIComponent(beforeDeletes.body.next_changes_since)}`,
+        modern.token
+      );
+      assert.equal(deletions.status, 200, JSON.stringify(deletions.body));
+      assert.deepEqual(
+        deletions.body.data.map((record) => record.id),
+        ["b"]
+      );
+      assert.deepEqual(Object.keys(deletions.body.data[0] ?? {}).sort(), [
+        "deleted",
+        "id",
+        "instance_id",
+        "object",
+        "stream",
+      ]);
+      assert.equal(deletions.body.data[0]?.deleted, true);
     } finally {
       await closeTestServer(server);
       closeDb();
