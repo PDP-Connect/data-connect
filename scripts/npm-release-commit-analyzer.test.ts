@@ -67,6 +67,8 @@ describe(".releaserc.yaml commit-analyzer scope gate", () => {
     ["feat(read-core): add field window", "minor"],
     ["perf(mcp-server): cache schema", "patch"],
     ["fix(auth,cli): answer revoked tokens with 401", "patch"],
+    ["fix(auth,cli,docs): a package only in the middle of the scope list", "patch"],
+    ["revert(cli): drop the token refresh", "patch"],
     ["feat(mcp-server)!: require grant_id", "major"],
   ])("releases %s as a %s bump", async (subject, expected) => {
     expect(await releaseTypeFor([subject])).toBe(expected)
@@ -88,6 +90,20 @@ describe(".releaserc.yaml commit-analyzer scope gate", () => {
     ["fix(read-core-tests): flake", "scoped, but not a published package"],
   ])("does not release on %s (%s)", async (subject) => {
     expect(await releaseTypeFor([subject])).toBeNull()
+  })
+
+  // The no-release rule is hand-written as the negation of SCOPE_GLOB. If the
+  // two drift, a package scope can match both a release rule and the `false`
+  // rule, which cancels the batch, or neither, which falls through to the
+  // preset's default rules.
+  it("keeps the no-release scope rule the exact negation of the package scope glob", () => {
+    const rules = loadCommitAnalyzerConfig().releaseRules as { scope?: unknown; release?: unknown; type?: unknown }[]
+    const packageScopes = new Set(rules.filter((rule) => rule.release !== false).map((rule) => rule.scope))
+    expect(packageScopes.size).toBe(1)
+    const [glob] = packageScopes
+    expect(rules.filter((rule) => rule.release === false && typeof rule.scope === "string")).toEqual([
+      { release: false, scope: `!(${glob})` },
+    ])
   })
 
   it("a real target-package fix is not cancelled by an unrelated commit in the same batch", async () => {
